@@ -1,5 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
-using Kiapi.Schematic;
+using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;

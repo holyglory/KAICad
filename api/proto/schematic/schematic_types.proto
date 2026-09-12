@@ -164,6 +164,8 @@ message SchematicNetSettings
   // Explicit "Default" is required; absence never requests inferred defaults.
   kiapi.common.project.NetClass default_class = 1;
   repeated kiapi.common.project.NetClass classes = 2;
+  // Observed projection from native netclass directives/connectivity. This is
+  // rebuilt by the schematic; edit the owning labels, not this cached mapping.
   map<string, SchematicNetClassNames> label_assignments = 3;
   repeated SchematicNetClassPattern patterns = 4;
   map<string, kiapi.common.types.Color> net_colors = 5;

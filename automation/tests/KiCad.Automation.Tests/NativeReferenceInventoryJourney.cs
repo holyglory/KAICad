@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -37,6 +38,10 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(before, await Read(), "Invalid allocation history must not change live references, policy or revision.");
         }
         var rejected = Batch(before, expected.Metadata.ReferenceInventory);
+        var unknown = SchematicReferenceInventory.Parser.ParseFrom(expected.Metadata.ReferenceInventory.ToByteArray()
+            .Concat(new byte[] { 0xa0, 0x06, 1 }).ToArray());
+        await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(Batch(before, unknown)));
+        Assert.AreEqual(before, await Read());
         rejected.Operations.Add(new SchematicItemOperation { Remove = new() { Value = Guid.NewGuid().ToString("D") } });
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(rejected));
         Assert.AreEqual(before, await Read(), "Later batch failure must restore exact allocation history.");
@@ -72,6 +77,22 @@ public sealed partial class NativeSessionTests
         var reopened = await Read();
         Assert.AreEqual(expected, reopened.Data);
         await File.WriteAllTextAsync(Path.Combine(evidence, processId + "-reference-inventory.xml"), SchematicDataXml.Write(reopened.Data), token);
+        // Exercise the adjacent policy update with nonempty historical records.
+        // The user may permit reuse without deleting the retained inventory.
+        var policyChange = Batch(reopened, expected.Metadata.ReferenceInventory);
+        policyChange.Operations.Clear();
+        var policy = expected.Metadata.Annotation.Clone(); policy.ReuseDesignators = !policy.ReuseDesignators;
+        policyChange.Operations.Add(new SchematicItemOperation { SetAnnotation = policy });
+        await Apply(policyChange);
+        var changedPolicy = await Read();
+        var policyExpected = expected.Clone(); policyExpected.Metadata.Annotation = policy;
+        Assert.AreEqual(policyExpected, changedPolicy.Data);
+        var restorePolicy = Batch(changedPolicy, expected.Metadata.ReferenceInventory);
+        restorePolicy.Operations.Clear();
+        restorePolicy.Operations.Add(new SchematicItemOperation { SetAnnotation = expected.Metadata.Annotation.Clone() });
+        await Apply(restorePolicy);
+        reopened = await Read();
+        Assert.AreEqual(expected, reopened.Data);
         // Removing inventory records is a distinct explicit operation, not a
         // side effect of deleting a schematic symbol or changing reuse policy.
         var empty = new SchematicReferenceInventory();

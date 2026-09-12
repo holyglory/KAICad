@@ -30,6 +30,12 @@ it also checks changed headers/definitions and timestamp bypass. Receipts retain
 hits, misses and elapsed build times. They do not claim faster linking or tests,
 or qualify another platform/compiler. Ordinary native graphs use the same profile.
 
+For performance comparisons, use the fixture's per-command stopwatch and per-build
+cache counters. Governed check elapsed times can include shared-capacity waiting;
+they are not isolated compiler timings. Cache hits do not eliminate configuration,
+linking, or all precompiled-header rebuilds, and a small-fixture speedup must not be
+reported as a whole-KiCad speedup.
+
 Keep caches out of tracked source, signed packages and evidence snapshots. Do not
 clear the shared cache to measure a cold build; qualification uses unique input
 identity and per-build statistics. To stop using it in a custom build, reconfigure

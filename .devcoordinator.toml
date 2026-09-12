@@ -63,7 +63,7 @@ command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja
 [[test.compiler-cache.check]]
 name = "native-build"
 tier = "development"
-command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_document_change_journal"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_document_change_journal", "common/CMakeFiles/kicommon.dir/build_version.cpp.o", "eeschema/CMakeFiles/eeschema_kiface_objects.dir/api/api_handler_sch.cpp.o"]
 
 [[test.compiler-cache.check]]
 name = "native-journal"

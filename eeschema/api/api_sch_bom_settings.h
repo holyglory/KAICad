@@ -154,5 +154,26 @@ inline void Restore( FIELDS_TABLE_BOM_SETTINGS& aSettings, const MESSAGE& aValue
     auto prepared = Prepare( aValue );
     Swap( aSettings, prepared );
 }
+
+inline FIELDS_TABLE_BOM_SETTINGS PrepareUiEdit( const FIELDS_TABLE_BOM_SETTINGS& aLive,
+        const FIELDS_TABLE_BOM_SETTINGS& aBeforeUi, const FIELDS_TABLE_BOM_SETTINGS& aAfterUi,
+        bool aSaveFilename )
+{
+    // The editor normalizes its initial presentation. Only a subsequent UI
+    // change owns replacement of a persisted group; untouched live values and
+    // their transient flags must survive Cancel and unrelated table actions.
+    FIELDS_TABLE_BOM_SETTINGS desired = aLive;
+    if( nlohmann::json( aBeforeUi.m_BomSettings ) != nlohmann::json( aAfterUi.m_BomSettings ) )
+        desired.m_BomSettings = aAfterUi.m_BomSettings;
+    if( nlohmann::json( aBeforeUi.m_BomPresets ) != nlohmann::json( aAfterUi.m_BomPresets ) )
+        desired.m_BomPresets = aAfterUi.m_BomPresets;
+    if( nlohmann::json( aBeforeUi.m_BomFmtSettings ) != nlohmann::json( aAfterUi.m_BomFmtSettings ) )
+        desired.m_BomFmtSettings = aAfterUi.m_BomFmtSettings;
+    if( nlohmann::json( aBeforeUi.m_BomFmtPresets ) != nlohmann::json( aAfterUi.m_BomFmtPresets ) )
+        desired.m_BomFmtPresets = aAfterUi.m_BomFmtPresets;
+    if( aSaveFilename && aBeforeUi.m_BomExportFileName != aAfterUi.m_BomExportFileName )
+        desired.m_BomExportFileName = aAfterUi.m_BomExportFileName;
+    return desired;
+}
 }
 #endif

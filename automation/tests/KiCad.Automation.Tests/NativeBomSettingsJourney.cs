@@ -108,7 +108,7 @@ public sealed partial class NativeSessionTests
             foreach (var (key, expected) in new[] { ("z", original), ("y", changed) })
             {
                 var before = await Read();
-                NativeKeyboard.SchematicShortcut(display, processId, key, focusCanvas: false);
+                await FocusedSchematicShortcut(client, document, processId, display, key, token);
                 using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
                 limit.CancelAfter(TimeSpan.FromSeconds(5));
                 int delay = 25;

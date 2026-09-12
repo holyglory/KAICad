@@ -503,6 +503,8 @@ bool DIALOG_SYMBOL_FIELDS_TABLE::TransferDataToWindow()
     // user's current selection.
     EnableSelectionEvents();
 
+    if( !m_job ) m_bomUiBaseline = readBomUiSettings();
+
     return true;
 }
 
@@ -533,6 +535,8 @@ bool DIALOG_SYMBOL_FIELDS_TABLE::TransferDataFromWindow()
         commit.Push( wxS( "Symbol Fields Table Edit" ) );  // Push clears the commit buffer.
         m_parent->OnModify();
     }
+
+    m_bomUiBaseline = readBomUiSettings();
 
     // Reset the view to where we left the user
     m_parent->SetCurrentSheet( currentSheet );
@@ -796,16 +800,42 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnTableSelectionChanged( const std::set<int>& a
 }
 
 
-void DIALOG_SYMBOL_FIELDS_TABLE::stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename )
+FIELDS_TABLE_BOM_SETTINGS DIALOG_SYMBOL_FIELDS_TABLE::readBomUiSettings()
 {
-    // Build the desired state off-model; comparing persisted values avoids
-    // treating built-in preset read-only flags as a design edit.
     FIELDS_TABLE_BOM_SETTINGS desired = m_cfgBomSettings;
     desired.m_BomPresets = GetUserBomPresets();
     desired.m_BomSettings = m_dataModel->GetBomSettings();
     desired.m_BomFmtPresets = GetUserBomFmtPresets();
     desired.m_BomFmtSettings = GetCurrentBomFmtSettings();
-    if( aSaveFilename ) desired.m_BomExportFileName = m_outputFileName->GetValue();
+    desired.m_BomExportFileName = m_outputFileName->GetValue();
+    return desired;
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::recordInitialBomUiState()
+{
+    if( !m_job && !m_bomInitialViewSelected )
+    {
+        m_bomUiBaseline = readBomUiSettings();
+        m_bomInitialViewSelected = true;
+    }
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::ShowEditTab()
+{
+    DIALOG_FIELDS_TABLE::ShowEditTab();
+    recordInitialBomUiState();
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::ShowExportTab()
+{
+    DIALOG_FIELDS_TABLE::ShowExportTab();
+    recordInitialBomUiState();
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename )
+{
+    auto desired = SCH_BOM_SETTINGS::PrepareUiEdit( m_cfgBomSettings, m_bomUiBaseline,
+                                                   readBomUiSettings(), aSaveFilename );
     aCommit.SetBomSettings( SCH_BOM_SETTINGS::Capture( desired ) );
     // The typed commit owns persisted fields. Retain the exact UI transient
     // flags as well, without serializing them or creating a false revision.

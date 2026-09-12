@@ -42,6 +42,7 @@
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
 #include <pcb_edit_frame.h>
+#include <pgm_base.h>
 #include <pcb_group.h>
 #include <pcb_reference_image.h>
 #include <pcb_shape.h>

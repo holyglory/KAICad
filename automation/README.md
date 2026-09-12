@@ -1101,6 +1101,20 @@ Snapshot schema 4 adds presence-aware chain exclusions. Earlier schemas omit
 those fields with an explicit coverage gap; an older/incomplete replacement
 cannot clear existing restrictions by leaving the exclusion field out.
 
+Snapshot schema 5 adds the project annotation policy: numbering order (X/Y),
+method (incremental, sheet × 100, sheet × 1000), exact starting number and
+reference reuse. Typed XML retains these independently of symbol positions and
+already placed references. Changing the policy uses one revision-bound native
+commit; independent policy-field edits merge, while competing values conflict.
+Older snapshots report the missing policy explicitly instead of supplying defaults.
+The focused Linux Setup journey covers real Annotation-page edits, page-switch
+Cancel, complete policy import, native Undo/Redo, retry/stale/no-op behavior and
+save/reopen. Run `devcoordinator2 test start /absolute/isolated/worktree --test
+native-setup-dialog --tier development` against the development source.
+The inventory of previously allocated designators is preserved by policy edits
+but is not yet reconstructible from XML (`p72f9010349b0093e`). Remaining project
+settings, whole-design reconstruction and native-Mac qualification stay open.
+
 The net-chain coverage gap remains until complete identity and electrical-change
 restoration are qualified; this is not proof of full schematic reconstruction.
 Its structured result retains incomplete revision tracking and lists

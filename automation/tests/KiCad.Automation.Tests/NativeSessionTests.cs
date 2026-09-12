@@ -40,11 +40,11 @@ public sealed partial class NativeSessionTests
             : Path.Combine(artifacts, journey switch { NativeJourney.TableVariants => "native-table-variants",
                 NativeJourney.Setup => "native-setup-draft", _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
-        // Full composed verification includes all editor/chain/color journeys
-        // in both instances (first instance measured at 166s). Keep individual
-        // action/startup limits; only the complete journey gets a larger ceiling.
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(
-            journey == NativeJourney.Foundation ? 480 : 300));
+        // The earlier composed journey took 433s before expanded Setup and
+        // annotation coverage. Keep all per-action limits and focused ceilings;
+        // only the full two-editor sequence receives the measured workload margin.
+        int aggregateSeconds = journey == NativeJourney.Foundation ? 600 : 300;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         var processes = new List<Process>();
         var captures = new List<Task>();
@@ -584,7 +584,7 @@ public sealed partial class NativeSessionTests
         }
         catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
         {
-            Assert.Fail($"The aggregate native-session ceiling of 300 seconds expired after {elapsed.Elapsed.TotalSeconds:F1}s. "
+            Assert.Fail($"The aggregate native-session ceiling of {aggregateSeconds} seconds expired after {elapsed.Elapsed.TotalSeconds:F1}s. "
                 + $"This is not a successful journey or an individual-operation timeout. Original cancellation: {error}");
         }
         finally

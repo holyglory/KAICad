@@ -28,6 +28,7 @@
 #include <api/api_pcb_utils.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>
+#include <api/api_server.h>
 #include <api/cross_probe_client.h>
 #include <wx/log.h>
 #include <base_screen.h>
@@ -210,7 +211,9 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_PCB::handleGetOpenDocuments
     doc.set_board_filename( fn.GetFullName() );
 
     doc.mutable_project()->set_name( project().GetProjectName().ToStdString() );
-    doc.mutable_project()->set_path( project().GetProjectDirectory().ToStdString() );
+    // Use the same project representation as schematic documents in this
+    // instance, including the directory separator returned by GetProjectPath.
+    doc.mutable_project()->set_path( project().GetProjectPath().ToStdString() );
 
     response.mutable_documents()->Add( std::move( doc ) );
     return response;
@@ -336,6 +339,25 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
         e.set_error_message( "the requested document is not a board" );
         return tl::unexpected( e );
+    }
+
+    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
+    if( automation || aDocument.has_project() )
+    {
+        wxFileName supplied = wxFileName::DirName( wxString::FromUTF8( aDocument.project().path() ) );
+        wxFileName expected = wxFileName::DirName( project().GetProjectPath() );
+        const bool absolute = supplied.IsAbsolute();
+        supplied.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        if( !absolute || supplied != expected
+                || aDocument.project().path().find( '\0' ) != std::string::npos
+                || aDocument.project().name() != project().GetProjectName().ToStdString() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The requested PCB project identity does not match this instance" );
+            return tl::unexpected( e );
+        }
     }
 
     wxFileName fn( pcbContext()->GetCurrentFileName() );

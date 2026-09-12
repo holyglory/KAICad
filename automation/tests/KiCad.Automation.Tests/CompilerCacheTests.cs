@@ -86,6 +86,8 @@ public sealed class CompilerCacheTests
                 include(CompilerCache.cmake)
                 find_program(CCACHE ccache REQUIRED)
                 set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE} ${KICAD_CCACHE_ARGUMENTS})
+                # Isolate the cold comparison without clearing anyone's cache.
+                list(APPEND CMAKE_CXX_COMPILER_LAUNCHER "namespace=kicad-qualification-${CACHE_RUN}")
                 find_package(Boost REQUIRED COMPONENTS unit_test_framework)
                 add_executable(probe common/probe.cpp)
                 target_compile_features(probe PRIVATE cxx_std_20)
@@ -120,8 +122,12 @@ public sealed class CompilerCacheTests
             var values = counters.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                 .Where(parts => parts.Length == 2).ToDictionary(parts => parts[0], parts => long.Parse(parts[1], CultureInfo.InvariantCulture));
-            long Get(string key) => values.GetValueOrDefault(key);
-            long hits = Get("cache_hit_direct") + Get("cache_hit_preprocessed"), misses = Get("cache_miss"), disabled = Get("disabled");
+            long Get(string key)
+            {
+                Assert.IsTrue(values.ContainsKey(key), "Missing ccache counter: " + key);
+                return values[key];
+            }
+            long hits = Get("direct_cache_hit") + Get("preprocessed_cache_hit"), misses = Get("cache_miss"), disabled = Get("disabled");
             phases.Add(new { name, hits, misses, disabled, milliseconds = build.Milliseconds });
             return (hits, misses, disabled, build.Milliseconds);
         }

@@ -1039,6 +1039,12 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
                                   bool aChangeProject )
 {
+    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
+    auto reportFailure = [&]( const wxString& aMessage )
+    {
+        if( automation ) wxLogError( "%s", aMessage );
+        else DisplayError( this, aMessage );
+    };
     // please, keep it simple.  prompting goes elsewhere.
     wxFileName pcbFileName = aFileName;
 
@@ -1053,7 +1059,7 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         wxString msg = wxString::Format( _( "Insufficient permissions to write file '%s'." ),
                                          pcbFileName.GetFullPath() );
 
-        DisplayError( this, msg );
+        reportFailure( msg );
         return false;
     }
 
@@ -1065,9 +1071,20 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     projectFile.SetExt( FILEEXT::ProjectFileExtension );
     rulesFile.SetExt( FILEEXT::DesignRulesFileExtension );
 
+    if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile ) ) )
+    {
+        reportFailure( "The project file is missing or not writable; the PCB was not saved" );
+        return false;
+    }
+
     if( projectFile.FileExists() )
     {
-        GetSettingsManager()->SaveProject();
+        bool projectSaved = GetSettingsManager()->SaveProject();
+        if( automation && !projectSaved )
+        {
+            reportFailure( "Project persistence failed; the PCB was not saved" );
+            return false;
+        }
     }
     else if( aChangeProject )
     {
@@ -1082,8 +1099,9 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( !msg.IsEmpty() )
     {
-        DisplayError( this, wxString::Format( _( "Error saving custom rules file '%s'." ),
-                                              rulesFile.GetFullPath() ) );
+        reportFailure( wxString::Format( _( "Error saving custom rules file '%s'." ),
+                                         rulesFile.GetFullPath() ) );
+        if( automation ) return false;
     }
 
     if( projectFile.FileExists() )
@@ -1111,9 +1129,8 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     }
     catch( const IO_ERROR& ioe )
     {
-        DisplayError( this, wxString::Format( _( "Error saving board file '%s'.\n%s" ),
-                                              pcbFileName.GetFullPath(),
-                                              ioe.What() ) );
+        reportFailure( wxString::Format( _( "Error saving board file '%s'.\n%s" ),
+                                         pcbFileName.GetFullPath(), ioe.What() ) );
         return false;
     }
 

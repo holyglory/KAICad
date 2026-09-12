@@ -807,7 +807,7 @@ bool PROJECT_FILE::LoadFromFile( const wxString& aDirectory )
 }
 
 
-bool PROJECT_FILE::SaveToFile( const wxString& aDirectory, bool aForce )
+bool PROJECT_FILE::SaveToFile( const wxString& aDirectory, bool aForce, SETTINGS_SAVE_RESULT* aResult )
 {
     wxASSERT( m_project );
 
@@ -816,11 +816,9 @@ bool PROJECT_FILE::SaveToFile( const wxString& aDirectory, bool aForce )
     // Even if parameters were not modified, we should resave after migration
     bool force = aForce || m_wasMigrated;
 
-    // If we're actually going ahead and doing the save, the flag that keeps code from doing the
-    // save should be cleared at this.
-    m_wasMigrated = false;
-
-    return JSON_SETTINGS::SaveToFile( aDirectory, force );
+    bool written = JSON_SETTINGS::SaveToFile( aDirectory, force, aResult );
+    if( written ) m_wasMigrated = false;
+    return written;
 }
 
 

@@ -82,6 +82,20 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(schematic.Project, board.Project);
         Assert.IsFalse(File.Exists(boardPath), "Explicit native creation remains unsaved.");
         Assert.AreEqual(opened, await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, token));
+        async Task FailedSave()
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            var failed = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, limit.Token));
+            Assert.AreEqual(3, failed.Status);
+            Assert.AreEqual(board, (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(
+                new() { Type = (DocumentType)3 }, limit.Token)).Documents.Single());
+        }
+        Directory.CreateDirectory(boardPath);
+        await FailedSave();
+        Assert.IsTrue(Directory.Exists(boardPath), "A failed save must preserve its filesystem obstruction.");
+        Directory.Delete(boardPath); // Only the empty obstruction created for this private fixture.
         foreach (int kind in Enumerable.Range(0, 3))
         {
             var wrong = board.Clone();
@@ -96,6 +110,22 @@ public sealed partial class NativeSessionTests
         }
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue(File.Exists(boardPath));
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("This is the Linux native save fixture.");
+        foreach (string protectedPath in new[] { boardPath, project })
+        {
+            byte[] beforeBoard = await File.ReadAllBytesAsync(boardPath, token);
+            byte[] beforeProject = await File.ReadAllBytesAsync(project, token);
+            var mode = File.GetUnixFileMode(protectedPath);
+            try
+            {
+                File.SetUnixFileMode(protectedPath, mode & ~(UnixFileMode.UserWrite | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite));
+                await FailedSave();
+                CollectionAssert.AreEqual(beforeBoard, await File.ReadAllBytesAsync(boardPath, token));
+                CollectionAssert.AreEqual(beforeProject, await File.ReadAllBytesAsync(project, token));
+            }
+            finally { File.SetUnixFileMode(protectedPath, mode); }
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
+        }
         Assert.AreEqual(opened, await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
             toolName: "kicad_pcb_open"));
 

@@ -363,6 +363,7 @@ add_executable( qa_symbol_graphic_identity
     net_chains/test_net_chain_recalc_refresh.cpp
     net_chains/test_net_chain_remove_rename.cpp
     ../common/test_settings_snapshot.cpp
+    ../common/test_settings_save_outcome.cpp
     ../common/test_netclass_proto.cpp
     ../common/test_api_request_target.cpp
     ../libs/kinng/test_publisher.cpp
@@ -408,6 +409,10 @@ setup_qa_env( qa_netclass_proto )
 add_test( NAME qa_api_request_target
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=ApiRequestTarget --log_level=test_suite )
 setup_qa_env( qa_api_request_target )
+
+add_test( NAME qa_settings_save_outcome
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SettingsSaveOutcome --log_level=test_suite )
+setup_qa_env( qa_settings_save_outcome )
 
 add_test( NAME qa_net_settings_capture
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )

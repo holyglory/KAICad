@@ -106,7 +106,8 @@ public:
 
     bool LoadFromFile( const wxString& aDirectory = "" ) override;
 
-    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false ) override;
+    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false,
+                     SETTINGS_SAVE_RESULT* aResult = nullptr ) override;
 
     bool SaveAs( const wxString& aDirectory, const wxString& aFile );
 

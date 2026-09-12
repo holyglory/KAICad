@@ -63,6 +63,8 @@ enum class SETTINGS_LOC {
 };
 
 
+enum class SETTINGS_SAVE_RESULT { SKIPPED, UNCHANGED, STORED, WRITTEN, FAILED };
+
 /// pimpl to allow hiding json.hpp
 class JSON_SETTINGS_INTERNALS;
 
@@ -167,7 +169,10 @@ public:
      * @param aDirectory is the directory to save to, including trailing separator
      * @return true if the file was saved
      */
-    virtual bool SaveToFile( const wxString& aDirectory = "", bool aForce = false );
+    // The optional outcome distinguishes benign no-write cases from errors;
+    // the legacy boolean still means that content was written or stored.
+    virtual bool SaveToFile( const wxString& aDirectory = "", bool aForce = false,
+                             SETTINGS_SAVE_RESULT* aResult = nullptr );
 
     /**
      * @return true once the in-memory store has been synchronized with an on-disk file, either

@@ -1301,11 +1301,20 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     if( !SCH_NET_SETTINGS::Same( observed, supplied ) )
                         return reject( prefix + "Label class assignments are derived; edit the owning native directives" );
                 }
-                (void) SCH_NET_SETTINGS::PrepareDeclared( desired );
-                if( !SCH_NET_SETTINGS::SameDeclared( current, desired ) )
+                try
                 {
-                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetNetSettings( desired );
-                    result.set_net_settings_changed( true );
+                    (void) SCH_NET_SETTINGS::PrepareDeclared( desired );
+                    if( !SCH_NET_SETTINGS::SameDeclared( current, desired ) )
+                    {
+                        static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetNetSettings( desired );
+                        result.set_net_settings_changed( true );
+                    }
+                }
+                catch( const std::exception& error )
+                {
+                    // Private validation uses exceptions; the transport needs
+                    // an explicit reply, with all earlier operations reverted.
+                    return reject( prefix + error.what() );
                 }
             }
             else if( operation.has_set_reference_inventory() )

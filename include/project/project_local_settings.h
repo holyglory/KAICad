@@ -62,7 +62,8 @@ public:
 
     bool SaveAs( const wxString& aDirectory, const wxString& aFile );
 
-    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false ) override;
+    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false,
+                     SETTINGS_SAVE_RESULT* aResult = nullptr ) override;
 
     void SetProject( PROJECT* aProject ) { m_project = aProject; }
 

@@ -166,7 +166,8 @@ public:
      */
     JOBSET_DESTINATION* FindDestination( wxString& aDestinationStr );
 
-    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false ) override;
+    bool SaveToFile( const wxString& aDirectory = "", bool aForce = false,
+                     SETTINGS_SAVE_RESULT* aResult = nullptr ) override;
 
     void SetDirty( bool aFlag = true ) { m_dirty = aFlag; }
     bool GetDirty() const { return m_dirty; }

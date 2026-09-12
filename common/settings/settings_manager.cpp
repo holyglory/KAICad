@@ -1295,7 +1295,10 @@ bool SETTINGS_MANAGER::SaveProject( const wxString& aFullPath, PROJECT* aProject
     PROJECT_FILE* project     = m_project_files.at( path );
     wxString      projectPath = aProject->GetProjectPath();
 
-    project->SaveToFile( projectPath );
+    SETTINGS_SAVE_RESULT result = SETTINGS_SAVE_RESULT::FAILED;
+    project->SaveToFile( projectPath, false, &result );
+    if( result != SETTINGS_SAVE_RESULT::WRITTEN && result != SETTINGS_SAVE_RESULT::UNCHANGED )
+        return false;
     aProject->GetLocalSettings().SaveToFile( projectPath );
 
     return true;

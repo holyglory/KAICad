@@ -573,8 +573,9 @@ void JSON_SETTINGS::ApplyCurrentStateDelta( const nlohmann::json& aBefore,
 }
 
 
-bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
+bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTINGS_SAVE_RESULT* aResult )
 {
+    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::SKIPPED;
     if( !m_writeFile )
         return false;
 
@@ -603,6 +604,8 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         return false;
     }
 
+    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::FAILED;
+
     // Ensure the path exists, and create it if not.
     if( !path.DirExists() && !path.Mkdir() )
     {
@@ -625,7 +628,10 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         wxCHECK2( settings, continue );
 
-        modified |= settings->SaveToFile();
+        SETTINGS_SAVE_RESULT nestedResult = SETTINGS_SAVE_RESULT::FAILED;
+        modified |= settings->SaveToFile( wxEmptyString, false, &nestedResult );
+        if( nestedResult == SETTINGS_SAVE_RESULT::FAILED )
+            return false;
     }
 
     modified |= Store();
@@ -634,6 +640,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         wxLogTrace( traceSettings, wxT( "%s contents not modified, skipping save" ),
                     GetFullFilename() );
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::UNCHANGED;
         return false;
     }
     else if( !modified && !aForce && !m_createIfDefault )
@@ -641,6 +648,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         wxLogTrace( traceSettings,
                     wxT( "%s contents still default and m_createIfDefault == false; not saving" ),
                     GetFullFilename() );
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::SKIPPED;
         return false;
     }
 
@@ -695,6 +703,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
 
                     m_modified = false;
 
+                    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::UNCHANGED;
                     return false;
                 }
             }
@@ -724,6 +733,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         m_modified = false;
         m_fileSynced = true;
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::WRITTEN;
     }
 
     return success;

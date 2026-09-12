@@ -284,6 +284,36 @@ void SCH_COMMIT::SetDrawingRatios( const std::array<double, 5>& aRatios )
     SCH_PAGE_SETTINGS_UNDO_ITEM::ApplyDrawingRatios( frame, aRatios );
 }
 
+void SCH_COMMIT::SetFieldTemplates( const kiapi::schematic::types::SchematicFieldTemplates& aValue )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    wxCHECK_RET( frame && !m_isLibEditor, "Project field templates require a schematic editor" );
+    auto& templates = frame->Prj().GetProjectFile().m_TemplateFieldNames;
+    if( SCH_FIELD_TEMPLATES::Capture( templates ).SerializeAsString() == aValue.SerializeAsString() ) return;
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeFieldTemplates();
+    SCH_FIELD_TEMPLATES::Restore( templates, aValue );
+}
+
+void SCH_COMMIT::SetSymbolComparison( const kiapi::schematic::types::SchematicSymbolComparisonSettings& aValue )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    wxCHECK_RET( frame && !m_isLibEditor, "Symbol comparison policy requires a schematic editor" );
+    auto& policy = frame->Schematic().Settings().m_SymbolParity;
+    if( SCH_SYMBOL_COMPARISON::Capture( policy ).SerializeAsString() == aValue.SerializeAsString() ) return;
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeSymbolComparison();
+    SCH_SYMBOL_COMPARISON::Restore( policy, aValue );
+}
+
 void SCH_COMMIT::SetReferenceInventory( const REFDES_TRACKER& aPrepared )
 {
     auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );

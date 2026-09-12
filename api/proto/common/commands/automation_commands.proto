@@ -17,6 +17,7 @@ message ReadSchematicMetadata {
   // 4: includes explicit net-chain member exclusions.
   // 5: includes persisted reference-numbering policy.
   // 6: includes the inventory of previously allocated reference designators.
+  // 7: includes project field templates and symbol/library comparison policy.
   // Unknown versions are rejected, never silently simplified.
   uint32 schema_version = 2;
 }
@@ -333,6 +334,8 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicNetChainClassState replace_net_chain_classes = 18;
     kiapi.schematic.types.SchematicAnnotationSettings set_annotation = 19;
     kiapi.schematic.types.SchematicReferenceInventory set_reference_inventory = 20;
+    kiapi.schematic.types.SchematicFieldTemplates set_field_templates = 21;
+    kiapi.schematic.types.SchematicSymbolComparisonSettings set_symbol_comparison = 22;
   }
 }
 
@@ -399,6 +402,8 @@ message SchematicItemBatchResult {
   bool net_chain_classes_changed = 18;
   bool annotation_changed = 19;
   bool reference_inventory_changed = 20;
+  bool field_templates_changed = 21;
+  bool symbol_comparison_changed = 22;
 }
 
 message InspectSchematicOperation {

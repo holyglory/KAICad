@@ -51,6 +51,7 @@ public sealed partial class NativeSessionTests
         changed.Metadata.Annotation.Order = SchematicAnnotationOrder.SaoYPosition;
         changed.Metadata.Annotation.Method = SchematicAnnotationMethod.SamSheetTimes100;
         schematic["compare_symbols"]!["missing_fields"] = !schematic["compare_symbols"]!["missing_fields"]!.GetValue<bool>();
+        changed.Metadata.SymbolComparison.MissingFields = schematic["compare_symbols"]!["missing_fields"]!.GetValue<bool>();
         string scratch = Directory.CreateTempSubdirectory("setup-import-").FullName;
         string sourceProject = Path.Combine(scratch, "import.kicad_pro");
         await File.WriteAllTextAsync(sourceProject, imported.ToJsonString(), token);

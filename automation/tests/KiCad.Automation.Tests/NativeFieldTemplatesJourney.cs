@@ -59,8 +59,11 @@ public sealed partial class NativeSessionTests
         Assert.HasCount(1, Fields(withTemplate));
         Assert.AreEqual("AutomationTemplate", Fields(withTemplate)[0]!["name"]!.GetValue<string>());
         var created = await Read();
+        var createdExpected = original.Data.Clone();
+        createdExpected.Metadata.FieldTemplates.Fields.Add(new Kiapi.Schematic.Types.SchematicFieldTemplate { Name = "AutomationTemplate" });
         Assert.AreEqual(original.Revision.Sequence + 1, created.Revision.Sequence);
-        Assert.AreEqual(original.Data, created.Data, "Project templates must not change existing component fields or other snapshot data.");
+        Assert.AreEqual(createdExpected, created.Data, "Project templates must not change existing component fields or other snapshot data.");
+        Assert.AreEqual(created.Data, SchematicDataXml.Read(SchematicDataXml.Write(created.Data)));
 
         foreach (bool accept in new[] { false, true })
         {
@@ -78,7 +81,8 @@ public sealed partial class NativeSessionTests
             await Finish(accept);
             var after = await Read();
             Assert.AreEqual(before.Revision.Sequence + (accept ? 1UL : 0UL), after.Revision.Sequence);
-            Assert.AreEqual(before.Data, after.Data);
+            Assert.AreEqual(accept ? original.Data : createdExpected, after.Data);
+            Assert.AreEqual(after.Data, SchematicDataXml.Read(SchematicDataXml.Write(after.Data)));
             var saved = await SaveProject();
             Assert.IsTrue(JsonNode.DeepEquals(accept ? originalProject["schematic"] : withTemplate["schematic"], saved["schematic"]),
                 "Removing the last project field template must affect only that list; Cancel retains it.");
@@ -95,7 +99,7 @@ public sealed partial class NativeSessionTests
                     restored = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document }, limit.Token);
                     if (restored.Revision.Equals(prior.Revision)) await Task.Delay(50, limit.Token);
                 } while (restored.Revision.Equals(prior.Revision));
-                Assert.AreEqual(original.Data, restored.Data);
+                Assert.AreEqual(key == "z" ? createdExpected : original.Data, restored.Data);
                 Assert.IsTrue(JsonNode.DeepEquals(expected["schematic"], (await SaveProject())["schematic"]));
             }
         }

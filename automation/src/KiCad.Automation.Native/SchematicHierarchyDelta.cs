@@ -24,6 +24,8 @@ public static class SchematicHierarchyDelta
                 || !Equals(s.Metadata.DrawingRatios, assets.DrawingRatios)
                 || !Equals(s.Metadata.Formatting, assets.Formatting)
                 || !Equals(s.Metadata.Annotation, assets.Annotation)
+                || !Equals(s.Metadata.FieldTemplates, assets.FieldTemplates)
+                || !Equals(s.Metadata.SymbolComparison, assets.SymbolComparison)
                 || !SchematicReferenceInventoryState.Same(s.Metadata.ReferenceInventory, assets.ReferenceInventory)
                 || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
                 || !SchematicErcSettingsValidation.Same(s.Metadata.ErcSettings, assets.ErcSettings)))
@@ -75,6 +77,8 @@ public static class SchematicHierarchyDelta
         bool drawingRatiosEmitted = false;
         bool formattingEmitted = false;
         bool annotationEmitted = false;
+        bool fieldTemplatesEmitted = false;
+        bool symbolComparisonEmitted = false;
         bool referenceInventoryEmitted = false;
         bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
@@ -126,6 +130,16 @@ public static class SchematicHierarchyDelta
                 {
                     if (annotationEmitted) continue;
                     annotationEmitted = true;
+                }
+                if (operation.SetFieldTemplates is not null)
+                {
+                    if (fieldTemplatesEmitted) continue;
+                    fieldTemplatesEmitted = true;
+                }
+                if (operation.SetSymbolComparison is not null)
+                {
+                    if (symbolComparisonEmitted) continue;
+                    symbolComparisonEmitted = true;
                 }
                 if (operation.SetReferenceInventory is not null)
                 {

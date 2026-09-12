@@ -251,11 +251,27 @@ public static class SchematicItemDelta
         remainder.Formatting = current.Formatting?.Clone();
         remainder.Annotation = current.Annotation?.Clone();
         remainder.ReferenceInventory = current.ReferenceInventory?.Clone();
+        remainder.FieldTemplates = current.FieldTemplates?.Clone();
+        remainder.SymbolComparison = current.SymbolComparison?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.FieldTemplates is not null || desired.FieldTemplates is not null)
+        {
+            var before = current.FieldTemplates ?? throw Invalid("The native peer did not capture project field templates.");
+            var after = desired.FieldTemplates ?? throw Invalid("Field templates cannot be omitted or inferred from global defaults.");
+            SchematicFieldTemplatesValidation.Validate(before);
+            SchematicFieldTemplatesValidation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetFieldTemplates = after.Clone() });
+        }
+        if (current.SymbolComparison is not null || desired.SymbolComparison is not null)
+        {
+            var before = current.SymbolComparison ?? throw Invalid("The native peer did not capture symbol comparison policy.");
+            var after = desired.SymbolComparison ?? throw Invalid("Symbol comparison policy cannot be omitted or inferred.");
+            if (!before.Equals(after)) operations.Add(new() { SetSymbolComparison = after.Clone() });
+        }
         if (current.ReferenceInventory is not null || desired.ReferenceInventory is not null)
         {
             var before = current.ReferenceInventory ?? throw Invalid("The native peer did not capture allocated references.");

@@ -298,7 +298,8 @@ public static class SchematicItemMerge
             copy.EmbeddedFonts = false; copy.RootInstance = null; copy.TitleBlock = null; copy.Page = null;
             copy.TextVariables.Clear(); copy.BusAliases.Clear(); copy.NetChains.Clear();
             copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; copy.ErcSettings = null;
-            copy.NetChainClasses = null; copy.Annotation = null; copy.ReferenceInventory = null; return copy;
+            copy.NetChainClasses = null; copy.Annotation = null; copy.ReferenceInventory = null;
+            copy.FieldTemplates = null; copy.SymbolComparison = null; return copy;
         }
         var assetsBefore = (baseline.EmbeddedFiles, baseline.EmbeddedFonts);
         var assetsXml = (xml.EmbeddedFiles, xml.EmbeddedFonts);
@@ -314,6 +315,8 @@ public static class SchematicItemMerge
             || !Choose(baseline.DrawingRatios, xml.DrawingRatios, native.DrawingRatios, out var drawing)
             || !MergeFormatting(baseline.Formatting, xml.Formatting, native.Formatting, out var formatting)
             || !MergeAnnotation(baseline.Annotation, xml.Annotation, native.Annotation, out var annotation)
+            || !Choose(baseline.FieldTemplates, xml.FieldTemplates, native.FieldTemplates, out var templates)
+            || !MergeSymbolComparison(baseline.SymbolComparison, xml.SymbolComparison, native.SymbolComparison, out var comparison)
             || !MergeReferenceInventory(baseline.ReferenceInventory, xml.ReferenceInventory, native.ReferenceInventory, out var inventory)
             || !MergeErc(baseline.ErcSettings, xml.ErcSettings, native.ErcSettings, out var erc)
             || !SchematicNetChainClasses.Merge(baseline.NetChainClasses, xml.NetChainClasses, native.NetChainClasses, out var chainClasses)
@@ -325,6 +328,8 @@ public static class SchematicItemMerge
         result.DrawingRatios = drawing?.Clone();
         result.Formatting = formatting?.Clone();
         result.Annotation = annotation?.Clone();
+        result.FieldTemplates = templates?.Clone();
+        result.SymbolComparison = comparison?.Clone();
         result.ReferenceInventory = inventory?.Clone();
         result.ErcSettings = erc?.Clone();
         result.NetChainClasses = chainClasses?.Clone();
@@ -399,6 +404,23 @@ public static class SchematicItemMerge
         else if (SchematicReferenceInventoryState.Same(baseline, xml)) result = native;
         else if (SchematicReferenceInventoryState.Same(baseline, native)) result = xml;
         else return false;
+        return true;
+    }
+
+    private static bool MergeSymbolComparison(SchematicSymbolComparisonSettings? baseline,
+        SchematicSymbolComparisonSettings? xml, SchematicSymbolComparisonSettings? native,
+        out SchematicSymbolComparisonSettings? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        var merged = new SchematicSymbolComparisonSettings();
+        foreach (var field in SchematicSymbolComparisonSettings.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
         return true;
     }
 

@@ -5,6 +5,7 @@
 #include <refdes_tracker.h>
 #include <settings/json_settings_internals.h>
 #include <api/api_sch_annotation.h>
+#include <api/api_sch_symbol_project_settings.h>
 #include <limits>
 
 BOOST_AUTO_TEST_CASE( AnnotationPolicyPreservesAllocatedDesignators )
@@ -85,6 +86,76 @@ BOOST_AUTO_TEST_CASE( ReferenceInventoryValidatesBeforeReplacingAllocationState 
     BOOST_CHECK( reopened.GetAllocatedReferences().empty() );
     BOOST_REQUIRE( reopened.Deserialize( "R1-2", 2 ) );
     BOOST_CHECK_EQUAL( reopened.Size(), 2 );
+}
+
+BOOST_AUTO_TEST_CASE( SymbolProjectSettingsMatchPersistedFields )
+{
+    PROJECT_FILE project( "symbol-policy-codec.kicad_pro" );
+    SCHEMATIC_SETTINGS schematic( &project, "schematic" );
+    project.m_SchematicSettings = &schematic;
+    project.Load(); schematic.Load();
+    const auto original = SCH_SYMBOL_COMPARISON::Capture( schematic.m_SymbolParity );
+    const std::vector<std::string> keys{
+        "missing_fields", "extra_fields", "field_texts", "field_visibilities",
+        "field_styles", "field_positions", "pin_name_number_visibilities",
+        "pin_alt_function_definitions", "exclude_from_board_flags", "dnp_flags",
+        "exclude_from_bom_flags", "exclude_from_position_file_flags"
+    };
+    auto* descriptor = SCH_SYMBOL_COMPARISON::MESSAGE::descriptor();
+    BOOST_REQUIRE_EQUAL( descriptor->field_count(), keys.size() );
+    auto persisted = schematic.CaptureCurrentState().at( "compare_symbols" );
+    BOOST_REQUIRE_EQUAL( persisted.size(), keys.size() );
+    for( size_t index = 0; index < keys.size(); ++index )
+    {
+        SCH_SYMBOL_COMPARISON::MESSAGE policy;
+        policy.GetReflection()->SetBool( &policy, descriptor->field( index ), true );
+        std::string failure;
+        BOOST_REQUIRE( SCH_SYMBOL_COMPARISON::Validate( policy, failure ) );
+        SCH_SYMBOL_COMPARISON::Restore( schematic.m_SymbolParity, policy );
+        BOOST_CHECK_EQUAL( SCH_SYMBOL_COMPARISON::Capture( schematic.m_SymbolParity ).SerializeAsString(), policy.SerializeAsString() );
+        auto expected = persisted;
+        for( const auto& key : keys ) expected[key] = key == keys[index];
+        BOOST_CHECK( schematic.CaptureCurrentState().at( "compare_symbols" ) == expected );
+    }
+    SCH_SYMBOL_COMPARISON::Restore( schematic.m_SymbolParity, original );
+    BOOST_CHECK( schematic.CaptureCurrentState().at( "compare_symbols" ) == persisted );
+    auto unknown = original;
+    unknown.GetReflection()->MutableUnknownFields( &unknown )->AddVarint( 100, 1 );
+    std::string failure;
+    BOOST_CHECK( !SCH_SYMBOL_COMPARISON::Validate( unknown, failure ) );
+
+    TEMPLATES templates;
+    templates.AddTemplateFieldName( TEMPLATE_FIELDNAME( "GlobalOnly" ), TEMPLATES::SCOPE::GLOBAL );
+    SCH_FIELD_TEMPLATES::MESSAGE desired;
+    auto* first = desired.add_fields();
+    first->set_name( "電源 & Vendor" ); first->set_visible( true );
+    auto* second = desired.add_fields();
+    second->set_name( "Documentation" ); second->set_url( true );
+    BOOST_REQUIRE( SCH_FIELD_TEMPLATES::Validate( desired, failure ) );
+    SCH_FIELD_TEMPLATES::Restore( templates, desired );
+    BOOST_CHECK_EQUAL( SCH_FIELD_TEMPLATES::Capture( templates ).SerializeAsString(), desired.SerializeAsString() );
+    BOOST_CHECK_EQUAL( templates.GetTemplateFieldNames( TEMPLATES::SCOPE::GLOBAL ).size(), 1 );
+    project.m_TemplateFieldNames = templates;
+    auto expectedFields = nlohmann::json::array( {
+        { { "name", "電源 & Vendor" }, { "visible", true }, { "url", false } },
+        { { "name", "Documentation" }, { "visible", false }, { "url", true } }
+    } );
+    BOOST_CHECK( project.CaptureCurrentState().at( "schematic" ).at( "drawing" ).at( "field_names" ) == expectedFields );
+    for( const std::string& name : std::vector<std::string>{ "", "rEfErEnCe", "電源 & Vendor", std::string( "bad\0name", 8 ) } )
+    {
+        auto invalid = desired;
+        invalid.add_fields()->set_name( name );
+        BOOST_CHECK( !SCH_FIELD_TEMPLATES::Validate( invalid, failure ) );
+    }
+    auto unknownTemplate = desired;
+    unknownTemplate.mutable_fields( 0 )->GetReflection()->MutableUnknownFields(
+            unknownTemplate.mutable_fields( 0 ) )->AddVarint( 100, 1 );
+    BOOST_CHECK( !SCH_FIELD_TEMPLATES::Validate( unknownTemplate, failure ) );
+    SCH_FIELD_TEMPLATES::MESSAGE empty;
+    BOOST_REQUIRE( SCH_FIELD_TEMPLATES::Validate( empty, failure ) );
+    SCH_FIELD_TEMPLATES::Restore( templates, empty );
+    BOOST_CHECK( templates.GetTemplateFieldNames( TEMPLATES::SCOPE::PROJECT ).empty() );
+    BOOST_CHECK_EQUAL( templates.GetTemplateFieldNames( TEMPLATES::SCOPE::GLOBAL ).size(), 1 );
 }
 
 BOOST_AUTO_TEST_CASE( SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker )

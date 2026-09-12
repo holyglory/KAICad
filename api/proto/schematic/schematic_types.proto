@@ -136,6 +136,38 @@ message SchematicMetadata
   // Schema 6. Empty means an explicitly captured empty inventory; absence
   // means unavailable data. Not inferred from currently placed components.
   SchematicReferenceInventory reference_inventory = 20;
+  // Schema 7. Presence distinguishes captured state from an older peer.
+  SchematicFieldTemplates field_templates = 21;
+  SchematicSymbolComparisonSettings symbol_comparison = 22;
+}
+
+message SchematicFieldTemplate
+{
+  string name = 1;
+  bool visible = 2;
+  bool url = 3;
+}
+
+// Ordered project templates only, never resolved application/global defaults.
+message SchematicFieldTemplates
+{
+  repeated SchematicFieldTemplate fields = 1;
+}
+
+message SchematicSymbolComparisonSettings
+{
+  bool missing_fields = 1;
+  bool extra_fields = 2;
+  bool field_texts = 3;
+  bool field_visibilities = 4;
+  bool field_styles = 5;
+  bool field_positions = 6;
+  bool pin_visibilities = 7;
+  bool pin_alt_functions = 8;
+  bool exclude_from_board_flags = 9;
+  bool dnp_flags = 10;
+  bool exclude_from_bom_flags = 11;
+  bool exclude_from_position_file_flags = 12;
 }
 
 message SchematicReferenceInventory

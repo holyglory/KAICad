@@ -166,6 +166,36 @@ public sealed class SchematicHierarchyMergeTests
     }
 
     [TestMethod]
+    public void SymbolProjectSettingsKeepOneOwnerDuringSheetStructureChanges()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances)
+            {
+                screen.Metadata.FieldTemplates = SchematicSymbolProjectSettingsTests.Templates();
+                screen.Metadata.SymbolComparison = new() { MissingFields = true };
+            }
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances)
+            {
+                screen.Metadata.FieldTemplates.Fields.Clear();
+                screen.Metadata.SymbolComparison.FieldTexts = true;
+            }
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            Assert.IsTrue(merged.Merged!.Instances.All(s => s.Metadata.FieldTemplates.Fields.Count == 0 && s.Metadata.SymbolComparison.FieldTexts));
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetFieldTemplates is not null || o.SetSymbolComparison is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetFieldTemplates is not null));
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetSymbolComparison is not null));
+            Assert.AreEqual(merged.Merged, reverse.Merged);
+        }
+    }
+
+    [TestMethod]
     public void AnnotationPolicyKeepsOneOwnerAcrossBranchInsertionAndRemoval()
     {
         foreach (bool remove in new[] { false, true })

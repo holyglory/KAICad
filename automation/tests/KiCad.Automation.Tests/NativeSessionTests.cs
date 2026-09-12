@@ -260,6 +260,8 @@ public sealed partial class NativeSessionTests
                             evidence, deadline.Token);
                         await VerifyFieldTemplateRemoval(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
+                        await VerifySymbolProjectSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
                         await VerifyManualSetup(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, target.Id, deadline.Token);
                         await VerifySetupPinMap(client, opened.Document, focusProcessId, ":" + displayNumber,
@@ -523,6 +525,8 @@ public sealed partial class NativeSessionTests
                 await Measure("reference-inventory", () => VerifyReferenceInventory(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, deadline.Token));
                 await Measure("field-templates", () => VerifyFieldTemplateRemoval(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
+                await Measure("symbol-project-settings", () => VerifySymbolProjectSettings(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, deadline.Token));
                 await VerifySetupPinMap(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);

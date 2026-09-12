@@ -17,6 +17,7 @@
 #include <sch_painter.h>
 #include <api/api_sch_formatting.h>
 #include <api/api_sch_annotation.h>
+#include <api/api_sch_symbol_project_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
@@ -37,6 +38,8 @@ public:
         m_drawingRatios = aFrame->Schematic().Settings().DrawingRatios();
         m_formatting = SCH_FORMATTING::Capture( aFrame->Schematic().Settings() );
         m_annotation = SCH_ANNOTATION::Capture( aFrame->Schematic().Settings() );
+        m_fieldTemplates = SCH_FIELD_TEMPLATES::Capture( aFrame->Prj().GetProjectFile().m_TemplateFieldNames );
+        m_symbolComparison = SCH_SYMBOL_COMPARISON::Capture( aFrame->Schematic().Settings().m_SymbolParity );
         if( auto tracker = aFrame->Schematic().Settings().m_refDesTracker )
         {
             m_referenceInventory = std::make_unique<REFDES_TRACKER>();
@@ -107,6 +110,10 @@ public:
             ApplyFormatting( aFrame, m_formatting );
         if( m_restoreAnnotation )
             SCH_ANNOTATION::Restore( aFrame->Schematic().Settings(), m_annotation );
+        if( m_restoreFieldTemplates )
+            SCH_FIELD_TEMPLATES::Restore( aFrame->Prj().GetProjectFile().m_TemplateFieldNames, m_fieldTemplates );
+        if( m_restoreSymbolComparison )
+            SCH_SYMBOL_COMPARISON::Restore( aFrame->Schematic().Settings().m_SymbolParity, m_symbolComparison );
         if( m_restoreReferenceInventory )
         {
             auto& tracker = aFrame->Schematic().Settings().m_refDesTracker;
@@ -168,6 +175,8 @@ public:
     void IncludeDrawingRatios() { m_restoreDrawingRatios = true; }
     void IncludeFormatting() { m_restoreFormatting = true; }
     void IncludeAnnotation() { m_restoreAnnotation = true; }
+    void IncludeFieldTemplates() { m_restoreFieldTemplates = true; }
+    void IncludeSymbolComparison() { m_restoreSymbolComparison = true; }
     void IncludeReferenceInventory() { m_restoreReferenceInventory = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     static void ApplyFormatting( SCH_EDIT_FRAME* aFrame, const SCH_FORMATTING::MESSAGE& aValue )
@@ -275,6 +284,8 @@ public:
         m_restoreDrawingRatios = aOther.m_restoreDrawingRatios;
         m_restoreFormatting = aOther.m_restoreFormatting;
         m_restoreAnnotation = aOther.m_restoreAnnotation;
+        m_restoreFieldTemplates = aOther.m_restoreFieldTemplates;
+        m_restoreSymbolComparison = aOther.m_restoreSymbolComparison;
         m_restoreReferenceInventory = aOther.m_restoreReferenceInventory;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreSetup = aOther.m_restoreSetup;
@@ -334,6 +345,10 @@ private:
     SCH_FORMATTING::MESSAGE m_formatting;
     bool m_restoreAnnotation = false;
     SCH_ANNOTATION::MESSAGE m_annotation;
+    bool m_restoreFieldTemplates = false;
+    bool m_restoreSymbolComparison = false;
+    SCH_FIELD_TEMPLATES::MESSAGE m_fieldTemplates;
+    SCH_SYMBOL_COMPARISON::MESSAGE m_symbolComparison;
     bool m_restoreReferenceInventory = false;
     std::unique_ptr<REFDES_TRACKER> m_referenceInventory;
     bool m_restoreErcPolicy = false;

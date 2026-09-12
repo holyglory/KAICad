@@ -52,6 +52,7 @@
 #include <api/api_sch_formatting.h>
 #include <api/api_sch_annotation.h>
 #include <api/api_sch_reference_inventory.h>
+#include <api/api_sch_symbol_project_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <api/api_sch_field_text_modes.h>
 #include <sch_symbol_cache_state.h>
@@ -1239,6 +1240,32 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     result.set_net_chain_classes_changed( true );
                 }
             }
+            else if( operation.has_set_field_templates() )
+            {
+                const auto& desired = operation.set_field_templates();
+                std::string failure;
+                if( !SCH_FIELD_TEMPLATES::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_FIELD_TEMPLATES::Capture( project().GetProjectFile().m_TemplateFieldNames ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetFieldTemplates( desired );
+                    result.set_field_templates_changed( true );
+                }
+            }
+            else if( operation.has_set_symbol_comparison() )
+            {
+                const auto& desired = operation.set_symbol_comparison();
+                std::string failure;
+                if( !SCH_SYMBOL_COMPARISON::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_SYMBOL_COMPARISON::Capture( schematic()->Settings().m_SymbolParity ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetSymbolComparison( desired );
+                    result.set_symbol_comparison_changed( true );
+                }
+            }
             else if( operation.has_set_reference_inventory() )
             {
                 REFDES_TRACKER prepared;
@@ -1568,7 +1595,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicOperationReceipt> API_HANDLER_SCH
 
 std::optional<ApiResponseStatus> API_HANDLER_SCH::validateSnapshotSchema( uint32_t aVersion )
 {
-    if( aVersion <= 6 ) return std::nullopt;
+    if( aVersion <= 7 ) return std::nullopt;
     ApiResponseStatus error;
     error.set_status( ApiStatusCode::AS_BAD_REQUEST );
     error.set_error_message( "Unsupported schematic snapshot schema version" );
@@ -1604,6 +1631,12 @@ void API_HANDLER_SCH::projectSnapshotSchema(
         aMetadata.clear_reference_inventory();
         aMetadata.add_unrepresented_state( "reference_inventory_requires_snapshot_schema_6" );
     }
+    if( aVersion < 7 )
+    {
+        aMetadata.clear_field_templates();
+        aMetadata.clear_symbol_comparison();
+        aMetadata.add_unrepresented_state( "symbol_project_settings_require_snapshot_schema_7" );
+    }
 }
 
 
@@ -1616,7 +1649,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::han
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
     // Compare full current state across rendering, even for legacy clients.
-    query.Request.set_schema_version( 6 );
+    query.Request.set_schema_version( 7 );
     auto before = handleReadScreenData( query );
     if( !before )
         return tl::unexpected( before.error() );
@@ -1765,7 +1798,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> API_HANDLER_SCH:
     HANDLER_CONTEXT<ReadSchematicHierarchyData> query;
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
-    query.Request.set_schema_version( 6 );
+    query.Request.set_schema_version( 7 );
     auto before = handleReadHierarchyData( query );
     if( !before ) return tl::unexpected( before.error() );
     if( aCtx.Request.has_expected_revision()
@@ -1993,6 +2026,8 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
     *metadata->mutable_formatting() = SCH_FORMATTING::Capture( schematic()->Settings() );
     *metadata->mutable_annotation() = SCH_ANNOTATION::Capture( schematic()->Settings() );
     *metadata->mutable_reference_inventory() = SCH_REFERENCE_INVENTORY::Capture( schematic()->Settings() );
+    *metadata->mutable_field_templates() = SCH_FIELD_TEMPLATES::Capture( project().GetProjectFile().m_TemplateFieldNames );
+    *metadata->mutable_symbol_comparison() = SCH_SYMBOL_COMPARISON::Capture( schematic()->Settings().m_SymbolParity );
     if( auto settings = project().GetProjectFile().NetSettings() )
     {
         auto* classes = metadata->mutable_net_chain_classes();

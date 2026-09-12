@@ -183,6 +183,7 @@ set( QA_COMMON_SRCS
     test_nested_settings.cpp
     test_settings_snapshot.cpp
     test_settings_save_outcome.cpp
+    test_native_state_digest.cpp
     test_net_settings.cpp
     test_component_class_settings.cpp
     test_project_local_settings.cpp

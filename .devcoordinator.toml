@@ -1784,7 +1784,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_sy
 name = "contracts"
 tier = "development"
 requires = ["build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_state_format$|^qa_pcbnew_state_format$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_state_format$|^qa_pcbnew_state_format$|^qa_native_state_digest$", "--output-on-failure", "--no-tests=error"]
 
 [test.net-settings-contract]
 timeout_seconds = 900

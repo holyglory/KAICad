@@ -170,7 +170,7 @@ public sealed class NativeClientTests
         var rejected = new ScriptTransport((_, _) => SnapshotReply(new SchematicMetadataSnapshot(), 3));
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => new NativeClient(rejected, "ipc:///tmp/rejected-schema.sock")
             .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
-        Assert.HasCount(4, rejected.Requests);
+        Assert.HasCount(5, rejected.Requests);
 
         var replaced = new ScriptTransport((_, attempt) =>
         {

@@ -150,10 +150,23 @@ public sealed partial class NativeSessionTests
             var nets = await Nets(power.Name);
             CollectionAssert.AreEqual(assigned ? new[] { "POWER_RAIL" } : Array.Empty<string>(),
                 nets.Nets.Select(net => net.Name).ToArray());
-            CollectionAssert.AreEqual(Encoded(originalItems), Encoded(await Items()),
+            var currentItems = await Items();
+            if (!Encoded(originalItems).SequenceEqual(Encoded(currentItems)))
+            {
+                await File.WriteAllBytesAsync(Path.Combine(evidence, processId + "-board-" + phase + "-expected.pb"), originalItems.ToByteArray(), token);
+                await File.WriteAllBytesAsync(Path.Combine(evidence, processId + "-board-" + phase + "-actual.pb"), currentItems.ToByteArray(), token);
+            }
+            var expectedItems = phase == "reopened"
+                ? NativeBoardReloadComparison.RebindRuntimeContainer(originalItems, currentItems) : originalItems;
+            CollectionAssert.AreEqual(Encoded(expectedItems), Encoded(currentItems),
                 "A project net-class change must preserve all track/via geometry, locks and identities.");
-            NativeKeyboard.SchematicShortcut(display, processId, "", "PCB Editor", false, false);
+            // A presence query does not raise the window after schematic Undo.
+            // Motion raises this exact owned PCB window without clicking/editing.
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor", false, false);
+            await NativeSetupUi.StableGeometry(display, processId, token, "PCB Editor");
             await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + "-board-net-settings-" + phase + ".png"), token);
+            CollectionAssert.AreEqual(Encoded(currentItems), Encoded(await Items()),
+                "Bringing the PCB into view must not change any native design field.");
         }
         await Verify(true, "applied");
         foreach (var (key, assigned) in new[] { ("z", false), ("y", true) })
@@ -174,5 +187,7 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
         await Verify(false, "reopened");
+        Assert.AreEqual(board, (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(
+            new() { Type = (DocumentType)3 }, token)).Documents.Single());
     }
 }

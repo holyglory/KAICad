@@ -159,6 +159,7 @@ set( QA_COMMON_SRCS
 
     test_netname_validator.cpp
     test_netclass_proto.cpp
+    test_api_request_target.cpp
 
     # GAL tests
     test_gal_xor_mode.cpp

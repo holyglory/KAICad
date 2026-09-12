@@ -2521,3 +2521,27 @@ devcoordinator2 test start /absolute/path/to/kicad --test automation --check res
 
 Compiled handler and STDIO evidence is not evidence of operation in Codex
 Desktop or on macOS. Those acceptance checks remain required separately.
+
+### Project PCB opening (development branch)
+
+With a matching native build, `kicad_pcb_open` opens an existing project-root
+`.kicad_pcb` in the same instance as its schematic. `kicad_pcb_create` explicitly
+creates an unsaved empty board when that file is absent. Both require an attached
+`instanceId` and an absolute project-owned `path`; repeating the operation keeps
+the existing board. Closing the MCP connection does not close the editor.
+
+Locked, malformed, future-format and recovery-needed files return errors without
+hidden dialogs or replacement of the schematic. These tools do not place or route
+components. Use the native UI for save/close; public MCP save/close and
+revision-safe PCB mutation tools remain separate unfinished work.
+
+The focused Linux journey opens two independent native projects, creates and
+reopens their boards over real MCP STDIO, and checks shared net-class updates,
+native undo/redo, geometry and lock preservation, persistence and recovery. Run:
+
+```sh
+devcoordinator2 test start /absolute/worktree --test native-net-settings --tier development
+```
+
+This is scoped Linux integration evidence, not full XML reconstruction,
+automatic repository synchronization, Codex Desktop or native-Mac qualification.

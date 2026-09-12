@@ -27,7 +27,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSetupDraft")]
     public Task SetupDraftPreservesCancelledPageChangesAndNativeHistory() => RunNativeSessions(NativeJourney.Setup);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup }
+    [TestMethod, TestCategory("NativeBomSettings")]
+    public Task BomPreferencesRoundTripThroughXmlAndNativeEdits() => RunNativeSessions(NativeJourney.BomSettings);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -38,7 +41,8 @@ public sealed partial class NativeSessionTests
         string artifacts = Path.Combine(root, "automation", "artifacts");
         string evidence = NativeEvidenceDirectory.Begin(journey == NativeJourney.Foundation ? artifacts
             : Path.Combine(artifacts, journey switch { NativeJourney.TableVariants => "native-table-variants",
-                NativeJourney.Setup => "native-setup-draft", _ => "native-net-chains" }));
+                NativeJourney.Setup => "native-setup-draft", NativeJourney.BomSettings => "native-bom-settings",
+                _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
         // annotation coverage. Keep all per-action limits and focused ceilings;
@@ -271,6 +275,12 @@ public sealed partial class NativeSessionTests
                             evidence, target.Id, deadline.Token);
                         await VerifySetupAssets(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, target.Id, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.BomSettings)
+                    {
+                        await VerifyBomSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                     }
                     else if (journey == NativeJourney.TableVariants)
                         await VerifyTableVariantEdits(client, opened.Document, schematic, focusProcessId,

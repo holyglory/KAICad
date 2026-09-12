@@ -253,11 +253,20 @@ public static class SchematicItemDelta
         remainder.ReferenceInventory = current.ReferenceInventory?.Clone();
         remainder.FieldTemplates = current.FieldTemplates?.Clone();
         remainder.SymbolComparison = current.SymbolComparison?.Clone();
+        remainder.BomSettings = current.BomSettings?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.BomSettings is not null || desired.BomSettings is not null)
+        {
+            var before = current.BomSettings ?? throw Invalid("The native peer did not capture BOM settings.");
+            var after = desired.BomSettings ?? throw Invalid("BOM settings cannot be omitted or inferred from defaults.");
+            SchematicBomSettingsValidation.Validate(before);
+            SchematicBomSettingsValidation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetBomSettings = after.Clone() });
+        }
         if (current.FieldTemplates is not null || desired.FieldTemplates is not null)
         {
             var before = current.FieldTemplates ?? throw Invalid("The native peer did not capture project field templates.");

@@ -33,7 +33,7 @@
 class EMBEDDED_FILES;
 namespace kiapi::schematic::types { class SchematicFormattingSettings; }
 namespace kiapi::schematic::types { class SchematicAnnotationSettings; }
-namespace kiapi::schematic::types { class SchematicFieldTemplates; class SchematicSymbolComparisonSettings; }
+namespace kiapi::schematic::types { class SchematicFieldTemplates; class SchematicSymbolComparisonSettings; class SchematicBomSettings; }
 class REFDES_TRACKER;
 class BUS_ALIAS;
 class SCH_EMBEDDED_FILES_UNDO_ITEM;
@@ -100,6 +100,7 @@ public:
     void SetReferenceInventory( const REFDES_TRACKER& aPrepared );
     void SetFieldTemplates( const kiapi::schematic::types::SchematicFieldTemplates& aValue );
     void SetSymbolComparison( const kiapi::schematic::types::SchematicSymbolComparisonSettings& aValue );
+    void SetBomSettings( const kiapi::schematic::types::SchematicBomSettings& aValue );
     bool SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::string& aFailure );
     void SetVariantRegistry( const std::map<wxString, wxString>& aDescriptions );
     // Stage graph declarations and the exact affected symbols before a native

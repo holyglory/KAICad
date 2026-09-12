@@ -1725,6 +1725,23 @@ requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSetupDraft", "--logger", "trx", "--results-directory", "automation/artifacts/native-setup-tests"]
 retained_artifacts = [{ name = "native-setup-tests", path = "automation/artifacts/native-setup-tests", max_bytes = 16777216 }, { name = "native-setup-evidence", path = "automation/artifacts/native-setup-draft/native-session-current", max_bytes = 33554432 }]
 
+[test.bom-settings-model]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.bom-settings-model.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.bom-settings-model.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicDataXmlTests", "--logger", "trx", "--results-directory", "automation/artifacts/bom-settings-model"]
+retained_artifacts = [{ name = "bom-settings-model", path = "automation/artifacts/bom-settings-model", max_bytes = 16777216 }]
+
 [test.net-chain-exclusion-model]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

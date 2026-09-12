@@ -26,6 +26,7 @@ public static class SchematicHierarchyDelta
                 || !Equals(s.Metadata.Annotation, assets.Annotation)
                 || !Equals(s.Metadata.FieldTemplates, assets.FieldTemplates)
                 || !Equals(s.Metadata.SymbolComparison, assets.SymbolComparison)
+                || !Equals(s.Metadata.BomSettings, assets.BomSettings)
                 || !SchematicReferenceInventoryState.Same(s.Metadata.ReferenceInventory, assets.ReferenceInventory)
                 || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
                 || !SchematicErcSettingsValidation.Same(s.Metadata.ErcSettings, assets.ErcSettings)))
@@ -79,6 +80,7 @@ public static class SchematicHierarchyDelta
         bool annotationEmitted = false;
         bool fieldTemplatesEmitted = false;
         bool symbolComparisonEmitted = false;
+        bool bomSettingsEmitted = false;
         bool referenceInventoryEmitted = false;
         bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
@@ -140,6 +142,11 @@ public static class SchematicHierarchyDelta
                 {
                     if (symbolComparisonEmitted) continue;
                     symbolComparisonEmitted = true;
+                }
+                if (operation.SetBomSettings is not null)
+                {
+                    if (bomSettingsEmitted) continue;
+                    bomSettingsEmitted = true;
                 }
                 if (operation.SetReferenceInventory is not null)
                 {

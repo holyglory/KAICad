@@ -45,6 +45,8 @@ public:
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;
+    void ShowEditTab();
+    void ShowExportTab();
 
 private:
     wxGridCellEditor* createDatasheetEditor() override;
@@ -59,6 +61,8 @@ private:
      */
     void LoadFieldNames();
     void stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename );
+    FIELDS_TABLE_BOM_SETTINGS readBomUiSettings();
+    void recordInitialBomUiState();
 
     void OnTableSelectionChanged( const std::set<int>& aRows ) override;
 
@@ -107,6 +111,8 @@ private:
     TEMPLATES&                         m_templateFieldNames;
 
     bool m_aborted = false;
+    FIELDS_TABLE_BOM_SETTINGS m_bomUiBaseline;
+    bool m_bomInitialViewSelected = false;
 
 public:
     bool WasAborted() const { return m_aborted; }

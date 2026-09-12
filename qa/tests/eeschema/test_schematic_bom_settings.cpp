@@ -98,4 +98,37 @@ BOOST_AUTO_TEST_CASE( TypedSnapshotMatchesEveryPersistedViewAndFormatField )
     }
 }
 
+BOOST_AUTO_TEST_CASE( UiNormalizationDoesNotInventChangesAndFilenameCancelIsIsolated )
+{
+    FIELDS_TABLE_BOM_SETTINGS live;
+    live.m_BomSettings = BOM_PRESET::DefaultEditing();
+    live.m_BomFmtSettings = BOM_FMT_PRESET::CSV();
+    live.m_BomExportFileName = "${PROJECTNAME}.csv";
+    auto ui = live;
+    ui.m_BomSettings.name = "";
+    ui.m_BomSettings.fieldsOrdered.push_back( { "Normalized field", "Normalized field", false, false } );
+    ui.m_BomSettings.readOnly = !live.m_BomSettings.readOnly;
+    ui.m_BomFmtSettings.readOnly = !live.m_BomFmtSettings.readOnly;
+    ui.m_BomExportFileName = "display.csv";
+    auto unchanged = SCH_BOM_SETTINGS::PrepareUiEdit( live, ui, ui, true );
+    BOOST_CHECK( unchanged.m_BomSettings == live.m_BomSettings );
+    BOOST_CHECK( unchanged.m_BomFmtSettings == live.m_BomFmtSettings );
+    BOOST_CHECK_EQUAL( unchanged.m_BomExportFileName, live.m_BomExportFileName );
+    auto edited = ui;
+    edited.m_BomExportFileName = "manual.csv";
+    edited.m_BomFmtSettings.fieldDelimiter = ";";
+    edited.m_BomFmtPresets.push_back( edited.m_BomFmtSettings );
+    auto cancelledFilename = SCH_BOM_SETTINGS::PrepareUiEdit( live, ui, edited, false );
+    BOOST_CHECK_EQUAL( cancelledFilename.m_BomExportFileName, live.m_BomExportFileName );
+    BOOST_CHECK( cancelledFilename.m_BomSettings == live.m_BomSettings );
+    BOOST_CHECK( cancelledFilename.m_BomFmtSettings == edited.m_BomFmtSettings );
+    BOOST_CHECK( cancelledFilename.m_BomFmtPresets == edited.m_BomFmtPresets );
+    auto accepted = SCH_BOM_SETTINGS::PrepareUiEdit( live, ui, edited, true );
+    BOOST_CHECK_EQUAL( accepted.m_BomExportFileName, "manual.csv" );
+    // Untouched live owners may have changed independently since UI creation.
+    live.m_BomSettings.filterString = "intervening";
+    auto preserved = SCH_BOM_SETTINGS::PrepareUiEdit( live, ui, edited, true );
+    BOOST_CHECK( preserved.m_BomSettings == live.m_BomSettings );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

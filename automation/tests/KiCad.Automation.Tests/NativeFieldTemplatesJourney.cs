@@ -45,8 +45,10 @@ public sealed partial class NativeSessionTests
         // the stable row explicitly before replacing its initial field name.
         await NativeSetupUi.StableGeometry(display, processId, token);
         NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
-            clickFromLeft: 350, clickFromTop: 38);
+            clickFromLeft: 350, clickFromTop: 67);
         NativeKeyboard.SchematicShortcut(display, processId, "F2", "Schematic Setup", false, false);
+        await NativeSetupUi.StableGeometry(display, processId, token);
+        await Capture("name-editor");
         NativeKeyboard.SchematicShortcut(display, processId, "a", "Schematic Setup", true, false);
         foreach (char c in "AutomationTemplate")
             NativeKeyboard.SchematicShortcut(display, processId, c.ToString(), "Schematic Setup", false, false);
@@ -66,7 +68,7 @@ public sealed partial class NativeSessionTests
             await NativeSetupUi.Open(client, document, display, processId, token);
             await NativeSetupUi.SelectPage(display, processId, 75, token);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
-                clickFromLeft: 350, clickFromTop: 38);
+                clickFromLeft: 350, clickFromTop: 67);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
                 clickFromLeft: 400, clickFromBottom: 75);
             await Capture("removed-" + accept);

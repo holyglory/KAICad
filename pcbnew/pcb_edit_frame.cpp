@@ -2639,6 +2639,8 @@ int PCB_EDIT_FRAME::ShowExchangeFootprintsDialog( FOOTPRINT* aFootprint, bool aU
 
 void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
+    if( ( aFlags & NET_SETTINGS_CHANGED ) && GetBoard() )
+        GetBoard()->SynchronizeNetsAndNetClasses( false );
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
     m_appearancePanel->CommonSettingsChanged( aFlags );
 

@@ -250,6 +250,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     std::set<SCH_TABLE*>   changedTables;
     bool                   updateVariantCtrl = false;
     bool                   dirtyConnectivity = false;
+    bool                   netSettingsChanged = false;
     bool                   rebuildHierarchyNavigator = false;
     bool                   refreshHierarchy = false;
     SCH_CLEANUP_FLAGS      connectivityCleanUp = NO_CLEANUP;
@@ -383,12 +384,14 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
             if( auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item ) )
             {
                 if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
-                        || allPages->IncludesNetChains() || allPages->IncludesSetup() )
+                        || allPages->IncludesNetChains() || allPages->IncludesSetup()
+                        || allPages->IncludesNetSettings() )
                 {
                     dirtyConnectivity = true;
                     connectivityCleanUp = GLOBAL_CLEANUP;
                 }
                 SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
+                netSettingsChanged |= allPages->IncludesNetSettings();
                 alternate.CopyProjectSettingsScope( *allPages );
                 allPages->RestoreAll( this );
                 *allPages = std::move( alternate );
@@ -577,6 +580,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         SCH_COMMIT localCommit( m_toolManager );
 
         RecalculateConnections( &localCommit, connectivityCleanUp );
+        if( netSettingsChanged ) SCH_PAGE_SETTINGS_UNDO_ITEM::RefreshNetSettings( this );
 
         if( connectivityCleanUp == GLOBAL_CLEANUP )
             SetSheetNumberAndCount();

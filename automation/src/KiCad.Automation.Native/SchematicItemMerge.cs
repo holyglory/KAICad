@@ -299,7 +299,7 @@ public static class SchematicItemMerge
             copy.TextVariables.Clear(); copy.BusAliases.Clear(); copy.NetChains.Clear();
             copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; copy.ErcSettings = null;
             copy.NetChainClasses = null; copy.Annotation = null; copy.ReferenceInventory = null;
-            copy.FieldTemplates = null; copy.SymbolComparison = null; copy.BomSettings = null; return copy;
+            copy.FieldTemplates = null; copy.SymbolComparison = null; copy.BomSettings = null; copy.NetSettings = null; return copy;
         }
         var assetsBefore = (baseline.EmbeddedFiles, baseline.EmbeddedFonts);
         var assetsXml = (xml.EmbeddedFiles, xml.EmbeddedFonts);
@@ -318,6 +318,7 @@ public static class SchematicItemMerge
             || !Choose(baseline.FieldTemplates, xml.FieldTemplates, native.FieldTemplates, out var templates)
             || !MergeSymbolComparison(baseline.SymbolComparison, xml.SymbolComparison, native.SymbolComparison, out var comparison)
             || !MergeBomSettings(baseline.BomSettings, xml.BomSettings, native.BomSettings, out var bom)
+            || !SchematicNetSettingsState.Merge(baseline.NetSettings, xml.NetSettings, native.NetSettings, out var netSettings)
             || !MergeReferenceInventory(baseline.ReferenceInventory, xml.ReferenceInventory, native.ReferenceInventory, out var inventory)
             || !MergeErc(baseline.ErcSettings, xml.ErcSettings, native.ErcSettings, out var erc)
             || !SchematicNetChainClasses.Merge(baseline.NetChainClasses, xml.NetChainClasses, native.NetChainClasses, out var chainClasses)
@@ -332,6 +333,7 @@ public static class SchematicItemMerge
         result.FieldTemplates = templates?.Clone();
         result.SymbolComparison = comparison?.Clone();
         result.BomSettings = bom?.Clone();
+        result.NetSettings = netSettings?.Clone();
         result.ReferenceInventory = inventory?.Clone();
         result.ErcSettings = erc?.Clone();
         result.NetChainClasses = chainClasses?.Clone();

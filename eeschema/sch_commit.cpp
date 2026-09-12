@@ -241,6 +241,8 @@ void SCH_COMMIT::SetSetupSettings( const nlohmann::json& aBefore, const nlohmann
     }
     m_pageSettingsUndo->ApplySetupDelta( frame, aBefore, aAfter );
     m_connectivitySettingsChanged = true;
+    m_netSettingsChanged |= aBefore.contains( "net_settings" ) && aAfter.contains( "net_settings" )
+            && aBefore.at( "net_settings" ) != aAfter.at( "net_settings" );
 }
 
 
@@ -328,6 +330,25 @@ void SCH_COMMIT::SetBomSettings( const kiapi::schematic::types::SchematicBomSett
     }
     m_pageSettingsUndo->IncludeBomSettings();
     SCH_BOM_SETTINGS::Swap( settings, prepared );
+}
+
+void SCH_COMMIT::SetNetSettings( const kiapi::schematic::types::SchematicNetSettings& aValue )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    if( !frame || m_isLibEditor ) throw std::runtime_error( "Net settings require a schematic editor" );
+    auto settings = frame->Prj().GetProjectFile().NetSettings();
+    if( !settings ) throw std::runtime_error( "Project net settings are unavailable" );
+    auto prepared = SCH_NET_SETTINGS::PrepareDeclared( aValue );
+    if( SCH_NET_SETTINGS::SameDeclared( SCH_NET_SETTINGS::Capture( *settings ), aValue ) ) return;
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeNetSettings();
+    m_connectivitySettingsChanged = true;
+    m_netSettingsChanged = true;
+    SCH_NET_SETTINGS::ApplyPrepared( *settings, *prepared );
 }
 
 void SCH_COMMIT::SetReferenceInventory( const REFDES_TRACKER& aPrepared )
@@ -1020,6 +1041,9 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
             schematic->RecalculateConnections( this, connectivityCleanUp, m_toolMgr );
     }
 
+    if( m_netSettingsChanged && frame )
+        SCH_PAGE_SETTINGS_UNDO_ITEM::RefreshNetSettings( frame );
+
     m_toolMgr->PostEvent( { TC_MESSAGE, TA_MODEL_CHANGE, AS_GLOBAL } );
 
     if( itemsDeselected )
@@ -1065,6 +1089,7 @@ void SCH_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     m_libraryCacheUndo.clear();
     m_libraryCacheChanged = false;
     m_connectivitySettingsChanged = false;
+    m_netSettingsChanged = false;
     m_originId.clear();
     m_operationId.clear();
     clear();
@@ -1323,7 +1348,11 @@ void SCH_COMMIT::Revert()
     if( frame )
         frame->RecalculateConnections( nullptr, m_connectivitySettingsChanged ? GLOBAL_CLEANUP : NO_CLEANUP );
 
+    if( m_netSettingsChanged && frame )
+        SCH_PAGE_SETTINGS_UNDO_ITEM::RefreshNetSettings( frame );
+
     m_connectivitySettingsChanged = false;
+    m_netSettingsChanged = false;
     m_originId.clear();
     m_operationId.clear();
     clear();

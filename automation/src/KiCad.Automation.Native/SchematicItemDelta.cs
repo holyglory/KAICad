@@ -254,11 +254,19 @@ public static class SchematicItemDelta
         remainder.FieldTemplates = current.FieldTemplates?.Clone();
         remainder.SymbolComparison = current.SymbolComparison?.Clone();
         remainder.BomSettings = current.BomSettings?.Clone();
+        remainder.NetSettings = current.NetSettings?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.NetSettings is not null || desired.NetSettings is not null)
+        {
+            var before = current.NetSettings ?? throw Invalid("The native peer did not capture declared net settings.");
+            var after = desired.NetSettings ?? throw Invalid("Declared net settings cannot be omitted or inferred from defaults.");
+            if (!SchematicNetSettingsState.SameDeclared(before, after))
+                operations.Add(new() { SetNetSettings = SchematicNetSettingsState.Declared(after) });
+        }
         if (current.BomSettings is not null || desired.BomSettings is not null)
         {
             var before = current.BomSettings ?? throw Invalid("The native peer did not capture BOM settings.");

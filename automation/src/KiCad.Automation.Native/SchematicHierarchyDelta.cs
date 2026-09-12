@@ -27,6 +27,8 @@ public static class SchematicHierarchyDelta
                 || !Equals(s.Metadata.FieldTemplates, assets.FieldTemplates)
                 || !Equals(s.Metadata.SymbolComparison, assets.SymbolComparison)
                 || !Equals(s.Metadata.BomSettings, assets.BomSettings)
+                || !SchematicNetSettingsState.SameDeclared(s.Metadata.NetSettings, assets.NetSettings)
+                || !Equals(s.Metadata.NetSettings?.LabelAssignments, assets.NetSettings?.LabelAssignments)
                 || !SchematicReferenceInventoryState.Same(s.Metadata.ReferenceInventory, assets.ReferenceInventory)
                 || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
                 || !SchematicErcSettingsValidation.Same(s.Metadata.ErcSettings, assets.ErcSettings)))
@@ -81,6 +83,7 @@ public static class SchematicHierarchyDelta
         bool fieldTemplatesEmitted = false;
         bool symbolComparisonEmitted = false;
         bool bomSettingsEmitted = false;
+        bool netSettingsEmitted = false;
         bool referenceInventoryEmitted = false;
         bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
@@ -147,6 +150,11 @@ public static class SchematicHierarchyDelta
                 {
                     if (bomSettingsEmitted) continue;
                     bomSettingsEmitted = true;
+                }
+                if (operation.SetNetSettings is not null)
+                {
+                    if (netSettingsEmitted) continue;
+                    netSettingsEmitted = true;
                 }
                 if (operation.SetReferenceInventory is not null)
                 {

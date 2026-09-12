@@ -76,6 +76,13 @@ timeout_seconds = 600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
 [[test.compiler-cache-pch-diagnostic.check]]
+name = "logs"
+tier = "development"
+role = "preflight"
+invalidates = ["prepare", "compile", "restore"]
+command = ["cmake", "-E", "make_directory", "automation/artifacts/compiler-cache-pch"]
+
+[[test.compiler-cache-pch-diagnostic.check]]
 name = "prepare"
 tier = "development"
 role = "preflight"
@@ -85,8 +92,8 @@ command = ["cmake", "-E", "rename", "automation/artifacts/native/common/CMakeFil
 [[test.compiler-cache-pch-diagnostic.check]]
 name = "compile"
 tier = "development"
-command = ["cmake", "-E", "env", "CCACHE_LOGFILE=../compiler-cache-pch.log", "cmake", "--build", "automation/artifacts/native", "--target", "common/CMakeFiles/kicommon.dir/cmake_pch.hxx.gch"]
-retained_artifacts = [{ name = "pch-cache-log", path = "automation/artifacts/compiler-cache-pch.log", max_bytes = 4194304 }]
+command = ["cmake", "-E", "env", "CCACHE_LOGFILE=../compiler-cache-pch/ccache.log", "cmake", "--build", "automation/artifacts/native", "--target", "common/CMakeFiles/kicommon.dir/cmake_pch.hxx.gch"]
+retained_artifacts = [{ name = "pch-cache-log", path = "automation/artifacts/compiler-cache-pch", max_bytes = 4194304 }]
 
 [[test.compiler-cache-pch-diagnostic.check]]
 name = "restore"

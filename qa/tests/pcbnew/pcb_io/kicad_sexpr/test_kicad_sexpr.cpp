@@ -35,6 +35,7 @@
 #include <progress_reporter.h>
 #include <richio.h>
 #include <embedded_files.h>
+#include <api/native_state_digest.h>
 
 #include <board.h>
 #include <board_connected_item.h>
@@ -81,6 +82,10 @@ BOOST_AUTO_TEST_CASE( StateSerializationPreservesCurrentEmbeddedResources )
     kicadPlugin.FormatBoardToFormatter( &first, &board, nullptr, false );
     kicadPlugin.FormatBoardToFormatter( &second, &board, nullptr, false );
     BOOST_CHECK_EQUAL( first.GetString(), second.GetString() );
+    NATIVE_STATE_DIGEST streamed;
+    kicadPlugin.FormatBoardToFormatter( &streamed, &board, nullptr, false );
+    BOOST_CHECK_EQUAL( streamed.Hex(), picosha2::hash256_hex_string( first.GetString() ) );
+    BOOST_CHECK_EQUAL( streamed.Bytes(), first.GetString().size() );
     BOOST_CHECK( first.GetString().find( "retained.ttf" ) != std::string::npos );
     BOOST_REQUIRE( board.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == asset.get() );
     BOOST_CHECK_EQUAL( asset->compressedEncodedData, encoded );

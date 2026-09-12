@@ -6,6 +6,7 @@
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <embedded_files.h>
 #include <richio.h>
+#include <api/native_state_digest.h>
 
 BOOST_AUTO_TEST_SUITE( SchematicStateFormat )
 
@@ -29,6 +30,10 @@ BOOST_AUTO_TEST_CASE( RepeatedStateSerializationPreservesCurrentResourcesAndDirt
     writer.FormatSchematicToFormatter( &first, schematic.GetTopLevelSheet(), &schematic, nullptr, false );
     writer.FormatSchematicToFormatter( &second, schematic.GetTopLevelSheet(), &schematic, nullptr, false );
     BOOST_CHECK_EQUAL( first.GetString(), second.GetString() );
+    NATIVE_STATE_DIGEST streamed;
+    writer.FormatSchematicToFormatter( &streamed, schematic.GetTopLevelSheet(), &schematic, nullptr, false );
+    BOOST_CHECK_EQUAL( streamed.Hex(), picosha2::hash256_hex_string( first.GetString() ) );
+    BOOST_CHECK_EQUAL( streamed.Bytes(), first.GetString().size() );
     BOOST_CHECK( first.GetString().find( "retained.ttf" ) != std::string::npos );
     BOOST_REQUIRE( schematic.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == asset.get() );
     BOOST_CHECK_EQUAL( asset->compressedEncodedData, encoded );

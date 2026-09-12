@@ -25,6 +25,7 @@ package kiapi.schematic.types;
 import "google/protobuf/any.proto";
 import "common/types/base_types.proto";
 import "common/types/embedded_files.proto";
+import "common/types/project_settings.proto";
 import "schematic/schematic_rules.proto";
 
 // One native screen's top-level objects and settings collected in one handler.
@@ -142,6 +143,31 @@ message SchematicMetadata
   // Schema 8. Project-owned BOM presentation/export settings, not component
   // fields or transient built-in-preset read-only flags.
   SchematicBomSettings bom_settings = 23;
+  // Schema 9: declared shared project net settings, excluding effective caches
+  // and the separately owned net-chain grouping definitions.
+  SchematicNetSettings net_settings = 24;
+}
+
+message SchematicNetClassNames
+{
+  repeated string names = 1;
+}
+
+message SchematicNetClassPattern
+{
+  string pattern = 1;
+  string net_class = 2;
+}
+
+message SchematicNetSettings
+{
+  // Explicit "Default" is required; absence never requests inferred defaults.
+  kiapi.common.project.NetClass default_class = 1;
+  repeated kiapi.common.project.NetClass classes = 2;
+  map<string, SchematicNetClassNames> label_assignments = 3;
+  repeated SchematicNetClassPattern patterns = 4;
+  map<string, kiapi.common.types.Color> net_colors = 5;
+  map<string, string> chain_netclasses = 6;
 }
 
 message SchematicBomField

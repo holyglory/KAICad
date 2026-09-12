@@ -9,6 +9,7 @@
 #include <settings/json_settings_internals.h>
 #include <set>
 #include <stdexcept>
+#include <cmath>
 
 namespace SCH_NET_SETTINGS
 {
@@ -41,7 +42,18 @@ inline MESSAGE Capture( NET_SETTINGS& aSettings )
 
 inline bool Same( const MESSAGE& aLeft, const MESSAGE& aRight )
 {
-    return google::protobuf::util::MessageDifferencer::Equals( aLeft, aRight );
+    google::protobuf::util::MessageDifferencer comparison;
+    comparison.TreatAsMap( MESSAGE::descriptor()->FindFieldByName( "classes" ),
+                          kiapi::common::project::NetClass::descriptor()->FindFieldByName( "name" ) );
+    comparison.TreatAsSet( kiapi::schematic::types::SchematicNetClassNames::descriptor()->FindFieldByName( "names" ) );
+    return comparison.Compare( aLeft, aRight );
+}
+
+inline void ValidateColor( const kiapi::common::types::Color& aColor )
+{
+    for( double component : { aColor.r(), aColor.g(), aColor.b(), aColor.a() } )
+        if( !std::isfinite( component ) || component < 0 || component > 1 )
+            throw std::runtime_error( "Net colors require finite RGBA components between zero and one" );
 }
 
 inline bool SameDeclared( const MESSAGE& aLeft, const MESSAGE& aRight )
@@ -62,6 +74,8 @@ inline std::shared_ptr<NETCLASS> PrepareClass( const kiapi::common::project::Net
             || !aValue.constituents().empty() || !aValue.has_priority() )
         throw std::runtime_error( "Net settings require named explicit classes with declared priorities" );
     auto prepared = std::make_shared<NETCLASS>( wxString::FromUTF8( aValue.name() ), false );
+    if( aValue.board().has_color() ) ValidateColor( aValue.board().color() );
+    if( aValue.schematic().has_color() ) ValidateColor( aValue.schematic().color() );
     if( !prepared->Deserialize( aValue ) )
         throw std::runtime_error( "Net class contains unsupported native values" );
     kiapi::common::project::NetClass captured;
@@ -91,7 +105,10 @@ inline std::unique_ptr<NET_SETTINGS> PrepareDeclared( const MESSAGE& aValue )
         prepared->SetNetclassPatternAssignment( wxString::FromUTF8( pattern.pattern() ),
                                                wxString::FromUTF8( pattern.net_class() ) );
     for( const auto& [net, color] : aValue.net_colors() )
+    {
+        ValidateColor( color );
         prepared->SetNetColorAssignment( wxString::FromUTF8( net ), kiapi::common::UnpackColor( color ) );
+    }
     for( const auto& [chain, netclass] : aValue.chain_netclasses() )
         prepared->SetNetChainNetClass( wxString::FromUTF8( chain ), wxString::FromUTF8( netclass ) );
     if( !SameDeclared( Capture( *prepared ), aValue ) )

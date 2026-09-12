@@ -33,7 +33,7 @@
 class EMBEDDED_FILES;
 namespace kiapi::schematic::types { class SchematicFormattingSettings; }
 namespace kiapi::schematic::types { class SchematicAnnotationSettings; }
-namespace kiapi::schematic::types { class SchematicFieldTemplates; class SchematicSymbolComparisonSettings; class SchematicBomSettings; }
+namespace kiapi::schematic::types { class SchematicFieldTemplates; class SchematicSymbolComparisonSettings; class SchematicBomSettings; class SchematicNetSettings; }
 class REFDES_TRACKER;
 class BUS_ALIAS;
 class SCH_EMBEDDED_FILES_UNDO_ITEM;
@@ -101,6 +101,7 @@ public:
     void SetFieldTemplates( const kiapi::schematic::types::SchematicFieldTemplates& aValue );
     void SetSymbolComparison( const kiapi::schematic::types::SchematicSymbolComparisonSettings& aValue );
     void SetBomSettings( const kiapi::schematic::types::SchematicBomSettings& aValue );
+    void SetNetSettings( const kiapi::schematic::types::SchematicNetSettings& aValue );
     bool SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::string& aFailure );
     void SetVariantRegistry( const std::map<wxString, wxString>& aDescriptions );
     // Stage graph declarations and the exact affected symbols before a native
@@ -139,4 +140,5 @@ private:
     std::map<SCH_SCREEN*, std::unique_ptr<SCH_SYMBOL_CACHE_EDIT_SCOPE>> m_libraryCacheScopes;
     bool m_libraryCacheChanged = false;
     bool m_connectivitySettingsChanged = false;
+    bool m_netSettingsChanged = false;
 };

@@ -19,6 +19,7 @@
 #include <api/api_sch_annotation.h>
 #include <api/api_sch_symbol_project_settings.h>
 #include <api/api_sch_bom_settings.h>
+#include <api/api_sch_net_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
@@ -42,6 +43,8 @@ public:
         m_fieldTemplates = SCH_FIELD_TEMPLATES::Capture( aFrame->Prj().GetProjectFile().m_TemplateFieldNames );
         m_symbolComparison = SCH_SYMBOL_COMPARISON::Capture( aFrame->Schematic().Settings().m_SymbolParity );
         m_bomSettings = aFrame->Schematic().Settings();
+        if( auto settings = aFrame->Prj().GetProjectFile().NetSettings() )
+            m_netSettings = SCH_NET_SETTINGS::Capture( *settings );
         if( auto tracker = aFrame->Schematic().Settings().m_refDesTracker )
         {
             m_referenceInventory = std::make_unique<REFDES_TRACKER>();
@@ -123,6 +126,13 @@ public:
             auto prepared = m_bomSettings;
             SCH_BOM_SETTINGS::Swap( aFrame->Schematic().Settings(), prepared );
         }
+        if( m_restoreNetSettings && m_netSettings )
+        {
+            auto prepared = SCH_NET_SETTINGS::PrepareDeclared( *m_netSettings );
+            auto live = aFrame->Prj().GetProjectFile().NetSettings();
+            if( !live ) throw std::runtime_error( "Project net settings are unavailable during history restoration" );
+            SCH_NET_SETTINGS::ApplyPrepared( *live, *prepared );
+        }
         if( m_restoreReferenceInventory )
         {
             auto& tracker = aFrame->Schematic().Settings().m_refDesTracker;
@@ -187,6 +197,7 @@ public:
     void IncludeFieldTemplates() { m_restoreFieldTemplates = true; }
     void IncludeSymbolComparison() { m_restoreSymbolComparison = true; }
     void IncludeBomSettings() { m_restoreBomSettings = true; }
+    void IncludeNetSettings() { m_restoreNetSettings = true; }
     void IncludeReferenceInventory() { m_restoreReferenceInventory = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     static void ApplyFormatting( SCH_EDIT_FRAME* aFrame, const SCH_FORMATTING::MESSAGE& aValue )
@@ -233,6 +244,12 @@ public:
         aFrame->GetCanvas()->GetView()->MarkDirty();
     }
     bool IncludesNetChains() const { return m_restoreNetChains; }
+    bool IncludesNetSettings() const
+    {
+        return m_restoreNetSettings || ( m_restoreSetup && m_setupBefore && m_setupAfter
+                && m_setupBefore->contains( "net_settings" ) && m_setupAfter->contains( "net_settings" )
+                && m_setupBefore->at( "net_settings" ) != m_setupAfter->at( "net_settings" ) );
+    }
     bool IncludesSetup() const { return m_restoreSetup; }
 
     void ApplySetupDelta( SCH_EDIT_FRAME* aFrame, const nlohmann::json& aBefore,
@@ -250,6 +267,19 @@ public:
         m_restoreSetup = true;
         RefreshSetup( aFrame, operating != SCH_FORMATTING::Capture( aFrame->Schematic().Settings() )
                                                    .operating_point().SerializeAsString() );
+    }
+
+    static void RefreshNetSettings( SCH_EDIT_FRAME* aFrame )
+    {
+        aFrame->Schematic().ConnectionGraph()->ApplyNetChainNetclasses();
+        aFrame->Prj().IncrementNetclassesTicker();
+        std::set<SCH_SCREEN*> visited;
+        for( const SCH_SHEET_PATH& path : aFrame->Schematic().Hierarchy() )
+            if( SCH_SCREEN* screen = path.LastScreen(); screen && visited.insert( screen ).second )
+                for( SCH_ITEM* item : screen->Items() ) item->ClearCaches();
+        aFrame->Kiway().CommonSettingsChanged( NET_SETTINGS_CHANGED );
+        aFrame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
+        aFrame->GetCanvas()->Refresh();
     }
 
     static void RefreshSetup( SCH_EDIT_FRAME* aFrame, bool aOperatingPointChanged )
@@ -297,6 +327,7 @@ public:
         m_restoreFieldTemplates = aOther.m_restoreFieldTemplates;
         m_restoreSymbolComparison = aOther.m_restoreSymbolComparison;
         m_restoreBomSettings = aOther.m_restoreBomSettings;
+        m_restoreNetSettings = aOther.m_restoreNetSettings;
         m_restoreReferenceInventory = aOther.m_restoreReferenceInventory;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreSetup = aOther.m_restoreSetup;
@@ -362,6 +393,8 @@ private:
     SCH_SYMBOL_COMPARISON::MESSAGE m_symbolComparison;
     bool m_restoreBomSettings = false;
     FIELDS_TABLE_BOM_SETTINGS m_bomSettings;
+    bool m_restoreNetSettings = false;
+    std::optional<SCH_NET_SETTINGS::MESSAGE> m_netSettings;
     bool m_restoreReferenceInventory = false;
     std::unique_ptr<REFDES_TRACKER> m_referenceInventory;
     bool m_restoreErcPolicy = false;

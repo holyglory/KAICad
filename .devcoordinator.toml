@@ -1628,7 +1628,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_sy
 name = "native-build"
 tier = "development"
 requires = ["contracts"]
-command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "eeschema"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
 
 [[test.native-setup-dialog.check]]
 name = "managed-build"

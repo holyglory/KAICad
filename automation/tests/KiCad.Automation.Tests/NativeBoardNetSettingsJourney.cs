@@ -80,6 +80,9 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual((DocumentType)3, board.Type);
         Assert.AreEqual(Path.GetFileName(boardPath), board.BoardFilename);
         Assert.AreEqual(schematic.Project, board.Project);
+        var createdState = await ObserveLifecycleState(client, board, token);
+        Assert.AreEqual(DocumentLifecycleScope.DlsPcb, createdState.Scope);
+        Assert.IsTrue(createdState.NativeContentDirty);
         Assert.IsFalse(File.Exists(boardPath), "Explicit native creation remains unsaved.");
         Assert.AreEqual(opened, await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, token));
         async Task FailedSave()
@@ -110,6 +113,7 @@ public sealed partial class NativeSessionTests
         }
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue(File.Exists(boardPath));
+        Assert.IsFalse((await ObserveLifecycleState(client, board, token)).NativeContentDirty);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("This is the Linux native save fixture.");
         foreach (string protectedPath in new[] { boardPath, project })
         {
@@ -159,6 +163,10 @@ public sealed partial class NativeSessionTests
         static string[] Encoded(GetItemsResponse items) => items.Items
             .Select(item => Convert.ToBase64String(item.ToByteArray())).Order(StringComparer.Ordinal).ToArray();
         var original = await Read();
+        var originalSchematicState = await ObserveLifecycleState(client, schematic, token);
+        Assert.AreEqual(DocumentLifecycleScope.DlsSchematicHierarchy, originalSchematicState.Scope);
+        Assert.AreEqual(original, await Read(), "Full native state serialization must preserve the schematic snapshot.");
+        var originalBoardState = await ObserveLifecycleState(client, board, token);
         var desired = original.Data.Metadata.NetSettings.Clone();
         var power = desired.DefaultClass.Clone(); power.Name = "BoardPower"; power.Priority = 1;
         power.Board.TrackWidth = new() { ValueNm = 600000 };
@@ -175,6 +183,10 @@ public sealed partial class NativeSessionTests
         }
         Assert.HasCount(0, (await Nets(power.Name)).Nets);
         await Apply(desired);
+        Assert.AreNotEqual(originalSchematicState.StateSha256,
+            (await ObserveLifecycleState(client, schematic, token)).StateSha256);
+        Assert.AreNotEqual(originalBoardState.StateSha256,
+            (await ObserveLifecycleState(client, board, token)).StateSha256);
         async Task Verify(bool assigned, string phase)
         {
             var nets = await Nets(power.Name);
@@ -213,6 +225,10 @@ public sealed partial class NativeSessionTests
         }
         await Apply(original.Data.Metadata.NetSettings);
         await Verify(false, "restored");
+        Assert.AreEqual(originalSchematicState.StateSha256,
+            (await ObserveLifecycleState(client, schematic, token)).StateSha256);
+        Assert.AreEqual(originalBoardState.StateSha256,
+            (await ObserveLifecycleState(client, board, token)).StateSha256);
         Assert.AreEqual(original.Data, (await Read()).Data);
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);

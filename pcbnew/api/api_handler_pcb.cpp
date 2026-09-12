@@ -29,6 +29,10 @@
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_server.h>
+#include <api/native_state_digest.h>
+#include <project/project_file.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <json_common.h>
 #include <api/cross_probe_client.h>
 #include <wx/log.h>
 #include <base_screen.h>
@@ -112,6 +116,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>(
             &API_HANDLER_PCB::handleGetOpenDocuments );
     registerHandler<SaveDocument, Empty>( &API_HANDLER_PCB::handleSaveDocument );
+    registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
+            &API_HANDLER_PCB::handleReadLifecycleState );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -218,6 +224,55 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_PCB::handleGetOpenDocuments
 
     response.mutable_documents()->Add( std::move( doc ) );
     return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::handleReadLifecycleState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx )
+{
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    try
+    {
+        kiapi::automation::v1::DocumentLifecycleState result;
+        result.mutable_document()->CopyFrom( aCtx.Request.document() );
+        result.set_native_identity( board()->m_Uuid.AsStdString() );
+        result.mutable_revision()->set_epoch( result.native_identity() );
+        const int sequence = board()->GetTimeStamp();
+        if( sequence < 0 ) throw std::runtime_error( "Board observation counter requires a new document epoch" );
+        result.mutable_revision()->set_sequence( static_cast<uint64_t>( sequence ) );
+        result.set_scope( kiapi::automation::v1::DLS_PCB );
+        result.set_native_content_dirty( frame() ? frame()->IsContentModified() : board()->IsModified() );
+        NATIVE_DOCUMENT_DIGEST digest;
+        NATIVE_STATE_DIGEST content, settings;
+        PCB_IO_KICAD_SEXPR writer;
+        writer.FormatBoardToFormatter( &content, board(), nullptr, false );
+        digest.Add( "board", content );
+        settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
+        digest.Add( "project-settings", settings );
+        result.set_project_settings_included( true );
+        result.set_complete_change_tracking( false );
+        result.set_disk_baseline_checked( false );
+        result.add_native_files( project().AbsolutePath( board()->GetFileName() ).ToStdString( wxConvUTF8 ) );
+        result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.set_state_sha256( digest.Hex() );
+        if( result.native_identity() != board()->m_Uuid.AsStdString() || sequence != board()->GetTimeStamp() )
+        {
+            ApiResponseStatus changed;
+            changed.set_status( ApiStatusCode::AS_BUSY );
+            changed.set_error_message( "PCB changed during native state observation" );
+            return tl::unexpected( changed );
+        }
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        failure.set_error_message( std::string( "Native state could not be observed: " ) + error.what() );
+        return tl::unexpected( failure );
+    }
 }
 
 

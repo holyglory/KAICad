@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using Kiapi.Schematic;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -120,6 +121,48 @@ public sealed class SchematicHierarchyMergeTests
         Assert.AreEqual("merge_document_changed", SchematicHierarchyMerge.Plan(b, other, b).ErrorCode);
         using var cancel = new CancellationTokenSource(); cancel.Cancel();
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicHierarchyMerge.Plan(b, b, b, cancel.Token));
+    }
+
+    [TestMethod]
+    public void ElectricalProjectPolicySurvivesConcurrentSheetInsertionAndRemoval()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances)
+            {
+                screen.Metadata.ErcSettings = SchematicErcSettingsTests.Fixture();
+                screen.Metadata.ErcSettings.Exclusions.Clear();
+                screen.Metadata.NetChainClasses = new()
+                {
+                    Definitions = { "Used", "Unused" }, Assignments = { ["Signal"] = "Used" }
+                };
+            }
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances)
+            {
+                screen.Metadata.ErcSettings.RuleSeverities[0].Severity = RuleSeverity.RsError;
+                screen.Metadata.NetChainClasses.Definitions.Add("Added");
+            }
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            foreach (var screen in merged.Merged!.Instances)
+            {
+                Assert.AreEqual(native.Instances[0].Metadata.ErcSettings, screen.Metadata.ErcSettings);
+                Assert.AreEqual(native.Instances[0].Metadata.NetChainClasses, screen.Metadata.NetChainClasses);
+            }
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetErcSettings is not null || o.ReplaceNetChainClasses is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetErcSettings is not null));
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.ReplaceNetChainClasses is not null));
+            Assert.AreEqual(merged.Merged, reverse.Merged);
+            foreach (var screen in xml.Instances) screen.Metadata.ErcSettings.RuleSeverities[0].Severity = RuleSeverity.RsIgnore;
+            var originalXml = xml.Clone(); var originalNative = native.Clone();
+            Assert.IsFalse(SchematicHierarchyMerge.Plan(baseline, xml, native).CanApply);
+            Assert.AreEqual(originalXml, xml); Assert.AreEqual(originalNative, native);
+        }
     }
 
     [TestMethod]

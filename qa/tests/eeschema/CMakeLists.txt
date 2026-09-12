@@ -350,6 +350,7 @@ setup_qa_env( qa_eeschema )
 # Focused native save/load acceptance without rebuilding every eeschema test.
 add_executable( qa_symbol_graphic_identity
     ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+    test_schematic_state_format.cpp
     test_module.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp

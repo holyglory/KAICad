@@ -165,6 +165,7 @@ public static class SchematicHierarchyMerge
         metadata.ReferenceInventory = project.ReferenceInventory?.Clone();
         metadata.FieldTemplates = project.FieldTemplates?.Clone();
         metadata.SymbolComparison = project.SymbolComparison?.Clone();
+        metadata.BomSettings = project.BomSettings?.Clone();
         metadata.ErcSettings = project.ErcSettings?.Clone();
         metadata.NetChainClasses = project.NetChainClasses?.Clone();
         SchematicVariantProjection.Reproject(result);

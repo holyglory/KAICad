@@ -218,6 +218,7 @@ set( QA_EESCHEMA_SRCS
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
     test_schematic_setup_draft.cpp
+    test_schematic_bom_settings.cpp
     test_schematic_initialization.cpp
     test_schematic_symbol_library_identity.cpp
     test_sch_table.cpp
@@ -352,6 +353,7 @@ add_executable( qa_symbol_graphic_identity
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
     test_schematic_setup_draft.cpp
+    test_schematic_bom_settings.cpp
     test_schematic_initialization.cpp
     test_sch_text_presentation.cpp
     test_drawing_sheet_context.cpp
@@ -390,3 +392,7 @@ add_test( NAME qa_schematic_setup_draft
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
         --run_test=SettingsSnapshot:SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker:SchematicDraftAppliesOnlyItsChangedOwnersAndCanUndo:AnnotationPolicyPreservesAllocatedDesignators:ReferenceInventoryValidatesBeforeReplacingAllocationState:ProjectFieldTemplatesCanBeExplicitlyEmpty:SymbolProjectSettingsMatchPersistedFields --log_level=test_suite )
 setup_qa_env( qa_schematic_setup_draft )
+
+add_test( NAME qa_schematic_bom_settings
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicBomSettings --log_level=test_suite )
+setup_qa_env( qa_schematic_bom_settings )

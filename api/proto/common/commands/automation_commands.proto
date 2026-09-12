@@ -336,6 +336,7 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicReferenceInventory set_reference_inventory = 20;
     kiapi.schematic.types.SchematicFieldTemplates set_field_templates = 21;
     kiapi.schematic.types.SchematicSymbolComparisonSettings set_symbol_comparison = 22;
+    kiapi.schematic.types.SchematicBomSettings set_bom_settings = 23;
   }
 }
 
@@ -404,6 +405,7 @@ message SchematicItemBatchResult {
   bool reference_inventory_changed = 20;
   bool field_templates_changed = 21;
   bool symbol_comparison_changed = 22;
+  bool bom_settings_changed = 23;
 }
 
 message InspectSchematicOperation {

@@ -53,6 +53,7 @@
 #include <api/api_sch_annotation.h>
 #include <api/api_sch_reference_inventory.h>
 #include <api/api_sch_symbol_project_settings.h>
+#include <api/api_sch_bom_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <api/api_sch_field_text_modes.h>
 #include <sch_symbol_cache_state.h>
@@ -1266,6 +1267,19 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     result.set_symbol_comparison_changed( true );
                 }
             }
+            else if( operation.has_set_bom_settings() )
+            {
+                const auto& desired = operation.set_bom_settings();
+                std::string failure;
+                if( !SCH_BOM_SETTINGS::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_BOM_SETTINGS::Capture( schematic()->Settings() ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetBomSettings( desired );
+                    result.set_bom_settings_changed( true );
+                }
+            }
             else if( operation.has_set_reference_inventory() )
             {
                 REFDES_TRACKER prepared;
@@ -1595,7 +1609,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicOperationReceipt> API_HANDLER_SCH
 
 std::optional<ApiResponseStatus> API_HANDLER_SCH::validateSnapshotSchema( uint32_t aVersion )
 {
-    if( aVersion <= 7 ) return std::nullopt;
+    if( aVersion <= 8 ) return std::nullopt;
     ApiResponseStatus error;
     error.set_status( ApiStatusCode::AS_BAD_REQUEST );
     error.set_error_message( "Unsupported schematic snapshot schema version" );
@@ -1637,6 +1651,11 @@ void API_HANDLER_SCH::projectSnapshotSchema(
         aMetadata.clear_symbol_comparison();
         aMetadata.add_unrepresented_state( "symbol_project_settings_require_snapshot_schema_7" );
     }
+    if( aVersion < 8 )
+    {
+        aMetadata.clear_bom_settings();
+        aMetadata.add_unrepresented_state( "bom_settings_require_snapshot_schema_8" );
+    }
 }
 
 
@@ -1649,7 +1668,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::han
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
     // Compare full current state across rendering, even for legacy clients.
-    query.Request.set_schema_version( 7 );
+    query.Request.set_schema_version( 8 );
     auto before = handleReadScreenData( query );
     if( !before )
         return tl::unexpected( before.error() );
@@ -1798,7 +1817,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> API_HANDLER_SCH:
     HANDLER_CONTEXT<ReadSchematicHierarchyData> query;
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
-    query.Request.set_schema_version( 7 );
+    query.Request.set_schema_version( 8 );
     auto before = handleReadHierarchyData( query );
     if( !before ) return tl::unexpected( before.error() );
     if( aCtx.Request.has_expected_revision()
@@ -2028,6 +2047,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
     *metadata->mutable_reference_inventory() = SCH_REFERENCE_INVENTORY::Capture( schematic()->Settings() );
     *metadata->mutable_field_templates() = SCH_FIELD_TEMPLATES::Capture( project().GetProjectFile().m_TemplateFieldNames );
     *metadata->mutable_symbol_comparison() = SCH_SYMBOL_COMPARISON::Capture( schematic()->Settings().m_SymbolParity );
+    *metadata->mutable_bom_settings() = SCH_BOM_SETTINGS::Capture( schematic()->Settings() );
     if( auto settings = project().GetProjectFile().NetSettings() )
     {
         auto* classes = metadata->mutable_net_chain_classes();

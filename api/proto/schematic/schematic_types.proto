@@ -139,6 +139,59 @@ message SchematicMetadata
   // Schema 7. Presence distinguishes captured state from an older peer.
   SchematicFieldTemplates field_templates = 21;
   SchematicSymbolComparisonSettings symbol_comparison = 22;
+  // Schema 8. Project-owned BOM presentation/export settings, not component
+  // fields or transient built-in-preset read-only flags.
+  SchematicBomSettings bom_settings = 23;
+}
+
+message SchematicBomField
+{
+  string name = 1;
+  string label = 2;
+  bool show = 3;
+  bool group_by = 4;
+}
+
+enum SchematicBomFilterScope
+{
+  SBFS_UNKNOWN = 0;
+  SBFS_REFERENCE = 1;
+  SBFS_VISIBLE = 2;
+  SBFS_ALL = 3;
+}
+
+message SchematicBomView
+{
+  string name = 1;
+  repeated SchematicBomField fields = 2;
+  string sort_field = 3;
+  bool sort_ascending = 4;
+  string filter = 5;
+  SchematicBomFilterScope filter_scope = 6;
+  bool group_symbols = 7;
+  bool exclude_dnp = 8;
+  bool include_excluded_from_bom = 9;
+}
+
+message SchematicBomFormat
+{
+  string name = 1;
+  string field_delimiter = 2;
+  string string_delimiter = 3;
+  string reference_delimiter = 4;
+  string reference_range_delimiter = 5;
+  bool keep_tabs = 6;
+  bool keep_line_breaks = 7;
+  bool include_byte_order_mark = 8;
+}
+
+message SchematicBomSettings
+{
+  string export_filename = 1;
+  SchematicBomView current_view = 2;
+  repeated SchematicBomView saved_views = 3;
+  SchematicBomFormat current_format = 4;
+  repeated SchematicBomFormat saved_formats = 5;
 }
 
 message SchematicFieldTemplate

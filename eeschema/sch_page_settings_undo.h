@@ -18,6 +18,7 @@
 #include <api/api_sch_formatting.h>
 #include <api/api_sch_annotation.h>
 #include <api/api_sch_symbol_project_settings.h>
+#include <api/api_sch_bom_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
@@ -40,6 +41,7 @@ public:
         m_annotation = SCH_ANNOTATION::Capture( aFrame->Schematic().Settings() );
         m_fieldTemplates = SCH_FIELD_TEMPLATES::Capture( aFrame->Prj().GetProjectFile().m_TemplateFieldNames );
         m_symbolComparison = SCH_SYMBOL_COMPARISON::Capture( aFrame->Schematic().Settings().m_SymbolParity );
+        m_bomSettings = aFrame->Schematic().Settings();
         if( auto tracker = aFrame->Schematic().Settings().m_refDesTracker )
         {
             m_referenceInventory = std::make_unique<REFDES_TRACKER>();
@@ -114,6 +116,13 @@ public:
             SCH_FIELD_TEMPLATES::Restore( aFrame->Prj().GetProjectFile().m_TemplateFieldNames, m_fieldTemplates );
         if( m_restoreSymbolComparison )
             SCH_SYMBOL_COMPARISON::Restore( aFrame->Schematic().Settings().m_SymbolParity, m_symbolComparison );
+        if( m_restoreBomSettings )
+        {
+            // Undo retains transient native flags as well as persisted values.
+            // Prepare the full copy before touching live project settings.
+            auto prepared = m_bomSettings;
+            SCH_BOM_SETTINGS::Swap( aFrame->Schematic().Settings(), prepared );
+        }
         if( m_restoreReferenceInventory )
         {
             auto& tracker = aFrame->Schematic().Settings().m_refDesTracker;
@@ -177,6 +186,7 @@ public:
     void IncludeAnnotation() { m_restoreAnnotation = true; }
     void IncludeFieldTemplates() { m_restoreFieldTemplates = true; }
     void IncludeSymbolComparison() { m_restoreSymbolComparison = true; }
+    void IncludeBomSettings() { m_restoreBomSettings = true; }
     void IncludeReferenceInventory() { m_restoreReferenceInventory = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     static void ApplyFormatting( SCH_EDIT_FRAME* aFrame, const SCH_FORMATTING::MESSAGE& aValue )
@@ -286,6 +296,7 @@ public:
         m_restoreAnnotation = aOther.m_restoreAnnotation;
         m_restoreFieldTemplates = aOther.m_restoreFieldTemplates;
         m_restoreSymbolComparison = aOther.m_restoreSymbolComparison;
+        m_restoreBomSettings = aOther.m_restoreBomSettings;
         m_restoreReferenceInventory = aOther.m_restoreReferenceInventory;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreSetup = aOther.m_restoreSetup;
@@ -349,6 +360,8 @@ private:
     bool m_restoreSymbolComparison = false;
     SCH_FIELD_TEMPLATES::MESSAGE m_fieldTemplates;
     SCH_SYMBOL_COMPARISON::MESSAGE m_symbolComparison;
+    bool m_restoreBomSettings = false;
+    FIELDS_TABLE_BOM_SETTINGS m_bomSettings;
     bool m_restoreReferenceInventory = false;
     std::unique_ptr<REFDES_TRACKER> m_referenceInventory;
     bool m_restoreErcPolicy = false;

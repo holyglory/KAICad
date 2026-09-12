@@ -31,6 +31,10 @@ if( KICAD_CCACHE_DIR )
     add_compile_options( "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=." )
     if( KICAD_USE_PCH )
         list( APPEND KICAD_CCACHE_ARGUMENTS "sloppiness=pch_defines,time_macros" )
+        # Also guard incremental edits made after configuration, including time
+        # macros introduced through headers. Only explicitly uncached sources
+        # may locally suppress this diagnostic.
+        add_compile_options( "-Werror=date-time" )
         if( CMAKE_CXX_COMPILER_ID MATCHES "Clang" )
             add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:-Xclang>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-pch-timestamp>" )
         endif()

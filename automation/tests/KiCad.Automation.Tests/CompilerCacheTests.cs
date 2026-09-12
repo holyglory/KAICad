@@ -53,6 +53,21 @@ public sealed class CompilerCacheTests
             Assert.IsTrue(cold.Disabled > 0 && warm.Disabled > 0 && cross.Disabled > 0,
                 "Timestamp-bearing compilation must bypass ccache even when PCH caching is enabled.");
 
+            string changedSource = "#include \"value.h\"\n#include <iostream>\nint main() { std::cout << cache_value + CACHE_BIAS + 1; }\n";
+            await File.WriteAllTextAsync(Path.Combine(second, "common/probe.cpp"), changedSource, token);
+            var source = await Build("changed-source", second);
+            Assert.IsTrue(source.Misses >= 1, "Changed source bytes must invalidate the object.");
+            await CheckPrograms(second, 29);
+            await File.WriteAllTextAsync(Path.Combine(second, "common/value.h"),
+                "#pragma once\ninline constexpr int cache_value = 23;\ninline const char* cache_time = __TIME__;\n", token);
+            var incrementalRejected = await Run("reject-incremental-time", second, "cmake", ["--build", "build"], false);
+            Assert.AreNotEqual(0, incrementalRejected.Code,
+                "Time macros added through a header must fail even without rerunning configuration.");
+            StringAssert.Contains(incrementalRejected.Output + incrementalRejected.Error, "date-time");
+            await File.WriteAllTextAsync(Path.Combine(second, "common/value.h"), "#pragma once\ninline constexpr int cache_value = 23;\n", token);
+            await Build("recovery", second);
+            await CheckPrograms(second, 29);
+
             await File.WriteAllTextAsync(Path.Combine(second, "common/unguarded.cpp"), "const char* build_time = __TIME__;\n", token);
             var rejected = await Run("reject-unguarded-time", second, "cmake", Configure(second, 5), false);
             Assert.AreNotEqual(0, rejected.Code);
@@ -78,7 +93,7 @@ public sealed class CompilerCacheTests
             File.Copy(Path.Combine(root, "qa/tests/common/test_document_change_journal_main.cpp"), Path.Combine(directory, "journal-main.cpp"));
             await File.WriteAllTextAsync(Path.Combine(directory, "common/value.h"), "#pragma once\ninline constexpr int cache_value = 17;\n", token);
             await File.WriteAllTextAsync(Path.Combine(directory, "common/probe.cpp"), "#include \"value.h\"\n#include <iostream>\nint main() { std::cout << cache_value + CACHE_BIAS; }\n", token);
-            await File.WriteAllTextAsync(Path.Combine(directory, "common/stamp.cpp"), "// ccache:disable\n#include <cstdio>\nint main() { puts(__TIME__); }\n", token);
+            await File.WriteAllTextAsync(Path.Combine(directory, "common/stamp.cpp"), "// ccache:disable\n#pragma GCC diagnostic ignored \"-Wdate-time\"\n#include <cstdio>\nint main() { puts(__TIME__); }\n", token);
             await File.WriteAllTextAsync(Path.Combine(directory, "CMakeLists.txt"), """
                 cmake_minimum_required(VERSION 3.25)
                 project(CacheProbe LANGUAGES CXX)

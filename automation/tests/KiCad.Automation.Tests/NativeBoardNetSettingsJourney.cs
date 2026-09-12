@@ -115,11 +115,16 @@ public sealed partial class NativeSessionTests
             """, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
         Task<GetItemsResponse> Items() => client.InvokeAsync<GetItemsByNet, GetItemsResponse>(
-            new() { Header = new() { Document = board } }, token);
+            new() { Header = new() { Document = board },
+                Nets = { new Kiapi.Board.Types.Net { Name = "POWER_RAIL" },
+                    new Kiapi.Board.Types.Net { Name = "OTHER" } } }, token);
         Task<NetsResponse> Nets(string netclass) => client.InvokeAsync<GetNets, NetsResponse>(
             new() { Board = board, NetclassFilter = { netclass } }, token);
         Task<SchematicScreenDataSnapshot> Read() => client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
             new() { Document = schematic }, token);
+        var loadedNets = await client.InvokeAsync<GetNets, NetsResponse>(new() { Board = board }, token);
+        CollectionAssert.AreEqual(new[] { "OTHER", "POWER_RAIL" },
+            loadedNets.Nets.Select(net => net.Name).Where(name => name.Length != 0).Order(StringComparer.Ordinal).ToArray());
         var originalItems = await Items(); Assert.HasCount(3, originalItems.Items);
         static string[] Encoded(GetItemsResponse items) => items.Items
             .Select(item => Convert.ToBase64String(item.ToByteArray())).Order(StringComparer.Ordinal).ToArray();

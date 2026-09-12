@@ -764,6 +764,16 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+    // Failed opens use Destroy(), bypassing doCloseWindow(). Never leave the
+    // process-wide dispatcher pointing at handlers owned by this dead frame.
+    if( auto* server = Pgm().ApiServerOrNull() )
+    {
+        server->DeregisterHandler( m_apiHandler.get() );
+        server->DeregisterHandler( m_apiHandlerCommon.get() );
+    }
+    if( wxTheApp )
+        wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &PCB_EDIT_FRAME::onPluginAvailabilityChanged, this );
+
     // Always ensure that we are unregistered even in a close without graceful doCloseWindow()
     if( GetBoard() )
         Kiway().LocalHistory().UnregisterSaver( GetBoard() );

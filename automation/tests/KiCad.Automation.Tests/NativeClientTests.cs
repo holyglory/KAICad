@@ -84,6 +84,24 @@ public sealed class NativeClientTests
     }
 
     [TestMethod]
+    public async Task BoardOpenPreservesNativeFailureAndPreCancelledCallsNeverReachTransport()
+    {
+        var transport = new ScriptTransport((_, attempt) => SnapshotReply(new OpenDocumentResponse(),
+            attempt == 1 ? 3 : 1, "The selected project board is locked"));
+        var client = new NativeClient(transport, "ipc:///tmp/board-failure.sock");
+        string path = Path.Combine(Path.GetTempPath(), "native-board-recovery.kicad_pcb");
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => client.CreateRootBoardAsync(path, cancelled.Token));
+        Assert.IsEmpty(transport.Requests);
+        var error = await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.OpenRootBoardAsync(path));
+        Assert.AreEqual(3, error.Status);
+        Assert.HasCount(1, transport.Requests, "A failed open must not retry implicitly or create a replacement.");
+        await client.OpenRootBoardAsync(path);
+        Assert.HasCount(2, transport.Requests);
+        Assert.IsFalse(transport.Requests[1].Message.Unpack<OpenDocument>().CreateIfMissing);
+    }
+
+    [TestMethod]
     public void SchematicOpenRequiresAnExplicitNativePath()
     {
         var fixture = new FixtureTransport();

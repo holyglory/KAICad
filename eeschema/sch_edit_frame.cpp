@@ -586,6 +586,16 @@ void SCH_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 SCH_EDIT_FRAME::~SCH_EDIT_FRAME()
 {
+    // Failed opens and forced teardown do not run doCloseWindow(). Handler
+    // registration must not outlive the frame, including standalone handlers.
+    if( auto* server = Pgm().ApiServerOrNull() )
+    {
+        server->DeregisterHandler( m_apiHandler.get() );
+        server->DeregisterHandler( m_apiHandlerCommon.get() );
+    }
+    if( wxTheApp )
+        wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &SCH_EDIT_FRAME::onPluginAvailabilityChanged, this );
+
     // Ensure that teardowns without doCloseWindow are fully unregistered
     if( m_schematic )
         Kiway().LocalHistory().UnregisterSaver( m_schematic );

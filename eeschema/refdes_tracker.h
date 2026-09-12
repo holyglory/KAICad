@@ -29,6 +29,7 @@
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <limits>
 
 // Forward declaration
 class SCH_REFERENCE;
@@ -109,7 +110,8 @@ public:
      * @param aData the serialized data string
      * @return true if deserialization was successful
      */
-    bool Deserialize( const std::string& aData );
+    bool Deserialize( const std::string& aData,
+                      size_t aMaxEntries = std::numeric_limits<size_t>::max() );
 
     /** Canonical persisted reference entries, independent of numbering policy. */
     std::vector<std::string> GetAllocatedReferences() const;

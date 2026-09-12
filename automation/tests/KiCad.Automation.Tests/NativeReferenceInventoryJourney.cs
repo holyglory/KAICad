@@ -31,7 +31,7 @@ public sealed partial class NativeSessionTests
         var entries = before.Data.Metadata.ReferenceInventory.Allocated.Concat(new[] { "DELETED123", "X,1", "R2147483646", "R2147483647" })
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         expected.Metadata.ReferenceInventory.Allocated.Clear(); expected.Metadata.ReferenceInventory.Allocated.Add(entries);
-        foreach (string[] invalid in new[] { new[] { "R1", "R1" }, new[] { "R001" }, new[] { "R0" }, new[] { "R9-3" }, new[] { "R2147483648" } })
+        foreach (string[] invalid in new[] { new[] { "R1", "R1" }, new[] { "R001" }, new[] { "R0" }, new[] { "R9-3" }, new[] { "R2147483648" }, new[] { "R1-2147483647" } })
         {
             var inventory = new SchematicReferenceInventory(); inventory.Allocated.Add(invalid);
             await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(Batch(before, inventory)));

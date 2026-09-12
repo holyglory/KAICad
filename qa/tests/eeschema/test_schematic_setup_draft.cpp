@@ -64,7 +64,7 @@ BOOST_AUTO_TEST_CASE( ReferenceInventoryValidatesBeforeReplacingAllocationState 
     BOOST_CHECK( reopened.GetAllocatedReferences() == expected );
     for( const std::vector<std::string>& invalid : std::vector<std::vector<std::string>>{
             { "R1", "R1" }, { "R001" }, { "R0" }, { "" }, { std::string( "R\0X", 3 ) },
-            { "R2147483648" }, { "R9-3" } } )
+            { "R2147483648" }, { "R9-3" }, { "R1-2147483647" } } )
     {
         BOOST_CHECK( !tracker.ReplaceAllocatedReferences( invalid ) );
         BOOST_CHECK( tracker.GetAllocatedReferences() == expected );
@@ -81,6 +81,10 @@ BOOST_AUTO_TEST_CASE( ReferenceInventoryValidatesBeforeReplacingAllocationState 
     BOOST_CHECK( reopened.GetAllocatedReferences().empty() );
     BOOST_REQUIRE( reopened.Deserialize( "R2147483647-2147483647" ) );
     BOOST_CHECK( reopened.Contains( "R2147483647" ) );
+    BOOST_CHECK( !reopened.Deserialize( "R1-2147483647", 2 ) );
+    BOOST_CHECK( reopened.GetAllocatedReferences().empty() );
+    BOOST_REQUIRE( reopened.Deserialize( "R1-2", 2 ) );
+    BOOST_CHECK_EQUAL( reopened.Size(), 2 );
 }
 
 BOOST_AUTO_TEST_CASE( SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker )

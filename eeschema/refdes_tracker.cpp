@@ -383,7 +383,7 @@ std::string REFDES_TRACKER::Serialize() const
     return result.str();
 }
 
-bool REFDES_TRACKER::Deserialize( const std::string& aData )
+bool REFDES_TRACKER::Deserialize( const std::string& aData, size_t aMaxEntries )
 {
     std::unique_lock<std::mutex> lock;
 
@@ -433,7 +433,8 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
             int end = 0;
 
             if( !parsePositiveInt( match[2], start ) || !parsePositiveInt( match[3], end )
-                    || start > end )
+                    || start > end
+                    || static_cast<size_t>( end - start ) + 1 > aMaxEntries - m_allRefDes.size() )
             {
                 clearImpl();
                 return false;
@@ -451,7 +452,7 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
             std::string prefix = match[1].str();
             int number = 0;
 
-            if( !parsePositiveInt( match[2], number ) )
+            if( !parsePositiveInt( match[2], number ) || m_allRefDes.size() >= aMaxEntries )
             {
                 clearImpl();
                 return false;
@@ -461,6 +462,11 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
         }
         else if( std::regex_match( unescaped, match, prefixOnlyPattern ) )
         {
+            if( m_allRefDes.size() >= aMaxEntries )
+            {
+                clearImpl();
+                return false;
+            }
             std::string prefix = match[1].str();
 
             insertImpl( prefix );
@@ -504,7 +510,10 @@ bool REFDES_TRACKER::ReplaceAllocatedReferences( const std::vector<std::string>&
     std::sort( requested.begin(), requested.end() );
     if( candidate.GetAllocatedReferences() != requested ) return false;
     REFDES_TRACKER persisted;
-    if( !persisted.Deserialize( candidate.Serialize() ) || persisted.GetAllocatedReferences() != requested )
+    // A literal entry may resemble the native range grammar after escaping.
+    // Its validation must not expand more records than the supplied inventory.
+    if( !persisted.Deserialize( candidate.Serialize(), requested.size() )
+            || persisted.GetAllocatedReferences() != requested )
         return false;
     CopyAllocatedFrom( candidate );
     return true;

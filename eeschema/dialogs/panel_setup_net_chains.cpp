@@ -214,6 +214,14 @@ void PANEL_SETUP_NET_CHAINS::refreshNetClassDropdownChoices()
 }
 
 
+void PANEL_SETUP_NET_CHAINS::RefreshNetClassChoices()
+{
+    // Another page may have edited the shared draft. Update only the editor
+    // choices: reloading the chains here would discard pending row edits.
+    refreshNetClassDropdownChoices();
+}
+
+
 void PANEL_SETUP_NET_CHAINS::rebuildChainsGrid()
 {
     if( m_chainsGrid->GetNumberRows() )

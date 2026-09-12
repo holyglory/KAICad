@@ -39,8 +39,9 @@ class NET_SETTINGS;
  * Schematic-Setup tab for managing committed net chains.
  *
  * All edits are buffered in m_chainRows / m_classRows so that pressing Cancel
- * in the parent dialog leaves the live model untouched.  TransferDataFromWindow
- * applies them in dependency order:
+ * in the parent dialog leaves the live model untouched. TransferDataFromWindow
+ * validates the buffer; ApplyEdits joins the accepted parent transaction in
+ * dependency order:
  *
  *   1. Rename committed chains   (via RenameCommittedNetChain)
  *   2. Update colour / netclass override on each committed chain
@@ -65,6 +66,7 @@ public:
     void RollbackEdits();
     void ReleaseModelPointers();
     void RebindModelPointers();
+    void RefreshNetClassChoices();
 
 protected:
     void OnDeleteChainClicked( wxCommandEvent& aEvent ) override;

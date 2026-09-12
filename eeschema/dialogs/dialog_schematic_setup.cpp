@@ -307,6 +307,9 @@ void DIALOG_SCHEMATIC_SETUP::onPageChanged( wxBookCtrlEvent& aEvent )
 
     int page = aEvent.GetSelection();
 
+    if( m_netChainsPanel && m_treebook->GetCurrentPage() == m_netChainsPanel )
+        m_netChainsPanel->RefreshNetClassChoices();
+
     if( Prj().IsReadOnly() )
         KIUI::Disable( m_treebook->GetPage( page ) );
 }
@@ -372,8 +375,12 @@ void DIALOG_SCHEMATIC_SETUP::onAuxiliaryAction( wxCommandEvent& event )
 
     if( importDlg.m_NetClassesOpt->GetValue() )
     {
-        static_cast<PANEL_SETUP_NETCLASSES*>( m_treebook->ResolvePage( m_netclassesPage ) )
-                ->ImportSettingsFrom( file.m_NetSettings );
+        auto* panel = static_cast<PANEL_SETUP_NETCLASSES*>( m_treebook->ResolvePage( m_netclassesPage ) );
+        panel->ImportSettingsFrom( file.m_NetSettings );
+        // Imports populate controls even when their page is not visible. Keep
+        // dependent choices current without committing to the live project.
+        if( panel->TransferDataFromWindow() && m_netChainsPanel )
+            m_netChainsPanel->RefreshNetClassChoices();
     }
 
     if( importDlg.m_BomPresetsOpt->GetValue() )

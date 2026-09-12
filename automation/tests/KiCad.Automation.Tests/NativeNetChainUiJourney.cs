@@ -7,6 +7,7 @@ using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Diagnostics;
 
 namespace KiCad.Automation.Tests;
@@ -244,6 +245,88 @@ public sealed partial class NativeSessionTests
             await Same(setupBaseline, await Read(token), accept ? "chain-setup-noop" : "chain-setup-cancel");
             await Saved(false);
         }
+        // A class imported while this page already exists must become a real
+        // dropdown choice without losing the pending chain name. Typing an
+        // arbitrary override would not prove that the shared choices refreshed.
+        const string draftClass = "zzzzDraftForSetup", draftChain = "draftpreserved";
+        string projectPath = Path.ChangeExtension(rootFile, ".kicad_pro");
+        var projectBeforeDraft = JsonNode.Parse(await File.ReadAllTextAsync(projectPath, token))!;
+        var importedProject = projectBeforeDraft.DeepClone();
+        var classList = importedProject["net_settings"]!["classes"]!.AsArray();
+        Assert.IsTrue(classList.All(c => string.CompareOrdinal(c!["name"]!.GetValue<string>(), draftClass) < 0));
+        var importedClass = classList.Single(c => c!["name"]!.GetValue<string>() == "Default")!.DeepClone();
+        importedClass["name"] = draftClass;
+        classList.Add(importedClass);
+        string importDirectory = Directory.CreateTempSubdirectory("chain-draft-import-").FullName;
+        string importProjectPath = Path.Combine(importDirectory, "draft.kicad_pro");
+        await File.WriteAllTextAsync(importProjectPath, importedProject.ToJsonString(), token);
+        try
+        {
+            foreach (bool accept in new[] { false, true })
+            {
+                var draftBefore = await Read(token);
+                await OpenSetupPage();
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                    clickFromLeft: 350, clickFromTop: 107);
+                Key("F2", "Schematic Setup"); Key("a", "Schematic Setup", control: true);
+                foreach (char c in draftChain) Key(c.ToString(), "Schematic Setup");
+                Key("Tab", "Schematic Setup");
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                    clickFromLeft: 400, clickFromBottom: 25);
+                await Window("Import Settings", true);
+                await NativeSetupUi.StableGeometry(display, processId, token, "Import Settings");
+                NativeKeyboard.SchematicShortcut(display, processId, "a", "Import Settings", true,
+                    clickFromLeft: 150, clickFromTop: 23);
+                foreach (char c in importProjectPath) Key(c.ToString(), "Import Settings");
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Import Settings", false,
+                    clickFromLeft: 65, clickFromBottom: 25);
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Import Settings", false,
+                    clickFromRight: 65, clickFromBottom: 25);
+                await Window("Import Settings", false);
+                await NativeSetupUi.SelectPage(display, processId, 34, token);
+                await NativeSetupUi.SelectPage(display, processId, 264, token);
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                    clickFromLeft: 850, clickFromTop: 107);
+                Key("F2", "Schematic Setup"); Key("Down", "Schematic Setup", alt: true);
+                await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"chain-draft-choices-{accept}.png"), token);
+                Key("End", "Schematic Setup"); Key("Return", "Schematic Setup"); Key("Tab", "Schematic Setup");
+                await FinishSetup(accept);
+                var actual = await Read(token);
+                if (!accept)
+                {
+                    await Same(draftBefore, actual, "chain-draft-cancel");
+                    await Saved(false);
+                    continue;
+                }
+                var expected = draftBefore.Data.Clone();
+                foreach (var screen in expected.Instances)
+                {
+                    var chain = screen.Metadata.NetChains.Single(c => c.Name == oldName);
+                    chain.Name = draftChain; chain.NetClass = draftClass;
+                    if (screen.Metadata.NetChainClasses.Assignments.TryGetValue(oldName, out var assignment))
+                    {
+                        screen.Metadata.NetChainClasses.Assignments.Remove(oldName);
+                        screen.Metadata.NetChainClasses.Assignments[draftChain] = assignment;
+                    }
+                }
+                await Same(expected, actual.Data, "chain-draft-applied");
+                Assert.AreEqual(draftBefore.Revision.Sequence + 1, actual.Revision.Sequence);
+                await client.InvokeAsync<SaveDocument, Empty>(new() { Document = root }, token);
+                var savedProject = JsonNode.Parse(await File.ReadAllTextAsync(projectPath, token))!;
+                Assert.IsTrue(savedProject["net_settings"]!["classes"]!.AsArray().Any(c => c!["name"]!.GetValue<string>() == draftClass));
+                var draftUndone = await History("z", actual);
+                await Same(draftBefore.Data, draftUndone.Data, "chain-draft-undo");
+                var draftRedone = await History("y", draftUndone);
+                await Same(actual.Data, draftRedone.Data, "chain-draft-redo");
+                await Same(draftBefore.Data, (await History("z", draftRedone)).Data, "chain-draft-restored");
+                await Saved(false);
+                var restoredProject = JsonNode.Parse(await File.ReadAllTextAsync(projectPath, token))!;
+                Assert.IsTrue(JsonNode.DeepEquals(projectBeforeDraft["net_settings"], restoredProject["net_settings"]),
+                    "One native Undo must restore the class registry and chain assignments together.");
+            }
+        }
+        finally { Directory.Delete(importDirectory, true); }
+        setupBaseline = await Read(token);
         foreach (bool accept in new[] { false, true })
         {
             await OpenSetupPage();

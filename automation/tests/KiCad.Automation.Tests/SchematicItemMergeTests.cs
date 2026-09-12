@@ -10,6 +10,56 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class SchematicItemMergeTests
 {
+    private static SchematicScreenData OrderedFixture()
+    {
+        var baseline = Fixture(); baseline.Items.Clear();
+        foreach (string id in new[] { "ffffffff-ffff-4fff-8fff-ffffffffffff", "11111111-1111-4111-8111-111111111111" })
+            baseline.Items.Add(Any.Pack(new SchematicText { Id = new() { Value = id },
+                Text = new() { Text_ = id } }));
+        foreach (string key in new[] { "Lib:Z", "Lib:A" })
+            baseline.CachedSymbols.Add(new SchematicCachedSymbol { CacheKey = key, Definition = new() });
+        return baseline;
+    }
+
+    [TestMethod]
+    public void UnchangedCollectionsKeepNativeRepresentationWithoutFileChurn()
+    {
+        var baseline = OrderedFixture();
+        var native = baseline.Clone(); native.Metadata.TextVariables.Add("NOTE", "Native edit");
+        var xml = baseline.Clone();
+        var merged = SchematicItemMerge.Plan(baseline, xml, native);
+        Assert.IsTrue(merged.CanApply);
+        Assert.AreEqual(native, merged.Merged);
+        Assert.AreEqual(SchematicDataXml.Write(native), SchematicDataXml.Write(merged.Merged!));
+        Assert.IsEmpty(merged.NativeOperations);
+        Assert.AreEqual(OrderedFixture().Items, baseline.Items);
+        Assert.AreEqual(baseline, xml);
+        var converged = SchematicItemMerge.Plan(baseline, native, native);
+        Assert.AreEqual(native, converged.Merged);
+        Assert.IsEmpty(converged.NativeOperations);
+    }
+
+    [TestMethod]
+    public void CombinedEditsPreserveSurvivorOrderAppendXmlAdditionsAndBecomeIdempotent()
+    {
+        var baseline = OrderedFixture(); var native = baseline.Clone(); var xml = baseline.Clone();
+        native.Metadata.TextVariables.Add("NOTE", "Native edit");
+        xml.Items.RemoveAt(1); xml.CachedSymbols.RemoveAt(1);
+        foreach (string id in new[] { "33333333-3333-4333-8333-333333333333", "22222222-2222-4222-8222-222222222222" })
+            xml.Items.Add(Any.Pack(new SchematicText { Id = new() { Value = id }, Text = new() { Text_ = "New" } }));
+        foreach (string key in new[] { "Lib:D", "Lib:C" })
+            xml.CachedSymbols.Add(new SchematicCachedSymbol { CacheKey = key, Definition = new() });
+        var expected = xml.Clone(); expected.Metadata = native.Metadata.Clone();
+        var merged = SchematicItemMerge.Plan(baseline, xml, native);
+        Assert.IsTrue(merged.CanApply);
+        Assert.AreEqual(expected, merged.Merged);
+        Assert.IsNotEmpty(merged.NativeOperations);
+        var again = SchematicItemMerge.Plan(merged.Merged!, merged.Merged!.Clone(), merged.Merged!.Clone());
+        Assert.AreEqual(merged.Merged, again.Merged);
+        Assert.AreEqual(SchematicDataXml.Write(expected), SchematicDataXml.Write(again.Merged!));
+        Assert.IsEmpty(again.NativeOperations);
+    }
+
     [TestMethod]
     public void CacheEditsMergeByExactKeyAndRetainAllConflictingVersions()
     {

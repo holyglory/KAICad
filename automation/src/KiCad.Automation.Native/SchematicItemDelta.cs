@@ -440,7 +440,7 @@ public static class SchematicItemDelta
         return operations;
     }
 
-    internal static Dictionary<Guid, IMessage> Index(IEnumerable<Any> items)
+    internal static Dictionary<Guid, IMessage> Index(IEnumerable<Any> items, ICollection<Guid>? order = null)
     {
         var result = new Dictionary<Guid, IMessage>();
         foreach (var item in items)
@@ -467,6 +467,7 @@ public static class SchematicItemDelta
             var field = descriptor.FindFieldByName("id");
             var id = Identity(field?.Accessor.GetValue(decoded) as KIID);
             if (!result.TryAdd(id, decoded)) throw Invalid("Duplicate native object identity.");
+            order?.Add(id);
         }
         return result;
     }

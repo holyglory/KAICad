@@ -205,9 +205,13 @@ public static class SchematicItemMerge
                 Any.Pack(xml.Metadata), Any.Pack(native.Metadata))], error.Message);
         }
 
-        var before = SchematicItemDelta.Index(baseline.Items);
-        var desired = SchematicItemDelta.Index(xml.Items);
-        var current = SchematicItemDelta.Index(native.Items);
+        // Identity selects values, not presentation order. Keep the native
+        // representation, appending new XML entries in their source order.
+        // Baseline-only identities still participate in deletion conflicts.
+        var itemOrder = new List<Guid>();
+        var current = SchematicItemDelta.Index(native.Items, itemOrder);
+        var desired = SchematicItemDelta.Index(xml.Items, itemOrder);
+        var before = SchematicItemDelta.Index(baseline.Items, itemOrder);
         var conflicts = new List<SchematicItemConflict>();
         var merged = native.Clone(); merged.Items.Clear();
         merged.Metadata = chosenMetadata.Clone();
@@ -215,7 +219,8 @@ public static class SchematicItemMerge
         var cacheBefore = baseline.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
         var cacheXml = xml.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
         var cacheNative = native.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
-        foreach (var key in cacheBefore.Keys.Union(cacheXml.Keys).Union(cacheNative.Keys).Order(StringComparer.Ordinal))
+        foreach (var key in native.CachedSymbols.Concat(xml.CachedSymbols).Concat(baseline.CachedSymbols)
+            .Select(symbol => symbol.CacheKey).Distinct(StringComparer.Ordinal))
         {
             var b = cacheBefore.GetValueOrDefault(key); var x = cacheXml.GetValueOrDefault(key);
             var n = cacheNative.GetValueOrDefault(key);
@@ -223,7 +228,7 @@ public static class SchematicItemMerge
                 conflicts.Add(new(null, "cache_definition_changed", Pack(b), Pack(x), Pack(n), key));
             else if (selected is not null) merged.CachedSymbols.Add(selected.Clone());
         }
-        foreach (Guid id in before.Keys.Union(desired.Keys).Union(current.Keys).Order())
+        foreach (Guid id in itemOrder.Distinct())
         {
             before.TryGetValue(id, out var original);
             desired.TryGetValue(id, out var xmlItem);

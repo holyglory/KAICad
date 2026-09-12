@@ -1489,7 +1489,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.erc-model.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicHierarchyMergeTests", "--logger", "trx", "--results-directory", "automation/artifacts/erc-model"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicHierarchyMergeTests", "--logger", "trx", "--results-directory", "automation/artifacts/erc-model"]
 retained_artifacts = [{ name = "erc-model", path = "automation/artifacts/erc-model", max_bytes = 16777216 }]
 
 [test.native-erc-dialog]

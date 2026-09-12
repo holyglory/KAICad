@@ -117,5 +117,40 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(empty, (await Read()).Data);
         await Apply(Batch(await Read(), before.Data));
         Assert.AreEqual(before.Data, (await Read()).Data);
+        // The ordinary comparison page must update the same typed state, not
+        // just a model-only replacement. Exercise Cancel before accepting it.
+        foreach (bool accept in new[] { false, true })
+        {
+            var baseline = await Read();
+            var expected = baseline.Data.Clone();
+            expected.Metadata.SymbolComparison.MissingFields = !expected.Metadata.SymbolComparison.MissingFields;
+            await NativeSetupUi.Open(client, document, display, processId, token);
+            await NativeSetupUi.SelectPage(display, processId, 158, token);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + $"-symbol-comparison-before-{accept}.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                clickFromLeft: 300, clickFromTop: 54);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + $"-symbol-comparison-edited-{accept}.png"), token);
+            await NativeSetupUi.SelectPage(display, processId, 34, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                clickFromRight: accept ? 60 : 150, clickFromBottom: 25);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            while (NativeKeyboard.HasWindow(display, processId, "Schematic Setup")) await Task.Delay(50, limit.Token);
+            var observed = await Read();
+            if (!(accept ? expected : baseline.Data).Equals(observed.Data))
+                Assert.Fail(NativeSnapshotDifference.Describe(accept ? expected : baseline.Data, observed.Data));
+            Assert.AreEqual(baseline.Revision.Sequence + (accept ? 1UL : 0UL), observed.Revision.Sequence);
+            Assert.AreEqual(observed.Data, SchematicDataXml.Read(SchematicDataXml.Write(observed.Data)));
+            if (!accept) continue;
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "z");
+            do
+            {
+                observed = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document }, limit.Token);
+                if (observed.Revision.Sequence == baseline.Revision.Sequence + 1) await Task.Delay(50, limit.Token);
+            } while (observed.Revision.Sequence == baseline.Revision.Sequence + 1);
+            Assert.AreEqual(baseline.Data, observed.Data);
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        }
     }
 }

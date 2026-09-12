@@ -812,11 +812,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         restoreSelection();
     };
 
-    auto reject = [&]( const std::string& message ) -> HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult>
+    auto reject = [&]( const std::string& message, ApiStatusCode code = ApiStatusCode::AS_BAD_REQUEST ) -> HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult>
     {
         rollback();
         ApiResponseStatus error;
-        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_status( code );
         error.set_error_message( message );
         if( receipt )
         {
@@ -1276,6 +1276,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( SCH_BOM_SETTINGS::Capture( schematic()->Settings() ).SerializeAsString()
                         != desired.SerializeAsString() )
                 {
+                    if( !m_frame )
+                        return reject( prefix + "BOM settings require a schematic editor" );
+                    if( m_frame->HasOpenSymbolFieldsTableDialog() )
+                        return reject( prefix + "Close the Symbol Fields table before replacing BOM settings",
+                                       ApiStatusCode::AS_BUSY );
                     static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetBomSettings( desired );
                     result.set_bom_settings_changed( true );
                 }

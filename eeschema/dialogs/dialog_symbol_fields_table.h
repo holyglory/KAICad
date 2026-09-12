@@ -32,6 +32,7 @@
 wxDECLARE_EVENT( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, wxCommandEvent );
 
 class SCH_EDIT_FRAME;
+class SCH_COMMIT;
 class JOB_EXPORT_BOM;
 class TEMPLATES;
 
@@ -57,6 +58,7 @@ private:
      * field names in use.
      */
     void LoadFieldNames();
+    void stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename );
 
     void OnTableSelectionChanged( const std::set<int>& aRows ) override;
 

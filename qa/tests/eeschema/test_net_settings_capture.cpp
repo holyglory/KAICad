@@ -47,4 +47,44 @@ BOOST_AUTO_TEST_CASE( CaptureKeepsDeclaredOwnersAndDoesNotSerializeEffectiveCach
     BOOST_CHECK_EQUAL( settings->GetNetChainClass( "other-chain" ), "Control" );
 }
 
+BOOST_AUTO_TEST_CASE( DeclaredPreparationAndApplyPreserveIndependentProjectOwners )
+{
+    PROJECT_FILE project( "net-settings-prepare.kicad_pro" );
+    project.Load();
+    auto live = project.NetSettings();
+    BOOST_REQUIRE( live );
+    live->SetNetclassLabelAssignment( "/N", { "Default" } );
+    live->SetNetChainClassDefinitions( { "Keep" } );
+    live->SetNetChainClass( "existing", "Keep" );
+    auto before = SCH_NET_SETTINGS::Capture( *live );
+    auto desired = before;
+    desired.mutable_default_class()->mutable_board()->mutable_track_width()->set_value_nm( 420000 );
+    auto* declared = desired.add_classes();
+    NETCLASS auxiliary( "Aux", false );
+    auxiliary.Serialize( *declared );
+    auto prepared = SCH_NET_SETTINGS::PrepareDeclared( desired );
+    const auto* identity = live.get();
+    const auto priorGrouping = live->GetNetChainClasses();
+    const auto priorLabels = live->GetNetclassLabelAssignments();
+    SCH_NET_SETTINGS::ApplyPrepared( *live, *prepared );
+    BOOST_CHECK( project.NetSettings().get() == identity );
+    BOOST_CHECK( live->GetNetChainClasses() == priorGrouping );
+    BOOST_CHECK( live->GetNetclassLabelAssignments() == priorLabels );
+    BOOST_CHECK( live->GetNetChainClassDefinitions().contains( "Keep" ) );
+    BOOST_CHECK( SCH_NET_SETTINGS::SameDeclared( SCH_NET_SETTINGS::Capture( *live ), desired ) );
+    auto rollback = SCH_NET_SETTINGS::PrepareDeclared( before );
+    SCH_NET_SETTINGS::ApplyPrepared( *live, *rollback );
+    BOOST_CHECK( SCH_NET_SETTINGS::Same( SCH_NET_SETTINGS::Capture( *live ), before ) );
+    for( int invalidCase = 0; invalidCase < 3; ++invalidCase )
+    {
+        auto invalid = desired;
+        if( invalidCase == 0 ) invalid.clear_default_class();
+        if( invalidCase == 1 ) *invalid.add_classes() = invalid.classes( 0 );
+        if( invalidCase == 2 ) invalid.mutable_classes( 0 )->mutable_board()->mutable_via_stack()
+                ->mutable_drill()->mutable_diameter()->set_y_nm( 12 );
+        BOOST_CHECK_THROW( SCH_NET_SETTINGS::PrepareDeclared( invalid ), std::runtime_error );
+        BOOST_CHECK( SCH_NET_SETTINGS::Same( SCH_NET_SETTINGS::Capture( *live ), before ) );
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

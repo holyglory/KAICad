@@ -4,6 +4,7 @@ using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -92,13 +93,18 @@ public sealed partial class NativeSessionTests
         {
             var invalid = batch.Clone(); invalid.OperationId = Guid.NewGuid().ToString("D");
             var value = invalid.Operations[0].SetNetSettings;
-            if (kind == 0) value.DefaultClass = null;
-            if (kind == 1) value.Classes.Add(value.Classes[0].Clone());
-            if (kind == 2) value.DefaultClass.Schematic.LineStyle = (StrokeLineStyle)99;
-            if (kind == 3) value.NetColors["/POWER"].R = double.NaN;
-            if (kind == 4) value.LabelAssignments.Add("foreign-label", new() { Names = { power.Name } });
-            if (kind == 5) invalid.Operations[0].SetNetSettings = SchematicNetSettings.Parser.ParseFrom(
-                value.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 1 }).ToArray());
+            switch (kind)
+            {
+                case 0: value.DefaultClass = null; break;
+                case 1: value.Classes.Add(value.Classes[0].Clone()); break;
+                case 2: value.DefaultClass.Schematic.LineStyle = (StrokeLineStyle)99; break;
+                case 3: value.NetColors["/POWER"].R = double.NaN; break;
+                case 4: value.LabelAssignments.Add("foreign-label", new() { Names = { power.Name } }); break;
+                case 5:
+                    invalid.Operations[0].SetNetSettings = SchematicNetSettings.Parser.ParseFrom(
+                        value.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 1 }).ToArray());
+                    break;
+            }
             await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(invalid));
             Assert.AreEqual(original, await Read(), "Rejected settings must preserve the native revision and all owners.");
         }

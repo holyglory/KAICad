@@ -21,6 +21,9 @@
 #include <api/api_handler_sch.h>
 #include <sch_file_versions.h>
 #include <project/project_file.h>
+#include <api/native_state_digest.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <json_common.h>
 #include <project/net_settings.h>
 #include <cmath>
 #include <limits>
@@ -162,6 +165,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadMetadata );
     registerHandler<kiapi::automation::v1::ReadSchematicSaveState, kiapi::automation::v1::SchematicSaveState>(
             &API_HANDLER_SCH::handleReadSaveState );
+    registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
+            &API_HANDLER_SCH::handleReadLifecycleState );
     registerHandler<kiapi::automation::v1::ReadSchematicScreenData, kiapi::automation::v1::SchematicScreenDataSnapshot>(
             &API_HANDLER_SCH::handleReadScreenData );
     registerHandler<kiapi::automation::v1::ReadSchematicHierarchyData, kiapi::automation::v1::SchematicHierarchyDataSnapshot>(
@@ -1743,6 +1748,66 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::han
     projectSnapshotSchema( *result.mutable_snapshot()->mutable_data()->mutable_metadata(),
                            aCtx.Request.schema_version() );
     return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::handleReadLifecycleState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx )
+{
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    try
+    {
+        kiapi::automation::v1::DocumentLifecycleState result;
+        result.mutable_document()->CopyFrom( aCtx.Request.document() );
+        result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
+        result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
+        result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
+        result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
+        NATIVE_DOCUMENT_DIGEST digest;
+        std::map<std::string, SCH_SHEET*> screens;
+        for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+            screens.try_emplace( path.LastScreen()->GetUuid().AsStdString(), path.Last() );
+        // The first root owns schematic-wide embedded files and net chains.
+        auto* root = schematic()->GetTopLevelSheet( 0 );
+        screens[root->GetScreen()->GetUuid().AsStdString()] = root;
+        std::set<std::string> files;
+        for( const auto& [id, sheet] : screens )
+        {
+            NATIVE_STATE_DIGEST state;
+            SCH_IO_KICAD_SEXPR writer;
+            writer.FormatSchematicToFormatter( &state, sheet, schematic(), nullptr, false );
+            digest.Add( "screen:" + id, state );
+            result.set_native_content_dirty( result.native_content_dirty() || sheet->GetScreen()->IsContentModified() );
+            files.insert( project().AbsolutePath( sheet->GetScreen()->GetFileName() ).ToStdString( wxConvUTF8 ) );
+        }
+        NATIVE_STATE_DIGEST settings;
+        settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
+        digest.Add( "project-settings", settings );
+        result.set_project_settings_included( true );
+        result.set_complete_change_tracking( false );
+        result.set_disk_baseline_checked( false );
+        for( const auto& file : files ) result.add_native_files( file );
+        result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.set_state_sha256( digest.Hex() );
+        if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
+                || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
+        {
+            ApiResponseStatus changed;
+            changed.set_status( ApiStatusCode::AS_BUSY );
+            changed.set_error_message( "Schematic changed during native state observation" );
+            return tl::unexpected( changed );
+        }
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        failure.set_error_message( std::string( "Native state could not be observed: " ) + error.what() );
+        return tl::unexpected( failure );
+    }
 }
 
 

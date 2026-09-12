@@ -28,6 +28,31 @@ message ReadSchematicSaveState {
   kiapi.common.types.DocumentSpecifier document = 1;
 }
 
+// Read-only full native-writer state observation. Not yet a lifecycle mutation
+// token: callers must honor the explicit change/disk coverage below.
+message ReadDocumentLifecycleState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+enum DocumentLifecycleScope {
+  DLS_UNKNOWN = 0;
+  DLS_SCHEMATIC_HIERARCHY = 1;
+  DLS_PCB = 2;
+}
+
+message DocumentLifecycleState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  string native_identity = 3;
+  string state_sha256 = 4;
+  DocumentLifecycleScope scope = 5;
+  bool native_content_dirty = 6;
+  bool project_settings_included = 7;
+  bool complete_change_tracking = 8;
+  bool disk_baseline_checked = 9;
+  repeated string native_files = 10;
+}
+
 message SchematicSaveState {
   kiapi.common.types.DocumentSpecifier document = 1;
   DocumentRevision revision = 2;

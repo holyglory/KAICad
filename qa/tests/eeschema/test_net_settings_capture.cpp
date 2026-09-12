@@ -1,0 +1,49 @@
+/* Project net-settings capture ownership. GPL-3.0-or-later. */
+#include <boost/test/unit_test.hpp>
+#include <api/api_sch_net_settings.h>
+#include <project/project_file.h>
+
+BOOST_AUTO_TEST_SUITE( NetSettingsCapture )
+
+BOOST_AUTO_TEST_CASE( CaptureKeepsDeclaredOwnersAndDoesNotSerializeEffectiveCaches )
+{
+    PROJECT_FILE project( "net-settings-capture.kicad_pro" );
+    project.Load();
+    auto settings = project.NetSettings();
+    BOOST_REQUIRE( settings );
+    auto power = std::make_shared<NETCLASS>( "Power", false );
+    power->SetTrackWidth( 500000 );
+    power->SetuViaDiameter( 300000 );
+    power->SetuViaDrill( 100000 );
+    power->SetLineStyle( 2 );
+    settings->SetNetclass( "Power", power );
+    settings->SetNetclassLabelAssignment( "/VCC", { "Power", "Unresolved" } );
+    settings->SetNetclassPatternAssignment( "USB*", "Default" );
+    settings->SetNetclassPatternAssignment( "V*", "Power" );
+    settings->SetNetColorAssignment( "/VCC", KIGFX::COLOR4D( 1, 0, 0, 1 ) );
+    settings->SetNetChainNetClass( "power-rail", "Power" );
+    settings->SetNetChainClassDefinitions( { "Control" } );
+    settings->SetNetChainClass( "other-chain", "Control" );
+    const auto persisted = settings->CaptureCurrentState();
+    const auto first = SCH_NET_SETTINGS::Capture( *settings );
+    BOOST_REQUIRE( first.has_default_class() );
+    BOOST_CHECK_EQUAL( first.default_class().name(), "Default" );
+    BOOST_REQUIRE_EQUAL( first.classes_size(), 1 );
+    BOOST_CHECK_EQUAL( first.classes( 0 ).name(), "Power" );
+    BOOST_CHECK( !first.classes( 0 ).board().has_clearance() );
+    BOOST_CHECK_EQUAL( first.patterns( 0 ).pattern(), "USB*" );
+    BOOST_CHECK_EQUAL( first.patterns( 1 ).pattern(), "V*" );
+    BOOST_CHECK_EQUAL( first.chain_netclasses().at( "power-rail" ), "Power" );
+    BOOST_CHECK_EQUAL( first.label_assignments().at( "/VCC" ).names_size(), 2 );
+    BOOST_REQUIRE( settings->GetEffectiveNetClass( "/VCC" ) );
+    const auto afterResolution = SCH_NET_SETTINGS::Capture( *settings );
+    BOOST_CHECK( SCH_NET_SETTINGS::Same( first, afterResolution ) );
+    BOOST_CHECK( settings->CaptureCurrentState() == persisted );
+    settings->SetNetclassLabelAssignment( "/VCC", { "Power" } );
+    const auto newProjection = SCH_NET_SETTINGS::Capture( *settings );
+    BOOST_CHECK( !SCH_NET_SETTINGS::Same( first, newProjection ) );
+    BOOST_CHECK( SCH_NET_SETTINGS::SameDeclared( first, newProjection ) );
+    BOOST_CHECK_EQUAL( settings->GetNetChainClass( "other-chain" ), "Control" );
+}
+
+BOOST_AUTO_TEST_SUITE_END()

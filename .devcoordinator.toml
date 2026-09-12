@@ -1801,7 +1801,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_sy
 name = "contracts"
 tier = "development"
 requires = ["build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$|^qa_net_settings_capture$", "--output-on-failure", "--no-tests=error"]
 
 [test.mac-baseline-downloads]
 # Admission can wait behind a native build; each HTTP request remains bounded

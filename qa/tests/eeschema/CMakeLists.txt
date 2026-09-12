@@ -219,6 +219,7 @@ set( QA_EESCHEMA_SRCS
     test_schematic_formatting.cpp
     test_schematic_setup_draft.cpp
     test_schematic_bom_settings.cpp
+    test_net_settings_capture.cpp
     test_schematic_initialization.cpp
     test_schematic_symbol_library_identity.cpp
     test_sch_table.cpp
@@ -354,6 +355,7 @@ add_executable( qa_symbol_graphic_identity
     test_schematic_formatting.cpp
     test_schematic_setup_draft.cpp
     test_schematic_bom_settings.cpp
+    test_net_settings_capture.cpp
     test_schematic_initialization.cpp
     test_sch_text_presentation.cpp
     test_drawing_sheet_context.cpp
@@ -401,3 +403,7 @@ setup_qa_env( qa_schematic_bom_settings )
 add_test( NAME qa_netclass_proto
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetclassProto --log_level=test_suite )
 setup_qa_env( qa_netclass_proto )
+
+add_test( NAME qa_net_settings_capture
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )
+setup_qa_env( qa_net_settings_capture )

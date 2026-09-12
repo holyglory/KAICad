@@ -123,6 +123,26 @@ public sealed class SchematicHierarchyMergeTests
     }
 
     [TestMethod]
+    public void AnnotationPolicyKeepsOneOwnerAcrossBranchInsertionAndRemoval()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances) screen.Metadata.Annotation = SchematicAnnotationTests.Policy();
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances) screen.Metadata.Annotation.StartAfter = 741;
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            Assert.IsTrue(merged.Merged!.Instances.All(s => s.Metadata.Annotation.StartAfter == 741));
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetAnnotation is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetAnnotation is not null));
+        }
+    }
+
+    [TestMethod]
     public void ProjectChangesHaveOneOwnerEvenAcrossConcurrentBranchInsertionAndRemoval()
     {
         foreach (bool remove in new[] { false, true })

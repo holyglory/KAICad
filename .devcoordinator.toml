@@ -1640,7 +1640,7 @@ name = "input-contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["rendered"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~NativeClientTests", "--logger", "trx", "--results-directory", "automation/artifacts/native-setup-input-tests"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests", "--logger", "trx", "--results-directory", "automation/artifacts/native-setup-input-tests"]
 retained_artifacts = [{ name = "native-setup-input-tests", path = "automation/artifacts/native-setup-input-tests", max_bytes = 16777216 }]
 
 [[test.native-setup-dialog.check]]

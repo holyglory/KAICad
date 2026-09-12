@@ -46,6 +46,13 @@ public sealed partial class NativeSessionTests
         int aggregateSeconds = journey == NativeJourney.Foundation ? 600 : 300;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
+        async Task Measure(string stage, Func<Task> action)
+        {
+            var started = elapsed.Elapsed;
+            Console.WriteLine($"Native phase {stage} started at {started.TotalSeconds:F1}s.");
+            try { await action(); }
+            finally { Console.WriteLine($"Native phase {stage} ended after {(elapsed.Elapsed - started).TotalSeconds:F1}s at {elapsed.Elapsed.TotalSeconds:F1}s."); }
+        }
         var processes = new List<Process>();
         var captures = new List<Task>();
         try
@@ -250,6 +257,8 @@ public sealed partial class NativeSessionTests
                         await VerifyAnnotation(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
                         await VerifyReferenceInventory(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifyFieldTemplateRemoval(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
                         await VerifyManualSetup(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, target.Id, deadline.Token);
@@ -511,17 +520,19 @@ public sealed partial class NativeSessionTests
                     evidence, target.Id, deadline.Token);
                 await VerifyAnnotation(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, deadline.Token);
-                await VerifyReferenceInventory(client, opened.Document, nativeProcessId, ":" + displayNumber,
-                    evidence, deadline.Token);
+                await Measure("reference-inventory", () => VerifyReferenceInventory(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
+                await Measure("field-templates", () => VerifyFieldTemplateRemoval(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
                 await VerifySetupPinMap(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);
                 await VerifySetupImport(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);
-                await VerifySetupAssets(client, opened.Document, nativeProcessId, ":" + displayNumber,
-                    evidence, target.Id, deadline.Token);
+                await Measure("setup-assets", () => VerifySetupAssets(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, target.Id, deadline.Token));
                 await VerifyNativeEvents(client, registry.Client(launched.Single(p => p.Id != target.Id).Id),
                     opened.Document, textId, nativeProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
-                await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                await Measure("snapshot-schemas", () => VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token));
                 await VerifyNativeSymbolXml(client, opened.Document, electrical, evidence, target.Id, deadline.Token);
                 await VerifyNativeCacheTransaction(client, opened.Document, nativeProcessId,
                     ":" + displayNumber, evidence, target.Id, deadline.Token);
@@ -546,7 +557,7 @@ public sealed partial class NativeSessionTests
                     ":" + displayNumber, deadline.Token);
                 await VerifySharedRootOwnership(client, opened.Document, hierarchyFixture, schematic, nativeProcessId,
                     ":" + displayNumber, evidence, target.Id, deadline.Token);
-                await VerifyNetChainMetadata(client, opened.Document, schematic, electrical, nativeProcessId, ":" + displayNumber, evidence, deadline.Token);
+                await Measure("net-chains", () => VerifyNetChainMetadata(client, opened.Document, schematic, electrical, nativeProcessId, ":" + displayNumber, evidence, deadline.Token));
                 await VerifyVariantDescriptionDialog(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, evidence, deadline.Token);
                 await VerifyVariantRegistryXml(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, deadline.Token);
                 await VerifyDrawingRatios(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, evidence, deadline.Token);

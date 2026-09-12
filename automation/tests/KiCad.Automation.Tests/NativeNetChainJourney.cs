@@ -274,7 +274,10 @@ public sealed partial class NativeSessionTests
             try
             {
                 await File.WriteAllBytesAsync(rootFile, original, CancellationToken.None);
-                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root }, token);
+                // Restoration has its own finite allowance: a spent journey
+                // token must not manufacture a second failure before trying.
+                using var cleanupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root }, cleanupDeadline.Token);
             }
             catch (Exception cleanup) when (primaryFailure is not null)
             {

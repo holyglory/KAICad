@@ -427,6 +427,8 @@ function( add_pcbnew_test_group GROUP_NAME FILTER )
     setup_qa_env( ${TEST_NAME} )
 endfunction()
 
+add_pcbnew_test_group( state_format "KiCadSexprIO/StateSerializationPreservesCurrentEmbeddedResources" )
+
 # Zone fill and zone tests (~40s)
 set( PCBNEW_ZONE_TESTS
     "BasicZoneFills\

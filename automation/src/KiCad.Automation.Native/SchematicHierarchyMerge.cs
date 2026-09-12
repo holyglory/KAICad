@@ -163,6 +163,8 @@ public static class SchematicHierarchyMerge
         metadata.DrawingRatios = project.DrawingRatios?.Clone(); metadata.Formatting = project.Formatting?.Clone();
         metadata.Annotation = project.Annotation?.Clone();
         metadata.ReferenceInventory = project.ReferenceInventory?.Clone();
+        metadata.ErcSettings = project.ErcSettings?.Clone();
+        metadata.NetChainClasses = project.NetChainClasses?.Clone();
         SchematicVariantProjection.Reproject(result);
         return result;
     }

@@ -288,8 +288,12 @@ public sealed partial class NativeSessionTests
                 NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
                     clickFromLeft: 850, clickFromTop: 107);
                 Key("F2", "Schematic Setup"); Key("Down", "Schematic Setup", alt: true);
+                await NativeSetupUi.WaitForPopup(display, processId, true, token);
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"chain-draft-choices-{accept}.png"), token);
-                Key("End", "Schematic Setup"); Key("Return", "Schematic Setup"); Key("Tab", "Schematic Setup");
+                Key("End", "Schematic Setup"); Key("Return", "Schematic Setup");
+                await NativeSetupUi.WaitForPopup(display, processId, false, token);
+                Key("Tab", "Schematic Setup");
+                await NativeSetupUi.StableGeometry(display, processId, token);
                 await FinishSetup(accept);
                 var actual = await Read(token);
                 if (!accept)

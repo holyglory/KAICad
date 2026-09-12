@@ -2,6 +2,7 @@
 #include <boost/test/unit_test.hpp>
 #include <api/api_sch_net_settings.h>
 #include <project/project_file.h>
+#include <settings/json_settings_internals.h>
 
 BOOST_AUTO_TEST_SUITE( NetSettingsCapture )
 

@@ -148,3 +148,33 @@ BOOST_AUTO_TEST_CASE( SchematicDraftAppliesOnlyItsChangedOwnersAndCanUndo )
     BOOST_CHECK( project.CaptureCurrentState() == live );
     BOOST_CHECK( static_cast<const nlohmann::json&>( *project.Internals() ) == store );
 }
+
+BOOST_AUTO_TEST_CASE( ProjectFieldTemplatesCanBeExplicitlyEmpty )
+{
+    PROJECT_FILE project( "empty-project-templates.kicad_pro" );
+    ERC_SETTINGS erc( &project, "erc" );
+    SCHEMATIC_SETTINGS schematic( &project, "schematic" );
+    project.m_ErcSettings = &erc; project.m_SchematicSettings = &schematic;
+    project.Load(); erc.Load(); schematic.Load();
+    TEMPLATE_FIELDNAME global( "GLOBAL_KEEP" );
+    global.m_URL = true;
+    project.m_TemplateFieldNames.AddTemplateFieldName( global, TEMPLATES::SCOPE::GLOBAL );
+    TEMPLATE_FIELDNAME local( "PROJECT_REMOVE" );
+    local.m_Visible = true;
+    project.m_TemplateFieldNames.AddTemplateFieldName( local, TEMPLATES::SCOPE::PROJECT );
+    const auto before = project.CaptureCurrentState();
+    auto after = before;
+    after["schematic"]["drawing"]["field_names"] = nlohmann::json::array();
+    project.ApplyCurrentStateDelta( before, after );
+    BOOST_CHECK( project.CaptureCurrentState() == after );
+    BOOST_CHECK( project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::PROJECT ).empty() );
+    const auto& globals = project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::GLOBAL );
+    BOOST_REQUIRE_EQUAL( globals.size(), 1 );
+    BOOST_CHECK_EQUAL( globals[0].m_Name, "GLOBAL_KEEP" );
+    BOOST_CHECK( globals[0].m_URL );
+    project.ApplyCurrentStateDelta( after, before );
+    BOOST_CHECK( project.CaptureCurrentState() == before );
+    project.ApplyCurrentStateDelta( before, after );
+    BOOST_CHECK( project.CaptureCurrentState() == after );
+    BOOST_CHECK_EQUAL( project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::GLOBAL ).size(), 1 );
+}

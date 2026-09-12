@@ -82,7 +82,7 @@ PROJECT_FILE::PROJECT_FILE( const wxString& aFullPath ) :
             },
             [&]( const nlohmann::json& aJson )
             {
-                if( !aJson.empty() && aJson.is_array() )
+                if( aJson.is_array() )
                 {
                     m_TemplateFieldNames.DeleteFieldNameTemplates( TEMPLATES::SCOPE::PROJECT );
 

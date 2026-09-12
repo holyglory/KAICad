@@ -592,11 +592,15 @@ bool PGM_KICAD::OnPgmInit()
                             return tl::unexpected( status );
                         };
 
-                        if( request.type() != types::DOCTYPE_SCHEMATIC )
-                            return fail( AS_UNIMPLEMENTED, "This graphical open operation currently supports schematic documents" );
+                        if( request.type() != types::DOCTYPE_SCHEMATIC && request.type() != types::DOCTYPE_PCB )
+                            return fail( AS_UNIMPLEMENTED, "This graphical open operation supports project schematics and PCBs" );
+
+                        const auto frameType = request.type() == types::DOCTYPE_SCHEMATIC
+                                                       ? FRAME_SCH : FRAME_PCB_EDITOR;
 
                         wxFileName requested( wxString::FromUTF8( request.path() ) );
-                        wxFileName expected( managerFrame->SchFileName() );
+                        wxFileName expected( request.type() == types::DOCTYPE_SCHEMATIC
+                                                     ? managerFrame->SchFileName() : managerFrame->PcbFileName() );
                         requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
                         expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
 
@@ -606,15 +610,15 @@ bool PGM_KICAD::OnPgmInit()
                         if( !wxFileName( wxString::FromUTF8( request.path() ) ).IsAbsolute()
                                 || requested != expected
                                 || ( !requested.FileExists() && !request.create_if_missing() ) )
-                            return fail( AS_BAD_REQUEST, "An absolute root schematic path for this project is required; missing files require explicit creation" );
+                            return fail( AS_BAD_REQUEST, "An absolute root document path for this project is required; missing files require explicit creation" );
 
-                        KIWAY_PLAYER* player = Kiway.Player( FRAME_SCH, false );
+                        KIWAY_PLAYER* player = Kiway.Player( frameType, false );
 
                         if( player && player->IsModal() )
-                            return fail( AS_BUSY, "The schematic editor has an active modal operation" );
+                            return fail( AS_BUSY, "The requested editor has an active modal operation" );
 
                         if( player && player->GetCurrentFileName().IsEmpty() )
-                            return fail( AS_BUSY, "Close the untitled schematic explicitly before opening another" );
+                            return fail( AS_BUSY, "Close the untitled document explicitly before opening another" );
 
                         if( player && !player->GetCurrentFileName().IsEmpty()
                                 && wxFileName( player->GetCurrentFileName() ) != requested )
@@ -625,10 +629,10 @@ bool PGM_KICAD::OnPgmInit()
                         try
                         {
                             if( !player )
-                                player = Kiway.Player( FRAME_SCH, true );
+                                player = Kiway.Player( frameType, true );
 
                             if( !player )
-                                return fail( AS_NOT_READY, "The schematic editor could not be created" );
+                                return fail( AS_NOT_READY, "The requested editor could not be created" );
 
                             int controls = KICTL_KICAD_ONLY;
                             if( request.create_if_missing() )
@@ -637,7 +641,7 @@ bool PGM_KICAD::OnPgmInit()
                             if( created && !player->OpenProjectFiles( { requested.GetFullPath() }, controls ) )
                             {
                                 player->Destroy();
-                                return fail( AS_BAD_REQUEST, "Schematic load failed; inspect native diagnostics" );
+                                return fail( AS_BAD_REQUEST, "Document load failed; inspect native diagnostics" );
                             }
 
                             player->Show( true );
@@ -652,7 +656,7 @@ bool PGM_KICAD::OnPgmInit()
                         }
 
                         commands::GetOpenDocuments query;
-                        query.set_type( types::DOCTYPE_SCHEMATIC );
+                        query.set_type( request.type() );
                         ApiRequest envelope;
                         envelope.mutable_message()->PackFrom( query );
                         API_RESULT result = m_api_server->DispatchToHandlers( envelope );
@@ -663,7 +667,7 @@ bool PGM_KICAD::OnPgmInit()
                         commands::GetOpenDocumentsResponse documents;
 
                         if( !result->message().UnpackTo( &documents ) || documents.documents_size() != 1 )
-                            return fail( AS_NOT_READY, "The editor did not identify the opened schematic" );
+                            return fail( AS_NOT_READY, "The editor did not identify the opened document" );
 
                         commands::OpenDocumentResponse response;
                         response.mutable_document()->CopyFrom( documents.documents( 0 ) );

@@ -290,6 +290,8 @@ public sealed partial class NativeSessionTests
                     {
                         await VerifyNetSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
+                        await VerifyBoardNetSettings(client, opened.Document, target.Project, focusProcessId,
+                            ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                     }
                     else if (journey == NativeJourney.TableVariants)

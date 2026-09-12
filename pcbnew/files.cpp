@@ -773,6 +773,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             std::unique_ptr<BOARD> loaded =
                     BOARD_LOADER::Load( fullFileName, pluginType, &Prj(), loaderOptions );
+            if( automation && loaded && loaded->GetFileFormatVersionAtLoad() > SEXPR_BOARD_FILE_VERSION )
+                THROW_IO_ERROR( "Automation cannot open a PCB newer than this native writer format" );
+
             loadedBoard = loaded.release();
 
 #if USE_INSTRUMENTATION

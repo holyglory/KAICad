@@ -42,6 +42,7 @@
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
 #include <pcb_edit_frame.h>
+#include <pgm_base.h>
 #include <pcb_group.h>
 #include <pcb_reference_image.h>
 #include <pcb_shape.h>
@@ -210,10 +211,10 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_PCB::handleGetOpenDocuments
     doc.set_type( DocumentType::DOCTYPE_PCB );
     doc.set_board_filename( fn.GetFullName() );
 
-    doc.mutable_project()->set_name( project().GetProjectName().ToStdString() );
+    doc.mutable_project()->set_name( project().GetProjectName().ToStdString( wxConvUTF8 ) );
     // Use the same project representation as schematic documents in this
     // instance, including the directory separator returned by GetProjectPath.
-    doc.mutable_project()->set_path( project().GetProjectPath().ToStdString() );
+    doc.mutable_project()->set_path( project().GetProjectPath().ToStdString( wxConvUTF8 ) );
 
     response.mutable_documents()->Add( std::move( doc ) );
     return response;
@@ -351,7 +352,7 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
         if( !absolute || supplied != expected
                 || aDocument.project().path().find( '\0' ) != std::string::npos
-                || aDocument.project().name() != project().GetProjectName().ToStdString() )
+                || aDocument.project().name() != project().GetProjectName().ToStdString( wxConvUTF8 ) )
         {
             ApiResponseStatus e;
             e.set_status( ApiStatusCode::AS_BAD_REQUEST );

@@ -34,6 +34,43 @@ env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build
 [test]
 default = "automation"
 
+[test.compiler-cache]
+timeout_seconds = 1200
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_TEST_COMPILER_CACHE = "/mnt/build-storage/codex/kicad/compiler-cache" }
+
+[[test.compiler-cache.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["cache-contracts", "native-configure", "native-build", "native-journal"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.compiler-cache.check]]
+name = "cache-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["native-configure", "native-build", "native-journal"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=CompilerCache", "--logger", "trx", "--results-directory", "automation/artifacts/compiler-cache-tests"]
+retained_artifacts = [{ name = "cache-tests", path = "automation/artifacts/compiler-cache-tests", max_bytes = 16777216 }, { name = "cache-evidence", path = "automation/artifacts/compiler-cache", max_bytes = 16777216 }]
+
+[[test.compiler-cache.check]]
+name = "native-configure"
+tier = "development"
+role = "preflight"
+invalidates = ["native-build", "native-journal"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.compiler-cache.check]]
+name = "native-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_document_change_journal"]
+
+[[test.compiler-cache.check]]
+name = "native-journal"
+tier = "development"
+requires = ["native-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_document_change_journal$", "--output-on-failure", "--no-tests=error"]
+
 [deployment.download-page-preview]
 source = ["checkout"]
 components = ["page"]
@@ -651,7 +688,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["build", "caption"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-caption.check]]
 name = "build"
@@ -737,7 +774,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["objects"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-updater-objects.check]]
 name = "objects"
@@ -1309,7 +1346,7 @@ name = "native-configure"
 tier = "development"
 role = "preflight"
 invalidates = ["native-objects"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.automation.check]]
 name = "native-objects"
@@ -1451,7 +1488,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["native-build", "override-model"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-erc-overrides.check]]
 name = "native-build"
@@ -1487,7 +1524,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["native-build"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-foundation.check]]
 name = "event-model"
@@ -1565,7 +1602,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["native-build", "native-table"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-table-variants.check]]
 name = "input-contracts"
@@ -1595,7 +1632,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["build", "contracts"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-setup-draft.check]]
 name = "build"
@@ -1617,7 +1654,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["model-build", "native-build", "contracts", "rendered"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-setup-dialog.check]]
 name = "model-build"
@@ -1725,7 +1762,7 @@ name = "configure"
 tier = "development"
 role = "preflight"
 invalidates = ["native-build", "native-chains", "setup-dialog"]
-command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
 
 [[test.native-net-chains.check]]
 name = "input-contracts"

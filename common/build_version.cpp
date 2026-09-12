@@ -19,6 +19,7 @@
  */
 
 // Date for KiCad build version
+// ccache:disable -- this source intentionally reports its actual compilation time.
 #include <wx/wx.h>
 #include <config.h>
 #include <boost/version.hpp>

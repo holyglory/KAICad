@@ -26,4 +26,35 @@ public sealed partial class NativeSessionTests
             "Reading the same native state must be deterministic and non-mutating.");
         return state;
     }
+
+    private static async Task VerifyLifecycleStateThroughMcp(NativeClient client, DocumentSpecifier document,
+        string evidence, CancellationToken token)
+    {
+        string statePath = Directory.CreateTempSubdirectory("kicad-state-mcp-").FullName;
+        try
+        {
+            var expected = await ObserveLifecycleState(client, document, token);
+            string instanceId = (await client.HandshakeAsync(token)).InstanceId;
+            await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
+                Path.Combine(evidence, "state-mcp-" + Guid.NewGuid().ToString("N") + ".stderr.log"), token))
+            {
+                var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                Assert.IsFalse(attached.TryGetProperty("isError", out var attachError) && attachError.GetBoolean());
+                var observed = await mcp.Tool("kicad_document_state", new
+                    { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
+                Assert.IsFalse(observed.TryGetProperty("isError", out var error) && error.GetBoolean(), observed.GetRawText());
+                string json = observed.GetProperty("content").EnumerateArray()
+                    .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!;
+                Assert.AreEqual(expected, SchematicJson.Parser.Parse<DocumentLifecycleState>(json));
+                var malformed = await mcp.Tool("kicad_document_state", new { instanceId, documentJson = "{}" });
+                Assert.IsTrue(malformed.GetProperty("isError").GetBoolean());
+                var recovered = await mcp.Tool("kicad_document_state", new
+                    { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
+                Assert.IsFalse(recovered.TryGetProperty("isError", out error) && error.GetBoolean());
+            }
+            Assert.AreEqual(expected, await ObserveLifecycleState(client, document, token),
+                "MCP state reads, rejected input and EOF must leave the native document unchanged.");
+        }
+        finally { Directory.Delete(statePath, true); }
+    }
 }

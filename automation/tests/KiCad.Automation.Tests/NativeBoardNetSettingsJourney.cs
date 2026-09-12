@@ -167,6 +167,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(DocumentLifecycleScope.DlsSchematicHierarchy, originalSchematicState.Scope);
         Assert.AreEqual(original, await Read(), "Full native state serialization must preserve the schematic snapshot.");
         var originalBoardState = await ObserveLifecycleState(client, board, token);
+        await VerifyLifecycleStateThroughMcp(client, schematic, evidence, token);
+        await VerifyLifecycleStateThroughMcp(client, board, evidence, token);
         var desired = original.Data.Metadata.NetSettings.Clone();
         var power = desired.DefaultClass.Clone(); power.Name = "BoardPower"; power.Priority = 1;
         power.Board.TrackWidth = new() { ValueNm = 600000 };

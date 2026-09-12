@@ -62,6 +62,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_create");
             CollectionAssert.Contains(names, "kicad_pcb_open");
             CollectionAssert.Contains(names, "kicad_pcb_create");
+            CollectionAssert.Contains(names, "kicad_document_state");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");

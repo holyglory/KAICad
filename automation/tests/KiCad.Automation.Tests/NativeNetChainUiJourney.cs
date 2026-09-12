@@ -303,6 +303,11 @@ public sealed partial class NativeSessionTests
                 {
                     var chain = screen.Metadata.NetChains.Single(c => c.Name == oldName);
                     chain.Name = draftChain; chain.NetClass = draftClass;
+                    // The native snapshot emits the name-keyed chain map in
+                    // name order. Renaming moves this entry within that map.
+                    var orderedChains = screen.Metadata.NetChains.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
+                    screen.Metadata.NetChains.Clear();
+                    screen.Metadata.NetChains.Add(orderedChains);
                     if (screen.Metadata.NetChainClasses.Assignments.TryGetValue(oldName, out var assignment))
                     {
                         screen.Metadata.NetChainClasses.Assignments.Remove(oldName);

@@ -365,12 +365,16 @@ add_compile_definitions( $<$<BOOL:${KICAD_BUILD_ARCH_ARM64}>:KICAD_BUILD_ARCH_AR
 if (USE_CCACHE)
   find_program(CCACHE_FOUND ccache)
   if(CCACHE_FOUND)
+    include( KiCadCompilerCache )
     # Set ccache on the actual lang
-    list(PREPEND CMAKE_C_COMPILER_LAUNCHER ${CCACHE_FOUND})
-    list(PREPEND CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})
+    list(PREPEND CMAKE_C_COMPILER_LAUNCHER ${CCACHE_FOUND} ${KICAD_CCACHE_ARGUMENTS})
+    list(PREPEND CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND} ${KICAD_CCACHE_ARGUMENTS})
 
     message(STATUS "Used ${CCACHE_FOUND} for compilation.")
   else(CCACHE_FOUND)
+    if( KICAD_CCACHE_DIR )
+      message( FATAL_ERROR "The reusable compiler cache was requested but ccache is not installed." )
+    endif()
     message(STATUS "CCache was requested but not found.")
   endif(CCACHE_FOUND)
 endif(USE_CCACHE)

@@ -43,6 +43,13 @@ public sealed partial class NativeSessionTests
         imported["erc"]!["pin_map"]![0]![0] = (int)pin.Conflict - 1;
         var schematic = imported["schematic"]!;
         schematic["reuse_designators"] = !(schematic["reuse_designators"]?.GetValue<bool>() ?? false);
+        changed.Metadata.Annotation.ReuseDesignators = schematic["reuse_designators"]!.GetValue<bool>();
+        schematic["annotate_start_num"] = 421;
+        schematic["annotation"]!["sort_order"] = 1;
+        schematic["annotation"]!["method"] = 1;
+        changed.Metadata.Annotation.StartAfter = 421;
+        changed.Metadata.Annotation.Order = SchematicAnnotationOrder.SaoYPosition;
+        changed.Metadata.Annotation.Method = SchematicAnnotationMethod.SamSheetTimes100;
         schematic["compare_symbols"]!["missing_fields"] = !schematic["compare_symbols"]!["missing_fields"]!.GetValue<bool>();
         string scratch = Directory.CreateTempSubdirectory("setup-import-").FullName;
         string sourceProject = Path.Combine(scratch, "import.kicad_pro");

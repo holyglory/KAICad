@@ -20,7 +20,7 @@ public sealed partial class NativeSessionTests
         {
             var batch = new ApplySchematicItemBatch { Document = document, ExpectedRevision = state.Revision.Clone(),
                 DocumentEpoch = state.Revision.Epoch, OperationId = Guid.NewGuid().ToString("D"), Description = "Annotation policy XML round trip" };
-            batch.Operations.Add(new() { SetAnnotation = policy.Clone() });
+            batch.Operations.Add(new SchematicItemOperation { SetAnnotation = policy.Clone() });
             return batch;
         }
         // Normalize only through a real native save/reload before establishing
@@ -42,7 +42,7 @@ public sealed partial class NativeSessionTests
         var unknown = SchematicAnnotationSettings.Parser.ParseFrom(desired.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 1 }).ToArray());
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(Batch(before, unknown)));
         var failed = Batch(before, desired);
-        failed.Operations.Add(new() { Remove = new() { Value = Guid.NewGuid().ToString("D") } });
+        failed.Operations.Add(new SchematicItemOperation { Remove = new() { Value = Guid.NewGuid().ToString("D") } });
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(failed));
         Assert.AreEqual(before, await Read(), "Later operation failure must roll back the policy without a revision.");
         var xml = before.Data.Clone(); xml.Metadata.Annotation = desired;
@@ -84,5 +84,40 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Path.Combine(evidence, processId + "-annotation-policy.xml"), SchematicDataXml.Write(reopened.Data), token);
         await Apply(Batch(reopened, before.Data.Metadata.Annotation));
         Assert.AreEqual(before.Data, (await Read()).Data);
+
+        // Exercise a human edit through the actual Annotation page, using its
+        // native X/Y mnemonic, and carry it across a page switch before OK.
+        foreach (bool accept in new[] { false, true })
+        {
+            var baseline = await Read();
+            var edited = baseline.Data.Clone();
+            bool chooseY = baseline.Data.Metadata.Annotation.Order == SchematicAnnotationOrder.SaoXPosition;
+            edited.Metadata.Annotation.Order = chooseY ? SchematicAnnotationOrder.SaoYPosition : SchematicAnnotationOrder.SaoXPosition;
+            await NativeSetupUi.Open(client, document, display, processId, token);
+            await NativeSetupUi.SelectPage(display, processId, 55, token);
+            NativeKeyboard.SchematicShortcut(display, processId, chooseY ? "y" : "x", "Schematic Setup",
+                controlKey: false, focusCanvas: false, altKey: true);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + $"-annotation-manual-{accept}.png"), token);
+            await NativeSetupUi.SelectPage(display, processId, 34, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+                clickFromRight: accept ? 60 : 150, clickFromBottom: 25);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            while (NativeKeyboard.HasWindow(display, processId, "Schematic Setup")) await Task.Delay(50, limit.Token);
+            var actual = await Read();
+            Assert.AreEqual(accept ? edited : baseline.Data, actual.Data);
+            Assert.AreEqual(baseline.Revision.Sequence + (accept ? 1UL : 0UL), actual.Revision.Sequence);
+            Assert.AreEqual(actual.Data, SchematicDataXml.Read(SchematicDataXml.Write(actual.Data)));
+            if (!accept) continue;
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "z");
+            do
+            {
+                actual = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document }, limit.Token);
+                if (actual.Revision.Sequence == baseline.Revision.Sequence + 1) await Task.Delay(50, limit.Token);
+            } while (actual.Revision.Sequence == baseline.Revision.Sequence + 1);
+            Assert.AreEqual(baseline.Data, actual.Data);
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        }
     }
 }

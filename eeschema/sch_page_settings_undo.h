@@ -37,6 +37,11 @@ public:
         m_drawingRatios = aFrame->Schematic().Settings().DrawingRatios();
         m_formatting = SCH_FORMATTING::Capture( aFrame->Schematic().Settings() );
         m_annotation = SCH_ANNOTATION::Capture( aFrame->Schematic().Settings() );
+        if( auto tracker = aFrame->Schematic().Settings().m_refDesTracker )
+        {
+            m_referenceInventory = std::make_unique<REFDES_TRACKER>();
+            m_referenceInventory->CopyAllocatedFrom( *tracker );
+        }
         m_ercPolicy = SCH_ERC_SETTINGS::Capture( aFrame->Schematic() );
         m_ercPolicy.clear_exclusions(); // marker undo owns exclusion flags and added markers
         m_currentVariant = aFrame->Schematic().GetCurrentVariant();
@@ -102,6 +107,13 @@ public:
             ApplyFormatting( aFrame, m_formatting );
         if( m_restoreAnnotation )
             SCH_ANNOTATION::Restore( aFrame->Schematic().Settings(), m_annotation );
+        if( m_restoreReferenceInventory )
+        {
+            auto& tracker = aFrame->Schematic().Settings().m_refDesTracker;
+            if( !tracker ) tracker = std::make_shared<REFDES_TRACKER>();
+            if( m_referenceInventory ) tracker->CopyAllocatedFrom( *m_referenceInventory );
+            else tracker->Clear();
+        }
         if( m_restoreErcPolicy )
         {
             SCH_ERC_SETTINGS::RestorePolicy( aFrame->Schematic().ErcSettings(), m_ercPolicy );
@@ -156,6 +168,7 @@ public:
     void IncludeDrawingRatios() { m_restoreDrawingRatios = true; }
     void IncludeFormatting() { m_restoreFormatting = true; }
     void IncludeAnnotation() { m_restoreAnnotation = true; }
+    void IncludeReferenceInventory() { m_restoreReferenceInventory = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     static void ApplyFormatting( SCH_EDIT_FRAME* aFrame, const SCH_FORMATTING::MESSAGE& aValue )
     {
@@ -262,6 +275,7 @@ public:
         m_restoreDrawingRatios = aOther.m_restoreDrawingRatios;
         m_restoreFormatting = aOther.m_restoreFormatting;
         m_restoreAnnotation = aOther.m_restoreAnnotation;
+        m_restoreReferenceInventory = aOther.m_restoreReferenceInventory;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreSetup = aOther.m_restoreSetup;
         if( m_restoreSetup )
@@ -320,6 +334,8 @@ private:
     SCH_FORMATTING::MESSAGE m_formatting;
     bool m_restoreAnnotation = false;
     SCH_ANNOTATION::MESSAGE m_annotation;
+    bool m_restoreReferenceInventory = false;
+    std::unique_ptr<REFDES_TRACKER> m_referenceInventory;
     bool m_restoreErcPolicy = false;
     bool m_restoreSetup = false;
     std::optional<nlohmann::json> m_setupBefore;

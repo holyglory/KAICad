@@ -298,7 +298,7 @@ public static class SchematicItemMerge
             copy.EmbeddedFonts = false; copy.RootInstance = null; copy.TitleBlock = null; copy.Page = null;
             copy.TextVariables.Clear(); copy.BusAliases.Clear(); copy.NetChains.Clear();
             copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; copy.ErcSettings = null;
-            copy.NetChainClasses = null; copy.Annotation = null; return copy;
+            copy.NetChainClasses = null; copy.Annotation = null; copy.ReferenceInventory = null; return copy;
         }
         var assetsBefore = (baseline.EmbeddedFiles, baseline.EmbeddedFonts);
         var assetsXml = (xml.EmbeddedFiles, xml.EmbeddedFonts);
@@ -314,6 +314,7 @@ public static class SchematicItemMerge
             || !Choose(baseline.DrawingRatios, xml.DrawingRatios, native.DrawingRatios, out var drawing)
             || !MergeFormatting(baseline.Formatting, xml.Formatting, native.Formatting, out var formatting)
             || !MergeAnnotation(baseline.Annotation, xml.Annotation, native.Annotation, out var annotation)
+            || !MergeReferenceInventory(baseline.ReferenceInventory, xml.ReferenceInventory, native.ReferenceInventory, out var inventory)
             || !MergeErc(baseline.ErcSettings, xml.ErcSettings, native.ErcSettings, out var erc)
             || !SchematicNetChainClasses.Merge(baseline.NetChainClasses, xml.NetChainClasses, native.NetChainClasses, out var chainClasses)
             || !Choose(baseline.BusAliases, xml.BusAliases, native.BusAliases, out var aliases)
@@ -324,6 +325,7 @@ public static class SchematicItemMerge
         result.DrawingRatios = drawing?.Clone();
         result.Formatting = formatting?.Clone();
         result.Annotation = annotation?.Clone();
+        result.ReferenceInventory = inventory?.Clone();
         result.ErcSettings = erc?.Clone();
         result.NetChainClasses = chainClasses?.Clone();
         result.EmbeddedFiles = assets.Item1?.Clone(); result.EmbeddedFonts = assets.Item2;
@@ -384,6 +386,20 @@ public static class SchematicItemMerge
             if (chosen is not null) result.Add(key, chosen);
         }
         return result;
+    }
+
+    private static bool MergeReferenceInventory(SchematicReferenceInventory? baseline,
+        SchematicReferenceInventory? xml, SchematicReferenceInventory? native,
+        out SchematicReferenceInventory? result)
+    {
+        result = null;
+        // Allocation/deallocation can encode history that is absent from placed
+        // symbols. Preserve one complete selected version; never guess a union.
+        if (SchematicReferenceInventoryState.Same(xml, native)) result = native;
+        else if (SchematicReferenceInventoryState.Same(baseline, xml)) result = native;
+        else if (SchematicReferenceInventoryState.Same(baseline, native)) result = xml;
+        else return false;
+        return true;
     }
 
     private static bool MergeAnnotation(SchematicAnnotationSettings? baseline,

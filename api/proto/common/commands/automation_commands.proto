@@ -16,6 +16,7 @@ message ReadSchematicMetadata {
   // 3: also includes the net-chain class registry and assignments.
   // 4: includes explicit net-chain member exclusions.
   // 5: includes persisted reference-numbering policy.
+  // 6: includes the inventory of previously allocated reference designators.
   // Unknown versions are rejected, never silently simplified.
   uint32 schema_version = 2;
 }
@@ -331,6 +332,7 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicErcSettings set_erc_settings = 17;
     kiapi.schematic.types.SchematicNetChainClassState replace_net_chain_classes = 18;
     kiapi.schematic.types.SchematicAnnotationSettings set_annotation = 19;
+    kiapi.schematic.types.SchematicReferenceInventory set_reference_inventory = 20;
   }
 }
 
@@ -396,6 +398,7 @@ message SchematicItemBatchResult {
   bool erc_settings_changed = 17;
   bool net_chain_classes_changed = 18;
   bool annotation_changed = 19;
+  bool reference_inventory_changed = 20;
 }
 
 message InspectSchematicOperation {

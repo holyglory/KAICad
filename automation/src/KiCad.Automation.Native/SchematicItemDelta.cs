@@ -250,11 +250,19 @@ public static class SchematicItemDelta
         remainder.DrawingRatios = current.DrawingRatios?.Clone();
         remainder.Formatting = current.Formatting?.Clone();
         remainder.Annotation = current.Annotation?.Clone();
+        remainder.ReferenceInventory = current.ReferenceInventory?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.ReferenceInventory is not null || desired.ReferenceInventory is not null)
+        {
+            var before = current.ReferenceInventory ?? throw Invalid("The native peer did not capture allocated references.");
+            var after = desired.ReferenceInventory ?? throw Invalid("The reference inventory cannot be omitted or inferred from placed components.");
+            if (!SchematicReferenceInventoryState.Same(before, after))
+                operations.Add(new() { SetReferenceInventory = SchematicReferenceInventoryState.Normalize(after) });
+        }
         if (current.Annotation is not null || desired.Annotation is not null)
         {
             var before = current.Annotation ?? throw Invalid("The native peer did not capture annotation policy.");

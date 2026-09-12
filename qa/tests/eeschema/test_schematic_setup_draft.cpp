@@ -46,6 +46,43 @@ BOOST_AUTO_TEST_CASE( AnnotationPolicyPreservesAllocatedDesignators )
     BOOST_CHECK_EQUAL( tracker->Serialize(), allocated );
 }
 
+BOOST_AUTO_TEST_CASE( ReferenceInventoryValidatesBeforeReplacingAllocationState )
+{
+    REFDES_TRACKER tracker( true );
+    tracker.SetReuseRefDes( false );
+    tracker.Insert( "R001" ); // Native Undo must retain in-session spelling too.
+    REFDES_TRACKER saved;
+    saved.CopyAllocatedFrom( tracker );
+    const std::vector<std::string> references{ "#PWR1", "C5", "R2147483646", "R2147483647", "U1U2", "PREFIX", "123", "X,1" };
+    BOOST_REQUIRE( tracker.ReplaceAllocatedReferences( references ) );
+    auto expected = references;
+    std::sort( expected.begin(), expected.end() );
+    BOOST_CHECK( tracker.GetAllocatedReferences() == expected );
+    BOOST_CHECK( !tracker.GetReuseRefDes() );
+    REFDES_TRACKER reopened;
+    BOOST_REQUIRE( reopened.Deserialize( tracker.Serialize() ) );
+    BOOST_CHECK( reopened.GetAllocatedReferences() == expected );
+    for( const std::vector<std::string>& invalid : std::vector<std::vector<std::string>>{
+            { "R1", "R1" }, { "R001" }, { "R0" }, { "" }, { std::string( "R\0X", 3 ) },
+            { "R2147483648" }, { "R9-3" } } )
+    {
+        BOOST_CHECK( !tracker.ReplaceAllocatedReferences( invalid ) );
+        BOOST_CHECK( tracker.GetAllocatedReferences() == expected );
+        BOOST_CHECK( !tracker.GetReuseRefDes() );
+    }
+    tracker.CopyAllocatedFrom( saved );
+    BOOST_CHECK( tracker.Contains( "R001" ) );
+    BOOST_CHECK( !tracker.Contains( "R1" ) );
+    BOOST_CHECK( !tracker.GetReuseRefDes() );
+    BOOST_REQUIRE( tracker.ReplaceAllocatedReferences( {} ) );
+    BOOST_CHECK( tracker.GetAllocatedReferences().empty() );
+    BOOST_CHECK( !tracker.GetReuseRefDes() );
+    BOOST_CHECK( !reopened.Deserialize( "R9-3" ) );
+    BOOST_CHECK( reopened.GetAllocatedReferences().empty() );
+    BOOST_REQUIRE( reopened.Deserialize( "R2147483647-2147483647" ) );
+    BOOST_CHECK( reopened.Contains( "R2147483647" ) );
+}
+
 BOOST_AUTO_TEST_CASE( SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker )
 {
     PROJECT_FILE project( "detached-fixture.kicad_pro" );

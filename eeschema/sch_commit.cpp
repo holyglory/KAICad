@@ -284,6 +284,22 @@ void SCH_COMMIT::SetDrawingRatios( const std::array<double, 5>& aRatios )
     SCH_PAGE_SETTINGS_UNDO_ITEM::ApplyDrawingRatios( frame, aRatios );
 }
 
+void SCH_COMMIT::SetReferenceInventory( const REFDES_TRACKER& aPrepared )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    wxCHECK_RET( frame && !m_isLibEditor, "Reference inventory requires a schematic editor" );
+    auto& tracker = frame->Schematic().Settings().m_refDesTracker;
+    if( tracker && tracker->GetAllocatedReferences() == aPrepared.GetAllocatedReferences() ) return;
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeReferenceInventory();
+    if( !tracker ) tracker = std::make_shared<REFDES_TRACKER>();
+    tracker->CopyAllocatedFrom( aPrepared );
+}
+
 void SCH_COMMIT::SetAnnotation( const kiapi::schematic::types::SchematicAnnotationSettings& aAnnotation )
 {
     auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );

@@ -133,6 +133,15 @@ message SchematicMetadata
   // Schema 5. Project policy for future annotation, not placed references or
   // the separately persisted inventory of previously allocated designators.
   SchematicAnnotationSettings annotation = 19;
+  // Schema 6. Empty means an explicitly captured empty inventory; absence
+  // means unavailable data. Not inferred from currently placed components.
+  SchematicReferenceInventory reference_inventory = 20;
+}
+
+message SchematicReferenceInventory
+{
+  // Individual canonical reference entries, not a serialized native range string.
+  repeated string allocated = 1;
 }
 
 message SchematicAnnotationSettings

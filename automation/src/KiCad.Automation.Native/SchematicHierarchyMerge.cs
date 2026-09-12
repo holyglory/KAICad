@@ -162,6 +162,7 @@ public static class SchematicHierarchyMerge
         metadata.VariantDescriptions.Clear(); metadata.VariantDescriptions.Add(project.VariantDescriptions);
         metadata.DrawingRatios = project.DrawingRatios?.Clone(); metadata.Formatting = project.Formatting?.Clone();
         metadata.Annotation = project.Annotation?.Clone();
+        metadata.ReferenceInventory = project.ReferenceInventory?.Clone();
         SchematicVariantProjection.Reproject(result);
         return result;
     }

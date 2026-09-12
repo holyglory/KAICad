@@ -111,6 +111,17 @@ public:
      */
     bool Deserialize( const std::string& aData );
 
+    /** Canonical persisted reference entries, independent of numbering policy. */
+    std::vector<std::string> GetAllocatedReferences() const;
+
+    /** Validate the complete replacement against native persistence before
+     * changing any allocation. Does not change the reference-reuse preference. */
+    bool ReplaceAllocatedReferences( const std::vector<std::string>& aReferences );
+
+    /** Copy allocation state for native commits/undo, retaining in-session
+     * spellings too. The receiving tracker's policy and threading mode remain. */
+    void CopyAllocatedFrom( const REFDES_TRACKER& aSource );
+
     /**
      * Clear all stored reference designators.
      */

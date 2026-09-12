@@ -46,7 +46,7 @@ public sealed partial class NativeSessionTests
                 await File.WriteAllTextAsync(Prefix(phase + "-actual.xml"), SchematicDataXml.Write(actual), token);
             }
             Assert.AreEqual(expected, actual, "BOM edit must preserve every unrelated native object and property.");
-            Assert.AreEqual(actual, SchematicDataXml.Read(SchematicDataXml.Write(actual)));
+            Assert.AreEqual(expected, SchematicDataXml.Read(SchematicDataXml.Write(actual)));
         }
         async Task Capture(string phase)
         {

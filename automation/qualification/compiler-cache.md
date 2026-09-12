@@ -19,6 +19,9 @@ controls. PCH support uses ccache's documented `pch_defines,time_macros` setting
 timestamp-bearing native source must carry `ccache:disable` in its first 4096
 bytes. The configure-time check rejects unguarded time macros in native source
 roots. `common/build_version.cpp` bypasses caching so its build date stays real.
+Compiler diagnostics also reject time macros introduced by incremental edits or
+headers after configuration. The uncached build-version source explicitly permits
+its intentional timestamp; other sources cannot silently cache stale timestamps.
 
 Run `devcoordinator2 test start /absolute/worktree --test compiler-cache --tier
 development` for compiled cache qualification. It compares a cold build, a warm

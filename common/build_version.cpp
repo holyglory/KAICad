@@ -20,6 +20,9 @@
 
 // Date for KiCad build version
 // ccache:disable -- this source intentionally reports its actual compilation time.
+#if defined( __GNUC__ ) || defined( __clang__ )
+#pragma GCC diagnostic ignored "-Wdate-time"
+#endif
 #include <wx/wx.h>
 #include <config.h>
 #include <boost/version.hpp>

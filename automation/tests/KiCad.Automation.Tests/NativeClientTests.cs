@@ -72,7 +72,7 @@ public sealed class NativeClientTests
             Assert.ThrowsExactly<AutomationException>(() => client.CreateRootBoardAsync(path));
         }
         Assert.IsEmpty(transport.Requests);
-        string absolute = Path.Combine(Path.GetTempPath(), "native-board-open.kicad_pcb");
+        string absolute = Path.Combine(Path.GetTempPath(), "native-board-open-電源.kicad_pcb");
         await client.OpenRootBoardAsync(absolute);
         await client.CreateRootBoardAsync(absolute);
         Assert.HasCount(2, transport.Requests);

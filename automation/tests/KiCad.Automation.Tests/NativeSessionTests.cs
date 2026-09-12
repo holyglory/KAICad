@@ -86,6 +86,8 @@ public sealed partial class NativeSessionTests
             {
                 string id = Guid.NewGuid().ToString("D");
                 string projectDirectory = Path.Combine(temporary, index.ToString());
+                if (journey == NativeJourney.NetSettings)
+                    projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
                 string project = Path.Combine(projectDirectory, "fixture.kicad_pro");
                 string declaredRootId = (index == 0 ? Guid.NewGuid() : Guid.Empty).ToString("D");

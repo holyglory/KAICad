@@ -221,6 +221,7 @@ set( QA_EESCHEMA_SRCS
     test_schematic_bom_settings.cpp
     test_net_settings_capture.cpp
     test_schematic_initialization.cpp
+    test_schematic_state_format.cpp
     test_schematic_symbol_library_identity.cpp
     test_sch_table.cpp
     test_sch_textbox.cpp
@@ -413,6 +414,10 @@ setup_qa_env( qa_api_request_target )
 add_test( NAME qa_settings_save_outcome
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SettingsSaveOutcome --log_level=test_suite )
 setup_qa_env( qa_settings_save_outcome )
+
+add_test( NAME qa_schematic_state_format
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicStateFormat --log_level=test_suite )
+setup_qa_env( qa_schematic_state_format )
 
 add_test( NAME qa_net_settings_capture
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )

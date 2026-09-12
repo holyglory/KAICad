@@ -308,7 +308,8 @@ void PCB_IO_KICAD_SEXPR::SaveBoard( const wxString& aFileName, BOARD* aBoard,
 
 
 void PCB_IO_KICAD_SEXPR::FormatBoardToFormatter( OUTPUTFORMATTER* aOut, BOARD* aBoard,
-                                                  const std::map<std::string, UTF8>* aProperties )
+                                                  const std::map<std::string, UTF8>* aProperties,
+                                                  bool aPrepareResources )
 {
     init( aProperties );
 
@@ -316,20 +317,29 @@ void PCB_IO_KICAD_SEXPR::FormatBoardToFormatter( OUTPUTFORMATTER* aOut, BOARD* a
 
     // If the user wants fonts embedded, make sure that they are added to the board.  Otherwise,
     // remove any fonts that were previously embedded.
-    if( m_board->GetAreFontsEmbedded() )
-        m_board->EmbedFonts();
-    else
-        m_board->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    if( aPrepareResources )
+    {
+        if( m_board->GetAreFontsEmbedded() )
+            m_board->EmbedFonts();
+        else
+            m_board->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    }
 
     m_out = aOut;
 
-    m_out->Print( "(kicad_pcb (version %d) (generator \"pcbnew\") (generator_version %s)",
-                  SEXPR_BOARD_FILE_VERSION,
-                  m_out->Quotew( GetMajorMinorVersion() ).c_str() );
-
-    Format( aBoard );
-
-    m_out->Print( ")" );
+    try
+    {
+        m_out->Print( "(kicad_pcb (version %d) (generator \"pcbnew\") (generator_version %s)",
+                      SEXPR_BOARD_FILE_VERSION,
+                      m_out->Quotew( GetMajorMinorVersion() ).c_str() );
+        Format( aBoard );
+        m_out->Print( ")" );
+    }
+    catch( ... )
+    {
+        m_out = nullptr;
+        throw;
+    }
 
     m_out = nullptr;
 }

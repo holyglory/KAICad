@@ -34,6 +34,7 @@
 #include <io/kicad/kicad_io_utils.h>
 #include <progress_reporter.h>
 #include <richio.h>
+#include <embedded_files.h>
 
 #include <board.h>
 #include <board_connected_item.h>
@@ -63,6 +64,32 @@ struct KICAD_SEXPR_FIXTURE
  * Declares the struct as the Boost test fixture.
  */
 BOOST_FIXTURE_TEST_SUITE( KiCadSexprIO, KICAD_SEXPR_FIXTURE )
+
+BOOST_AUTO_TEST_CASE( StateSerializationPreservesCurrentEmbeddedResources )
+{
+    BOARD board;
+    board.SetAreFontsEmbedded( false );
+    auto asset = std::make_shared<EMBEDDED_FILES::EMBEDDED_FILE>();
+    asset->name = "retained.ttf";
+    asset->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT;
+    asset->decompressedData = { 'f', 'i', 'x', 't', 'u', 'r', 'e' };
+    BOOST_REQUIRE( EMBEDDED_FILES::CompressAndEncode( *asset ) == EMBEDDED_FILES::RETURN_CODE::OK );
+    board.GetEmbeddedFiles()->AddFile( asset );
+    const auto encoded = asset->compressedEncodedData;
+    const auto hash = asset->data_hash;
+    STRING_FORMATTER first, second;
+    kicadPlugin.FormatBoardToFormatter( &first, &board, nullptr, false );
+    kicadPlugin.FormatBoardToFormatter( &second, &board, nullptr, false );
+    BOOST_CHECK_EQUAL( first.GetString(), second.GetString() );
+    BOOST_CHECK( first.GetString().find( "retained.ttf" ) != std::string::npos );
+    BOOST_REQUIRE( board.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == asset.get() );
+    BOOST_CHECK_EQUAL( asset->compressedEncodedData, encoded );
+    BOOST_CHECK_EQUAL( asset->data_hash, hash );
+    STRING_FORMATTER saved;
+    kicadPlugin.FormatBoardToFormatter( &saved, &board );
+    BOOST_CHECK( board.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == nullptr );
+    BOOST_CHECK( saved.GetString().find( "retained.ttf" ) == std::string::npos );
+}
 
 
 /**

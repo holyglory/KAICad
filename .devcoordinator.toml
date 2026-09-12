@@ -1764,6 +1764,28 @@ tier = "development"
 requires = ["build"]
 command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_bom_settings$", "--output-on-failure", "--no-tests=error"]
 
+[test.native-state-format]
+timeout_seconds = 5400
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-state-format.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-state-format.check]]
+name = "build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity", "qa_pcbnew"]
+
+[[test.native-state-format.check]]
+name = "contracts"
+tier = "development"
+requires = ["build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_state_format$|^qa_pcbnew_state_format$", "--output-on-failure", "--no-tests=error"]
+
 [test.net-settings-contract]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

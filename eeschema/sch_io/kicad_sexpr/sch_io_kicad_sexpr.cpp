@@ -433,7 +433,8 @@ void SCH_IO_KICAD_SEXPR::SaveSchematicFile( const wxString& aFileName, SCH_SHEET
 
 void SCH_IO_KICAD_SEXPR::FormatSchematicToFormatter( OUTPUTFORMATTER* aOut, SCH_SHEET* aSheet,
                                                       SCHEMATIC* aSchematic,
-                                                      const std::map<std::string, UTF8>* aProperties )
+                                                      const std::map<std::string, UTF8>* aProperties,
+                                                      bool aPrepareResources )
 {
     wxCHECK_RET( aSheet != nullptr, "NULL SCH_SHEET object." );
 
@@ -441,13 +442,21 @@ void SCH_IO_KICAD_SEXPR::FormatSchematicToFormatter( OUTPUTFORMATTER* aOut, SCH_
 
     m_out = aOut;
 
-    Format( aSheet );
+    try
+    {
+        Format( aSheet, aPrepareResources );
+    }
+    catch( ... )
+    {
+        m_out = nullptr;
+        throw;
+    }
 
     m_out = nullptr;
 }
 
 
-void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
+void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet, bool aPrepareResources )
 {
     wxCHECK_RET( aSheet != nullptr, "NULL SCH_SHEET* object." );
     wxCHECK_RET( m_schematic != nullptr, "NULL SCHEMATIC* object." );
@@ -460,10 +469,13 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
     // If we've requested to embed the fonts in the schematic, do so.
     // Otherwise, clear the embedded fonts from the schematic.  Embedded
     // fonts will be used if available
-    if( m_schematic->GetAreFontsEmbedded() )
-        m_schematic->EmbedFonts();
-    else
-        m_schematic->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    if( aPrepareResources )
+    {
+        if( m_schematic->GetAreFontsEmbedded() )
+            m_schematic->EmbedFonts();
+        else
+            m_schematic->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    }
 
     m_out->Print( "(kicad_sch (version %d) (generator \"eeschema\") (generator_version %s)",
                   SEXPR_SCHEMATIC_FILE_VERSION,

@@ -104,12 +104,14 @@ public:
 
     /** Serialize a schematic sheet to an OUTPUTFORMATTER without file I/O or Prettify.
      *  Handles init() and Format().
-     *  Skips GroupsSanityCheck and SetFileExists side effects. */
+     *  Skips GroupsSanityCheck and SetFileExists side effects. Pass false for
+     *  aPrepareResources to retain the current embedded resource set. */
     void FormatSchematicToFormatter( OUTPUTFORMATTER* aOut, SCH_SHEET* aSheet,
                                      SCHEMATIC* aSchematic,
-                                     const std::map<std::string, UTF8>* aProperties = nullptr );
+                                     const std::map<std::string, UTF8>* aProperties = nullptr,
+                                     bool aPrepareResources = true );
 
-    void Format( SCH_SHEET* aSheet );
+    void Format( SCH_SHEET* aSheet, bool aPrepareResources = true );
 
     void Format( SCH_SELECTION* aSelection, SCH_SHEET_PATH* aSelectionPath,
                  SCHEMATIC& aSchematic, OUTPUTFORMATTER* aFormatter, bool aForClipboard );

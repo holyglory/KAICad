@@ -62,6 +62,28 @@ public sealed class NativeClientTests
     }
 
     [TestMethod]
+    public async Task BoardOpenAndCreationKeepExplicitTypePathAndCreationIntent()
+    {
+        var transport = new ScriptTransport((_, _) => SnapshotReply(new OpenDocumentResponse(), 1));
+        var client = new NativeClient(transport, "ipc:///tmp/board-open.sock");
+        foreach (string path in new[] { "relative.kicad_pcb", "/tmp/legacy.brd", "" })
+        {
+            Assert.ThrowsExactly<AutomationException>(() => client.OpenRootBoardAsync(path));
+            Assert.ThrowsExactly<AutomationException>(() => client.CreateRootBoardAsync(path));
+        }
+        Assert.IsEmpty(transport.Requests);
+        string absolute = Path.Combine(Path.GetTempPath(), "native-board-open.kicad_pcb");
+        await client.OpenRootBoardAsync(absolute);
+        await client.CreateRootBoardAsync(absolute);
+        Assert.HasCount(2, transport.Requests);
+        var normal = transport.Requests[0].Message.Unpack<OpenDocument>();
+        var create = transport.Requests[1].Message.Unpack<OpenDocument>();
+        Assert.AreEqual((Kiapi.Common.Types.DocumentType)3, normal.Type);
+        Assert.AreEqual(absolute, normal.Path); Assert.IsFalse(normal.CreateIfMissing);
+        normal.CreateIfMissing = true; Assert.AreEqual(normal, create);
+    }
+
+    [TestMethod]
     public void SchematicOpenRequiresAnExplicitNativePath()
     {
         var fixture = new FixtureTransport();

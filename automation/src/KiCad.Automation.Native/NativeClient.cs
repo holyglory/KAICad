@@ -50,6 +50,22 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
             new OpenDocument { Type = (Kiapi.Common.Types.DocumentType)1, Path = path, CreateIfMissing = true }, cancellationToken);
     }
 
+    public Task<OpenDocumentResponse> OpenRootBoardAsync(string path, CancellationToken cancellationToken = default)
+    {
+        if (!Path.IsPathFullyQualified(path) || Path.GetExtension(path) != ".kicad_pcb")
+            throw new AutomationException("invalid_document_path", "An absolute native PCB path is required.");
+        return InvokeAsync<OpenDocument, OpenDocumentResponse>(
+            new OpenDocument { Type = (Kiapi.Common.Types.DocumentType)3, Path = path }, cancellationToken);
+    }
+
+    public Task<OpenDocumentResponse> CreateRootBoardAsync(string path, CancellationToken cancellationToken = default)
+    {
+        if (!Path.IsPathFullyQualified(path) || Path.GetExtension(path) != ".kicad_pcb")
+            throw new AutomationException("invalid_document_path", "An absolute native PCB path is required.");
+        return InvokeAsync<OpenDocument, OpenDocumentResponse>(
+            new OpenDocument { Type = (Kiapi.Common.Types.DocumentType)3, Path = path, CreateIfMissing = true }, cancellationToken);
+    }
+
     public async Task<TResponse> InvokeAsync<TRequest, TResponse>(TRequest request,
         CancellationToken cancellationToken = default)
         where TRequest : IMessage<TRequest>

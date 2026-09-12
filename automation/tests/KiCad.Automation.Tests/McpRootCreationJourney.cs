@@ -10,7 +10,8 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task<OpenDocumentResponse> CreateRootThroughMcp(string endpoint, string instanceId,
-        string path, string evidence, CancellationToken token, string? publishedExecutable = null)
+        string path, string evidence, CancellationToken token, string? publishedExecutable = null,
+        string toolName = "kicad_schematic_create")
     {
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
         string state = Directory.CreateTempSubdirectory("kicad-mcp-create-").FullName;
@@ -33,7 +34,7 @@ public sealed partial class NativeSessionTests
                 clientInfo = new { name = "native-root-creation-journey", version = "1" } });
             await process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
             await Tool("kicad_instance_attach", new { endpoint, expectedInstanceId = instanceId });
-            var result = await Tool("kicad_schematic_create", new { instanceId, path });
+            var result = await Tool(toolName, new { instanceId, path });
             var text = result.GetProperty("content").EnumerateArray()
                 .Single(c => c.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!;
             return new OpenDocumentResponse { Document = SchematicJson.Parser.Parse<DocumentSpecifier>(text) };

@@ -73,18 +73,9 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(recovered, await File.ReadAllTextAsync(autosave, token));
         Assert.IsFalse(File.Exists(boardPath));
         File.Delete(autosave); // The isolated recovery input is no longer needed.
-        OpenDocumentResponse opened;
-        using (var ready = CancellationTokenSource.CreateLinkedTokenSource(token))
-        {
-            ready.CancelAfter(TimeSpan.FromSeconds(5));
-            int delay = 25;
-            while (true)
-            {
-                try { opened = await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, ready.Token); break; }
-                catch (NativeApiException error) when (error.Status == 7)
-                { await Task.Delay(delay, ready.Token); delay = Math.Min(delay * 2, 200); }
-            }
-        }
+        string instanceId = (await client.HandshakeAsync(token)).InstanceId;
+        var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
+            toolName: "kicad_pcb_create");
         var board = opened.Document;
         Assert.AreEqual((DocumentType)3, board.Type);
         Assert.AreEqual(Path.GetFileName(boardPath), board.BoardFilename);
@@ -105,6 +96,8 @@ public sealed partial class NativeSessionTests
         }
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue(File.Exists(boardPath));
+        Assert.AreEqual(opened, await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
+            toolName: "kicad_pcb_open"));
 
         // Test data only: reload a small, explicitly owned routed board through
         // the native loader, retaining both locked and unlocked geometry.

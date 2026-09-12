@@ -87,6 +87,9 @@ public sealed class CompilerCacheTests
             string directory = Directory.CreateDirectory(Path.Combine(fixture, name)).FullName;
             Directory.CreateDirectory(Path.Combine(directory, "common"));
             Directory.CreateDirectory(Path.Combine(directory, "include/api"));
+            Directory.CreateDirectory(Path.Combine(directory, "api"));
+            await File.WriteAllTextAsync(Path.Combine(directory, "include/import_export.h"), "#define CACHE_IMPORT_EXPORT 1\n", token);
+            await File.WriteAllTextAsync(Path.Combine(directory, "include/project_pch.h"), "#pragma once\n#include <optional>\n", token);
             File.Copy(Path.Combine(root, "cmake/KiCadCompilerCache.cmake"), Path.Combine(directory, "CompilerCache.cmake"));
             File.Copy(Path.Combine(root, "include/api/document_change_journal.h"), Path.Combine(directory, "include/api/document_change_journal.h"));
             File.Copy(Path.Combine(root, "qa/tests/common/test_document_change_journal.cpp"), Path.Combine(directory, "journal.cpp"));
@@ -103,11 +106,14 @@ public sealed class CompilerCacheTests
                 set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE} ${KICAD_CCACHE_ARGUMENTS})
                 # Isolate the cold comparison without clearing anyone's cache.
                 list(APPEND CMAKE_CXX_COMPILER_LAUNCHER "namespace=kicad-qualification-${CACHE_RUN}")
+                # Match native KiCad's macro debug information and imported definitions.
+                add_compile_options(-g3 -ggdb3 "SHELL:-imacros ${CMAKE_SOURCE_DIR}/api/../include/import_export.h")
                 find_package(Boost REQUIRED COMPONENTS unit_test_framework)
                 add_executable(probe common/probe.cpp)
                 target_compile_features(probe PRIVATE cxx_std_20)
                 target_compile_definitions(probe PRIVATE CACHE_BIAS=${CACHE_BIAS} CACHE_RUN=${CACHE_RUN})
-                target_precompile_headers(probe PRIVATE <vector> <string> <map>)
+                target_include_directories(probe PRIVATE include)
+                target_precompile_headers(probe PRIVATE <project_pch.h> <vector> <string> <map>)
                 add_executable(stamp common/stamp.cpp)
                 add_executable(journal journal-main.cpp journal.cpp)
                 target_compile_features(journal PRIVATE cxx_std_20)
@@ -154,7 +160,11 @@ public sealed class CompilerCacheTests
                 RedirectStandardOutput = true, RedirectStandardError = true };
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
             start.Environment["CCACHE_DIR"] = cache;
-            if (statsLog is not null) start.Environment["CCACHE_STATSLOG"] = statsLog;
+            if (statsLog is not null)
+            {
+                start.Environment["CCACHE_STATSLOG"] = statsLog;
+                start.Environment["CCACHE_LOGFILE"] = Path.Combine(evidence, name + ".ccache.log");
+            }
             var watch = Stopwatch.StartNew();
             using var process = Process.Start(start)!;
             var output = process.StandardOutput.ReadToEndAsync(token); var error = process.StandardError.ReadToEndAsync(token);

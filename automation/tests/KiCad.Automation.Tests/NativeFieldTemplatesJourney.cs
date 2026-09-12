@@ -41,6 +41,12 @@ public sealed partial class NativeSessionTests
         // name editor; the downstream saved project proves the action happened.
         NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
             clickFromLeft: 290, clickFromBottom: 75);
+        // The row's editor is opened after native layout/focus handling. Target
+        // the stable row explicitly before replacing its initial field name.
+        await NativeSetupUi.StableGeometry(display, processId, token);
+        NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false,
+            clickFromLeft: 350, clickFromTop: 38);
+        NativeKeyboard.SchematicShortcut(display, processId, "F2", "Schematic Setup", false, false);
         NativeKeyboard.SchematicShortcut(display, processId, "a", "Schematic Setup", true, false);
         foreach (char c in "AutomationTemplate")
             NativeKeyboard.SchematicShortcut(display, processId, c.ToString(), "Schematic Setup", false, false);

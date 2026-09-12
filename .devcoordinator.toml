@@ -71,6 +71,29 @@ tier = "development"
 requires = ["native-build"]
 command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_document_change_journal$", "--output-on-failure", "--no-tests=error"]
 
+[test.compiler-cache-pch-diagnostic]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.compiler-cache-pch-diagnostic.check]]
+name = "prepare"
+tier = "development"
+role = "preflight"
+invalidates = ["compile", "restore"]
+command = ["cmake", "-E", "rename", "automation/artifacts/native/common/CMakeFiles/kicommon.dir/cmake_pch.hxx.gch", "automation/artifacts/native/cache-pch-before.gch"]
+
+[[test.compiler-cache-pch-diagnostic.check]]
+name = "compile"
+tier = "development"
+command = ["cmake", "-E", "env", "CCACHE_LOGFILE=automation/artifacts/compiler-cache-pch.log", "cmake", "--build", "automation/artifacts/native", "--target", "common/CMakeFiles/kicommon.dir/cmake_pch.hxx.gch"]
+retained_artifacts = [{ name = "pch-cache-log", path = "automation/artifacts/compiler-cache-pch.log", max_bytes = 4194304 }]
+
+[[test.compiler-cache-pch-diagnostic.check]]
+name = "restore"
+tier = "development"
+after = ["compile"]
+command = ["cmake", "-E", "rename", "automation/artifacts/native/cache-pch-before.gch", "automation/artifacts/native/common/CMakeFiles/kicommon.dir/cmake_pch.hxx.gch"]
+
 [deployment.download-page-preview]
 source = ["checkout"]
 components = ["page"]

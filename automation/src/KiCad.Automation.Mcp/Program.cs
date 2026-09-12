@@ -70,6 +70,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<SchematicMutationTools>()
     .WithTools<SchematicXmlTools>()
     .WithTools<DocumentTools>()
+    .WithTools<DocumentStateTools>()
     .WithTools<KnowledgeTools>()
     .WithTools<PlacementTools>()
     .WithTools<RecoveryTools>()

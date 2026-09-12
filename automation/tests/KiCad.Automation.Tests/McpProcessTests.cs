@@ -60,6 +60,8 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_operation", invalidReconnect.GetProperty("result").GetProperty("structuredContent").GetProperty("code").GetString());
             CollectionAssert.Contains(names, "kicad_schematic_open");
             CollectionAssert.Contains(names, "kicad_schematic_create");
+            CollectionAssert.Contains(names, "kicad_pcb_open");
+            CollectionAssert.Contains(names, "kicad_pcb_create");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");

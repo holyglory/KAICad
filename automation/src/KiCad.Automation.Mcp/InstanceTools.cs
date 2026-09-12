@@ -91,4 +91,20 @@ public sealed class InstanceTools(InstanceRegistry registry)
         var response = await registry.Client(instanceId).CreateRootSchematicAsync(path, cancellationToken);
         return JsonFormatter.Default.Format(response.Document);
     });
+
+    [McpServerTool(Name = "kicad_pcb_open"),
+     Description("Open the existing project-root .kicad_pcb in the graphical editor belonging to an explicitly attached instance. Requires an absolute path belonging to that project; does not switch projects or import other formats. Returns the native project/board descriptor. Repeating an open preserves the current document. Does not provide revision-safe board editing or rendering.")]
+    public Task<CallToolResult> OpenPcb(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var response = await registry.Client(instanceId).OpenRootBoardAsync(path, cancellationToken);
+        return JsonFormatter.Default.Format(response.Document);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_create"),
+     Description("Create an unsaved empty project-root PCB in an explicitly attached native instance if its .kicad_pcb file is missing. Existing files and open boards are returned without replacement. Requires an absolute path belonging to that instance's project. Save explicitly to persist the board. Does not place components or route a board.")]
+    public Task<CallToolResult> CreatePcb(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var response = await registry.Client(instanceId).CreateRootBoardAsync(path, cancellationToken);
+        return JsonFormatter.Default.Format(response.Document);
+    });
 }

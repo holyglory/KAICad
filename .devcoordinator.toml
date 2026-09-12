@@ -1778,7 +1778,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.net-settings-contract.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-contract"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-contract"]
 retained_artifacts = [{ name = "net-settings-contract", path = "automation/artifacts/net-settings-contract", max_bytes = 16777216 }]
 
 [test.netclass-native-codec]
@@ -1834,7 +1834,7 @@ name = "input-contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-input-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-input-contracts"]
 retained_artifacts = [{ name = "net-settings-input-contracts", path = "automation/artifacts/net-settings-input-contracts", max_bytes = 16777216 }]
 
 [[test.native-net-settings.check]]

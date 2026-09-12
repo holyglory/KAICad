@@ -1054,7 +1054,7 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     // Write through symlinks, don't replace them
     WX_FILENAME::ResolvePossibleSymlinks( pcbFileName );
 
-    if( !IsWritable( pcbFileName ) )
+    if( !IsWritable( pcbFileName, !automation ) )
     {
         wxString msg = wxString::Format( _( "Insufficient permissions to write file '%s'." ),
                                          pcbFileName.GetFullPath() );
@@ -1071,7 +1071,7 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     projectFile.SetExt( FILEEXT::ProjectFileExtension );
     rulesFile.SetExt( FILEEXT::DesignRulesFileExtension );
 
-    if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile ) ) )
+    if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile, false ) ) )
     {
         reportFailure( "The project file is missing or not writable; the PCB was not saved" );
         return false;

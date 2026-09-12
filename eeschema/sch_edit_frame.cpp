@@ -2528,6 +2528,11 @@ void SCH_EDIT_FRAME::RefreshErcDialog()
 }
 
 
+bool SCH_EDIT_FRAME::HasOpenSymbolFieldsTableDialog() const
+{
+    return m_symbolFieldsTableDialog && m_symbolFieldsTableDialog->IsShown();
+}
+
 DIALOG_SYMBOL_FIELDS_TABLE* SCH_EDIT_FRAME::GetSymbolFieldsTableDialog()
 {
     if( !m_symbolFieldsTableDialog )

@@ -52,6 +52,7 @@
 #include <tools/sch_actions.h>
 #include <tools/sch_selection_tool.h>
 #include <sch_sheet_path.h>
+#include <api/api_sch_bom_settings.h>
 
 wxDEFINE_EVENT( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, wxCommandEvent );
 
@@ -525,6 +526,7 @@ bool DIALOG_SYMBOL_FIELDS_TABLE::TransferDataFromWindow()
     wxString       currentVariant = m_parent->Schematic().GetCurrentVariant();
 
     m_dataModel->ApplyData( commit, m_templateFieldNames, currentVariant );
+    stageBomSettings( commit, true );
 
     if( !commit.Empty() )
     {
@@ -794,11 +796,26 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnTableSelectionChanged( const std::set<int>& a
 }
 
 
+void DIALOG_SYMBOL_FIELDS_TABLE::stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename )
+{
+    // Build the desired state off-model; comparing persisted values avoids
+    // treating built-in preset read-only flags as a design edit.
+    FIELDS_TABLE_BOM_SETTINGS desired = m_cfgBomSettings;
+    desired.m_BomPresets = GetUserBomPresets();
+    desired.m_BomSettings = m_dataModel->GetBomSettings();
+    desired.m_BomFmtPresets = GetUserBomFmtPresets();
+    desired.m_BomFmtSettings = GetCurrentBomFmtSettings();
+    if( aSaveFilename ) desired.m_BomExportFileName = m_outputFileName->GetValue();
+    aCommit.SetBomSettings( SCH_BOM_SETTINGS::Capture( desired ) );
+    // The typed commit owns persisted fields. Retain the exact UI transient
+    // flags as well, without serializing them or creating a false revision.
+    SCH_BOM_SETTINGS::Swap( m_cfgBomSettings, desired );
+}
+
 void DIALOG_SYMBOL_FIELDS_TABLE::OnSaveAndContinue( wxCommandEvent& aEvent )
 {
     if( TransferDataFromWindow() )
     {
-        m_cfgBomSettings.m_BomExportFileName = m_outputFileName->GetValue();
         m_parent->SaveProject();
         ClearModify();
     }
@@ -832,12 +849,6 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnOk( wxCommandEvent& aEvent )
     }
     else
     {
-        if( m_cfgBomSettings.m_BomExportFileName != m_outputFileName->GetValue() )
-        {
-            m_cfgBomSettings.m_BomExportFileName = m_outputFileName->GetValue();
-            m_parent->OnModify();
-        }
-
         Close();
     }
 }
@@ -866,8 +877,12 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnClose( wxCloseEvent& aEvent )
         }
     }
 
-    if( savePresets( true ) )
-        m_parent->OnModify();
+    // Upstream retains view/preset preferences on close, including Cancel;
+    // the unsaved export filename is still discarded by OnCancel above.
+    SCH_COMMIT commit( m_parent );
+    stageBomSettings( commit, false );
+    if( !commit.Empty() )
+        commit.Push( wxS( "Symbol Fields Table Edit" ) );
 
     // Stop listening to schematic events
     m_parent->Schematic().RemoveListener( this );

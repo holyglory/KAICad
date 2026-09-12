@@ -1742,6 +1742,28 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicDataXmlTests", "--logger", "trx", "--results-directory", "automation/artifacts/bom-settings-model"]
 retained_artifacts = [{ name = "bom-settings-model", path = "automation/artifacts/bom-settings-model", max_bytes = 16777216 }]
 
+[test.bom-settings-native-codec]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.bom-settings-native-codec.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.bom-settings-native-codec.check]]
+name = "build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+
+[[test.bom-settings-native-codec.check]]
+name = "contracts"
+tier = "development"
+requires = ["build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_bom_settings$", "--output-on-failure", "--no-tests=error"]
+
 [test.net-chain-exclusion-model]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

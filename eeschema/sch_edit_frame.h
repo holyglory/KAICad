@@ -876,6 +876,7 @@ public:
     void RefreshErcDialog();
 
     DIALOG_SYMBOL_FIELDS_TABLE* GetSymbolFieldsTableDialog();
+    bool HasOpenSymbolFieldsTableDialog() const;
 
     wxGenericTreeCtrl* GetNetNavigator();
 

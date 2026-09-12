@@ -361,6 +361,7 @@ add_executable( qa_symbol_graphic_identity
     net_chains/test_net_chain_recalc_refresh.cpp
     net_chains/test_net_chain_remove_rename.cpp
     ../common/test_settings_snapshot.cpp
+    ../common/test_netclass_proto.cpp
     ../libs/kinng/test_publisher.cpp
 )
 target_link_libraries( qa_symbol_graphic_identity PRIVATE
@@ -396,3 +397,7 @@ setup_qa_env( qa_schematic_setup_draft )
 add_test( NAME qa_schematic_bom_settings
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicBomSettings --log_level=test_suite )
 setup_qa_env( qa_schematic_bom_settings )
+
+add_test( NAME qa_netclass_proto
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetclassProto --log_level=test_suite )
+setup_qa_env( qa_netclass_proto )

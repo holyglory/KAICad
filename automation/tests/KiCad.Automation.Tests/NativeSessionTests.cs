@@ -30,7 +30,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeBomSettings")]
     public Task BomPreferencesRoundTripThroughXmlAndNativeEdits() => RunNativeSessions(NativeJourney.BomSettings);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings }
+    [TestMethod, TestCategory("NativeNetSettings")]
+    public Task NetClassesRoundTripThroughXmlAndNativeEdits() => RunNativeSessions(NativeJourney.NetSettings);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -42,6 +45,7 @@ public sealed partial class NativeSessionTests
         string evidence = NativeEvidenceDirectory.Begin(journey == NativeJourney.Foundation ? artifacts
             : Path.Combine(artifacts, journey switch { NativeJourney.TableVariants => "native-table-variants",
                 NativeJourney.Setup => "native-setup-draft", NativeJourney.BomSettings => "native-bom-settings",
+                NativeJourney.NetSettings => "native-net-settings",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -279,6 +283,12 @@ public sealed partial class NativeSessionTests
                     else if (journey == NativeJourney.BomSettings)
                     {
                         await VerifyBomSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.NetSettings)
+                    {
+                        await VerifyNetSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                     }

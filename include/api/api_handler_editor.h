@@ -46,6 +46,8 @@ public:
     API_HANDLER_EDITOR( EDA_BASE_FRAME* aFrame = nullptr );
 
 protected:
+    std::optional<ApiResponseStatus> checkRequestTarget( const google::protobuf::Message& aRequest ) const override;
+
     /// If the header is valid, returns the item container
     HANDLER_RESULT<std::optional<KIID>> validateItemHeaderDocument(
             const kiapi::common::types::ItemHeader& aHeader );

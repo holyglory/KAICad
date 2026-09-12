@@ -69,6 +69,13 @@ public:
 
 protected:
 
+    // Called after typed decoding and before command-specific busy or
+    // validation checks. Non-editor handlers keep their existing behavior.
+    virtual std::optional<ApiResponseStatus> checkRequestTarget( const google::protobuf::Message& ) const
+    {
+        return std::nullopt;
+    }
+
     /**
      * A handler for outer messages (envelopes) that will unpack to inner messages and call a
      * specific handler function.  @see registerHandler.
@@ -106,6 +113,9 @@ protected:
 
                     if( !tryUnpack( aRequest, envelope, ctx.Request ) )
                         return envelope;
+
+                    if( auto target = checkRequestTarget( ctx.Request ) )
+                        return tl::unexpected( *target );
 
                     ctx.ClientName = aRequest.header().client_name();
 

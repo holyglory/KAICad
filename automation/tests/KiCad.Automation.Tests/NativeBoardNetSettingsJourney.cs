@@ -27,13 +27,82 @@ public sealed partial class NativeSessionTests
             client.InvokeAsync<OpenDocument, OpenDocumentResponse>(foreign, token));
         Assert.IsFalse(File.Exists(foreign.Path));
         open.CreateIfMissing = true;
-        var opened = await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, token);
+        var untouched = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+            new() { Document = schematic }, token);
+        async Task Reject(string phase)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                var failure = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                    client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, limit.Token));
+                Assert.AreEqual(3, failure.Status, phase);
+                Assert.AreEqual(untouched, await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                    new() { Document = schematic }, limit.Token), "Rejected board opening must preserve the schematic.");
+            }
+            catch
+            {
+                await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence,
+                    processId + "-board-open-" + phase + "-failure.png"), CancellationToken.None);
+                throw;
+            }
+        }
+        foreach (var (phase, source) in new[]
+        {
+            ("future-format", "(kicad_pcb (version 99999999) (generator pcbnew))"),
+            ("malformed", "(kicad_pcb (version 20260206) (unexpected_automation_fixture_node 1))")
+        })
+        {
+            await File.WriteAllTextAsync(boardPath, source, token);
+            await Reject(phase);
+            Assert.AreEqual(source, await File.ReadAllTextAsync(boardPath, token));
+            File.Delete(boardPath); // Only the deliberately invalid private fixture just written above.
+        }
+        string lockPath = Path.Combine(Path.GetDirectoryName(boardPath)!, "~" + Path.GetFileName(boardPath) + ".lck");
+        const string foreignLock = """{"username":"fixture-other-user","hostname":"fixture-other-host"}""";
+        await File.WriteAllTextAsync(lockPath, foreignLock, token);
+        await Reject("locked");
+        Assert.AreEqual(foreignLock, await File.ReadAllTextAsync(lockPath, token));
+        Assert.IsFalse(File.Exists(boardPath));
+        File.Delete(lockPath); // Release this test's simulated foreign lock, never a real editor lock.
+        string autosave = Path.Combine(Path.GetDirectoryName(boardPath)!, "_autosave-" + Path.GetFileName(boardPath));
+        const string recovered = "(kicad_pcb (version 20260206) (generator pcbnew))";
+        await File.WriteAllTextAsync(autosave, recovered, token);
+        await Reject("recovery-needed");
+        Assert.AreEqual(recovered, await File.ReadAllTextAsync(autosave, token));
+        Assert.IsFalse(File.Exists(boardPath));
+        File.Delete(autosave); // The isolated recovery input is no longer needed.
+        OpenDocumentResponse opened;
+        using (var ready = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            ready.CancelAfter(TimeSpan.FromSeconds(5));
+            int delay = 25;
+            while (true)
+            {
+                try { opened = await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, ready.Token); break; }
+                catch (NativeApiException error) when (error.Status == 7)
+                { await Task.Delay(delay, ready.Token); delay = Math.Min(delay * 2, 200); }
+            }
+        }
         var board = opened.Document;
         Assert.AreEqual((DocumentType)3, board.Type);
         Assert.AreEqual(Path.GetFileName(boardPath), board.BoardFilename);
         Assert.AreEqual(schematic.Project, board.Project);
         Assert.IsFalse(File.Exists(boardPath), "Explicit native creation remains unsaved.");
         Assert.AreEqual(opened, await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, token));
+        foreach (int kind in Enumerable.Range(0, 3))
+        {
+            var wrong = board.Clone();
+            switch (kind)
+            {
+                case 0: wrong.Project = null; break;
+                case 1: wrong.Project.Name = "other-project"; break;
+                case 2: wrong.Project.Path += "other-directory/"; break;
+            }
+            Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<GetNets, NetsResponse>(new() { Board = wrong }, token))).Status);
+        }
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue(File.Exists(boardPath));
 

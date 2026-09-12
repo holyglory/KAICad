@@ -3,6 +3,9 @@
 #include <settings/json_settings.h>
 #include <settings/nested_settings.h>
 #include <settings/parameters.h>
+#include <project.h>
+#include <project/project_file.h>
+#include <wx/filename.h>
 #include <kiid.h>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +48,17 @@ public:
         return NESTED_SETTINGS::SaveToFile( aDirectory, aForce, aResult );
     }
     bool fail = true;
+};
+
+class SAVE_PROJECT : public PROJECT
+{
+public:
+    explicit SAVE_PROJECT( const wxString& aDirectory ) : m_directory( aDirectory ) {}
+    const wxString GetProjectName() const override { return "migration"; }
+    const wxString GetProjectPath() const override { return m_directory + wxFileName::GetPathSeparator(); }
+    const wxString GetProjectFullName() const override { return GetProjectPath() + "migration.kicad_pro"; }
+private:
+    wxString m_directory;
 };
 
 std::string Read( const fs::path& aPath )
@@ -108,6 +122,29 @@ BOOST_AUTO_TEST_CASE( FailedNestedStoreCannotBecomeASuccessfulParentFile )
     child.fail = false;
     BOOST_CHECK( root.SaveToFile( directory.Directory(), false, &result ) );
     BOOST_CHECK( result == SETTINGS_SAVE_RESULT::WRITTEN );
+}
+
+BOOST_AUTO_TEST_CASE( FailedProjectWriteKeepsMigrationPendingUntilSuccessfulRetry )
+{
+    SAVE_DIRECTORY directory;
+    SAVE_PROJECT project( directory.Directory() );
+    PROJECT_FILE file( "migration" );
+    file.SetProject( &project );
+    const auto path = directory.path / "migration.kicad_pro";
+    { std::ofstream source( path ); source << R"({"meta":{"version":3},"schematic":{}})"; }
+    BOOST_REQUIRE( file.LoadFromFile( directory.Directory() ) );
+    BOOST_CHECK( !file.ShouldAutoSave() ); // The missing root inventory was migrated in memory.
+    fs::rename( path, directory.path / "before.kicad_pro" );
+    BOOST_REQUIRE( fs::create_directory( path ) );
+    SETTINGS_SAVE_RESULT result = SETTINGS_SAVE_RESULT::SKIPPED;
+    BOOST_CHECK( !file.SaveToFile( directory.Directory(), false, &result ) );
+    BOOST_CHECK( result == SETTINGS_SAVE_RESULT::FAILED );
+    BOOST_CHECK( !file.ShouldAutoSave() );
+    BOOST_REQUIRE( fs::remove( path ) );
+    BOOST_CHECK( file.SaveToFile( directory.Directory(), false, &result ) );
+    BOOST_CHECK( result == SETTINGS_SAVE_RESULT::WRITTEN );
+    BOOST_CHECK( file.ShouldAutoSave() );
+    BOOST_CHECK( Read( path ).find( "top_level_sheets" ) != std::string::npos );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

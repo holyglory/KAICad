@@ -40,7 +40,8 @@ internal static class NativeSetupUi
         await StableGeometry(display, processId, token);
     }
 
-    internal static async Task WaitForPopup(string display, int processId, bool visible, CancellationToken token)
+    internal static async Task WaitForPopup(string display, int processId, bool visible, CancellationToken token,
+        string window = "Schematic Setup")
     {
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
         wait.CancelAfter(TimeSpan.FromSeconds(5));
@@ -49,7 +50,7 @@ internal static class NativeSetupUi
         {
             wait.Token.ThrowIfCancellationRequested();
             int count = 0;
-            NativeKeyboard.SchematicShortcut(display, processId, "", "Schematic Setup",
+            NativeKeyboard.SchematicShortcut(display, processId, "", window,
                 observePopupCount: value => count = value);
             if ((count != 0) == visible) return;
             await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 200);

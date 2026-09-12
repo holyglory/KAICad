@@ -1111,9 +1111,17 @@ The focused Linux Setup journey covers real Annotation-page edits, page-switch
 Cancel, complete policy import, native Undo/Redo, retry/stale/no-op behavior and
 save/reopen. Run `devcoordinator2 test start /absolute/isolated/worktree --test
 native-setup-dialog --tier development` against the development source.
-The inventory of previously allocated designators is preserved by policy edits
-but is not yet reconstructible from XML (`p72f9010349b0093e`). Remaining project
-settings, whole-design reconstruction and native-Mac qualification stay open.
+Snapshot schema 6 adds `reference_inventory.allocated`: explicit entries such as
+`R17`, including historical references absent from the current schematic. A
+replacement leaves numbering policy unchanged, validates against native
+persistence before mutation and is undoable. Missing legacy data cannot clear
+the inventory; competing allocation-history changes remain conflicts. The
+focused Linux journey has exercised XML apply, invalid input, no-op/retry/stale
+requests, Undo/Redo, explicit clearing and save/reopen. The strengthened range
+expansion guard and composed integration remain under qualification in
+`p72f9010349b0093e`. Remaining project settings, whole-design reconstruction and
+native-Mac qualification stay open. These are source-build integration features,
+not new visible controls or a claim about the published packages.
 
 The net-chain coverage gap remains until complete identity and electrical-change
 restoration are qualified; this is not proof of full schematic reconstruction.

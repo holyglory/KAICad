@@ -1503,7 +1503,7 @@ tier = "development"
 role = "preflight"
 requires = ["managed-build"]
 invalidates = ["native-build", "native-session"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicFieldTextModeTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicLibraryIdentityTests|FullyQualifiedName~SchematicFormattingTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicGroupGraphTests|FullyQualifiedName~SchematicDrawingRatiosTests|FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests", "--logger", "trx", "--results-directory", "automation/artifacts/field-fidelity-results"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicFieldTextModeTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicLibraryIdentityTests|FullyQualifiedName~SchematicFormattingTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicReferenceInventoryTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicGroupGraphTests|FullyQualifiedName~SchematicDrawingRatiosTests|FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests", "--logger", "trx", "--results-directory", "automation/artifacts/field-fidelity-results"]
 
 [[test.native-foundation.check]]
 name = "recovery-model"
@@ -1528,6 +1528,8 @@ command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex"
 [[test.native-foundation.check]]
 name = "native-symbol-identity"
 tier = "development"
+role = "preflight"
+invalidates = ["native-session"]
 requires = ["native-build"]
 command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_symbol_graphic_identity$", "--output-on-failure", "--no-tests=error"]
 

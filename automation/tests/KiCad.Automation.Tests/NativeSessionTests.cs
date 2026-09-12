@@ -262,6 +262,7 @@ public sealed partial class NativeSessionTests
                             evidence, deadline.Token);
                         await VerifySymbolProjectSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyManualSetup(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, target.Id, deadline.Token);
                         await VerifySetupPinMap(client, opened.Document, focusProcessId, ":" + displayNumber,

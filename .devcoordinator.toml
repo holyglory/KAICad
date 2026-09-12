@@ -1795,7 +1795,7 @@ command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja
 [[test.netclass-native-codec.check]]
 name = "build"
 tier = "development"
-command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity", "pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/pcb_edit_frame.cpp.o"]
 
 [[test.netclass-native-codec.check]]
 name = "contracts"

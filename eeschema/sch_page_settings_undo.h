@@ -16,6 +16,7 @@
 #include <connection_graph.h>
 #include <sch_painter.h>
 #include <api/api_sch_formatting.h>
+#include <api/api_sch_annotation.h>
 #include <api/api_sch_erc_settings.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
@@ -35,6 +36,7 @@ public:
         m_variantNames = aFrame->Schematic().GetVariantNames();
         m_drawingRatios = aFrame->Schematic().Settings().DrawingRatios();
         m_formatting = SCH_FORMATTING::Capture( aFrame->Schematic().Settings() );
+        m_annotation = SCH_ANNOTATION::Capture( aFrame->Schematic().Settings() );
         m_ercPolicy = SCH_ERC_SETTINGS::Capture( aFrame->Schematic() );
         m_ercPolicy.clear_exclusions(); // marker undo owns exclusion flags and added markers
         m_currentVariant = aFrame->Schematic().GetCurrentVariant();
@@ -98,6 +100,8 @@ public:
             ApplyDrawingRatios( aFrame, m_drawingRatios );
         if( m_restoreFormatting )
             ApplyFormatting( aFrame, m_formatting );
+        if( m_restoreAnnotation )
+            SCH_ANNOTATION::Restore( aFrame->Schematic().Settings(), m_annotation );
         if( m_restoreErcPolicy )
         {
             SCH_ERC_SETTINGS::RestorePolicy( aFrame->Schematic().ErcSettings(), m_ercPolicy );
@@ -151,6 +155,7 @@ public:
     void IncludeNetChains() { m_restoreNetChains = true; }
     void IncludeDrawingRatios() { m_restoreDrawingRatios = true; }
     void IncludeFormatting() { m_restoreFormatting = true; }
+    void IncludeAnnotation() { m_restoreAnnotation = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     static void ApplyFormatting( SCH_EDIT_FRAME* aFrame, const SCH_FORMATTING::MESSAGE& aValue )
     {
@@ -256,6 +261,7 @@ public:
         m_restoreNetChains = aOther.m_restoreNetChains;
         m_restoreDrawingRatios = aOther.m_restoreDrawingRatios;
         m_restoreFormatting = aOther.m_restoreFormatting;
+        m_restoreAnnotation = aOther.m_restoreAnnotation;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreSetup = aOther.m_restoreSetup;
         if( m_restoreSetup )
@@ -312,6 +318,8 @@ private:
     bool m_restoreDrawingRatios = false;
     bool m_restoreFormatting = false;
     SCH_FORMATTING::MESSAGE m_formatting;
+    bool m_restoreAnnotation = false;
+    SCH_ANNOTATION::MESSAGE m_annotation;
     bool m_restoreErcPolicy = false;
     bool m_restoreSetup = false;
     std::optional<nlohmann::json> m_setupBefore;

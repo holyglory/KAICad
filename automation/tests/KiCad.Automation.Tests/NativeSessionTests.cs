@@ -247,6 +247,8 @@ public sealed partial class NativeSessionTests
                     Console.WriteLine($"Focused {journey} {target.Id} reached its target at {elapsed.Elapsed.TotalSeconds:F1}s.");
                     if (journey == NativeJourney.Setup)
                     {
+                        await VerifyAnnotation(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
                         await VerifyManualSetup(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, target.Id, deadline.Token);
                         await VerifySetupPinMap(client, opened.Document, focusProcessId, ":" + displayNumber,
@@ -505,6 +507,8 @@ public sealed partial class NativeSessionTests
                     evidence, target.Id, textId, hierarchyFixture, deadline.Token);
                 await VerifyManualSetup(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);
+                await VerifyAnnotation(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token);
                 await VerifySetupPinMap(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);
                 await VerifySetupImport(client, opened.Document, nativeProcessId, ":" + displayNumber,

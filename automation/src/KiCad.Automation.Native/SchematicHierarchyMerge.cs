@@ -161,6 +161,7 @@ public static class SchematicHierarchyMerge
         metadata.NetChains.Clear(); metadata.NetChains.Add(project.NetChains.Select(c => c.Clone()));
         metadata.VariantDescriptions.Clear(); metadata.VariantDescriptions.Add(project.VariantDescriptions);
         metadata.DrawingRatios = project.DrawingRatios?.Clone(); metadata.Formatting = project.Formatting?.Clone();
+        metadata.Annotation = project.Annotation?.Clone();
         SchematicVariantProjection.Reproject(result);
         return result;
     }

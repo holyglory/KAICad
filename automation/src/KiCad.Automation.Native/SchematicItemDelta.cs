@@ -249,11 +249,20 @@ public static class SchematicItemDelta
         remainder.VariantDescriptions.Clear(); remainder.VariantDescriptions.Add(current.VariantDescriptions);
         remainder.DrawingRatios = current.DrawingRatios?.Clone();
         remainder.Formatting = current.Formatting?.Clone();
+        remainder.Annotation = current.Annotation?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.Annotation is not null || desired.Annotation is not null)
+        {
+            var before = current.Annotation ?? throw Invalid("The native peer did not capture annotation policy.");
+            var after = desired.Annotation ?? throw Invalid("Annotation policy cannot be removed or inferred from defaults.");
+            SchematicAnnotation.Validate(before);
+            SchematicAnnotation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetAnnotation = after.Clone() });
+        }
         if (current.NetChainClasses is not null || desired.NetChainClasses is not null)
         {
             var before = current.NetChainClasses ?? throw Invalid("The native peer did not capture the net-chain class registry.");

@@ -85,7 +85,7 @@ public sealed class NativeClientTests
             var current = NativeClient.CurrentSnapshotRequest(request);
             Assert.AreNotSame(request, current);
             Assert.AreEqual(0U, field.Accessor.GetValue(request));
-            Assert.AreEqual(4U, field.Accessor.GetValue(current));
+            Assert.AreEqual(5U, field.Accessor.GetValue(current));
             foreach (uint explicitVersion in new[] { 1U, 2U, 3U, 4U, 5U })
             {
                 field.Accessor.SetValue(request, explicitVersion);
@@ -100,7 +100,7 @@ public sealed class NativeClientTests
         var query = new ReadSchematicMetadata();
         // The transport is deliberately a protocol fixture, not a native peer.
         await client.InvokeAsync<ReadSchematicMetadata, GetVersionResponse>(query);
-        Assert.AreEqual(4U, transport.LastRequest!.Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+        Assert.AreEqual(5U, transport.LastRequest!.Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
         Assert.AreEqual(0U, query.SchemaVersion);
     }
 
@@ -108,6 +108,8 @@ public sealed class NativeClientTests
     [DataRow(1U)]
     [DataRow(2U)]
     [DataRow(3U)]
+    [DataRow(4U)]
+    [DataRow(5U)]
     public async Task AutomaticSnapshotNegotiationIsBoundedPinnedAndCachedPerPeer(uint maximum)
     {
         var payload = new SchematicMetadataSnapshot { Metadata = new(), TrackingComplete = false };
@@ -118,7 +120,7 @@ public sealed class NativeClientTests
         var query = new ReadSchematicMetadata();
         var result = await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
         Assert.AreEqual(payload, result); // Coverage limitations are not discarded or invented.
-        CollectionAssert.AreEqual(Enumerable.Range((int)maximum, 5 - (int)maximum).Reverse().Select(x => (uint)x).ToArray(),
+        CollectionAssert.AreEqual(Enumerable.Range((int)maximum, 6 - (int)maximum).Reverse().Select(x => (uint)x).ToArray(),
             transport.Requests.Select(x => x.Message.Unpack<ReadSchematicMetadata>().SchemaVersion).ToArray());
         Assert.AreEqual(0U, query.SchemaVersion);
         Assert.AreEqual("schema-peer", client.Epoch);
@@ -129,7 +131,7 @@ public sealed class NativeClientTests
         Assert.AreEqual(maximum, transport.Requests[^1].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
         var independent = new NativeClient(transport, "ipc:///tmp/another-schema-peer.sock");
         await independent.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
-        Assert.AreEqual(4U, transport.Requests[count + 1].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+        Assert.AreEqual(5U, transport.Requests[count + 1].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
     }
 
     [TestMethod]

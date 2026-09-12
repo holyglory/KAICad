@@ -388,5 +388,5 @@ setup_qa_env( qa_symbol_update_identity )
 
 add_test( NAME qa_schematic_setup_draft
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
-        --run_test=SettingsSnapshot:SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker:SchematicDraftAppliesOnlyItsChangedOwnersAndCanUndo --log_level=test_suite )
+        --run_test=SettingsSnapshot:SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker:SchematicDraftAppliesOnlyItsChangedOwnersAndCanUndo:AnnotationPolicyPreservesAllocatedDesignators --log_level=test_suite )
 setup_qa_env( qa_schematic_setup_draft )

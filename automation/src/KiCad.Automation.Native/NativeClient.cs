@@ -18,7 +18,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly string clientName = $"kicad-automation-{Guid.NewGuid():N}";
     private string? epoch = expectedEpoch;
-    private uint snapshotSchema = 4;
+    private uint snapshotSchema = 5;
     public string Endpoint { get; } = endpoint;
     public string Epoch => epoch ?? throw new InvalidOperationException("Handshake has not completed.");
 
@@ -102,7 +102,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
     // New clients opt into all current schematic fields. Explicit legacy or
     // unknown versions remain untouched for negotiation/error handling. Clone
     // read requests so invoking a client never changes caller-owned messages.
-    internal static IMessage CurrentSnapshotRequest(IMessage request, uint schemaVersion = 4) => request switch
+    internal static IMessage CurrentSnapshotRequest(IMessage request, uint schemaVersion = 5) => request switch
     {
         ReadSchematicMetadata { SchemaVersion: 0 } value => new ReadSchematicMetadata(value) { SchemaVersion = schemaVersion },
         ReadSchematicScreenData { SchemaVersion: 0 } value => new ReadSchematicScreenData(value) { SchemaVersion = schemaVersion },

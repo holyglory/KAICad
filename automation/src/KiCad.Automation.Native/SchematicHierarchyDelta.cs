@@ -23,6 +23,7 @@ public static class SchematicHierarchyDelta
                 || !s.Metadata.VariantDescriptions.Equals(assets.VariantDescriptions)
                 || !Equals(s.Metadata.DrawingRatios, assets.DrawingRatios)
                 || !Equals(s.Metadata.Formatting, assets.Formatting)
+                || !Equals(s.Metadata.Annotation, assets.Annotation)
                 || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
                 || !SchematicErcSettingsValidation.Same(s.Metadata.ErcSettings, assets.ErcSettings)))
                 throw Invalid("Schematic-wide assets, bus aliases, text variables and net chains must agree across all sheet instances.");
@@ -72,6 +73,7 @@ public static class SchematicHierarchyDelta
         bool variantsEmitted = false;
         bool drawingRatiosEmitted = false;
         bool formattingEmitted = false;
+        bool annotationEmitted = false;
         bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
         {
@@ -117,6 +119,11 @@ public static class SchematicHierarchyDelta
                 {
                     if (formattingEmitted) continue;
                     formattingEmitted = true;
+                }
+                if (operation.SetAnnotation is not null)
+                {
+                    if (annotationEmitted) continue;
+                    annotationEmitted = true;
                 }
                 if (operation.SetErcSettings is not null)
                 {

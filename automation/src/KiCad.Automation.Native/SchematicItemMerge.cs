@@ -298,7 +298,7 @@ public static class SchematicItemMerge
             copy.EmbeddedFonts = false; copy.RootInstance = null; copy.TitleBlock = null; copy.Page = null;
             copy.TextVariables.Clear(); copy.BusAliases.Clear(); copy.NetChains.Clear();
             copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; copy.ErcSettings = null;
-            copy.NetChainClasses = null; return copy;
+            copy.NetChainClasses = null; copy.Annotation = null; return copy;
         }
         var assetsBefore = (baseline.EmbeddedFiles, baseline.EmbeddedFonts);
         var assetsXml = (xml.EmbeddedFiles, xml.EmbeddedFonts);
@@ -313,6 +313,7 @@ public static class SchematicItemMerge
             || !Choose(baseline.Page, xml.Page, native.Page, out var page)
             || !Choose(baseline.DrawingRatios, xml.DrawingRatios, native.DrawingRatios, out var drawing)
             || !MergeFormatting(baseline.Formatting, xml.Formatting, native.Formatting, out var formatting)
+            || !MergeAnnotation(baseline.Annotation, xml.Annotation, native.Annotation, out var annotation)
             || !MergeErc(baseline.ErcSettings, xml.ErcSettings, native.ErcSettings, out var erc)
             || !SchematicNetChainClasses.Merge(baseline.NetChainClasses, xml.NetChainClasses, native.NetChainClasses, out var chainClasses)
             || !Choose(baseline.BusAliases, xml.BusAliases, native.BusAliases, out var aliases)
@@ -322,6 +323,7 @@ public static class SchematicItemMerge
         result.Page = page?.Clone();
         result.DrawingRatios = drawing?.Clone();
         result.Formatting = formatting?.Clone();
+        result.Annotation = annotation?.Clone();
         result.ErcSettings = erc?.Clone();
         result.NetChainClasses = chainClasses?.Clone();
         result.EmbeddedFiles = assets.Item1?.Clone(); result.EmbeddedFonts = assets.Item2;
@@ -382,6 +384,23 @@ public static class SchematicItemMerge
             if (chosen is not null) result.Add(key, chosen);
         }
         return result;
+    }
+
+    private static bool MergeAnnotation(SchematicAnnotationSettings? baseline,
+        SchematicAnnotationSettings? xml, SchematicAnnotationSettings? native,
+        out SchematicAnnotationSettings? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        var merged = new SchematicAnnotationSettings();
+        foreach (var field in SchematicAnnotationSettings.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
+        return true;
     }
 
     private static bool MergeFormatting(SchematicFormattingSettings? baseline,

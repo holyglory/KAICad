@@ -284,6 +284,21 @@ void SCH_COMMIT::SetDrawingRatios( const std::array<double, 5>& aRatios )
     SCH_PAGE_SETTINGS_UNDO_ITEM::ApplyDrawingRatios( frame, aRatios );
 }
 
+void SCH_COMMIT::SetAnnotation( const kiapi::schematic::types::SchematicAnnotationSettings& aAnnotation )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    wxCHECK_RET( frame && !m_isLibEditor, "Annotation policy requires a schematic editor" );
+    if( SCH_ANNOTATION::Capture( frame->Schematic().Settings() ).SerializeAsString()
+            == aAnnotation.SerializeAsString() ) return;
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeAnnotation();
+    SCH_ANNOTATION::Restore( frame->Schematic().Settings(), aAnnotation );
+}
+
 void SCH_COMMIT::SetFormatting( const kiapi::schematic::types::SchematicFormattingSettings& aFormatting )
 {
     auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );

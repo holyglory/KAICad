@@ -4,6 +4,47 @@
 #include <project/net_settings.h>
 #include <refdes_tracker.h>
 #include <settings/json_settings_internals.h>
+#include <api/api_sch_annotation.h>
+#include <limits>
+
+BOOST_AUTO_TEST_CASE( AnnotationPolicyPreservesAllocatedDesignators )
+{
+    PROJECT_FILE project( "annotation-policy.kicad_pro" );
+    SCHEMATIC_SETTINGS settings( &project, "schematic" );
+    project.m_SchematicSettings = &settings;
+    project.Load(); settings.Load();
+    const auto tracker = settings.m_refDesTracker;
+    BOOST_REQUIRE( tracker );
+    tracker->Insert( "R123" ); tracker->Insert( "U98" );
+    const auto allocated = tracker->Serialize();
+    const auto original = SCH_ANNOTATION::Capture( settings );
+    std::string failure;
+    BOOST_CHECK( SCH_ANNOTATION::Validate( original, failure ) );
+    for( int start : { std::numeric_limits<int>::min(), -1, 0, 317, std::numeric_limits<int>::max() } )
+    {
+        auto desired = original;
+        desired.set_start_after( start );
+        desired.set_order( kiapi::schematic::types::SAO_Y_POSITION );
+        desired.set_method( kiapi::schematic::types::SAM_SHEET_TIMES_1000 );
+        desired.set_reuse_designators( !original.reuse_designators() );
+        BOOST_REQUIRE( SCH_ANNOTATION::Validate( desired, failure ) );
+        SCH_ANNOTATION::Restore( settings, desired );
+        BOOST_CHECK_EQUAL( SCH_ANNOTATION::Capture( settings ).SerializeAsString(), desired.SerializeAsString() );
+        BOOST_CHECK( settings.m_refDesTracker == tracker );
+        BOOST_CHECK_EQUAL( tracker->Serialize(), allocated );
+    }
+    auto malformed = original;
+    malformed.set_order( kiapi::schematic::types::SAO_UNKNOWN );
+    BOOST_CHECK( !SCH_ANNOTATION::Validate( malformed, failure ) );
+    malformed = original; malformed.set_method( kiapi::schematic::types::SAM_UNKNOWN );
+    BOOST_CHECK( !SCH_ANNOTATION::Validate( malformed, failure ) );
+    malformed = original;
+    malformed.GetReflection()->MutableUnknownFields( &malformed )->AddVarint( 100, 1 );
+    BOOST_CHECK( !SCH_ANNOTATION::Validate( malformed, failure ) );
+    SCH_ANNOTATION::Restore( settings, original );
+    BOOST_CHECK_EQUAL( SCH_ANNOTATION::Capture( settings ).SerializeAsString(), original.SerializeAsString() );
+    BOOST_CHECK_EQUAL( tracker->Serialize(), allocated );
+}
 
 BOOST_AUTO_TEST_CASE( SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker )
 {

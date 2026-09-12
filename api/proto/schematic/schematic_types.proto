@@ -130,6 +130,33 @@ message SchematicMetadata
   // Schema 3: project class definitions are separate from chain assignments.
   // Absence is unavailable/legacy state, not an instruction to clear it.
   SchematicNetChainClassState net_chain_classes = 18;
+  // Schema 5. Project policy for future annotation, not placed references or
+  // the separately persisted inventory of previously allocated designators.
+  SchematicAnnotationSettings annotation = 19;
+}
+
+message SchematicAnnotationSettings
+{
+  // Exact persisted signed value; no inference from the present symbol set.
+  int32 start_after = 1;
+  SchematicAnnotationOrder order = 2;
+  SchematicAnnotationMethod method = 3;
+  bool reuse_designators = 4;
+}
+
+enum SchematicAnnotationOrder
+{
+  SAO_UNKNOWN = 0;
+  SAO_X_POSITION = 1;
+  SAO_Y_POSITION = 2;
+}
+
+enum SchematicAnnotationMethod
+{
+  SAM_UNKNOWN = 0;
+  SAM_INCREMENTAL = 1;
+  SAM_SHEET_TIMES_100 = 2;
+  SAM_SHEET_TIMES_1000 = 3;
 }
 
 message SchematicNetChainClassState

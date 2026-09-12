@@ -15,6 +15,7 @@ message ReadSchematicMetadata {
   // 0/1: legacy fields with explicit missing-ERC coverage; 2: includes ERC;
   // 3: also includes the net-chain class registry and assignments.
   // 4: includes explicit net-chain member exclusions.
+  // 5: includes persisted reference-numbering policy.
   // Unknown versions are rejected, never silently simplified.
   uint32 schema_version = 2;
 }
@@ -329,6 +330,7 @@ message SchematicItemOperation {
     // support; older handlers do not implement this operation.
     kiapi.schematic.types.SchematicErcSettings set_erc_settings = 17;
     kiapi.schematic.types.SchematicNetChainClassState replace_net_chain_classes = 18;
+    kiapi.schematic.types.SchematicAnnotationSettings set_annotation = 19;
   }
 }
 
@@ -393,6 +395,7 @@ message SchematicItemBatchResult {
   bool tracking_complete = 16;
   bool erc_settings_changed = 17;
   bool net_chain_classes_changed = 18;
+  bool annotation_changed = 19;
 }
 
 message InspectSchematicOperation {

@@ -32,6 +32,7 @@
 
 class EMBEDDED_FILES;
 namespace kiapi::schematic::types { class SchematicFormattingSettings; }
+namespace kiapi::schematic::types { class SchematicAnnotationSettings; }
 class BUS_ALIAS;
 class SCH_EMBEDDED_FILES_UNDO_ITEM;
 class SCH_PAGE_SETTINGS_UNDO_ITEM;
@@ -93,6 +94,7 @@ public:
     void StageVariantRegistry();
     void SetDrawingRatios( const std::array<double, 5>& aRatios );
     void SetFormatting( const kiapi::schematic::types::SchematicFormattingSettings& aFormatting );
+    void SetAnnotation( const kiapi::schematic::types::SchematicAnnotationSettings& aAnnotation );
     bool SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::string& aFailure );
     void SetVariantRegistry( const std::map<wxString, wxString>& aDescriptions );
     // Stage graph declarations and the exact affected symbols before a native

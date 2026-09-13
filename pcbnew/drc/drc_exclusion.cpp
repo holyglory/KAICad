@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include <board_design_settings.h>
+#include <board.h>
 #include <pcb_marker.h>
 
 #include <api/board/board_rules.pb.h>
@@ -63,6 +64,13 @@ DRC_EXCLUSION DRC_EXCLUSION::FromMarker( const PCB_MARKER& aMarker )
 
     aMarker.Serialize( container );
     container.UnpackTo( ex.m_impl->message.mutable_marker() );
+    // Board-level violations must survive a new BOARD instance on reload.
+    // No native marker emits a nil item ID, so this is an explicit scoped
+    // reference, distinct from an absent or unresolved ordinary object.
+    if( const BOARD* board = aMarker.GetBoard() )
+        for( auto& item : *ex.m_impl->message.mutable_marker()->mutable_items() )
+            if( item.value() == board->m_Uuid.AsStdString() )
+                item.set_value( niluuid.AsStdString() );
     ex.SetComment( aMarker.GetComment() );
 
     return ex;

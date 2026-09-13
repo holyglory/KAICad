@@ -3,6 +3,7 @@
 #include <pcb_project_editor_state.h>
 #include <project/net_settings.h>
 #include <drc/drc_item.h>
+#include <api/board/board_rules.pb.h>
 #include <limits>
 
 BOOST_AUTO_TEST_SUITE( PcbProjectEditorState )
@@ -72,6 +73,45 @@ BOOST_AUTO_TEST_CASE( ExclusionsKeepUnrepresentedBindingsAndRespectExplicitRemov
     auto markers = board.ResolveDRCExclusions( false );
     BOOST_CHECK( markers.empty() );
     BOOST_CHECK( board.GetDesignSettings().m_DrcExclusions.contains( retained ) );
+}
+
+BOOST_AUTO_TEST_CASE( BoardLevelExclusionSurvivesNewBoardIdentityWithoutGuessingOtherIds )
+{
+    BOARD first;
+    auto item = DRC_ITEM::Create( DRCE_INVALID_OUTLINE );
+    item->SetItems( &first );
+    auto* marker = new PCB_MARKER( item, { 100, 200 }, Edge_Cuts );
+    first.Add( marker );
+    marker->SetExcluded( true, "reviewed board outline" );
+    const auto exclusion = DRC_EXCLUSION::FromMarker( *marker );
+    BOOST_REQUIRE_EQUAL( exclusion.ToProto().marker().items_size(), 1 );
+    BOOST_CHECK_EQUAL( exclusion.ToProto().marker().items( 0 ).value(), niluuid.AsStdString() );
+    BOOST_CHECK( item->GetMainItemID() == first.m_Uuid );
+
+    // Serialize through the actual project JSON representation, not just a
+    // copied in-memory pointer. The ordinary unknown object must stay unresolved.
+    nlohmann::json saved = exclusion;
+    BOARD second;
+    BOOST_REQUIRE( first.m_Uuid != second.m_Uuid );
+    second.GetDesignSettings().m_DrcExclusions.insert( saved.get<DRC_EXCLUSION>() );
+    auto unresolved = exclusion.ToProto();
+    unresolved.mutable_marker()->mutable_items( 0 )->set_value( KIID().AsStdString() );
+    second.GetDesignSettings().m_DrcExclusions.insert( DRC_EXCLUSION::FromProto( unresolved ) );
+    auto restored = second.ResolveDRCExclusions( true );
+    BOOST_REQUIRE_EQUAL( restored.size(), 1 );
+    second.Add( restored[0] );
+    BOOST_CHECK( restored[0]->GetRCItem()->GetMainItemID() == second.m_Uuid );
+    BOOST_CHECK_EQUAL( restored[0]->GetComment(), "reviewed board outline" );
+    BOOST_CHECK_EQUAL( DRC_EXCLUSION::FromMarker( *restored[0] ).GetSortKey(), exclusion.GetSortKey() );
+    BOOST_CHECK_EQUAL( second.GetDesignSettings().m_DrcExclusions.size(), 2 );
+    BOOST_CHECK( second.ResolveDRCExclusions( true ).empty() );
+
+    // New actual findings use the current UUID and still match the same saved
+    // declaration; position or name similarity is not involved.
+    restored[0]->SetExcluded( false );
+    second.ResolveDRCExclusions( false );
+    BOOST_CHECK( restored[0]->IsExcluded() );
+    BOOST_CHECK_EQUAL( restored[0]->GetComment(), "reviewed board outline" );
 }
 
 BOOST_AUTO_TEST_CASE( RemovingOneNetColorPreservesUnrepresentedDeclarations )

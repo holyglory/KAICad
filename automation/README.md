@@ -2582,3 +2582,23 @@ bound to its exact candidate; it does not qualify the public packages, later
 source changes or Mac/Desktop execution. Field-specific editor-state coverage,
 Save As, atomic multi-file persistence and complete lifecycle/platform acceptance
 remain open.
+
+### PCB DRC marker inventory (development branch)
+
+With the matching native build, `kicad_pcb_drc_state` takes `instanceId` and
+`documentJson` identifying the PCB. It returns the existing native violations,
+their marker identities and geometry, exclusion flags and comments, together
+with the document revision and process epoch. It does not start a DRC run.
+
+While the native checker is running, the result has `running: true` and no
+marker snapshot. Otherwise `markerSnapshotComplete` identifies a complete
+inventory of the markers currently present. `resultsFreshnessKnown` remains
+false: an empty inventory is not proof that the current board passed DRC.
+Markers can predate a design edit or have been manually deleted. Re-run KiCad's
+checker when current verification is needed; native DRC job control and
+result-to-design revision qualification remain unfinished.
+
+The `native-net-settings` development journey includes the actual DRC dialog,
+exclusion-comment cancellation, exclusion/save/reload/removal and an independent
+STDIO MCP inventory comparison. A submitted run is not proof that this journey
+passed, and Linux checks do not qualify public packages or Mac/Desktop execution.

@@ -12,17 +12,24 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyCleanPcbClose(NativeClient client, DocumentSpecifier board,
         DocumentSpecifier schematic, string evidence, CancellationToken token)
     {
+        await VerifyCleanDocumentClose(client, board, schematic, "kicad_pcb_open", evidence, token);
+        await VerifyCleanDocumentClose(client, schematic, board, "kicad_schematic_open", evidence, token);
+    }
+
+    private static async Task VerifyCleanDocumentClose(NativeClient client, DocumentSpecifier document,
+        DocumentSpecifier otherDocument, string openTool, string evidence, CancellationToken token)
+    {
         string statePath = Directory.CreateTempSubdirectory("kicad-close-mcp-").FullName;
         try
         {
             string instanceId = (await client.HandshakeAsync(token)).InstanceId;
-            await SaveCheckedThroughMcp(client, board, evidence, token);
+            await SaveCheckedThroughMcp(client, document, evidence, token);
             for (int pass = 0; pass < 2; pass++)
             {
-                var current = await ObserveLifecycleState(client, board, token);
+                var current = await ObserveLifecycleState(client, document, token);
                 Assert.IsFalse(current.NativeContentDirty);
                 Assert.AreEqual(current.StateSha256, current.CleanCheckpointSha256);
-                var other = await ObserveLifecycleState(client, schematic, token);
+                var other = await ObserveLifecycleState(client, otherDocument, token);
                 var files = current.NativeFiles.ToDictionary(path => path,
                     path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
                 var modes = new Dictionary<string, UnixFileMode>();
@@ -52,7 +59,7 @@ public sealed partial class NativeSessionTests
                             { instanceId, expectedStateJson = SchematicJson.Formatter.Format(stale), operationId = Guid.NewGuid().ToString("D") });
                         Assert.IsTrue(refused.GetProperty("isError").GetBoolean());
                         Assert.AreEqual(LifecycleOperationStatus.LosRejected, Parse(refused).Status);
-                        Assert.AreEqual(current, await ObserveLifecycleState(client, board, token));
+                        Assert.AreEqual(current, await ObserveLifecycleState(client, document, token));
                         var request = new { instanceId, expectedStateJson = SchematicJson.Formatter.Format(current), operationId = operation };
                         var reply = await mcp.Tool("kicad_document_close", request);
                         Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
@@ -60,8 +67,8 @@ public sealed partial class NativeSessionTests
                         Assert.AreEqual(LifecycleOperationStatus.LosClosed, result.Status);
                         Assert.AreEqual(result, Parse(await mcp.Tool("kicad_document_close", request)));
                         await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
-                            client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = board }, token));
-                        Assert.AreEqual(other, await ObserveLifecycleState(client, schematic, token));
+                            client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, token));
+                        Assert.AreEqual(other, await ObserveLifecycleState(client, otherDocument, token));
                     }
                     await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
                         Path.Combine(evidence, "clean-close-reconnect-" + operation + ".stderr.log"), token))
@@ -69,7 +76,7 @@ public sealed partial class NativeSessionTests
                         var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
                         Assert.IsFalse(attached.TryGetProperty("isError", out var error) && error.GetBoolean());
                         var receipt = await mcp.Tool("kicad_document_operation", new
-                            { instanceId, documentJson = SchematicJson.Formatter.Format(board), operationId = operation, processEpoch = client.Epoch });
+                            { instanceId, documentJson = SchematicJson.Formatter.Format(document), operationId = operation, processEpoch = client.Epoch });
                         Assert.IsFalse(receipt.TryGetProperty("isError", out error) && error.GetBoolean());
                         Assert.AreEqual(result, Parse(receipt));
                     }
@@ -85,10 +92,10 @@ public sealed partial class NativeSessionTests
                 }
                 // Reopen through the actual manager so a clean loaded checkpoint is
                 // established without another save. The second close is readonly.
-                string boardPath = Path.Combine(board.Project.Path, board.BoardFilename);
-                var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
-                    toolName: "kicad_pcb_open");
-                Assert.AreEqual(board, opened.Document);
+                string filename = (int)document.Type == 3 ? document.BoardFilename : document.Project.Name + ".kicad_sch";
+                string documentPath = current.NativeFiles.Single(path => Path.GetFileName(path) == filename);
+                var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, documentPath, evidence, token, toolName: openTool);
+                Assert.AreEqual(document, opened.Document);
             }
         }
         finally { Directory.Delete(statePath, true); }

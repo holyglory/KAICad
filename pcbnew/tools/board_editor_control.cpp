@@ -537,6 +537,7 @@ int BOARD_EDITOR_CONTROL::PageSettings( const TOOL_EVENT& aEvent )
     DIALOG_PAGES_SETTINGS dlg( m_frame, m_frame->GetBoard()->GetEmbeddedFiles(), pcbIUScale.IU_PER_MILS,
                                VECTOR2I( MAX_PAGE_SIZE_PCBNEW_MILS, MAX_PAGE_SIZE_PCBNEW_MILS ) );
     dlg.SetWksFileName( m_frame->GetDrawingSheetFileName() );
+    dlg.DeferModifiedNotification();
 
     if( dlg.ShowModal() == wxID_OK && persistedState() != before )
     {

@@ -32,6 +32,8 @@
 #include <wx/cmdline.h>
 
 #include <api/api_server.h>
+#include <api/common/commands/automation_commands.pb.h>
+#include <wx/dialog.h>
 #include <api/common/commands/editor_commands.pb.h>
 #include <common.h>
 #include <env_vars.h>
@@ -671,7 +673,67 @@ bool PGM_KICAD::OnPgmInit()
 
                         commands::OpenDocumentResponse response;
                         response.mutable_document()->CopyFrom( documents.documents( 0 ) );
+                        if( created && requested.FileExists() )
+                            m_api_server->RememberLoadedDocument( response.document() );
                         return response;
+                    } );
+            m_api_common_handler->SetCloseDocumentHandler(
+                    [this]( const kiapi::common::commands::CloseDocument& request )
+                            -> HANDLER_RESULT<google::protobuf::Empty>
+                    {
+                        using namespace kiapi::common;
+                        auto fail = []( ApiStatusCode code, const std::string& message )
+                                -> HANDLER_RESULT<google::protobuf::Empty>
+                        {
+                            ApiResponseStatus status; status.set_status( code ); status.set_error_message( message );
+                            return tl::unexpected( status );
+                        };
+                        const auto type = request.document().type();
+                        if( type != types::DOCTYPE_SCHEMATIC && type != types::DOCTYPE_PCB )
+                            return fail( AS_UNIMPLEMENTED, "This graphical close operation supports schematics and PCBs" );
+                        // PCB doCloseWindow currently writes editor-owned project
+                        // settings. Do not call that path as a clean-only close
+                        // until those owners have qualified observation/save handling.
+                        if( type == types::DOCTYPE_PCB )
+                            return fail( AS_UNIMPLEMENTED, "PCB clean-close is awaiting project editor-state qualification" );
+                        const auto frameType = type == types::DOCTYPE_SCHEMATIC ? FRAME_SCH : FRAME_PCB_EDITOR;
+                        KIWAY_PLAYER* player = Kiway.Player( frameType, false );
+                        if( !player || player->IsBeingDeleted() ) return fail( AS_BAD_REQUEST, "Requested editor is not open" );
+                        if( player->IsModal() || player->IsContentModified() )
+                            return fail( AS_BUSY, "Close will not discard unsaved edits or interrupt a modal operation" );
+                        auto hasDialog = [&]( auto&& self, wxWindow* window ) -> bool
+                        {
+                            for( wxWindow* child : window->GetChildren() )
+                                if( ( wxDynamicCast( child, wxDialog ) && child->IsShown() ) || self( self, child ) )
+                                    return true;
+                            return false;
+                        };
+                        if( hasDialog( hasDialog, player ) )
+                            return fail( AS_BUSY, "Close the editor dialogs before closing this document" );
+                        if( type == types::DOCTYPE_SCHEMATIC
+                                && ( Kiway.Player( FRAME_SIMULATOR, false ) || Kiway.Player( FRAME_SCH_SYMBOL_EDITOR, false ) ) )
+                            return fail( AS_BUSY, "Close the associated simulator or symbol editor explicitly first" );
+                        if( type == types::DOCTYPE_PCB && Kiway.Player( FRAME_FOOTPRINT_EDITOR, false ) )
+                            return fail( AS_BUSY, "Close the associated footprint editor explicitly first" );
+
+                        kiapi::automation::v1::ReadDocumentLifecycleState read;
+                        read.mutable_document()->CopyFrom( request.document() );
+                        ApiRequest envelope; envelope.mutable_message()->PackFrom( read );
+                        auto observed = m_api_server->DispatchToHandlers( envelope );
+                        if( !observed ) return tl::unexpected( observed.error() );
+                        kiapi::automation::v1::DocumentLifecycleState state;
+                        if( observed->status().status() != AS_OK || !observed->message().UnpackTo( &state )
+                                || state.native_content_dirty() || state.clean_checkpoint_sha256().empty()
+                                || state.clean_checkpoint_sha256() != state.state_sha256() )
+                            return fail( AS_BUSY, "Document has not reached a verified clean load/save checkpoint" );
+                        for( const auto& file : state.file_baselines() )
+                            if( file.status() != kiapi::automation::v1::NFBS_UNCHANGED )
+                                return fail( AS_BUSY, "Document files changed outside KiCad; close was refused" );
+                        if( !Kiway.PlayerClose( frameType, false ) )
+                            return fail( AS_BUSY, "Native editor refused to close; no forced close was attempted" );
+                        if( Kiway.Player( frameType, false ) )
+                            return fail( AS_BUSY, "Native editor close has not completed" );
+                        return google::protobuf::Empty{};
                     } );
         }
 

@@ -2532,8 +2532,8 @@ the existing board. Closing the MCP connection does not close the editor.
 
 Locked, malformed, future-format and recovery-needed files return errors without
 hidden dialogs or replacement of the schematic. These tools do not place or route
-components. Use the native UI for save/close; public MCP save/close and
-revision-safe PCB mutation tools remain separate unfinished work.
+components. Guarded MCP saving is described below. Use the native UI for close;
+MCP close and general revision-safe PCB mutations remain unfinished work.
 
 The focused Linux journey opens two independent native projects, creates and
 reopens their boards over real MCP STDIO, and checks shared net-class updates,
@@ -2545,3 +2545,29 @@ devcoordinator2 test start /absolute/worktree --test native-net-settings --tier 
 
 This is scoped Linux integration evidence, not full XML reconstruction,
 automatic repository synchronization, Codex Desktop or native-Mac qualification.
+
+### Guarded document saving (development branch)
+
+With the matching native build, call `kicad_document_state` for the explicit
+instance/document, then pass its complete JSON result as `expectedStateJson` to
+`kicad_document_save`, together with `instanceId` and a new UUID `operationId`.
+The native process checks the observed document identity, revision, full model
+fingerprint and loaded file versions. The actual writers check file versions
+again before replacement. Unknown or changed baselines refuse admission.
+
+After a timeout, reuse the exact request and operation ID or query
+`kicad_document_operation` with the original document descriptor, operation ID
+and process epoch. A retained receipt is replayed without another save, including
+after an MCP reconnect. Failed and indeterminate results require inspection;
+do not invent a new operation ID merely to bypass an uncertain result.
+
+Linux native run `t20260913T010338Z-c02c70` passed the compiled contracts and real
+two-instance MCP/editor saves, stale rejection, retry no-write assertions and
+receipt lookup after reconnect. This evidence covers its frozen candidate, not
+the public packages or Mac/Desktop execution. The guard does not provide an
+atomic multi-file transaction or protection against arbitrary uncooperative
+writers. General change tracking remains explicitly incomplete.
+
+Clean-only close is not exported yet. PCB close currently captures and writes
+additional editor-owned project settings; that behavior must be included in
+observation and explicit save before the close tool can be qualified.

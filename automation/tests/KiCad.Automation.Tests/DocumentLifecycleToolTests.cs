@@ -29,6 +29,8 @@ public sealed class DocumentLifecycleToolTests
                 Assert.IsTrue((await tool.Save("missing", json, Guid.NewGuid().ToString("D"), default)).IsError);
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             await Assert.ThrowsAsync<OperationCanceledException>(() => tool.Save("missing", "{}", "bad", cancelled.Token));
+            await Assert.ThrowsAsync<OperationCanceledException>(() => tool.Close("missing", "{}", "bad", cancelled.Token));
+            Assert.IsTrue((await tool.Close("missing", "{}", Guid.NewGuid().ToString("D"), default)).IsError);
             Assert.AreEqual(0, transport.LifecycleCalls);
         }
         finally { Directory.Delete(directory, true); }
@@ -76,6 +78,15 @@ public sealed class DocumentLifecycleToolTests
             transport.WrongTarget = true;
             Assert.IsTrue((await tool.Save(transport.Session.InstanceId, SchematicJson.Formatter.Format(state),
                 Guid.NewGuid().ToString("D"), default)).IsError);
+            transport.WrongTarget = false;
+            transport.Status = LifecycleOperationStatus.LosClosed;
+            var closed = await tool.Close(transport.Session.InstanceId, SchematicJson.Formatter.Format(state),
+                Guid.NewGuid().ToString("D"), default);
+            Assert.IsFalse(closed.IsError ?? false);
+            Assert.AreEqual(LifecycleOperationStatus.LosClosed, SchematicJson.Parser.Parse<LifecycleOperationResult>(Text(closed)).Status);
+            transport.Status = LifecycleOperationStatus.LosSaved;
+            Assert.IsTrue((await tool.Close(transport.Session.InstanceId, SchematicJson.Formatter.Format(state),
+                Guid.NewGuid().ToString("D"), default)).IsError, "A save result cannot be reported as a successful close.");
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -99,6 +110,14 @@ public sealed class DocumentLifecycleToolTests
                 if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";
             }
             else if (envelope.Message.Is(ReadLifecycleOperation.Descriptor)) ++LifecycleCalls;
+            else if (envelope.Message.Is(CheckedCloseDocument.Descriptor))
+            {
+                ++LifecycleCalls;
+                var close = envelope.Message.Unpack<CheckedCloseDocument>();
+                result = new() { Document = close.Document.Clone(), OperationId = close.OperationId,
+                    ProcessEpoch = Session.Epoch, Status = Status };
+                if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";
+            }
             else return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                 Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(result!) }.ToByteArray());

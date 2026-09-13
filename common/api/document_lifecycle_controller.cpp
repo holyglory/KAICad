@@ -75,7 +75,24 @@ bool FileCoverage( const DocumentLifecycleState& aState )
 bool DOCUMENT_LIFECYCLE_CONTROLLER::Handles( const ApiRequest& aRequest )
 {
     return aRequest.message().Is<kiapi::automation::v1::CheckedSaveDocument>()
+            || aRequest.message().Is<kiapi::automation::v1::CheckedCloseDocument>()
             || aRequest.message().Is<kiapi::automation::v1::ReadLifecycleOperation>();
+}
+
+void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& state )
+{
+    if( state.native_content_dirty() || !FileCoverage( state ) || !Digest( state.state_sha256() )
+            || !Uuid( state.native_identity() ) || !Uuid( state.revision().epoch() ) ) return;
+    m_cleanByScope[state.scope()] = { state.revision().epoch(), state.native_identity(), state.state_sha256() };
+}
+
+void DOCUMENT_LIFECYCLE_CONTROLLER::AnnotateCleanState( kiapi::automation::v1::DocumentLifecycleState& state ) const
+{
+    state.clear_clean_checkpoint_sha256();
+    auto checkpoint = m_cleanByScope.find( state.scope() );
+    if( checkpoint != m_cleanByScope.end() && checkpoint->second.epoch == state.revision().epoch()
+            && checkpoint->second.identity == state.native_identity() )
+        state.set_clean_checkpoint_sha256( checkpoint->second.sha );
 }
 
 API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
@@ -95,7 +112,18 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
     }
 
     CheckedSaveDocument request;
-    if( !aEnvelope.message().UnpackTo( &request ) || !Uuid( request.operation_id() )
+    const bool close = aEnvelope.message().Is<CheckedCloseDocument>();
+    bool decoded;
+    if( close )
+    {
+        CheckedCloseDocument source;
+        decoded = aEnvelope.message().UnpackTo( &source );
+        request.mutable_document()->CopyFrom( source.document() );
+        request.set_operation_id( source.operation_id() );
+        if( source.has_expected_state() ) request.mutable_expected_state()->CopyFrom( source.expected_state() );
+    }
+    else decoded = aEnvelope.message().UnpackTo( &request );
+    if( !decoded || !Uuid( request.operation_id() )
             || !request.has_expected_state() || request.expected_state().process_epoch() != aProcessEpoch
             || !MessageDifferencer::Equals( request.document(), request.expected_state().document() ) )
         return Error( "Checked save requires an operation UUID and an exact observed document/process target" );
@@ -103,7 +131,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
     const auto previous = m_receipts.find( request.operation_id() );
     if( previous != m_receipts.end() )
     {
-        if( !MessageDifferencer::Equals( request, previous->second.request ) )
+        if( close != previous->second.close || !MessageDifferencer::Equals( request, previous->second.request ) )
             return Error( "Lifecycle operation ID was already used for another request" );
         return Pack( previous->second.result );
     }
@@ -119,6 +147,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
 
     RECEIPT receipt;
     receipt.request = request;
+    receipt.close = close;
     receipt.result.mutable_document()->CopyFrom( request.document() );
     receipt.result.set_operation_id( request.operation_id() );
     receipt.result.set_process_epoch( aProcessEpoch );
@@ -151,6 +180,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             error.set_error_message( "Native lifecycle observation is invalid or exceeded the reserved receipt size" );
             return tl::unexpected( error );
         }
+        AnnotateCleanState( state );
         return state;
     };
 
@@ -165,6 +195,25 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                 || !Digest( before->state_sha256() ) || !before->project_settings_included()
                 || ( before->scope() != DLS_SCHEMATIC_HIERARCHY && before->scope() != DLS_PCB ) || !FileCoverage( *before ) )
             return fail( LOS_REJECTED, "file_baseline_conflict", "Loaded file coverage is incomplete or differs from disk; no save was attempted" );
+
+        if( close )
+        {
+            if( before->native_content_dirty() || before->clean_checkpoint_sha256().empty()
+                    || before->clean_checkpoint_sha256() != before->state_sha256() )
+                return fail( LOS_REJECTED, "document_not_clean", "Document differs from its native loaded/saved checkpoint; close will not save or discard it" );
+            kiapi::common::commands::CloseDocument closing;
+            closing.mutable_document()->CopyFrom( request.document() );
+            ApiRequest envelope;
+            envelope.mutable_header()->CopyFrom( aEnvelope.header() );
+            envelope.mutable_message()->PackFrom( closing );
+            attemptedSave = true; // Any exception after native close dispatch is an uncertain operation.
+            auto closed = aDispatch( envelope );
+            if( !closed || closed->status().status() != ApiStatusCode::AS_OK )
+                return fail( LOS_FAILED, "native_close_failed", closed ? closed->status().error_message() : closed.error().error_message() );
+            result.set_status( LOS_CLOSED ); result.clear_error_code(); result.clear_error_message();
+            m_cleanByScope.erase( before->scope() );
+            return Pack( result );
+        }
 
         kiapi::common::commands::SaveDocument save;
         save.mutable_document()->CopyFrom( request.document() );
@@ -215,6 +264,9 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                 || after->revision().epoch() != before->revision().epoch()
                 || after->native_content_dirty() || !FileCoverage( *after ) )
             return fail( LOS_INDETERMINATE, "saved_state_not_confirmed", "Native save returned, but clean matching disk state was not confirmed" );
+        RememberCleanState( *after );
+        AnnotateCleanState( *after );
+        result.mutable_observed_state()->CopyFrom( *after );
         result.set_status( LOS_SAVED ); result.clear_error_code(); result.clear_error_message();
         return Pack( result );
     }

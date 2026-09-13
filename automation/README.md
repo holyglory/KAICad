@@ -2598,7 +2598,17 @@ Markers can predate a design edit or have been manually deleted. Re-run KiCad's
 checker when current verification is needed; native DRC job control and
 result-to-design revision qualification remain unfinished.
 
-The `native-net-settings` development journey includes the actual DRC dialog,
-exclusion-comment cancellation, exclusion/save/reload/removal and an independent
-STDIO MCP inventory comparison. A submitted run is not proof that this journey
-passed, and Linux checks do not qualify public packages or Mac/Desktop execution.
+Linux run `t20260913T041710Z-0cee9d` passed all seven development stages on
+`222d65281389c66d3f1077c650fa27208383dc52`, including eleven native regression
+groups and both project instances. The actual DRC dialog journey proved comment
+cancellation, exclusion/save/reload/rerun/removal, wrong-target rejection and
+STDIO MCP inventory equality. Board-level exclusions use an explicit owning-board
+reference so they survive the native board UUID changing on reload; unrelated
+unresolved object IDs are not guessed or rebound.
+
+The same run proved that an open native 3D viewer blocks checked PCB close,
+preserves both windows and files, and permits normal close/reopen after explicitly
+closing the viewer. This is close-safety evidence, not qualification of MCP 3D
+rendering. The receipt covers its frozen Linux candidate, not public packages,
+later source changes or Mac/Desktop execution. Cancellable DRC jobs and result
+freshness remain open in completion-ledger outcome `p9966151ec04cd9cf`.

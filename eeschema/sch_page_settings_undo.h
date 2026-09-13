@@ -85,7 +85,6 @@ public:
                                                        .operating_point().SerializeAsString() );
         }
         DS_PROXY_UNDO_ITEM::Restore( aFrame );
-        aFrame->Schematic().Settings().m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
         if( !BusAliasesMatch( aFrame->Schematic() ) )
             aFrame->Schematic().SetBusAliases( m_busAliases );
         if( !TextVariablesMatch( aFrame ) )

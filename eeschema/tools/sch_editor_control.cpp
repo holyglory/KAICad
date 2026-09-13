@@ -504,7 +504,7 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
 
     DIALOG_EESCHEMA_PAGE_SETTINGS dlg( m_frame, m_frame->Schematic().GetEmbeddedFiles(),
                                        VECTOR2I( MAX_PAGE_SIZE_EESCHEMA_MILS, MAX_PAGE_SIZE_EESCHEMA_MILS ) );
-    dlg.SetWksFileName( BASE_SCREEN::m_DrawingSheetFileName );
+    dlg.SetWksFileName( m_frame->GetDrawingSheetFileName() );
 
     if( dlg.ShowModal() == wxID_OK )
     {
@@ -526,7 +526,6 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
     else
     {
         undoItem->RestoreAll( m_frame );
-        m_frame->Schematic().Settings().m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
         m_frame->GetCanvas()->GetView()->MarkDirty();
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();

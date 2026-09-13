@@ -86,7 +86,7 @@ bool SCH_EDIT_FRAME::LoadProjectSettings()
 
 void SCH_EDIT_FRAME::LoadDrawingSheet()
 {
-    // Load the drawing sheet from the filename stored in BASE_SCREEN::m_DrawingSheetFileName.
+    // Load the drawing sheet from this schematic project's owned filename.
     // If empty, or not existing, the default drawing sheet is loaded.
 
     SCHEMATIC_SETTINGS& settings = Schematic().Settings();
@@ -237,16 +237,14 @@ void SCH_EDIT_FRAME::saveProjectSettings()
 
     // Save the page layout file if doesn't exist yet (e.g. if we opened a non-kicad schematic)
 
-    // TODO: We need to remove dependence on BASE_SCREEN
-    Prj().GetProjectFile().m_SchematicSettings->m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
-
-    if( !BASE_SCREEN::m_DrawingSheetFileName.IsEmpty() )
+    const wxString drawingSheetFile = GetDrawingSheetFileName();
+    if( !drawingSheetFile.IsEmpty() )
     {
         FILENAME_RESOLVER resolve;
         resolve.SetProject( &Prj() );
         resolve.SetProgramBase( &Pgm() );
 
-        wxFileName layoutfn( resolve.ResolvePath( BASE_SCREEN::m_DrawingSheetFileName,
+        wxFileName layoutfn( resolve.ResolvePath( drawingSheetFile,
                                                   Prj().GetProjectPath(),
                                                   { Schematic().GetEmbeddedFiles() } ) );
 
@@ -329,6 +327,16 @@ void SCH_EDIT_FRAME::SaveProjectLocalSettings()
     }
 
     localSettings.m_SchHierarchyCollapsed = m_hierarchy->GetCollapsedPaths();
+}
+
+wxString SCH_EDIT_FRAME::GetDrawingSheetFileName() const
+{
+    return Schematic().Settings().m_SchDrawingSheetFileName;
+}
+
+void SCH_EDIT_FRAME::SetDrawingSheetFileName( const wxString& name )
+{
+    Schematic().Settings().m_SchDrawingSheetFileName = name;
 }
 
 

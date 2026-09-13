@@ -11,6 +11,13 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyPageSettings(NativeClient client, DocumentSpecifier document,
         int processId, string display, string directory, string evidence, string instanceId, CancellationToken token)
     {
+        var beforeFocus = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+            new() { Document = document }, token);
+        // A newly opened editor need not have canvas focus yet. Later Undo/Redo
+        // does establish it; compare page methods from the same observed input state.
+        await FocusedSchematicShortcut(client, document, processId, display, "", token);
+        Assert.AreEqual(beforeFocus, await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+            new() { Document = document }, token), "Establishing focus must not alter native design state.");
         var query = new GetPageSettings { Document = document };
         var original = await client.InvokeAsync<GetPageSettings, PageSettings>(query, token);
         var originalTitle = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token);

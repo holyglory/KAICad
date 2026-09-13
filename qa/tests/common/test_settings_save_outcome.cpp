@@ -155,7 +155,6 @@ BOOST_AUTO_TEST_CASE( LoadedAndWrittenBaselinesDoNotAdoptExternalEditsOrFailedWr
     const wxString nativePath = wxString::FromUTF8( path.string() );
     BOOST_REQUIRE( root.SaveToFile( directory.Directory() ) );
     BOOST_CHECK( root.FileBaseline().Check( nativePath ) == FILE_BASELINE_CHECK::UNCHANGED );
-    const auto original = Read( path );
     SAVE_ROOT loaded;
     BOOST_REQUIRE( loaded.LoadFromFile( directory.Directory() ) );
     BOOST_CHECK_EQUAL( loaded.FileBaseline().Sha256(), root.FileBaseline().Sha256() );

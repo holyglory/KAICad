@@ -8,6 +8,7 @@
 #include <richio.h>
 #include <api/native_state_digest.h>
 #include <project.h>
+#include <project/project_file.h>
 #include <wx/filename.h>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,8 @@ BOOST_AUTO_TEST_CASE( NativeSaveLoadAndExportKeepTheCorrectFileBaseline )
     class TEST_PROJECT : public PROJECT
     {
     public:
+        TEST_PROJECT() { settings.SetProject( this ); settings.SetReadOnly( true ); setProjectFile( &settings ); }
+        PROJECT_FILE settings{ "baseline" };
         wxString directory;
         const wxString GetProjectName() const override { return "baseline"; }
         const wxString GetProjectPath() const override { return directory + wxFileName::GetPathSeparator(); }
@@ -37,7 +40,9 @@ BOOST_AUTO_TEST_CASE( NativeSaveLoadAndExportKeepTheCorrectFileBaseline )
     io.SaveSchematicFile( file, schematic.GetTopLevelSheet(), &schematic );
     const auto baseline = schematic.RootScreen()->FileBaseline();
     BOOST_CHECK( baseline.Check( file ) == FILE_BASELINE_CHECK::UNCHANGED );
-    SCHEMATIC reloaded( &project );
+    TEST_PROJECT reloadProject;
+    reloadProject.directory = project.directory;
+    SCHEMATIC reloaded( &reloadProject );
     std::unique_ptr<SCH_SHEET> sheet( io.LoadSchematicFile( file, &reloaded ) );
     BOOST_REQUIRE( sheet && sheet->GetScreen() );
     BOOST_CHECK_EQUAL( sheet->GetScreen()->FileBaseline().Sha256(), baseline.Sha256() );

@@ -76,6 +76,37 @@ message DocumentLifecycleState {
   bool disk_baseline_checked = 9;
   repeated string native_files = 10;
   repeated NativeFileBaselineState file_baselines = 11;
+  string process_epoch = 12;
+}
+
+message CheckedSaveDocument {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentLifecycleState expected_state = 3;
+}
+
+message ReadLifecycleOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+enum LifecycleOperationStatus {
+  LOS_UNKNOWN = 0;
+  LOS_SAVED = 1;
+  LOS_REJECTED = 2;
+  LOS_FAILED = 3;
+  LOS_INDETERMINATE = 4;
+}
+
+message LifecycleOperationResult {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  LifecycleOperationStatus status = 4;
+  string error_code = 5;
+  string error_message = 6;
+  DocumentLifecycleState observed_state = 7;
 }
 
 message SchematicSaveState {

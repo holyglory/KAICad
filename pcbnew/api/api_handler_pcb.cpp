@@ -239,6 +239,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
         kiapi::automation::v1::DocumentLifecycleState result;
         result.mutable_document()->CopyFrom( aCtx.Request.document() );
         result.set_native_identity( board()->m_Uuid.AsStdString() );
+        result.set_process_epoch( Pgm().GetApiServer().Token() );
         result.mutable_revision()->set_epoch( result.native_identity() );
         const int sequence = board()->GetTimeStamp();
         if( sequence < 0 ) throw std::runtime_error( "Board observation counter requires a new document epoch" );

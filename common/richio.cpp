@@ -721,8 +721,10 @@ bool PRETTIFIED_FILE_OUTPUTFORMATTER::Finish()
         THROW_IO_ERRORF( _( "Write failed to '%s': %s" ), failedPath, wxString::FromUTF8( strerror( err ) ) );
     }
 
+    FILE_WRITE_OBSERVER::BeforeWrite( m_requestedFilename );
     atomicCommit( m_fp, m_tempPath, m_filename );
     m_committed = true;
+    FILE_WRITE_OBSERVER::AfterWrite( CommittedBaseline() );
     return true;
 }
 

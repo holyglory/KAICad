@@ -28,6 +28,7 @@
 #include <api/api_handler.h>
 #include <api/api_utils.h> // traceApi
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <api/api_socket_url.h>
 #include <kiid.h>
 #include <kinng.h>
@@ -59,6 +60,7 @@ KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
         m_token( KIID().AsStdString() ),
         m_readyToReply( false )
 {
+    m_lifecycle = std::make_unique<DOCUMENT_LIFECYCLE_CONTROLLER>();
     if( !aAutoStart )
         return;
 
@@ -418,6 +420,18 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
 API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
 {
     wxASSERT( wxIsMainThread() );
+    if( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( aRequest ) )
+    {
+        if( !IsAutomation() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+            error.set_error_message( "Checked lifecycle operations require an explicit automation instance" );
+            return tl::unexpected( error );
+        }
+        return m_lifecycle->Handle( aRequest, m_token,
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+    }
     ApiResponseStatus unhandled;
     unhandled.set_status( ApiStatusCode::AS_UNHANDLED );
     API_RESULT result = tl::unexpected( unhandled );

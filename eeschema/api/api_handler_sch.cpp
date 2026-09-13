@@ -19,6 +19,8 @@
  */
 
 #include <api/api_handler_sch.h>
+#include <api/api_server.h>
+#include <pgm_base.h>
 #include <sch_file_versions.h>
 #include <project/project_file.h>
 #include <api/native_state_digest.h>
@@ -1765,6 +1767,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
         result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
         result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
+        result.set_process_epoch( Pgm().GetApiServer().Token() );
         result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
         NATIVE_DOCUMENT_DIGEST digest;
         std::map<std::string, SCH_SHEET*> screens;

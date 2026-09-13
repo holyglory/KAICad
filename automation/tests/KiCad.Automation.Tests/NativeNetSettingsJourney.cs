@@ -70,7 +70,7 @@ public sealed partial class NativeSessionTests
                 }
                 finally { File.SetUnixFileMode(protectedPath, mode); }
             }
-            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+            await SaveCheckedThroughMcp(client, document, evidence, token);
             await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
             await Same(expected, (await Read()).Data, phase);
         }

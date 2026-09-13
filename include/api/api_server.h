@@ -34,6 +34,7 @@
 #include <api/api_handler.h>
 
 class API_HANDLER;
+class DOCUMENT_LIFECYCLE_CONTROLLER;
 class KINNG_REQUEST_SERVER;
 class KINNG_PUBLISHER;
 class wxEvtHandler;
@@ -139,6 +140,7 @@ private:
     uint64_t m_eventSequence = 0;
 
     std::set<API_HANDLER*> m_handlers;
+    std::unique_ptr<DOCUMENT_LIFECYCLE_CONTROLLER> m_lifecycle;
 
     std::string m_token;
     std::string m_automationInstanceId;

@@ -65,8 +65,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_document_state");
             CollectionAssert.Contains(names, "kicad_document_save");
             CollectionAssert.Contains(names, "kicad_document_operation");
-            CollectionAssert.DoesNotContain(names, "kicad_document_close",
-                "Close stays unpublished until PCB editor-owned project state is qualified.");
+            CollectionAssert.Contains(names, "kicad_document_close");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");

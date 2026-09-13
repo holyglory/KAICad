@@ -8,7 +8,7 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
-    // Wired into the rendered graph only when the close export passes its native gates.
+    // Native contracts precede this real MCP/editor journey in the governed graph.
     private static async Task VerifyCleanPcbClose(NativeClient client, DocumentSpecifier board,
         DocumentSpecifier schematic, string evidence, CancellationToken token)
     {

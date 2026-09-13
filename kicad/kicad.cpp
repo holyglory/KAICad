@@ -691,11 +691,8 @@ bool PGM_KICAD::OnPgmInit()
                         const auto type = request.document().type();
                         if( type != types::DOCTYPE_SCHEMATIC && type != types::DOCTYPE_PCB )
                             return fail( AS_UNIMPLEMENTED, "This graphical close operation supports schematics and PCBs" );
-                        // PCB doCloseWindow currently writes editor-owned project
-                        // settings. Do not call that path as a clean-only close
-                        // until those owners have qualified observation/save handling.
-                        if( type == types::DOCTYPE_PCB )
-                            return fail( AS_UNIMPLEMENTED, "PCB clean-close is awaiting project editor-state qualification" );
+                        if( !m_api_server->IsCleanCloseActive() )
+                            return fail( AS_BAD_REQUEST, "Use CheckedCloseDocument with an exact native state observation" );
                         const auto frameType = type == types::DOCTYPE_SCHEMATIC ? FRAME_SCH : FRAME_PCB_EDITOR;
                         KIWAY_PLAYER* player = Kiway.Player( frameType, false );
                         if( !player || player->IsBeingDeleted() ) return fail( AS_BAD_REQUEST, "Requested editor is not open" );

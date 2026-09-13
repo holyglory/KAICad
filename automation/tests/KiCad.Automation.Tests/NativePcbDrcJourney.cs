@@ -16,6 +16,7 @@ public sealed partial class NativeSessionTests
         const string dialog = "Design Rules Checker";
         const string commentDialog = "Exclusion Comment";
         const string comment = "fixture reviewed exclusion";
+        int contextNumber = 0;
         string project = Path.Combine(board.Project.Path, board.Project.Name + ".kicad_pro");
         void Key(string key, string window = dialog, bool control = false) =>
             NativeKeyboard.SchematicShortcut(display, processId, key, window, control, false);
@@ -61,7 +62,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "right-click", dialog, false, false,
                 clickFromLeft: 180, clickFromTop: 110);
             await NativeSetupUi.WaitForPopup(display, processId, true, token, dialog);
-            await Picture("context");
+            await Picture("context-" + ++contextNumber);
             Key("Home"); if (withComment) Key("Down"); Key("Return");
             if (withComment) await Window(commentDialog, true);
             else await NativeSetupUi.WaitForPopup(display, processId, false, token, dialog);
@@ -121,6 +122,12 @@ public sealed partial class NativeSessionTests
             string instanceId = (await client.HandshakeAsync(token)).InstanceId;
             var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
             Assert.IsFalse(attached.TryGetProperty("isError", out var error) && error.GetBoolean());
+            var inventoryBefore = await Read();
+            var wrongBoard = board.Clone(); wrongBoard.BoardFilename = "not-the-open-board.kicad_pcb";
+            var wrongTarget = await mcp.Tool("kicad_pcb_drc_state", new
+                { instanceId, documentJson = SchematicJson.Formatter.Format(wrongBoard) });
+            Assert.IsTrue(wrongTarget.GetProperty("isError").GetBoolean());
+            Assert.AreEqual(inventoryBefore, await Read(), "A wrong-target query must not change the actual board.");
             var reply = await mcp.Tool("kicad_pcb_drc_state", new { instanceId, documentJson = SchematicJson.Formatter.Format(board) });
             Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
             var observed = SchematicJson.Parser.Parse<PcbDrcState>(reply.GetProperty("content").EnumerateArray()
@@ -152,6 +159,14 @@ public sealed partial class NativeSessionTests
             }
         Assert.AreEqual(expectedMarker, restored.Marker, "Persisted exclusion must restore the exact violation, not a nearby one.");
         await Open(); await Picture("reloaded");
+        var beforeFilter = await ObserveLifecycleState(client, board, token);
+        // Fresh findings can have a different order. Show only exclusions so
+        // the action targets the saved finding, not the first new warning.
+        NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
+            clickFromLeft: 165, clickFromBottom: 85); // Errors off.
+        NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
+            clickFromLeft: 290, clickFromBottom: 85); // Warnings off; Exclusions stays on.
+        Assert.AreEqual(beforeFilter, await ObserveLifecycleState(client, board, token));
         // A real rerun must match the persisted board-scoped exclusion too.
         NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
             clickFromRight: 60, clickFromBottom: 45);

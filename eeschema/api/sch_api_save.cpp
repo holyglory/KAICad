@@ -41,6 +41,16 @@
 namespace SCH_API_SAVE
 {
 
+namespace
+{
+bool WritableDestination( const wxString& aPath )
+{
+    wxFileName path( aPath );
+    if( aPath.empty() || !path.IsOk() || !path.IsAbsolute() || wxDirExists( aPath ) ) return false;
+    return path.FileExists() ? path.IsFileWritable() : path.IsDirWritable();
+}
+}
+
 bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& aPath )
 {
     wxCHECK( aSheet, false );
@@ -56,9 +66,6 @@ bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& 
 
     if( schematicFileName.FileExists() && !schematicFileName.IsFileWritable() )
         return false;
-
-    if( schematicFileName.FileExists() )
-        KIPLATFORM::IO::MakeWriteable( schematicFileName.GetFullPath() );
 
     SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::GuessPluginTypeFromSchPath( schematicFileName.GetFullPath() );
 
@@ -80,18 +87,17 @@ bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& 
 }
 
 
-void UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject )
+bool UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject )
 {
     SCH_SCREEN* rootScreen = aSchematic.RootScreen();
 
     if( !rootScreen )
-        return;
+        return false;
 
-    wxFileName projectFile( rootScreen->GetFileName() );
-    projectFile.SetExt( FILEEXT::ProjectFileExtension );
+    wxFileName projectFile( aProject.GetProjectFullName() );
 
     if( !projectFile.HasName() || !projectFile.IsOk() )
-        return;
+        return false;
 
     aSchematic.RecordERCExclusions();
 
@@ -148,7 +154,7 @@ void UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject )
             sheets.emplace_back( std::make_pair( sheet->m_Uuid, sheet->GetName() ) );
     }
 
-    Pgm().GetSettingsManager().SaveProject( projectFile.GetFullPath() );
+    return Pgm().GetSettingsManager().SaveProject( projectFile.GetFullPath(), &aProject );
 }
 
 
@@ -167,6 +173,16 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
     SCH_SCREENS screens( aSchematic.Root() );
     screens.BuildClientSheetPathList();
 
+    if( aProject.IsReadOnly() || aProject.GetProjectFile().IsReadOnly()
+            || !WritableDestination( aProject.GetProjectFullName() ) )
+        return false;
+    for( size_t i = 0; i < screens.GetCount(); ++i )
+    {
+        const SCH_SCREEN* screen = screens.GetScreen( i );
+        if( !screen || !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
+            return false;
+    }
+
     bool success = true;
 
     for( size_t i = 0; i < screens.GetCount(); i++ )
@@ -175,7 +191,7 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
         wxCHECK2( screen, continue );
 
-        wxFileName fileName = screen->GetFileName();
+        wxFileName fileName = aProject.AbsolutePath( screen->GetFileName() );
 
         if( !fileName.IsOk() )
             continue;
@@ -189,12 +205,14 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
         success &= SaveSheetToFile( screens.GetSheet( i ), aSchematic, fileName.GetFullPath() );
 
-        if( success )
-            screen->SetContentModified( false );
     }
 
     if( success )
-        UpdateProjectFile( aSchematic, aProject );
+        success = UpdateProjectFile( aSchematic, aProject );
+
+    if( success )
+        for( size_t i = 0; i < screens.GetCount(); ++i )
+            screens.GetScreen( i )->SetContentModified( false );
 
     return success;
 }
@@ -227,7 +245,7 @@ bool SaveSchematicCopy( SCHEMATIC& aSchematic, PROJECT& aProject, const wxString
         projectFile.SetExt( FILEEXT::ProjectFileExtension );
 
         if( !projectFile.FileExists() )
-            Pgm().GetSettingsManager().SaveProjectCopy( projectFile.GetFullPath() );
+            return Pgm().GetSettingsManager().SaveProjectCopy( projectFile.GetFullPath(), &aProject );
     }
 
     return true;

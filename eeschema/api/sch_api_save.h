@@ -33,7 +33,7 @@ namespace SCH_API_SAVE
 bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& aPath );
 
 /// Sync schematic metadata into the project file (.kicad_pro) and save it.
-void UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject );
+bool UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject );
 
 /// Save every screen in the hierarchy to its current path, then update the project file.
 bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject );

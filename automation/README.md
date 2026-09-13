@@ -2532,8 +2532,8 @@ the existing board. Closing the MCP connection does not close the editor.
 
 Locked, malformed, future-format and recovery-needed files return errors without
 hidden dialogs or replacement of the schematic. These tools do not place or route
-components. Guarded MCP saving is described below. Use the native UI for close;
-MCP close and general revision-safe PCB mutations remain unfinished work.
+components. Guarded MCP save and clean-only close are described below. General
+revision-safe PCB mutations and full lifecycle qualification remain unfinished.
 
 The focused Linux journey opens two independent native projects, creates and
 reopens their boards over real MCP STDIO, and checks shared net-class updates,
@@ -2546,7 +2546,7 @@ devcoordinator2 test start /absolute/worktree --test native-net-settings --tier 
 This is scoped Linux integration evidence, not full XML reconstruction,
 automatic repository synchronization, Codex Desktop or native-Mac qualification.
 
-### Guarded document saving (development branch)
+### Guarded document lifecycle (development branch)
 
 With the matching native build, call `kicad_document_state` for the explicit
 instance/document, then pass its complete JSON result as `expectedStateJson` to
@@ -2568,6 +2568,17 @@ the public packages or Mac/Desktop execution. The guard does not provide an
 atomic multi-file transaction or protection against arbitrary uncooperative
 writers. General change tracking remains explicitly incomplete.
 
-Clean-only close is not exported yet. PCB close currently captures and writes
-additional editor-owned project settings; that behavior must be included in
-observation and explicit save before the close tool can be qualified.
+`kicad_document_close` takes `instanceId`, the complete `expectedStateJson` and a
+new `operationId`. It requires state matching a native loaded/saved checkpoint
+and refuses dirty or stale state, pending dialogs and associated editors/viewers.
+It does not implicitly save, discard changes, force closure or stop the native
+process. Query its receipt with `kicad_document_operation` after closure or an MCP
+reconnect; retries must reuse the identical request and operation ID.
+
+Linux run `t20260913T024019Z-0f674e` proved saved and read-only close/reopen for
+both schematic and PCB documents, unchanged design bytes and timestamps, receipt
+recovery after reconnect, and preservation of the other editor. That proof is
+bound to its exact candidate; it does not qualify the public packages, later
+source changes or Mac/Desktop execution. Field-specific editor-state coverage,
+Save As, atomic multi-file persistence and complete lifecycle/platform acceptance
+remain open.

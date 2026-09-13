@@ -44,8 +44,8 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         return response;
     }
 
-    // Intentionally not exported yet: PCB close persists editor-owned project
-    // settings which must first join the exact snapshot/explicit-save contract.
+    [McpServerTool(Name = "kicad_document_close", ReadOnly = false),
+     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure.")]
     public async Task<CallToolResult> Close(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
     {

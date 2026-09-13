@@ -35,6 +35,16 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(LifecycleOperationStatus.LosRejected, Parse(rejected).Status);
                 Assert.AreEqual(before, await ObserveLifecycleState(client, document, token));
 
+                if (before.NativeContentDirty || before.CleanCheckpointSha256 != before.StateSha256)
+                {
+                    var dirtyClose = await mcp.Tool("kicad_document_close", new
+                        { instanceId, expectedStateJson = expectedJson, operationId = Guid.NewGuid().ToString("D") });
+                    Assert.IsTrue(dirtyClose.GetProperty("isError").GetBoolean());
+                    Assert.AreEqual(LifecycleOperationStatus.LosRejected, Parse(dirtyClose).Status);
+                    Assert.AreEqual(before, await ObserveLifecycleState(client, document, token),
+                        "Refused close must preserve both native state and dirty edits.");
+                }
+
                 var reply = await mcp.Tool("kicad_document_save", new
                     { instanceId, expectedStateJson = expectedJson, operationId = operation });
                 Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());

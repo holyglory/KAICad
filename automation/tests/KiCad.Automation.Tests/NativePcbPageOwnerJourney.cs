@@ -49,6 +49,53 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(beforeDialog, await ObserveLifecycleState(client, board, token),
             "Page dialog Cancel must preserve the exact PCB state and owner filename.");
         Assert.AreEqual(other, await Read(schematic));
+        async Task PageDialog(bool accept, string? title = null)
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor", false, false,
+                clickFromLeft: 100, clickFromTop: 44);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(8));
+            int delay = 25;
+            while (!NativeKeyboard.HasWindow(display, processId, "Page Settings"))
+            { await Task.Delay(delay, limit.Token); delay = Math.Min(delay * 2, 200); }
+            await NativeSetupUi.StableGeometry(display, processId, limit.Token, "Page Settings");
+            if (title is not null)
+            {
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Page Settings", false, false,
+                    clickFromLeft: 500, clickFromTop: 243);
+                NativeKeyboard.SchematicShortcut(display, processId, "a", "Page Settings", true, false);
+                foreach (char character in title)
+                    NativeKeyboard.SchematicShortcut(display, processId, character.ToString(), "Page Settings", false, false);
+            }
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Page Settings", false, false,
+                clickFromRight: accept ? 60 : 150, clickFromBottom: 25);
+            while (NativeKeyboard.HasWindow(display, processId, "Page Settings"))
+            { await Task.Delay(delay, limit.Token); delay = Math.Min(delay * 2, 200); }
+        }
+        await PageDialog(true);
+        Assert.AreEqual(beforeDialog, await ObserveLifecycleState(client, board, token),
+            "Accepting unchanged page settings must not advance history or dirty state.");
+        var titleBefore = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, token);
+        await PageDialog(true, "Owner history fixture");
+        var titleAfter = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, token);
+        Assert.AreEqual("Owner history fixture", titleAfter.Title);
+        async Task History(string key, TitleBlockInfo expected)
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, key, "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            int delay = 25;
+            while (!expected.Equals(await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, limit.Token)))
+            { await Task.Delay(delay, limit.Token); delay = Math.Min(delay * 2, 200); }
+        }
+        await History("z", titleBefore);
+        var beforeCancelWithRedo = await ObserveLifecycleState(client, board, token);
+        await PageDialog(false);
+        Assert.AreEqual(beforeCancelWithRedo, await ObserveLifecycleState(client, board, token));
+        await History("y", titleAfter);
+        await History("z", titleBefore);
+        Assert.AreEqual(other, await Read(schematic));
         await client.InvokeAsync<SetPageSettings, PageSettings>(new() { Document = board, PageSettings = original }, token);
         await SaveCheckedThroughMcp(client, board, evidence, token);
         Assert.AreEqual(original, await Read(board));

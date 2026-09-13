@@ -76,6 +76,8 @@
 #include <tools/tool_event_utils.h>
 #include <tools/zone_filler_tool.h>
 #include <richio.h>
+#include <drawing_sheet/ds_data_model.h>
+#include <tuple>
 #include <router/router_tool.h>
 #include <view/view_controls.h>
 #include <view/view_group.h>
@@ -519,20 +521,30 @@ int BOARD_EDITOR_CONTROL::ExportFootprints( const TOOL_EVENT& aEvent )
 
 int BOARD_EDITOR_CONTROL::PageSettings( const TOOL_EVENT& aEvent )
 {
-    PICKED_ITEMS_LIST   undoCmd;
-    DS_PROXY_UNDO_ITEM* undoItem = new DS_PROXY_UNDO_ITEM( m_frame );
-    ITEM_PICKER         wrapper( nullptr, undoItem, UNDO_REDO::PAGESETTINGS );
-
-    undoCmd.PushItem( wrapper );
-    undoCmd.SetDescription( _( "Page Settings" ) );
-    m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS );
+    auto undoItem = std::make_unique<DS_PROXY_UNDO_ITEM>( m_frame );
+    const bool wasModified = m_frame->GetScreen()->IsContentModified();
+    auto persistedState = [&]()
+    {
+        STRING_FORMATTER page;
+        m_frame->GetPageSettings().Format( &page );
+        m_frame->GetTitleBlock().Format( &page );
+        wxString layout;
+        DS_DATA_MODEL::GetTheInstance().SaveInString( &layout );
+        return std::make_tuple( page.GetString(), m_frame->GetDrawingSheetFileName(), layout );
+    };
+    const auto before = persistedState();
 
     DIALOG_PAGES_SETTINGS dlg( m_frame, m_frame->GetBoard()->GetEmbeddedFiles(), pcbIUScale.IU_PER_MILS,
                                VECTOR2I( MAX_PAGE_SIZE_PCBNEW_MILS, MAX_PAGE_SIZE_PCBNEW_MILS ) );
     dlg.SetWksFileName( m_frame->GetDrawingSheetFileName() );
 
-    if( dlg.ShowModal() == wxID_OK )
+    if( dlg.ShowModal() == wxID_OK && persistedState() != before )
     {
+        PICKED_ITEMS_LIST undoCmd;
+        undoCmd.PushItem( ITEM_PICKER( nullptr, undoItem.get(), UNDO_REDO::PAGESETTINGS ) );
+        undoCmd.SetDescription( _( "Page Settings" ) );
+        m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS );
+        undoItem.release();
         m_frame->GetCanvas()->GetView()->UpdateAllItemsConditionally(
                 [&]( KIGFX::VIEW_ITEM* aItem ) -> int
                 {
@@ -552,7 +564,12 @@ int BOARD_EDITOR_CONTROL::PageSettings( const TOOL_EVENT& aEvent )
     }
     else
     {
-        m_frame->RollbackFromUndo();
+        // Cancel/no-op never enters native history: normal Undo would bump
+        // the board timestamp and would already have destroyed Redo.
+        undoItem->Restore( m_frame );
+        m_frame->GetScreen()->SetContentModified( wasModified );
+        m_frame->GetCanvas()->GetView()->MarkDirty();
+        m_frame->GetCanvas()->Refresh();
     }
 
     return 0;

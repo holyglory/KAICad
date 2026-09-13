@@ -244,5 +244,6 @@ public sealed partial class NativeSessionTests
         await Verify(false, "reopened");
         Assert.AreEqual(board, (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(
             new() { Type = (DocumentType)3 }, token)).Documents.Single());
+        await VerifyPcbPreferences(client, board, processId, display, evidence, token);
     }
 }

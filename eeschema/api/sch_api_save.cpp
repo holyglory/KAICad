@@ -183,8 +183,11 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
         return false;
     for( size_t i = 0; i < screens.GetCount(); ++i )
     {
+        const SCH_SHEET* sheet = screens.GetSheet( i );
+        if( sheet && sheet->IsVirtualRootSheet() ) continue;
         const SCH_SCREEN* screen = screens.GetScreen( i );
-        if( !screen || !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
+        if( !sheet || !screen || screen->GetFileName().empty()
+                || !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
             return false;
     }
 
@@ -192,6 +195,7 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     for( size_t i = 0; i < screens.GetCount(); i++ )
     {
+        if( screens.GetSheet( i )->IsVirtualRootSheet() ) continue;
         SCH_SCREEN* screen = screens.GetScreen( i );
 
         wxCHECK2( screen, continue );
@@ -217,7 +221,8 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     if( success )
         for( size_t i = 0; i < screens.GetCount(); ++i )
-            screens.GetScreen( i )->SetContentModified( false );
+            if( !screens.GetSheet( i )->IsVirtualRootSheet() )
+                screens.GetScreen( i )->SetContentModified( false );
 
     return success;
 }

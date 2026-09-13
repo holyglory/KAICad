@@ -40,6 +40,30 @@ enum DocumentLifecycleScope {
   DLS_PCB = 2;
 }
 
+enum NativeFileBaselineStatus {
+  NFBS_UNKNOWN = 0;
+  NFBS_UNCHANGED = 1;
+  NFBS_CHANGED = 2;
+  NFBS_WRONG_PATH = 3;
+  NFBS_UNREADABLE = 4;
+}
+
+// Read-only comparison with bytes previously loaded/written by the native owner.
+// An unknown baseline is not an absent file and never authorizes persistence.
+message NativeFileBaselineState {
+  string path = 1;
+  string baseline_path = 2;
+  bool baseline_known = 3;
+  bool baseline_exists = 4;
+  string baseline_sha256 = 5;
+  uint64 baseline_bytes = 6;
+  bool current_known = 7;
+  bool current_exists = 8;
+  string current_sha256 = 9;
+  uint64 current_bytes = 10;
+  NativeFileBaselineStatus status = 11;
+}
+
 message DocumentLifecycleState {
   kiapi.common.types.DocumentSpecifier document = 1;
   DocumentRevision revision = 2;
@@ -51,6 +75,7 @@ message DocumentLifecycleState {
   bool complete_change_tracking = 8;
   bool disk_baseline_checked = 9;
   repeated string native_files = 10;
+  repeated NativeFileBaselineState file_baselines = 11;
 }
 
 message SchematicSaveState {

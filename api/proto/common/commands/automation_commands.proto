@@ -77,9 +77,18 @@ message DocumentLifecycleState {
   repeated string native_files = 10;
   repeated NativeFileBaselineState file_baselines = 11;
   string process_epoch = 12;
+  // Exact native state at a successful load/save checkpoint; empty means unavailable.
+  string clean_checkpoint_sha256 = 13;
 }
 
 message CheckedSaveDocument {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentLifecycleState expected_state = 3;
+}
+
+// Clean-only: this request never authorizes saving or discarding unsaved changes.
+message CheckedCloseDocument {
   kiapi.common.types.DocumentSpecifier document = 1;
   string operation_id = 2;
   DocumentLifecycleState expected_state = 3;
@@ -97,6 +106,7 @@ enum LifecycleOperationStatus {
   LOS_REJECTED = 2;
   LOS_FAILED = 3;
   LOS_INDETERMINATE = 4;
+  LOS_CLOSED = 5;
 }
 
 message LifecycleOperationResult {

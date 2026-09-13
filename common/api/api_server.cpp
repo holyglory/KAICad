@@ -448,9 +448,29 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             break;
     }
 
+    if( result && aRequest.message().Is<kiapi::automation::v1::ReadDocumentLifecycleState>() )
+    {
+        kiapi::automation::v1::DocumentLifecycleState state;
+        if( result->message().UnpackTo( &state ) )
+        {
+            m_lifecycle->AnnotateCleanState( state );
+            result->mutable_message()->PackFrom( state );
+        }
+    }
     return result;
 }
 
+void KICAD_API_SERVER::RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& document )
+{
+    kiapi::automation::v1::ReadDocumentLifecycleState read;
+    read.mutable_document()->CopyFrom( document );
+    ApiRequest request;
+    request.mutable_message()->PackFrom( read );
+    auto result = DispatchToHandlers( request );
+    kiapi::automation::v1::DocumentLifecycleState state;
+    if( result && result->status().status() == ApiStatusCode::AS_OK && result->message().UnpackTo( &state ) )
+        m_lifecycle->RememberCleanState( state );
+}
 
 void KICAD_API_SERVER::log( const std::string& aOutput )
 {

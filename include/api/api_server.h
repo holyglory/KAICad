@@ -39,6 +39,7 @@ class KINNG_REQUEST_SERVER;
 class KINNG_PUBLISHER;
 class wxEvtHandler;
 namespace kiapi::automation::v1 { class SchematicCommitNotification; }
+namespace kiapi::common::types { class DocumentSpecifier; }
 
 
 wxDECLARE_EVENT( API_REQUEST_EVENT, wxCommandEvent );
@@ -75,6 +76,7 @@ public:
     // result after creating its window. Does not send an IPC reply or bypass
     // handler document validation.
     API_RESULT DispatchToHandlers( ApiRequest& aRequest );
+    void RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& aDocument );
 
     void SetReadyToReply( bool aReady = true )
     {

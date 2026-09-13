@@ -18,8 +18,9 @@ struct LIFECYCLE_FIXTURE
     std::string epoch = KIID().AsStdString();
     DocumentLifecycleState state;
     DOCUMENT_LIFECYCLE_CONTROLLER controller;
-    unsigned reads = 0, saves = 0;
+    unsigned reads = 0, saves = 0, closes = 0;
     bool failSave = false, throwSave = false, failAfter = false, changeIdentity = false;
+    bool closed = false, failClose = false;
     std::function<void()> persist;
     LIFECYCLE_FIXTURE()
     {
@@ -51,11 +52,19 @@ struct LIFECYCLE_FIXTURE
     }
     CheckedSaveDocument Request()
     {
+        controller.AnnotateCleanState( state );
         CheckedSaveDocument request;
         request.mutable_document()->CopyFrom( state.document() );
         request.set_operation_id( KIID().AsStdString() );
         request.mutable_expected_state()->CopyFrom( state );
         return request;
+    }
+    CheckedCloseDocument CloseRequest()
+    {
+        auto save = Request();
+        CheckedCloseDocument close;
+        close.mutable_document()->CopyFrom( save.document() ); close.set_operation_id( save.operation_id() );
+        close.mutable_expected_state()->CopyFrom( save.expected_state() ); return close;
     }
     API_RESULT Dispatch( ApiRequest& request )
     {
@@ -63,6 +72,11 @@ struct LIFECYCLE_FIXTURE
         if( request.message().Is<ReadDocumentLifecycleState>() )
         {
             ++reads;
+            if( closed )
+            {
+                ApiResponseStatus error; error.set_status( ApiStatusCode::AS_UNHANDLED );
+                error.set_error_message( "Fixture editor is closed" ); return tl::unexpected( error );
+            }
             if( saves && failAfter )
             {
                 ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BUSY );
@@ -84,6 +98,17 @@ struct LIFECYCLE_FIXTURE
             if( changeIdentity ) state.set_native_identity( KIID().AsStdString() );
             reply.mutable_message()->PackFrom( google::protobuf::Empty{} );
         }
+        else if( request.message().Is<kiapi::common::commands::CloseDocument>() )
+        {
+            ++closes;
+            if( failClose )
+            {
+                ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BUSY );
+                error.set_error_message( "Fixture close veto" ); return tl::unexpected( error );
+            }
+            closed = true;
+            reply.mutable_message()->PackFrom( google::protobuf::Empty{} );
+        }
         else throw std::runtime_error( "Unexpected lifecycle dispatch" );
         return reply;
     }
@@ -92,7 +117,7 @@ struct LIFECYCLE_FIXTURE
         ApiRequest envelope; envelope.mutable_message()->PackFrom( request );
         return controller.Handle( envelope, epoch, [this]( ApiRequest& value ) { return Dispatch( value ); } );
     }
-    LifecycleOperationResult Result( const CheckedSaveDocument& request )
+    template<typename T> LifecycleOperationResult Result( const T& request )
     {
         auto response = Call( request ); BOOST_REQUIRE( response );
         LifecycleOperationResult result; BOOST_REQUIRE( response->message().UnpackTo( &result ) ); return result;
@@ -217,6 +242,58 @@ BOOST_AUTO_TEST_CASE( ExternalChangeAfterObservationIsRejectedAtTheActualWriter 
     BOOST_REQUIRE( current.Known() ); BOOST_CHECK_EQUAL( retained, "external" );
     BOOST_CHECK( fixture.Result( request ).status() == LOS_INDETERMINATE );
     BOOST_CHECK_EQUAL( fixture.saves, 1 );
+}
+
+BOOST_AUTO_TEST_CASE( LoadedCleanDocumentClosesWithoutSavingAndReceiptSurvivesClosedEditor )
+{
+    LIFECYCLE_FIXTURE fixture;
+    fixture.state.set_native_content_dirty( false );
+    fixture.controller.RememberCleanState( fixture.state );
+    auto request = fixture.CloseRequest();
+    auto result = fixture.Result( request );
+    BOOST_CHECK( result.status() == LOS_CLOSED );
+    BOOST_CHECK_EQUAL( fixture.closes, 1 ); BOOST_CHECK_EQUAL( fixture.saves, 0 );
+    BOOST_CHECK( fixture.closed );
+    BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, fixture.Result( request ) ) );
+    BOOST_CHECK_EQUAL( fixture.reads, 1 ); BOOST_CHECK_EQUAL( fixture.closes, 1 );
+    ReadLifecycleOperation query;
+    query.mutable_document()->CopyFrom( request.document() ); query.set_operation_id( request.operation_id() );
+    query.set_process_epoch( fixture.epoch );
+    auto receipt = fixture.Call( query ); BOOST_REQUIRE( receipt );
+    LifecycleOperationResult replay; BOOST_REQUIRE( receipt->message().UnpackTo( &replay ) );
+    BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, replay ) );
+    auto otherKind = fixture.Request(); otherKind.set_operation_id( request.operation_id() );
+    BOOST_CHECK( !fixture.Call( otherKind ) );
+}
+
+BOOST_AUTO_TEST_CASE( CloseRefusesDirtyUncheckpointedChangedAndReplacedDocuments )
+{
+    for( int variant = 0; variant < 4; ++variant )
+    {
+        LIFECYCLE_FIXTURE fixture;
+        fixture.state.set_native_content_dirty( false );
+        if( variant != 1 ) fixture.controller.RememberCleanState( fixture.state );
+        if( variant == 0 ) fixture.state.set_native_content_dirty( true );
+        if( variant == 2 ) fixture.state.set_state_sha256( std::string( 64, 'd' ) );
+        if( variant == 3 ) fixture.state.mutable_revision()->set_epoch( KIID().AsStdString() );
+        BOOST_CHECK( fixture.Result( fixture.CloseRequest() ).status() == LOS_REJECTED );
+        BOOST_CHECK_EQUAL( fixture.closes, 0 ); BOOST_CHECK_EQUAL( fixture.saves, 0 );
+    }
+}
+
+BOOST_AUTO_TEST_CASE( SavedCheckpointAllowsCloseAndVetoDoesNotConsumeTheEditor )
+{
+    LIFECYCLE_FIXTURE fixture;
+    BOOST_CHECK( fixture.Result( fixture.Request() ).status() == LOS_SAVED );
+    fixture.failClose = true;
+    const auto request = fixture.CloseRequest();
+    BOOST_CHECK( fixture.Result( request ).status() == LOS_FAILED );
+    BOOST_CHECK( !fixture.closed );
+    fixture.failClose = false;
+    BOOST_CHECK( fixture.Result( request ).status() == LOS_FAILED );
+    BOOST_CHECK_EQUAL( fixture.closes, 1 );
+    BOOST_CHECK( fixture.Result( fixture.CloseRequest() ).status() == LOS_CLOSED );
+    BOOST_CHECK_EQUAL( fixture.saves, 1 ); BOOST_CHECK_EQUAL( fixture.closes, 2 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

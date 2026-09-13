@@ -32,7 +32,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_save_observation", "Use a complete observation from this native process; it cannot be replaced by a filename or guessed revision.");
             result = await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(new()
                 { Document = expected.Document.Clone(), ExpectedState = expected, OperationId = id }, cancellationToken);
-            ValidateResult(result, expected.Document, id, client.Epoch);
+            ValidateResult(result, expected.Document, id, client.Epoch, LifecycleOperationStatus.LosSaved);
             return SchematicJson.Formatter.Format(result);
         });
         if (result is not null && !(response.IsError ?? false))
@@ -40,6 +40,35 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             using var json = JsonDocument.Parse(SchematicJson.Formatter.Format(result));
             response.StructuredContent = json.RootElement.Clone();
             response.IsError = result.Status != LifecycleOperationStatus.LosSaved;
+        }
+        return response;
+    }
+
+    // Intentionally not exported yet: PCB close persists editor-owned project
+    // settings which must first join the exact snapshot/explicit-save contract.
+    public async Task<CallToolResult> Close(string instanceId, string expectedStateJson, string operationId,
+        CancellationToken cancellationToken)
+    {
+        LifecycleOperationResult? result = null;
+        var response = await InstanceToolBoundary.Run(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var expected = Parse<DocumentLifecycleState>(expectedStateJson);
+            DocumentStateTools.ValidateTarget(expected.Document);
+            string id = OperationId(operationId);
+            var client = registry.Client(instanceId);
+            if (expected.ProcessEpoch != client.Epoch)
+                throw new AutomationException("stale_process_epoch", "Use an observation from this native process epoch.");
+            result = await client.InvokeAsync<CheckedCloseDocument, LifecycleOperationResult>(new()
+                { Document = expected.Document.Clone(), ExpectedState = expected, OperationId = id }, cancellationToken);
+            ValidateResult(result, expected.Document, id, client.Epoch, LifecycleOperationStatus.LosClosed);
+            return SchematicJson.Formatter.Format(result);
+        });
+        if (result is not null && !(response.IsError ?? false))
+        {
+            using var json = JsonDocument.Parse(SchematicJson.Formatter.Format(result));
+            response.StructuredContent = json.RootElement.Clone();
+            response.IsError = result.Status != LifecycleOperationStatus.LosClosed;
         }
         return response;
     }
@@ -76,11 +105,14 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         return id.ToString("D");
     }
 
-    private static void ValidateResult(LifecycleOperationResult result, DocumentSpecifier document, string id, string epoch)
+    private static void ValidateResult(LifecycleOperationResult result, DocumentSpecifier document, string id, string epoch,
+        LifecycleOperationStatus? expectedSuccess = null)
     {
         if (!document.Equals(result.Document) || result.OperationId != id || result.ProcessEpoch != epoch
             || result.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
-                or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate))
+                or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate or LifecycleOperationStatus.LosClosed)
+            || (expectedSuccess is not null && result.Status is (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosClosed)
+                && result.Status != expectedSuccess))
             throw new AutomationException("invalid_lifecycle_result", "Native operation result did not match the requested target and identity.");
     }
 }

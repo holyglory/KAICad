@@ -24,8 +24,9 @@ BOOST_AUTO_TEST_CASE( NativeSaveLoadAndExportKeepTheCorrectFileBaseline )
     class TEST_PROJECT : public PROJECT
     {
     public:
-        TEST_PROJECT() { settings.SetProject( this ); settings.SetReadOnly( true ); setProjectFile( &settings ); }
-        PROJECT_FILE settings{ "baseline" };
+        TEST_PROJECT() { settings.SetProject( this ); settings.SetReadOnly( true ); }
+        PROJECT_FILE& GetProjectFile() const override { return settings; }
+        mutable PROJECT_FILE settings{ "baseline" };
         wxString directory;
         const wxString GetProjectName() const override { return "baseline"; }
         const wxString GetProjectPath() const override { return directory + wxFileName::GetPathSeparator(); }

@@ -22,6 +22,7 @@
 #define _JSON_SETTINGS_H
 
 #include <core/wx_stl_compat.h>
+#include <file_content_baseline.h>
 
 #include <utility>
 #include <wx/string.h>
@@ -90,6 +91,8 @@ public:
     wxString GetFilename() const { return m_filename; }
 
     wxString GetFullFilename() const;
+
+    const FILE_CONTENT_BASELINE& FileBaseline() const { return m_fileBaseline; }
 
     void SetFilename( const wxString& aFilename ) { m_filename = aFilename; }
 
@@ -357,6 +360,7 @@ protected:
 
     /// The filename (not including path) of this settings file (inicode)
     wxString m_filename;
+    FILE_CONTENT_BASELINE m_fileBaseline;
 
     /// The filename of the wxConfig legacy file (if different from m_filename)
     wxString m_legacy_filename;

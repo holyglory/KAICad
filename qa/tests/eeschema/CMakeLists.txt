@@ -350,6 +350,7 @@ setup_qa_env( qa_eeschema )
 # Focused native save/load acceptance without rebuilding every eeschema test.
 add_executable( qa_symbol_graphic_identity
     ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+    ../common/test_file_content_baseline.cpp
     ../common/test_native_state_digest.cpp
     test_schematic_state_format.cpp
     test_module.cpp
@@ -424,6 +425,10 @@ setup_qa_env( qa_schematic_state_format )
 add_test( NAME qa_native_state_digest
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NativeStateDigest --log_level=test_suite )
 setup_qa_env( qa_native_state_digest )
+
+add_test( NAME qa_file_content_baseline
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=FileContentBaseline --log_level=test_suite )
+setup_qa_env( qa_file_content_baseline )
 
 add_test( NAME qa_net_settings_capture
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )

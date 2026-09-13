@@ -19,6 +19,7 @@
  */
 
 #include <wx/dir.h>
+#include <digesting_file_line_reader.h>
 #include <wx/ffile.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
@@ -304,6 +305,8 @@ void PCB_IO_KICAD_SEXPR::SaveBoard( const wxString& aFileName, BOARD* aBoard,
     PRETTIFIED_FILE_OUTPUTFORMATTER formatter( aFileName );
     FormatBoardToFormatter( &formatter, aBoard, aProperties );
     formatter.Finish();
+    if( FILE_CONTENT_BASELINE::SamePath( aFileName, aBoard->GetFileName() ) )
+        aBoard->SetFileBaseline( formatter.CommittedBaseline() );
 }
 
 
@@ -3530,7 +3533,7 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
                                       const std::map<std::string, UTF8>* aProperties,
                                       PROJECT* aProject )
 {
-    FILE_LINE_READER reader( aFileName );
+    DIGESTING_FILE_LINE_READER reader( aFileName );
 
     unsigned lineCount = 0;
 
@@ -3554,7 +3557,13 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
 
     // Give the filename to the board if it's new
     if( !aAppendToMe )
+    {
         board->SetFileName( aFileName );
+        // Do not leak the parsed board if finishing the file read fails.
+        std::unique_ptr<BOARD> owned( board );
+        board->SetFileBaseline( reader.FinishBaseline() );
+        owned.release();
+    }
 
     return board;
 }

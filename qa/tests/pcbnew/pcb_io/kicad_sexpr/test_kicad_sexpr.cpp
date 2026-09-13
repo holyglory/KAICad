@@ -66,6 +66,30 @@ struct KICAD_SEXPR_FIXTURE
  */
 BOOST_FIXTURE_TEST_SUITE( KiCadSexprIO, KICAD_SEXPR_FIXTURE )
 
+BOOST_AUTO_TEST_CASE( FileBaselineSurvivesNativeLoadSaveAndCopy )
+{
+    namespace fs = std::filesystem;
+    const auto directory = fs::temp_directory_path() / ( "kicad-pcb-baseline-" + KIID().AsStdString() );
+    BOOST_REQUIRE( fs::create_directory( directory ) );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ directory };
+    const auto path = directory / "baseline.kicad_pcb";
+    const wxString file = wxString::FromUTF8( path.string() );
+    BOARD board;
+    board.SetFileName( file );
+    kicadPlugin.SaveBoard( file, &board );
+    const auto baseline = board.FileBaseline();
+    BOOST_CHECK( baseline.Check( file ) == FILE_BASELINE_CHECK::UNCHANGED );
+    std::unique_ptr<BOARD> loaded( kicadPlugin.LoadBoard( file, nullptr ) );
+    BOOST_REQUIRE( loaded );
+    BOOST_CHECK_EQUAL( loaded->FileBaseline().Sha256(), baseline.Sha256() );
+    kicadPlugin.SaveBoard( wxString::FromUTF8( ( directory / "copy.kicad_pcb" ).string() ), loaded.get() );
+    BOOST_CHECK_EQUAL( loaded->FileBaseline().Path().ToStdString( wxConvUTF8 ),
+                       baseline.Path().ToStdString( wxConvUTF8 ) );
+    { std::ofstream external( path, std::ios::app ); external << "\n;external edit\n"; }
+    BOOST_CHECK( loaded->FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+    BOOST_CHECK( board.FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+}
+
 BOOST_AUTO_TEST_CASE( StateSerializationPreservesCurrentEmbeddedResources )
 {
     BOARD board;

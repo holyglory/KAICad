@@ -1476,13 +1476,13 @@ bool API_HANDLER_PCB::setPageSettings( const PAGE_INFO& aPageInfo )
 
 wxString API_HANDLER_PCB::getDrawingSheetFileName()
 {
-    return BASE_SCREEN::m_DrawingSheetFileName;
+    return project().GetProjectFile().m_BoardDrawingSheetFile;
 }
 
 
 void API_HANDLER_PCB::setDrawingSheetFileName( const wxString& aFileName )
 {
-    BASE_SCREEN::m_DrawingSheetFileName = aFileName;
+    project().GetProjectFile().m_BoardDrawingSheetFile = aFileName;
 
     if( frame() )
         frame()->LoadDrawingSheet();

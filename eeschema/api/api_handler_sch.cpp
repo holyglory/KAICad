@@ -3893,13 +3893,12 @@ bool API_HANDLER_SCH::setPageSettings( const PAGE_INFO& aPageInfo )
 
 wxString API_HANDLER_SCH::getDrawingSheetFileName()
 {
-    return BASE_SCREEN::m_DrawingSheetFileName;
+    return schematic()->Settings().m_SchDrawingSheetFileName;
 }
 
 
 void API_HANDLER_SCH::setDrawingSheetFileName( const wxString& aFileName )
 {
-    BASE_SCREEN::m_DrawingSheetFileName = aFileName;
     schematic()->Settings().m_SchDrawingSheetFileName = aFileName;
 
     if( m_frame )

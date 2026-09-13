@@ -162,6 +162,8 @@ public:
      * Load the drawing sheet file.
      */
     void LoadDrawingSheet();
+    wxString GetDrawingSheetFileName() const override;
+    void SetDrawingSheetFileName( const wxString& aFileName ) override;
 
     void ShowSchematicSetupDialog( const wxString& aInitialPage = wxEmptyString );
 

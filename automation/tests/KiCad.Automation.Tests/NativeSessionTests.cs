@@ -289,6 +289,12 @@ public sealed partial class NativeSessionTests
                     }
                     else if (journey == NativeJourney.NetSettings)
                     {
+                        var originalPage = await client.InvokeAsync<GetPageSettings, PageSettings>(
+                            new() { Document = opened.Document }, deadline.Token);
+                        await VerifyPageSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            Path.GetDirectoryName(schematic)!, evidence, target.Id, deadline.Token);
+                        await client.InvokeAsync<SetPageSettings, PageSettings>(
+                            new() { Document = opened.Document, PageSettings = originalPage }, deadline.Token);
                         await VerifyNetSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
                             evidence, deadline.Token);
                         await VerifyBoardNetSettings(client, opened.Document, target.Project, focusProcessId,

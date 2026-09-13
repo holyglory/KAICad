@@ -106,8 +106,6 @@ bool UpdateProjectFile( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     aSchematic.RecordERCExclusions();
 
-    aProject.GetProjectFile().m_SchematicSettings->m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
-
     if( rootScreen )
     {
         aProject.GetProjectFile().m_IP2581Bom.schRevision = rootScreen->GetTitleBlock().GetRevision();

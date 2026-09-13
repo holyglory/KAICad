@@ -402,7 +402,6 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
                 item->Restore( this );
                 *item = std::move( alternate );
             }
-            Schematic().Settings().m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
             refreshHierarchy = true;
             rebuildHierarchyNavigator = true;
         }

@@ -1856,7 +1856,7 @@ name = "input-contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-input-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-input-contracts"]
 retained_artifacts = [{ name = "net-settings-input-contracts", path = "automation/artifacts/net-settings-input-contracts", max_bytes = 16777216 }]
 
 [[test.native-net-settings.check]]
@@ -1875,7 +1875,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_sy
 name = "codec"
 tier = "development"
 requires = ["model-build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$|^qa_net_settings_capture$|^qa_api_request_target$|^qa_settings_save_outcome$|^qa_schematic_state_format$|^qa_native_state_digest$|^qa_file_content_baseline$|^qa_pcbnew_state_format$|^qa_pcbnew_file_baseline$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$|^qa_net_settings_capture$|^qa_api_request_target$|^qa_settings_save_outcome$|^qa_schematic_state_format$|^qa_native_state_digest$|^qa_file_content_baseline$|^qa_pcbnew_state_format$|^qa_pcbnew_file_baseline$|^qa_document_lifecycle_controller$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-net-settings.check]]
 name = "native-build"

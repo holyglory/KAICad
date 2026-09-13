@@ -22,6 +22,7 @@
 #define CLASS_BOARD_H_
 
 #include <atomic>
+#include <file_content_baseline.h>
 #include <board_item_container.h>
 #include <board_stackup_manager/board_stackup.h>
 #include <core/mirror.h>
@@ -410,6 +411,9 @@ public:
     void SetFileName( const wxString& aFileName ) { m_fileName = aFileName; }
 
     const wxString &GetFileName() const { return m_fileName; }
+
+    const FILE_CONTENT_BASELINE& FileBaseline() const { return m_fileBaseline; }
+    void SetFileBaseline( const FILE_CONTENT_BASELINE& aBaseline ) { m_fileBaseline = aBaseline; }
 
     /**
      * Return the absolute path to the design rules file for this board.
@@ -1780,6 +1784,7 @@ private:
     std::atomic<int>    m_timeStamp;                // actually a modification counter
 
     wxString            m_fileName;
+    FILE_CONTENT_BASELINE m_fileBaseline;
 
     std::map<wxString, KIGFX::COLOR4D> m_netChainColors;
 

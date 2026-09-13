@@ -147,4 +147,38 @@ BOOST_AUTO_TEST_CASE( FailedProjectWriteKeepsMigrationPendingUntilSuccessfulRetr
     BOOST_CHECK( Read( path ).find( "top_level_sheets" ) != std::string::npos );
 }
 
+BOOST_AUTO_TEST_CASE( LoadedAndWrittenBaselinesDoNotAdoptExternalEditsOrFailedWrites )
+{
+    SAVE_DIRECTORY directory;
+    SAVE_ROOT root;
+    const auto path = directory.path / "save-result.json";
+    const wxString nativePath = wxString::FromUTF8( path.string() );
+    BOOST_REQUIRE( root.SaveToFile( directory.Directory() ) );
+    BOOST_CHECK( root.FileBaseline().Check( nativePath ) == FILE_BASELINE_CHECK::UNCHANGED );
+    const auto original = Read( path );
+    SAVE_ROOT loaded;
+    BOOST_REQUIRE( loaded.LoadFromFile( directory.Directory() ) );
+    BOOST_CHECK_EQUAL( loaded.FileBaseline().Sha256(), root.FileBaseline().Sha256() );
+    { std::ofstream external( path, std::ios::binary ); external << "external edit"; }
+    BOOST_CHECK( loaded.FileBaseline().Check( nativePath ) == FILE_BASELINE_CHECK::CHANGED );
+    SETTINGS_SAVE_RESULT result;
+    BOOST_CHECK( !loaded.SaveToFile( directory.Directory(), false, &result ) );
+    BOOST_CHECK( result == SETTINGS_SAVE_RESULT::UNCHANGED ); // Legacy no-op, NOT a checked save.
+    BOOST_CHECK( loaded.FileBaseline().Check( nativePath ) == FILE_BASELINE_CHECK::CHANGED );
+    const auto baseline = loaded.FileBaseline().Sha256();
+    fs::rename( path, directory.path / "external.json" );
+    BOOST_REQUIRE( fs::create_directory( path ) );
+    loaded.value = 9;
+    BOOST_CHECK( !loaded.SaveToFile( directory.Directory(), false, &result ) );
+    BOOST_CHECK( result == SETTINGS_SAVE_RESULT::FAILED );
+    BOOST_CHECK_EQUAL( loaded.FileBaseline().Sha256(), baseline );
+    BOOST_REQUIRE( fs::remove( path ) );
+    BOOST_REQUIRE( loaded.SaveToFile( directory.Directory(), false, &result ) );
+    BOOST_CHECK( loaded.FileBaseline().Check( nativePath ) == FILE_BASELINE_CHECK::UNCHANGED );
+    BOOST_CHECK( loaded.FileBaseline().Sha256() != baseline );
+    SAVE_ROOT missing;
+    BOOST_CHECK( !missing.LoadFromFile( directory.Directory() + "/absent" ) );
+    BOOST_CHECK( missing.FileBaseline().Known() && !missing.FileBaseline().Exists() );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

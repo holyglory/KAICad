@@ -675,6 +675,8 @@ PRETTIFIED_FILE_OUTPUTFORMATTER::PRETTIFIED_FILE_OUTPUTFORMATTER( const wxString
         m_fp( nullptr ),
         m_filename( KIPLATFORM::IO::ResolveSymlinkTarget( aFileName ) ),
         m_committed( false ),
+        m_requestedFilename( aFileName ),
+        m_textMode( wxString( aMode ).Find( 'b' ) == wxNOT_FOUND ),
         m_mode( aFormatMode )
 {
     if( ADVANCED_CFG::GetCfg().m_CompactSave && m_mode == KICAD_FORMAT::FORMAT_MODE::NORMAL )
@@ -728,4 +730,10 @@ bool PRETTIFIED_FILE_OUTPUTFORMATTER::Finish()
 void PRETTIFIED_FILE_OUTPUTFORMATTER::write( const char* aOutBuf, int aCount )
 {
     m_buf.append( aOutBuf, aCount );
+}
+
+FILE_CONTENT_BASELINE PRETTIFIED_FILE_OUTPUTFORMATTER::CommittedBaseline() const
+{
+    if( !m_committed ) return {};
+    return FILE_CONTENT_BASELINE::FromBytes( m_requestedFilename, m_buf, m_textMode );
 }

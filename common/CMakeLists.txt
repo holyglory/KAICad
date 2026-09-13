@@ -340,6 +340,7 @@ set( KICOMMON_SRCS
     remote_provider_utils.cpp
     reporter.cpp
     richio.cpp
+    file_content_baseline.cpp
     scintilla_tricks.cpp
     search_stack.cpp
     searchhelpfilefullpath.cpp

@@ -428,6 +428,7 @@ function( add_pcbnew_test_group GROUP_NAME FILTER )
 endfunction()
 
 add_pcbnew_test_group( state_format "KiCadSexprIO/StateSerializationPreservesCurrentEmbeddedResources" )
+add_pcbnew_test_group( file_baseline "KiCadSexprIO/FileBaselineSurvivesNativeLoadSaveAndCopy" )
 
 # Zone fill and zone tests (~40s)
 set( PCBNEW_ZONE_TESTS

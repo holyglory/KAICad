@@ -7,8 +7,47 @@
 #include <embedded_files.h>
 #include <richio.h>
 #include <api/native_state_digest.h>
+#include <project.h>
+#include <wx/filename.h>
+#include <filesystem>
+#include <fstream>
 
 BOOST_AUTO_TEST_SUITE( SchematicStateFormat )
+
+BOOST_AUTO_TEST_CASE( NativeSaveLoadAndExportKeepTheCorrectFileBaseline )
+{
+    namespace fs = std::filesystem;
+    const auto directory = fs::temp_directory_path() / ( "kicad-sch-baseline-" + KIID().AsStdString() );
+    BOOST_REQUIRE( fs::create_directory( directory ) );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ directory };
+    class TEST_PROJECT : public PROJECT
+    {
+    public:
+        wxString directory;
+        const wxString GetProjectName() const override { return "baseline"; }
+        const wxString GetProjectPath() const override { return directory + wxFileName::GetPathSeparator(); }
+        const wxString GetProjectFullName() const override { return GetProjectPath() + "baseline.kicad_pro"; }
+    } project;
+    project.directory = wxString::FromUTF8( directory.string() );
+    const wxString file = project.GetProjectPath() + "baseline.kicad_sch";
+    SCHEMATIC schematic( &project );
+    schematic.CreateDefaultScreens();
+    schematic.RootScreen()->SetFileName( file );
+    SCH_IO_KICAD_SEXPR io;
+    io.SaveSchematicFile( file, schematic.GetTopLevelSheet(), &schematic );
+    const auto baseline = schematic.RootScreen()->FileBaseline();
+    BOOST_CHECK( baseline.Check( file ) == FILE_BASELINE_CHECK::UNCHANGED );
+    SCHEMATIC reloaded( &project );
+    std::unique_ptr<SCH_SHEET> sheet( io.LoadSchematicFile( file, &reloaded ) );
+    BOOST_REQUIRE( sheet && sheet->GetScreen() );
+    BOOST_CHECK_EQUAL( sheet->GetScreen()->FileBaseline().Sha256(), baseline.Sha256() );
+    io.SaveSchematicFile( project.GetProjectPath() + "copy.kicad_sch", schematic.GetTopLevelSheet(), &schematic );
+    BOOST_CHECK_EQUAL( schematic.RootScreen()->FileBaseline().Path().ToStdString( wxConvUTF8 ),
+                       baseline.Path().ToStdString( wxConvUTF8 ) );
+    { std::ofstream external( directory / "baseline.kicad_sch", std::ios::app ); external << "\n;external edit\n"; }
+    BOOST_CHECK( sheet->GetScreen()->FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+    BOOST_CHECK( schematic.RootScreen()->FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+}
 
 BOOST_AUTO_TEST_CASE( RepeatedStateSerializationPreservesCurrentResourcesAndDirtyState )
 {

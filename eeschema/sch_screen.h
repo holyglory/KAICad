@@ -31,6 +31,7 @@
 #include <wx/string.h>
 
 #include <base_screen.h>
+#include <file_content_baseline.h>
 #include <core/typeinfo.h>
 #include <kiid.h>
 #include <kiway_holder.h>
@@ -149,6 +150,9 @@ public:
     void SetFileName( const wxString& aFileName );
 
     const wxString& GetFileName() const                     { return m_fileName; }
+
+    const FILE_CONTENT_BASELINE& FileBaseline() const { return m_fileBaseline; }
+    void SetFileBaseline( const FILE_CONTENT_BASELINE& aBaseline ) { m_fileBaseline = aBaseline; }
 
     void SetFileReadOnly( bool aIsReadOnly )                { m_isReadOnly = aIsReadOnly; }
     bool IsReadOnly() const                                 { return m_isReadOnly; }
@@ -691,6 +695,7 @@ public:
 
 private:
     wxString    m_fileName;                 // File used to load the screen.
+    FILE_CONTENT_BASELINE m_fileBaseline;
     int         m_fileFormatVersionAtLoad;
     int         m_refCount;                 // Number of sheets referencing this screen.
                                             // Delete when it goes to zero.

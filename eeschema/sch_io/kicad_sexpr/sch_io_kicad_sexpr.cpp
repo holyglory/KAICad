@@ -21,6 +21,7 @@
  */
 
 #include <algorithm>
+#include <digesting_file_line_reader.h>
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -320,7 +321,7 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
 
 void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet )
 {
-    FILE_LINE_READER reader( aFileName );
+    DIGESTING_FILE_LINE_READER reader( aFileName );
 
     size_t lineCount = 0;
 
@@ -341,6 +342,7 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
                                       m_appending, m_sheetLoad );
 
     parser.ParseSchematic( aSheet );
+    aSheet->GetScreen()->SetFileBaseline( reader.FinishBaseline() );
 
     // Net chains live at the root-sheet level. Sub-sheet parses always produce empty maps,
     // so applying them would wipe the chains restored from the root file.
@@ -427,7 +429,12 @@ void SCH_IO_KICAD_SEXPR::SaveSchematicFile( const wxString& aFileName, SCH_SHEET
     formatter.Finish();
 
     if( aSheet->GetScreen() )
+    {
         aSheet->GetScreen()->SetFileExists( true );
+        // Autosave/export copies must not replace the loaded document's baseline.
+        if( FILE_CONTENT_BASELINE::SamePath( aFileName, aSheet->GetScreen()->GetFileName() ) )
+            aSheet->GetScreen()->SetFileBaseline( formatter.CommittedBaseline() );
+    }
 }
 
 

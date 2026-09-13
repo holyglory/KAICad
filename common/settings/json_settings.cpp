@@ -165,6 +165,7 @@ void JSON_SETTINGS::Load()
 
 bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 {
+    m_fileBaseline = {};
     // First, load all params to default values
     m_internals->clear();
     Load();
@@ -260,6 +261,9 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 
     if( !path.Exists() )
     {
+        // Keep absence distinct from an unreadable or malformed file.
+        const auto absent = FILE_CONTENT_BASELINE::Read( path.GetFullPath() );
+        if( absent.Known() && !absent.Exists() ) m_fileBaseline = absent;
         // Case 1: legacy migration, no .json extension yet
         path.SetExt( getLegacyFileExt() );
 
@@ -287,15 +291,16 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 
         try
         {
-            wxFFileInputStream fp( path.GetFullPath(), wxT( "rt" ) );
-            wxStdInputStream fstream( fp );
+            std::string bytes;
+            const auto loaded = FILE_CONTENT_BASELINE::Read( path.GetFullPath(), &bytes );
 
-            if( fp.IsOk() )
+            if( loaded.Known() && loaded.Exists() )
             {
                 *static_cast<nlohmann::json*>( m_internals.get() ) =
-                        nlohmann::json::parse( fstream, nullptr,
+                        nlohmann::json::parse( bytes, nullptr,
                                                /* allow_exceptions = */ true,
                                                /* ignore_comments  = */ true );
+                m_fileBaseline = loaded;
 
                 // Save whatever we loaded, before doing any migration etc
                 m_internals->m_original = *static_cast<nlohmann::json*>( m_internals.get() );
@@ -344,12 +349,14 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
             }
             else
             {
+                success = false;
                 wxLogTrace( traceSettings, wxT( "%s exists but can't be opened for read" ),
                             GetFullFilename() );
             }
         }
         catch( nlohmann::json::parse_error& error )
         {
+            m_fileBaseline = {};
             success = false;
             wxLogTrace( traceSettings, wxT( "Json parse error reading %s: %s" ),
                         path.GetFullPath(), error.what() );
@@ -702,6 +709,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTING
                                 GetFullFilename() );
 
                     m_modified = false;
+                    m_fileBaseline = FILE_CONTENT_BASELINE::FromBytes( path.GetFullPath(), payload );
 
                     if( aResult ) *aResult = SETTINGS_SAVE_RESULT::UNCHANGED;
                     return false;
@@ -715,6 +723,10 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTING
             wxLogTrace( traceSettings, wxT( "Warning: could not save %s: %s" ), GetFullFilename(),
                         writeError );
             success = false;
+        }
+        else
+        {
+            m_fileBaseline = FILE_CONTENT_BASELINE::FromBytes( path.GetFullPath(), payload );
         }
     }
     catch( nlohmann::json::exception& error )

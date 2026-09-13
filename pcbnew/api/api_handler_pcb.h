@@ -52,6 +52,8 @@ private:
     HANDLER_RESULT<Empty> handleSaveDocument( const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> handleReadLifecycleState(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> handleReadDrcState(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcState>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );

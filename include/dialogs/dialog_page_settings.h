@@ -61,6 +61,9 @@ public:
          m_browseButton->Enable( aEnable );
     }
 
+    // The owning tool may decide whether accepted values form a real commit.
+    void DeferModifiedNotification() { m_deferModifiedNotification = true; }
+
 private:
     virtual void onTransferDataToWindow() {}
 
@@ -140,6 +143,7 @@ protected:
     std::set<wxString> m_embeddedSheetsToRemove;
 
 private:
+    bool m_deferModifiedNotification = false;
     UNIT_BINDER m_customSizeX;
     UNIT_BINDER m_customSizeY;
 };

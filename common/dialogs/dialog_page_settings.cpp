@@ -214,10 +214,12 @@ bool DIALOG_PAGES_SETTINGS::TransferDataFromWindow()
 
     if( SavePageSettings() )
     {
-        m_screen->SetContentModified();
-
-        if( LocalPrjConfigChanged() )
-            m_parent->OnModify();
+        if( !m_deferModifiedNotification )
+        {
+            m_screen->SetContentModified();
+            if( LocalPrjConfigChanged() )
+                m_parent->OnModify();
+        }
 
         // Call the post processing (if any) after changes
         m_parent->OnPageSettingsChange();

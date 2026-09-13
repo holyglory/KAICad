@@ -251,7 +251,8 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
         PCB_IO_KICAD_SEXPR writer;
         writer.FormatBoardToFormatter( &content, board(), nullptr, false );
         digest.Add( "board", content );
-        settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
+        settings.Append( ( frame() ? frame()->CaptureProjectEditorState()
+                                  : project().GetProjectFile().CaptureCurrentState() ).dump() );
         digest.Add( "project-settings", settings );
         result.set_project_settings_included( true );
         result.set_complete_change_tracking( false );

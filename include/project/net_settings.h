@@ -187,6 +187,7 @@ public:
     /// @brief Sets a net to color assignment
     /// Calling user is responsible for resetting the effective netclass calculation caches
     void SetNetColorAssignment( const wxString& netName, const KIGFX::COLOR4D& color );
+    void RemoveNetColorAssignment( const wxString& netName );
 
     /// @brief Gets all net name to color assignments
     const std::map<wxString, KIGFX::COLOR4D>& GetNetColorAssignments() const;

@@ -133,7 +133,7 @@ bool DIALOG_PAGES_SETTINGS::TransferDataToWindow()
     m_paperSizeComboBox->SetSelection( selectedIdx );
 
     // initialize the drawing sheet filename
-    SetWksFileName( BASE_SCREEN::m_DrawingSheetFileName );
+    SetWksFileName( m_parent->GetDrawingSheetFileName() );
 
     m_orientationComboBox->SetSelection( m_pageInfo.IsPortrait() );
 
@@ -460,7 +460,7 @@ bool DIALOG_PAGES_SETTINGS::SavePageSettings()
 
     wxString fullFileName = m_filenameResolver->ResolvePath( fileName, m_projectPath, { m_embeddedFiles } );
 
-    BASE_SCREEN::m_DrawingSheetFileName = fileName;
+    m_parent->SetDrawingSheetFileName( fileName );
 
     if( !DS_DATA_MODEL::GetTheInstance().LoadDrawingSheet( fullFileName, &msg ) )
         DisplayErrorMessage( this, wxString::Format( _( "Error loading drawing sheet '%s'." ), fullFileName ), msg );

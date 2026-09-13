@@ -26,6 +26,7 @@
 #include <mail_type.h>
 #include <settings/app_settings.h>
 #include <variant>
+#include <nlohmann/json_fwd.hpp>
 
 class PCB_SCREEN;
 class BOARD;
@@ -214,6 +215,11 @@ public:
     static std::vector<const PLUGIN_ACTION*> GetOrderedPluginActions();
 
     void SaveProjectLocalSettings() override;
+    wxString GetDrawingSheetFileName() const override;
+    void SetDrawingSheetFileName( const wxString& aFileName ) override;
+    nlohmann::json CaptureProjectEditorState() const;
+    void StoreProjectEditorState();
+    void RefreshProjectNetColors();
 
     /**
      * Load the current project's file configuration settings which are pertinent

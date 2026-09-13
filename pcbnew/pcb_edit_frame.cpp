@@ -1742,7 +1742,10 @@ void PCB_EDIT_FRAME::doCloseWindow()
     if( Prj().GetLocalSettings().ShouldAutoSave() )
     {
         m_netInspectorPanel->SaveSettings();
-        SaveProjectLocalSettings();
+        if( Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsCleanCloseActive() )
+            saveProjectSettings(); // Local UI preferences only; design was checked before closing.
+        else
+            SaveProjectLocalSettings();
     }
     else
     {
@@ -2650,7 +2653,10 @@ int PCB_EDIT_FRAME::ShowExchangeFootprintsDialog( FOOTPRINT* aFootprint, bool aU
 void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
     if( ( aFlags & NET_SETTINGS_CHANGED ) && GetBoard() )
+    {
         GetBoard()->SynchronizeNetsAndNetClasses( false );
+        RefreshProjectNetColors();
+    }
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
     m_appearancePanel->CommonSettingsChanged( aFlags );
 

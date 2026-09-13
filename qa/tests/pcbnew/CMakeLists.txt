@@ -259,6 +259,7 @@ set( QA_PCBNEW_SRCS
     pcb_io/sprint_layout/test_sprint_layout_import.cpp
 
     pcb_io/kicad_sexpr/test_kicad_sexpr.cpp
+    test_pcb_project_editor_state.cpp
 
     pcb_io/easyedapro/test_easyedapro_import.cpp
     pcb_io/easyedapro/test_easyedapro_v3_import.cpp
@@ -429,6 +430,7 @@ endfunction()
 
 add_pcbnew_test_group( state_format "KiCadSexprIO/StateSerializationPreservesCurrentEmbeddedResources" )
 add_pcbnew_test_group( file_baseline "KiCadSexprIO/FileBaselineSurvivesNativeLoadSaveAndCopy" )
+add_pcbnew_test_group( project_editor_state "PcbProjectEditorState" )
 
 # Zone fill and zone tests (~40s)
 set( PCBNEW_ZONE_TESTS

@@ -13,7 +13,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class DocumentStateTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_document_state", ReadOnly = true),
-     Description("Read full native-writer state for an explicitly identified schematic hierarchy or PCB. Returns native identity, revision, content digest, native dirty flag, file names and explicit coverage flags without saving or changing the design. Complete change tracking and loaded-file baselines are not yet qualified; this observation is not authorization to save, close or discard a document.")]
+     Description("Read full native-writer state for an explicitly identified schematic hierarchy or PCB. Returns native identity, revision, content digest, native dirty flag, file names, loaded/written versus current file comparisons and explicit coverage flags without saving or changing the design. Unknown file baselines remain explicit. Complete lifecycle protection is not yet qualified; this observation is not authorization to save, close or discard a document.")]
     public Task<CallToolResult> Read(string instanceId, string documentJson, CancellationToken cancellationToken) =>
         InstanceToolBoundary.Run(async () =>
         {

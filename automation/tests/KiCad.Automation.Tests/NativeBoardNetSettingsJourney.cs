@@ -83,6 +83,10 @@ public sealed partial class NativeSessionTests
         var createdState = await ObserveLifecycleState(client, board, token);
         Assert.AreEqual(DocumentLifecycleScope.DlsPcb, createdState.Scope);
         Assert.IsTrue(createdState.NativeContentDirty);
+        var newBoardBaseline = createdState.FileBaselines.Single(file => file.Path == boardPath);
+        Assert.IsTrue(newBoardBaseline.BaselineKnown);
+        Assert.IsFalse(newBoardBaseline.BaselineExists);
+        Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, newBoardBaseline.Status);
         Assert.IsFalse(File.Exists(boardPath), "Explicit native creation remains unsaved.");
         Assert.AreEqual(opened, await client.InvokeAsync<OpenDocument, OpenDocumentResponse>(open, token));
         async Task FailedSave()
@@ -114,6 +118,9 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue(File.Exists(boardPath));
         Assert.IsFalse((await ObserveLifecycleState(client, board, token)).NativeContentDirty);
+        var writtenBoardBaseline = (await ObserveLifecycleState(client, board, token)).FileBaselines.Single(file => file.Path == boardPath);
+        Assert.IsTrue(writtenBoardBaseline.BaselineKnown && writtenBoardBaseline.BaselineExists);
+        Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, writtenBoardBaseline.Status);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("This is the Linux native save fixture.");
         foreach (string protectedPath in new[] { boardPath, project })
         {

@@ -578,6 +578,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     pro.SetExt( FILEEXT::ProjectFileExtension );
 
     bool is_new = !wxFileName::IsFileReadable( fullFileName );
+    const auto creationBaseline = is_new ? FILE_CONTENT_BASELINE::Read( fullFileName ) : FILE_CONTENT_BASELINE{};
 
     wxString previousBoardFileName = GetBoard() ? GetBoard()->GetFileName() : wxString();
 
@@ -671,6 +672,8 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         GetBoard()->SetProject( &Prj() );
 
         GetBoard()->SetFileName( fullFileName );
+        if( creationBaseline.Known() && !creationBaseline.Exists() )
+            GetBoard()->SetFileBaseline( creationBaseline );
 
         OnModify();
     }

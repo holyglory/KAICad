@@ -22,6 +22,7 @@
 #include <sch_file_versions.h>
 #include <project/project_file.h>
 #include <api/native_state_digest.h>
+#include <api/native_file_observation.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <json_common.h>
 #include <project/net_settings.h>
@@ -1781,6 +1782,8 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
             digest.Add( "screen:" + id, state );
             result.set_native_content_dirty( result.native_content_dirty() || sheet->GetScreen()->IsContentModified() );
             files.insert( project().AbsolutePath( sheet->GetScreen()->GetFileName() ).ToStdString( wxConvUTF8 ) );
+            result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                    project().AbsolutePath( sheet->GetScreen()->GetFileName() ), sheet->GetScreen()->FileBaseline() ) );
         }
         NATIVE_STATE_DIGEST settings;
         settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
@@ -1790,6 +1793,8 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.set_disk_baseline_checked( false );
         for( const auto& file : files ) result.add_native_files( file );
         result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
         result.set_state_sha256( digest.Hex() );
         if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
                 || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )

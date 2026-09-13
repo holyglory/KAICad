@@ -30,6 +30,7 @@
 #include <api/api_utils.h>
 #include <api/api_server.h>
 #include <api/native_state_digest.h>
+#include <api/native_file_observation.h>
 #include <project/project_file.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <json_common.h>
@@ -256,6 +257,10 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
         result.set_disk_baseline_checked( false );
         result.add_native_files( project().AbsolutePath( board()->GetFileName() ).ToStdString( wxConvUTF8 ) );
         result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().AbsolutePath( board()->GetFileName() ), board()->FileBaseline() ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
         result.set_state_sha256( digest.Hex() );
         if( result.native_identity() != board()->m_Uuid.AsStdString() || sequence != board()->GetTimeStamp() )
         {

@@ -48,6 +48,14 @@ public sealed class DocumentStateToolTests
             var state = new DocumentLifecycleState { Document = target.Clone(), Scope = DocumentLifecycleScope.DlsPcb,
                 NativeIdentity = Guid.NewGuid().ToString("D"), Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 3 },
                 StateSha256 = new string('a', 64), ProjectSettingsIncluded = true };
+            state.NativeFiles.Add(Path.Combine(directory, "fixture.kicad_pcb"));
+            state.FileBaselines.Add(new NativeFileBaselineState
+            {
+                Path = state.NativeFiles[0], BaselinePath = state.NativeFiles[0],
+                BaselineKnown = true, BaselineExists = true, BaselineSha256 = new string('b', 64), BaselineBytes = 42,
+                CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('c', 64), CurrentBytes = 43,
+                Status = NativeFileBaselineStatus.NfbsChanged
+            });
             var transport = new StateTransport { State = state.Clone() };
             transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
             var registry = new InstanceRegistry(transport, directory);

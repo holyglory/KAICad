@@ -48,6 +48,28 @@ public sealed partial class NativeSessionTests
         }
         async Task Reopen(SchematicScreenData expected, string phase)
         {
+            if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("This is the Linux native save fixture.");
+            var beforeSave = await ObserveLifecycleState(client, document, token);
+            var persisted = beforeSave.NativeFiles.ToDictionary(path => path, File.ReadAllBytes);
+            string projectFile = Path.Combine(document.Project.Path, document.Project.Name + ".kicad_pro");
+            foreach (string protectedPath in new[] { projectFile, beforeSave.NativeFiles.First(path => path.EndsWith(".kicad_sch", StringComparison.Ordinal)) })
+            {
+                var mode = File.GetUnixFileMode(protectedPath);
+                try
+                {
+                    File.SetUnixFileMode(protectedPath, mode & ~(UnixFileMode.UserWrite | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite));
+                    using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    limit.CancelAfter(TimeSpan.FromSeconds(5));
+                    var failure = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                        client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, limit.Token));
+                    Assert.AreEqual(3, failure.Status);
+                    Assert.AreEqual(beforeSave, await ObserveLifecycleState(client, document, token),
+                        "Rejected schematic/project persistence must preserve state and dirty flags.");
+                    foreach (var (path, bytes) in persisted)
+                        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+                }
+                finally { File.SetUnixFileMode(protectedPath, mode); }
+            }
             await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
             await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
             await Same(expected, (await Read()).Data, phase);

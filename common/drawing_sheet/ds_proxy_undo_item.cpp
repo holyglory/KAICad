@@ -36,7 +36,7 @@ DS_PROXY_UNDO_ITEM::DS_PROXY_UNDO_ITEM( const EDA_DRAW_FRAME* aFrame ) :
     {
         m_pageInfo = aFrame->GetPageSettings();
         m_titleBlock = aFrame->GetTitleBlock();
-        m_drawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
+        m_drawingSheetFileName = aFrame->GetDrawingSheetFileName();
     }
 
     DS_DATA_MODEL& model = DS_DATA_MODEL::GetTheInstance();
@@ -67,7 +67,7 @@ void DS_PROXY_UNDO_ITEM::Restore( EDA_DRAW_FRAME* aFrame, KIGFX::VIEW* aView )
     {
         aFrame->SetPageSettings( m_pageInfo );
         aFrame->SetTitleBlock( m_titleBlock );
-        BASE_SCREEN::m_DrawingSheetFileName = m_drawingSheetFileName;
+        aFrame->SetDrawingSheetFileName( m_drawingSheetFileName );
     }
 
     DS_DATA_MODEL::GetTheInstance().SetPageLayout( TO_UTF8( m_layoutSerialization ) );

@@ -472,6 +472,11 @@ void KICAD_API_SERVER::RememberLoadedDocument( const kiapi::common::types::Docum
         m_lifecycle->RememberCleanState( state );
 }
 
+bool KICAD_API_SERVER::IsCleanCloseActive() const
+{
+    return m_lifecycle->IsCleanCloseActive();
+}
+
 void KICAD_API_SERVER::log( const std::string& aOutput )
 {
     FILE* fp = wxFopen( m_logFilePath.GetFullPath(), wxT( "a" ) );

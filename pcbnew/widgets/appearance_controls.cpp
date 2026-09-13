@@ -36,6 +36,8 @@
 #include <pcbnew_settings.h>
 #include <footprint_editor_settings.h>
 #include <project.h>
+#include <project/project_file.h>
+#include <project/net_settings.h>
 #include <project/project_local_settings.h>
 #include <settings/color_settings.h>
 #include <settings/settings_manager.h>
@@ -316,9 +318,17 @@ void NET_GRID_TABLE::updateNetColor( const NET_GRID_ENTRY& aNet )
     std::map<int, KIGFX::COLOR4D>& netColors  = renderSettings->GetNetColorMap();
 
     if( aNet.color != COLOR4D::UNSPECIFIED )
+    {
         netColors[aNet.code] = aNet.color;
+        if( NETINFO_ITEM* net = m_frame->GetBoard()->FindNet( aNet.code ) )
+            m_frame->Prj().GetProjectFile().NetSettings()->SetNetColorAssignment( net->GetNetname(), aNet.color );
+    }
     else
+    {
         netColors.erase( aNet.code );
+        if( NETINFO_ITEM* net = m_frame->GetBoard()->FindNet( aNet.code ) )
+            m_frame->Prj().GetProjectFile().NetSettings()->RemoveNetColorAssignment( net->GetNetname() );
+    }
 
     m_frame->GetCanvas()->GetView()->UpdateAllLayersColor();
     m_frame->GetCanvas()->RedrawRatsnest();

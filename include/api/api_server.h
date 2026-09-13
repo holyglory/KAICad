@@ -77,6 +77,7 @@ public:
     // handler document validation.
     API_RESULT DispatchToHandlers( ApiRequest& aRequest );
     void RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& aDocument );
+    bool IsCleanCloseActive() const;
 
     void SetReadyToReply( bool aReady = true )
     {

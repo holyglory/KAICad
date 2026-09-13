@@ -1082,6 +1082,7 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( projectFile.FileExists() )
     {
+        StoreProjectEditorState();
         bool projectSaved = GetSettingsManager()->SaveProject();
         if( automation && !projectSaved )
         {
@@ -1091,6 +1092,7 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     }
     else if( aChangeProject )
     {
+        StoreProjectEditorState();
         Prj().SetReadOnly( false );
         GetSettingsManager()->SaveProjectAs( projectFile.GetFullPath() );
     }

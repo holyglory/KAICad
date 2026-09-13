@@ -13,6 +13,7 @@ public:
     API_RESULT Handle( ApiRequest& aRequest, const std::string& aProcessEpoch, const DISPATCH& aDispatch );
     void RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& aState );
     void AnnotateCleanState( kiapi::automation::v1::DocumentLifecycleState& aState ) const;
+    bool IsCleanCloseActive() const { return m_cleanCloseActive; }
 
 private:
     struct RECEIPT
@@ -28,5 +29,6 @@ private:
     // checks prevent a replaced container inheriting its predecessor's checkpoint.
     struct CHECKPOINT { std::string epoch, identity, sha; };
     std::map<int, CHECKPOINT> m_cleanByScope;
+    bool m_cleanCloseActive = false;
 };
 #endif

@@ -883,6 +883,11 @@ void NET_SETTINGS::SetNetColorAssignment( const wxString& netName, const KIGFX::
 }
 
 
+void NET_SETTINGS::RemoveNetColorAssignment( const wxString& name )
+{
+    m_netColorAssignments.erase( name );
+}
+
 const std::map<wxString, KIGFX::COLOR4D>& NET_SETTINGS::GetNetColorAssignments() const
 {
     return m_netColorAssignments;

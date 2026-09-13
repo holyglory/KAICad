@@ -21,6 +21,7 @@
  */
 
 #include <pcb_edit_frame.h>
+#include <pcb_project_editor_state.h>
 #include <tool/tool_manager.h>
 #include <tools/pcb_selection_tool.h>
 #include <board_design_settings.h>
@@ -147,33 +148,10 @@ void PCB_EDIT_FRAME::SaveProjectLocalSettings()
     if( !fn.IsDirWritable() )
         return;
 
-    PROJECT_FILE& project = Prj().GetProjectFile();
-
     // save some local settings like appearance control settings
     saveProjectSettings();
 
-    // TODO: Can this be pulled out of BASE_SCREEN?
-    project.m_BoardDrawingSheetFile = BASE_SCREEN::m_DrawingSheetFileName;
-
-    project.m_LayerPresets = m_appearancePanel->GetUserLayerPresets();
-    project.m_Viewports = m_appearancePanel->GetUserViewports();
-
-    GetBoard()->RecordDRCExclusions();
-
-    // Save render settings that aren't stored in PCB_DISPLAY_OPTIONS
-
-    std::shared_ptr<NET_SETTINGS>& netSettings = project.NetSettings();
-    const NETINFO_LIST&            nets = GetBoard()->GetNetInfo();
-    KIGFX::RENDER_SETTINGS*        rs = GetCanvas()->GetView()->GetPainter()->GetSettings();
-    KIGFX::PCB_RENDER_SETTINGS*    renderSettings = static_cast<KIGFX::PCB_RENDER_SETTINGS*>( rs );
-
-    netSettings->ClearNetColorAssignments();
-
-    for( const auto& [ netcode, color ] : renderSettings->GetNetColorMap() )
-    {
-        if( NETINFO_ITEM* net = nets.GetNetItem( netcode ) )
-            netSettings->SetNetColorAssignment( net->GetNetname(), color );
-    }
+    StoreProjectEditorState();
 
     /**
      * The below automatically saves the project on exit, which is what we want to do if the project
@@ -242,4 +220,42 @@ void PCB_EDIT_FRAME::saveProjectSettings()
         if( PCB_SELECTION_TOOL* selTool = toolMgr->GetTool<PCB_SELECTION_TOOL>() )
             localSettings.m_PcbSelectionFilter = selTool->GetFilter();
     }
+}
+
+wxString PCB_EDIT_FRAME::GetDrawingSheetFileName() const
+{
+    return Prj().GetProjectFile().m_BoardDrawingSheetFile;
+}
+
+void PCB_EDIT_FRAME::SetDrawingSheetFileName( const wxString& name )
+{
+    Prj().GetProjectFile().m_BoardDrawingSheetFile = name;
+}
+
+nlohmann::json PCB_EDIT_FRAME::CaptureProjectEditorState() const
+{
+    return PCB_PROJECT_EDITOR_STATE::Capture( *GetBoard(), Prj().GetProjectFile(),
+            m_appearancePanel->GetUserLayerPresets(), m_appearancePanel->GetUserViewports() );
+}
+
+void PCB_EDIT_FRAME::StoreProjectEditorState()
+{
+    // Validate the same pure projection used for admission before changing live owners.
+    (void) CaptureProjectEditorState();
+    PROJECT_FILE& project = Prj().GetProjectFile();
+    project.m_LayerPresets = m_appearancePanel->GetUserLayerPresets();
+    project.m_Viewports = m_appearancePanel->GetUserViewports();
+    GetBoard()->RecordDRCExclusions();
+}
+
+void PCB_EDIT_FRAME::RefreshProjectNetColors()
+{
+    auto* settings = static_cast<KIGFX::PCB_RENDER_SETTINGS*>( GetCanvas()->GetView()->GetPainter()->GetSettings() );
+    auto& colors = settings->GetNetColorMap();
+    colors.clear();
+    for( const auto& [name, color] : Prj().GetProjectFile().NetSettings()->GetNetColorAssignments() )
+        if( color != COLOR4D::UNSPECIFIED )
+            if( const NETINFO_ITEM* net = GetBoard()->FindNet( name ) ) colors[net->GetNetCode()] = color;
+    GetCanvas()->GetView()->UpdateAllLayersColor();
+    GetCanvas()->RedrawRatsnest();
 }

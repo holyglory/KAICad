@@ -30,6 +30,7 @@
 #include <drc/drc_engine.h>
 #include <drc/drc_rtree.h>
 #include <board_design_settings.h>
+#include <pcb_project_editor_state.h>
 #include <board_commit.h>
 #include <board.h>
 #include <collectors.h>
@@ -397,18 +398,7 @@ void BOARD::UpdateRatsnestExclusions()
 
 void BOARD::RecordDRCExclusions()
 {
-    m_designSettings->m_DrcExclusions.clear();
-
-    for( PCB_MARKER* marker : m_markers )
-    {
-        // DRC_EXCLUSION::FromMarker() dereferences the RC_ITEM, so a marker carrying none would
-        // fault while persisting exclusions during a save or window close.
-        if( !marker->GetRCItem() )
-            continue;
-
-        if( marker->IsExcluded() )
-            m_designSettings->m_DrcExclusions.insert( DRC_EXCLUSION::FromMarker( *marker ) );
-    }
+    m_designSettings->m_DrcExclusions = PCB_PROJECT_EDITOR_STATE::Exclusions( *this );
 
     if( m_project )
     {
@@ -424,7 +414,7 @@ void BOARD::RecordDRCExclusions()
 std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
 {
     std::set<DRC_EXCLUSION, DRC_EXCLUSION_COMPARE> exclusions = m_designSettings->m_DrcExclusions;
-    m_designSettings->m_DrcExclusions.clear();
+    std::set<DRC_EXCLUSION, DRC_EXCLUSION_COMPARE> represented;
 
     for( PCB_MARKER* marker : GetBoard()->Markers() )
     {
@@ -433,7 +423,7 @@ std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
         if( auto it = exclusions.find( lookup ); it != exclusions.end() )
         {
             marker->SetExcluded( true, it->GetComment() );
-            m_designSettings->m_DrcExclusions.insert( *it );
+            represented.insert( *it );
         }
     }
 
@@ -443,7 +433,7 @@ std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
     {
         for( const DRC_EXCLUSION& exclusion : exclusions )
         {
-            if( m_designSettings->m_DrcExclusions.contains( exclusion ) )
+            if( represented.contains( exclusion ) )
                 continue;
 
             PCB_MARKER* marker = PCB_MARKER::FromProto( exclusion.ToProto().marker() );

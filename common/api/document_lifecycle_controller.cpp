@@ -206,6 +206,13 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             ApiRequest envelope;
             envelope.mutable_header()->CopyFrom( aEnvelope.header() );
             envelope.mutable_message()->PackFrom( closing );
+            struct CLOSE_SCOPE
+            {
+                bool& flag;
+                bool previous;
+                explicit CLOSE_SCOPE( bool& value ) : flag( value ), previous( value ) { flag = true; }
+                ~CLOSE_SCOPE() { flag = previous; }
+            } closeScope( m_cleanCloseActive );
             attemptedSave = true; // Any exception after native close dispatch is an uncertain operation.
             auto closed = aDispatch( envelope );
             if( !closed || closed->status().status() != ApiStatusCode::AS_OK )

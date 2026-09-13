@@ -227,6 +227,9 @@ message DrcSeveritySetting
 
 message DrcExclusion
 {
+  // In this persisted exclusion only, a nil UUID in marker.items explicitly
+  // refers to the owning board. Live DrcMarker observations use its real UUID.
+  // The board UUID is not persisted by the native board file format.
   DrcMarker marker = 1;
   string comment = 2;
 }

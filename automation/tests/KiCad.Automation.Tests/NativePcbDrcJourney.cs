@@ -139,9 +139,25 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
         var reloaded = await Read();
         var restored = reloaded.Findings.Single(finding => finding.Excluded && finding.Comment == comment);
-        Assert.AreEqual(excluded.Marker, restored.Marker, "Persisted exclusion must restore the exact violation, not a nearby one.");
+        var expectedMarker = excluded.Marker.Clone();
+        // The actual project record must explicitly identify the parent board;
+        // never infer an owner from coordinates or an unresolved old UUID.
+        var persistedItems = declared[0]!["marker"]!["items"]!.AsArray();
+        Assert.AreEqual(expectedMarker.Items.Count, persistedItems.Count);
+        for (int index = 0; index < expectedMarker.Items.Count; ++index)
+            if (persistedItems[index]!["value"]!.GetValue<string>() == Guid.Empty.ToString("D"))
+            {
+                Assert.AreEqual(changed.Revision.Epoch, expectedMarker.Items[index].Value);
+                expectedMarker.Items[index].Value = reloaded.Revision.Epoch;
+            }
+        Assert.AreEqual(expectedMarker, restored.Marker, "Persisted exclusion must restore the exact violation, not a nearby one.");
         await Open(); await Picture("reloaded");
-        // Only the restored excluded marker exists before another DRC run.
+        // A real rerun must match the persisted board-scoped exclusion too.
+        NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
+            clickFromRight: 60, clickFromBottom: 45);
+        var repeated = await WaitFor(state => state.Findings.Count == initial.Findings.Count);
+        Assert.AreEqual(expectedMarker, repeated.Findings.Single(finding => finding.Excluded && finding.Comment == comment).Marker);
+        await Picture("rerun");
         await Menu(false);
         await WaitFor(state => state.Findings.All(finding => !finding.Excluded));
         await Picture("removed");

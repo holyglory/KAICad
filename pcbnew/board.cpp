@@ -436,7 +436,11 @@ std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
             if( represented.contains( exclusion ) )
                 continue;
 
-            PCB_MARKER* marker = PCB_MARKER::FromProto( exclusion.ToProto().marker() );
+            auto persistedMarker = exclusion.ToProto().marker();
+            for( auto& item : *persistedMarker.mutable_items() )
+                if( item.value() == niluuid.AsStdString() )
+                    item.set_value( m_Uuid.AsStdString() );
+            PCB_MARKER* marker = PCB_MARKER::FromProto( persistedMarker );
 
             if( !marker )
                 continue;

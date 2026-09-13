@@ -717,6 +717,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTING
             }
         }
 
+        FILE_WRITE_OBSERVER::BeforeWrite( path.GetFullPath() );
         if( !KIPLATFORM::IO::AtomicWriteFile( path.GetFullPath(), payload.data(), payload.size(),
                                               &writeError ) )
         {
@@ -727,6 +728,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTING
         else
         {
             m_fileBaseline = FILE_CONTENT_BASELINE::FromBytes( path.GetFullPath(), payload );
+            FILE_WRITE_OBSERVER::AfterWrite( m_fileBaseline );
         }
     }
     catch( nlohmann::json::exception& error )

@@ -22,23 +22,7 @@ public sealed class DocumentStateTools(InstanceRegistry registry)
             try { document = SchematicJson.Parser.Parse<DocumentSpecifier>(documentJson); }
             catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
             { throw new AutomationException("invalid_document_target", "Provide a valid native document descriptor: " + error.Message); }
-            if (document.Project is null || string.IsNullOrWhiteSpace(document.Project.Name)
-                || !Path.IsPathFullyQualified(document.Project.Path))
-                throw new AutomationException("invalid_document_target", "An explicit project name and absolute project directory are required.");
-            if ((int)document.Type == 1)
-            {
-                if (document.SheetPath is null || document.SheetPath.Path.Count == 0
-                    || document.SheetPath.Path.Any(id => !Guid.TryParseExact(id.Value, "D", out _)))
-                    throw new AutomationException("invalid_document_target", "An exact native sheet-instance path is required.");
-            }
-            else if ((int)document.Type == 3)
-            {
-                if (string.IsNullOrWhiteSpace(document.BoardFilename)
-                    || Path.GetFileName(document.BoardFilename) != document.BoardFilename
-                    || Path.GetExtension(document.BoardFilename) != ".kicad_pcb")
-                    throw new AutomationException("invalid_document_target", "The native board filename is required.");
-            }
-            else throw new AutomationException("unsupported_document_type", "This state query currently supports schematic and PCB documents.");
+            ValidateTarget(document);
 
             var state = await registry.Client(instanceId).InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                 new() { Document = document }, cancellationToken);
@@ -50,4 +34,25 @@ public sealed class DocumentStateTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_native_state", "Native state did not match the requested document or digest contract.");
             return SchematicJson.Formatter.Format(state);
         });
+
+    internal static void ValidateTarget(DocumentSpecifier? document)
+    {
+        if (document?.Project is null || string.IsNullOrWhiteSpace(document.Project.Name)
+            || !Path.IsPathFullyQualified(document.Project.Path))
+            throw new AutomationException("invalid_document_target", "An explicit project name and absolute project directory are required.");
+        if ((int)document.Type == 1)
+        {
+            if (document.SheetPath is null || document.SheetPath.Path.Count == 0
+                || document.SheetPath.Path.Any(id => !Guid.TryParseExact(id.Value, "D", out _)))
+                throw new AutomationException("invalid_document_target", "An exact native sheet-instance path is required.");
+        }
+        else if ((int)document.Type == 3)
+        {
+            if (string.IsNullOrWhiteSpace(document.BoardFilename)
+                || Path.GetFileName(document.BoardFilename) != document.BoardFilename
+                || Path.GetExtension(document.BoardFilename) != ".kicad_pcb")
+                throw new AutomationException("invalid_document_target", "The native board filename is required.");
+        }
+        else throw new AutomationException("unsupported_document_type", "This state query currently supports schematic and PCB documents.");
+    }
 }

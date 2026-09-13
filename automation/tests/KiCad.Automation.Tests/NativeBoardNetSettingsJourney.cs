@@ -115,7 +115,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                 client.InvokeAsync<GetNets, NetsResponse>(new() { Board = wrong }, token))).Status);
         }
-        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = board }, token);
+        await SaveCheckedThroughMcp(client, board, evidence, token);
         Assert.IsTrue(File.Exists(boardPath));
         Assert.IsFalse((await ObserveLifecycleState(client, board, token)).NativeContentDirty);
         var writtenBoardBaseline = (await ObserveLifecycleState(client, board, token)).FileBaselines.Single(file => file.Path == boardPath);

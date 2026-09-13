@@ -71,6 +71,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<SchematicXmlTools>()
     .WithTools<DocumentTools>()
     .WithTools<DocumentStateTools>()
+    .WithTools<DocumentLifecycleTools>()
     .WithTools<KnowledgeTools>()
     .WithTools<PlacementTools>()
     .WithTools<RecoveryTools>()

@@ -116,4 +116,34 @@ BOOST_AUTO_TEST_CASE( OutputBaselineUsesCommittedBytesNotSubsequentDiskContents 
     BOOST_CHECK( writer.CommittedBaseline().Check( directory.File() ) == FILE_BASELINE_CHECK::CHANGED );
 }
 
+BOOST_AUTO_TEST_CASE( CommitObserverRejectsBeforeReplacementAndRestoresItsScope )
+{
+    BASELINE_DIRECTORY directory;
+    directory.Write( "original" );
+    const auto before = FILE_CONTENT_BASELINE::Read( directory.File() );
+    unsigned rejected = 0, committed = 0;
+    {
+        FILE_WRITE_OBSERVER observer( [&]( const wxString& ) { ++rejected; THROW_IO_ERROR( "Fixture rejection" ); },
+                                      [&]( const FILE_CONTENT_BASELINE& ) { ++committed; } );
+        PRETTIFIED_FILE_OUTPUTFORMATTER output( directory.File() );
+        output.Print( "(changed)" );
+        BOOST_CHECK_THROW( output.Finish(), IO_ERROR );
+        BOOST_CHECK( before.Check( directory.File() ) == FILE_BASELINE_CHECK::UNCHANGED );
+        BOOST_CHECK( !output.CommittedBaseline().Known() );
+    }
+    BOOST_CHECK_EQUAL( rejected, 1 ); BOOST_CHECK_EQUAL( committed, 0 );
+    FILE_CONTENT_BASELINE observed;
+    {
+        FILE_WRITE_OBSERVER observer( {}, [&]( const FILE_CONTENT_BASELINE& value ) { ++committed; observed = value; } );
+        PRETTIFIED_FILE_OUTPUTFORMATTER output( directory.File() );
+        output.Print( "(changed)" );
+        BOOST_REQUIRE( output.Finish() );
+    }
+    BOOST_CHECK_EQUAL( rejected, 1 ); BOOST_CHECK_EQUAL( committed, 1 );
+    BOOST_CHECK( observed.Check( directory.File() ) == FILE_BASELINE_CHECK::UNCHANGED );
+    PRETTIFIED_FILE_OUTPUTFORMATTER ordinary( directory.File() );
+    ordinary.Print( "(normal-save)" ); BOOST_REQUIRE( ordinary.Finish() );
+    BOOST_CHECK_EQUAL( committed, 1 );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

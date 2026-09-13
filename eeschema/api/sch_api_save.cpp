@@ -20,7 +20,6 @@
 #include <api/sch_api_save.h>
 
 #include <base_screen.h>
-#include <kiplatform/io.h>
 #include <pgm_base.h>
 #include <project.h>
 #include <project/project_file.h>
@@ -47,7 +46,13 @@ bool WritableDestination( const wxString& aPath )
 {
     wxFileName path( aPath );
     if( aPath.empty() || !path.IsOk() || !path.IsAbsolute() || wxDirExists( aPath ) ) return false;
-    return path.FileExists() ? path.IsFileWritable() : path.IsDirWritable();
+    if( path.FileExists() ) return path.IsFileWritable();
+    if( path.DirExists() ) return path.IsDirWritable();
+    // Preserve SaveSheetToFile's existing single-directory creation workflow.
+    wxFileName parent( path.GetPath(), wxEmptyString );
+    if( parent.GetDirCount() == 0 ) return false;
+    parent.RemoveLastDir();
+    return parent.DirExists() && parent.IsDirWritable();
 }
 }
 

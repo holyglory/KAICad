@@ -81,6 +81,7 @@
 #include <project.h>
 #include <tool/actions.h>
 #include <tool/tool_manager.h>
+#include <tools/drc_tool.h>
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <tools/zone_filler_tool.h>
@@ -119,6 +120,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<SaveDocument, Empty>( &API_HANDLER_PCB::handleSaveDocument );
     registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
             &API_HANDLER_PCB::handleReadLifecycleState );
+    registerHandler<kiapi::automation::v1::ReadPcbDrcState, kiapi::automation::v1::PcbDrcState>(
+            &API_HANDLER_PCB::handleReadDrcState );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -282,6 +285,81 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
     }
 }
 
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> API_HANDLER_PCB::handleReadDrcState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcState>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    kiapi::automation::v1::PcbDrcState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    result.set_process_epoch( Pgm().GetApiServer().Token() );
+    result.mutable_revision()->set_epoch( board()->m_Uuid.AsStdString() );
+    const int sequence = board()->GetTimeStamp();
+    if( sequence < 0 )
+    {
+        ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB observation counter requires a new document epoch" );
+        return tl::unexpected( error );
+    }
+    result.mutable_revision()->set_sequence( sequence );
+    if( frame() && frame()->GetToolManager() )
+        if( const DRC_TOOL* tool = frame()->GetToolManager()->GetTool<DRC_TOOL>() )
+            result.set_running( tool->IsDRCRunning() );
+    result.set_results_freshness_known( false );
+    if( result.running() ) return result;
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    std::map<std::string, PCB_MARKER*> markers;
+    for( PCB_MARKER* marker : board()->Markers() )
+    {
+        if( !marker || !markers.emplace( marker->m_Uuid.AsStdString(), marker ).second )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Native DRC inventory contains a missing or duplicate marker" );
+            return tl::unexpected( error );
+        }
+    }
+    for( const auto& [id, marker] : markers )
+    {
+        if( !marker->GetRCItem() )
+        {
+            ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "A native DRC marker has no rule-check data" );
+            return tl::unexpected( error );
+        }
+        google::protobuf::Any encoded;
+        try
+        {
+            marker->Serialize( encoded );
+        }
+        catch( const std::exception& error )
+        {
+            ApiResponseStatus failure;
+            failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            failure.set_error_message( std::string( "Native DRC marker serialization failed: " )
+                                       + error.what() );
+            return tl::unexpected( failure );
+        }
+        auto* finding = result.add_findings();
+        if( !encoded.UnpackTo( finding->mutable_marker() ) )
+        {
+            ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Native DRC marker serialization failed" );
+            return tl::unexpected( error );
+        }
+        finding->set_native_id( id ); finding->set_excluded( marker->IsExcluded() );
+        finding->set_comment( marker->GetComment().ToStdString( wxConvUTF8 ) );
+    }
+    if( sequence != board()->GetTimeStamp() || result.revision().epoch() != board()->m_Uuid.AsStdString() )
+    {
+        ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "PCB changed during DRC marker observation" );
+        return tl::unexpected( error );
+    }
+    result.set_marker_snapshot_complete( true );
+    return result;
+}
 
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(
         const HANDLER_CONTEXT<SaveDocument>& aCtx )

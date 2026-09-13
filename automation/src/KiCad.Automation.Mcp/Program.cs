@@ -72,6 +72,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<DocumentTools>()
     .WithTools<DocumentStateTools>()
     .WithTools<DocumentLifecycleTools>()
+    .WithTools<PcbDrcTools>()
     .WithTools<KnowledgeTools>()
     .WithTools<PlacementTools>()
     .WithTools<RecoveryTools>()

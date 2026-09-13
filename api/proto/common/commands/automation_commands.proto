@@ -9,6 +9,29 @@ import "common/types/base_types.proto";
 import "common/types/embedded_files.proto";
 import "google/protobuf/any.proto";
 import "schematic/schematic_types.proto";
+import "board/board_rules.proto";
+
+message ReadPcbDrcState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+message PcbDrcFinding {
+  string native_id = 1;
+  kiapi.board.DrcMarker marker = 2;
+  bool excluded = 3;
+  string comment = 4;
+}
+
+// Existing native marker inventory, not an assertion of fresh verification.
+message PcbDrcState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  string process_epoch = 3;
+  bool running = 4;
+  bool marker_snapshot_complete = 5;
+  bool results_freshness_known = 6;
+  repeated PcbDrcFinding findings = 7;
+}
 
 message ReadSchematicMetadata {
   kiapi.common.types.DocumentSpecifier document = 1;

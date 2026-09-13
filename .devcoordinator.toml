@@ -1800,7 +1800,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.net-settings-contract.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-contract"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~PcbDrcToolTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/net-settings-contract"]
 retained_artifacts = [{ name = "net-settings-contract", path = "automation/artifacts/net-settings-contract", max_bytes = 16777216 }]
 
 [test.netclass-native-codec]

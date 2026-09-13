@@ -715,6 +715,9 @@ bool PGM_KICAD::OnPgmInit()
                             return fail( AS_BUSY, "Close the associated simulator or symbol editor explicitly first" );
                         if( type == types::DOCTYPE_PCB && Kiway.Player( FRAME_FOOTPRINT_EDITOR, false ) )
                             return fail( AS_BUSY, "Close the associated footprint editor explicitly first" );
+                        if( type == types::DOCTYPE_PCB
+                                && wxWindow::FindWindowByName( QUALIFIED_VIEWER3D_FRAMENAME( player ) ) )
+                            return fail( AS_BUSY, "Close the associated 3D viewer explicitly before closing this document" );
 
                         kiapi::automation::v1::ReadDocumentLifecycleState read;
                         read.mutable_document()->CopyFrom( request.document() );

@@ -35,11 +35,12 @@ public sealed class PcbDrcToolTests
                 CheckedRevision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 8 },
                 Status = (PcbDrcJobStatus)3,
                 Progress = 1,
-                ResultsFresh = true
+                ResultsFresh = true, WorkerFinished = true, SnapshotComplete = true
             };
             string json = SchematicJson.Formatter.Format(document);
+            string revisionJson = SchematicJson.Formatter.Format(transport.State.CheckedRevision);
             var started = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
-                false, false, false, default);
+                false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsFalse(started.IsError ?? false, started.ToString());
             Assert.IsTrue(started.StructuredContent.HasValue);
             Assert.AreEqual(transport.State,
@@ -56,9 +57,35 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue(stale.IsError ?? false);
             Assert.AreEqual(3, transport.Calls);
             var badOperation = await tool.Start(transport.Session.InstanceId, json,
-                Guid.Empty.ToString("D"), false, false, false, default);
+                Guid.Empty.ToString("D"), false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsTrue(badOperation.IsError ?? false);
             Assert.AreEqual(3, transport.Calls);
+            var valid = transport.State.Clone();
+            for (int variant = 0; variant < 7; ++variant)
+            {
+                transport.State = valid.Clone();
+                switch (variant)
+                {
+                    case 0: transport.State.JobId = Guid.NewGuid().ToString("D"); break;
+                    case 1: transport.State.WorkerFinished = false; break;
+                    case 2: transport.State.SnapshotComplete = false; break;
+                    case 3: transport.State.Progress = 0; break;
+                    case 4: transport.State.Status = (PcbDrcJobStatus)4; break;
+                    case 5: transport.State.OperationId = Guid.Empty.ToString("D"); break;
+                    case 6: transport.State.CheckedRevision.Epoch = Guid.Empty.ToString("D"); break;
+                }
+                Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                    transport.Session.Epoch, default)).IsError, $"Invalid native state variant {variant} was accepted");
+            }
+            transport.State = valid.Clone();
+            transport.State.Status = (PcbDrcJobStatus)2;
+            transport.State.WorkerFinished = false; transport.State.Progress = 0.2;
+            transport.State.ResultsFresh = false; transport.State.CancellationRequested = true;
+            Assert.IsFalse((await tool.Cancel(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false, "Cancellation acknowledgement may still be running.");
+            transport.State.Status = (PcbDrcJobStatus)4; transport.State.WorkerFinished = true;
+            Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false);
         }
         finally { Directory.Delete(directory, true); }
     }

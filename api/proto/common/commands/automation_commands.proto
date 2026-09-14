@@ -41,6 +41,8 @@ message StartPcbDrcJob {
   bool refill_zones = 3;
   bool report_all_track_errors = 4;
   bool test_footprints = 5;
+  DocumentRevision expected_revision = 6;
+  string process_epoch = 7;
 }
 
 message ReadPcbDrcJob {
@@ -79,6 +81,11 @@ message PcbDrcJobState {
   string error_message = 10;
   bool results_fresh = 11;
   repeated PcbDrcFinding findings = 12;
+  // A request to stop is not a terminal cancellation receipt.
+  bool cancellation_requested = 13;
+  bool worker_finished = 14;
+  // False until all declared project/rule dependencies are captured exactly.
+  bool snapshot_complete = 15;
 }
 
 message ReadSchematicMetadata {

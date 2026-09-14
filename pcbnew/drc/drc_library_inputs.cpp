@@ -5,6 +5,10 @@
 #include <footprint_library_adapter.h>
 #include <libraries/library_table.h>
 #include <progress_reporter.h>
+#include <api/native_state_digest.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <json_common.h>
+#include <richio.h>
 #include <set>
 #include <stdexcept>
 
@@ -12,6 +16,28 @@ const DRC_LIBRARY_INPUTS::ENTRY* DRC_LIBRARY_INPUTS::Find( const LIB_ID& aId ) c
 {
     auto found = m_entries.find( aId );
     return found == m_entries.end() ? nullptr : &found->second;
+}
+
+std::string DRC_LIBRARY_INPUTS::ContentFingerprint() const
+{
+    NATIVE_STATE_DIGEST digest;
+    for( const auto& [id, entry] : m_entries )
+    {
+        std::string definition;
+        if( entry.footprint )
+        {
+            PCB_IO_KICAD_SEXPR writer( CTL_FOR_LIBRARY );
+            STRING_FORMATTER output;
+            writer.SetOutputFormatter( &output );
+            writer.Format( entry.footprint.get() );
+            definition = output.GetString();
+        }
+        // JSON provides unambiguous boundaries even for arbitrary library names,
+        // source URIs and definition strings. Map traversal fixes entry order.
+        digest.Append( nlohmann::json( { std::string( id.Format().c_str() ),
+                static_cast<int>( entry.status ), entry.uri.utf8_string(), definition } ).dump() );
+    }
+    return digest.Hex();
 }
 
 std::shared_ptr<const DRC_LIBRARY_INPUTS> DRC_LIBRARY_INPUTS::Capture(

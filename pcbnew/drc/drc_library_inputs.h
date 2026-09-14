@@ -5,6 +5,7 @@
 #include <lib_id.h>
 #include <map>
 #include <memory>
+#include <string>
 class BOARD;
 class FOOTPRINT;
 class FOOTPRINT_LIBRARY_ADAPTER;
@@ -28,6 +29,9 @@ public:
             const BOARD& aBoard, FOOTPRINT_LIBRARY_ADAPTER& aAdapter, PROGRESS_REPORTER* aReporter = nullptr );
     const ENTRY* Find( const LIB_ID& aId ) const;
     size_t Size() const { return m_entries.size(); }
+    // Stable across fresh native loads: library serialization omits generated
+    // object UUIDs, but preserves every persisted library-definition property.
+    std::string ContentFingerprint() const;
 
 private:
     std::map<LIB_ID, ENTRY> m_entries;

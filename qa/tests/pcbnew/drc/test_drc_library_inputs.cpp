@@ -112,6 +112,18 @@ BOOST_FIXTURE_TEST_CASE( CapturedLibraryOutlivesAdapterAndDoesNotFollowLaterEdit
                    == VECTOR2I( 800000, 800000 ) );
     BOOST_CHECK( Check( board, before ).empty() );
 
+    const std::string originalFingerprint = before->ContentFingerprint();
+    BOOST_CHECK_EQUAL( originalFingerprint.size(), 64 );
+    {
+        LIBRARY_MANAGER manager; Load( manager );
+        FOOTPRINT_LIBRARY_ADAPTER adapter( manager );
+        auto loaded = adapter.LoadOne( nickname );
+        BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+        auto repeated = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+        BOOST_REQUIRE( repeated );
+        BOOST_CHECK_EQUAL( repeated->ContentFingerprint(), originalFingerprint );
+    }
+
     const auto footprintPath = scratch.GetPath() / "local.pretty" / "Part.kicad_mod";
     const auto timestamp = std::filesystem::last_write_time( footprintPath );
     const auto bytes = std::filesystem::file_size( footprintPath );
@@ -128,6 +140,8 @@ BOOST_FIXTURE_TEST_CASE( CapturedLibraryOutlivesAdapterAndDoesNotFollowLaterEdit
         after = DRC_LIBRARY_INPUTS::Capture( board, adapter );
     }
     BOOST_REQUIRE( after );
+    BOOST_CHECK_NE( after->ContentFingerprint(), originalFingerprint );
+    BOOST_CHECK_EQUAL( before->ContentFingerprint(), originalFingerprint );
     BOOST_REQUIRE( after->Find( original.GetFPID() )->footprint );
     BOOST_REQUIRE_MESSAGE( after->Find( original.GetFPID() )->footprint->Pads().front()->GetSize( F_Cu )
                            == VECTOR2I( 1400000, 1400000 ),
@@ -136,6 +150,46 @@ BOOST_FIXTURE_TEST_CASE( CapturedLibraryOutlivesAdapterAndDoesNotFollowLaterEdit
     auto mismatches = Check( board, after );
     BOOST_REQUIRE_EQUAL( mismatches.size(), 1 );
     BOOST_CHECK_EQUAL( mismatches.front(), DRCE_LIB_FOOTPRINT_MISMATCH );
+}
+
+BOOST_FIXTURE_TEST_CASE( LibraryFingerprintTracksDefinitionsAndAvailabilityNotPlacedObjectIds, LIBRARY_FIXTURE )
+{
+    BOARD board;
+    auto* placed = Place( board, original.GetFPID() );
+    LIBRARY_MANAGER manager; Load( manager );
+    FOOTPRINT_LIBRARY_ADAPTER adapter( manager );
+    auto loaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+    auto first = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( first );
+    const auto fingerprint = first->ContentFingerprint();
+    placed->SetUuid( KIID() );
+    placed->SetPosition( { 900000, 700000 } );
+    Place( board, original.GetFPID() ); // Multiple instances share one dependency.
+    auto repeated = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( repeated );
+    BOOST_CHECK_EQUAL( repeated->ContentFingerprint(), fingerprint );
+
+    original.SetLibDescription( "changed library definition" );
+    io.FootprintSave( path, &original );
+    auto description = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( description );
+    BOOST_CHECK_NE( description->ContentFingerprint(), fingerprint );
+    original.SetLibDescription( "" );
+    io.FootprintSave( path, &original );
+    auto restored = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( restored );
+    BOOST_CHECK_EQUAL( restored->ContentFingerprint(), fingerprint );
+    BOOST_REQUIRE( std::filesystem::remove( scratch.GetPath() / "local.pretty" / "Part.kicad_mod" ) );
+    auto absent = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( absent );
+    BOOST_CHECK( absent->Find( original.GetFPID() )->status
+                 == DRC_LIBRARY_INPUTS::STATUS::UNAVAILABLE_FOOTPRINT );
+    BOOST_CHECK_NE( absent->ContentFingerprint(), fingerprint );
+    io.FootprintSave( path, &original );
+    auto recovered = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( recovered );
+    BOOST_CHECK_EQUAL( recovered->ContentFingerprint(), fingerprint );
 }
 
 BOOST_FIXTURE_TEST_CASE( MissingDisabledAndUnavailableInputsAreExplicitAndCancellationIsAtomic, LIBRARY_FIXTURE )

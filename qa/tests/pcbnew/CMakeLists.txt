@@ -209,6 +209,7 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_document_snapshot.cpp
     drc/test_drc_library_inputs.cpp
     drc/test_drc_drawing_sheet_inputs.cpp
+    drc/test_drc_captured_rules.cpp
     drc/test_pcb_drc_job_lifecycle.cpp
     drc/test_drc_via_dangling.cpp
     drc/test_drc_keepout_disallow.cpp
@@ -534,6 +535,7 @@ add_pcbnew_test_group( drc_provider_isolation "DrcProviderIsolation" )
 add_pcbnew_test_group( drc_document_snapshot "DrcDocumentSnapshot" )
 add_pcbnew_test_group( drc_library_inputs "DrcLibraryInputs" )
 add_pcbnew_test_group( drc_drawing_sheet_inputs "DrcDrawingSheetInputs" )
+add_pcbnew_test_group( drc_captured_rules "DrcCapturedRules" )
 add_pcbnew_test_group( footprint_library_adapter "FootprintLibraryAdapter" )
 add_pcbnew_test_group( drc_job_lifecycle "PcbDrcJobLifecycle" )
 
@@ -606,6 +608,7 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!DrcDocumentSnapshot\
 :!DrcLibraryInputs\
 :!DrcDrawingSheetInputs\
+:!DrcCapturedRules\
 :!FootprintLibraryAdapter\
 :!PcbDrcJobLifecycle\
 :!PlanegcsSmokeSolve\

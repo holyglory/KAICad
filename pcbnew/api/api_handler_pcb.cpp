@@ -59,6 +59,7 @@
 #include <pcb_textbox.h>
 #include <pcb_track.h>
 #include <pcbnew_id.h>
+#include <pcbnew_settings.h>
 #include <pcb_marker.h>
 #include <pcb_point.h>
 #include <kiway.h>
@@ -383,7 +384,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
         error.set_error_message( "Native DRC requires initialized project library and drawing-sheet inputs" );
         return tl::unexpected( error );
     }
-    PCB_DRC_CAPTURE_CONTEXT capture{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid };
+    PCB_DRC_CAPTURE_CONTEXT capture{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid,
+                                    frame()->GetPcbNewSettings()->m_PnsSettings.get() };
     auto started = m_drcJobs.Start( aCtx.Request, *board(), Pgm().GetApiServer().Token(), capture );
     if( !started )
     {

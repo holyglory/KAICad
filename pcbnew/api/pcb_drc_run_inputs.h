@@ -6,6 +6,8 @@
 #include <kiid.h>
 #include <memory>
 #include <string>
+#include <vector>
+namespace PNS { class ROUTING_SETTINGS; }
 class BOARD;
 class DRC_ENGINE;
 class DRC_LIBRARY_INPUTS;
@@ -20,6 +22,15 @@ struct PCB_DRC_CAPTURE_CONTEXT
     FOOTPRINT_LIBRARY_ADAPTER& libraries;
     DS_DATA_MODEL& drawing;
     KIID drawingIdentity;
+    const PNS::ROUTING_SETTINGS* routingSettings = nullptr;
+};
+
+struct PCB_DRC_COPPER_PREPARATION
+{
+    enum class STATUS { NOT_RUN, COMPLETED, CANCELLED, NOT_CONVERGED, FAILED };
+    STATUS status = STATUS::NOT_RUN;
+    std::string error;
+    std::vector<KIID> regenerated;
 };
 
 class PCB_DRC_RUN_INPUTS
@@ -37,6 +48,11 @@ public:
     const KIID& SourceDrawingIdentity() const { return m_sourceDrawingIdentity; }
     bool RulesUnchanged() const;
 
+    // Mutates only this bundle's detached board. Failure makes the preparation
+    // unusable: capture a fresh bundle instead of retrying partially prepared data.
+    // Call after installing and initializing the board's owned DRC engine.
+    const PCB_DRC_COPPER_PREPARATION& PrepareCopper( PROGRESS_REPORTER* aReporter = nullptr );
+
 private:
     PCB_DRC_RUN_INPUTS() = default;
     std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> m_document;
@@ -46,5 +62,7 @@ private:
     FILE_CONTENT_BASELINE m_rulesBaseline;
     std::string m_rulesText;
     KIID m_sourceDrawingIdentity;
+    std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;
+    PCB_DRC_COPPER_PREPARATION m_copperPreparation;
 };
 #endif

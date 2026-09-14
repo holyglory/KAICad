@@ -4,6 +4,7 @@
 #include <board_design_settings.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcb_project_editor_state.h>
+#include <pcb_generator.h>
 #include <project.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
@@ -41,6 +42,16 @@ std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> PCB_DRC_DOCUMENT_SNAPSHOT::Capture( B
     board->SetUuid( identity );
     board->SetFileName( aBoard.GetFileName() );
     if( result->m_project ) board->SetProject( result->m_project.get() );
+
+    // Pending native generator work is not serialized into the board file.
+    // Carry its exact identity-bound dirty state into the private refill input.
+    for( const PCB_GENERATOR* source : aBoard.Generators() )
+    {
+        auto* copy = dynamic_cast<PCB_GENERATOR*>( board->ResolveItem( source->m_Uuid, true ) );
+        if( !copy ) throw std::runtime_error( "Native snapshot lost a generator identity" );
+        if( source->IsDirty() ) copy->MarkDirty();
+        else copy->ClearDirty();
+    }
 
     auto& sourceSettings = aBoard.GetDesignSettings();
     auto& copiedSettings = board->GetDesignSettings();

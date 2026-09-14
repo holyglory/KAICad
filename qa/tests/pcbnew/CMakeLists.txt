@@ -210,6 +210,7 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_provider_isolation.cpp
     drc/test_drc_document_snapshot.cpp
     drc/test_drc_copper_preparation.cpp
+    drc/test_drc_schematic_input.cpp
     drc/test_drc_library_inputs.cpp
     drc/test_drc_drawing_sheet_inputs.cpp
     drc/test_drc_captured_rules.cpp
@@ -537,6 +538,7 @@ add_pcbnew_test_group( drc_run_scope "DrcRunScope" )
 add_pcbnew_test_group( drc_provider_isolation "DrcProviderIsolation" )
 add_pcbnew_test_group( drc_document_snapshot "DrcDocumentSnapshot" )
 add_pcbnew_test_group( drc_copper_preparation "DrcCopperPreparation" )
+add_pcbnew_test_group( drc_schematic_input "DrcSchematicInput" )
 add_pcbnew_test_group( drc_library_inputs "DrcLibraryInputs" )
 add_pcbnew_test_group( drc_drawing_sheet_inputs "DrcDrawingSheetInputs" )
 add_pcbnew_test_group( drc_captured_rules "DrcCapturedRules" )
@@ -613,6 +615,7 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!DrcProviderIsolation\
 :!DrcDocumentSnapshot\
 :!DrcCopperPreparation\
+:!DrcSchematicInput\
 :!DrcLibraryInputs\
 :!DrcDrawingSheetInputs\
 :!DrcCapturedRules\

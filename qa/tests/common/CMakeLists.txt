@@ -182,6 +182,7 @@ set( QA_COMMON_SRCS
     test_settings_manager.cpp
     test_nested_settings.cpp
     test_settings_snapshot.cpp
+    test_project_analysis_snapshot.cpp
     test_settings_save_outcome.cpp
     test_native_state_digest.cpp
     test_file_content_baseline.cpp
@@ -285,6 +286,19 @@ endif()
 kicad_add_boost_test( qa_common qa_common )
 
 setup_qa_env( qa_common )
+
+# A focused project-copy target avoids rebuilding unrelated editor test modules.
+add_executable( qa_project_analysis_snapshot
+    ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+    test_module.cpp test_project_analysis_snapshot.cpp )
+target_link_libraries( qa_project_analysis_snapshot PRIVATE
+    common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework
+    ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} )
+if( TARGET api_schema_build_copy )
+    add_dependencies( qa_project_analysis_snapshot api_schema_build_copy )
+endif()
+kicad_add_boost_test( qa_project_analysis_snapshot qa_project_analysis_snapshot )
+setup_qa_env( qa_project_analysis_snapshot )
 
 # The recovery journal has no GUI dependencies. Keep its focused tests usable
 # without initializing an editor or a display; the cases also run in qa_common.

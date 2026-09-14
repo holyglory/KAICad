@@ -1847,6 +1847,28 @@ tier = "development"
 requires = ["build"]
 command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_provider_isolation$|^qa_pcbnew_drc_job_lifecycle$|^qa_pcbnew_drc_run_scope$", "--output-on-failure", "--no-tests=error"]
 
+[test.project-analysis-snapshot]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.project-analysis-snapshot.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.project-analysis-snapshot.check]]
+name = "build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_project_analysis_snapshot"]
+
+[[test.project-analysis-snapshot.check]]
+name = "contracts"
+tier = "development"
+requires = ["build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_project_analysis_snapshot$", "--output-on-failure", "--no-tests=error"]
+
 [test.mac-baseline-downloads]
 # Admission can wait behind a native build; each HTTP request remains bounded
 # independently to 30 seconds below.

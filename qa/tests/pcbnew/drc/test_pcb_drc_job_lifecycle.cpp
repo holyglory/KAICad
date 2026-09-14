@@ -1,5 +1,6 @@
 /* Internal worker lifecycle, not qualification of complete design verification. GPL-3.0-or-later. */
 #include <boost/test/unit_test.hpp>
+#include <advanced_config.h>
 #include <api/pcb_drc_job_manager.h>
 #include <api/pcb_drc_run_inputs.h>
 #include <board.h>
@@ -19,6 +20,8 @@
 #include <project/project_file.h>
 #include <settings/settings_manager.h>
 #include <json_common.h>
+#include <router/pns_routing_settings.h>
+#include <zone.h>
 #include <fstream>
 #include <google/protobuf/util/message_differencer.h>
 #include <chrono>
@@ -315,6 +318,98 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
     BOOST_CHECK_EQUAL( board.Markers().size(), 1 );
     BOOST_CHECK( !std::filesystem::exists( scratch.GetPath() / "fixture.kicad_pcb" ) );
+}
+
+BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )
+{
+    BOARD board;
+    board.SetFileName( "refill-worker.kicad_pcb" );
+    auto* zone = new ZONE( &board );
+    zone->SetLayer( F_SilkS );
+    zone->AppendCorner( { 0, 0 }, -1 );
+    zone->AppendCorner( { 10000000, 0 }, -1 );
+    zone->AppendCorner( { 10000000, 10000000 }, -1 );
+    zone->AppendCorner( { 0, 10000000 }, -1 );
+    zone->SetIslandRemovalMode( ISLAND_REMOVAL_MODE::NEVER );
+    board.Add( zone );
+    const int revision = board.GetTimeStamp();
+    const auto beforeFill = zone->GetFilledPolysList( F_SilkS );
+    const int vertices = beforeFill ? beforeFill->TotalVertices() : 0;
+    PCB_DRC_JOB_MANAGER jobs;
+    const std::string epoch = KIID().AsStdString();
+    StartPcbDrcJob request;
+    request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    request.mutable_document()->set_board_filename( "refill-worker.kicad_pcb" );
+    request.set_operation_id( KIID().AsStdString() );
+    request.set_process_epoch( epoch );
+    request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+    request.mutable_expected_revision()->set_sequence( revision );
+    request.set_refill_zones( true );
+    auto rejected = jobs.Start( request, board, epoch, context );
+    BOOST_CHECK( !rejected );
+    PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
+    context.routingSettings = &routing;
+    auto started = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    ReadPcbDrcJob query;
+    query.mutable_document()->CopyFrom( request.document() );
+    query.set_job_id( started->job_id() ); query.set_process_epoch( epoch );
+    auto state = jobs.Read( query, board, epoch );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+    while( state && !state->worker_finished() && std::chrono::steady_clock::now() < deadline )
+    {
+        std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+        state = jobs.Read( query, board, epoch );
+    }
+    BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
+    BOOST_REQUIRE_MESSAGE( state->status() == PDRCJS_COMPLETED, state->error_message() );
+    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_SilkS ) ? zone->GetFilledPolysList( F_SilkS )->TotalVertices() : 0,
+                       vertices );
+    BOOST_CHECK_EQUAL( board.Zones().size(), 1 );
+    auto replay = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE( replay );
+    BOOST_CHECK( MessageDifferencer::Equals( *state, *replay ) );
+}
+
+BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindings )
+{
+    auto& enabled = const_cast<ADVANCED_CFG&>( ADVANCED_CFG::GetCfg() ).m_ZoneFillIterativeRefill;
+    struct RESTORE { bool& value; bool old; ~RESTORE() { value = old; } } restore{ enabled, enabled };
+    enabled = true;
+    SETTINGS_MANAGER settings;
+    std::unique_ptr<BOARD> board;
+    KI_TEST::LoadBoard( settings, "zone_refill_convergence_limit", board );
+    PCB_DRC_JOB_MANAGER jobs;
+    const std::string epoch = KIID().AsStdString();
+    PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
+    context.routingSettings = &routing;
+    StartPcbDrcJob request;
+    request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    request.mutable_document()->set_board_filename( board->GetFileName().ToStdString() );
+    request.set_operation_id( KIID().AsStdString() ); request.set_process_epoch( epoch );
+    request.set_refill_zones( true );
+    request.mutable_expected_revision()->set_epoch( board->m_Uuid.AsStdString() );
+    request.mutable_expected_revision()->set_sequence( board->GetTimeStamp() );
+    auto started = jobs.Start( request, *board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    ReadPcbDrcJob query;
+    query.mutable_document()->CopyFrom( request.document() );
+    query.set_job_id( started->job_id() ); query.set_process_epoch( epoch );
+    auto state = jobs.Read( query, *board, epoch );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+    while( state && !state->worker_finished() && std::chrono::steady_clock::now() < deadline )
+    {
+        std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+        state = jobs.Read( query, *board, epoch );
+    }
+    BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
+    BOOST_CHECK( state->status() == PDRCJS_INCOMPLETE );
+    BOOST_CHECK_EQUAL( state->error_code(), "refill_not_converged" );
+    BOOST_CHECK_EQUAL( state->findings_size(), 0 );
+    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK_EQUAL( board->GetTimeStamp(), request.expected_revision().sequence() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

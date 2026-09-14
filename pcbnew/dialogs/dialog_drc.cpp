@@ -56,6 +56,8 @@
 #include <tools/zone_filler_tool.h>
 #include <tools/board_inspection_tool.h>
 #include <kiplatform/ui.h>
+#include <scoped_set_reset.h>
+#include <functional>
 
 // wxWidgets spends *far* too long calcuating column widths (most of it, believe it or
 // not, in repeatedly creating/destroying a wxDC to do the measurement in).
@@ -450,7 +452,7 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
     bool              refillZones          = m_cbRefillZones->GetValue();
     bool              testFootprints       = m_cbTestFootprints->GetValue();
 
-    if( zoneFillerTool->IsBusy() )
+    if( m_running || drcTool->IsDRCRunning() || zoneFillerTool->IsBusy() )
     {
         wxBell();
         return;
@@ -512,6 +514,25 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
     m_messages->Clear();
     Update();                                     // Repaint only, don't enter the full event loop
 
+    bool runFinished = false;
+    auto restoreControls = [this, &runFinished]
+    {
+        m_running = false;
+        m_sdbSizerCancel->SetLabel( _( "Close" ) );
+        m_sdbSizerOK->Enable( true );
+        m_DeleteCurrentMarkerButton->Enable( runFinished );
+        m_DeleteAllMarkersButton->Enable( runFinished );
+        m_saveReport->Enable( runFinished );
+
+        if( !runFinished )
+        {
+            m_drcRun = false;
+            m_footprintTestsRun = false;
+            if( m_drcStatusBar ) m_drcStatusBar->SetStatusText( wxEmptyString, 1 );
+        }
+    };
+    SCOPED_EXECUTION<std::function<void()>> controlsOnExit( [] {}, restoreControls );
+
     m_running = true;
     m_sdbSizerCancel->SetLabel( _( "Cancel" ) );
     m_sdbSizerOK->Enable( false );
@@ -526,8 +547,16 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
         m_drcStatusBar->SetStatusText( _( "Elapsed: 0 s" ), 1 );
 
     {
-    wxBusyCursor dummy;
-    drcTool->RunTests( this, refillZones, m_report_all_track_errors, testFootprints );
+        wxBusyCursor dummy;
+        const auto result = drcTool->RunTests( this, refillZones, m_report_all_track_errors,
+                                              testFootprints );
+        if( result == DRC_TOOL::RUN_RESULT::BUSY || result == DRC_TOOL::RUN_RESULT::INCOMPLETE )
+        {
+            wxBell();
+            return;
+        }
+        m_cancelled = result == DRC_TOOL::RUN_RESULT::CANCELLED;
+        runFinished = true;
     }
 
     double elapsedMs =
@@ -562,12 +591,7 @@ void DIALOG_DRC::OnRunDRCClick( wxCommandEvent& aEvent )
     Raise();
     Update();                                     // Repaint only, don't enter the full event loop
 
-    m_running = false;
-    m_sdbSizerCancel->SetLabel( _( "Close" ) );
-    m_sdbSizerOK->Enable( true );
-    m_DeleteCurrentMarkerButton->Enable( true );
-    m_DeleteAllMarkersButton->Enable( true );
-    m_saveReport->Enable( true );
+    restoreControls();
 
     if( !m_cancelled )
     {

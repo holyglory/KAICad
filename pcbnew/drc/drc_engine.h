@@ -30,6 +30,7 @@
 #include <units_provider.h>
 #include <lset.h>
 #include <drc/drc_rule.h>
+#include <drc/drc_run_result.h>
 
 
 /**
@@ -198,8 +199,8 @@ public:
     /**
      * Run the DRC tests.
      */
-    void RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
-                   BOARD_COMMIT* aCommit = nullptr );
+    DRC_RUN_RESULT RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
+                             BOARD_COMMIT* aCommit = nullptr );
 
     bool IsErrorLimitExceeded( int error_code );
 

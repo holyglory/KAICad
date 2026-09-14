@@ -39,6 +39,7 @@
 #include <diff_merge/kicad_diff_types.h>
 #include <settings/json_settings_internals.h>
 #include <drc/drc_engine.h>
+#include <drc/drc_run_scope.h>
 #include <board_statistics_report.h>
 #include <drc/drc_item.h>
 #include <drc/drc_report.h>
@@ -2976,6 +2977,8 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
     }
 
     std::shared_ptr<DRC_ENGINE> drcEngine = brd->GetDesignSettings().m_DRCEngine;
+    if( !drcEngine )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
     std::unique_ptr<NETLIST>    netlist = std::make_unique<NETLIST>();
 
     drcEngine->SetDrawingSheet( getDrawingSheetProxyView( brd ) );
@@ -2986,6 +2989,8 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
     BOARD_COMMIT commit( toolManager );
     bool         checkParity = drcJob->m_parity;
     std::string  netlist_str;
+    bool         drcRunning = false;
+    DRC_RUN_SCOPE runScope( *drcEngine, drcRunning );
 
     if( checkParity )
     {
@@ -3072,8 +3077,10 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
 
     brd->RecordDRCExclusions();
     brd->DeleteMARKERs( true, true );
-    drcEngine->RunTests( units, drcJob->m_reportAllTrackErrors, checkParity );
-    drcEngine->ClearViolationHandler();
+    const DRC_RUN_RESULT result = drcEngine->RunTests( units, drcJob->m_reportAllTrackErrors,
+                                                     checkParity );
+    if( result != DRC_RUN_RESULT::COMPLETED )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
 
     commit.Push( _( "DRC" ), SKIP_UNDO | SKIP_SET_DIRTY );
 

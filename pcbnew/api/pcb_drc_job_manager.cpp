@@ -179,8 +179,10 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     if( aRequest.operation_id().empty() || aRequest.operation_id() == niluuid.AsStdString() )
         return tl::unexpected( "A DRC job requires a nonempty operation ID" );
     if( aRequest.process_epoch() != aProcessEpoch ) return tl::unexpected( "PCB DRC process epoch mismatch" );
-    if( aRequest.refill_zones() || aRequest.test_footprints() )
-        return tl::unexpected( "Snapshot refill and schematic parity are not implemented; no job was started" );
+    if( aRequest.test_footprints() )
+        return tl::unexpected( "Captured schematic parity input is not implemented; no job was started" );
+    if( aRequest.refill_zones() && !aCaptureContext.routingSettings )
+        return tl::unexpected( "Snapshot refill requires native routing settings; no job was started" );
     if( aRequest.document().type() != kiapi::common::types::DOCTYPE_PCB )
         return tl::unexpected( "A DRC job requires a PCB document" );
     std::shared_ptr<JOB> duplicate;
@@ -291,11 +293,30 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                 }
                 findings.push_back( std::move( finding ) );
             } );
-            const DRC_RUN_RESULT run = engine.RunTests( EDA_UNITS::MM, job->reportAllTrackErrors,
-                                                        job->testFootprints );
-            if( run == DRC_RUN_RESULT::CANCELLED ) terminal = PDRCJS_CANCELLED;
-            else if( run == DRC_RUN_RESULT::COMPLETED ) terminal = PDRCJS_COMPLETED;
-            else { terminal = PDRCJS_INCOMPLETE; errorCode = "incomplete"; errorMessage = "DRC did not complete"; }
+            bool copperReady = true;
+            if( job->refillZones )
+            {
+                const auto& preparation = inputs->PrepareCopper( job->reporter.get() );
+                using STATUS = PCB_DRC_COPPER_PREPARATION::STATUS;
+                copperReady = preparation.status == STATUS::COMPLETED;
+                if( preparation.status == STATUS::CANCELLED ) terminal = PDRCJS_CANCELLED;
+                else if( !copperReady )
+                {
+                    terminal = preparation.status == STATUS::NOT_CONVERGED ? PDRCJS_INCOMPLETE : PDRCJS_FAILED;
+                    errorCode = preparation.status == STATUS::NOT_CONVERGED
+                            ? "refill_not_converged" : "refill_failed";
+                    errorMessage = preparation.error.empty() ? "Native copper preparation did not complete"
+                                                             : preparation.error;
+                }
+            }
+            if( copperReady )
+            {
+                const DRC_RUN_RESULT run = engine.RunTests( EDA_UNITS::MM, job->reportAllTrackErrors,
+                                                            job->testFootprints );
+                if( run == DRC_RUN_RESULT::CANCELLED ) terminal = PDRCJS_CANCELLED;
+                else if( run == DRC_RUN_RESULT::COMPLETED ) terminal = PDRCJS_COMPLETED;
+                else { terminal = PDRCJS_INCOMPLETE; errorCode = "incomplete"; errorMessage = "DRC did not complete"; }
+            }
         }
         catch( const std::exception& error )
         {

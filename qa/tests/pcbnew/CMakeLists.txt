@@ -205,6 +205,7 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_skew_arc.cpp
     drc/test_drc_unconnected_items_exclusion_loss.cpp
     drc/test_drc_run_scope.cpp
+    drc/test_pcb_drc_job_lifecycle.cpp
     drc/test_drc_via_dangling.cpp
     drc/test_drc_keepout_disallow.cpp
     drc/test_drc_tuning_profiles.cpp
@@ -525,6 +526,7 @@ add_pcbnew_test_group( drc_regression "${PCBNEW_DRC_REGRESSION_TESTS}" )
 add_pcbnew_test_group( drc_solder_mask "${PCBNEW_DRC_SOLDER_MASK_TESTS}" )
 add_pcbnew_test_group( constraints "${PCBNEW_CONSTRAINTS_TESTS}" )
 add_pcbnew_test_group( drc_run_scope "DrcRunScope" )
+add_pcbnew_test_group( drc_job_lifecycle "PcbDrcJobLifecycle" )
 
 # Catch-all for everything not in a named group.  New tests automatically
 # land here so they are never silently skipped.
@@ -591,6 +593,7 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!FootprintLevelSolderMaskExpansion\
 :!SolderMaskExpansionPerformance\
 :!DrcRunScope\
+:!PcbDrcJobLifecycle\
 :!PlanegcsSmokeSolve\
 :!ConstraintSolver*" )
 

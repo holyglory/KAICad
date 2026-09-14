@@ -122,12 +122,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleReadLifecycleState );
     registerHandler<kiapi::automation::v1::ReadPcbDrcState, kiapi::automation::v1::PcbDrcState>(
             &API_HANDLER_PCB::handleReadDrcState );
-    registerHandler<kiapi::automation::v1::StartPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
-            &API_HANDLER_PCB::handleStartDrcJob );
-    registerHandler<kiapi::automation::v1::ReadPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
-            &API_HANDLER_PCB::handleReadDrcJob );
-    registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
-            &API_HANDLER_PCB::handleCancelDrcJob );
+    // Live job commands remain unregistered until detached project/rule inputs
+    // and concurrent provider ownership have been qualified (p23deb822a36256a6).
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 

@@ -8,12 +8,14 @@
 #include <pcb_io/pcb_io_mgr.h>
 #include <pcb_marker.h>
 #include <progress_reporter.h>
+#include <richio.h>
 #include <wx/filename.h>
 #include <wx/filefn.h>
 #include <google/protobuf/util/message_differencer.h>
 
 #include <atomic>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -53,7 +55,8 @@ public:
         std::lock_guard lock( m_mutex );
         m_phase = aMessage.ToStdString();
     }
-    void SetCurrentProgress( double aProgress ) override { m_progress.store( aProgress ); }
+    void SetCurrentProgress( double aProgress ) override
+    { if( std::isfinite( aProgress ) ) m_progress.store( std::clamp( aProgress, 0.0, 0.99 ) ); }
     void SetMaxProgress( int ) override { }
     void AdvanceProgress() override { }
     bool KeepRefreshing( bool = false ) override { return !m_cancelled.load(); }
@@ -78,6 +81,7 @@ private:
 
 struct PCB_DRC_JOB_MANAGER::JOB
 {
+    StartPcbDrcJob request;
     std::string id;
     std::string operationId;
     DocumentSpecifier document;
@@ -93,6 +97,8 @@ struct PCB_DRC_JOB_MANAGER::JOB
     std::string errorCode;
     std::string errorMessage;
     bool resultsFresh = false;
+    bool workerFinished = false;
+    bool invalidated = false;
     std::vector<PcbDrcFinding> findings;
     std::unique_ptr<JOB_PROGRESS> reporter;
     std::thread worker;
@@ -108,6 +114,7 @@ PCB_DRC_JOB_MANAGER::~PCB_DRC_JOB_MANAGER()
         std::lock_guard lock( m_mutex );
         for( auto& [id, job] : m_jobs ) jobs.push_back( job );
     }
+    for( const auto& job : jobs ) job->reporter->Cancel();
     for( const auto& job : jobs )
         if( job->worker.joinable() ) job->worker.join();
 }
@@ -126,7 +133,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     std::lock_guard lock( aJob->mutex );
     if( aJob->processEpoch != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
-    if( aJob->reporter )
+    if( aJob->reporter && !aJob->workerFinished )
     {
         aJob->progress = std::max( aJob->progress, aJob->reporter->Progress() );
         const std::string phase = aJob->reporter->Phase();
@@ -137,7 +144,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
           || aJob->status == PDRCJS_COMPLETED ) && liveChanged )
     {
-        aJob->status = PDRCJS_STALE;
+        aJob->invalidated = true;
+        if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
         aJob->resultsFresh = false;
         aJob->findings.clear();
         aJob->errorCode = "document_changed";
@@ -157,14 +165,23 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_error_code( aJob->errorCode );
     result.set_error_message( aJob->errorMessage );
     result.set_results_fresh( aJob->resultsFresh );
-    result.mutable_findings()->Assign( aJob->findings.begin(), aJob->findings.end() );
+    result.set_cancellation_requested( aJob->reporter->IsCancelled() );
+    result.set_worker_finished( aJob->workerFinished );
+    // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
+    result.set_snapshot_complete( false );
+    if( aJob->workerFinished && aJob->status == PDRCJS_COMPLETED )
+        result.mutable_findings()->Assign( aJob->findings.begin(), aJob->findings.end() );
     return result;
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         const StartPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch )
 {
-    if( aRequest.operation_id().empty() ) return tl::unexpected( "A DRC job requires an operation ID" );
+    if( aRequest.operation_id().empty() || aRequest.operation_id() == niluuid.AsStdString() )
+        return tl::unexpected( "A DRC job requires a nonempty operation ID" );
+    if( aRequest.process_epoch() != aProcessEpoch ) return tl::unexpected( "PCB DRC process epoch mismatch" );
+    if( aRequest.refill_zones() || aRequest.test_footprints() )
+        return tl::unexpected( "Snapshot refill and schematic parity are not implemented; no job was started" );
     if( aRequest.document().type() != kiapi::common::types::DOCTYPE_PCB )
         return tl::unexpected( "A DRC job requires a PCB document" );
     std::shared_ptr<JOB> duplicate;
@@ -175,8 +192,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             std::lock_guard existingLock( existing->mutex );
             if( existing->operationId == aRequest.operation_id() )
             {
-                if( !SameDocument( existing->document, aRequest.document() ) )
-                    return tl::unexpected( "The operation ID is already bound to another PCB target" );
+                if( !google::protobuf::util::MessageDifferencer::Equals( existing->request, aRequest ) )
+                    return tl::unexpected( "The operation ID is already bound to different DRC arguments" );
                 duplicate = existing;
                 break;
             }
@@ -184,19 +201,40 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     }
     if( duplicate ) return state( duplicate, aBoard, aProcessEpoch );
 
+    const int sequence = aBoard.GetTimeStamp();
+    if( !aRequest.has_expected_revision() || sequence < 0
+            || aRequest.expected_revision().epoch() != aBoard.m_Uuid.AsStdString()
+            || aRequest.expected_revision().sequence() != static_cast<uint64_t>( sequence ) )
+        return tl::unexpected( "PCB changed since the requested DRC revision; no job was started" );
+    {
+        std::lock_guard lock( m_mutex );
+        if( m_jobs.size() >= 128 ) return tl::unexpected( "DRC receipt capacity reached; existing receipts preserved" );
+        for( const auto& [id, existing] : m_jobs )
+        {
+            std::lock_guard jobLock( existing->mutex );
+            if( !existing->workerFinished ) return tl::unexpected( "A DRC worker is still active for this owner" );
+        }
+    }
+
     wxString path = wxFileName::CreateTempFileName( "kicad-drc-job-" );
+    if( path.empty() ) return tl::unexpected( "Could not create a private DRC snapshot" );
+    auto cleanup = std::shared_ptr<wxString>( new wxString( path ), []( wxString* file )
+                                            { wxRemoveFile( *file ); delete file; } );
     try
     {
         PCB_IO_KICAD_SEXPR writer;
-        writer.SaveBoard( path, &aBoard, nullptr );
+        PRETTIFIED_FILE_OUTPUTFORMATTER output( path );
+        writer.FormatBoardToFormatter( &output, &aBoard, nullptr, false );
+        output.Finish();
+        if( aBoard.GetTimeStamp() != sequence ) return tl::unexpected( "PCB changed during DRC capture" );
     }
     catch( const std::exception& error )
     {
-        wxRemoveFile( path );
         return tl::unexpected( std::string( "Could not snapshot PCB for DRC: " ) + error.what() );
     }
 
     auto job = std::make_shared<JOB>();
+    job->request = aRequest;
     job->id = KIID().AsStdString();
     job->operationId = aRequest.operation_id();
     job->document = aRequest.document();
@@ -211,48 +249,72 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         std::lock_guard lock( m_mutex );
         m_jobs.emplace( job->id, job );
     }
-    job->worker = std::thread( [job, path, this]
+    try
     {
-        std::unique_ptr<BOARD> board;
+    job->worker = std::thread( [job, path, cleanup = std::move( cleanup )]() mutable
+    {
+        PcbDrcJobStatus terminal = PDRCJS_FAILED;
+        std::string errorCode, errorMessage;
+        std::vector<PcbDrcFinding> findings;
+        {
+            std::lock_guard lock( job->mutex );
+            job->status = PDRCJS_RUNNING;
+        }
         try
         {
-            board.reset( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXP, path, nullptr, nullptr, nullptr ) );
+            std::unique_ptr<BOARD> board( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXP,
+                    path, nullptr, nullptr, nullptr, job->reporter.get() ) );
             if( !board ) throw std::runtime_error( "Native PCB snapshot could not be loaded" );
             DRC_ENGINE engine( board.get(), &board->GetDesignSettings() );
             engine.InitEngine( board->GetDesignRulesPath() );
             engine.SetProgressReporter( job->reporter.get() );
-            engine.SetViolationHandler( [job]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,
+            engine.SetViolationHandler( [&findings, job]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,
                                                int layer, const std::function<void( PCB_MARKER* )>& pathGenerator )
             {
                 auto marker = std::make_unique<PCB_MARKER>( item, position, layer );
-                pathGenerator( marker.get() );
+                if( pathGenerator ) pathGenerator( marker.get() );
                 google::protobuf::Any encoded;
                 marker->Serialize( encoded );
                 PcbDrcFinding finding;
                 finding.set_native_id( marker->m_Uuid.AsStdString() );
-                if( !encoded.UnpackTo( finding.mutable_marker() ) ) return;
-                std::lock_guard lock( job->mutex );
-                job->findings.push_back( std::move( finding ) );
+                if( !encoded.UnpackTo( finding.mutable_marker() ) )
+                    throw std::runtime_error( "Could not serialize a DRC finding" );
+                findings.push_back( std::move( finding ) );
             } );
             const DRC_RUN_RESULT run = engine.RunTests( EDA_UNITS::MM, job->reportAllTrackErrors,
                                                         job->testFootprints );
-            std::lock_guard lock( job->mutex );
-            if( job->status == PDRCJS_STALE ) return;
-            job->progress = 1.0;
-            job->phase = "complete";
-            if( run == DRC_RUN_RESULT::CANCELLED ) job->status = PDRCJS_CANCELLED;
-            else if( run == DRC_RUN_RESULT::COMPLETED ) { job->status = PDRCJS_COMPLETED; job->resultsFresh = true; }
-            else { job->status = PDRCJS_INCOMPLETE; job->errorCode = "incomplete"; job->errorMessage = "DRC did not complete"; }
+            if( run == DRC_RUN_RESULT::CANCELLED ) terminal = PDRCJS_CANCELLED;
+            else if( run == DRC_RUN_RESULT::COMPLETED ) terminal = PDRCJS_COMPLETED;
+            else { terminal = PDRCJS_INCOMPLETE; errorCode = "incomplete"; errorMessage = "DRC did not complete"; }
         }
         catch( const std::exception& error )
         {
-            std::lock_guard lock( job->mutex );
-            job->status = PDRCJS_FAILED;
-            job->errorCode = "native_exception";
-            job->errorMessage = error.what();
+            errorCode = "native_exception";
+            errorMessage = error.what();
         }
-        wxRemoveFile( path );
+        catch( ... ) { errorCode = "native_exception"; errorMessage = "Unexpected native DRC exception"; }
+        // Board/engine/callbacks and private snapshot are gone before terminal
+        // cancellation is acknowledged. No worker publishes partial findings.
+        cleanup.reset();
+        std::lock_guard lock( job->mutex );
+        if( job->invalidated ) { terminal = PDRCJS_STALE; errorCode = "document_changed"; }
+        else if( job->reporter->IsCancelled() ) terminal = PDRCJS_CANCELLED;
+        job->workerFinished = true;
+        job->status = terminal;
+        job->errorCode = errorCode;
+        job->errorMessage = errorMessage;
+        job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : job->reporter->Progress();
+        job->phase = job->reporter->Phase();
+        if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
+        job->resultsFresh = false; // Full project/rule snapshot remains unqualified.
     } );
+    }
+    catch( const std::exception& error )
+    {
+        std::lock_guard lock( m_mutex );
+        m_jobs.erase( job->id );
+        return tl::unexpected( std::string( "Could not launch native DRC worker: " ) + error.what() );
+    }
     return state( job, aBoard, aProcessEpoch );
 }
 
@@ -277,8 +339,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
     {
         std::lock_guard lock( job->mutex );
         if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
-        if( job->reporter ) job->reporter->Cancel();
-        if( job->status == PDRCJS_QUEUED || job->status == PDRCJS_RUNNING ) job->status = PDRCJS_CANCELLED;
+        if( !job->workerFinished ) job->reporter->Cancel();
     }
     return state( job, aBoard, aProcessEpoch );
 }

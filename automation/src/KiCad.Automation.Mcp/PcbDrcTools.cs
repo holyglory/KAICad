@@ -13,10 +13,11 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbDrcTools(InstanceRegistry registry)
 {
-    [McpServerTool(Name = "kicad_pcb_drc_start", ReadOnly = false),
-     Description("Start a real native PCB DRC job for an explicit document. Returns a job identity, checked revision and progress state; use kicad_pcb_drc_job to observe it and kicad_pcb_drc_cancel to cancel it. Results are fresh only when the native job completes without a live-document revision change.")]
+    // Deliberately not in tools/list until complete snapshot/isolation and real
+    // cancellation journeys qualify this family (p23deb822a36256a6).
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
-        bool refillZones, bool reportAllTrackErrors, bool testFootprints, CancellationToken cancellationToken)
+        bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
+        string processEpoch, CancellationToken cancellationToken)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -26,22 +27,28 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             ValidatePcb(document);
             string id = OperationId(operationId);
             var client = registry.Client(instanceId);
+            if (processEpoch != client.Epoch)
+                throw new AutomationException("stale_process_epoch", "Use the checked process epoch.");
+            var expected = SchematicJson.Parser.Parse<Protocol.DocumentRevision>(expectedRevisionJson);
+            _ = Identifier(expected.Epoch, "document");
             state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(new()
             {
                 Document = document,
                 OperationId = id,
                 RefillZones = refillZones,
                 ReportAllTrackErrors = reportAllTrackErrors,
-                TestFootprints = testFootprints
+                TestFootprints = testFootprints,
+                ExpectedRevision = expected,
+                ProcessEpoch = processEpoch
             }, cancellationToken);
-            ValidateJobState(state, document, client.Epoch, requireFreshResults: false);
+            ValidateJobState(state, document, client.Epoch);
+            if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
+                throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested operation and revision.");
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
     }
 
-    [McpServerTool(Name = "kicad_pcb_drc_job", ReadOnly = true),
-     Description("Read a real native PCB DRC job by explicit document, job identity and process epoch. Running jobs expose progress without partial findings; completed jobs expose findings only when the live document still matches the checked revision. Stale, cancelled, failed and incomplete jobs remain explicit terminal states.")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {
@@ -57,14 +64,13 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("stale_process_epoch", "The DRC job belongs to another native process epoch.");
             state = await client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(new()
                 { Document = document, JobId = id, ProcessEpoch = processEpoch }, cancellationToken);
-            ValidateJobState(state, document, processEpoch, requireFreshResults: false);
+            ValidateJobState(state, document, processEpoch);
+            if (state.JobId != id) throw new AutomationException("invalid_drc_job_state", "Native DRC job identity mismatch.");
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
     }
 
-    [McpServerTool(Name = "kicad_pcb_drc_cancel", ReadOnly = false),
-     Description("Cancel a real native PCB DRC job by explicit document, job identity and process epoch. Cancellation is cooperative and the terminal state is returned; it never reports a partial run as a fresh completed result.")]
     public async Task<CallToolResult> Cancel(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {
@@ -80,7 +86,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("stale_process_epoch", "The DRC job belongs to another native process epoch.");
             state = await client.InvokeAsync<CancelPcbDrcJob, PcbDrcJobState>(new()
                 { Document = document, JobId = id, ProcessEpoch = processEpoch }, cancellationToken);
-            ValidateJobState(state, document, processEpoch, requireFreshResults: false);
+            ValidateJobState(state, document, processEpoch);
+            if (state.JobId != id) throw new AutomationException("invalid_drc_job_state", "Native DRC job identity mismatch.");
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -135,20 +142,25 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     private static void ValidateJobState(PcbDrcJobState state, DocumentSpecifier document,
-        string processEpoch, bool requireFreshResults)
+        string processEpoch)
     {
         if (!document.Equals(state.Document) || state.ProcessEpoch != processEpoch
             || !Guid.TryParseExact(state.JobId, "D", out _)
+            || state.JobId == Guid.Empty.ToString("D")
             || !Guid.TryParseExact(state.OperationId, "D", out _)
+            || state.OperationId == Guid.Empty.ToString("D")
             || state.CheckedRevision is null
             || !Guid.TryParseExact(state.CheckedRevision.Epoch, "D", out _)
+            || state.CheckedRevision.Epoch == Guid.Empty.ToString("D")
             || (int)state.Status is < 1 or > 7
             || !double.IsFinite(state.Progress) || state.Progress < 0 || state.Progress > 1
-            || ((int)state.Status is 1 or 2
-                && state.Findings.Count != 0)
-            || (requireFreshResults && ((int)state.Status != 3 || !state.ResultsFresh))
+            || (state.WorkerFinished != ((int)state.Status >= 3))
+            || ((int)state.Status != 3 && state.Findings.Count != 0)
+            || ((int)state.Status == 3 && state.Progress != 1)
+            || (state.ResultsFresh && ((int)state.Status != 3 || !state.SnapshotComplete))
+            || ((int)state.Status == 4 && !state.CancellationRequested)
             || state.Findings.Any(finding => !Guid.TryParseExact(finding.NativeId, "D", out _)
-                                             || finding.Marker is null)
+            || finding.Marker is null)
             || state.Findings.Select(finding => finding.NativeId).Distinct().Count() != state.Findings.Count)
             throw new AutomationException("invalid_drc_job_state", "Native DRC job state did not match its target, identity or terminal-state contract.");
     }

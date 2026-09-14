@@ -40,6 +40,8 @@
 #include <footprint_library_adapter.h>
 
 #include <project/project_file.h>
+#include <project/project_local_settings.h>
+#include <stdexcept>
 #include <trace_helpers.h>
 #include <wildcards_and_files_ext.h>
 #include <settings/common_settings.h>
@@ -75,6 +77,36 @@ void PROJECT::elemsClear()
 PROJECT::~PROJECT()
 {
     elemsClear();
+}
+
+
+std::unique_ptr<PROJECT> PROJECT::CloneForAnalysis() const
+{
+    if( !m_projectFile )
+        throw std::logic_error( "Cannot capture project settings before the project is initialized" );
+
+    auto copy = std::make_unique<PROJECT>();
+    copy->m_project_name = m_project_name;
+    copy->m_readOnly = true;
+    copy->m_sheetNames = m_sheetNames;
+    copy->m_rstrings = m_rstrings;
+    copy->m_textVarsTicker = m_textVarsTicker;
+    copy->m_netclassesTicker = m_netclassesTicker;
+
+    copy->m_analysisProjectFile = std::make_unique<PROJECT_FILE>( GetProjectFullName() );
+    copy->m_projectFile = copy->m_analysisProjectFile.get();
+    copy->m_projectFile->SetProject( copy.get() );
+    copy->m_projectFile->SetReadOnly( true );
+    m_projectFile->CopyCurrentStateTo( *copy->m_projectFile );
+
+    copy->m_analysisLocalSettings = std::make_unique<PROJECT_LOCAL_SETTINGS>(
+            copy.get(), m_localSettings ? m_localSettings->GetFilename() : GetProjectFullName() );
+    copy->m_localSettings = copy->m_analysisLocalSettings.get();
+    copy->m_localSettings->SetReadOnly( true );
+    if( m_localSettings )
+        m_localSettings->CopyCurrentStateTo( *copy->m_localSettings );
+
+    return copy;
 }
 
 

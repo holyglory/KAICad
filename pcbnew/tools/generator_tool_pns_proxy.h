@@ -24,6 +24,7 @@
 #include <router/pns_tool_base.h>
 
 class BOARD_ITEM;
+namespace PNS { class ROUTING_SETTINGS; }
 
 
 struct GENERATOR_PNS_CHANGES
@@ -44,6 +45,7 @@ public:
 
     /// @copydoc TOOL_INTERACTIVE::Reset()
     void Reset( RESET_REASON aReason ) override;
+    void InitializeSnapshot( std::unique_ptr<PNS::ROUTING_SETTINGS> aSettings );
 
     void                                      ClearRouterChanges();
     const std::vector<GENERATOR_PNS_CHANGES>& GetRouterChanges();
@@ -51,6 +53,9 @@ public:
     /// Returns true if the given board item was created by the router interface during the
     /// current generator edit session
     bool ItemCreatedBySession( BOARD_ITEM* aItem ) const;
+
+private:
+    std::unique_ptr<PNS::ROUTING_SETTINGS> m_snapshotSettings;
 };
 
 #endif // GENERATOR_TOOL_PNS_PROXY_H

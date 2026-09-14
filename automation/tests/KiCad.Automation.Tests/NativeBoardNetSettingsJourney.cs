@@ -248,6 +248,7 @@ public sealed partial class NativeSessionTests
         await VerifyPcbNetColor(client, board, schematic, processId, display, evidence, token);
         await VerifyPcbPageOwner(client, board, schematic, processId, display, evidence, token);
         await VerifyPcbDrcExclusions(client, board, processId, display, evidence, token);
+        await VerifyPcbDrcJobs(client, board, evidence, token);
         await VerifyPcbViewerCloseRefusal(client, board, schematic, processId, display, evidence, token);
         await VerifyCleanPcbClose(client, board, schematic, evidence, token);
     }

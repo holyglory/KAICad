@@ -256,6 +256,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
+    if( aRequest.process_epoch() != aProcessEpoch )
+        return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
     return state( job, aBoard, aProcessEpoch );
 }
@@ -265,6 +267,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
+    if( aRequest.process_epoch() != aProcessEpoch )
+        return tl::unexpected( "The native process epoch changed; reattach before cancelling this DRC job" );
     {
         std::lock_guard lock( job->mutex );
         if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );

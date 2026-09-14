@@ -40,6 +40,7 @@ public:
     DRC_RULES_PARSER( const wxString& aSource, const wxString& aSourceDescr );
 
     void Parse( std::vector<std::shared_ptr<DRC_RULE>>& aRules, REPORTER* aReporter );
+    bool IsTooRecent() const { return m_tooRecent; }
     
     bool VerifyParseCondition( REPORTER* aReporter );
 

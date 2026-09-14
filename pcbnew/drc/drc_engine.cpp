@@ -678,41 +678,37 @@ void DRC_ENGINE::loadRules( const wxFileName& aPath )
 {
     if( m_board && aPath.FileExists() )
     {
-        std::vector<std::shared_ptr<DRC_RULE>> rules;
-
         if( FILE* fp = wxFopen( aPath.GetFullPath(), wxT( "rt" ) ) )
         {
             FILE_LINE_READER lineReader( fp, aPath.GetFullPath() );  // Will close rules file
-            wxString         rulesText;
-
-            std::function<bool( wxString* )> resolver =
-                    [&]( wxString* token ) -> bool
-                    {
-                        if( IsComponentClassSelector( *token ) )
-                            return false;
-
-                        return m_board->ResolveTextVar( token, 0 );
-                    };
-
-            while( char* line = lineReader.ReadLine() )
-            {
-                wxString str( line );
-                str = m_board->ConvertCrossReferencesToKIIDs( str );
-                str = ExpandTextVars( str, &resolver );
-
-                rulesText << str << '\n';
-            }
-
-            DRC_RULES_PARSER parser( rulesText, aPath.GetFullPath() );
-            parser.Parse( rules, m_logReporter );
+            loadRules( lineReader, aPath.GetFullPath() );
         }
-
-        // Copy the rules into the member variable afterwards so that if Parse() throws then
-        // the possibly malformed rules won't contaminate the current ruleset.
-
-        for( std::shared_ptr<DRC_RULE>& rule : rules )
-            m_rules.push_back( rule );
     }
+}
+
+void DRC_ENGINE::loadRules( LINE_READER& aReader, const wxString& aSourceName, bool aStrict )
+{
+    std::vector<std::shared_ptr<DRC_RULE>> rules;
+    wxString rulesText;
+    std::function<bool( wxString* )> resolver = [&]( wxString* token ) -> bool
+    {
+        if( IsComponentClassSelector( *token ) ) return false;
+        return m_board->ResolveTextVar( token, 0 );
+    };
+    while( char* line = aReader.ReadLine() )
+    {
+        wxString str( line );
+        str = m_board->ConvertCrossReferencesToKIIDs( str );
+        rulesText << ExpandTextVars( str, &resolver ) << '\n';
+    }
+    DRC_RULES_PARSER parser( rulesText, aSourceName );
+    // Captured verification inputs must fail on malformed rules even when a
+    // diagnostic logger is present. UI file parsing retains its existing mode.
+    parser.Parse( rules, aStrict ? nullptr : m_logReporter );
+    if( aStrict && parser.IsTooRecent() )
+        throw std::runtime_error( "Captured design rules require a newer native format" );
+    // Publish only after successful parsing, preserving the existing native contract.
+    for( auto& rule : rules ) m_rules.push_back( std::move( rule ) );
 }
 
 
@@ -846,6 +842,22 @@ void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 
 void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 {
+    initEngine( [&] { loadRules( aRulePath ); } );
+}
+
+
+void DRC_ENGINE::InitEngineFromText( const std::string& aRuleText, const wxString& aSourceName )
+{
+    initEngine( [&]
+    {
+        STRING_LINE_READER reader( aRuleText, aSourceName );
+        loadRules( reader, aSourceName, true );
+    } );
+}
+
+
+void DRC_ENGINE::initEngine( const std::function<void()>& aLoadRules )
+{
     m_testProviders = DRC_TEST_PROVIDER_REGISTRY::Instance().CreateTestProviders();
 
     for( const auto& provider : m_testProviders )
@@ -895,7 +907,7 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
     try         // attempt to load full set of rules (implicit + user rules)
     {
         loadImplicitRules();
-        loadRules( aRulePath );
+        aLoadRules();
         compileRules();
     }
     catch( PARSE_ERROR& original_parse_error )
@@ -928,7 +940,7 @@ DRC_RUN_RESULT DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackError
     if( IsCancelled() )
         return DRC_RUN_RESULT::CANCELLED;
 
-    if( !m_board || !m_designSettings )
+    if( !m_board || !m_designSettings || !m_rulesValid )
         return DRC_RUN_RESULT::INCOMPLETE;
 
     PROF_TIMER timer;

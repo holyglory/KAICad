@@ -69,6 +69,7 @@ class BOARD_COMMIT;
 class BOARD_DESIGN_SETTINGS;
 class DRC_TEST_PROVIDER;
 class DRC_LIBRARY_INPUTS;
+class LINE_READER;
 class DRC_TEST_PROVIDER_CREEPAGE;
 class PCB_EDIT_FRAME;
 class DS_PROXY_VIEW_ITEM;
@@ -202,6 +203,9 @@ public:
      * @throws PARSE_ERROR if the rules file contains errors
      */
     void InitEngine( const wxFileName& aRulePath );
+
+    // Parse already captured UTF-8 rule content; no file access occurs here.
+    void InitEngineFromText( const std::string& aRuleText, const wxString& aSourceName );
 
     void InitEngine( const std::shared_ptr<DRC_RULE>& rule );
 
@@ -364,6 +368,8 @@ private:
      * @throws PARSE_ERROR
      */
     void loadRules( const wxFileName& aPath );
+    void loadRules( LINE_READER& aReader, const wxString& aSourceName, bool aStrict = false );
+    void initEngine( const std::function<void()>& aLoadRules );
 
     void compileRules();
 

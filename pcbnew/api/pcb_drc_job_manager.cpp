@@ -167,6 +167,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     if( aRequest.operation_id().empty() ) return tl::unexpected( "A DRC job requires an operation ID" );
     if( aRequest.document().type() != kiapi::common::types::DOCTYPE_PCB )
         return tl::unexpected( "A DRC job requires a PCB document" );
+    std::shared_ptr<JOB> duplicate;
     {
         std::lock_guard lock( m_mutex );
         for( const auto& [id, existing] : m_jobs )
@@ -176,10 +177,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             {
                 if( !SameDocument( existing->document, aRequest.document() ) )
                     return tl::unexpected( "The operation ID is already bound to another PCB target" );
-                return state( existing, aBoard, aProcessEpoch );
+                duplicate = existing;
+                break;
             }
         }
     }
+    if( duplicate ) return state( duplicate, aBoard, aProcessEpoch );
 
     wxString path = wxFileName::CreateTempFileName( "kicad-drc-job-" );
     try

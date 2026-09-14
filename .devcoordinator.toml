@@ -1943,6 +1943,41 @@ command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex"
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
+[test.drc-project-freshness]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.drc-project-freshness.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["native-build", "native-contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.drc-project-freshness.check]]
+name = "native-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_pcbnew"]
+
+[[test.drc-project-freshness.check]]
+name = "native-contracts"
+tier = "development"
+requires = ["native-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_provider_isolation$|^qa_pcbnew_drc_job_lifecycle$|^qa_pcbnew_drc_run_scope$|^qa_pcbnew_drc_document_snapshot$|^qa_pcbnew_drc_library_inputs$|^qa_pcbnew_drc_drawing_sheet_inputs$|^qa_pcbnew_drc_captured_rules$|^qa_pcbnew_zone_fill_outcome$|^qa_pcbnew_detached_generator_context$|^qa_pcbnew_drc_copper_preparation$|^qa_pcbnew_drc_schematic_input$", "--output-on-failure", "--no-tests=error"]
+
+[[test.drc-project-freshness.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["managed-contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.drc-project-freshness.check]]
+name = "managed-contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~SignedUpdateServerTests", "--logger", "trx", "--results-directory", "automation/artifacts/drc-project-freshness"]
+retained_artifacts = [{ name = "update-recovery", path = "automation/artifacts/drc-project-freshness", max_bytes = 16777216 }]
+
 [[test.project-analysis-snapshot.check]]
 name = "configure"
 tier = "development"

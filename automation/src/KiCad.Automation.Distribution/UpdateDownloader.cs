@@ -147,7 +147,7 @@ public sealed class UpdateDownloader : IDisposable
         try
         {
             if (response.StatusCode != HttpStatusCode.OK)
-                throw new InvalidDataException("Update download did not return a complete successful response.");
+                throw new InvalidDataException($"Update download returned HTTP {(int)response.StatusCode}; no package was accepted.");
             if (response.RequestMessage?.RequestUri != uri || response.Headers.Location is not null)
                 throw new InvalidDataException("Update download changed the requested publisher location.");
             if (response.Content.Headers.ContentEncoding.Count != 0)

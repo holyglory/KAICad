@@ -35,7 +35,9 @@ public sealed class UpdateDownloaderTests
             [new("linux-x64", "tar.gz", "fixture.tar.gz", bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)))]);
         byte[] installed = UpdateManifestCodec.Sign(release, publisher);
         byte[] published = UpdateManifestCodec.Sign(release with { Sequence = 2, Version = "fixture-2" }, publisher);
-        app.MapGet("/artifacts/fixture.tar.gz", () => Results.Bytes(bytes, "application/octet-stream"));
+        int artifactStatus = StatusCodes.Status200OK;
+        app.MapGet("/artifacts/fixture.tar.gz", () => Volatile.Read(ref artifactStatus) == StatusCodes.Status200OK
+            ? (IResult)Results.Bytes(bytes, "application/octet-stream") : Results.StatusCode(Volatile.Read(ref artifactStatus)));
         app.MapGet("/updates/preview.json", () => Results.Bytes(published, "application/json"));
         try
         {
@@ -57,6 +59,25 @@ public sealed class UpdateDownloaderTests
             var manifest = check.Manifest;
             var downloaded = await downloader.DownloadAsync(manifest, "linux-x64", "tar.gz", root);
             CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(downloaded.Path));
+            var filesBeforeFailure = Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order().ToArray();
+            var directoriesBeforeFailure = Directory.GetDirectories(root, "*", SearchOption.AllDirectories).Order().ToArray();
+            foreach (int httpStatus in new[] { StatusCodes.Status404NotFound, StatusCodes.Status503ServiceUnavailable,
+                                               StatusCodes.Status206PartialContent })
+            {
+                Volatile.Write(ref artifactStatus, httpStatus);
+                var error = await Assert.ThrowsExactlyAsync<InvalidDataException>(() =>
+                    downloader.DownloadAsync(manifest, "linux-x64", "tar.gz", root));
+                StringAssert.Contains(error.Message, $"HTTP {httpStatus}");
+                CollectionAssert.AreEqual(filesBeforeFailure,
+                    Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order().ToArray());
+                CollectionAssert.AreEqual(directoriesBeforeFailure,
+                    Directory.GetDirectories(root, "*", SearchOption.AllDirectories).Order().ToArray());
+                CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(downloaded.Path));
+            }
+            Volatile.Write(ref artifactStatus, StatusCodes.Status200OK);
+            var recovered = await downloader.DownloadAsync(manifest, "linux-x64", "tar.gz", root);
+            CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(recovered.Path));
+            Assert.IsTrue(File.Exists(Path.Combine(Path.GetDirectoryName(recovered.Path)!, "download.json")));
             using var cancellation = new CancellationTokenSource();
             var progress = new CancellingProgress(cancellation);
             var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order().ToArray();

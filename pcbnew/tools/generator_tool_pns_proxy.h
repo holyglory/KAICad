@@ -24,6 +24,7 @@
 #include <router/pns_tool_base.h>
 
 class BOARD_ITEM;
+class BOARD_COMMIT;
 namespace PNS { class ROUTING_SETTINGS; }
 
 
@@ -49,6 +50,10 @@ public:
 
     void                                      ClearRouterChanges();
     const std::vector<GENERATOR_PNS_CHANGES>& GetRouterChanges();
+
+    /// Apply buffered in-place changes after staging additions/removals in the owning edit.
+    /// Preview routing never modifies the board; clearing changes discards these updates.
+    void ApplyRouterUpdates( BOARD_COMMIT& aCommit );
 
     /// Returns true if the given board item was created by the router interface during the
     /// current generator edit session

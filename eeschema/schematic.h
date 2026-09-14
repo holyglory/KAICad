@@ -151,6 +151,7 @@ public:
 
     /// Return a reference to the project this schematic is part of
     PROJECT& Project() const { return *m_project; }
+    PROJECT* GetProject() const { return m_project; }
     void SetProject( PROJECT* aPrj );
 
     const std::map<wxString, wxString>* GetProperties() { return &m_properties; }

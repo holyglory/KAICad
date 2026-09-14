@@ -534,6 +534,7 @@ add_pcbnew_test_group( drc_provider_isolation "DrcProviderIsolation" )
 add_pcbnew_test_group( drc_document_snapshot "DrcDocumentSnapshot" )
 add_pcbnew_test_group( drc_library_inputs "DrcLibraryInputs" )
 add_pcbnew_test_group( drc_drawing_sheet_inputs "DrcDrawingSheetInputs" )
+add_pcbnew_test_group( footprint_library_adapter "FootprintLibraryAdapter" )
 add_pcbnew_test_group( drc_job_lifecycle "PcbDrcJobLifecycle" )
 
 # Catch-all for everything not in a named group.  New tests automatically
@@ -605,6 +606,7 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!DrcDocumentSnapshot\
 :!DrcLibraryInputs\
 :!DrcDrawingSheetInputs\
+:!FootprintLibraryAdapter\
 :!PcbDrcJobLifecycle\
 :!PlanegcsSmokeSolve\
 :!ConstraintSolver*" )

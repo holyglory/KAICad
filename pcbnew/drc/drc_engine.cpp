@@ -35,6 +35,7 @@
 #include <drc/drc_rule.h>
 #include <drc/drc_rule_condition.h>
 #include <drc/drc_test_provider.h>
+#include <drawing_sheet/ds_data_model.h>
 #include <drc/drc_item.h>
 #include <drc/drc_cache_generator.h>
 #include <board.h>
@@ -98,6 +99,18 @@ DRC_ENGINE::DRC_ENGINE( BOARD* aBoard, BOARD_DESIGN_SETTINGS *aSettings ) :
 
     for( int ii = DRCE_FIRST; ii <= DRCE_LAST; ++ii )
         m_errorLimits[ii] = ERROR_LIMIT;
+}
+
+
+void DRC_ENGINE::SetDrawingSheetModel( std::unique_ptr<DS_DATA_MODEL> aModel )
+{
+    m_drawingSheetModel = std::move( aModel );
+}
+
+
+void DRC_ENGINE::ClearDrawingSheetModel()
+{
+    m_drawingSheetModel.reset();
 }
 
 

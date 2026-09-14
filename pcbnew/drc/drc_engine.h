@@ -68,9 +68,11 @@ namespace std
 class BOARD_COMMIT;
 class BOARD_DESIGN_SETTINGS;
 class DRC_TEST_PROVIDER;
+class DRC_LIBRARY_INPUTS;
 class DRC_TEST_PROVIDER_CREEPAGE;
 class PCB_EDIT_FRAME;
 class DS_PROXY_VIEW_ITEM;
+class DS_DATA_MODEL;
 class BOARD_ITEM;
 class BOARD;
 class PCB_MARKER;
@@ -151,6 +153,13 @@ public:
 
     void SetDrawingSheet( DS_PROXY_VIEW_ITEM* aDrawingSheet ) { m_drawingSheet = aDrawingSheet; }
     DS_PROXY_VIEW_ITEM* GetDrawingSheet() const { return m_drawingSheet; }
+    void SetDrawingSheetModel( std::unique_ptr<DS_DATA_MODEL> aModel );
+    void ClearDrawingSheetModel();
+    DS_DATA_MODEL* GetDrawingSheetModel() const { return m_drawingSheetModel.get(); }
+
+    void SetLibraryInputs( std::shared_ptr<const DRC_LIBRARY_INPUTS> aInputs )
+    { m_libraryInputs = std::move( aInputs ); }
+    const DRC_LIBRARY_INPUTS* GetLibraryInputs() const { return m_libraryInputs.get(); }
 
     void SetDebugOverlay( std::shared_ptr<KIGFX::VIEW_OVERLAY> aOverlay )
     {
@@ -378,6 +387,8 @@ protected:
     BOARD_DESIGN_SETTINGS*     m_designSettings;
     BOARD*                     m_board;
     DS_PROXY_VIEW_ITEM*        m_drawingSheet;
+    std::unique_ptr<DS_DATA_MODEL> m_drawingSheetModel;
+    std::shared_ptr<const DRC_LIBRARY_INPUTS> m_libraryInputs;
     NETLIST*                   m_schematicNetlist;
 
     std::vector<std::shared_ptr<DRC_RULE>>  m_rules;

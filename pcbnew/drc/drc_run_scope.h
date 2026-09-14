@@ -35,6 +35,9 @@ private:
         m_engine.SetProgressReporter( nullptr );
         m_engine.ClearViolationHandler();
         m_engine.SetSchematicNetlist( nullptr );
+        m_engine.SetLibraryInputs( nullptr );
+        m_engine.SetDrawingSheet( nullptr );
+        m_engine.ClearDrawingSheetModel();
     }
 
     DRC_ENGINE& m_engine;

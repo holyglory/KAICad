@@ -2981,8 +2981,6 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
     std::unique_ptr<NETLIST>    netlist = std::make_unique<NETLIST>();
 
-    drcEngine->SetDrawingSheet( getDrawingSheetProxyView( brd ) );
-
     // BOARD_COMMIT uses TOOL_MANAGER to grab the board internally so we must give it one
     TOOL_MANAGER* toolManager = getToolManager( brd );
 
@@ -2991,6 +2989,7 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
     std::string  netlist_str;
     bool         drcRunning = false;
     DRC_RUN_SCOPE runScope( *drcEngine, drcRunning );
+    drcEngine->SetDrawingSheet( getDrawingSheetProxyView( brd ) );
 
     if( checkParity )
     {

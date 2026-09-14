@@ -44,7 +44,7 @@ struct PARITY_FIXTURE
             for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
             {
                 auto* symbol = static_cast<SCH_SYMBOL*>( item );
-                if( symbol->GetLibSymbol() && !symbol->GetLibSymbol()->IsPower() ) return symbol;
+                if( symbol->GetLibSymbolRef() && !symbol->GetLibSymbolRef()->IsPower() ) return symbol;
             }
         return nullptr;
     }

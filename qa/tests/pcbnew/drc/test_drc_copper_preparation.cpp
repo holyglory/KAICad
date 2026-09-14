@@ -14,6 +14,7 @@
 #include <pad.h>
 #include <pcb_track.h>
 #include <pcb_generator.h>
+#include <generators/pcb_via_stitch.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <richio.h>
@@ -221,6 +222,52 @@ BOOST_AUTO_TEST_CASE( RebuildsAndFillsRealPadTeardropsWithoutAddingThemToTheSour
     }
     BOOST_CHECK_GT( filledTeardrops, 0 );
     BOOST_CHECK( source.Zones().empty() );
+    BOOST_CHECK_EQUAL( structure( source ), before );
+}
+
+BOOST_AUTO_TEST_CASE( CopperFillDrivesViaStitchingAndTheGeneratedViasStayPrivate )
+{
+    BOARD source;
+    source.Add( new NETINFO_ITEM( &source, "GND", 1 ) );
+    for( PCB_LAYER_ID layer : { F_Cu, B_Cu } )
+    {
+        ZONE* zone = addZone( source );
+        zone->SetLayer( layer );
+        zone->SetNetCode( 1 );
+    }
+    auto* stitch = new PCB_VIA_STITCH( &source );
+    SHAPE_POLY_SET outline;
+    outline.NewOutline();
+    outline.Append( 2000000, 2000000 );
+    outline.Append( 8000000, 2000000 );
+    outline.Append( 8000000, 8000000 );
+    outline.Append( 2000000, 8000000 );
+    stitch->SetOutline( outline );
+    stitch->SetPitch( 2000000 );
+    stitch->SetLayout( PCB_VIA_STITCH_LAYOUT::STAGGERED );
+    stitch->SetMode( PCB_VIA_STITCH_MODE::STITCH );
+    stitch->SetNetCode( 1 );
+    stitch->ViaTemplate()->SetWidth( PADSTACK::ALL_LAYERS, 600000 );
+    stitch->ViaTemplate()->SetDrill( 300000 );
+    source.Add( stitch );
+    const auto before = structure( source );
+    auto inputs = capture( source );
+    BOOST_REQUIRE( inputs );
+    const auto& result = inputs->PrepareCopper();
+    BOOST_REQUIRE_MESSAGE( result.status == STATUS::COMPLETED, result.error );
+    BOOST_CHECK( std::find( result.regenerated.begin(), result.regenerated.end(), stitch->m_Uuid )
+                    != result.regenerated.end() );
+    auto* generated = dynamic_cast<PCB_VIA_STITCH*>( inputs->GetBoard().ResolveItem( stitch->m_Uuid, true ) );
+    BOOST_REQUIRE( generated );
+    BOOST_CHECK_GT( generated->GetBoardItems().size(), 0 );
+    BOOST_CHECK_GT( inputs->GetBoard().Tracks().size(), 0 );
+    for( ZONE* zone : inputs->GetBoard().Zones() )
+    {
+        BOOST_REQUIRE( zone->GetFilledPolysList( zone->GetFirstLayer() ) );
+        BOOST_CHECK_GT( zone->GetFilledPolysList( zone->GetFirstLayer() )->TotalVertices(), 0 );
+    }
+    BOOST_CHECK( stitch->GetBoardItems().empty() );
+    BOOST_CHECK( source.Tracks().empty() );
     BOOST_CHECK_EQUAL( structure( source ), before );
 }
 

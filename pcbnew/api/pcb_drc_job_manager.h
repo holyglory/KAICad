@@ -11,6 +11,7 @@
 #include <string>
 
 class BOARD;
+struct PCB_DRC_CAPTURE_CONTEXT;
 
 /**
  * Owns DRC jobs for one native process/document owner. Jobs run against a
@@ -28,7 +29,7 @@ public:
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Start(
             const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch );
+            const std::string& aProcessEpoch, const PCB_DRC_CAPTURE_CONTEXT& aCaptureContext );
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Read(
             const kiapi::automation::v1::ReadPcbDrcJob& aRequest, BOARD& aBoard,

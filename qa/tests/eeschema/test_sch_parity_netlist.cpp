@@ -160,4 +160,57 @@ BOOST_AUTO_TEST_CASE( MissingProjectIsAnExplicitInputError )
     BOOST_CHECK( output.GetString().empty() );
 }
 
+BOOST_AUTO_TEST_CASE( AnExplicitlyEmptySchematicProducesAnEmptyNativeNetlist )
+{
+    SETTINGS_MANAGER emptySettings;
+    // Empty filename initializes the default project but reports no file loaded.
+    emptySettings.LoadProject( "" );
+    SCHEMATIC empty( &emptySettings.Prj() );
+    empty.CreateDefaultScreens();
+    const auto before = state( empty );
+    STRING_FORMATTER output;
+    BOOST_CHECK( FormatSchematicParityNetlist( empty, output ).empty() );
+    NETLIST netlist;
+    KICAD_NETLIST_READER reader( new STRING_LINE_READER( output.GetString(), "empty netlist" ), &netlist );
+    reader.LoadNetlist();
+    BOOST_CHECK_EQUAL( netlist.GetCount(), 0 );
+    BOOST_CHECK_EQUAL( state( empty ), before );
+}
+
+BOOST_AUTO_TEST_CASE( DuplicateSheetNamesRequireAnExplicitChoiceAndRetainTheWarning )
+{
+    SETTINGS_MANAGER emptySettings;
+    emptySettings.LoadProject( "" );
+    SCHEMATIC nested( &emptySettings.Prj() );
+    nested.CreateDefaultScreens();
+    for( const wxString& filename : { wxString( "one.kicad_sch" ), wxString( "two.kicad_sch" ) } )
+    {
+        auto* child = new SCH_SHEET( &nested.Root() );
+        auto* screen = new SCH_SCREEN( &nested );
+        screen->SetFileName( filename );
+        child->SetScreen( screen );
+        child->SetFileName( filename );
+        child->SetName( "SameName" );
+        nested.RootScreen()->Append( child );
+    }
+    nested.RefreshHierarchy();
+    const auto sheets = nested.Hierarchy();
+    BOOST_REQUIRE_EQUAL( sheets.size(), 3 );
+    nested.SetCurrentSheet( sheets.back() );
+    nested.ConnectionGraph()->Recalculate( sheets, true );
+    const auto before = state( nested );
+    STRING_FORMATTER rejected;
+    BOOST_CHECK_EXCEPTION( FormatSchematicParityNetlist( nested, rejected ), SCH_PARITY_INPUT_ERROR,
+                           []( const SCH_PARITY_INPUT_ERROR& error )
+                           { return error.Status() == SCH_PARITY_INPUT_STATUS::DUPLICATE_SHEET_NAMES; } );
+    BOOST_CHECK( rejected.GetString().empty() );
+    BOOST_CHECK_EQUAL( state( nested ), before );
+    STRING_FORMATTER accepted;
+    auto warnings = FormatSchematicParityNetlist( nested, accepted, true );
+    BOOST_REQUIRE_EQUAL( warnings.size(), 1 );
+    BOOST_CHECK( !accepted.GetString().empty() );
+    BOOST_CHECK( nested.CurrentSheet() == sheets.back() );
+    BOOST_CHECK_EQUAL( state( nested ), before );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

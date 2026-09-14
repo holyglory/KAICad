@@ -109,6 +109,8 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicSaveState>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> handleReadLifecycleState(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> handleReadParityNetlist(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicParityNetlist>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicHierarchyDataSnapshot> handleReadHierarchyData(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicHierarchyData>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> handleReadElectricalState(

@@ -24,6 +24,7 @@
 #include <sch_file_versions.h>
 #include <project/project_file.h>
 #include <api/native_state_digest.h>
+#include <api/sch_parity_netlist.h>
 #include <api/native_file_observation.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <json_common.h>
@@ -170,6 +171,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadSaveState );
     registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
             &API_HANDLER_SCH::handleReadLifecycleState );
+    registerHandler<kiapi::automation::v1::ReadSchematicParityNetlist, kiapi::automation::v1::SchematicParityNetlistSnapshot>(
+            &API_HANDLER_SCH::handleReadParityNetlist );
     registerHandler<kiapi::automation::v1::ReadSchematicScreenData, kiapi::automation::v1::SchematicScreenDataSnapshot>(
             &API_HANDLER_SCH::handleReadScreenData );
     registerHandler<kiapi::automation::v1::ReadSchematicHierarchyData, kiapi::automation::v1::SchematicHierarchyDataSnapshot>(
@@ -1815,6 +1818,70 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
         failure.set_error_message( std::string( "Native state could not be observed: " ) + error.what() );
         return tl::unexpected( failure );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> API_HANDLER_SCH::handleReadParityNetlist(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicParityNetlist>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto fail = []( ApiStatusCode code, const std::string& message ) -> HANDLER_RESULT<SchematicParityNetlistSnapshot>
+    {
+        ApiResponseStatus error;
+        error.set_status( code ); error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    if( aCtx.Request.schema_version() != 1 )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "Unsupported schematic parity snapshot version" );
+    // Native netlist paths omit the root UUID. The explicit document sheet path
+    // in source_state anchors them without guessing from names or positions.
+    if( !aCtx.Request.document().has_sheet_path() || aCtx.Request.document().sheet_path().path_size() == 0 )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "An explicit schematic sheet instance is required for comparison input" );
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    if( !aCtx.Request.has_expected_state() )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "Read the current schematic state before capturing comparison input" );
+
+    HANDLER_CONTEXT<ReadDocumentLifecycleState> query;
+    query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+    auto before = handleReadLifecycleState( query );
+    if( !before ) return tl::unexpected( before.error() );
+    // A journal cursor alone is not sufficient until all native changes are tracked.
+    // Compare the full writer/project state, explicit target and process identity.
+    if( !google::protobuf::util::MessageDifferencer::Equals( *before, aCtx.Request.expected_state() ) )
+        return fail( ApiStatusCode::AS_BUSY, "Schematic state changed; observe it again before capturing comparison input" );
+
+    try
+    {
+        STRING_FORMATTER output;
+        auto warnings = FormatSchematicParityNetlist( *schematic(), output,
+                aCtx.Request.allow_duplicate_sheet_names(), context()->GetKiway() );
+        auto after = handleReadLifecycleState( query );
+        if( !after ) return tl::unexpected( after.error() );
+        if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after ) )
+            return fail( ApiStatusCode::AS_BUSY, "Schematic changed while capturing comparison input" );
+        SchematicParityNetlistSnapshot result;
+        result.set_schema_version( 1 );
+        result.mutable_source_state()->CopyFrom( *after );
+        result.set_native_netlist_sexpr( output.GetString() );
+        NATIVE_STATE_DIGEST digest;
+        digest.Append( output.GetString() );
+        result.set_netlist_sha256( digest.Hex() );
+        for( const auto& warning : warnings ) result.add_warnings( warning );
+        return result;
+    }
+    catch( const SCH_PARITY_INPUT_ERROR& error )
+    {
+        bool busy = error.Status() == SCH_PARITY_INPUT_STATUS::EDIT_IN_PROGRESS
+                    || error.Status() == SCH_PARITY_INPUT_STATUS::CONNECTIVITY_PENDING;
+        return fail( busy ? ApiStatusCode::AS_BUSY : ApiStatusCode::AS_BAD_REQUEST, error.what() );
+    }
+    catch( const std::exception& error )
+    {
+        return fail( ApiStatusCode::AS_BAD_REQUEST,
+                     std::string( "Schematic comparison input could not be captured: " ) + error.what() );
     }
 }
 

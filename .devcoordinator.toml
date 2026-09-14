@@ -1845,7 +1845,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_pc
 name = "contracts"
 tier = "development"
 requires = ["build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_provider_isolation$|^qa_pcbnew_drc_job_lifecycle$|^qa_pcbnew_drc_run_scope$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_provider_isolation$|^qa_pcbnew_drc_job_lifecycle$|^qa_pcbnew_drc_run_scope$|^qa_pcbnew_drc_document_snapshot$", "--output-on-failure", "--no-tests=error"]
 
 [test.project-analysis-snapshot]
 timeout_seconds = 1800

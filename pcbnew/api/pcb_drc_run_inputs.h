@@ -79,6 +79,8 @@ public:
     bool RulesUnchanged() const;
     const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
     const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
+    std::string LibraryFingerprint() const;
+    bool HasLibraryDependencies() const;
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.

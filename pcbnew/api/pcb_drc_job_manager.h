@@ -26,6 +26,7 @@ public:
     using SCHEMATIC_OBSERVER = std::function<
             tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string>(
                     const kiapi::common::types::DocumentSpecifier& )>;
+    using LIBRARY_OBSERVER = std::function<tl::expected<std::string, std::string>( BOARD& )>;
     PCB_DRC_JOB_MANAGER();
     ~PCB_DRC_JOB_MANAGER();
 
@@ -36,7 +37,8 @@ public:
     // state to be recaptured and must never launch a second worker.
     tl::expected<std::optional<kiapi::automation::v1::PcbDrcJobState>, std::string> ReadOperation(
             const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} ) const;
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
+            const LIBRARY_OBSERVER& aObserveLibraries = {} ) const;
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Start(
             const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
@@ -44,18 +46,21 @@ public:
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Read(
             const kiapi::automation::v1::ReadPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} );
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
+            const LIBRARY_OBSERVER& aObserveLibraries = {} );
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Cancel(
             const kiapi::automation::v1::CancelPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} );
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
+            const LIBRARY_OBSERVER& aObserveLibraries = {} );
 
 private:
     struct JOB;
     std::shared_ptr<JOB> find( const std::string& aJobId ) const;
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
             const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
-            const SCHEMATIC_OBSERVER& aObserveSchematic = {} ) const;
+            const SCHEMATIC_OBSERVER& aObserveSchematic = {},
+            const LIBRARY_OBSERVER& aObserveLibraries = {} ) const;
 
     mutable std::mutex m_mutex;
     std::map<std::string, std::shared_ptr<JOB>> m_jobs;

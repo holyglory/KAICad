@@ -16,6 +16,7 @@
 #include <drawing_sheet/ds_data_item.h>
 #include <board_design_settings.h>
 #include <drc/drc_item.h>
+#include <drc/drc_library_inputs.h>
 #include <pcb_marker.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <project.h>
@@ -581,12 +582,19 @@ BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindin
     ReadPcbDrcJob query;
     query.mutable_document()->CopyFrom( request.document() );
     query.set_job_id( started->job_id() ); query.set_process_epoch( epoch );
-    auto state = jobs.Read( query, *board, epoch );
+    PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER observeLibraries = [&]( BOARD& source )
+            -> tl::expected<std::string, std::string>
+    {
+        auto captured = DRC_LIBRARY_INPUTS::Capture( source, adapter );
+        if( !captured ) return tl::unexpected( "Library observation cancelled" );
+        return captured->ContentFingerprint();
+    };
+    auto state = jobs.Read( query, *board, epoch, {}, observeLibraries );
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
     while( state && !state->worker_finished() && std::chrono::steady_clock::now() < deadline )
     {
         std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
-        state = jobs.Read( query, *board, epoch );
+        state = jobs.Read( query, *board, epoch, {}, observeLibraries );
     }
     BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
     BOOST_CHECK( state->status() == PDRCJS_INCOMPLETE );

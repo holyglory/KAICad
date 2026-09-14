@@ -141,6 +141,16 @@ void PCB_DRC_RUN_INPUTS::SetSchematicInput( std::unique_ptr<PCB_DRC_SCHEMATIC_IN
 
 const KIID& PCB_DRC_RUN_INPUTS::CapturedDrawingIdentity() const { return m_proxy->m_Uuid; }
 
+std::string PCB_DRC_RUN_INPUTS::LibraryFingerprint() const
+{
+    return m_libraries->ContentFingerprint();
+}
+
+bool PCB_DRC_RUN_INPUTS::HasLibraryDependencies() const
+{
+    return m_libraries->Size() != 0;
+}
+
 bool PCB_DRC_RUN_INPUTS::RulesUnchanged() const
 {
     // An absent project/rule path is explicitly implicit-only, not a failed read.

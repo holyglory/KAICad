@@ -1,5 +1,8 @@
 /* Frozen real library content for native checks. GPL-3.0-or-later. */
 #include <boost/test/unit_test.hpp>
+#include <api/pcb_drc_job_manager.h>
+#include <api/pcb_drc_run_inputs.h>
+#include <drawing_sheet/ds_data_model.h>
 #include <board.h>
 #include <board_design_settings.h>
 #include <cli_progress_reporter.h>
@@ -14,6 +17,8 @@
 #include <pad.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcbnew_utils/board_test_utils.h>
+#include <chrono>
+#include <thread>
 
 namespace
 {
@@ -190,6 +195,81 @@ BOOST_FIXTURE_TEST_CASE( LibraryFingerprintTracksDefinitionsAndAvailabilityNotPl
     auto recovered = DRC_LIBRARY_INPUTS::Capture( board, adapter );
     BOOST_REQUIRE( recovered );
     BOOST_CHECK_EQUAL( recovered->ContentFingerprint(), fingerprint );
+}
+
+BOOST_FIXTURE_TEST_CASE( CompletedJobsRejectChangedMissingAndUnobservableLibraryInputs, LIBRARY_FIXTURE )
+{
+    using namespace kiapi::automation::v1;
+    BOARD board;
+    board.SetFileName( "library-job.kicad_pcb" );
+    Place( board, original.GetFPID() );
+    LIBRARY_MANAGER manager; Load( manager );
+    FOOTPRINT_LIBRARY_ADAPTER adapter( manager );
+    auto loaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+    DS_DATA_MODEL drawing;
+    drawing.ClearList(); drawing.AllowVoidList( true );
+    PCB_DRC_CAPTURE_CONTEXT context{ adapter, drawing, KIID() };
+    PCB_DRC_JOB_MANAGER jobs;
+    const int revision = board.GetTimeStamp();
+    const std::string epoch = KIID().AsStdString();
+    bool observable = true;
+    PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER observer = [&]( BOARD& source )
+            -> tl::expected<std::string, std::string>
+    {
+        if( !observable ) return tl::unexpected( "Library owner is unavailable" );
+        auto inputs = DRC_LIBRARY_INPUTS::Capture( source, adapter );
+        if( !inputs ) return tl::unexpected( "Cancelled capture" );
+        return inputs->ContentFingerprint();
+    };
+    for( int change = 0; change < 4; ++change )
+    {
+        StartPcbDrcJob request;
+        request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+        request.mutable_document()->set_board_filename( "library-job.kicad_pcb" );
+        request.set_process_epoch( epoch ); request.set_operation_id( KIID().AsStdString() );
+        request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+        request.mutable_expected_revision()->set_sequence( revision );
+        auto started = jobs.Start( request, board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        ReadPcbDrcJob query;
+        query.mutable_document()->CopyFrom( request.document() );
+        query.set_process_epoch( epoch ); query.set_job_id( started->job_id() );
+        auto current = jobs.Read( query, board, epoch, {}, observer );
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+        while( current && !current->worker_finished() && std::chrono::steady_clock::now() < deadline )
+        {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+            current = jobs.Read( query, board, epoch, {}, observer );
+        }
+        BOOST_REQUIRE( current ); BOOST_REQUIRE( current->worker_finished() );
+        BOOST_REQUIRE_MESSAGE( current->status() == PDRCJS_COMPLETED, current->error_message() );
+        BOOST_CHECK_GT( current->findings_size(), 0 );
+        if( change == 0 )
+        {
+            original.SetLibDescription( "Changed during result lifetime" );
+            io.FootprintSave( path, &original );
+        }
+        else if( change == 1 )
+            BOOST_REQUIRE( std::filesystem::remove( scratch.GetPath() / "local.pretty" / "Part.kicad_mod" ) );
+        else if( change == 2 ) observable = false;
+        auto stale = change == 3 ? jobs.Read( query, board, epoch )
+                                : jobs.Read( query, board, epoch, {}, observer );
+        BOOST_REQUIRE( stale );
+        BOOST_CHECK( stale->status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( stale->error_code(), "library_inputs_changed" );
+        BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+        BOOST_CHECK( stale->worker_finished() && !stale->results_fresh() );
+        original.SetLibDescription( "" );
+        io.FootprintSave( path, &original );
+        observable = true;
+        auto replay = jobs.ReadOperation( request, board, epoch, {}, observer );
+        BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+        BOOST_CHECK_EQUAL( replay->value().job_id(), stale->job_id() );
+        BOOST_CHECK( replay->value().status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( replay->value().findings_size(), 0 );
+        BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE( MissingDisabledAndUnavailableInputsAreExplicitAndCancellationIsAtomic, LIBRARY_FIXTURE )

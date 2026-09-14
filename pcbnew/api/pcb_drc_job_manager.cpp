@@ -7,6 +7,7 @@
 #include <board_design_settings.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_item.h>
+#include <drc/drc_library_inputs.h>
 #include <drc/drc_run_scope.h>
 #include <pcb_marker.h>
 #include <progress_reporter.h>
@@ -92,6 +93,8 @@ struct PCB_DRC_JOB_MANAGER::JOB
     bool testFootprints = false;
     DocumentLifecycleState schematicState;
     PCB_DRC_PROJECT_BASELINE projectBaseline;
+    std::string libraryFingerprint;
+    bool hasLibraryDependencies = false;
     std::vector<std::string> inputWarnings;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
     double progress = 0.0;
@@ -130,7 +133,8 @@ std::shared_ptr<PCB_DRC_JOB_MANAGER::JOB> PCB_DRC_JOB_MANAGER::find( const std::
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
-        const SCHEMATIC_OBSERVER& aObserveSchematic ) const
+        const SCHEMATIC_OBSERVER& aObserveSchematic,
+        const LIBRARY_OBSERVER& aObserveLibraries ) const
 {
     if( !aJob ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aJob->processEpoch != aProcessEpoch )
@@ -153,6 +157,20 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         }
     }
     const bool projectChanged = !aJob->projectBaseline.Unchanged( aBoard );
+    bool librariesChanged = false;
+    if( aJob->hasLibraryDependencies )
+    {
+        if( !aObserveLibraries ) librariesChanged = true;
+        else
+        {
+            try
+            {
+                auto fingerprint = aObserveLibraries( aBoard );
+                librariesChanged = !fingerprint || *fingerprint != aJob->libraryFingerprint;
+            }
+            catch( const std::exception& ) { librariesChanged = true; }
+        }
+    }
     std::lock_guard lock( aJob->mutex );
     if( aJob->reporter && !aJob->workerFinished )
     {
@@ -163,17 +181,20 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     const bool liveChanged = aBoard.m_Uuid.AsStdString() != aJob->checkedBoardEpoch
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;
     if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
-          || aJob->status == PDRCJS_COMPLETED ) && ( liveChanged || schematicChanged || projectChanged ) )
+          || aJob->status == PDRCJS_COMPLETED )
+        && ( liveChanged || schematicChanged || projectChanged || librariesChanged ) )
     {
         aJob->invalidated = true;
         if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
         aJob->resultsFresh = false;
         aJob->findings.clear();
         aJob->errorCode = schematicChanged ? "schematic_changed"
-                : ( liveChanged ? "document_changed" : "project_inputs_changed" );
+                : ( liveChanged ? "document_changed"
+                    : ( projectChanged ? "project_inputs_changed" : "library_inputs_changed" ) );
         aJob->errorMessage = schematicChanged ? "The source schematic changed or could not be observed"
                 : ( liveChanged ? "The live PCB changed while DRC was running"
-                                : "Project settings, exclusions or custom rules changed or could not be observed" );
+                    : ( projectChanged ? "Project settings, exclusions or custom rules changed or could not be observed"
+                                       : "Footprint library inputs changed or could not be observed" ) );
         if( aJob->reporter ) aJob->reporter->Cancel();
     }
     PcbDrcJobState result;
@@ -202,7 +223,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
 
 tl::expected<std::optional<PcbDrcJobState>, std::string> PCB_DRC_JOB_MANAGER::ReadOperation(
         const StartPcbDrcJob& request, BOARD& board, const std::string& epoch,
-        const SCHEMATIC_OBSERVER& observer ) const
+        const SCHEMATIC_OBSERVER& observer, const LIBRARY_OBSERVER& libraries ) const
 {
     if( request.process_epoch() != epoch ) return tl::unexpected( "PCB DRC process epoch mismatch" );
     std::shared_ptr<JOB> existing;
@@ -216,7 +237,7 @@ tl::expected<std::optional<PcbDrcJobState>, std::string> PCB_DRC_JOB_MANAGER::Re
     if( !existing ) return std::optional<PcbDrcJobState>();
     if( !google::protobuf::util::MessageDifferencer::Equals( existing->request, request ) )
         return tl::unexpected( "The operation ID is already bound to different DRC arguments" );
-    auto result = state( existing, board, epoch, observer );
+    auto result = state( existing, board, epoch, observer, libraries );
     if( !result ) return tl::unexpected( result.error() );
     return std::optional<PcbDrcJobState>( *result );
 }
@@ -259,7 +280,13 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             return tl::unexpected( "Native schematic source is unavailable" );
         return aCaptureContext.schematic->source_state();
     };
-    if( duplicate ) return state( duplicate, aBoard, aProcessEpoch, capturedState );
+    LIBRARY_OBSERVER observeLibraries = [&]( BOARD& source ) -> tl::expected<std::string, std::string>
+    {
+        auto captured = DRC_LIBRARY_INPUTS::Capture( source, aCaptureContext.libraries );
+        if( !captured ) return tl::unexpected( "Library capture was cancelled" );
+        return captured->ContentFingerprint();
+    };
+    if( duplicate ) return state( duplicate, aBoard, aProcessEpoch, capturedState, observeLibraries );
 
     const int sequence = aBoard.GetTimeStamp();
     if( !aRequest.has_expected_revision() || sequence < 0
@@ -303,6 +330,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->reportAllTrackErrors = aRequest.report_all_track_errors();
     job->testFootprints = aRequest.test_footprints();
     job->projectBaseline = inputs->ProjectBaseline();
+    job->libraryFingerprint = inputs->LibraryFingerprint();
+    job->hasLibraryDependencies = inputs->HasLibraryDependencies();
     if( job->testFootprints )
     {
         job->schematicState = aCaptureContext.schematic->source_state();
@@ -420,24 +449,24 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         m_jobs.erase( job->id );
         return tl::unexpected( std::string( "Could not launch native DRC worker: " ) + error.what() );
     }
-    return state( job, aBoard, aProcessEpoch, capturedState );
+    return state( job, aBoard, aProcessEpoch, capturedState, observeLibraries );
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
         const ReadPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
-        const SCHEMATIC_OBSERVER& aObserveSchematic )
+        const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries )
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aRequest.process_epoch() != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
-    return state( job, aBoard, aProcessEpoch, aObserveSchematic );
+    return state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
         const CancelPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
-        const SCHEMATIC_OBSERVER& aObserveSchematic )
+        const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries )
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
@@ -448,5 +477,5 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
         if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
         if( !job->workerFinished ) job->reporter->Cancel();
     }
-    return state( job, aBoard, aProcessEpoch, aObserveSchematic );
+    return state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
 }

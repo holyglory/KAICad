@@ -48,6 +48,7 @@
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
 #include <api/pcb_drc_run_inputs.h>
+#include <drc/drc_library_inputs.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <drawing_sheet/ds_proxy_view_item.h>
 #include <project_pcb.h>
@@ -377,7 +378,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
         return tl::unexpected( valid.error() );
 
     auto replay = m_drcJobs.ReadOperation( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
-                                         [this]( const auto& document ) { return observeDrcSchematic( document ); } );
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !replay )
     {
         ApiResponseStatus error;
@@ -457,6 +459,16 @@ tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> API_HAN
     return state;
 }
 
+tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOARD& source )
+{
+    if( &source != board() ) return tl::unexpected( "Library observation target changed" );
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    if( !libraries ) return tl::unexpected( "Native footprint libraries are unavailable" );
+    auto captured = DRC_LIBRARY_INPUTS::Capture( source, *libraries );
+    if( !captured ) return tl::unexpected( "Native footprint library observation was cancelled" );
+    return captured->ContentFingerprint();
+}
+
 HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcJob(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx )
 {
@@ -464,7 +476,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
         return tl::unexpected( valid.error() );
 
     auto read = m_drcJobs.Read( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
-                               [this]( const auto& document ) { return observeDrcSchematic( document ); } );
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !read )
     {
         ApiResponseStatus error;
@@ -482,7 +495,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCan
         return tl::unexpected( valid.error() );
 
     auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
-                                     [this]( const auto& document ) { return observeDrcSchematic( document ); } );
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !cancelled )
     {
         ApiResponseStatus error;

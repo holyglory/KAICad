@@ -1941,7 +1941,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_sy
 name = "codec"
 tier = "development"
 requires = ["model-build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$|^qa_net_settings_capture$|^qa_api_request_target$|^qa_settings_save_outcome$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_netclass_proto$|^qa_net_settings_capture$|^qa_api_request_target$|^qa_settings_save_outcome$|^qa_schematic_parity_netlist$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-net-settings.check]]
 name = "native-build"

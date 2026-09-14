@@ -300,6 +300,7 @@ public sealed partial class NativeSessionTests
                         await VerifyBoardNetSettings(client, opened.Document, target.Project, focusProcessId,
                             ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                        await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
                     }
                     else if (journey == NativeJourney.TableVariants)
                         await VerifyTableVariantEdits(client, opened.Document, schematic, focusProcessId,

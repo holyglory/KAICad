@@ -7,6 +7,7 @@
 #include <board.h>
 #include <pcb_track.h>
 #include <netinfo.h>
+#include <netclass.h>
 #include <footprint.h>
 #include <pad.h>
 #include <footprint_library_adapter.h>
@@ -19,6 +20,7 @@
 #include <pcbnew_utils/board_test_utils.h>
 #include <project.h>
 #include <project/project_file.h>
+#include <project/net_settings.h>
 #include <settings/settings_manager.h>
 #include <json_common.h>
 #include <router/pns_routing_settings.h>
@@ -169,6 +171,148 @@ BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotC
     BOOST_CHECK( stale->worker_finished() );
     BOOST_CHECK( !stale->results_fresh() );
     BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( ProjectBaselineOwnsSettingsAndDetectsContentChangesWithoutTimestampChanges )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_baseline_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    const auto rulesPath = scratch.GetPath() / "fixture.kicad_dru";
+    SETTINGS_MANAGER manager;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    BOARD board;
+    board.SetProject( project );
+    const wxString boardName = wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() );
+    board.SetFileName( boardName );
+    auto item = DRC_ITEM::Create( DRCE_INVALID_OUTLINE );
+    item->SetItems( &board );
+    auto* marker = new PCB_MARKER( item, {}, Edge_Cuts );
+    board.Add( marker ); marker->SetExcluded( true, "retained explanation" );
+    const int sequence = board.GetTimeStamp();
+    auto inputs = PCB_DRC_RUN_INPUTS::Capture( board, context );
+    BOOST_REQUIRE( inputs );
+    const auto absent = inputs->ProjectBaseline();
+    inputs.reset(); // A terminal receipt must not need the worker's private inputs.
+    BOOST_CHECK( absent.Unchanged( board ) );
+    project->GetTextVars()["CHECK_VALUE"] = "changed";
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    project->GetTextVars().erase( "CHECK_VALUE" );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    auto& settings = board.GetDesignSettings();
+    const int minimum = settings.m_MinClearance;
+    settings.m_MinClearance = minimum + 1;
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    settings.m_MinClearance = minimum;
+    BOOST_CHECK( absent.Unchanged( board ) );
+    auto netclass = settings.m_NetSettings->GetDefaultNetclass();
+    const int clearance = netclass->GetClearance();
+    netclass->SetClearance( clearance + 1 );
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    netclass->SetClearance( clearance );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    marker->SetExcluded( true, "changed explanation" );
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    marker->SetExcluded( true, "retained explanation" );
+    BOOST_CHECK( absent.Unchanged( board ) );
+
+    const std::string first = "(version 1)\n(rule \"limit\" (constraint clearance (min 0.4mm)))\n";
+    const std::string second = "(version 1)\n(rule \"limit\" (constraint clearance (min 0.5mm)))\n";
+    { std::ofstream file( rulesPath ); file << first; }
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    inputs = PCB_DRC_RUN_INPUTS::Capture( board, context );
+    BOOST_REQUIRE( inputs );
+    const auto present = inputs->ProjectBaseline();
+    inputs.reset();
+    BOOST_CHECK( present.Unchanged( board ) );
+    const auto modified = std::filesystem::last_write_time( rulesPath );
+    const auto bytes = std::filesystem::file_size( rulesPath );
+    { std::ofstream file( rulesPath ); file << second; }
+    std::filesystem::last_write_time( rulesPath, modified );
+    BOOST_REQUIRE_EQUAL( std::filesystem::file_size( rulesPath ), bytes );
+    BOOST_CHECK( !present.Unchanged( board ) );
+    { std::ofstream file( rulesPath ); file << first; }
+    BOOST_CHECK( present.Unchanged( board ) );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "other.kicad_pcb" ).string() ) );
+    BOOST_CHECK( !present.Unchanged( board ) );
+    board.SetFileName( boardName );
+    BOOST_CHECK( present.Unchanged( board ) );
+    BOOST_REQUIRE( std::filesystem::remove( rulesPath ) );
+    BOOST_CHECK( !present.Unchanged( board ) );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    BOOST_REQUIRE( std::filesystem::create_directory( rulesPath ) );
+    BOOST_CHECK( !present.Unchanged( board ) );
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    BOOST_REQUIRE( std::filesystem::remove( rulesPath ) );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
+}
+
+BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotResurrect )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_receipt_inputs_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    const auto rulesPath = scratch.GetPath() / "fixture.kicad_dru";
+    SETTINGS_MANAGER manager;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    BOARD board;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    const int sequence = board.GetTimeStamp();
+    const std::string epoch = KIID().AsStdString();
+    PCB_DRC_JOB_MANAGER jobs;
+    StartPcbDrcJob request;
+    request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    request.mutable_document()->set_board_filename( "fixture.kicad_pcb" );
+    request.set_process_epoch( epoch );
+    request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+    request.mutable_expected_revision()->set_sequence( sequence );
+    for( bool ruleChange : { false, true } )
+    {
+        request.set_operation_id( KIID().AsStdString() );
+        auto started = jobs.Start( request, board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        ReadPcbDrcJob query;
+        query.mutable_document()->CopyFrom( request.document() );
+        query.set_process_epoch( epoch ); query.set_job_id( started->job_id() );
+        auto current = jobs.Read( query, board, epoch );
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+        while( current && !current->worker_finished() && std::chrono::steady_clock::now() < deadline )
+        {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+            current = jobs.Read( query, board, epoch );
+        }
+        BOOST_REQUIRE( current ); BOOST_REQUIRE( current->worker_finished() );
+        BOOST_REQUIRE_MESSAGE( current->status() == PDRCJS_COMPLETED, current->error_message() );
+        BOOST_CHECK_GT( current->findings_size(), 0 );
+        auto unchanged = jobs.Read( query, board, epoch );
+        BOOST_REQUIRE( unchanged );
+        BOOST_CHECK( MessageDifferencer::Equals( *current, *unchanged ) );
+        if( ruleChange ) { std::ofstream file( rulesPath ); file << "(version 1)"; }
+        else project->GetTextVars()["CHECK_VALUE"] = "changed without a board edit";
+        auto stale = jobs.Read( query, board, epoch );
+        BOOST_REQUIRE( stale );
+        BOOST_CHECK( stale->status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( stale->error_code(), "project_inputs_changed" );
+        BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+        BOOST_CHECK( !stale->results_fresh() && stale->worker_finished() );
+        if( ruleChange ) BOOST_REQUIRE( std::filesystem::remove( rulesPath ) );
+        else project->GetTextVars().erase( "CHECK_VALUE" );
+        auto replay = jobs.ReadOperation( request, board, epoch );
+        BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+        BOOST_CHECK( MessageDifferencer::Equals( replay->value(), *stale ) );
+        auto repeated = jobs.Start( request, board, epoch, context );
+        BOOST_REQUIRE( repeated );
+        BOOST_CHECK( MessageDifferencer::Equals( *repeated, *stale ) );
+        BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
+    }
 }
 
 BOOST_AUTO_TEST_CASE( WorkerFindsActualCopperViolationsWithItsBoardEngineBound )

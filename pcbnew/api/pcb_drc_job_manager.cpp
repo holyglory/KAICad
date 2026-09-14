@@ -91,6 +91,7 @@ struct PCB_DRC_JOB_MANAGER::JOB
     bool reportAllTrackErrors = false;
     bool testFootprints = false;
     DocumentLifecycleState schematicState;
+    PCB_DRC_PROJECT_BASELINE projectBaseline;
     std::vector<std::string> inputWarnings;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
     double progress = 0.0;
@@ -132,6 +133,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         const SCHEMATIC_OBSERVER& aObserveSchematic ) const
 {
     if( !aJob ) return tl::unexpected( "Unknown PCB DRC job" );
+    if( aJob->processEpoch != aProcessEpoch )
+        return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     // Immutable source identity is fixed before worker launch. Do not hold the
     // receipt mutex while dispatching a UI-thread observation of another document.
     bool schematicChanged = false;
@@ -149,9 +152,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
             catch( const std::exception& ) { schematicChanged = true; }
         }
     }
+    const bool projectChanged = !aJob->projectBaseline.Unchanged( aBoard );
     std::lock_guard lock( aJob->mutex );
-    if( aJob->processEpoch != aProcessEpoch )
-        return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( aJob->reporter && !aJob->workerFinished )
     {
         aJob->progress = std::max( aJob->progress, aJob->reporter->Progress() );
@@ -161,15 +163,17 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     const bool liveChanged = aBoard.m_Uuid.AsStdString() != aJob->checkedBoardEpoch
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;
     if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
-          || aJob->status == PDRCJS_COMPLETED ) && ( liveChanged || schematicChanged ) )
+          || aJob->status == PDRCJS_COMPLETED ) && ( liveChanged || schematicChanged || projectChanged ) )
     {
         aJob->invalidated = true;
         if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
         aJob->resultsFresh = false;
         aJob->findings.clear();
-        aJob->errorCode = schematicChanged ? "schematic_changed" : "document_changed";
+        aJob->errorCode = schematicChanged ? "schematic_changed"
+                : ( liveChanged ? "document_changed" : "project_inputs_changed" );
         aJob->errorMessage = schematicChanged ? "The source schematic changed or could not be observed"
-                                            : "The live PCB changed while DRC was running";
+                : ( liveChanged ? "The live PCB changed while DRC was running"
+                                : "Project settings, exclusions or custom rules changed or could not be observed" );
         if( aJob->reporter ) aJob->reporter->Cancel();
     }
     PcbDrcJobState result;
@@ -298,6 +302,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->refillZones = aRequest.refill_zones();
     job->reportAllTrackErrors = aRequest.report_all_track_errors();
     job->testFootprints = aRequest.test_footprints();
+    job->projectBaseline = inputs->ProjectBaseline();
     if( job->testFootprints )
     {
         job->schematicState = aCaptureContext.schematic->source_state();

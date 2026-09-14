@@ -4,6 +4,7 @@
 
 #include <file_content_baseline.h>
 #include <kiid.h>
+#include <json_common.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,6 +38,19 @@ struct PCB_DRC_COPPER_PREPARATION
     std::vector<KIID> regenerated;
 };
 
+// Lightweight, immutable receipt data; never borrows the live project or the
+// worker's private board. This covers project/settings/rules, not every input.
+class PCB_DRC_PROJECT_BASELINE
+{
+public:
+    bool Unchanged( const BOARD& aBoard ) const;
+
+private:
+    friend class PCB_DRC_RUN_INPUTS;
+    FILE_CONTENT_BASELINE m_rules;
+    nlohmann::json m_settings;
+};
+
 class PCB_DRC_RUN_INPUTS
 {
 public:
@@ -52,6 +66,7 @@ public:
     const KIID& CapturedDrawingIdentity() const;
     const KIID& SourceDrawingIdentity() const { return m_sourceDrawingIdentity; }
     bool RulesUnchanged() const;
+    const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.
@@ -66,6 +81,7 @@ private:
     std::unique_ptr<DS_DATA_MODEL> m_drawing;
     std::unique_ptr<DS_PROXY_VIEW_ITEM> m_proxy;
     FILE_CONTENT_BASELINE m_rulesBaseline;
+    PCB_DRC_PROJECT_BASELINE m_projectBaseline;
     std::string m_rulesText;
     KIID m_sourceDrawingIdentity;
     std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;

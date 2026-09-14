@@ -3,6 +3,7 @@
 #include "pcb_drc_document_snapshot.h"
 #include "pcb_drc_schematic_input.h"
 #include <board.h>
+#include <board_design_settings.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_library_inputs.h>
 #include <drawing_sheet/ds_data_model.h>
@@ -10,6 +11,8 @@
 #include <progress_reporter.h>
 #include <project.h>
 #include <project/project_file.h>
+#include <project/net_settings.h>
+#include <pcb_project_editor_state.h>
 #include <json_common.h>
 #include <router/pns_routing_settings.h>
 #include <stdexcept>
@@ -17,14 +20,50 @@
 PCB_DRC_RUN_INPUTS::~PCB_DRC_RUN_INPUTS() = default;
 BOARD& PCB_DRC_RUN_INPUTS::GetBoard() const { return m_document->GetBoard(); }
 
+namespace
+{
+nlohmann::json ProjectInputs( const BOARD& aBoard )
+{
+    const PROJECT* project = aBoard.GetProject();
+    const auto& settings = aBoard.GetDesignSettings();
+    nlohmann::json result = {
+        { "project_path", project ? project->GetProjectFullName().ToStdString() : "" },
+        { "project", project ? project->GetProjectFile().CaptureCurrentState() : nlohmann::json() },
+        { "board_settings", settings.CaptureCurrentState() },
+        { "net_settings", settings.m_NetSettings
+                ? settings.m_NetSettings->CaptureCurrentState() : nlohmann::json() }
+    };
+    // Exclusion comments can change on live markers before project settings save.
+    result["effective_exclusions"] = nlohmann::json::array();
+    for( const auto& exclusion : PCB_PROJECT_EDITOR_STATE::Exclusions( aBoard ) )
+        result["effective_exclusions"].push_back( exclusion );
+    return result;
+}
+}
+
+bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
+{
+    try
+    {
+        const wxString rulesPath = aBoard.GetDesignRulesPath();
+        const bool rulesUnchanged = m_rules.Path().empty() ? rulesPath.empty()
+                : m_rules.Check( rulesPath ) == FILE_BASELINE_CHECK::UNCHANGED;
+        return rulesUnchanged && m_settings == ProjectInputs( aBoard );
+    }
+    catch( const std::exception& )
+    {
+        // Unreadable or unrepresentable inputs are not evidence of freshness.
+        return false;
+    }
+}
+
 std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
         BOARD& aBoard, const PCB_DRC_CAPTURE_CONTEXT& aContext, PROGRESS_REPORTER* aReporter )
 {
     const int revision = aBoard.GetTimeStamp();
     const KIID identity = aBoard.m_Uuid;
-    const auto projectBefore = aBoard.GetProject()
-            ? aBoard.GetProject()->GetProjectFile().CaptureCurrentState() : nlohmann::json();
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
+    result->m_projectBaseline.m_settings = ProjectInputs( aBoard );
     const auto routingBefore = aContext.routingSettings
             ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json();
     if( aContext.routingSettings )
@@ -41,6 +80,7 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
         if( !result->m_rulesBaseline.Known() )
             throw std::runtime_error( "Custom design rules could not be captured" );
     }
+    result->m_projectBaseline.m_rules = result->m_rulesBaseline;
     result->m_document = PCB_DRC_DOCUMENT_SNAPSHOT::Capture( aBoard );
     result->m_libraries = DRC_LIBRARY_INPUTS::Capture( aBoard, aContext.libraries, aReporter );
     if( !result->m_libraries ) return nullptr;
@@ -49,11 +89,9 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     result->m_proxy = std::make_unique<DS_PROXY_VIEW_ITEM>( pcbIUScale, &copy.GetPageSettings(),
             copy.GetProject(), &copy.GetTitleBlock(), &copy.GetProperties() );
     if( aReporter && aReporter->IsCancelled() ) return nullptr;
-    const auto projectAfter = aBoard.GetProject()
-            ? aBoard.GetProject()->GetProjectFile().CaptureCurrentState() : nlohmann::json();
-    if( aBoard.GetTimeStamp() != revision || aBoard.m_Uuid != identity || projectBefore != projectAfter
+    if( aBoard.GetTimeStamp() != revision || aBoard.m_Uuid != identity
             || ( aContext.routingSettings && routingBefore != aContext.routingSettings->CaptureCurrentState() )
-            || !result->RulesUnchanged() )
+            || !result->m_projectBaseline.Unchanged( aBoard ) )
         throw std::runtime_error( "Native DRC inputs changed during capture" );
     return result;
 }

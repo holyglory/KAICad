@@ -57,6 +57,28 @@ bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
     }
 }
 
+PCB_DRC_AUXILIARY_BASELINE PCB_DRC_AUXILIARY_BASELINE::Capture(
+        const PCB_DRC_CAPTURE_CONTEXT& aContext )
+{
+    wxString drawing;
+    aContext.drawing.SaveInString( &drawing );
+    PCB_DRC_AUXILIARY_BASELINE result;
+    result.m_state = {
+        { "drawing_identity", aContext.drawingIdentity.AsStdString() },
+        { "drawing", drawing.utf8_string() },
+        { "allow_empty_drawing", aContext.drawing.VoidListAllowed() },
+        { "routing", aContext.routingSettings
+                ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json() }
+    };
+    return result;
+}
+
+bool PCB_DRC_AUXILIARY_BASELINE::Unchanged( const PCB_DRC_CAPTURE_CONTEXT& aContext ) const
+{
+    try { return m_state == Capture( aContext ).m_state; }
+    catch( const std::exception& ) { return false; }
+}
+
 std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
         BOARD& aBoard, const PCB_DRC_CAPTURE_CONTEXT& aContext, PROGRESS_REPORTER* aReporter )
 {
@@ -64,8 +86,7 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const KIID identity = aBoard.m_Uuid;
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
     result->m_projectBaseline.m_settings = ProjectInputs( aBoard );
-    const auto routingBefore = aContext.routingSettings
-            ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json();
+    result->m_auxiliaryBaseline = PCB_DRC_AUXILIARY_BASELINE::Capture( aContext );
     if( aContext.routingSettings )
     {
         result->m_routingSettings = std::make_unique<PNS::ROUTING_SETTINGS>(
@@ -90,7 +111,7 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
             copy.GetProject(), &copy.GetTitleBlock(), &copy.GetProperties() );
     if( aReporter && aReporter->IsCancelled() ) return nullptr;
     if( aBoard.GetTimeStamp() != revision || aBoard.m_Uuid != identity
-            || ( aContext.routingSettings && routingBefore != aContext.routingSettings->CaptureCurrentState() )
+            || !result->m_auxiliaryBaseline.Unchanged( aContext )
             || !result->m_projectBaseline.Unchanged( aBoard ) )
         throw std::runtime_error( "Native DRC inputs changed during capture" );
     return result;

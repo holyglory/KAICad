@@ -251,6 +251,45 @@ BOOST_AUTO_TEST_CASE( ProjectBaselineOwnsSettingsAndDetectsContentChangesWithout
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
 }
 
+BOOST_AUTO_TEST_CASE( AuxiliaryBaselineRetainsDrawingAndRoutingWithoutBorrowingPrivateInputs )
+{
+    BOARD board;
+    PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
+    context.routingSettings = &routing;
+    auto* text = new DS_DATA_ITEM_TEXT( "Original drawing text" );
+    drawing.Append( text );
+    auto inputs = PCB_DRC_RUN_INPUTS::Capture( board, context );
+    BOOST_REQUIRE( inputs );
+    const auto baseline = inputs->AuxiliaryBaseline();
+    inputs.reset();
+    BOOST_CHECK( baseline.Unchanged( context ) );
+    text->m_TextBase = "Changed drawing text";
+    BOOST_CHECK( !baseline.Unchanged( context ) );
+    text->m_TextBase = "Original drawing text";
+    BOOST_CHECK( baseline.Unchanged( context ) );
+    drawing.AllowVoidList( false );
+    BOOST_CHECK( !baseline.Unchanged( context ) );
+    drawing.AllowVoidList( true );
+    BOOST_CHECK( baseline.Unchanged( context ) );
+    const KIID drawingId = context.drawingIdentity;
+    context.drawingIdentity = KIID();
+    BOOST_CHECK( !baseline.Unchanged( context ) );
+    context.drawingIdentity = drawingId;
+    BOOST_CHECK( baseline.Unchanged( context ) );
+    const bool shove = routing.ShoveVias();
+    routing.SetShoveVias( !shove );
+    BOOST_CHECK( !baseline.Unchanged( context ) );
+    routing.SetShoveVias( shove );
+    BOOST_CHECK( baseline.Unchanged( context ) );
+    context.routingSettings = nullptr;
+    BOOST_CHECK( !baseline.Unchanged( context ) );
+    const auto absent = PCB_DRC_AUXILIARY_BASELINE::Capture( context );
+    BOOST_CHECK( absent.Unchanged( context ) );
+    context.routingSettings = &routing;
+    BOOST_CHECK( !absent.Unchanged( context ) );
+    BOOST_CHECK( baseline.Unchanged( context ) );
+}
+
 BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotResurrect )
 {
     KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_receipt_inputs_" + KIID().AsStdString(), "" );

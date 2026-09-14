@@ -51,6 +51,17 @@ private:
     nlohmann::json m_settings;
 };
 
+// Retained native presentation/router state, without any live editor pointers.
+class PCB_DRC_AUXILIARY_BASELINE
+{
+public:
+    static PCB_DRC_AUXILIARY_BASELINE Capture( const PCB_DRC_CAPTURE_CONTEXT& aContext );
+    bool Unchanged( const PCB_DRC_CAPTURE_CONTEXT& aContext ) const;
+
+private:
+    nlohmann::json m_state;
+};
+
 class PCB_DRC_RUN_INPUTS
 {
 public:
@@ -67,6 +78,7 @@ public:
     const KIID& SourceDrawingIdentity() const { return m_sourceDrawingIdentity; }
     bool RulesUnchanged() const;
     const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
+    const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.
@@ -82,6 +94,7 @@ private:
     std::unique_ptr<DS_PROXY_VIEW_ITEM> m_proxy;
     FILE_CONTENT_BASELINE m_rulesBaseline;
     PCB_DRC_PROJECT_BASELINE m_projectBaseline;
+    PCB_DRC_AUXILIARY_BASELINE m_auxiliaryBaseline;
     std::string m_rulesText;
     KIID m_sourceDrawingIdentity;
     std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;

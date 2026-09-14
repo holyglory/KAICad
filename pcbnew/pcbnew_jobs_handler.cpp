@@ -3080,7 +3080,10 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
     const DRC_RUN_RESULT result = drcEngine->RunTests( units, drcJob->m_reportAllTrackErrors,
                                                      checkParity );
     if( result != DRC_RUN_RESULT::COMPLETED )
+    {
+        commit.Revert();
         return CLI::EXIT_CODES::ERR_UNKNOWN;
+    }
 
     commit.Push( _( "DRC" ), SKIP_UNDO | SKIP_SET_DIRTY );
 

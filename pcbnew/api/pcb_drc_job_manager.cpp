@@ -2,6 +2,7 @@
 #include "pcb_drc_job_manager.h"
 
 #include <board.h>
+#include <board_design_settings.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_item.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
@@ -265,7 +266,14 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             std::unique_ptr<BOARD> board( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXP,
                     path, nullptr, nullptr, nullptr, job->reporter.get() ) );
             if( !board ) throw std::runtime_error( "Native PCB snapshot could not be loaded" );
-            DRC_ENGINE engine( board.get(), &board->GetDesignSettings() );
+            // The board's runtime UUID is not serialized by the native file.
+            // Board-level findings must still identify the requested live owner.
+            board->SetUuid( KIID( job->checkedBoardEpoch ) );
+            // Board items consult their design settings' engine for cached
+            // clearances. A separate unregistered stack engine can miss rules.
+            auto& settings = board->GetDesignSettings();
+            settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( board.get(), &settings );
+            DRC_ENGINE& engine = *settings.m_DRCEngine;
             engine.InitEngine( board->GetDesignRulesPath() );
             engine.SetProgressReporter( job->reporter.get() );
             engine.SetViolationHandler( [&findings, job]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,

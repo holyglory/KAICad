@@ -14,6 +14,13 @@
 #include <pcbnew_utils/board_file_utils.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <json_common.h>
+#include <board.h>
+#include <board_design_settings.h>
+#include <pcb_track.h>
+#include <footprint.h>
+#include <pad.h>
+#include <project/net_settings.h>
+#include <atomic>
 
 namespace
 {
@@ -139,6 +146,82 @@ BOOST_AUTO_TEST_CASE( NestedAdmissionDoesNotClearTheActiveInvocation )
         BOOST_CHECK_EQUAL( calls, 1 );
     }
     BOOST_CHECK( !running );
+}
+
+BOOST_AUTO_TEST_CASE( CancellationDuringRealViolationsReleasesStateAndRecovers )
+{
+    class MID_CHECK_REPORTER : public CLI_PROGRESS_REPORTER
+    {
+    public:
+        bool IsCancelled() const override { return cancelled.load(); }
+        bool KeepRefreshing( bool = false ) override { return !cancelled.load(); }
+        std::atomic_bool cancelled = false;
+    } reporter;
+
+    BOARD board;
+    board.SetCopperLayerCount( 2 );
+    auto* netA = new NETINFO_ITEM( &board, "A", 1 );
+    auto* netB = new NETINFO_ITEM( &board, "B", 2 );
+    board.Add( netA ); board.Add( netB );
+    for( int i = 0; i < 30; ++i )
+    {
+        auto* footprint = new FOOTPRINT( &board );
+        footprint->SetPosition( { 0, i * 50000 } );
+        board.Add( footprint );
+        auto* pad = new PAD( footprint );
+        pad->SetPadstackMode( PADSTACK::MODE::NORMAL );
+        pad->SetAttribute( PAD_ATTRIB::SMD );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, { 100000, 100000 } );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetPosition( footprint->GetPosition() );
+        pad->SetNet( i % 2 ? netA : netB );
+        footprint->Add( pad );
+    }
+    auto& settings = board.GetDesignSettings();
+    settings.m_MinClearance = 250000;
+    settings.m_NetSettings->GetDefaultNetclass()->SetClearance( 250000 );
+    for( int code = DRCE_FIRST; code <= DRCE_LAST; ++code )
+        settings.m_DRCSeverities[code] = SEVERITY::RPT_SEVERITY_IGNORE;
+    settings.m_DRCSeverities[DRCE_CLEARANCE] = SEVERITY::RPT_SEVERITY_ERROR;
+    settings.m_DRCSeverities[DRCE_SHORTING_ITEMS] = SEVERITY::RPT_SEVERITY_ERROR;
+    settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( &board, &settings );
+    DRC_ENGINE& engine = *settings.m_DRCEngine;
+    engine.InitEngine( wxFileName() );
+    BOOST_REQUIRE_NE( netA->GetNetCode(), netB->GetNetCode() );
+    int completeCount = 0;
+    bool running = false;
+
+    for( bool cancel : { false, true, false } )
+    {
+        reporter.cancelled.store( false );
+        std::atomic<int> findings = 0;
+        std::weak_ptr<int> callbackLifetime;
+        {
+            DRC_RUN_SCOPE scope( engine, running );
+            engine.SetProgressReporter( &reporter );
+            auto lifetime = std::make_shared<int>( 1 );
+            callbackLifetime = lifetime;
+            engine.SetViolationHandler( [&, cancel, lifetime]( const auto&, const auto&, int, const auto& )
+            {
+                // Cancellation follows actual clearance/shorting findings,
+                // not parsing, initialization or an injected worker delay.
+                if( ++findings >= 5 && cancel ) reporter.cancelled.store( true );
+            } );
+            const auto result = engine.RunTests( EDA_UNITS::MM, true, false );
+            BOOST_CHECK( result == ( cancel ? DRC_RUN_RESULT::CANCELLED : DRC_RUN_RESULT::COMPLETED ) );
+            BOOST_CHECK_GE( findings.load(), 5 );
+            if( !cancel )
+            {
+                if( completeCount == 0 ) completeCount = findings.load();
+                else BOOST_CHECK_EQUAL( findings.load(), completeCount );
+            }
+        }
+        BOOST_CHECK( !running );
+        BOOST_CHECK( callbackLifetime.expired() );
+        BOOST_CHECK( engine.GetProgressReporter() == nullptr );
+        BOOST_CHECK( engine.GetSchematicNetlist() == nullptr );
+    }
 }
 
 BOOST_AUTO_TEST_CASE( ExportJobPreservesExistingReportOnCancellationAndRecovers )

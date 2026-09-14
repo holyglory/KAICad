@@ -27,11 +27,31 @@
 #include <router/pns_kicad_iface.h>
 #include <router/pns_solid.h>
 #include <router/pns_router.h>
+#include <router/pns_routing_settings.h>
+#include <stdexcept>
 
 
 class PNS_KICAD_IFACE_GENERATOR : public PNS_KICAD_IFACE
 {
 public:
+    explicit PNS_KICAD_IFACE_GENERATOR( bool aDetached = false ) : m_detached( aDetached ) {}
+
+    void EraseView() override
+    { if( !m_detached ) PNS_KICAD_IFACE::EraseView(); }
+    void HideItem( PNS::ITEM* aItem ) override
+    { if( !m_detached ) PNS_KICAD_IFACE::HideItem( aItem ); }
+    void DisplayItem( const PNS::ITEM* aItem, int aClearance, bool aEdit = false, int aFlags = 0 ) override
+    { if( !m_detached ) PNS_KICAD_IFACE::DisplayItem( aItem, aClearance, aEdit, aFlags ); }
+    void DisplayPathLine( const SHAPE_LINE_CHAIN& aLine, int aImportance ) override
+    { if( !m_detached ) PNS_KICAD_IFACE::DisplayPathLine( aLine, aImportance ); }
+    void DisplayRatline( const SHAPE_LINE_CHAIN& aLine, PNS::NET_HANDLE aNet ) override
+    { if( !m_detached ) PNS_KICAD_IFACE::DisplayRatline( aLine, aNet ); }
+    bool IsAnyLayerVisible( const PNS_LAYER_RANGE& aLayers ) const override
+    { return m_detached || PNS_KICAD_IFACE::IsAnyLayerVisible( aLayers ); }
+    bool IsItemVisible( const PNS::ITEM* aItem ) const override
+    { return m_detached || PNS_KICAD_IFACE::IsItemVisible( aItem ); }
+    EDA_UNITS GetUnits() const override
+    { return m_detached ? EDA_UNITS::MM : PNS_KICAD_IFACE::GetUnits(); }
     void SetHostTool( PCB_TOOL_BASE* aTool ) override
     {
         m_tool = aTool;
@@ -95,6 +115,7 @@ public:
     bool IsGeneratedItem( BOARD_ITEM* aItem ) const { return m_createdItems.contains( aItem ); }
 
 private:
+    bool m_detached;
     std::set<BOARD_ITEM*> m_createdItems;
 
     std::vector<GENERATOR_PNS_CHANGES> m_changes;
@@ -127,6 +148,17 @@ GENERATOR_TOOL_PNS_PROXY::GENERATOR_TOOL_PNS_PROXY( const std::string& aToolName
 
 GENERATOR_TOOL_PNS_PROXY::~GENERATOR_TOOL_PNS_PROXY()
 {
+    // ROUTER borrows its settings. Destroy it before the owned snapshot settings.
+    Reset( RESET_REASON::SHUTDOWN );
+}
+
+void GENERATOR_TOOL_PNS_PROXY::InitializeSnapshot( std::unique_ptr<PNS::ROUTING_SETTINGS> aSettings )
+{
+    if( !aSettings || !m_toolMgr || !board() )
+        throw std::invalid_argument( "Detached generator requires a board and routing settings" );
+    Reset( RESET_REASON::SHUTDOWN );
+    m_snapshotSettings = std::move( aSettings );
+    Reset( RESET_REASON::MODEL_RELOAD );
 }
 
 
@@ -135,18 +167,21 @@ void GENERATOR_TOOL_PNS_PROXY::Reset( RESET_REASON aReason )
     delete m_gridHelper;
     delete m_router;
     delete m_iface; // Delete after m_router because PNS::NODE dtor needs m_ruleResolver
+    m_gridHelper = nullptr;
+    m_router = nullptr;
+    m_iface = nullptr;
 
     if( aReason == RESET_REASON::SHUTDOWN )
     {
-        m_iface = nullptr;
-        m_router = nullptr;
-        m_gridHelper = nullptr;
         return;
     }
 
-    m_iface = new PNS_KICAD_IFACE_GENERATOR;
+    if( !m_snapshotSettings && !frame() )
+        throw std::logic_error( "A generator without an editor requires detached routing settings" );
+
+    m_iface = new PNS_KICAD_IFACE_GENERATOR( m_snapshotSettings != nullptr );
     m_iface->SetBoard( board() );
-    m_iface->SetView( getView() );
+    if( !m_snapshotSettings ) m_iface->SetView( getView() );
     m_iface->SetHostTool( this );
 
     m_router = new PNS::ROUTER;
@@ -155,6 +190,13 @@ void GENERATOR_TOOL_PNS_PROXY::Reset( RESET_REASON aReason )
     m_router->SyncWorld();
 
     m_router->UpdateSizes( m_savedSizes );
+
+    if( m_snapshotSettings )
+    {
+        m_router->LoadSettings( m_snapshotSettings.get() );
+        m_gridHelper = nullptr; // No pointer/keyboard grid interaction in this context.
+        return;
+    }
 
     PCBNEW_SETTINGS* settings = frame()->GetPcbNewSettings();
 

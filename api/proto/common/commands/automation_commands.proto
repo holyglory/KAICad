@@ -33,6 +33,54 @@ message PcbDrcState {
   repeated PcbDrcFinding findings = 7;
 }
 
+// Live PCB DRC job control. These messages are intentionally not registered
+// as MCP tools until the native job owner and cancellation path are present.
+message StartPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  bool refill_zones = 3;
+  bool report_all_track_errors = 4;
+  bool test_footprints = 5;
+}
+
+message ReadPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+
+message CancelPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+
+enum PcbDrcJobStatus {
+  PDRCJS_UNKNOWN = 0;
+  PDRCJS_QUEUED = 1;
+  PDRCJS_RUNNING = 2;
+  PDRCJS_COMPLETED = 3;
+  PDRCJS_CANCELLED = 4;
+  PDRCJS_FAILED = 5;
+  PDRCJS_STALE = 6;
+  PDRCJS_INCOMPLETE = 7;
+}
+
+message PcbDrcJobState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string operation_id = 3;
+  DocumentRevision checked_revision = 4;
+  string process_epoch = 5;
+  PcbDrcJobStatus status = 6;
+  double progress = 7;
+  string phase = 8;
+  string error_code = 9;
+  string error_message = 10;
+  bool results_fresh = 11;
+  repeated PcbDrcFinding findings = 12;
+}
+
 message ReadSchematicMetadata {
   kiapi.common.types.DocumentSpecifier document = 1;
   // 0/1: legacy fields with explicit missing-ERC coverage; 2: includes ERC;

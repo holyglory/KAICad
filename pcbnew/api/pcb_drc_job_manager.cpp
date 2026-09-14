@@ -13,6 +13,7 @@
 #include <google/protobuf/util/message_differencer.h>
 
 #include <atomic>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -127,8 +128,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( aJob->reporter )
     {
-        aJob->progress = aJob->reporter->Progress();
-        aJob->phase = aJob->reporter->Phase();
+        aJob->progress = std::max( aJob->progress, aJob->reporter->Progress() );
+        const std::string phase = aJob->reporter->Phase();
+        if( !phase.empty() ) aJob->phase = phase;
     }
     const bool liveChanged = aBoard.m_Uuid.AsStdString() != aJob->checkedBoardEpoch
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;

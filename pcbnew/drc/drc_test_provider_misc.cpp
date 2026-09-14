@@ -429,7 +429,10 @@ void DRC_TEST_PROVIDER_MISC::testTextVars()
 
     // The leading "(^|[^\\\\])" group requires the marker to start the string or follow a non-backslash,
     // so `\${ERC_ERROR ...}` stays inert.  (The group is just to make it easier for a human to parse.)
-    static wxRegEx varRefRegEx( wxT( "(^|[^\\\\])\\$\\{.*\\}.*" ) );
+    wxRegEx varRefRegEx( wxT( "(^|[^\\\\])\\$\\{.*\\}.*" ) );
+    // Match state is mutable; each invocation owns its expressions.
+    wxRegEx warningExpr( wxS( "(^|[^\\\\])\\$\\{DRC_WARNING\\s*([^}]*)\\}" ) );
+    wxRegEx errorExpr( wxS( "(^|[^\\\\])\\$\\{DRC_ERROR\\s*([^}]*)\\}" ) );
 
     auto testAssertion =
             [&]( BOARD_ITEM* item, const wxString& text, const VECTOR2I& pos, int layer )
@@ -440,9 +443,6 @@ void DRC_TEST_PROVIDER_MISC::testTextVars()
                 // group requires the marker to start the string or follow a
                 // non-backslash, so `\${DRC_ERROR ...}` stays inert; the
                 // captured message is group 2.
-                static wxRegEx warningExpr( wxS( "(^|[^\\\\])\\$\\{DRC_WARNING\\s*([^}]*)\\}" ) );
-                static wxRegEx errorExpr( wxS( "(^|[^\\\\])\\$\\{DRC_ERROR\\s*([^}]*)\\}" ) );
-
                 auto reportEach =
                         [&]( wxRegEx& aExpr, int aErrorCode )
                         {

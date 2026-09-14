@@ -299,7 +299,14 @@ public:
     bool HasUserDefinedPhysicalConstraint();
     std::set<int> QueryDistinctConstraints( DRC_CONSTRAINT_T aConstraintId );
 
-    std::vector<DRC_TEST_PROVIDER*> GetTestProviders() const { return m_testProviders; };
+    std::vector<DRC_TEST_PROVIDER*> GetTestProviders() const
+    {
+        std::vector<DRC_TEST_PROVIDER*> providers;
+        providers.reserve( m_testProviders.size() );
+        for( const auto& provider : m_testProviders )
+            providers.push_back( provider.get() );
+        return providers;
+    }
 
     DRC_TEST_PROVIDER* GetTestProvider( const wxString& name ) const;
 
@@ -375,7 +382,8 @@ protected:
 
     std::vector<std::shared_ptr<DRC_RULE>>  m_rules;
     bool                                    m_rulesValid;
-    std::vector<DRC_TEST_PROVIDER*>         m_testProviders;
+    // Providers keep mutable board/engine state. Never share them between engines.
+    std::vector<std::unique_ptr<DRC_TEST_PROVIDER>> m_testProviders;
 
     std::vector<int>           m_errorLimits;
     mutable std::mutex         m_errorLimitsMutex;

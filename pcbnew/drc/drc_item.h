@@ -158,18 +158,18 @@ public:
 
     static std::vector<std::reference_wrapper<RC_ITEM>> GetItemsWithSeverities()
     {
-        static std::vector<std::reference_wrapper<RC_ITEM>> itemsWithSeveritiesAll;
-
-        if( itemsWithSeveritiesAll.empty() )
+        static const auto itemsWithSeveritiesAll = []
         {
+            std::vector<std::reference_wrapper<RC_ITEM>> items;
             for( RC_ITEM& item : allItemTypes )
             {
                 if( &item == &heading_internal )
                     break;
 
-                itemsWithSeveritiesAll.push_back( item );
+                items.push_back( item );
             }
-        }
+            return items;
+        }();
 
         return itemsWithSeveritiesAll;
     }
@@ -179,8 +179,9 @@ public:
 
     wxString GetViolatingRuleDesc( bool aTranslate ) const override;
 
-    void SetViolatingTest( DRC_TEST_PROVIDER *aProvider ) { m_violatingTest = aProvider; }
-    DRC_TEST_PROVIDER* GetViolatingTest() const { return m_violatingTest; }
+    // Findings can outlive their engine; retain the diagnostic name, not a borrowed provider.
+    void SetViolatingTestName( const wxString& aName ) { m_violatingTestName = aName; }
+    const wxString& GetViolatingTestName() const { return m_violatingTestName; }
 
     KIID GetAuxItem2ID() const override;
     KIID GetAuxItem3ID() const override;
@@ -286,7 +287,7 @@ private:
 
 private:
     DRC_RULE*          m_violatingRule = nullptr;
-    DRC_TEST_PROVIDER* m_violatingTest = nullptr;
+    wxString m_violatingTestName;
 };
 
 

@@ -778,9 +778,9 @@ void DRC_ENGINE::compileRules()
 
 void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 {
-    m_testProviders = DRC_SHOWMATCHES_PROVIDER_REGISTRY::Instance().GetShowMatchesProviders();
+    m_testProviders = DRC_SHOWMATCHES_PROVIDER_REGISTRY::Instance().CreateShowMatchesProviders();
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
@@ -833,9 +833,9 @@ void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 
 void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 {
-    m_testProviders = DRC_TEST_PROVIDER_REGISTRY::Instance().GetTestProviders();
+    m_testProviders = DRC_TEST_PROVIDER_REGISTRY::Instance().CreateTestProviders();
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
@@ -951,7 +951,7 @@ DRC_RUN_RESULT DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackError
     int timestamp = m_board->GetTimeStamp();
     bool allProvidersCompleted = true;
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Run DRC provider: '%s'" ), provider->GetName() ) );
@@ -2342,7 +2342,7 @@ void DRC_ENGINE::ReportViolation( const std::shared_ptr<DRC_ITEM>& aItem, const 
     if( m_logReporter )
     {
         wxString msg = wxString::Format( wxT( "Test '%s': %s (code %d)" ),
-                                         aItem->GetViolatingTest()->GetName(),
+                                         aItem->GetViolatingTestName(),
                                          aItem->GetErrorMessage( false ),
                                          aItem->GetErrorCode() );
 
@@ -2906,10 +2906,10 @@ bool ruleMatchesPair( const DRC_RULE& aRule, const BOARD_ITEM* aItemA, const BOA
 
 DRC_TEST_PROVIDER* DRC_ENGINE::GetTestProvider( const wxString& name ) const
 {
-    for( DRC_TEST_PROVIDER* prov : m_testProviders )
+    for( const auto& prov : m_testProviders )
     {
         if( name == prov->GetName() )
-            return prov;
+            return prov.get();
     }
 
     return nullptr;

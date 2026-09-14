@@ -9,7 +9,7 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task SaveCheckedThroughMcp(NativeClient client, DocumentSpecifier document,
-        string evidence, CancellationToken token)
+        string evidence, CancellationToken token, bool verifyReconnect = true)
     {
         string statePath = Directory.CreateTempSubdirectory("kicad-save-mcp-").FullName;
         try
@@ -68,6 +68,9 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(conflict.GetProperty("isError").GetBoolean());
                 Assert.AreEqual(saved.ObservedState, await ObserveLifecycleState(client, document, token));
             }
+            // Repeated middle steps may omit only this process-reconnection proof.
+            // All per-edit persistence, stale/dirty refusal and replay assertions above remain.
+            if (!verifyReconnect) return;
             // A new MCP process must query the existing native receipt without saving/reopening.
             await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
                 Path.Combine(evidence, "checked-save-reconnect-" + operation + ".stderr.log"), token))

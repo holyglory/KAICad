@@ -46,7 +46,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(observation.Preview.Revision, observation.Snapshot.Revision);
             await File.WriteAllTextAsync(Prefix(phase + ".xml"), SchematicDataXml.Write(observation.Snapshot.Data), token);
         }
-        async Task Reopen(SchematicScreenData expected, string phase)
+        async Task Reopen(SchematicScreenData expected, string phase, bool verifyReconnect = true)
         {
             if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("This is the Linux native save fixture.");
             var beforeSave = await ObserveLifecycleState(client, document, token);
@@ -70,7 +70,7 @@ public sealed partial class NativeSessionTests
                 }
                 finally { File.SetUnixFileMode(protectedPath, mode); }
             }
-            await SaveCheckedThroughMcp(client, document, evidence, token);
+            await SaveCheckedThroughMcp(client, document, evidence, token, verifyReconnect);
             await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
             await Same(expected, (await Read()).Data, phase);
         }
@@ -154,7 +154,7 @@ public sealed partial class NativeSessionTests
         await Apply(twice); await Same(twiceExpected, (await Read()).Data, "two-operations");
         await UndoRedo(desired, twiceExpected);
         await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
-        await Reopen(original.Data, "restored");
+        await Reopen(original.Data, "restored", verifyReconnect: false);
 
         foreach (bool accept in new[] { false, true })
         {
@@ -184,7 +184,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(before.Revision.Sequence + (accept ? 1UL : 0UL), observed.Revision.Sequence);
             await Same(accept ? expected : before.Data, observed.Data, "manual-" + accept);
             if (!accept) continue;
-            await UndoRedo(before.Data, expected); await Reopen(expected, "manual-reopened");
+            await UndoRedo(before.Data, expected); await Reopen(expected, "manual-reopened", verifyReconnect: false);
         }
         await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
         await Reopen(original.Data, "final-restored");

@@ -60,6 +60,10 @@ message StartPcbDrcJob {
   bool test_footprints = 5;
   DocumentRevision expected_revision = 6;
   string process_epoch = 7;
+  // Required for test_footprints. Captured natively from this explicit schematic
+  // state; clients do not supply their own substitute netlist.
+  DocumentLifecycleState expected_schematic_state = 8;
+  bool allow_duplicate_sheet_names = 9;
 }
 
 message ReadPcbDrcJob {
@@ -103,6 +107,8 @@ message PcbDrcJobState {
   bool worker_finished = 14;
   // False until all declared project/rule dependencies are captured exactly.
   bool snapshot_complete = 15;
+  DocumentLifecycleState checked_schematic_state = 16;
+  repeated string input_warnings = 17;
 }
 
 message ReadSchematicMetadata {

@@ -17,7 +17,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     // cancellation journeys qualify this family (p23deb822a36256a6).
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
         bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
-        string processEpoch, CancellationToken cancellationToken)
+        string processEpoch, CancellationToken cancellationToken, string? expectedSchematicStateJson = null,
+        bool allowDuplicateSheetNames = false)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -31,6 +32,16 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("stale_process_epoch", "Use the checked process epoch.");
             var expected = SchematicJson.Parser.Parse<Protocol.DocumentRevision>(expectedRevisionJson);
             _ = Identifier(expected.Epoch, "document");
+            DocumentLifecycleState? schematic = null;
+            if (testFootprints)
+            {
+                if (string.IsNullOrWhiteSpace(expectedSchematicStateJson))
+                    throw new AutomationException("missing_schematic_state", "Observe the source schematic before requesting parity checks.");
+                schematic = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedSchematicStateJson);
+                ValidateSchematicState(schematic, document, processEpoch);
+            }
+            else if (expectedSchematicStateJson is not null || allowDuplicateSheetNames)
+                throw new AutomationException("unexpected_schematic_options", "Schematic options require parity checking.");
             state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(new()
             {
                 Document = document,
@@ -39,11 +50,15 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 ReportAllTrackErrors = reportAllTrackErrors,
                 TestFootprints = testFootprints,
                 ExpectedRevision = expected,
-                ProcessEpoch = processEpoch
+                ProcessEpoch = processEpoch,
+                ExpectedSchematicState = schematic,
+                AllowDuplicateSheetNames = allowDuplicateSheetNames
             }, cancellationToken);
             ValidateJobState(state, document, client.Epoch);
             if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
                 throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested operation and revision.");
+            if (!Equals(schematic, state.CheckedSchematicState))
+                throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested source schematic.");
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -144,6 +159,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     private static void ValidateJobState(PcbDrcJobState state, DocumentSpecifier document,
         string processEpoch)
     {
+        if (state.CheckedSchematicState is not null)
+            ValidateSchematicState(state.CheckedSchematicState, document, processEpoch);
         if (!document.Equals(state.Document) || state.ProcessEpoch != processEpoch
             || !Guid.TryParseExact(state.JobId, "D", out _)
             || state.JobId == Guid.Empty.ToString("D")
@@ -163,6 +180,21 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             || finding.Marker is null)
             || state.Findings.Select(finding => finding.NativeId).Distinct().Count() != state.Findings.Count)
             throw new AutomationException("invalid_drc_job_state", "Native DRC job state did not match its target, identity or terminal-state contract.");
+    }
+
+    private static void ValidateSchematicState(DocumentLifecycleState source, DocumentSpecifier board, string epoch)
+    {
+        if (source.Document is null || (int)source.Document.Type != 1
+            || !Equals(source.Document.Project, board.Project)
+            || source.Document.SheetPath is null || source.Document.SheetPath.Path.Count == 0
+            || source.ProcessEpoch != epoch || (int)source.Scope != 1 || !source.ProjectSettingsIncluded
+            || source.Revision is null || source.StateSha256.Length != 64
+            || !source.StateSha256.All(char.IsAsciiHexDigitLower))
+            throw new AutomationException("invalid_schematic_state", "Provide the observed schematic state from this project and native process.");
+        DocumentStateTools.ValidateTarget(source.Document);
+        _ = Identifier(source.NativeIdentity, "schematic");
+        _ = Identifier(source.Revision.Epoch, "schematic_epoch");
+        foreach (var sheet in source.Document.SheetPath.Path) _ = Identifier(sheet.Value, "sheet");
     }
 
     private static CallToolResult WithStructuredState(CallToolResult response, PcbDrcJobState? state)

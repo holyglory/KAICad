@@ -86,6 +86,39 @@ public sealed class PcbDrcToolTests
             transport.State.Status = (PcbDrcJobStatus)4; transport.State.WorkerFinished = true;
             Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
                 transport.Session.Epoch, default)).IsError ?? false);
+            transport.State = valid.Clone();
+            var schematic = new DocumentLifecycleState
+            {
+                Document = new() { Type = (DocumentType)1, Project = document.Project.Clone(), SheetPath = new() },
+                ProcessEpoch = transport.Session.Epoch,
+                NativeIdentity = Guid.NewGuid().ToString("D"),
+                Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 17 },
+                StateSha256 = new string('a', 64), Scope = (DocumentLifecycleScope)1,
+                ProjectSettingsIncluded = true
+            };
+            schematic.Document.SheetPath.Path.Add(new Kiapi.Common.Types.KIID { Value = Guid.NewGuid().ToString("D") });
+            transport.State.CheckedSchematicState = schematic.Clone();
+            string schematicJson = SchematicJson.Formatter.Format(schematic);
+            var parity = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, true, revisionJson, transport.Session.Epoch, default, schematicJson, true);
+            Assert.IsFalse(parity.IsError ?? false, parity.ToString());
+            var transmittedSchematic = transport.LastStart!.ExpectedSchematicState;
+            Assert.AreEqual(schematic, transmittedSchematic);
+            Assert.IsTrue(transport.LastStart.AllowDuplicateSheetNames);
+            int beforeInvalid = transport.Calls;
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, true, revisionJson, transport.Session.Epoch, default)).IsError ?? false);
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, false, revisionJson, transport.Session.Epoch, default, schematicJson)).IsError ?? false);
+            var wrongSource = schematic.Clone(); wrongSource.ProcessEpoch = Guid.NewGuid().ToString("D");
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, true, revisionJson, transport.Session.Epoch, default,
+                SchematicJson.Formatter.Format(wrongSource))).IsError ?? false);
+            Assert.AreEqual(beforeInvalid, transport.Calls);
+            transport.State.CheckedSchematicState.StateSha256 = new string('b', 64);
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, true, revisionJson, transport.Session.Epoch, default, schematicJson)).IsError ?? false,
+                "A different checked schematic cannot be accepted as this operation's result.");
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -159,6 +192,7 @@ public sealed class PcbDrcToolTests
         public NativeClientTests.FixtureTransport Session { get; } = new();
         public PcbDrcJobState State { get; set; } = new();
         public int Calls { get; private set; }
+        public StartPcbDrcJob? LastStart { get; private set; }
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var message = ApiRequest.Parser.ParseFrom(request).Message;
@@ -166,6 +200,7 @@ public sealed class PcbDrcToolTests
                 && !message.Is(CancelPcbDrcJob.Descriptor))
                 return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             ++Calls;
+            if (message.Is(StartPcbDrcJob.Descriptor)) LastStart = message.Unpack<StartPcbDrcJob>();
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                 Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(State) }.ToByteArray());
         }

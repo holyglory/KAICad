@@ -122,6 +122,12 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleReadLifecycleState );
     registerHandler<kiapi::automation::v1::ReadPcbDrcState, kiapi::automation::v1::PcbDrcState>(
             &API_HANDLER_PCB::handleReadDrcState );
+    registerHandler<kiapi::automation::v1::StartPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleStartDrcJob );
+    registerHandler<kiapi::automation::v1::ReadPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleReadDrcJob );
+    registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleCancelDrcJob );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -359,6 +365,58 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> API_HANDLER_PCB::handleReadDr
     }
     result.set_marker_snapshot_complete( true );
     return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleStartDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx )
+{
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto started = m_drcJobs.Start( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    if( !started )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( started.error() );
+        return tl::unexpected( error );
+    }
+    return *started;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto read = m_drcJobs.Read( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    if( !read )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( read.error() );
+        return tl::unexpected( error );
+    }
+    return *read;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCancelDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    if( !cancelled )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( cancelled.error() );
+        return tl::unexpected( error );
+    }
+    return *cancelled;
 }
 
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(

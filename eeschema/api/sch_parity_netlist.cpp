@@ -41,7 +41,8 @@ std::vector<std::string> FormatSchematicParityNetlist(
         if( item->GetFlags() & ( IN_EDIT | IS_MOVING | IS_NEW ) )
             throw SCH_PARITY_INPUT_ERROR( STATUS::EDIT_IN_PROGRESS,
                                           "Finish or cancel the current schematic edit before comparison" );
-        if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( item ); symbol && !symbol->GetLibSymbol() )
+        if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( item );
+            symbol && ( !symbol->GetLibSymbolRef() || symbol->IsMissingLibSymbol() ) )
             throw SCH_PARITY_INPUT_ERROR( STATUS::MISSING_SYMBOL_DEFINITION,
                                           "Schematic comparison requires every symbol definition: "
                                           + symbol->m_Uuid.AsStdString() );

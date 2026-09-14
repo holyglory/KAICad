@@ -20,6 +20,7 @@
 #include <vector>
 
 using namespace kiapi::automation::v1;
+using kiapi::common::types::DocumentSpecifier;
 
 namespace
 {
@@ -201,7 +202,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         std::unique_ptr<BOARD> board;
         try
         {
-            board.reset( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXPR, path, nullptr, nullptr, nullptr ) );
+            board.reset( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXP, path, nullptr, nullptr, nullptr ) );
             if( !board ) throw std::runtime_error( "Native PCB snapshot could not be loaded" );
             DRC_ENGINE engine( board.get(), &board->GetDesignSettings() );
             engine.InitEngine( board->GetDesignRulesPath() );

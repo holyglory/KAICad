@@ -26,6 +26,7 @@
 #include <api/board/board_jobs.pb.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/pcb_drc_job_manager.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <properties/property_mgr.h>
 
@@ -54,6 +55,12 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> handleReadDrcState(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleStartDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleCancelDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
@@ -207,6 +214,8 @@ private:
     PCB_CONTEXT* pcbContext() const { return static_cast<PCB_CONTEXT*>( context() ); }
 
     PCB_EDIT_FRAME* frame() const;
+
+    PCB_DRC_JOB_MANAGER m_drcJobs;
 };
 
 #endif //KICAD_API_HANDLER_PCB_H

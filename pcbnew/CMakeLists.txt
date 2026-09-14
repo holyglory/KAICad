@@ -482,6 +482,7 @@ set( PCBNEW_CLASS_SRCS
     api/api_handler_board.cpp
     api/api_handler_footprint.cpp
     api/api_handler_pcb.cpp
+    api/pcb_drc_job_manager.cpp
     api/footprint_context.cpp
     api/headless_pcb_context.cpp
     api/headless_footprint_context.cpp

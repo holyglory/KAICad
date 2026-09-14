@@ -542,7 +542,8 @@ void DRC_TEST_PROVIDER_MISC::testTextVars()
     drawItems.SetSheetName( wxT( "dummySheet" ) );
     drawItems.SetSheetLayer( wxT( "dummyLayer" ) );
     drawItems.SetProject( m_board->GetProject() );
-    drawItems.BuildDrawItemsList( drawingSheet->GetPageInfo(), drawingSheet->GetTitleBlock() );
+    drawItems.BuildDrawItemsList( drawingSheet->GetPageInfo(), drawingSheet->GetTitleBlock(),
+                                  m_drcEngine->GetDrawingSheetModel() );
 
     for( DS_DRAW_ITEM_BASE* item = drawItems.GetFirst(); item; item = drawItems.GetNext() )
     {

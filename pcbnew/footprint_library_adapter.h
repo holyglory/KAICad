@@ -88,8 +88,11 @@ public:
      * up without restarting KiCad.
      *
      * @param aNickname is the library to check and potentially refresh.
+     * @param aForceReload ignores timestamp hints and clears the plugin cache before
+     *        re-reading. Snapshot capture uses this because equal size/mtime does
+     *        not prove equal library content.
      */
-    void RefreshLibraryIfChanged( const wxString& aNickname );
+    void RefreshLibraryIfChanged( const wxString& aNickname, bool aForceReload = false );
 
     void RefreshChangedLibraries();
 

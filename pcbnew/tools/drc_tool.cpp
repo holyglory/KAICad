@@ -33,6 +33,7 @@
 #include <board_design_settings.h>
 #include <progress_reporter.h>
 #include <drc/drc_engine.h>
+#include <drc/drc_run_scope.h>
 #include <drc/drc_item.h>
 #include <netlist_reader/pcb_netlist.h>
 #include <macros.h>
@@ -132,14 +133,17 @@ void DRC_TOOL::DestroyDRCDialog()
 }
 
 
-void DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones,
-                         bool aReportAllTrackErrors, bool aTestFootprints )
+DRC_TOOL::RUN_RESULT DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones,
+                                      bool aReportAllTrackErrors, bool aTestFootprints )
 {
     // One at a time, please.
     // Note that the main GUI entry points to get here are blocked, so this is really an
     // insurance policy and as such we make no attempts to queue up the DRC run or anything.
     if( m_drcRunning )
-        return;
+        return RUN_RESULT::BUSY;
+
+    if( !aProgressReporter || !m_drcEngine || !m_editFrame )
+        throw std::invalid_argument( "Native DRC requires an initialized editor, engine and reporter" );
 
     ZONE_FILLER_TOOL* zoneFiller = m_toolMgr->GetTool<ZONE_FILLER_TOOL>();
     BOARD_COMMIT      commit( m_editFrame );
@@ -154,7 +158,7 @@ void DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones
     if( m_drcDialog )
         disabler = std::make_unique<wxWindowDisabler>( /* except: */ m_drcDialog );
 
-    m_drcRunning = true;
+    DRC_RUN_SCOPE runScope( *m_drcEngine, m_drcRunning );
 
     if( m_drcDialog )
     {
@@ -194,28 +198,32 @@ void DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones
                 commit.Add( marker );
             } );
 
-    m_drcEngine->RunTests( m_editFrame->GetUserUnits(), aReportAllTrackErrors, aTestFootprints,
-                           &commit );
+    const RUN_RESULT result = m_drcEngine->RunTests( m_editFrame->GetUserUnits(),
+                                                    aReportAllTrackErrors, aTestFootprints,
+                                                    &commit );
 
-    m_drcEngine->SetProgressReporter( nullptr );
-    m_drcEngine->ClearViolationHandler();
-
-    if( m_drcDialog )
+    if( m_drcDialog && result != RUN_RESULT::INCOMPLETE )
     {
         m_drcDialog->SetDrcRun();
 
-        if( aTestFootprints && netlistFetched )
+        if( result == RUN_RESULT::COMPLETED && aTestFootprints && netlistFetched )
             m_drcDialog->SetFootprintTestsRun();
     }
 
-    commit.Push( _( "DRC" ), SKIP_UNDO | SKIP_SET_DIRTY );
+    if( result == RUN_RESULT::INCOMPLETE )
+    {
+        commit.Revert();
+        return result;
+    }
 
-    m_drcRunning = false;
+    commit.Push( _( "DRC" ), SKIP_UNDO | SKIP_SET_DIRTY );
 
     m_editFrame->ShowSolderMask();
 
     // update the m_drcDialog listboxes
     updatePointers( aProgressReporter->IsCancelled() );
+
+    return result;
 }
 
 

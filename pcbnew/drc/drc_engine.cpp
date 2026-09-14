@@ -909,9 +909,15 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 }
 
 
-void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
-                           BOARD_COMMIT* aCommit )
+DRC_RUN_RESULT DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors,
+                                    bool aTestFootprints, BOARD_COMMIT* aCommit )
 {
+    if( IsCancelled() )
+        return DRC_RUN_RESULT::CANCELLED;
+
+    if( !m_board || !m_designSettings )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
     PROF_TIMER timer;
 
     SetUserUnits( aUnits );
@@ -937,12 +943,13 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
     cacheGenerator.SetDRCEngine( this );
 
     if( !cacheGenerator.Run() )         // ... and regenerate them.
-        return;
+        return IsCancelled() ? DRC_RUN_RESULT::CANCELLED : DRC_RUN_RESULT::INCOMPLETE;
 
     // Recompute component classes
     m_board->GetComponentClassManager().ForceComponentClassRecalculation();
 
     int timestamp = m_board->GetTimeStamp();
+    bool allProvidersCompleted = true;
 
     for( DRC_TEST_PROVIDER* provider : m_testProviders )
     {
@@ -952,7 +959,10 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
         PROF_TIMER providerTimer;
 
         if( !provider->RunTests( aUnits ) )
+        {
+            allProvidersCompleted = false;
             break;
+        }
 
         providerTimer.Stop();
         wxLogTrace( traceDrcProfile, "DRC provider '%s' took %0.3f ms", provider->GetName(), providerTimer.msecs() );
@@ -963,7 +973,13 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
 
     // DRC tests are multi-threaded; anything that causes us to attempt to re-generate the
     // caches while DRC is running is problematic.
-    wxASSERT( timestamp == m_board->GetTimeStamp() );
+    if( timestamp != m_board->GetTimeStamp() )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
+    if( IsCancelled() )
+        return DRC_RUN_RESULT::CANCELLED;
+
+    return allProvidersCompleted ? DRC_RUN_RESULT::COMPLETED : DRC_RUN_RESULT::INCOMPLETE;
 }
 
 

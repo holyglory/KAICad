@@ -15,6 +15,7 @@
 #include <sch_sheet.h>
 #include <sch_symbol.h>
 #include <settings/settings_manager.h>
+#include <algorithm>
 
 namespace
 {
@@ -79,7 +80,22 @@ BOOST_AUTO_TEST_CASE( NativeNetlistContainsActualComponentsAndNetsWithoutChangin
         auto* component = netlist.GetComponent( i );
         BOOST_CHECK( !component->GetReference().empty() );
         BOOST_CHECK( !component->GetKIIDs().empty() );
-        BOOST_CHECK( !component->GetPath().empty() );
+        // Native netlists omit the root UUID from sheet paths. An empty path
+        // means root, not lost identity; compare the exact native relative path
+        // and symbol UUID instead of inferring identity from reference or position.
+        bool identityMatched = false;
+        for( const auto& path : schematic->Hierarchy() )
+        {
+            if( KIID_PATH( path.PathAsString() ) != component->GetPath() ) continue;
+            for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                const auto& ids = component->GetKIIDs();
+                if( std::find( ids.begin(), ids.end(), item->m_Uuid ) == ids.end() ) continue;
+                identityMatched = true;
+                BOOST_CHECK_EQUAL( component->GetReference(), static_cast<SCH_SYMBOL*>( item )->GetRef( &path, false ) );
+            }
+        }
+        BOOST_CHECK( identityMatched );
         pins += component->GetNetCount();
     }
     BOOST_CHECK_GT( pins, 0 );

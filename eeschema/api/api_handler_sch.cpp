@@ -1844,9 +1844,28 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> API_HANDLE
     if( !aCtx.Request.has_expected_state() )
         return fail( ApiStatusCode::AS_BAD_REQUEST, "Read the current schematic state before capturing comparison input" );
 
-    HANDLER_CONTEXT<ReadDocumentLifecycleState> query;
-    query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
-    auto before = handleReadLifecycleState( query );
+    auto observe = [&]() -> HANDLER_RESULT<DocumentLifecycleState>
+    {
+        ReadDocumentLifecycleState query;
+        query.mutable_document()->CopyFrom( aCtx.Request.document() );
+        ApiRequest request;
+        request.mutable_message()->PackFrom( query );
+        // Go through the common dispatcher just as an external read does. It
+        // adds the process-owned clean checkpoint used by checked lifecycle calls.
+        auto reply = Pgm().GetApiServer().DispatchToHandlers( request );
+        if( !reply ) return tl::unexpected( reply.error() );
+        if( reply->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( reply->status() );
+        DocumentLifecycleState state;
+        if( !reply->message().UnpackTo( &state ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_NOT_READY );
+            error.set_error_message( "Native schematic state could not be decoded" );
+            return tl::unexpected( error );
+        }
+        return state;
+    };
+    auto before = observe();
     if( !before ) return tl::unexpected( before.error() );
     // A journal cursor alone is not sufficient until all native changes are tracked.
     // Compare the full writer/project state, explicit target and process identity.
@@ -1858,7 +1877,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> API_HANDLE
         STRING_FORMATTER output;
         auto warnings = FormatSchematicParityNetlist( *schematic(), output,
                 aCtx.Request.allow_duplicate_sheet_names(), context()->GetKiway() );
-        auto after = handleReadLifecycleState( query );
+        auto after = observe();
         if( !after ) return tl::unexpected( after.error() );
         if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after ) )
             return fail( ApiStatusCode::AS_BUSY, "Schematic changed while capturing comparison input" );

@@ -6,6 +6,14 @@
 #include <netlist_reader/pcb_netlist.h>
 #include <memory>
 #include <type_traits>
+#include <fstream>
+#include <filesystem>
+#include <cli/exit_codes.h>
+#include <jobs/job_pcb_drc.h>
+#include <pcbnew_jobs_handler.h>
+#include <pcbnew_utils/board_file_utils.h>
+#include <pcbnew_utils/board_test_utils.h>
+#include <json_common.h>
 
 namespace
 {
@@ -13,7 +21,14 @@ class CANCELLABLE_REPORTER : public CLI_PROGRESS_REPORTER
 {
 public:
     bool IsCancelled() const override { return cancelled; }
+    bool KeepRefreshing( bool = false ) override
+    {
+        ++refreshCalls;
+        return continueChecking && !cancelled;
+    }
     bool cancelled = false;
+    bool continueChecking = true;
+    int refreshCalls = 0;
 };
 }
 
@@ -124,6 +139,57 @@ BOOST_AUTO_TEST_CASE( NestedAdmissionDoesNotClearTheActiveInvocation )
         BOOST_CHECK_EQUAL( calls, 1 );
     }
     BOOST_CHECK( !running );
+}
+
+BOOST_AUTO_TEST_CASE( ExportJobPreservesExistingReportOnCancellationAndRecovers )
+{
+    namespace fs = std::filesystem;
+    KI_TEST::TEMPORARY_DIRECTORY temporary( "drc_export_" + KIID().AsStdString(), "" );
+    const fs::path boardPath = temporary.GetPath() / "fixture.kicad_pcb";
+    const fs::path outputPath = temporary.GetPath() / "drc.json";
+    fs::copy_file( fs::path( KI_TEST::GetPcbnewTestDataDir() )
+                           / "drc_courtyard/overlap/empty_board.kicad_pcb", boardPath );
+    auto contents = []( const fs::path& path )
+    {
+        std::ifstream input( path, std::ios::binary );
+        return std::string( std::istreambuf_iterator<char>( input ), {} );
+    };
+    const std::string originalBoard = contents( boardPath );
+    { std::ofstream output( outputPath, std::ios::binary ); output << "previous report"; }
+    const auto written = fs::last_write_time( outputPath );
+
+    CANCELLABLE_REPORTER reporter;
+    PCBNEW_JOBS_HANDLER handler( nullptr );
+    JOB_PCB_DRC job;
+    job.m_filename = wxString::FromUTF8( boardPath.string() );
+    job.SetConfiguredOutputPath( wxString::FromUTF8( outputPath.string() ) );
+    job.m_parity = false;
+    job.m_refillZones = false;
+    job.m_saveBoard = false;
+    job.m_format = JOB_RC::OUTPUT_FORMAT::JSON;
+    job.m_exitCodeViolations = false;
+
+    reporter.cancelled = true;
+    BOOST_CHECK_EQUAL( handler.RunJob( &job, nullptr, &reporter ), CLI::EXIT_CODES::ERR_UNKNOWN );
+    BOOST_CHECK( job.GetOutputs().empty() );
+    BOOST_CHECK_EQUAL( contents( outputPath ), "previous report" );
+    BOOST_CHECK( fs::last_write_time( outputPath ) == written );
+
+    reporter.cancelled = false;
+    reporter.continueChecking = false;
+    BOOST_CHECK_EQUAL( handler.RunJob( &job, nullptr, &reporter ), CLI::EXIT_CODES::ERR_UNKNOWN );
+    BOOST_CHECK_GT( reporter.refreshCalls, 0 );
+    BOOST_CHECK( job.GetOutputs().empty() );
+    BOOST_CHECK_EQUAL( contents( outputPath ), "previous report" );
+    BOOST_CHECK( fs::last_write_time( outputPath ) == written );
+
+    reporter.continueChecking = true;
+    BOOST_CHECK_EQUAL( handler.RunJob( &job, nullptr, &reporter ), CLI::EXIT_CODES::SUCCESS );
+    BOOST_CHECK_EQUAL( job.GetOutputs().size(), 1 );
+    const auto report = nlohmann::json::parse( contents( outputPath ) );
+    BOOST_CHECK( report.contains( "violations" ) );
+    BOOST_CHECK( !report.at( "violations" ).empty() );
+    BOOST_CHECK_EQUAL( contents( boardPath ), originalBoard );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

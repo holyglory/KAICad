@@ -120,7 +120,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
 
 
 API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame ) :
-        API_HANDLER_BOARD( std::move( aContext ), aFrame )
+        API_HANDLER_BOARD( std::move( aContext ), aFrame ),
+        m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } )
 {
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>(
             &API_HANDLER_PCB::handleGetOpenDocuments );
@@ -467,6 +468,17 @@ tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOA
     auto captured = DRC_LIBRARY_INPUTS::Capture( source, *libraries );
     if( !captured ) return tl::unexpected( "Native footprint library observation was cancelled" );
     return captured->ContentFingerprint();
+}
+
+tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcAuxiliary( BOARD& source )
+{
+    if( &source != board() || !frame() ) return tl::unexpected( "Native editor inputs are unavailable" );
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    auto* drawing = frame()->GetCanvas()->GetDrawingSheet();
+    if( !libraries || !drawing ) return tl::unexpected( "Native drawing inputs are unavailable" );
+    PCB_DRC_CAPTURE_CONTEXT current{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid,
+                                    frame()->GetPcbNewSettings()->m_PnsSettings.get() };
+    return PCB_DRC_AUXILIARY_BASELINE::Capture( current ).Fingerprint();
 }
 
 HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcJob(

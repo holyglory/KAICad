@@ -94,6 +94,7 @@ struct PCB_DRC_JOB_MANAGER::JOB
     DocumentLifecycleState schematicState;
     PCB_DRC_PROJECT_BASELINE projectBaseline;
     std::string libraryFingerprint;
+    std::string auxiliaryFingerprint;
     bool hasLibraryDependencies = false;
     std::vector<std::string> inputWarnings;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
@@ -110,7 +111,9 @@ struct PCB_DRC_JOB_MANAGER::JOB
     mutable std::mutex mutex;
 };
 
-PCB_DRC_JOB_MANAGER::PCB_DRC_JOB_MANAGER() = default;
+PCB_DRC_JOB_MANAGER::PCB_DRC_JOB_MANAGER( AUXILIARY_OBSERVER aObserveAuxiliary ) :
+        m_observeAuxiliary( std::move( aObserveAuxiliary ) )
+{}
 
 PCB_DRC_JOB_MANAGER::~PCB_DRC_JOB_MANAGER()
 {
@@ -157,6 +160,16 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         }
     }
     const bool projectChanged = !aJob->projectBaseline.Unchanged( aBoard );
+    bool auxiliaryChanged = true;
+    if( m_observeAuxiliary )
+    {
+        try
+        {
+            auto current = m_observeAuxiliary( aBoard );
+            auxiliaryChanged = !current || *current != aJob->auxiliaryFingerprint;
+        }
+        catch( const std::exception& ) { }
+    }
     bool librariesChanged = false;
     if( aJob->hasLibraryDependencies )
     {
@@ -182,7 +195,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;
     if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
           || aJob->status == PDRCJS_COMPLETED )
-        && ( liveChanged || schematicChanged || projectChanged || librariesChanged ) )
+        && ( liveChanged || schematicChanged || projectChanged || librariesChanged || auxiliaryChanged ) )
     {
         aJob->invalidated = true;
         if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
@@ -190,11 +203,13 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         aJob->findings.clear();
         aJob->errorCode = schematicChanged ? "schematic_changed"
                 : ( liveChanged ? "document_changed"
-                    : ( projectChanged ? "project_inputs_changed" : "library_inputs_changed" ) );
+                    : ( projectChanged ? "project_inputs_changed"
+                        : ( librariesChanged ? "library_inputs_changed" : "auxiliary_inputs_changed" ) ) );
         aJob->errorMessage = schematicChanged ? "The source schematic changed or could not be observed"
                 : ( liveChanged ? "The live PCB changed while DRC was running"
                     : ( projectChanged ? "Project settings, exclusions or custom rules changed or could not be observed"
-                                       : "Footprint library inputs changed or could not be observed" ) );
+                        : ( librariesChanged ? "Footprint library inputs changed or could not be observed"
+                                             : "Drawing-sheet or router inputs changed or could not be observed" ) ) );
         if( aJob->reporter ) aJob->reporter->Cancel();
     }
     PcbDrcJobState result;
@@ -331,6 +346,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->testFootprints = aRequest.test_footprints();
     job->projectBaseline = inputs->ProjectBaseline();
     job->libraryFingerprint = inputs->LibraryFingerprint();
+    job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
     if( job->testFootprints )
     {

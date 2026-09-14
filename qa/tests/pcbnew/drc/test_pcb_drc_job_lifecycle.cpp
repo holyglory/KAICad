@@ -41,6 +41,11 @@ struct DRC_CAPTURE_FIXTURE
     DS_DATA_MODEL drawing;
     PCB_DRC_CAPTURE_CONTEXT context{ adapter, drawing, KIID() };
     DRC_CAPTURE_FIXTURE() { drawing.ClearList(); drawing.AllowVoidList( true ); }
+    PCB_DRC_JOB_MANAGER::AUXILIARY_OBSERVER auxiliaryObserver()
+    {
+        return [this]( BOARD& ) -> tl::expected<std::string, std::string>
+        { return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint(); };
+    }
 };
 
 BOOST_FIXTURE_TEST_SUITE( PcbDrcJobLifecycle, DRC_CAPTURE_FIXTURE )
@@ -70,7 +75,7 @@ BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument 
     request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
     request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
 
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     auto started = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
     CancelPcbDrcJob cancel;
@@ -126,7 +131,7 @@ BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotC
 {
     BOARD board;
     board.SetFileName( "worker-fixture.kicad_pcb" );
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     const std::string epoch = KIID().AsStdString();
     StartPcbDrcJob request;
     request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
@@ -291,6 +296,63 @@ BOOST_AUTO_TEST_CASE( AuxiliaryBaselineRetainsDrawingAndRoutingWithoutBorrowingP
     BOOST_CHECK( baseline.Unchanged( context ) );
 }
 
+BOOST_AUTO_TEST_CASE( DrawingAndRouterChangesInvalidateCompletedJobsAndCannotReviveOldReceipts )
+{
+    BOARD board;
+    board.SetFileName( "auxiliary-job.kicad_pcb" );
+    PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
+    context.routingSettings = &routing;
+    auto* text = new DS_DATA_ITEM_TEXT( "Original" ); drawing.Append( text );
+    bool available = true;
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    {
+        if( !available ) return tl::unexpected( "Drawing editor is unavailable" );
+        return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
+    } );
+    const std::string epoch = KIID().AsStdString();
+    const int revision = board.GetTimeStamp();
+    const bool initialShove = routing.ShoveVias();
+    for( int change = 0; change < 3; ++change )
+    {
+        StartPcbDrcJob request;
+        request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+        request.mutable_document()->set_board_filename( "auxiliary-job.kicad_pcb" );
+        request.set_process_epoch( epoch ); request.set_operation_id( KIID().AsStdString() );
+        request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+        request.mutable_expected_revision()->set_sequence( revision );
+        auto started = jobs.Start( request, board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        ReadPcbDrcJob query;
+        query.mutable_document()->CopyFrom( request.document() );
+        query.set_job_id( started->job_id() ); query.set_process_epoch( epoch );
+        auto current = jobs.Read( query, board, epoch );
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+        while( current && !current->worker_finished() && std::chrono::steady_clock::now() < deadline )
+        {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+            current = jobs.Read( query, board, epoch );
+        }
+        BOOST_REQUIRE( current ); BOOST_REQUIRE( current->worker_finished() );
+        BOOST_REQUIRE_MESSAGE( current->status() == PDRCJS_COMPLETED, current->error_message() );
+        BOOST_CHECK_GT( current->findings_size(), 0 );
+        if( change == 0 ) text->m_TextBase = "Changed";
+        else if( change == 1 ) routing.SetShoveVias( !initialShove );
+        else available = false;
+        auto stale = jobs.Read( query, board, epoch );
+        BOOST_REQUIRE( stale );
+        BOOST_CHECK( stale->status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( stale->error_code(), "auxiliary_inputs_changed" );
+        BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+        BOOST_CHECK( !stale->results_fresh() );
+        text->m_TextBase = "Original"; routing.SetShoveVias( initialShove ); available = true;
+        auto replay = jobs.ReadOperation( request, board, epoch );
+        BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+        BOOST_CHECK( replay->value().status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( replay->value().findings_size(), 0 );
+        BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
+    }
+}
+
 BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotResurrect )
 {
     KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_receipt_inputs_" + KIID().AsStdString(), "" );
@@ -307,7 +369,7 @@ BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotR
     board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
     const int sequence = board.GetTimeStamp();
     const std::string epoch = KIID().AsStdString();
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     StartPcbDrcJob request;
     request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
     request.mutable_document()->set_board_filename( "fixture.kicad_pcb" );
@@ -385,7 +447,7 @@ BOOST_AUTO_TEST_CASE( WorkerFindsActualCopperViolationsWithItsBoardEngineBound )
     request.set_process_epoch( epoch ); request.set_operation_id( KIID().AsStdString() );
     request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
     request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     auto started = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
     ReadPcbDrcJob query;
@@ -466,7 +528,7 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
     request.set_process_epoch( epoch ); request.set_operation_id( KIID().AsStdString() );
     request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
     request.mutable_expected_revision()->set_sequence( sequence );
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     auto started = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
     ReadPcbDrcJob query;
@@ -520,7 +582,7 @@ BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSetti
     const int revision = board.GetTimeStamp();
     const auto beforeFill = zone->GetFilledPolysList( F_SilkS );
     const int vertices = beforeFill ? beforeFill->TotalVertices() : 0;
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     const std::string epoch = KIID().AsStdString();
     StartPcbDrcJob request;
     request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
@@ -566,7 +628,7 @@ BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindin
     SETTINGS_MANAGER settings;
     std::unique_ptr<BOARD> board;
     KI_TEST::LoadBoard( settings, "zone_refill_convergence_limit", board );
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     const std::string epoch = KIID().AsStdString();
     PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
     context.routingSettings = &routing;
@@ -622,7 +684,7 @@ BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChange
     request.set_test_footprints( true );
     request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
     request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
     BOOST_CHECK( !jobs.Start( request, board, epoch, context ) );
 
     SchematicParityNetlistSnapshot captured;

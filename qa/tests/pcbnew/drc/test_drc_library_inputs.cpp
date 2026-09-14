@@ -210,7 +210,8 @@ BOOST_FIXTURE_TEST_CASE( CompletedJobsRejectChangedMissingAndUnobservableLibrary
     DS_DATA_MODEL drawing;
     drawing.ClearList(); drawing.AllowVoidList( true );
     PCB_DRC_CAPTURE_CONTEXT context{ adapter, drawing, KIID() };
-    PCB_DRC_JOB_MANAGER jobs;
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    { return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint(); } );
     const int revision = board.GetTimeStamp();
     const std::string epoch = KIID().AsStdString();
     bool observable = true;

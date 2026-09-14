@@ -27,7 +27,10 @@ public:
             tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string>(
                     const kiapi::common::types::DocumentSpecifier& )>;
     using LIBRARY_OBSERVER = std::function<tl::expected<std::string, std::string>( BOARD& )>;
-    PCB_DRC_JOB_MANAGER();
+    using AUXILIARY_OBSERVER = std::function<tl::expected<std::string, std::string>( BOARD& )>;
+    // Owner-thread callback resolves current editor settings on each read. It is
+    // never passed to the worker or invoked during destruction.
+    explicit PCB_DRC_JOB_MANAGER( AUXILIARY_OBSERVER aObserveAuxiliary );
     ~PCB_DRC_JOB_MANAGER();
 
     PCB_DRC_JOB_MANAGER( const PCB_DRC_JOB_MANAGER& ) = delete;
@@ -63,6 +66,7 @@ private:
             const LIBRARY_OBSERVER& aObserveLibraries = {} ) const;
 
     mutable std::mutex m_mutex;
+    const AUXILIARY_OBSERVER m_observeAuxiliary;
     std::map<std::string, std::shared_ptr<JOB>> m_jobs;
 };
 

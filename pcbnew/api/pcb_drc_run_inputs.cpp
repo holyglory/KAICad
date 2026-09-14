@@ -3,6 +3,7 @@
 #include "pcb_drc_document_snapshot.h"
 #include "pcb_drc_schematic_input.h"
 #include <board.h>
+#include <api/native_state_digest.h>
 #include <board_design_settings.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_library_inputs.h>
@@ -77,6 +78,13 @@ bool PCB_DRC_AUXILIARY_BASELINE::Unchanged( const PCB_DRC_CAPTURE_CONTEXT& aCont
 {
     try { return m_state == Capture( aContext ).m_state; }
     catch( const std::exception& ) { return false; }
+}
+
+std::string PCB_DRC_AUXILIARY_BASELINE::Fingerprint() const
+{
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( m_state.dump() );
+    return digest.Hex();
 }
 
 std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(

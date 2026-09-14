@@ -62,6 +62,7 @@ private:
     tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> observeDrcSchematic(
             const kiapi::common::types::DocumentSpecifier& aDocument );
     tl::expected<std::string, std::string> observeDrcLibraries( BOARD& aBoard );
+    tl::expected<std::string, std::string> observeDrcAuxiliary( BOARD& aBoard );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleCancelDrcJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx );
 

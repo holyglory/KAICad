@@ -57,6 +57,7 @@ class PCB_DRC_AUXILIARY_BASELINE
 public:
     static PCB_DRC_AUXILIARY_BASELINE Capture( const PCB_DRC_CAPTURE_CONTEXT& aContext );
     bool Unchanged( const PCB_DRC_CAPTURE_CONTEXT& aContext ) const;
+    std::string Fingerprint() const;
 
 private:
     nlohmann::json m_state;

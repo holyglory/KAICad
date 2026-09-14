@@ -40,6 +40,7 @@ class SHAPE_LINE_CHAIN;
 class ZONE_FILLER
 {
 public:
+    enum class OUTCOME { NOT_RUN, COMPLETED, CANCELLED, NOT_CONVERGED, UNCHANGED_OR_DECLINED, FAILED };
     ZONE_FILLER( BOARD* aBoard, COMMIT* aCommit );
     ~ZONE_FILLER();
 
@@ -57,10 +58,14 @@ public:
      * Caller is also responsible for re-building connectivity afterwards.
      */
     bool Fill( const std::vector<ZONE*>& aZones, bool aCheck = false, wxWindow* aParent = nullptr );
+    OUTCOME LastOutcome() const { return m_lastOutcome; }
 
     bool IsDebug() const { return m_debugZoneFiller; }
 
 private:
+    bool fill( const std::vector<ZONE*>& aZones, bool aCheck, wxWindow* aParent );
+    OUTCOME m_lastOutcome = OUTCOME::NOT_RUN;
+    bool m_fillConverged = true;
 
     void addKnockout( BOARD_ITEM* aItem, PCB_LAYER_ID aLayer, int aGap, SHAPE_POLY_SET& aHoles );
 

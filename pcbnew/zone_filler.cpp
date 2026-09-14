@@ -587,6 +587,23 @@ bool ZONE_FILLER::zoneKnockoutMayInteract( const ZONE* aZone, const ZONE* aKnock
  */
 bool ZONE_FILLER::Fill( const std::vector<ZONE*>& aZones, bool aCheck, wxWindow* aParent )
 {
+    m_lastOutcome = OUTCOME::FAILED;
+    m_fillConverged = true;
+    // Preserve the legacy UI boolean while exposing whether verification may
+    // treat the result as a completed fill. Exceptions retain FAILED.
+    const bool accepted = fill( aZones, aCheck, aParent );
+    if( m_progressReporter && m_progressReporter->IsCancelled() )
+        m_lastOutcome = OUTCOME::CANCELLED;
+    else if( !m_fillConverged )
+        m_lastOutcome = OUTCOME::NOT_CONVERGED;
+    else
+        m_lastOutcome = accepted ? OUTCOME::COMPLETED : OUTCOME::UNCHANGED_OR_DECLINED;
+    return accepted;
+}
+
+
+bool ZONE_FILLER::fill( const std::vector<ZONE*>& aZones, bool aCheck, wxWindow* aParent )
+{
     std::lock_guard<KISPINLOCK> lock( m_board->GetConnectivity()->GetLock() );
 
     // Keyed on knockout geometry only; valid for this fill's passes (pre-knockout fill is rebuilt
@@ -1584,6 +1601,7 @@ bool ZONE_FILLER::Fill( const std::vector<ZONE*>& aZones, bool aCheck, wxWindow*
 
         if( hitIterationLimit )
         {
+            m_fillConverged = false;
             wxString msg = wxString::Format( _( "Zone fills may be incorrect: iterative refill did not converge "
                                                 "after %d passes.\n\n"
                                                 "This can happen with complex overlapping zones.  "

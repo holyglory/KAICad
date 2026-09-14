@@ -179,6 +179,12 @@ DRC_TOOL::RUN_RESULT DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, b
             {
                 netlistFetched = true;
             }
+            else
+            {
+                // Refusal, annotation failure and cancellation cannot substitute
+                // an empty schematic and produce spurious extra-footprint results.
+                return aProgressReporter->IsCancelled() ? RUN_RESULT::CANCELLED : RUN_RESULT::INCOMPLETE;
+            }
 
             if( m_drcDialog )
                 m_drcDialog->Raise();

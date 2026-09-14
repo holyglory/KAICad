@@ -943,6 +943,11 @@ DRC_RUN_RESULT DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackError
     if( !m_board || !m_designSettings || !m_rulesValid )
         return DRC_RUN_RESULT::INCOMPLETE;
 
+    // Parity is an explicit requested check. A missing input is not an empty
+    // schematic and must not become a successful run with that check skipped.
+    if( aTestFootprints && !m_schematicNetlist )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
     PROF_TIMER timer;
 
     SetUserUnits( aUnits );

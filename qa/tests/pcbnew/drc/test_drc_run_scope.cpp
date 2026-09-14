@@ -3,6 +3,7 @@
 #include <cli_progress_reporter.h>
 #include <drc/drc_item.h>
 #include <drc/drc_run_scope.h>
+#include <drc/drc_test_provider.h>
 #include <netlist_reader/pcb_netlist.h>
 #include <memory>
 #include <type_traits>
@@ -55,6 +56,50 @@ BOOST_AUTO_TEST_CASE( MissingInputAndCancellationCannotReportCompletion )
     reporter.cancelled = false;
     BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, false, false ) == DRC_RUN_RESULT::INCOMPLETE );
     engine.SetProgressReporter( nullptr );
+}
+
+BOOST_AUTO_TEST_CASE( RequestedParityRequiresANetlistAndRecoversWithRealFindings )
+{
+    BOARD board;
+    auto& settings = board.GetDesignSettings();
+    for( int code = DRCE_FIRST; code <= DRCE_LAST; ++code )
+        settings.m_DRCSeverities[code] = SEVERITY::RPT_SEVERITY_IGNORE;
+    settings.m_DRCSeverities[DRCE_MISSING_FOOTPRINT] = SEVERITY::RPT_SEVERITY_ERROR;
+    settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( &board, &settings );
+    DRC_ENGINE& engine = *settings.m_DRCEngine;
+    engine.InitEngine( wxFileName() );
+    CANCELLABLE_REPORTER reporter;
+    engine.SetProgressReporter( &reporter );
+    std::vector<std::shared_ptr<DRC_ITEM>> findings;
+    engine.SetViolationHandler( [&]( const auto& item, const auto&, int, const auto& )
+                               { findings.push_back( item ); } );
+    const int revision = board.GetTimeStamp();
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, true ) == DRC_RUN_RESULT::INCOMPLETE );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
+    BOOST_CHECK( findings.empty() );
+
+    NETLIST netlist;
+    engine.SetSchematicNetlist( &netlist );
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, true ) == DRC_RUN_RESULT::COMPLETED );
+    BOOST_CHECK( findings.empty() ); // An explicitly empty schematic is a valid input.
+    netlist.AddComponent( new COMPONENT( LIB_ID(), "R1", "10k", KIID_PATH(), { KIID() } ) );
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, true ) == DRC_RUN_RESULT::COMPLETED );
+    BOOST_REQUIRE_EQUAL( findings.size(), 1 );
+    BOOST_CHECK_EQUAL( findings.front()->GetErrorCode(), DRCE_MISSING_FOOTPRINT );
+
+    engine.SetSchematicNetlist( nullptr );
+    auto* parity = engine.GetTestProvider( "schematic_parity" );
+    BOOST_REQUIRE( parity );
+    BOOST_CHECK( !parity->RunTests( EDA_UNITS::MM ) );
+    reporter.cancelled = true;
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, true ) == DRC_RUN_RESULT::CANCELLED );
+    reporter.cancelled = false;
+    findings.clear();
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, false ) == DRC_RUN_RESULT::COMPLETED );
+    BOOST_CHECK( findings.empty() ); // Explicitly not requesting parity still works.
+    engine.SetSchematicNetlist( &netlist );
+    BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, true, true ) == DRC_RUN_RESULT::COMPLETED );
+    BOOST_REQUIRE_EQUAL( findings.size(), 1 );
 }
 
 BOOST_AUTO_TEST_CASE( SuccessAndCancellationReleaseAllBorrowedState )

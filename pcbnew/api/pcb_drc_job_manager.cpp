@@ -10,6 +10,7 @@
 #include <progress_reporter.h>
 #include <wx/filename.h>
 #include <wx/filefn.h>
+#include <google/protobuf/util/message_differencer.h>
 
 #include <atomic>
 #include <functional>
@@ -21,6 +22,14 @@
 
 using namespace kiapi::automation::v1;
 using kiapi::common::types::DocumentSpecifier;
+
+namespace
+{
+bool SameDocument( const DocumentSpecifier& aLeft, const DocumentSpecifier& aRight )
+{
+    return google::protobuf::util::MessageDifferencer::Equals( aLeft, aRight );
+}
+}
 
 namespace
 {
@@ -163,7 +172,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             std::lock_guard existingLock( existing->mutex );
             if( existing->operationId == aRequest.operation_id() )
             {
-                if( existing->document != aRequest.document() )
+                if( !SameDocument( existing->document, aRequest.document() ) )
                     return tl::unexpected( "The operation ID is already bound to another PCB target" );
                 return state( existing, aBoard, aProcessEpoch );
             }
@@ -247,7 +256,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
-    if( job->document != aRequest.document() ) return tl::unexpected( "PCB DRC job target mismatch" );
+    if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
     return state( job, aBoard, aProcessEpoch );
 }
 
@@ -258,7 +267,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
     {
         std::lock_guard lock( job->mutex );
-        if( job->document != aRequest.document() ) return tl::unexpected( "PCB DRC job target mismatch" );
+        if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
         if( job->reporter ) job->reporter->Cancel();
         if( job->status == PDRCJS_QUEUED || job->status == PDRCJS_RUNNING ) job->status = PDRCJS_CANCELLED;
     }

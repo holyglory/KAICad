@@ -222,6 +222,7 @@ set( QA_EESCHEMA_SRCS
     test_net_settings_capture.cpp
     test_schematic_initialization.cpp
     test_schematic_state_format.cpp
+    test_sch_parity_netlist.cpp
     test_schematic_symbol_library_identity.cpp
     test_sch_table.cpp
     test_sch_textbox.cpp
@@ -354,6 +355,7 @@ add_executable( qa_symbol_graphic_identity
     ../common/test_file_content_baseline.cpp
     ../common/test_native_state_digest.cpp
     test_schematic_state_format.cpp
+    test_sch_parity_netlist.cpp
     test_module.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp
@@ -422,6 +424,10 @@ setup_qa_env( qa_settings_save_outcome )
 add_test( NAME qa_schematic_state_format
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicStateFormat --log_level=test_suite )
 setup_qa_env( qa_schematic_state_format )
+
+add_test( NAME qa_schematic_parity_netlist
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicParityNetlist --log_level=test_suite )
+setup_qa_env( qa_schematic_parity_netlist )
 
 add_test( NAME qa_native_state_digest
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NativeStateDigest --log_level=test_suite )

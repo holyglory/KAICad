@@ -507,6 +507,7 @@ set( EESCHEMA_SRCS
     api/api_handler_sch_render.cpp
     api/headless_sch_context.cpp
     api/sch_api_save.cpp
+    api/sch_parity_netlist.cpp
     api/sch_context.cpp
 
     libraries/legacy_cache_reconcile.cpp

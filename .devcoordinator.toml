@@ -1829,6 +1829,28 @@ command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex"
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
+[test.schematic-parity-input]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.schematic-parity-input.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.schematic-parity-input.check]]
+name = "build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+
+[[test.schematic-parity-input.check]]
+name = "contracts"
+tier = "development"
+requires = ["build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_schematic_parity_netlist$|^qa_schematic_state_format$|^qa_net_settings_capture$|^qa_settings_save_outcome$", "--output-on-failure", "--no-tests=error"]
+
 [[test.drc-provider-isolation.check]]
 name = "configure"
 tier = "development"

@@ -485,6 +485,7 @@ set( PCBNEW_CLASS_SRCS
     api/pcb_drc_job_manager.cpp
     api/pcb_drc_document_snapshot.cpp
     api/pcb_drc_run_inputs.cpp
+    api/pcb_drc_copper_preparation.cpp
     drc/drc_library_inputs.cpp
     api/footprint_context.cpp
     api/headless_pcb_context.cpp

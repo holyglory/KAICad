@@ -10,6 +10,7 @@
 #include <project.h>
 #include <project/project_file.h>
 #include <json_common.h>
+#include <router/pns_routing_settings.h>
 #include <stdexcept>
 
 PCB_DRC_RUN_INPUTS::~PCB_DRC_RUN_INPUTS() = default;
@@ -23,6 +24,14 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const auto projectBefore = aBoard.GetProject()
             ? aBoard.GetProject()->GetProjectFile().CaptureCurrentState() : nlohmann::json();
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
+    const auto routingBefore = aContext.routingSettings
+            ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json();
+    if( aContext.routingSettings )
+    {
+        result->m_routingSettings = std::make_unique<PNS::ROUTING_SETTINGS>(
+                nullptr, aContext.routingSettings->GetPath() );
+        aContext.routingSettings->CopyCurrentStateTo( *result->m_routingSettings );
+    }
     result->m_sourceDrawingIdentity = aContext.drawingIdentity;
     const wxString rulesPath = aBoard.GetDesignRulesPath();
     if( !rulesPath.empty() )
@@ -42,6 +51,7 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const auto projectAfter = aBoard.GetProject()
             ? aBoard.GetProject()->GetProjectFile().CaptureCurrentState() : nlohmann::json();
     if( aBoard.GetTimeStamp() != revision || aBoard.m_Uuid != identity || projectBefore != projectAfter
+            || ( aContext.routingSettings && routingBefore != aContext.routingSettings->CaptureCurrentState() )
             || !result->RulesUnchanged() )
         throw std::runtime_error( "Native DRC inputs changed during capture" );
     return result;

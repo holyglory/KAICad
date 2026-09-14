@@ -1,4 +1,5 @@
 using System.Text.Json;
+using KiCad.Automation.Downloads;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -49,6 +50,25 @@ public sealed class LandingBrowserTests
             await Browser("reload");
             await State("document.documentElement.dataset.theme", "dark");
             await State("[...document.images].every(i=>i.complete && i.naturalWidth>0)", true);
+            string? candidatePath = Environment.GetEnvironmentVariable("KICAD_CAPTION_CANDIDATE_CATALOGUE");
+            if (candidatePath is not null)
+            {
+                var catalogue = await DownloadCatalogue.LoadAsync(candidatePath, deadline.Token);
+                var candidate = catalogue.Manifest.Artifacts.Single(item => item.Platform == "linux-x64");
+                foreach (string theme in new[] { "light", "dark" })
+                {
+                    await Browser("open", origin.TrimEnd('/') + "/?theme=" + theme + "&platform=linux-x64");
+                    await State("document.documentElement.dataset.theme", theme);
+                    await State("document.querySelector('#recommended a').getAttribute('href')",
+                        "/artifacts/" + candidate.FileName);
+                    await Browser("click", "a[href='#releases']");
+                    await Browser("select", "#platform-filter", "linux-x64");
+                    await State("[...document.querySelectorAll('.release-row')].filter(e=>!e.hidden)"
+                        + ".some(e=>e.textContent.includes(" + JsonSerializer.Serialize(candidate.Version)
+                        + ") && [...e.querySelectorAll('a')].some(a=>a.getAttribute('href')==="
+                        + JsonSerializer.Serialize("/artifacts/" + candidate.FileName) + "))", true);
+                }
+            }
             Assert.IsTrue(string.IsNullOrWhiteSpace(await Browser("errors")), "The browser reported page errors.");
             await Browser("click", "a.source-link");
             await State("location.origin + location.pathname", "https://github.com/holyglory/KAICad");

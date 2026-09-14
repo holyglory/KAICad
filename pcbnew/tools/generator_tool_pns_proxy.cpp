@@ -20,6 +20,7 @@
 
 #include "generator_tool_pns_proxy.h"
 
+#include <board_commit.h>
 #include <pad.h>
 #include <pcb_shape.h>
 #include <tools/pcb_grid_helper.h>
@@ -67,6 +68,8 @@ public:
 
     void ClearCommits()
     {
+        m_updatedItems.clear();
+        m_fpOffsets.clear();
         m_changes.clear();
         m_changes.emplace_back();
         m_createdItems.clear();
@@ -74,6 +77,12 @@ public:
 
     void AddItem( PNS::ITEM* aItem ) override
     {
+        if( aItem->OfKind( PNS::ITEM::SOLID_T ) )
+        {
+            UpdateItem( aItem );
+            return;
+        }
+
         BOARD_ITEM* brdItem = createBoardItem( aItem );
 
         if( brdItem )
@@ -87,8 +96,34 @@ public:
     }
 
     void UpdateItem( PNS::ITEM* aItem ) override
-    { //
-        modifyBoardItem( aItem );
+    {
+        if( !aItem || !aItem->Parent() || aItem->Parent()->GetBoard() != GetBoard() )
+            throw std::invalid_argument( "Generator update requires an item from its board" );
+
+        // A preview may have no BOARD_COMMIT at all. Keep the latest geometry owned
+        // here until EditFinish supplies the same transaction as its add/remove work.
+        m_updatedItems[aItem->Parent()] = std::unique_ptr<PNS::ITEM>( aItem->Clone() );
+    }
+
+    void ApplyUpdates( BOARD_COMMIT& aCommit )
+    {
+        if( aCommit.GetBoard() != GetBoard() )
+            throw std::invalid_argument( "Generator transaction belongs to another board" );
+
+        for( const auto& [parent, item] : m_updatedItems )
+        {
+            int status = aCommit.GetStatus( parent ) & CHT_TYPE;
+
+            // Ignore deleted originals and transient generated baselines which were
+            // never staged for addition. Modifying either would resurrect lost work.
+            if( status == CHT_REMOVE || ( IsGeneratedItem( parent ) && status != CHT_ADD ) )
+                continue;
+
+            modifyBoardItem( item.get(), aCommit );
+        }
+
+        applyFootprintOffsets( aCommit );
+        m_updatedItems.clear();
     }
 
     void RemoveItem( PNS::ITEM* aItem ) override
@@ -97,10 +132,8 @@ public:
 
         if( aItem->OfKind( PNS::ITEM::SOLID_T ) )
         {
-            PAD*     pad = static_cast<PAD*>( parent );
-            VECTOR2I pos = static_cast<PNS::SOLID*>( aItem )->Pos();
-
-            m_fpOffsets[pad].p_old = pos;
+            // Routing can move a pad's footprint, never remove it. Its matching
+            // AddItem/UpdateItem carries the final position without touching it here.
             return;
         }
 
@@ -117,6 +150,7 @@ public:
 private:
     bool m_detached;
     std::set<BOARD_ITEM*> m_createdItems;
+    std::map<BOARD_ITEM*, std::unique_ptr<PNS::ITEM>> m_updatedItems;
 
     std::vector<GENERATOR_PNS_CHANGES> m_changes;
 };
@@ -131,6 +165,12 @@ void GENERATOR_TOOL_PNS_PROXY::ClearRouterChanges()
 const std::vector<GENERATOR_PNS_CHANGES>& GENERATOR_TOOL_PNS_PROXY::GetRouterChanges()
 {
     return static_cast<PNS_KICAD_IFACE_GENERATOR*>( GetInterface() )->Changes();
+}
+
+
+void GENERATOR_TOOL_PNS_PROXY::ApplyRouterUpdates( BOARD_COMMIT& aCommit )
+{
+    static_cast<PNS_KICAD_IFACE_GENERATOR*>( GetInterface() )->ApplyUpdates( aCommit );
 }
 
 

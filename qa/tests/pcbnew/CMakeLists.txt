@@ -67,6 +67,7 @@ set( QA_PCBNEW_SRCS
     test_footprint_editor_tabs.cpp
     test_footprint_import_reconciler.cpp
     test_footprint_library_adapter.cpp
+    test_zone_fill_outcome.cpp
     test_footprint_load_save.cpp
     test_footprint_realignment.cpp
     test_cross_probe_selection.cpp
@@ -537,6 +538,7 @@ add_pcbnew_test_group( drc_library_inputs "DrcLibraryInputs" )
 add_pcbnew_test_group( drc_drawing_sheet_inputs "DrcDrawingSheetInputs" )
 add_pcbnew_test_group( drc_captured_rules "DrcCapturedRules" )
 add_pcbnew_test_group( footprint_library_adapter "FootprintLibraryAdapter" )
+add_pcbnew_test_group( zone_fill_outcome "ZoneFillOutcome" )
 add_pcbnew_test_group( drc_job_lifecycle "PcbDrcJobLifecycle" )
 
 # Catch-all for everything not in a named group.  New tests automatically
@@ -610,6 +612,7 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!DrcDrawingSheetInputs\
 :!DrcCapturedRules\
 :!FootprintLibraryAdapter\
+:!ZoneFillOutcome\
 :!PcbDrcJobLifecycle\
 :!PlanegcsSmokeSolve\
 :!ConstraintSolver*" )

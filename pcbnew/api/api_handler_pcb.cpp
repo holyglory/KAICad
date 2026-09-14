@@ -46,6 +46,10 @@
 #include <netinfo.h>
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
+#include <api/pcb_drc_run_inputs.h>
+#include <drawing_sheet/ds_data_model.h>
+#include <drawing_sheet/ds_proxy_view_item.h>
+#include <project_pcb.h>
 #include <pcb_edit_frame.h>
 #include <pgm_base.h>
 #include <pcb_group.h>
@@ -370,7 +374,17 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto started = m_drcJobs.Start( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    auto* drawing = frame() ? frame()->GetCanvas()->GetDrawingSheet() : nullptr;
+    if( !libraries || !drawing )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "Native DRC requires initialized project library and drawing-sheet inputs" );
+        return tl::unexpected( error );
+    }
+    PCB_DRC_CAPTURE_CONTEXT capture{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid };
+    auto started = m_drcJobs.Start( aCtx.Request, *board(), Pgm().GetApiServer().Token(), capture );
     if( !started )
     {
         ApiResponseStatus error;

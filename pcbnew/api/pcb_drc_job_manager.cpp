@@ -1,17 +1,14 @@
 /* Native asynchronous PCB DRC job ownership. GPL-3.0-or-later. */
 #include "pcb_drc_job_manager.h"
+#include "pcb_drc_run_inputs.h"
 
 #include <board.h>
 #include <board_design_settings.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_item.h>
-#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
-#include <pcb_io/pcb_io_mgr.h>
+#include <drc/drc_run_scope.h>
 #include <pcb_marker.h>
 #include <progress_reporter.h>
-#include <richio.h>
-#include <wx/filename.h>
-#include <wx/filefn.h>
 #include <google/protobuf/util/message_differencer.h>
 
 #include <atomic>
@@ -176,7 +173,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
-        const StartPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch )
+        const StartPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
+        const PCB_DRC_CAPTURE_CONTEXT& aCaptureContext )
 {
     if( aRequest.operation_id().empty() || aRequest.operation_id() == niluuid.AsStdString() )
         return tl::unexpected( "A DRC job requires a nonempty operation ID" );
@@ -217,16 +215,11 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         }
     }
 
-    wxString path = wxFileName::CreateTempFileName( "kicad-drc-job-" );
-    if( path.empty() ) return tl::unexpected( "Could not create a private DRC snapshot" );
-    auto cleanup = std::shared_ptr<wxString>( new wxString( path ), []( wxString* file )
-                                            { wxRemoveFile( *file ); delete file; } );
+    std::unique_ptr<PCB_DRC_RUN_INPUTS> inputs;
     try
     {
-        PCB_IO_KICAD_SEXPR writer;
-        PRETTIFIED_FILE_OUTPUTFORMATTER output( path );
-        writer.FormatBoardToFormatter( &output, &aBoard, nullptr, false );
-        output.Finish();
+        inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
+        if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
         if( aBoard.GetTimeStamp() != sequence ) return tl::unexpected( "PCB changed during DRC capture" );
     }
     catch( const std::exception& error )
@@ -252,7 +245,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     }
     try
     {
-    job->worker = std::thread( [job, path, cleanup = std::move( cleanup )]() mutable
+    job->worker = std::thread( [job, inputs = std::move( inputs )]() mutable
     {
         PcbDrcJobStatus terminal = PDRCJS_FAILED;
         std::string errorCode, errorMessage;
@@ -263,23 +256,26 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         }
         try
         {
-            std::unique_ptr<BOARD> board( PCB_IO_MGR::Load( PCB_IO_MGR::KICAD_SEXP,
-                    path, nullptr, nullptr, nullptr, job->reporter.get() ) );
-            if( !board ) throw std::runtime_error( "Native PCB snapshot could not be loaded" );
-            // The board's runtime UUID is not serialized by the native file.
-            // Board-level findings must still identify the requested live owner.
-            board->SetUuid( KIID( job->checkedBoardEpoch ) );
+            BOARD& board = inputs->GetBoard();
             // Board items consult their design settings' engine for cached
             // clearances. A separate unregistered stack engine can miss rules.
-            auto& settings = board->GetDesignSettings();
-            settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( board.get(), &settings );
+            auto& settings = board.GetDesignSettings();
+            settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( &board, &settings );
             DRC_ENGINE& engine = *settings.m_DRCEngine;
-            engine.InitEngine( board->GetDesignRulesPath() );
+            inputs->InitializeEngine( engine );
+            bool running = false;
+            DRC_RUN_SCOPE invocation( engine, running );
+            inputs->BindInvocation( engine );
             engine.SetProgressReporter( job->reporter.get() );
-            engine.SetViolationHandler( [&findings, job]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,
+            engine.SetViolationHandler( [&findings, &inputs, &settings, &board]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,
                                                int layer, const std::function<void( PCB_MARKER* )>& pathGenerator )
             {
+                auto ids = item->GetIDs();
+                for( auto& id : ids )
+                    if( id == inputs->CapturedDrawingIdentity() ) id = inputs->SourceDrawingIdentity();
+                item->SetItems( ids );
                 auto marker = std::make_unique<PCB_MARKER>( item, position, layer );
+                marker->SetParent( &board );
                 if( pathGenerator ) pathGenerator( marker.get() );
                 google::protobuf::Any encoded;
                 marker->Serialize( encoded );
@@ -287,6 +283,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                 finding.set_native_id( marker->m_Uuid.AsStdString() );
                 if( !encoded.UnpackTo( finding.mutable_marker() ) )
                     throw std::runtime_error( "Could not serialize a DRC finding" );
+                const auto exclusion = settings.m_DrcExclusions.find( DRC_EXCLUSION::FromMarker( *marker ) );
+                if( exclusion != settings.m_DrcExclusions.end() )
+                {
+                    finding.set_excluded( true );
+                    finding.set_comment( exclusion->GetComment().ToStdString( wxConvUTF8 ) );
+                }
                 findings.push_back( std::move( finding ) );
             } );
             const DRC_RUN_RESULT run = engine.RunTests( EDA_UNITS::MM, job->reportAllTrackErrors,
@@ -301,9 +303,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             errorMessage = error.what();
         }
         catch( ... ) { errorCode = "native_exception"; errorMessage = "Unexpected native DRC exception"; }
-        // Board/engine/callbacks and private snapshot are gone before terminal
+        // Board/engine/callbacks and all captured input owners are gone before terminal
         // cancellation is acknowledged. No worker publishes partial findings.
-        cleanup.reset();
+        inputs.reset();
         std::lock_guard lock( job->mutex );
         if( job->invalidated ) { terminal = PDRCJS_STALE; errorCode = "document_changed"; }
         else if( job->reporter->IsCancelled() ) terminal = PDRCJS_CANCELLED;

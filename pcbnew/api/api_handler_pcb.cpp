@@ -30,6 +30,7 @@
 #include <api/api_utils.h>
 #include <api/api_server.h>
 #include <api/native_state_digest.h>
+#include <google/protobuf/util/message_differencer.h>
 #include <api/native_file_observation.h>
 #include <project/project_file.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
@@ -375,6 +376,16 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
+    auto replay = m_drcJobs.ReadOperation( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
+                                         [this]( const auto& document ) { return observeDrcSchematic( document ); } );
+    if( !replay )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST ); error.set_error_message( replay.error() );
+        return tl::unexpected( error );
+    }
+    if( replay->has_value() ) return **replay;
+
     auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
     auto* drawing = frame() ? frame()->GetCanvas()->GetDrawingSheet() : nullptr;
     if( !libraries || !drawing )
@@ -386,6 +397,39 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     }
     PCB_DRC_CAPTURE_CONTEXT capture{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid,
                                     frame()->GetPcbNewSettings()->m_PnsSettings.get() };
+    kiapi::automation::v1::SchematicParityNetlistSnapshot schematic;
+    if( aCtx.Request.test_footprints() )
+    {
+        const auto& expected = aCtx.Request.expected_schematic_state();
+        if( !aCtx.Request.has_expected_schematic_state()
+            || expected.process_epoch() != Pgm().GetApiServer().Token()
+            || !google::protobuf::util::MessageDifferencer::Equals(
+                    expected.document().project(), aCtx.Request.document().project() ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "DRC parity requires an observed schematic in this project and native process" );
+            return tl::unexpected( error );
+        }
+        kiapi::automation::v1::ReadSchematicParityNetlist query;
+        query.set_schema_version( 1 );
+        query.mutable_document()->CopyFrom( expected.document() );
+        query.mutable_expected_state()->CopyFrom( expected );
+        query.set_allow_duplicate_sheet_names( aCtx.Request.allow_duplicate_sheet_names() );
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( query );
+        auto response = Pgm().GetApiServer().DispatchToHandlers( envelope );
+        if( !response ) return tl::unexpected( response.error() );
+        if( response->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( response->status() );
+        if( !response->message().UnpackTo( &schematic ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_NOT_READY );
+            error.set_error_message( "Native schematic comparison response could not be decoded" );
+            return tl::unexpected( error );
+        }
+        capture.schematic = &schematic;
+    }
     auto started = m_drcJobs.Start( aCtx.Request, *board(), Pgm().GetApiServer().Token(), capture );
     if( !started )
     {
@@ -397,13 +441,30 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     return *started;
 }
 
+tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> API_HANDLER_PCB::observeDrcSchematic(
+        const kiapi::common::types::DocumentSpecifier& document )
+{
+    kiapi::automation::v1::ReadDocumentLifecycleState query;
+    query.mutable_document()->CopyFrom( document );
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( query );
+    auto response = Pgm().GetApiServer().DispatchToHandlers( envelope );
+    if( !response ) return tl::unexpected( response.error().error_message() );
+    if( response->status().status() != ApiStatusCode::AS_OK )
+        return tl::unexpected( response->status().error_message() );
+    kiapi::automation::v1::DocumentLifecycleState state;
+    if( !response->message().UnpackTo( &state ) ) return tl::unexpected( "Native schematic state could not be decoded" );
+    return state;
+}
+
 HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcJob(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx )
 {
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto read = m_drcJobs.Read( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    auto read = m_drcJobs.Read( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
+                               [this]( const auto& document ) { return observeDrcSchematic( document ); } );
     if( !read )
     {
         ApiResponseStatus error;
@@ -420,7 +481,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCan
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), Pgm().GetApiServer().Token() );
+    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), Pgm().GetApiServer().Token(),
+                                     [this]( const auto& document ) { return observeDrcSchematic( document ); } );
     if( !cancelled )
     {
         ApiResponseStatus error;

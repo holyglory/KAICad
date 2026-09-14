@@ -1,6 +1,7 @@
 /* Owned native DRC input bundle. GPL-3.0-or-later. */
 #include "pcb_drc_run_inputs.h"
 #include "pcb_drc_document_snapshot.h"
+#include "pcb_drc_schematic_input.h"
 #include <board.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_library_inputs.h>
@@ -69,6 +70,14 @@ void PCB_DRC_RUN_INPUTS::BindInvocation( DRC_ENGINE& aEngine )
     aEngine.SetLibraryInputs( m_libraries );
     aEngine.SetDrawingSheet( m_proxy.get() );
     aEngine.SetDrawingSheetModel( std::move( m_drawing ) );
+    if( m_schematic ) aEngine.SetSchematicNetlist( &m_schematic->Netlist() );
+}
+
+void PCB_DRC_RUN_INPUTS::SetSchematicInput( std::unique_ptr<PCB_DRC_SCHEMATIC_INPUT> aInput )
+{
+    if( !m_drawing || m_schematic || !aInput )
+        throw std::logic_error( "Schematic input must be attached once before starting DRC" );
+    m_schematic = std::move( aInput );
 }
 
 const KIID& PCB_DRC_RUN_INPUTS::CapturedDrawingIdentity() const { return m_proxy->m_Uuid; }

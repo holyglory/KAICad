@@ -3,6 +3,7 @@
 #include <advanced_config.h>
 #include <api/pcb_drc_job_manager.h>
 #include <api/pcb_drc_run_inputs.h>
+#include <api/native_state_digest.h>
 #include <board.h>
 #include <pcb_track.h>
 #include <netinfo.h>
@@ -410,6 +411,94 @@ BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindin
     BOOST_CHECK_EQUAL( state->findings_size(), 0 );
     BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
     BOOST_CHECK_EQUAL( board->GetTimeStamp(), request.expected_revision().sequence() );
+}
+
+BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChangeInvalidatesIt )
+{
+    BOARD board;
+    board.SetFileName( "parity-worker.kicad_pcb" );
+    auto& settings = board.GetDesignSettings();
+    for( int code = DRCE_FIRST; code <= DRCE_LAST; ++code )
+        settings.m_DRCSeverities[code] = SEVERITY::RPT_SEVERITY_IGNORE;
+    settings.m_DRCSeverities[DRCE_MISSING_FOOTPRINT] = SEVERITY::RPT_SEVERITY_ERROR;
+    const std::string epoch = KIID().AsStdString();
+    StartPcbDrcJob request;
+    request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    request.mutable_document()->set_board_filename( "parity-worker.kicad_pcb" );
+    request.mutable_document()->mutable_project()->set_path( "/fixture/project" );
+    request.mutable_document()->mutable_project()->set_name( "fixture" );
+    request.set_operation_id( KIID().AsStdString() ); request.set_process_epoch( epoch );
+    request.set_test_footprints( true );
+    request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+    request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
+    PCB_DRC_JOB_MANAGER jobs;
+    BOOST_CHECK( !jobs.Start( request, board, epoch, context ) );
+
+    SchematicParityNetlistSnapshot captured;
+    captured.set_schema_version( 1 );
+    auto* source = captured.mutable_source_state();
+    source->mutable_document()->set_type( kiapi::common::types::DOCTYPE_SCHEMATIC );
+    source->mutable_document()->mutable_project()->CopyFrom( request.document().project() );
+    source->mutable_document()->mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+    source->mutable_revision()->set_epoch( KIID().AsStdString() );
+    source->mutable_revision()->set_sequence( 17 );
+    source->set_native_identity( KIID().AsStdString() ); source->set_process_epoch( epoch );
+    source->set_state_sha256( std::string( 64, 'a' ) );
+    source->set_scope( DLS_SCHEMATIC_HIERARCHY ); source->set_project_settings_included( true );
+    captured.set_native_netlist_sexpr( "(export (version E) (design) (components "
+            "(comp (ref R1) (value 10k) (footprint Device:R) (sheetpath (names /) (tstamps /)) "
+            "(tstamps e74fd410-f341-421a-b332-a39f523c96f6))) (libparts) (libraries) (nets))" );
+    NATIVE_STATE_DIGEST digest; digest.Append( captured.native_netlist_sexpr() );
+    captured.set_netlist_sha256( digest.Hex() );
+    captured.add_warnings( "fixture intentional duplicate sheet names" );
+    request.mutable_expected_schematic_state()->CopyFrom( *source );
+    context.schematic = &captured;
+    auto currentSchematic = *source;
+    auto observer = [&]( const kiapi::common::types::DocumentSpecifier& document )
+            -> tl::expected<DocumentLifecycleState, std::string>
+    {
+        BOOST_CHECK( MessageDifferencer::Equals( document, currentSchematic.document() ) );
+        return currentSchematic;
+    };
+    auto started = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    // No capture object or export buffer is borrowed by the background worker.
+    captured.Clear(); context.schematic = nullptr;
+    ReadPcbDrcJob query;
+    query.mutable_document()->CopyFrom( request.document() );
+    query.set_job_id( started->job_id() ); query.set_process_epoch( epoch );
+    auto state = jobs.Read( query, board, epoch, observer );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+    while( state && !state->worker_finished() && std::chrono::steady_clock::now() < deadline )
+    {
+        std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+        state = jobs.Read( query, board, epoch, observer );
+    }
+    BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
+    BOOST_REQUIRE_MESSAGE( state->status() == PDRCJS_COMPLETED, state->error_message() );
+    BOOST_REQUIRE_EQUAL( state->findings_size(), 1 );
+    BOOST_CHECK( state->findings( 0 ).marker().error_type() == kiapi::board::DRCET_MISSING_FOOTPRINT );
+    BOOST_CHECK( MessageDifferencer::Equals( state->checked_schematic_state(), currentSchematic ) );
+    BOOST_REQUIRE_EQUAL( state->input_warnings_size(), 1 );
+    BOOST_CHECK_EQUAL( state->input_warnings( 0 ), "fixture intentional duplicate sheet names" );
+    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+
+    // Writer digest, not just the journal cursor, protects against untracked edits.
+    currentSchematic.set_state_sha256( std::string( 64, 'b' ) );
+    auto stale = jobs.Read( query, board, epoch, observer );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( stale->error_code(), "schematic_changed" );
+    BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    currentSchematic = request.expected_schematic_state();
+    BOOST_CHECK( jobs.Read( query, board, epoch, observer )->status() == PDRCJS_STALE );
+    auto replay = jobs.ReadOperation( request, board, epoch, observer );
+    BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+    BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( ( **replay ).job_id(), started->job_id() );
+    auto changedRequest = request; changedRequest.set_allow_duplicate_sheet_names( true );
+    BOOST_CHECK( !jobs.ReadOperation( changedRequest, board, epoch, observer ) );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), request.expected_revision().sequence() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

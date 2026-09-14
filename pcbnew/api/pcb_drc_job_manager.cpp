@@ -1,6 +1,7 @@
 /* Native asynchronous PCB DRC job ownership. GPL-3.0-or-later. */
 #include "pcb_drc_job_manager.h"
 #include "pcb_drc_run_inputs.h"
+#include "pcb_drc_schematic_input.h"
 
 #include <board.h>
 #include <board_design_settings.h>
@@ -89,6 +90,8 @@ struct PCB_DRC_JOB_MANAGER::JOB
     bool refillZones = false;
     bool reportAllTrackErrors = false;
     bool testFootprints = false;
+    DocumentLifecycleState schematicState;
+    std::vector<std::string> inputWarnings;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
     double progress = 0.0;
     std::string phase;
@@ -125,9 +128,27 @@ std::shared_ptr<PCB_DRC_JOB_MANAGER::JOB> PCB_DRC_JOB_MANAGER::find( const std::
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
-        const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch ) const
+        const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
+        const SCHEMATIC_OBSERVER& aObserveSchematic ) const
 {
     if( !aJob ) return tl::unexpected( "Unknown PCB DRC job" );
+    // Immutable source identity is fixed before worker launch. Do not hold the
+    // receipt mutex while dispatching a UI-thread observation of another document.
+    bool schematicChanged = false;
+    if( aJob->testFootprints )
+    {
+        if( !aObserveSchematic ) schematicChanged = true;
+        else
+        {
+            try
+            {
+                auto current = aObserveSchematic( aJob->schematicState.document() );
+                schematicChanged = !current || !google::protobuf::util::MessageDifferencer::Equals(
+                        aJob->schematicState, *current );
+            }
+            catch( const std::exception& ) { schematicChanged = true; }
+        }
+    }
     std::lock_guard lock( aJob->mutex );
     if( aJob->processEpoch != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
@@ -140,14 +161,15 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     const bool liveChanged = aBoard.m_Uuid.AsStdString() != aJob->checkedBoardEpoch
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;
     if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
-          || aJob->status == PDRCJS_COMPLETED ) && liveChanged )
+          || aJob->status == PDRCJS_COMPLETED ) && ( liveChanged || schematicChanged ) )
     {
         aJob->invalidated = true;
         if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
         aJob->resultsFresh = false;
         aJob->findings.clear();
-        aJob->errorCode = "document_changed";
-        aJob->errorMessage = "The live PCB changed while DRC was running";
+        aJob->errorCode = schematicChanged ? "schematic_changed" : "document_changed";
+        aJob->errorMessage = schematicChanged ? "The source schematic changed or could not be observed"
+                                            : "The live PCB changed while DRC was running";
         if( aJob->reporter ) aJob->reporter->Cancel();
     }
     PcbDrcJobState result;
@@ -167,9 +189,32 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_worker_finished( aJob->workerFinished );
     // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
     result.set_snapshot_complete( false );
+    if( aJob->testFootprints ) result.mutable_checked_schematic_state()->CopyFrom( aJob->schematicState );
+    for( const auto& warning : aJob->inputWarnings ) result.add_input_warnings( warning );
     if( aJob->workerFinished && aJob->status == PDRCJS_COMPLETED )
         result.mutable_findings()->Assign( aJob->findings.begin(), aJob->findings.end() );
     return result;
+}
+
+tl::expected<std::optional<PcbDrcJobState>, std::string> PCB_DRC_JOB_MANAGER::ReadOperation(
+        const StartPcbDrcJob& request, BOARD& board, const std::string& epoch,
+        const SCHEMATIC_OBSERVER& observer ) const
+{
+    if( request.process_epoch() != epoch ) return tl::unexpected( "PCB DRC process epoch mismatch" );
+    std::shared_ptr<JOB> existing;
+    {
+        std::lock_guard lock( m_mutex );
+        for( const auto& [id, job] : m_jobs )
+        {
+            if( job->operationId == request.operation_id() ) { existing = job; break; }
+        }
+    }
+    if( !existing ) return std::optional<PcbDrcJobState>();
+    if( !google::protobuf::util::MessageDifferencer::Equals( existing->request, request ) )
+        return tl::unexpected( "The operation ID is already bound to different DRC arguments" );
+    auto result = state( existing, board, epoch, observer );
+    if( !result ) return tl::unexpected( result.error() );
+    return std::optional<PcbDrcJobState>( *result );
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
@@ -179,8 +224,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     if( aRequest.operation_id().empty() || aRequest.operation_id() == niluuid.AsStdString() )
         return tl::unexpected( "A DRC job requires a nonempty operation ID" );
     if( aRequest.process_epoch() != aProcessEpoch ) return tl::unexpected( "PCB DRC process epoch mismatch" );
-    if( aRequest.test_footprints() )
-        return tl::unexpected( "Captured schematic parity input is not implemented; no job was started" );
+    if( aRequest.test_footprints()
+        && ( !aRequest.has_expected_schematic_state() || !aCaptureContext.schematic ) )
+        return tl::unexpected( "Schematic parity requires native capture at the requested state; no job was started" );
+    if( !aRequest.test_footprints()
+        && ( aRequest.has_expected_schematic_state() || aRequest.allow_duplicate_sheet_names() ) )
+        return tl::unexpected( "Schematic parity options require test_footprints" );
     if( aRequest.refill_zones() && !aCaptureContext.routingSettings )
         return tl::unexpected( "Snapshot refill requires native routing settings; no job was started" );
     if( aRequest.document().type() != kiapi::common::types::DOCTYPE_PCB )
@@ -200,7 +249,13 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             }
         }
     }
-    if( duplicate ) return state( duplicate, aBoard, aProcessEpoch );
+    SCHEMATIC_OBSERVER capturedState = [&]( const DocumentSpecifier& document ) -> tl::expected<DocumentLifecycleState, std::string>
+    {
+        if( !aCaptureContext.schematic || !SameDocument( document, aCaptureContext.schematic->source_state().document() ) )
+            return tl::unexpected( "Native schematic source is unavailable" );
+        return aCaptureContext.schematic->source_state();
+    };
+    if( duplicate ) return state( duplicate, aBoard, aProcessEpoch, capturedState );
 
     const int sequence = aBoard.GetTimeStamp();
     if( !aRequest.has_expected_revision() || sequence < 0
@@ -222,6 +277,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     {
         inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
         if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
+        if( aRequest.test_footprints() )
+            inputs->SetSchematicInput( PCB_DRC_SCHEMATIC_INPUT::Capture( *aCaptureContext.schematic,
+                    aRequest.expected_schematic_state(), aRequest.document(), aProcessEpoch ) );
         if( aBoard.GetTimeStamp() != sequence ) return tl::unexpected( "PCB changed during DRC capture" );
     }
     catch( const std::exception& error )
@@ -240,6 +298,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->refillZones = aRequest.refill_zones();
     job->reportAllTrackErrors = aRequest.report_all_track_errors();
     job->testFootprints = aRequest.test_footprints();
+    if( job->testFootprints )
+    {
+        job->schematicState = aCaptureContext.schematic->source_state();
+        job->inputWarnings.assign( aCaptureContext.schematic->warnings().begin(),
+                                   aCaptureContext.schematic->warnings().end() );
+    }
     job->reporter = std::make_unique<JOB_PROGRESS>();
     {
         std::lock_guard lock( m_mutex );
@@ -328,7 +392,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         // cancellation is acknowledged. No worker publishes partial findings.
         inputs.reset();
         std::lock_guard lock( job->mutex );
-        if( job->invalidated ) { terminal = PDRCJS_STALE; errorCode = "document_changed"; }
+        if( job->invalidated )
+        {
+            terminal = PDRCJS_STALE;
+            errorCode = job->errorCode;
+            errorMessage = job->errorMessage;
+        }
         else if( job->reporter->IsCancelled() ) terminal = PDRCJS_CANCELLED;
         job->workerFinished = true;
         job->status = terminal;
@@ -346,22 +415,24 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         m_jobs.erase( job->id );
         return tl::unexpected( std::string( "Could not launch native DRC worker: " ) + error.what() );
     }
-    return state( job, aBoard, aProcessEpoch );
+    return state( job, aBoard, aProcessEpoch, capturedState );
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
-        const ReadPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch )
+        const ReadPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
+        const SCHEMATIC_OBSERVER& aObserveSchematic )
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aRequest.process_epoch() != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
-    return state( job, aBoard, aProcessEpoch );
+    return state( job, aBoard, aProcessEpoch, aObserveSchematic );
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
-        const CancelPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch )
+        const CancelPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
+        const SCHEMATIC_OBSERVER& aObserveSchematic )
 {
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
@@ -372,5 +443,5 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
         if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
         if( !job->workerFinished ) job->reporter->Cancel();
     }
-    return state( job, aBoard, aProcessEpoch );
+    return state( job, aBoard, aProcessEpoch, aObserveSchematic );
 }

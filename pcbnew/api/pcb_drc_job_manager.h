@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <functional>
+#include <optional>
 
 class BOARD;
 struct PCB_DRC_CAPTURE_CONTEXT;
@@ -21,11 +23,20 @@ struct PCB_DRC_CAPTURE_CONTEXT;
 class PCB_DRC_JOB_MANAGER
 {
 public:
+    using SCHEMATIC_OBSERVER = std::function<
+            tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string>(
+                    const kiapi::common::types::DocumentSpecifier& )>;
     PCB_DRC_JOB_MANAGER();
     ~PCB_DRC_JOB_MANAGER();
 
     PCB_DRC_JOB_MANAGER( const PCB_DRC_JOB_MANAGER& ) = delete;
     PCB_DRC_JOB_MANAGER& operator=( const PCB_DRC_JOB_MANAGER& ) = delete;
+
+    // Lookup a retry before native capture; it must not need an obsolete source
+    // state to be recaptured and must never launch a second worker.
+    tl::expected<std::optional<kiapi::automation::v1::PcbDrcJobState>, std::string> ReadOperation(
+            const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} ) const;
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Start(
             const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
@@ -33,17 +44,18 @@ public:
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Read(
             const kiapi::automation::v1::ReadPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch );
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} );
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Cancel(
             const kiapi::automation::v1::CancelPcbDrcJob& aRequest, BOARD& aBoard,
-            const std::string& aProcessEpoch );
+            const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {} );
 
 private:
     struct JOB;
     std::shared_ptr<JOB> find( const std::string& aJobId ) const;
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
-            const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch ) const;
+            const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
+            const SCHEMATIC_OBSERVER& aObserveSchematic = {} ) const;
 
     mutable std::mutex m_mutex;
     std::map<std::string, std::shared_ptr<JOB>> m_jobs;

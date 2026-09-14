@@ -22,7 +22,15 @@ BOOST_AUTO_TEST_CASE( EmptyColumnsReloadTheirOwnCurrentAndLegacyEncoding )
     BOOST_CHECK( legacy.fieldsOrdered.empty() );
     BOOST_CHECK_EQUAL( legacy.name, value.name );
     auto malformed = encoded; malformed["fields_ordered"] = 7;
-    BOOST_CHECK_THROW( malformed.get<BOM_PRESET>(), nlohmann::json::exception );
+    // from_json is exported by kicommon, but the header-only JSON exception's
+    // RTTI is private with hidden visibility. Use the public exception boundary
+    // across dylibs while still requiring the exact malformed-array diagnostic.
+    BOOST_CHECK_EXCEPTION( malformed.get<BOM_PRESET>(), std::exception,
+            []( const std::exception& error )
+            { return std::string( error.what() ).find( "type must be array" ) != std::string::npos; } );
+    BOOST_CHECK_EQUAL( malformed.at( "fields_ordered" ).get<int>(), 7 );
+    BOOST_CHECK( current.fieldsOrdered.empty() );
+    BOOST_CHECK( legacy.fieldsOrdered.empty() );
 }
 
 BOOST_AUTO_TEST_CASE( TypedSnapshotMatchesEveryPersistedViewAndFormatField )

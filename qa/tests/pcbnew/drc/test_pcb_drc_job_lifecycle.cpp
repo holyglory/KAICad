@@ -39,7 +39,7 @@ BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument 
 
     PCB_DRC_JOB_MANAGER jobs;
     auto started = jobs.Start( request, board, epoch );
-    BOOST_REQUIRE_MESSAGE( started, started ? "" : started.error() );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
     CancelPcbDrcJob cancel;
     cancel.mutable_document()->CopyFrom( request.document() );
     cancel.set_job_id( started->job_id() ); cancel.set_process_epoch( epoch );
@@ -104,7 +104,7 @@ BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotC
     BOOST_CHECK( !jobs.Start( request, board, epoch ) );
     request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
     auto started = jobs.Start( request, board, epoch );
-    BOOST_REQUIRE_MESSAGE( started, started ? "" : started.error() );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
     ReadPcbDrcJob query;
     query.mutable_document()->CopyFrom( request.document() );
     query.set_process_epoch( epoch ); query.set_job_id( started->job_id() );

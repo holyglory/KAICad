@@ -434,6 +434,36 @@ jobs:
           retention-days: 14
           compression-level: 1
 
+      - name: Build, inspect and package Windows x64
+        if: success() && !inputs.checks_only
+        working-directory: automation
+        shell: pwsh
+        run: |
+          # Older exact source commits retain their original all-in-one command.
+          $phaseArguments = @()
+          if ('${{ steps.stages.outputs.split }}' -eq 'true') { $phaseArguments = @('--phase', 'build') }
+          dotnet run --project tools/KiCad.Automation.Validation --configuration Release -- `
+            hosted --repository "$env:GITHUB_WORKSPACE" --commit "$env:SOURCE_COMMIT" `
+            --architecture x64 --output "$env:RUNNER_TEMP/kicad-delivery" `
+            --dependency-commit "$env:VCPKG_COMMIT" @phaseArguments
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows delivery failed; see retained evidence.' }
+      - name: Retain native result and bounded build evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-windows-x64-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kicad-delivery/evidence
+            ${{ runner.temp }}/kicad-delivery/receipt.json
+            ${{ runner.temp }}/kicad-delivery/packages
+            ${{ runner.temp }}/kicad-delivery/windows-prepared.json
+            ${{ runner.temp }}/kicad-delivery/windows-build-started.json
+            ${{ runner.temp }}/kicad-delivery/diagnostics
+            ${{ runner.temp }}/kicad-windows-preflight
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
   windows-cache-seed:
     if: inputs.target == 'windows-cache-check'
     runs-on: windows-2022
@@ -510,32 +540,3 @@ jobs:
           path: ${{ runner.temp }}/windows-cache-transfer.json
           if-no-files-found: error
           retention-days: 14
-      - name: Build, inspect and package Windows x64
-        if: success() && !inputs.checks_only
-        working-directory: automation
-        shell: pwsh
-        run: |
-          # Older exact source commits retain their original all-in-one command.
-          $phaseArguments = @()
-          if ('${{ steps.stages.outputs.split }}' -eq 'true') { $phaseArguments = @('--phase', 'build') }
-          dotnet run --project tools/KiCad.Automation.Validation --configuration Release -- `
-            hosted --repository "$env:GITHUB_WORKSPACE" --commit "$env:SOURCE_COMMIT" `
-            --architecture x64 --output "$env:RUNNER_TEMP/kicad-delivery" `
-            --dependency-commit "$env:VCPKG_COMMIT" @phaseArguments
-          if ($LASTEXITCODE -ne 0) { throw 'Native Windows delivery failed; see retained evidence.' }
-      - name: Retain native result and bounded build evidence, including failures
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: native-windows-x64-${{ inputs.source_commit }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/kicad-delivery/evidence
-            ${{ runner.temp }}/kicad-delivery/receipt.json
-            ${{ runner.temp }}/kicad-delivery/packages
-            ${{ runner.temp }}/kicad-delivery/windows-prepared.json
-            ${{ runner.temp }}/kicad-delivery/windows-build-started.json
-            ${{ runner.temp }}/kicad-delivery/diagnostics
-            ${{ runner.temp }}/kicad-windows-preflight
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 1

@@ -30,6 +30,12 @@ public sealed class HostedDeliveryTests
         StringAssert.Contains(workflow, "nuget,https://gitlab.com/api/v4/projects/27426693/packages/nuget/index.json,read");
         int save = workflow.IndexOf("name: Retain compiled Windows dependencies before native tests", StringComparison.Ordinal);
         int build = workflow.IndexOf("name: Build, inspect and package Windows x64", StringComparison.Ordinal);
+        int seedJob = workflow.IndexOf("\n  windows-cache-seed:", StringComparison.Ordinal);
+        int windowsJob = workflow.IndexOf("\n  windows:", StringComparison.Ordinal);
+        int nativeReceipt = workflow.IndexOf("name: native-windows-x64-", StringComparison.Ordinal);
+        Assert.IsTrue(windowsJob >= 0 && windowsJob < save && build < seedJob && nativeReceipt < seedJob,
+            "The native build and its retained evidence must remain in the Windows delivery job.");
+        Assert.IsFalse(workflow[seedJob..].Contains("name: Build, inspect and package Windows x64", StringComparison.Ordinal));
         Assert.IsTrue(save >= 0 && save < build, "Dependency cache must survive a later native test failure.");
         string cacheSteps = workflow[workflow.IndexOf("name: Identify the Windows dependency cache", StringComparison.Ordinal)..build];
         Assert.IsFalse(cacheSteps.Contains("signing/", StringComparison.Ordinal));

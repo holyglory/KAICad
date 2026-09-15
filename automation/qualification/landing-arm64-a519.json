@@ -1,5 +1,5 @@
 {
-  "repoRoot": "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64",
+  "repoRoot": "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme",
   "targets": [
     {
       "name": "arm64-light",

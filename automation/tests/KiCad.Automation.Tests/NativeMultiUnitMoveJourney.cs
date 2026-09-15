@@ -29,6 +29,9 @@ public sealed partial class NativeSessionTests
             foreach (var field in new[] { symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField }.Concat(symbol.UserFields))
                 if (field?.Text?.Position is { } position) { position.XNm += dx; position.YNm += dy; }
             symbol.Position = new() { XNm = positions[index].X, YNm = positions[index].Y };
+            // The preceding journey may have rotated the source template. These
+            // new fixture wires declare unrotated local pin rows explicitly.
+            symbol.Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 };
             symbol.Path = first.SheetPath.Clone(); symbol.Unit = new() { Unit = 1 };
             symbol.ReferenceField.Text.Text_ = "MU" + (301 + index); symbol.ValueField.Text.Text_ = "Unit probe";
             symbol.Definition.Id.EntryName = "UnitProbe"; symbol.Definition.UnitCount = 2;

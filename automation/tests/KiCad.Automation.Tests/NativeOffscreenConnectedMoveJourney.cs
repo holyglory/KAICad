@@ -137,6 +137,7 @@ public sealed partial class NativeSessionTests
             visibleSheetViewportImageSelectionPreserved = true, visibleNativeObjectsPreserved = true,
             normalStdioMcpMoveAndReplay = true, forwardXmlApplied = true, connectivityPreserved = true,
             nativeKeyboardUndo = true, repeatedDifferentUnitQualified = false, crossPlatformReady = false }), token);
+        await VerifyOffscreenTransformXml(client, root, child, fixture, hierarchy.TextId, processId, display, evidence, instanceId, token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);

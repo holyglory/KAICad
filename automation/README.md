@@ -1406,8 +1406,9 @@ surviving selection identities as well as design geometry.
 
 These native operations do not consume creations staged earlier in the same
 batch. They are not full electrical correctness verification, complete revision
-tracking or automatic XML synchronization. XML-driven transforms remain under
-implementation. The compiled editor journey covers both tools, all four
+tracking or automatic XML synchronization. XML-driven transforms have controlled
+Linux proof, including hidden physical sheets and attached label guidance. The
+compiled editor journey covers both tools, all four
 transforms, connection preservation, rejection/rollback, retry/stale behavior,
 observations and native undo/redo in two Linux editor instances. This is not
 Codex Desktop or native-Mac qualification. Run the focused journey with

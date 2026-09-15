@@ -36,7 +36,7 @@ default = "automation"
 
 [test.mac-arm64-a519-public]
 timeout_seconds = 900
-env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "a519e52fc30ada3b0a7f45695433f5157731a0e1", KICAD_DELIVERY_PLATFORM = "osx-arm64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/artifacts/mac-arm64-a519-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "osx-arm64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260915-a519e52fc30a" }
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "a519e52fc30ada3b0a7f45695433f5157731a0e1", KICAD_DELIVERY_PLATFORM = "osx-arm64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-arm64-a519-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "osx-arm64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260915-a519e52fc30a" }
 
 [[test.mac-arm64-a519-public.check]]
 name = "restore"
@@ -107,13 +107,13 @@ env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 [[test.sign-arm64-a519.check]]
 name = "sign"
 tier = "development"
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-osx-arm64-000009.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-preview9.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-4975-signed-000006/updates/platforms/osx-arm64/preview.json"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-osx-arm64-000009.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-preview9.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-4975-signed-000006/updates/platforms/osx-arm64/preview.json"]
 
 [[test.sign-arm64-a519.check]]
 name = "stage-feeds"
 tier = "development"
 requires = ["sign"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-signed-000009", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-arm64-000009.json"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-a519-signed-000009", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-arm64-000009.json"]
 
 [test.compiler-cache]
 timeout_seconds = 1200

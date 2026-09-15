@@ -192,7 +192,6 @@ jobs:
       # KiCad's documented, public read-only binary feed. ABI misses still build
       # from the pinned manifest/registries; no packages are pushed to GitLab.
       VCPKG_BINARY_SOURCES: clear;default,readwrite;nuget,https://gitlab.com/api/v4/projects/27426693/packages/nuget/index.json,read
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/kicad-vcpkg-binary-cache
       CHECKS_ONLY: ${{ inputs.checks_only }}
       WINDOWS_FIXTURE: ${{ inputs.windows_fixture }}
       WINDOWS_UPDATE_BASELINE_COMMIT: ${{ inputs.windows_update_baseline_commit }}
@@ -384,7 +383,9 @@ jobs:
         id: dependency-cache-key
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          $cacheDirectory = Join-Path $env:RUNNER_TEMP 'kicad-vcpkg-binary-cache'
+          New-Item -ItemType Directory -Force -Path $cacheDirectory | Out-Null
+          "VCPKG_DEFAULT_BINARY_CACHE=$cacheDirectory" >> $env:GITHUB_ENV
           $compiler = (Get-Item (Get-Command cl.exe).Source).VersionInfo.FileVersion
           if (!$compiler) { throw 'MSVC version is required for the dependency cache family.' }
           $compiler = $compiler -replace '[^0-9A-Za-z._-]', '_'

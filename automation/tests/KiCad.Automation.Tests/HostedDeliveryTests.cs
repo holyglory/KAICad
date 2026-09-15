@@ -18,7 +18,10 @@ public sealed class HostedDeliveryTests
         StringAssert.Contains(workflow, "actions/cache/restore@" + action);
         StringAssert.Contains(workflow, "actions/cache/save@" + action);
         StringAssert.Contains(workflow, "windows_dependency_cache:");
-        StringAssert.Contains(workflow, "VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/kicad-vcpkg-binary-cache");
+        StringAssert.Contains(workflow, "Join-Path $env:RUNNER_TEMP 'kicad-vcpkg-binary-cache'");
+        StringAssert.Contains(workflow, "\"VCPKG_DEFAULT_BINARY_CACHE=$cacheDirectory\" >> $env:GITHUB_ENV");
+        Assert.IsFalse(workflow.Contains("VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.", StringComparison.Ordinal),
+            "The runner context is unavailable in job-level environment expressions.");
         StringAssert.Contains(workflow, "if: '!inputs.checks_only'\n        id: dependency-cache-key");
         StringAssert.Contains(workflow, "steps.prepare.outcome == 'success' && inputs.windows_dependency_cache");
         StringAssert.Contains(workflow, "VersionInfo.FileVersion");

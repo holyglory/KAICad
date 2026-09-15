@@ -142,7 +142,7 @@ public sealed class NativeCaptionMcpProbeTests
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
         string executable = Path.Combine(repository.FullName, "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.exe");
         Assert.IsTrue(File.Exists(executable), "Build the actual Windows MCP apphost before this check.");
-        string scratch = Directory.CreateTempSubdirectory("kicad-win-catalog-").FullName;
+        string scratch = Directory.CreateTempSubdirectory("kwmcp-catalog-").FullName;
         string state = Path.Combine(scratch, "registry");
         string evidence = Directory.CreateDirectory(Path.Combine(Environment.GetEnvironmentVariable("KICAD_HOSTED_FIXTURE_EVIDENCE")
             ?? TestContext.TestResultsDirectory!, "windows-mcp-capabilities")).FullName;
@@ -169,6 +169,7 @@ public sealed class NativeCaptionMcpProbeTests
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
                 await job.StopAndWaitAsync(cleanup.Token);
                 await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(scratch);
+                Assert.IsFalse(Directory.Exists(scratch), "The test-owned Windows scratch directory must be removed.");
             });
         }
         finally

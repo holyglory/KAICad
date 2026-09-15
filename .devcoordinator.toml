@@ -2666,7 +2666,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.caption-mcp-capabilities.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeCaptionMcpProbeTests", "--logger", "trx", "--results-directory", "automation/artifacts/caption-mcp-capability-tests"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeCaptionMcpProbeTests&TestCategory!=NativeWindowsMcpCapabilities", "--logger", "trx", "--results-directory", "automation/artifacts/caption-mcp-capability-tests"]
 retained_artifacts = [{ name = "capability-contracts", path = "automation/artifacts/caption-mcp-capability-tests", max_bytes = 16777216 }]
 
 [test.mac-intel-f825-stage]

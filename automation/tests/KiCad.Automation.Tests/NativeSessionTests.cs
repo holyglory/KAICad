@@ -42,7 +42,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCheckedSchematicBatch")]
     public Task CheckedBatchesRejectChangedStateAndPreserveNativeUndo() => RunNativeSessions(NativeJourney.CheckedBatch);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch }
+    [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
+    public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -58,6 +61,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.HierarchyPolicy => "native-hierarchy-policy",
                 NativeJourney.SynchronizationPlan => "native-synchronization-plan",
                 NativeJourney.CheckedBatch => "native-checked-batch",
+                NativeJourney.OffscreenMove => "native-offscreen-move",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -200,6 +204,17 @@ public sealed partial class NativeSessionTests
                 string textId = Guid.NewGuid().ToString("D");
                 var electrical = MakeElectricalFixture(rootId);
                 var hierarchyFixture = await MakeHierarchyFixture(rootId, Path.GetDirectoryName(schematic)!, deadline.Token);
+                if (journey == NativeJourney.OffscreenMove)
+                {
+                    string childFile = Path.Combine(Path.GetDirectoryName(schematic)!, "shared-child.kicad_sch");
+                    string childSource = await File.ReadAllTextAsync(childFile, deadline.Token);
+                    string separateWires = $$"""
+                        (lib_symbols)
+                        (wire (pts (xy 80 80) (xy 90 80)) (stroke (width 0) (type default)) (uuid {{Guid.NewGuid():D}}))
+                        (wire (pts (xy 90 80) (xy 100 80)) (stroke (width 0) (type default)) (uuid {{Guid.NewGuid():D}}))
+                        """;
+                    await File.WriteAllTextAsync(childFile, childSource.Replace("(lib_symbols)", separateWires, StringComparison.Ordinal), deadline.Token);
+                }
                 var embeddedAsset = await MakeEmbeddedAssetFixture(root, deadline.Token);
                 Assert.AreEqual(1, hierarchyFixture.Contents.Split("(page \"2\")", StringSplitOptions.None).Length - 1);
                 // Deliberately duplicate the root's page number. Native loading
@@ -318,6 +333,22 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.OffscreenMove)
+                    {
+                        await VerifyConnectedSymbolMove(client, opened.Document, electrical, textId, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        try
+                        {
+                            await VerifyOffscreenConnectedMove(client, opened.Document, electrical, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-offscreen-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
+                        }
                     }
                     else if (journey == NativeJourney.CheckedBatch)
                     {

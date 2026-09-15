@@ -690,6 +690,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
     bool                itemsDeselected = false;
     bool                selectedModified = false;
     bool                dirtyConnectivity = m_connectivitySettingsChanged;
+    bool                cleanupVisibleScreen = m_connectivitySettingsChanged;
     bool                refreshHierarchy = false;
     SCH_CLEANUP_FLAGS   connectivityCleanUp = m_connectivitySettingsChanged ? GLOBAL_CLEANUP : NO_CLEANUP;
 
@@ -709,11 +710,12 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
     std::vector<SCH_ITEM*> itemsChanged;
 
     auto updateConnectivityFlag =
-            [&]( SCH_ITEM* schItem )
+            [&]( SCH_ITEM* schItem, SCH_SCREEN* screen )
             {
                 if( schItem->IsConnectable() || ( schItem->Type() == SCH_RULE_AREA_T ) )
                 {
                     dirtyConnectivity = true;
+                    cleanupVisibleScreen |= screen == currentScreen;
 
                     // Do a local clean up if there are any connectable objects in the commit.
                     if( connectivityCleanUp == NO_CLEANUP )
@@ -725,9 +727,12 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 }
             };
 
-    // We don't know that anything will be added to the entered group, but it does no harm to
-    // add it to the commit anyway.
-    if( enteredGroup && frame )
+    // Only additions on the entered group's own screen can acquire membership.
+    if( enteredGroup && frame && std::any_of( m_entries.begin(), m_entries.end(),
+            [&]( const COMMIT_LINE& entry )
+            {
+                return entry.m_screen == currentScreen && ( entry.m_type & CHT_TYPE ) == CHT_ADD;
+            } ) )
         Modify( enteredGroup, frame->GetScreen() );
 
     // Handle wires with Hop Over shapes (view update only; skipped headless):
@@ -801,10 +806,10 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         {
         case CHT_ADD:
         {
-            if( enteredGroup && schItem->IsGroupableType() && !schItem->GetParentGroup() )
+            if( enteredGroup && screen == currentScreen && schItem->IsGroupableType() && !schItem->GetParentGroup() )
                 selTool->GetEnteredGroup()->AddItem( schItem );
 
-            updateConnectivityFlag( schItem );
+            updateConnectivityFlag( schItem, screen );
 
             if( !( aCommitFlags & SKIP_UNDO ) )
                 undoList.PushItem( ITEM_PICKER( screen, schItem, UNDO_REDO::NEWITEM ) );
@@ -833,7 +838,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
 
         case CHT_REMOVE:
         {
-            updateConnectivityFlag( schItem );
+            updateConnectivityFlag( schItem, screen );
 
             if( !( aCommitFlags & SKIP_UNDO ) )
             {
@@ -902,7 +907,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 || itemCopy->HasConnectivityChanges( schItem, &currentSheet )
                 || ( itemCopy->Type() == SCH_RULE_AREA_T ) )
             {
-                updateConnectivityFlag( schItem );
+                updateConnectivityFlag( schItem, screen );
             }
 
             if( schItem->Type() == SCH_SYMBOL_T )
@@ -1036,7 +1041,9 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                     connectivityCleanUp == LOCAL_CLEANUP ? wxS( "local" ) : wxS( "global" ) );
 
         if( frame )
-            frame->RecalculateConnections( this, connectivityCleanUp );
+            frame->RecalculateConnections( this,
+                    connectivityCleanUp == LOCAL_CLEANUP && !cleanupVisibleScreen
+                            ? NO_CLEANUP : connectivityCleanUp );
         else if( schematic )
             schematic->RecalculateConnections( this, connectivityCleanUp, m_toolMgr );
     }

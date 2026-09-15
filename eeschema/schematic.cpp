@@ -1746,6 +1746,10 @@ void SCHEMATIC::CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen )
     if( aScreen == nullptr )
         aScreen = GetCurrentScreen();
 
+    // Cleanup of a non-displayed screen must not change the human selection.
+    if( aScreen != GetCurrentScreen() )
+        selectionTool = nullptr;
+
     auto remove_item = [&]( SCH_ITEM* aItem ) -> void
     {
         changed = true;

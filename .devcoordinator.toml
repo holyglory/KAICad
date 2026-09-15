@@ -3022,3 +3022,53 @@ tier = "development"
 requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCheckedSchematicBatch", "--logger", "trx", "--results-directory", "automation/artifacts/native-checked-batch-tests"]
 retained_artifacts = [{ name = "native-checked-batch-tests", path = "automation/artifacts/native-checked-batch-tests", max_bytes = 16777216 }, { name = "native-checked-batch-evidence", path = "automation/artifacts/native-checked-batch/native-session-current", max_bytes = 33554432 }]
+
+[test.native-offscreen-move]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-offscreen-move.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-offscreen-move.check]]
+name = "input-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/offscreen-move-input-contracts"]
+retained_artifacts = [{ name = "offscreen-move-input-contracts", path = "automation/artifacts/offscreen-move-input-contracts", max_bytes = 16777216 }]
+
+[[test.native-offscreen-move.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["model-build", "codec", "native-build", "rendered"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-offscreen-move.check]]
+name = "model-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+
+[[test.native-offscreen-move.check]]
+name = "codec"
+tier = "development"
+requires = ["model-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$", "--output-on-failure", "--no-tests=error"]
+
+[[test.native-offscreen-move.check]]
+name = "native-build"
+tier = "development"
+requires = ["codec"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-offscreen-move.check]]
+name = "rendered"
+tier = "development"
+requires = ["native-build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeOffscreenConnectedMove", "--logger", "trx", "--results-directory", "automation/artifacts/native-offscreen-move-tests"]
+retained_artifacts = [{ name = "native-offscreen-move-tests", path = "automation/artifacts/native-offscreen-move-tests", max_bytes = 16777216 }, { name = "native-offscreen-move-evidence", path = "automation/artifacts/native-offscreen-move/native-session-current", max_bytes = 33554432 }]

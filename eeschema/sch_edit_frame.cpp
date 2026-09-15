@@ -1824,7 +1824,7 @@ void SCH_EDIT_FRAME::RefreshOperatingPointDisplay()
 }
 
 
-void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem )
+void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem, const SCH_SHEET_PATH* aPath )
 {
     if( aItem->Type() == SCH_GLOBAL_LABEL_T || aItem->Type() == SCH_HIER_LABEL_T )
     {
@@ -1833,7 +1833,7 @@ void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem )
         if( label->AutoRotateOnPlacement() )
         {
             SPIN_STYLE spin = aScreen->GetLabelOrientationForPoint( label->GetPosition(), label->GetSpinStyle(),
-                                                                    &GetCurrentSheet() );
+                                                                    aPath ? aPath : &GetCurrentSheet() );
 
             if( spin != label->GetSpinStyle() )
             {

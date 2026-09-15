@@ -89,7 +89,19 @@ public:
     // commit, rollback and restoration of the user's original selection.
     bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError );
 
+    // Uses an explicit, non-displayed screen without changing editor navigation.
+    bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
+                          const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems );
+
 private:
+    SCH_SCREEN* moveScreen() const;
+    SCH_SHEET_PATH movePath() const;
+    void updateItem( EDA_ITEM* aItem, bool aUpdateRTree ) const;
+    void addDragSelection( EDA_ITEM* aItem );
+    void removeDragSelection();
+    const SCH_SHEET_PATH* m_explicitMovePath = nullptr;
+    SCH_SELECTION* m_privateMoveSelection = nullptr;
+
     bool doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aCommit );
 
     void moveItem( EDA_ITEM* aItem, const VECTOR2I& aDelta );

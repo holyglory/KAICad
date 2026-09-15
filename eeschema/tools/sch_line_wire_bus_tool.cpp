@@ -1313,10 +1313,10 @@ void SCH_LINE_WIRE_BUS_TOOL::finishSegments( SCH_COMMIT& aCommit )
 }
 
 
-int SCH_LINE_WIRE_BUS_TOOL::TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection  )
+int SCH_LINE_WIRE_BUS_TOOL::TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection, SCH_SCREEN* aScreen )
 {
     SCHEMATIC* sch = getModel<SCHEMATIC>();
-    SCH_SCREEN* screen = sch->CurrentSheet().LastScreen();
+    SCH_SCREEN* screen = aScreen ? aScreen : sch->CurrentSheet().LastScreen();
 
     std::set<SCH_LINE*> lines;
     BOX2I bb = aSelection->GetBoundingBox();
@@ -1349,7 +1349,7 @@ int SCH_LINE_WIRE_BUS_TOOL::TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELEC
             }
 
             if( conn_pts.size() == 2 )
-                m_frame->TrimWire( aCommit, conn_pts[0], conn_pts[1] );
+                m_frame->TrimWire( aCommit, conn_pts[0], conn_pts[1], screen );
         }
     }
 
@@ -1357,9 +1357,9 @@ int SCH_LINE_WIRE_BUS_TOOL::TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELEC
 }
 
 
-int SCH_LINE_WIRE_BUS_TOOL::AddJunctionsIfNeeded( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection )
+int SCH_LINE_WIRE_BUS_TOOL::AddJunctionsIfNeeded( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection, SCH_SCREEN* aScreen )
 {
-    SCH_SCREEN*           screen = m_frame->GetScreen();
+    SCH_SCREEN*           screen = aScreen ? aScreen : m_frame->GetScreen();
     std::deque<EDA_ITEM*> allItems;
 
     for( EDA_ITEM* item : aSelection->Items() )
@@ -1379,7 +1379,7 @@ int SCH_LINE_WIRE_BUS_TOOL::AddJunctionsIfNeeded( SCH_COMMIT* aCommit, SCH_SELEC
     for( const VECTOR2I& point : screen->GetNeededJunctions( allItems ) )
     {
         wxLogTrace( "KICAD_SCH_MOVE", "AddJunctionsIfNeeded: adding junction at %s", point.Format().c_str() );
-        AddJunction( aCommit, m_frame->GetScreen(), point );
+        AddJunction( aCommit, screen, point );
     }
 
     return 0;

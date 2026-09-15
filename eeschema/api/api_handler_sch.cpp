@@ -893,8 +893,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             {
                 if( !m_frame )
                     return reject( prefix + "Connected movement requires an editor context" );
-                if( auto valid = validateDisplayedSheet( document ); !valid )
-                    return reject( prefix + valid.error().error_message() );
+                const bool displayed = targetSheet->Path() == m_frame->GetCurrentSheet().Path();
                 if( operationId.empty() || !aCtx.Request.has_expected_revision() )
                     return reject( prefix + "Connected movement requires revision and retry identity" );
                 if( !createdItems.empty() )
@@ -949,7 +948,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( delta == VECTOR2I( 0, 0 ) )
                     continue;
                 auto* selectionTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
-                if( !savedSelection )
+                if( displayed && !savedSelection )
                 {
                     savedSelection.emplace();
                     auto& selection = selectionTool->GetSelection();
@@ -959,11 +958,23 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     for( EDA_ITEM* item : selection )
                         savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
                 }
-                selectionTool->ClearSelection( true );
-                for( const KIID& id : targets )
-                    selectionTool->AddItemToSel( available.at( id ), true );
                 wxString failure;
-                if( !toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy( nativeCommit, delta, failure ) )
+                bool moved;
+                if( displayed )
+                {
+                    selectionTool->ClearSelection( true );
+                    for( const KIID& id : targets )
+                        selectionTool->AddItemToSel( available.at( id ), true );
+                    moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy( nativeCommit, delta, failure );
+                }
+                else
+                {
+                    std::vector<SCH_ITEM*> selected;
+                    for( const KIID& id : targets ) selected.push_back( available.at( id ) );
+                    moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy(
+                            nativeCommit, delta, failure, *targetSheet, selected );
+                }
+                if( !moved )
                     return reject( prefix + failure.ToStdString() );
 
                 std::map<KIID, google::protobuf::Any> after;

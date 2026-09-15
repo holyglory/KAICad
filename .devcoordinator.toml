@@ -2651,3 +2651,20 @@ name = "native-contracts"
 tier = "development"
 requires = ["native-build"]
 command = ["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_file_content_baseline$", "--output-on-failure", "--no-tests=error"]
+
+[test.caption-mcp-capabilities]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.caption-mcp-capabilities.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.caption-mcp-capabilities.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeCaptionMcpProbeTests", "--logger", "trx", "--results-directory", "automation/artifacts/caption-mcp-capability-tests"]
+retained_artifacts = [{ name = "capability-contracts", path = "automation/artifacts/caption-mcp-capability-tests", max_bytes = 16777216 }]

@@ -222,6 +222,8 @@ public sealed class WindowsInstalledPackageTests
         private int nextId;
         Task<JsonElement> IMcpToolClient.Tool(string name, object arguments) =>
             Tool(name, arguments, allowNotReady: name is "kicad_schematic_observe" or "kicad_schematic_save_state");
+        public async Task<JsonElement> ListTools(string? cursor) =>
+            (await Request("tools/list", cursor is null ? new { } : (object)new { cursor })).GetProperty("result").Clone();
         public static async Task<Mcp> Start(string executable, string scratch, string state, string evidence,
             string name, WindowsProcessJob job, CancellationToken token, bool traceUpdates = false)
         {

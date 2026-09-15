@@ -2830,3 +2830,53 @@ name = "feeds"
 tier = "development"
 requires = ["sign"]
 command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-4975-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-4975-signed-000006", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/tmp/kicad-windows-4975-feeds6.json"]
+
+[test.native-hierarchy-policy]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-hierarchy-policy.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-hierarchy-policy.check]]
+name = "input-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeKeyboardTests", "--logger", "trx", "--results-directory", "automation/artifacts/hierarchy-policy-input-contracts"]
+retained_artifacts = [{ name = "hierarchy-policy-input-contracts", path = "automation/artifacts/hierarchy-policy-input-contracts", max_bytes = 16777216 }]
+
+[[test.native-hierarchy-policy.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["model-build", "codec", "native-build", "rendered"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-hierarchy-policy.check]]
+name = "model-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+
+[[test.native-hierarchy-policy.check]]
+name = "codec"
+tier = "development"
+requires = ["model-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_erc_override_edits$|^qa_net_chain_terminals$|^qa_schematic_state_format$", "--output-on-failure", "--no-tests=error"]
+
+[[test.native-hierarchy-policy.check]]
+name = "native-build"
+tier = "development"
+requires = ["codec"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-hierarchy-policy.check]]
+name = "rendered"
+tier = "development"
+requires = ["native-build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeHierarchyPolicy", "--logger", "trx", "--results-directory", "automation/artifacts/native-hierarchy-policy-tests"]
+retained_artifacts = [{ name = "native-hierarchy-policy-tests", path = "automation/artifacts/native-hierarchy-policy-tests", max_bytes = 16777216 }, { name = "native-hierarchy-policy-evidence", path = "automation/artifacts/native-hierarchy-policy/native-session-current", max_bytes = 33554432 }]

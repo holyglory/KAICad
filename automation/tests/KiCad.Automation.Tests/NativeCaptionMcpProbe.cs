@@ -22,12 +22,61 @@ internal sealed class NativeCaptionMcpProbe(string state, string evidence, Cance
 
     public async Task StartAsync(string executable)
     {
+        Assert.IsNull(mcp, "Dispose the current MCP client before replacing it.");
         Assert.IsTrue(File.Exists(executable));
         string name = "caption-mcp-" + starts++;
-        if (launch is not null) { mcp = await launch(executable, name); return; }
-        var start = new ProcessStartInfo(executable);
-        start.Environment.Remove("KICAD_AUTOMATION_NNG_LIBRARY");
-        mcp = await StdioMcpFixture.StartAsync(start, state, Path.Combine(evidence, name + ".stderr.log"), token);
+        IMcpToolClient started;
+        if (launch is not null) started = await launch(executable, name);
+        else
+        {
+            var start = new ProcessStartInfo(executable);
+            start.Environment.Remove("KICAD_AUTOMATION_NNG_LIBRARY");
+            started = await StdioMcpFixture.StartAsync(start, state, Path.Combine(evidence, name + ".stderr.log"), token);
+        }
+        try { await RequireCaptionToolsAsync(started, token); mcp = started; }
+        catch (Exception primary)
+        {
+            try { await started.DisposeAsync(); }
+            catch (Exception cleanup) { throw new AggregateException("MCP capability validation and cleanup both failed.", primary, cleanup); }
+            throw;
+        }
+    }
+
+    internal static async Task RequireCaptionToolsAsync(IMcpToolClient client, CancellationToken token)
+    {
+        string[] required = ["kicad_instance_attach", "kicad_instance_reattach",
+            "kicad_schematic_observe", "kicad_instance_reconnect_after_update"];
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var cursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        do
+        {
+            token.ThrowIfCancellationRequested();
+            JsonElement page = await client.ListTools(cursor);
+            token.ThrowIfCancellationRequested();
+            Assert.IsTrue(page.ValueKind == JsonValueKind.Object && page.TryGetProperty("tools", out _), "MCP tools/list must return a tool catalog.");
+            JsonElement tools = page.GetProperty("tools");
+            Assert.AreEqual(JsonValueKind.Array, tools.ValueKind, "MCP tools/list tools must be an array.");
+            foreach (JsonElement tool in tools.EnumerateArray())
+            {
+                Assert.IsTrue(tool.ValueKind == JsonValueKind.Object && tool.TryGetProperty("name", out _), "MCP tool has no name.");
+                JsonElement value = tool.GetProperty("name");
+                Assert.AreEqual(JsonValueKind.String, value.ValueKind, "MCP tool name must be a string.");
+                string? toolName = value.GetString();
+                Assert.IsFalse(string.IsNullOrWhiteSpace(toolName), "MCP tool name must not be empty.");
+                Assert.IsTrue(names.Add(toolName!), "Duplicate MCP tool name: " + toolName);
+            }
+            cursor = null;
+            if (page.TryGetProperty("nextCursor", out var next) && next.ValueKind != JsonValueKind.Null)
+            {
+                Assert.AreEqual(JsonValueKind.String, next.ValueKind, "MCP tools/list cursor must be a string.");
+                cursor = next.GetString();
+                Assert.IsFalse(string.IsNullOrEmpty(cursor), "MCP tools/list cursor must not be empty.");
+                Assert.IsTrue(cursors.Add(cursor!), "MCP tools/list repeated a pagination cursor.");
+            }
+        } while (cursor is not null);
+        string[] missing = required.Where(name => !names.Contains(name)).ToArray();
+        Assert.IsEmpty(missing, "Update-test baseline is incompatible; missing MCP tools: " + string.Join(", ", missing));
     }
 
     public async Task AttachDesignAsync(string id, string name, NativeClient native, DocumentSpecifier document)

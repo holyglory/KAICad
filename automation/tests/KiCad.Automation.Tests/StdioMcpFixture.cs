@@ -7,6 +7,7 @@ namespace KiCad.Automation.Tests;
 internal interface IMcpToolClient : IAsyncDisposable
 {
     Task<JsonElement> Tool(string name, object arguments);
+    Task<JsonElement> ListTools(string? cursor);
 }
 
 /// <summary>Compiled black-box test client; owns only its MCP child, never KiCad.</summary>
@@ -52,6 +53,9 @@ internal sealed class StdioMcpFixture : IMcpToolClient
     }
     public async Task<JsonElement> Tool(string name, object arguments) =>
         (await Request("tools/call", new { name, arguments })).GetProperty("result").Clone();
+
+    public async Task<JsonElement> ListTools(string? cursor) =>
+        (await Request("tools/list", cursor is null ? new { } : (object)new { cursor })).GetProperty("result").Clone();
 
     private async Task<JsonElement> Request(string method, object parameters)
     {

@@ -94,6 +94,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_render_views");
             CollectionAssert.Contains(names, "kicad_schematic_sheet_activate");
             CollectionAssert.Contains(names, "kicad_schematic_move_connected_symbols");
+            CollectionAssert.Contains(names, "kicad_schematic_transform_connected_symbols");
             Assert.IsFalse(names.Any(n => n.Contains("route", StringComparison.Ordinal)));
             CollectionAssert.Contains(names, "kicad_schematic_xml_plan");
             JsonElement call = await Request(3, "tools/call", new { name = "kicad_instances_list", arguments = new { } });

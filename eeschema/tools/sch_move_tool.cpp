@@ -771,7 +771,8 @@ std::set<SCH_ITEM*> SCH_MOVE_TOOL::moveConnectionCandidates( SCH_ITEM* aItem, co
 
 
 bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
-                                    const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems )
+                                    const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems,
+                                    CONNECTED_TRANSFORM aTransform, const VECTOR2I& aPivot )
 {
     if( !aCommit || aItems.empty() || aPath.size() == 0 || !aPath.LastScreen() || m_inMoveTool || m_moveInProgress
         || m_explicitMovePath )
@@ -817,6 +818,8 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
     m_contextPinOwners = std::move( contextOwners );
     m_explicitMovePath = &aPath;
     m_privateMoveSelection = &selection;
+    m_connectedTransform = aTransform;
+    m_transformPivot = aPivot;
     auto release = [&]()
     {
         auto restore = [&]( SCH_ITEM* item )
@@ -838,6 +841,7 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         m_explicitMovePath = nullptr;
         m_contextPins.clear();
         m_contextPinOwners.clear();
+        m_connectedTransform = CONNECTED_TRANSFORM::NONE;
     };
     try
     {
@@ -859,6 +863,83 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         release();
         throw;
     }
+}
+
+
+bool SCH_MOVE_TOOL::transformConnectedSelection( SCH_SELECTION& aSelection, wxString& aError )
+{
+    auto safePoint = [&]( const VECTOR2I& point )
+    {
+        const int64_t px = m_transformPivot.x, py = m_transformPivot.y;
+        const int64_t dx = int64_t{ point.x } - px, dy = int64_t{ point.y } - py;
+        auto fits = []( int64_t value ) { return value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max(); };
+        int64_t x = point.x, y = point.y;
+        switch( m_connectedTransform )
+        {
+        case CONNECTED_TRANSFORM::ROTATE_CW: x = px - dy; y = py + dx; break;
+        case CONNECTED_TRANSFORM::ROTATE_CCW: x = px + dy; y = py - dx; break;
+        case CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT:
+            if( !fits( 2 * px ) ) return false;
+            x = px - dx; break;
+        case CONNECTED_TRANSFORM::MIRROR_UP_DOWN:
+            if( !fits( 2 * py ) ) return false;
+            y = py - dy; break;
+        case CONNECTED_TRANSFORM::NONE: return false;
+        }
+        return fits( dx ) && fits( dy ) && fits( x ) && fits( y )
+                && fits( x - point.x ) && fits( y - point.y );
+    };
+    for( EDA_ITEM* selected : aSelection )
+    {
+        auto* item = static_cast<SCH_ITEM*>( selected );
+        const BOX2I bounds = item->GetBoundingBox();
+        for( const VECTOR2I& point : { bounds.GetOrigin(), bounds.GetEnd(),
+                VECTOR2I( bounds.GetLeft(), bounds.GetBottom() ), VECTOR2I( bounds.GetRight(), bounds.GetTop() ) } )
+            if( !safePoint( point ) )
+            {
+                aError = "Connected transformation exceeds native coordinate arithmetic range";
+                return false;
+            }
+        if( auto found = m_contextPins.find( item ); found != m_contextPins.end() )
+            for( SCH_PIN* pin : found->second )
+                if( !safePoint( pin->GetPosition() ) )
+                {
+                    aError = "Connected transformation exceeds an active unit's native pin range";
+                    return false;
+                }
+    }
+    for( EDA_ITEM* selected : aSelection )
+    {
+        auto* item = static_cast<SCH_ITEM*>( selected );
+        if( item->GetParent() && item->GetParent()->IsSelected() ) continue;
+        switch( m_connectedTransform )
+        {
+        case CONNECTED_TRANSFORM::ROTATE_CW: item->Rotate( m_transformPivot, false ); break;
+        case CONNECTED_TRANSFORM::ROTATE_CCW: item->Rotate( m_transformPivot, true ); break;
+        case CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT: item->MirrorHorizontally( m_transformPivot.x ); break;
+        case CONNECTED_TRANSFORM::MIRROR_UP_DOWN: item->MirrorVertically( m_transformPivot.y ); break;
+        case CONNECTED_TRANSFORM::NONE: break;
+        }
+        if( item->Type() == SCH_SYMBOL_T && ( m_connectedTransform == CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT
+                || m_connectedTransform == CONNECTED_TRANSFORM::MIRROR_UP_DOWN ) )
+            item->SetFieldsAutoplaced( AUTOPLACE_NONE );
+        updateItem( item, false );
+    }
+
+    // A label on a partially transformed wire does not undergo a rigid move
+    // with both ends. Retain its electrical attachment using native geometry.
+    for( const auto& [label, info] : m_specialCaseLabels )
+    {
+        SCH_LINE* line = info.attachedLine;
+        if( !label || !line ) continue;
+        if( info.trackMovingEnd && line->HasFlag( STARTPOINT ) != line->HasFlag( ENDPOINT ) )
+            label->SetPosition( line->HasFlag( STARTPOINT ) ? line->GetStartPoint() : line->GetEndPoint() );
+        else if( !line->HitTest( label->GetPosition(), 1 ) )
+            label->SetPosition( SEG( line->GetStartPoint(), line->GetEndPoint() ).NearestPoint( label->GetPosition() ) );
+        updateItem( label, false );
+    }
+    updateStoredPositions( aSelection );
+    return true;
 }
 
 
@@ -935,7 +1016,13 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         m_moveInProgress = true;
         int xBendCount = 1;
         int yBendCount = 1;
-        performItemMove( selection, aDelta, aCommit, xBendCount, yBendCount, grid );
+        if( m_connectedTransform == CONNECTED_TRANSFORM::NONE )
+            performItemMove( selection, aDelta, aCommit, xBendCount, yBendCount, grid );
+        else if( !transformConnectedSelection( selection, aError ) )
+        {
+            abandon();
+            return false;
+        }
         finalizeMoveOperation( selection, aCommit, false, internalPoints, false );
         releaseState();
         return true;

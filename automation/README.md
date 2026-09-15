@@ -1387,13 +1387,21 @@ The MCP result reports `NotConfirmed` for errors after submission rather than
 asserting that the native edit was rolled back. Use an explicit observation after
 the result to obtain image and supported state together.
 
-The native `move_connected_symbols` batch operation currently requires the
-targeted sheet to be displayed and does not consume creations staged earlier in
-the same batch. It is not full electrical correctness verification, unrestricted
-offscreen editing, complete revision tracking or automatic XML synchronization.
-The compiled editor journey covers actual MCP movement, connection preservation,
-retry/stale behavior, observation and native undo; it is Linux evidence, not a
-Codex Desktop or native-Mac qualification.
+`kicad_schematic_transform_connected_symbols` adds clockwise/counterclockwise
+quarter-turns and left-right/up-down reflections about an explicit sheet-space
+pivot in nanometers. Left-right reverses X; up-down reverses Y. Both tools operate
+on loaded displayed or non-displayed sheets, including all active units of a
+shared drawing, without navigating the visible editor. Rejected batches preserve
+surviving selection identities as well as design geometry.
+
+These native operations do not consume creations staged earlier in the same
+batch. They are not full electrical correctness verification, complete revision
+tracking or automatic XML synchronization. XML-driven transforms remain under
+implementation. The compiled editor journey covers both tools, all four
+transforms, connection preservation, rejection/rollback, retry/stale behavior,
+observations and native undo/redo in two Linux editor instances. This is not
+Codex Desktop or native-Mac qualification. Run the focused journey with
+`devcoordinator2 test start . --test native-offscreen-move --tier development --client codex`.
 
 ### Running checks
 

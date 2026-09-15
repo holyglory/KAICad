@@ -814,6 +814,19 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
     std::optional<std::vector<std::pair<KIID, int>>> savedSelection;
     std::optional<VECTOR2I> savedReference;
     bool savedHover = false;
+    // Revert can replace objects and clear the visible selection even when a
+    // batch fails before reaching its connected move. Capture once, before
+    // any operation, and restore surviving identities on success or failure.
+    if( m_frame )
+    {
+        savedSelection.emplace();
+        auto& selection = toolManager()->GetTool<SCH_SELECTION_TOOL>()->GetSelection();
+        savedHover = selection.IsHover();
+        if( selection.HasReferencePoint() )
+            savedReference = selection.GetReferencePoint();
+        for( EDA_ITEM* item : selection )
+            savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
+    }
     auto restoreSelection = [&]()
     {
         if( !savedSelection || !m_frame )
@@ -936,7 +949,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             header.mutable_document()->CopyFrom( document );
             result.add_operation_targets()->CopyFrom( document );
 
-            if( operation.has_move_connected_symbols() )
+            if( operation.has_move_connected_symbols() || operation.has_transform_connected_symbols() )
             {
                 if( !m_frame )
                     return reject( prefix + "Connected movement requires an editor context" );
@@ -945,21 +958,37 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( !createdItems.empty() )
                     return reject( prefix + "Commit staged creations before connected movement" );
 
+                const bool transforming = operation.has_transform_connected_symbols();
                 const auto& move = operation.move_connected_symbols();
-                auto known = move;
+                const auto& transform = operation.transform_connected_symbols();
+                const auto& symbols = transforming ? transform.symbols() : move.symbols();
+                auto known = operation;
                 known.DiscardUnknownFields();
-                if( !google::protobuf::util::MessageDifferencer::Equals( known, move )
-                        || move.symbols().empty() || !move.has_delta() )
-                    return reject( prefix + "Connected movement requires symbols and a supported displacement" );
-                const int64_t x = move.delta().x_nm();
-                const int64_t y = move.delta().y_nm();
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation ) || symbols.empty()
+                    || ( transforming ? !transform.has_pivot() : !move.has_delta() ) )
+                    return reject( prefix + "Connected editing requires explicit symbols and supported geometry" );
+                auto kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::NONE;
+                if( transforming )
+                {
+                    switch( transform.kind() )
+                    {
+                    case kiapi::automation::v1::SCT_ROTATE_CLOCKWISE: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::ROTATE_CW; break;
+                    case kiapi::automation::v1::SCT_ROTATE_COUNTERCLOCKWISE: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::ROTATE_CCW; break;
+                    case kiapi::automation::v1::SCT_MIRROR_LEFT_RIGHT: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT; break;
+                    case kiapi::automation::v1::SCT_MIRROR_UP_DOWN: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::MIRROR_UP_DOWN; break;
+                    default: return reject( prefix + "A supported connected transformation kind is required" );
+                    }
+                }
+                const int64_t x = transforming ? transform.pivot().x_nm() : move.delta().x_nm();
+                const int64_t y = transforming ? transform.pivot().y_nm() : move.delta().y_nm();
                 // Native schematic coordinates use exactly 100 nm per IU.
                 if( x % 100 || y % 100 || x / 100 < std::numeric_limits<int>::min()
                         || x / 100 > std::numeric_limits<int>::max()
                         || y / 100 < std::numeric_limits<int>::min()
                         || y / 100 > std::numeric_limits<int>::max() )
-                    return reject( prefix + "Displacement is outside the exact native schematic coordinate range" );
-                const VECTOR2I delta( x / 100, y / 100 );
+                    return reject( prefix + "Geometry is outside the exact native schematic coordinate range" );
+                const VECTOR2I delta = transforming ? VECTOR2I( 0, 0 ) : VECTOR2I( x / 100, y / 100 );
+                const VECTOR2I pivot = transforming ? VECTOR2I( x / 100, y / 100 ) : VECTOR2I( 0, 0 );
                 std::map<KIID, SCH_ITEM*> available;
                 std::map<KIID, google::protobuf::Any> before;
                 std::set<KIID> locked;
@@ -982,7 +1011,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     }
                 }
                 std::set<KIID> targets;
-                for( const auto& symbol : move.symbols() )
+                for( const auto& symbol : symbols )
                 {
                     const KIID id( symbol.value() );
                     if( id == niluuid || id.AsStdString() != symbol.value() || !targets.insert( id ).second
@@ -991,27 +1020,16 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     if( available.at( id )->IsLocked() )
                         return reject( prefix + "A requested symbol is locked" );
                 }
-                if( delta == VECTOR2I( 0, 0 ) )
+                if( !transforming && delta == VECTOR2I( 0, 0 ) )
                     continue;
                 MOVE_PIN_PARTITIONS originalPins;
                 if( !captureMovePinPartitions( *schematic(), originalPins ) )
                     return reject( prefix + "Cannot establish exact pin connections in all loaded sheet instances" );
-                auto* selectionTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
-                if( targetSheet->LastScreen() == m_frame->GetScreen() && !savedSelection )
-                {
-                    savedSelection.emplace();
-                    auto& selection = selectionTool->GetSelection();
-                    savedHover = selection.IsHover();
-                    if( selection.HasReferencePoint() )
-                        savedReference = selection.GetReferencePoint();
-                    for( EDA_ITEM* item : selection )
-                        savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
-                }
                 wxString failure;
                 std::vector<SCH_ITEM*> selected;
                 for( const KIID& id : targets ) selected.push_back( available.at( id ) );
                 const bool moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy(
-                        nativeCommit, delta, failure, *targetSheet, selected );
+                        nativeCommit, delta, failure, *targetSheet, selected, kind, pivot );
                 if( !moved )
                     return reject( prefix + failure.ToStdString() );
 

@@ -33,6 +33,83 @@ public sealed class ConnectedMoveToolTests
     }
 
     [TestMethod]
+    public void TransformContractIsAnExplicitStructuredMutation()
+    {
+        var contract = typeof(SchematicMutationTools).GetMethod(nameof(SchematicMutationTools.TransformConnectedSymbols))!
+            .GetCustomAttribute<McpServerToolAttribute>()!;
+        Assert.AreEqual("kicad_schematic_transform_connected_symbols", contract.Name);
+        Assert.IsTrue(contract.UseStructuredContent);
+        Assert.AreEqual(typeof(ConnectedMoveToolResult), contract.OutputSchemaType);
+        Assert.IsFalse(contract.ReadOnly);
+    }
+
+    [TestMethod]
+    public async Task InvalidTransformsAndCancellationNeverAccessRegistry()
+    {
+        var tools = new SchematicMutationTools(null!);
+        foreach (var (kind, x, ids, document) in new[]
+        {
+            ((ConnectedSymbolTransform)99, 100L, new[] { SymbolId }, DocumentJson),
+            (ConnectedSymbolTransform.Clockwise, 1L, new[] { SymbolId }, DocumentJson),
+            (ConnectedSymbolTransform.MirrorLeftRight, long.MinValue, new[] { SymbolId }, DocumentJson),
+            (ConnectedSymbolTransform.MirrorUpDown, 100L, Array.Empty<string>(), DocumentJson),
+            (ConnectedSymbolTransform.Counterclockwise, 100L, new[] { SymbolId, SymbolId }, DocumentJson),
+            (ConnectedSymbolTransform.Clockwise, 100L, new[] { SymbolId }, "{}")
+        })
+        {
+            var result = await tools.TransformConnectedSymbols("instance", document, ids, kind, x, 100,
+                "epoch", 3, "operation", CancellationToken.None);
+            Assert.IsTrue(result.IsError == true);
+            Assert.AreEqual("Rejected", result.StructuredContent!.Value.GetProperty("status").GetString());
+        }
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => tools.TransformConnectedSymbols("instance",
+            DocumentJson, [SymbolId], ConnectedSymbolTransform.Clockwise, 100, 100, "epoch", 3, "operation", new(true)));
+    }
+
+    [TestMethod]
+    public async Task TransformKindsPivotAndRetryIdentityReachNativeWithoutInventingRollback()
+    {
+        string state = Directory.CreateTempSubdirectory("kicad-transform-tool-").FullName;
+        try
+        {
+            var transport = new MoveTransport();
+            var registry = new InstanceRegistry(transport, state);
+            await registry.AttachAsync("ipc:///tmp/transform-tool-fixture.sock", transport.Identity.InstanceId);
+            var tools = new SchematicMutationTools(registry);
+            foreach (var (kind, nativeKind) in new[]
+            {
+                (ConnectedSymbolTransform.Clockwise, SchematicConnectedTransformKind.SctRotateClockwise),
+                (ConnectedSymbolTransform.Counterclockwise, SchematicConnectedTransformKind.SctRotateCounterclockwise),
+                (ConnectedSymbolTransform.MirrorLeftRight, SchematicConnectedTransformKind.SctMirrorLeftRight),
+                (ConnectedSymbolTransform.MirrorUpDown, SchematicConnectedTransformKind.SctMirrorUpDown)
+            })
+            {
+                async Task<ModelContextProtocol.Protocol.CallToolResult> Invoke() => await tools.TransformConnectedSymbols(
+                    transport.Identity.InstanceId, DocumentJson, [SymbolId], kind, 12300, -45600,
+                    "document-epoch", 42, "same-" + kind, CancellationToken.None);
+                Assert.IsFalse((await Invoke()).IsError == true);
+                var request = transport.Request!.Clone();
+                Assert.AreEqual("same-" + kind, request.OperationId);
+                Assert.AreEqual("document-epoch", request.DocumentEpoch);
+                Assert.AreEqual(42UL, request.ExpectedRevision.Sequence);
+                var operation = request.Operations.Single().TransformConnectedSymbols;
+                Assert.AreEqual(nativeKind, operation.Kind);
+                Assert.AreEqual(SymbolId, operation.Symbols.Single().Value);
+                Assert.AreEqual(12300L, operation.Pivot.XNm); Assert.AreEqual(-45600L, operation.Pivot.YNm);
+                transport.LoseReply = true;
+                var lost = await Invoke();
+                Assert.IsTrue(lost.IsError == true);
+                Assert.AreEqual("NotConfirmed", lost.StructuredContent!.Value.GetProperty("status").GetString());
+                Assert.AreEqual(request, transport.Request);
+                transport.LoseReply = false;
+                Assert.IsFalse((await Invoke()).IsError == true);
+                Assert.AreEqual(request, transport.Request);
+            }
+        }
+        finally { Directory.Delete(state, recursive: true); }
+    }
+
+    [TestMethod]
     public async Task InvalidRequestsNeverAccessRegistry()
     {
         var tools = new SchematicMutationTools(null!);

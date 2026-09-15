@@ -3028,6 +3028,15 @@ timeout_seconds = 3600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
 [[test.native-offscreen-move.check]]
+name = "connected-tool-contracts"
+tier = "development"
+role = "preflight"
+requires = ["managed-build"]
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~ConnectedMoveToolTests", "--logger", "trx", "--results-directory", "automation/artifacts/connected-tool-contracts"]
+retained_artifacts = [{ name = "connected-tool-contracts", path = "automation/artifacts/connected-tool-contracts", max_bytes = 16777216 }]
+
+[[test.native-offscreen-move.check]]
 name = "managed-build"
 tier = "development"
 role = "preflight"

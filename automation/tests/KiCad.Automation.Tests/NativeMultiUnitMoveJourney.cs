@@ -46,7 +46,7 @@ public sealed partial class NativeSessionTests
                 pin.Number = unit.ToString(); pin.Name = unit.ToString();
                 // The native protocol uses internal symbol-local coordinates
                 // (positive Y down), not library-file display coordinates.
-                pin.Position = new() { XNm = 0, YNm = unit == 1 ? 0 : 10_000_000 };
+                pin.Position = new() { XNm = unit == 1 ? 0 : 5_000_000, YNm = unit == 1 ? 0 : 10_000_000 };
                 item.Unit = new() { Unit = unit }; item.Item = Any.Pack(pin); symbol.Definition.Items.Add(item);
             }
             symbol.InstanceRecords = new();
@@ -60,7 +60,8 @@ public sealed partial class NativeSessionTests
         foreach (long y in new[] { 130_000_000L, 140_000_000L })
         {
             var line = source.Items.First(i => i.Is(SchematicLine.Descriptor)).Unpack<SchematicLine>();
-            line.Id.Value = Guid.NewGuid().ToString("D"); line.Start = new() { XNm = 50_000_000, YNm = y }; line.End = new() { XNm = 80_000_000, YNm = y };
+            long offset = y == 130_000_000 ? 0 : 5_000_000;
+            line.Id.Value = Guid.NewGuid().ToString("D"); line.Start = new() { XNm = 50_000_000 + offset, YNm = y }; line.End = new() { XNm = 80_000_000 + offset, YNm = y };
             create.Operations.Add(new SchematicItemOperation { Create = Any.Pack(line) });
         }
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(create, token);
@@ -161,6 +162,7 @@ public sealed partial class NativeSessionTests
             otherInstanceShortRejected = true, failureRolledBack = true, sameOperationReplayed = true,
             nativeUndoRedo = true, normalStdioMcpAndReplay = true, enteredGroupPreserved = true,
             staleRejected = true, crossPlatformReady = false }), token);
+        await VerifyConnectedTransforms(client, root, first, second, ids[0], processId, display, evidence, instanceId, token);
 
         async Task HumanUnchanged()
         {

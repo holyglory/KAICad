@@ -64,6 +64,8 @@ public:
         SLICE
     };
 
+    enum class CONNECTED_TRANSFORM { NONE, ROTATE_CW, ROTATE_CCW, MIRROR_LEFT_RIGHT, MIRROR_UP_DOWN };
+
     SCH_MOVE_TOOL();
     ~SCH_MOVE_TOOL() override { }
 
@@ -92,7 +94,9 @@ public:
 
     // Uses an explicit instance and private selection without editor navigation.
     bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
-                          const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems );
+                          const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems,
+                          CONNECTED_TRANSFORM aTransform = CONNECTED_TRANSFORM::NONE,
+                          const VECTOR2I& aPivot = VECTOR2I( 0, 0 ) );
 
 private:
     SCH_SCREEN* moveScreen() const;
@@ -107,6 +111,9 @@ private:
     SCH_SELECTION* m_privateMoveSelection = nullptr;
     std::map<SCH_ITEM*, std::vector<SCH_PIN*>> m_contextPins;
     std::map<VECTOR2I, std::set<SCH_ITEM*>> m_contextPinOwners;
+    CONNECTED_TRANSFORM m_connectedTransform = CONNECTED_TRANSFORM::NONE;
+    VECTOR2I m_transformPivot;
+    bool transformConnectedSelection( SCH_SELECTION& aSelection, wxString& aError );
 
     bool doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aCommit );
 

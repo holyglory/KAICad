@@ -579,15 +579,34 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicSymbolComparisonSettings set_symbol_comparison = 22;
     kiapi.schematic.types.SchematicBomSettings set_bom_settings = 23;
     kiapi.schematic.types.SchematicNetSettings set_net_settings = 24;
+    SchematicConnectedSymbolTransform transform_connected_symbols = 25;
   }
 }
 
-// Finite native drag, not an interactive mouse action. Currently requires the
-// explicitly targeted sheet to be displayed. The enclosing batch owns undo,
+// Finite native drag, not an interactive mouse action. Uses the explicitly
+// targeted loaded sheet and all of its active units. The enclosing batch owns undo,
 // revision admission and retry identity. Connected wires/labels may also change.
 message SchematicConnectedSymbolMove {
   repeated kiapi.common.types.KIID symbols = 1;
   kiapi.common.types.Vector2 delta = 2;
+}
+
+enum SchematicConnectedTransformKind {
+  SCT_UNKNOWN = 0;
+  SCT_ROTATE_CLOCKWISE = 1;
+  SCT_ROTATE_COUNTERCLOCKWISE = 2;
+  SCT_MIRROR_LEFT_RIGHT = 3;
+  SCT_MIRROR_UP_DOWN = 4;
+}
+
+// Relative transform around an explicit sheet-space pivot in nanometers.
+// Left/right reverses X around pivot.x; up/down reverses Y around pivot.y.
+// Attached wire ends and labels participate; all-instance pin connectivity
+// must remain equivalent. Does not request automatic field placement.
+message SchematicConnectedSymbolTransform {
+  repeated kiapi.common.types.KIID symbols = 1;
+  kiapi.common.types.Vector2 pivot = 2;
+  SchematicConnectedTransformKind kind = 3;
 }
 
 message SchematicLibraryCacheState {

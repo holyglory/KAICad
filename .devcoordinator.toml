@@ -55,6 +55,8 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.mac-arm64-a519-public.check]]
 name = "observations"
 tier = "development"
+role = "preflight"
+invalidates = ["browser", "formal"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/mac-arm64-a519-public-tests"]
 retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/mac-arm64-a519-public", max_bytes = 536870912 }, { name = "receipt-tests", path = "automation/artifacts/mac-arm64-a519-public-tests", max_bytes = 16777216 }]
 

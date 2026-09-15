@@ -92,7 +92,7 @@ public sealed class DeliveryReceiptTests
 
             async Task<JsonElement> Deployment()
             {
-                var result = await Command("devcoordinator2", "deployment", "status", "--name", "downloads", "--format", "json");
+                var result = await Command("devcoordinator2", "deployment", "status", "--deployment-id", deploymentId, "--format", "json");
                 Assert.IsTrue(result.GetProperty("ok").GetBoolean());
                 var state = result.GetProperty("data");
                 Assert.AreEqual(deploymentId, state.GetProperty("deployment_id").GetString());
@@ -108,7 +108,7 @@ public sealed class DeliveryReceiptTests
         async Task<JsonElement> Command(string executable, params string[] arguments)
         {
             var result = await WindowsLauncherTests.Invoke(executable, arguments, root, deadline.Token, input: null);
-            Assert.AreEqual(0, result.ExitCode, result.Error);
+            Assert.AreEqual(0, result.ExitCode, result.Error + "\n" + result.Output[..Math.Min(result.Output.Length, 4096)]);
             using var document = JsonDocument.Parse(result.Output);
             return document.RootElement.Clone();
         }

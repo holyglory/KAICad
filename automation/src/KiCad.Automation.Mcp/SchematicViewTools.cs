@@ -98,6 +98,8 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
                 JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Inspection.Receipt)),
             checkedReceipt = observed.Inspection.CheckedReceipt is null ? (JsonElement?)null :
                 JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Inspection.CheckedReceipt)),
+            saveReceipt = observed.Inspection.SaveReceipt is null ? (JsonElement?)null :
+                JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Inspection.SaveReceipt)),
             snapshot = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Snapshot)),
             xml = SchematicDataXml.Write(observed.Snapshot.Data)
         });

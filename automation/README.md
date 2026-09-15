@@ -746,6 +746,19 @@ inspection, persistent choices and reopening, wrong-instance/stale-write/locked-
 file failures followed by success; direct handler checks cover cancellation
 before the write. Native application and automatic synchronization remain separate.
 
+`kicad_design_sync_apply` is the first guarded execution path for a supported
+full-design candidate. It requires the exact recovery revision and an absolute
+engineering-XML path whose bytes still match that record. The service captures a
+fresh checked native checkpoint, journals the candidate and native operation before
+dispatch, applies only through the checked batch, saves the native editor, and
+atomically publishes the XML before advancing the recovery baseline. A changed
+checkpoint, competing XML save, failed native save, or lost reply leaves the
+pending candidate and exact operation available to `kicad_design_recovery_observe`
+and a same-operation recovery attempt. Version-5 recovery records retain the
+candidate XML and save request needed for that recovery. This is supported
+schematic synchronization evidence, not yet the full persisted-feature coverage,
+PCB propagation, or cross-platform automatic-synchronization qualification.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including

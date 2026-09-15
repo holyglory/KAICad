@@ -10,6 +10,42 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecoveryTools
 {
+    private readonly InstanceRegistry? registry;
+    public RecoveryTools() { }
+    public RecoveryTools(InstanceRegistry registry) => this.registry = registry;
+    [McpServerTool(Name = "kicad_design_sync_apply", ReadOnly = false),
+     Description("Execute one complete XML-to-native synchronization for an explicit instance. Recomputes the candidate from the saved recovery record, verifies the live checked native checkpoint, journals the exact pending batch before mutation, applies and saves native edits, atomically publishes the engineering XML, then advances baseline and observations together. Requires an absolute design XML path whose bytes still equal the saved desired version. Conflicts, stale checkpoints, file changes, failed native saves or persistence failures leave the pending recovery record available for inspection; there is no unchecked fallback. Reuse recovery inspection before retrying an uncertain operation.")]
+    public async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
+        string designPath, string expectedRevisionToken, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (store, saved) = Read(instanceId, recoveryPath);
+            if (saved.RevisionToken != expectedRevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect it before applying synchronization.");
+            if (registry is null)
+                throw new AutomationException("instance_registry_unavailable", "The synchronization executor requires the service instance registry.");
+            var result = await SchematicSynchronizationExecutor.ApplyAsync(store, registry.Client(instanceId),
+                designPath, expectedRevisionToken, cancellationToken);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, recoveryRevisionToken = result.RecoveryRevisionToken,
+                designFileSha256 = result.DesignFileSha256, nativeRevision = result.NativeRevision,
+                nativeMutationCommitted = result.NativeMutationCommitted, nativeFilesSaved = result.NativeFilesSaved,
+                synchronizationCommitted = result.SynchronizationCommitted,
+                nativeReceipt = result.NativeReceipt is null ? (JsonElement?)null : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result.NativeReceipt))
+            });
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            var data = JsonSerializer.SerializeToElement(new { instanceId,
+                errorCode = error is AutomationException known ? known.Code : "design_sync_io", errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
     [McpServerTool(Name = "kicad_design_sync_plan", ReadOnly = true),
      Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Conflicts or unresolved property projection return no partial candidate. Preserves textual requirements and unresolved net bindings. Returns candidate XML and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
     public CallToolResult PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,

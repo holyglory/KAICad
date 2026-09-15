@@ -13,7 +13,8 @@ public enum DesignRecoveryDisposition
 }
 
 public sealed record DesignRecoveryInspection(string RevisionToken, DesignRecoveryDisposition Disposition,
-    SchematicOperationReceipt? Receipt, CheckedSchematicBatchReceipt? CheckedReceipt = null);
+    SchematicOperationReceipt? Receipt, CheckedSchematicBatchReceipt? CheckedReceipt = null,
+    LifecycleOperationResult? SaveReceipt = null);
 
 public sealed record DesignRecoveryObservation(DesignRecoveryInspection Inspection,
     SchematicHierarchyDataSnapshot Snapshot, SchematicElectricalState? Electrical = null);
@@ -72,6 +73,8 @@ public static class DesignRecoveryInspector
         var inspection = await InspectAsync(store, client, cancellationToken);
         if (inspection.RevisionToken != saved.RevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery state changed before observation; reload it before continuing.");
+        if (saved.State.PendingNativeSave is not null && inspection.SaveReceipt?.Status != LifecycleOperationStatus.LosSaved)
+            throw new AutomationException("native_save_requires_recovery", "The synchronized native save is not confirmed; inspect or retry its exact saved operation.");
         // InspectAsync intentionally makes no IPC call when there is no pending operation.
         // Observation always verifies the saved instance, including that case.
         var session = await client.HandshakeAsync(cancellationToken);
@@ -164,7 +167,27 @@ public static class DesignRecoveryInspector
                 CheckedSchematicBatchStatus.CsbsRejected => DesignRecoveryDisposition.Rejected,
                 _ => DesignRecoveryDisposition.Indeterminate
             };
-            return new(saved.RevisionToken, checkedDisposition, null, checkedReceipt);
+            LifecycleOperationResult? saveReceipt = null;
+            if (saved.State.PendingNativeSave is { } saveRequest)
+            {
+                saveReceipt = await client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(new()
+                {
+                    Document = saveRequest.Document.Clone(), OperationId = saveRequest.OperationId,
+                    ProcessEpoch = saveRequest.ExpectedState.ProcessEpoch
+                }, cancellationToken);
+                if (!Equals(saveReceipt.Document, saveRequest.Document) || saveReceipt.OperationId != saveRequest.OperationId
+                    || saveReceipt.ProcessEpoch != saveRequest.ExpectedState.ProcessEpoch)
+                    throw new AutomationException("invalid_recovery_save_receipt", "The native save receipt identifies a different operation.");
+                if (checkedDisposition == DesignRecoveryDisposition.CompletedNeedsReconciliation)
+                    checkedDisposition = saveReceipt.Status switch
+                    {
+                        LifecycleOperationStatus.LosSaved => DesignRecoveryDisposition.CompletedNeedsReconciliation,
+                        LifecycleOperationStatus.LosRejected => DesignRecoveryDisposition.Rejected,
+                        LifecycleOperationStatus.LosIndeterminate => DesignRecoveryDisposition.Indeterminate,
+                        _ => DesignRecoveryDisposition.NotFound
+                    };
+            }
+            return new(saved.RevisionToken, checkedDisposition, null, checkedReceipt, saveReceipt);
         }
         var request = new InspectSchematicOperation
         {

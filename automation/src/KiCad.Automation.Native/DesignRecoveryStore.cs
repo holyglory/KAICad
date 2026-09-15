@@ -14,7 +14,8 @@ public sealed record DesignRecoveryState(Guid OriginId, Guid InstanceId, NativeR
     SchematicHierarchyData Observed, IReadOnlyList<ComponentKnowledgeLibrary> KnowledgeLibraries,
     ApplySchematicItemBatch? PendingMutation = null, DesignHierarchyResolution? HierarchyResolution = null,
     SchematicElectricalState? BaselineElectrical = null, SchematicElectricalState? ObservedElectrical = null,
-    DocumentLifecycleState? PendingNativeState = null);
+    DocumentLifecycleState? PendingNativeState = null, CheckedSaveDocument? PendingNativeSave = null,
+    byte[]? PendingCandidateFileBytes = null);
 
 public sealed record DesignHierarchyResolution(string SnapshotToken,
     IReadOnlyDictionary<string, SchematicConflictChoice> Choices, string NativeEpoch, ulong NativeSequence);
@@ -41,7 +42,9 @@ public sealed class DesignRecoveryStore(string statePath)
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignHierarchyResolution? HierarchyResolution = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ElectricalEnvelope? BaselineElectrical = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ElectricalEnvelope? ObservedElectrical = null,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeState = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeState = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeSave = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingCandidateFileBytes = null);
     private sealed record ElectricalEnvelope([property: JsonRequired] string Epoch,
         [property: JsonRequired] ulong Sequence, [property: JsonRequired] bool TrackingComplete,
         [property: JsonRequired] string[] NetsXml, [property: JsonRequired] string[] Limitations);
@@ -89,7 +92,8 @@ public sealed class DesignRecoveryStore(string statePath)
     public StoredDesignRecovery Save(DesignRecoveryState state, string? expectedRevisionToken)
     {
         Validate(state);
-        var envelope = new Envelope(state.PendingNativeState is not null ? 4
+        var envelope = new Envelope(state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
+            : state.PendingNativeState is not null ? 4
             : state.BaselineElectrical is not null || state.ObservedElectrical is not null ? 3
             : state.HierarchyResolution is null ? 1 : 2, state.OriginId, state.InstanceId, state.NativeRevision.Epoch,
             state.NativeRevision.Sequence, state.TrackingComplete,
@@ -97,7 +101,7 @@ public sealed class DesignRecoveryStore(string statePath)
             SchematicDataXml.Write(state.Observed), state.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray(),
             state.PendingMutation?.ToByteArray(), state.HierarchyResolution,
             EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic), EncodeElectrical(state.ObservedElectrical, state.Observed),
-            state.PendingNativeState?.ToByteArray());
+            state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes);
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
         // Verify complete recoverability before touching the previous recovery file.
         var next = Decode(bytes);
@@ -171,11 +175,16 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            if (envelope.Version is not (1 or 2 or 3 or 4) || envelope.KnowledgeLibraryXml is null
+            if (envelope.Version is not (1 or 2 or 3 or 4 or 5) || envelope.KnowledgeLibraryXml is null
                 || (envelope.Version == 1 && envelope.HierarchyResolution is not null)
                 || (envelope.Version == 2 && envelope.HierarchyResolution is null)
                 || (envelope.Version < 4 && (envelope.Version == 3) != electrical)
-                || (envelope.Version == 4) != (envelope.PendingNativeState is not null))
+                || (envelope.Version == 4) != (envelope.PendingNativeState is not null
+                    && envelope.PendingNativeSave is null && envelope.PendingCandidateFileBytes is null)
+                || (envelope.Version == 5) != (envelope.PendingNativeSave is not null
+                    || envelope.PendingCandidateFileBytes is not null)
+                || (envelope.Version < 5 && (envelope.PendingNativeSave is not null
+                    || envelope.PendingCandidateFileBytes is not null)))
                 throw Failure("invalid_design_recovery", "Unsupported or incomplete recovery state.");
             var libraries = envelope.KnowledgeLibraryXml.Select(ComponentKnowledgeXml.ReadLibrary).ToArray();
             var observed = SchematicDataXml.Read(envelope.ObservedXml) as SchematicHierarchyData
@@ -186,7 +195,9 @@ public sealed class DesignRecoveryStore(string statePath)
                 baseline, envelope.DesiredFileBytes, observed, libraries,
                 envelope.PendingMutation is null ? null : ApplySchematicItemBatch.Parser.ParseFrom(envelope.PendingMutation), envelope.HierarchyResolution,
                 DecodeElectrical(envelope.BaselineElectrical, baseline.Schematic), DecodeElectrical(envelope.ObservedElectrical, observed),
-                envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState));
+                envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState),
+                envelope.PendingNativeSave is null ? null : CheckedSaveDocument.Parser.ParseFrom(envelope.PendingNativeSave),
+                envelope.PendingCandidateFileBytes);
             Validate(state);
             return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), state);
         }
@@ -225,12 +236,25 @@ public sealed class DesignRecoveryStore(string statePath)
         }
         if (state.PendingMutation is not { } pending)
         {
-            if (state.PendingNativeState is not null)
+            if (state.PendingNativeState is not null || state.PendingNativeSave is not null
+                || state.PendingCandidateFileBytes is not null)
                 throw Failure("invalid_design_recovery", "A pending native precondition requires its exact saved mutation.");
             return;
         }
         if (state.PendingNativeState is { } nativeState)
             CheckedSchematicContract.ValidateRequest(new() { Batch = pending, ExpectedState = nativeState }, nativeState.ProcessEpoch);
+        if (state.PendingNativeSave is { } nativeSave)
+        {
+            if (state.PendingCandidateFileBytes is null || nativeSave.ExpectedState is null
+                || !nativeSave.Document.Equals(pending.Document) || string.IsNullOrWhiteSpace(nativeSave.OperationId)
+                || !Guid.TryParseExact(nativeSave.OperationId, "D", out _)
+                || nativeSave.ExpectedState.ProcessEpoch != state.PendingNativeState?.ProcessEpoch
+                || nativeSave.ExpectedState.Revision?.Epoch != pending.DocumentEpoch)
+                throw Failure("invalid_design_recovery", "A pending native save requires its exact synchronized candidate and document state.");
+            _ = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(state.PendingCandidateFileBytes), state.KnowledgeLibraries);
+        }
+        else if (state.PendingCandidateFileBytes is not null)
+            _ = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(state.PendingCandidateFileBytes), state.KnowledgeLibraries);
         if (string.IsNullOrWhiteSpace(pending.OperationId) || System.Text.Encoding.UTF8.GetByteCount(pending.OperationId) > 128
             || pending.OperationId.Contains('\0') || pending.DocumentEpoch != state.NativeRevision.Epoch
             || pending.ExpectedRevision?.Epoch != state.NativeRevision.Epoch

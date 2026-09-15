@@ -54,6 +54,34 @@ public sealed class CheckedDesignRecoveryTests
     }
 
     [TestMethod]
+    public void PendingCandidateAndNativeSaveRoundTripAsVersionFive()
+    {
+        string directory = Directory.CreateTempSubdirectory("checked-recovery-v5-").FullName;
+        try
+        {
+            string path = Path.Combine(directory, "recovery.json");
+            var state = Fixture(directory, Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+            var save = new CheckedSaveDocument
+            {
+                Document = state.PendingMutation!.Document.Clone(), OperationId = Guid.NewGuid().ToString("D"),
+                ExpectedState = state.PendingNativeState!.Clone()
+            };
+            save.ExpectedState.Revision.Sequence++;
+            byte[] candidate = System.Text.Encoding.UTF8.GetBytes(
+                SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries));
+            state = state with { PendingNativeSave = save, PendingCandidateFileBytes = candidate };
+            var store = new DesignRecoveryStore(path); var saved = store.Save(state, null);
+            var json = JsonNode.Parse(File.ReadAllText(path))!;
+            Assert.AreEqual(5, json["Version"]!.GetValue<int>());
+            var restored = store.Read()!;
+            Assert.AreEqual(save, restored.State.PendingNativeSave);
+            CollectionAssert.AreEqual(candidate, restored.State.PendingCandidateFileBytes);
+            Assert.AreEqual(saved.RevisionToken, restored.RevisionToken);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
     public void MismatchedOrOrphanedPreconditionsCannotReplaceTheRecoveryRecord()
     {
         string directory = Directory.CreateTempSubdirectory("checked-recovery-invalid-").FullName;

@@ -14,7 +14,7 @@ internal static class DesignPublicationCommitter
     internal static async Task<DesignPublicationResult> CommitAsync(DesignRecoveryStore store,
         string expectedRevisionToken, LifecycleOperationResult confirmedSave, CancellationToken token = default,
         Action<DesignPublicationPhase>? afterPhase = null, Action? afterReplacement = null,
-        Action? beforeReplacement = null)
+        Action? beforeReplacement = null, Func<string, CancellationToken, Task>? checkpoint = null)
     {
         token.ThrowIfCancellationRequested();
         var saved = RequireRecord(store, expectedRevisionToken);
@@ -68,7 +68,11 @@ internal static class DesignPublicationCommitter
             else if (!Same(staged, intent.CandidateFileBytes))
                 throw Error("publication_stage_changed", $"The recorded stage is missing or incomplete: {intent.StagedPath}. Preserve it for recovery.");
             token.ThrowIfCancellationRequested();
-            if (intent.Phase == DesignPublicationPhase.Prepared) SavePhase(DesignPublicationPhase.Staged);
+            if (intent.Phase == DesignPublicationPhase.Prepared)
+            {
+                SavePhase(DesignPublicationPhase.Staged);
+                if (checkpoint is not null) await checkpoint("publication-staged", token);
+            }
             SavePhase(DesignPublicationPhase.Attempting);
         }
 
@@ -97,6 +101,7 @@ internal static class DesignPublicationCommitter
         else
             throw Error("publication_conflict_preserved", $"XML or retained files changed; preserve {intent.DesignPath} and {intent.PreviousPath} for reconciliation.");
         afterReplacement?.Invoke();
+        if (checkpoint is not null) await checkpoint("publication-replaced", CancellationToken.None);
 
         // Report/persist the known outcome even if cancellation follows the swap.
         if (!MatchesPrevious(await ReadFile(intent.PreviousPath, CancellationToken.None)))

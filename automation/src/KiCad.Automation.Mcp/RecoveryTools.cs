@@ -16,7 +16,8 @@ public sealed class RecoveryTools
     // Qualification pending (p7e712f1bb764e327): do not advertise a mutation tool
     // before competing-file writes and interrupted commits have native evidence.
     internal async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
-        string designPath, string expectedRevisionToken, string operationId, CancellationToken cancellationToken)
+        string designPath, string expectedRevisionToken, string operationId, CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? checkpoint = null)
     {
         try
         {
@@ -27,7 +28,7 @@ public sealed class RecoveryTools
             if (registry is null)
                 throw new AutomationException("instance_registry_unavailable", "The synchronization executor requires the service instance registry.");
             var result = await SchematicSynchronizationExecutor.ApplyAsync(store, registry.Client(instanceId),
-                designPath, expectedRevisionToken, id, cancellationToken);
+                designPath, expectedRevisionToken, id, cancellationToken, checkpoint);
             var data = JsonSerializer.SerializeToElement(new
             {
                 instanceId, recoveryRevisionToken = result.RecoveryRevisionToken,
@@ -36,6 +37,7 @@ public sealed class RecoveryTools
                 synchronizationCommitted = result.SynchronizationCommitted,
                 operationId = result.PublicationId, replayed = result.Replayed, liveStateStillCurrent = false,
                 previousXmlPath = result.PreviousXmlPath,
+                retainedXml = result.RetainedXml,
                 nativeReceipt = result.NativeReceipt is null ? (JsonElement?)null : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result.NativeReceipt))
             });
             return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };

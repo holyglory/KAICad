@@ -787,9 +787,15 @@ reply, native-save reply, or completion before the MCP reply. The focused Linux
 journey repeats those three boundaries for two real editor instances, reattaches
 from a fresh host and verifies the same operation and revision, preserved dirty
 work, native/XML agreement and connectivity. It is not a shipped server mode or
-Codex Desktop proof. File-publication crash boundaries, retained-file cleanup,
-broader edit qualification and the automatic event loop remain open; the normal
-MCP server still does not advertise the high-level apply tool.
+Codex Desktop proof. The journey also covers service termination after staging,
+XML replacement, baseline commit, receipt archival and retained-history movement.
+Completed displaced XML is moved without overwrite or copy/delete fallback into
+`.kicad-sync-history/<operation-id>.xml` beside the design. Immutable receipts
+resolve the original or archived location; collisions, missing files, links and
+unexpected paths remain explicit. History is preserved, not purged. Cleanup
+status is separate from the historical native result, and replay itself remains
+read-only. Broader edit qualification and the automatic event loop remain open;
+the normal MCP server still does not advertise the high-level apply tool.
 
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact

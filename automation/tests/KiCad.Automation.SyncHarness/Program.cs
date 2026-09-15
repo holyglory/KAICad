@@ -37,7 +37,7 @@ public sealed class QualificationSynchronizationTools(InstanceRegistry registry,
         string expectedRevisionToken, string operationId, CancellationToken cancellationToken)
     {
         var result = await new RecoveryTools(registry).ApplySynchronization(instanceId, recoveryPath, designPath,
-            expectedRevisionToken, operationId, cancellationToken);
+            expectedRevisionToken, operationId, cancellationToken, pause.WaitAsync);
         if (!(result.IsError ?? false)) await pause.WaitAsync("completed", cancellationToken);
         return result;
     }
@@ -50,7 +50,8 @@ public sealed class PauseGate
     private int fired;
     public PauseGate(string stage, string? marker)
     {
-        if (stage is not ("none" or "native-edit" or "native-save" or "completed"))
+        if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
+            or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"))
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));

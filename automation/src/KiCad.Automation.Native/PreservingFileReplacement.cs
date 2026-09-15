@@ -35,6 +35,30 @@ internal static class PreservingFileReplacement
         throw new IOException($"Preserving file replacement failed ({error}): {new Win32Exception(error).Message}");
     }
 
+    internal static void MoveNoReplace(string source, string destination)
+    {
+        int error;
+        if (OperatingSystem.IsWindows())
+        {
+            // No REPLACE_EXISTING and no COPY_ALLOWED: preserve the target and
+            // fail rather than turn a cross-volume move into copy/delete.
+            if (MoveFile(source, destination, 0)) return;
+            error = Marshal.GetLastPInvokeError();
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            if (RenameAt2(-100, source, -100, destination, 1) == 0) return;
+            error = Marshal.GetLastPInvokeError();
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            if (RenameSwap(source, destination, 4) == 0) return;
+            error = Marshal.GetLastPInvokeError();
+        }
+        else throw new PlatformNotSupportedException("Preserving history moves are unavailable on this platform.");
+        throw new IOException($"History move failed ({error}): {new Win32Exception(error).Message}");
+    }
+
     [DllImport("libc", EntryPoint = "renameat2", SetLastError = true)]
     private static extern int RenameAt2(int oldDirectory, [MarshalAs(UnmanagedType.LPUTF8Str)] string oldPath,
         int newDirectory, [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath, uint flags);
@@ -47,4 +71,8 @@ internal static class PreservingFileReplacement
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ReplaceFile(string target, string staged, string backup, uint flags,
         IntPtr exclude, IntPtr reserved);
+
+    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveFile(string source, string destination, uint flags);
 }

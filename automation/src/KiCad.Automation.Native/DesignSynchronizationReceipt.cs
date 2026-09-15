@@ -51,11 +51,14 @@ public sealed record DesignSynchronizationReceipt(
             throw new AutomationException("sync_operation_id_conflict", "This operation ID already belongs to a different synchronization request.");
     }
 
-    internal SchematicSynchronizationExecution Result(string currentRecoveryToken, bool replayed) => new(
-        currentRecoveryToken, DesignFileSha256, new(NativeDocumentEpoch, NativeRevisionSequence),
-        NativeMutationCommitted, NativeFilesSaved, true,
-        NativeReceipt is null ? null : CheckedSchematicBatchReceipt.Parser.ParseFrom(NativeReceipt),
-        OperationId, PreviousXmlPath, replayed);
+    internal SchematicSynchronizationExecution Result(string currentRecoveryToken, bool replayed)
+    {
+        var retained = RetainedXmlHistory.Inspect(this);
+        return new(currentRecoveryToken, DesignFileSha256, new(NativeDocumentEpoch, NativeRevisionSequence),
+            NativeMutationCommitted, NativeFilesSaved, true,
+            NativeReceipt is null ? null : CheckedSchematicBatchReceipt.Parser.ParseFrom(NativeReceipt),
+            OperationId, retained.Path, replayed, retained);
+    }
 
     private static bool Digest(string value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
     private static bool Uuid(string value) => Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty && id.ToString("D") == value;

@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using Kiapi.Common.Types;
+using Kiapi.Common.Commands;
+using Google.Protobuf.WellKnownTypes;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 
@@ -13,7 +15,8 @@ public sealed partial class NativeSessionTests
     {
         string hostState = Path.Combine(evidence, instanceId + "-sync-host-state");
         var results = new List<object>();
-        foreach (string stage in new[] { "native-edit", "native-save", "completed" })
+        foreach (string stage in new[] { "native-edit", "native-save", "completed", "publication-staged",
+                     "publication-replaced", "baseline-committed", "receipt-archived", "retained-archived" })
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
             limit.CancelAfter(TimeSpan.FromSeconds(45));
@@ -21,10 +24,22 @@ public sealed partial class NativeSessionTests
             var saved = store.Read()!;
             var desired = saved.State.Baseline with { Schematic = saved.State.Baseline.Schematic.Clone() };
             string title = "Service restart: " + stage;
-            desired.Schematic.Instances.Single(s => s.Metadata.Document.Equals(document)).Metadata.TitleBlock.Title = title;
-            byte[] xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, []));
-            await File.WriteAllBytesAsync(designPath, xml, limit.Token);
-            saved = store.Save(saved.State with { DesiredFileBytes = xml }, saved.RevisionToken);
+            bool fileBoundary = stage is not ("native-edit" or "native-save" or "completed");
+            if (fileBoundary)
+            {
+                // Native-only input requires a real XML replacement rather
+                // than converging with an XML edit already saved by the caller.
+                await client.InvokeAsync<SetTitleBlockInfo, Empty>(new()
+                    { Document = document.Clone(), TitleBlock = new() { Title = title } }, limit.Token);
+                saved = await DesignRecoveryInspector.RefreshAsync(store, client, saved.RevisionToken, limit.Token, includeElectrical: true);
+            }
+            else
+            {
+                desired.Schematic.Instances.Single(s => s.Metadata.Document.Equals(document)).Metadata.TitleBlock.Title = title;
+                byte[] xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, []));
+                await File.WriteAllBytesAsync(designPath, xml, limit.Token);
+                saved = store.Save(saved.State with { DesiredFileBytes = xml }, saved.RevisionToken);
+            }
             Guid operationId = Guid.NewGuid();
             var arguments = new { instanceId, recoveryPath = store.StatePath, designPath,
                 expectedRevisionToken = saved.RevisionToken, operationId = operationId.ToString("D") };
@@ -63,7 +78,8 @@ public sealed partial class NativeSessionTests
             if (stage == "native-edit") Assert.IsTrue(afterStop.State.NativeContentDirty, "Dirty editor work must survive the service process.");
 
             var recovery = new DesignRecoveryStore(store.StatePath).Read()!;
-            if (stage == "completed") Assert.AreEqual(operationId, recovery.State.LastSynchronization!.OperationId);
+            bool completedBeforeStop = stage is "completed" or "baseline-committed" or "receipt-archived" or "retained-archived";
+            if (completedBeforeStop) Assert.AreEqual(operationId, recovery.State.LastSynchronization!.OperationId);
             else Assert.AreEqual(operationId, recovery.State.PendingPublication!.OperationId);
 
             await using (var restarted = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(), hostState,
@@ -75,7 +91,7 @@ public sealed partial class NativeSessionTests
                 var data = result.GetProperty("structuredContent");
                 Assert.AreEqual(operationId.ToString("D"), data.GetProperty("operationId").GetString());
                 Assert.IsTrue(data.GetProperty("synchronizationCommitted").GetBoolean());
-                Assert.AreEqual(stage == "completed", data.GetProperty("replayed").GetBoolean());
+                Assert.AreEqual(completedBeforeStop, data.GetProperty("replayed").GetBoolean());
             }
             var final = await Capture();
             Assert.AreEqual(beforeStop.State.Revision, final.State.Revision, "Service restart cannot duplicate the committed native edit.");

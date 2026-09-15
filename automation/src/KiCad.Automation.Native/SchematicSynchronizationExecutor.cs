@@ -54,6 +54,8 @@ internal static class SchematicSynchronizationExecutor
         RequireRequest(saved, operationId, designPath, expectedRevisionToken);
         if (saved.State.HasPendingWork)
         {
+            if (saved.State.PendingLayout is not null)
+                saved = await ResolveLayoutAsync(store, client, saved, cancellationToken, executionCheckpoint);
             if (saved.State.PendingPublication is null)
                 throw Error("pending_recovery_requires_reconciliation", "Legacy pending operations have no recorded publication destination; inspect and reconcile them first.");
             if (saved.State.PendingPublication.DesignPath != designPath)
@@ -64,7 +66,7 @@ internal static class SchematicSynchronizationExecutor
         byte[] original = await File.ReadAllBytesAsync(designPath, cancellationToken);
         if (!original.AsSpan().SequenceEqual(saved.State.DesiredFileBytes))
             throw Error("design_file_changed", "Capture the latest saved XML before planning synchronization.");
-        var plan = SchematicSynchronizationPlanner.Plan(saved.State, cancellationToken);
+        var plan = SchematicSynchronizationPlanner.PlanForExecution(saved.State, cancellationToken);
         if (!plan.CanPrepare || plan.Candidate is null || plan.CandidateXml is null)
             throw Error(plan.ErrorCode ?? "design_sync_conflict", plan.ErrorMessage ?? "Resolve the design conflicts before applying changes.");
         var checkpoint = await Capture(client, saved.State, cancellationToken);
@@ -97,6 +99,14 @@ internal static class SchematicSynchronizationExecutor
                 ExpectedRevision = checkpoint.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
                 OriginId = saved.State.OriginId.ToString("D"), Description = "Apply XML synchronization candidate" };
             batch.Operations.Add(plan.NativeOperations.Select(operation => operation.Clone()));
+        }
+        if (plan.NativeLayoutResolutionRequired)
+        {
+            saved = store.Save(saved.State with { PendingMutation = batch, PendingNativeState = checkpoint.State.Clone(),
+                PendingLayout = DesignLayoutIntent.Create(designPath, original, candidateBytes, operationId, expectedRevisionToken) }, saved.RevisionToken);
+            if (executionCheckpoint is not null) await executionCheckpoint("layout-prepared", cancellationToken);
+            saved = await ResolveLayoutAsync(store, client, saved, cancellationToken, executionCheckpoint);
+            return await ResumeAsync(store, receipts, client, saved, cancellationToken, executionCheckpoint);
         }
         // This includes native-only changes and engineering-only XML changes.
         // An interrupted publication must have a journal even without a batch.
@@ -212,7 +222,13 @@ internal static class SchematicSynchronizationExecutor
 
     private static void RequireRequest(StoredDesignRecovery saved, Guid operationId, string path, string token)
     {
-        if (saved.State.PendingPublication is { } pending)
+        if (saved.State.PendingLayout is { } layout)
+        {
+            if (layout.DesignPath != path) throw Error("publication_target_mismatch", "Resume only the exact recorded XML destination.");
+            if (layout.OperationId != operationId || layout.RequestedRecoveryRevisionToken != token)
+                throw Error("sync_operation_id_conflict", "The pending layout belongs to another exact request; inspect it before continuing.");
+        }
+        else if (saved.State.PendingPublication is { } pending)
         {
             if (pending.DesignPath != path) throw Error("publication_target_mismatch", "Resume only the exact recorded XML destination.");
             if (pending.OperationId != operationId || pending.RequestedRecoveryRevisionToken != token)
@@ -220,6 +236,37 @@ internal static class SchematicSynchronizationExecutor
         }
         else if (saved.RevisionToken != token)
             throw Error("design_recovery_changed", "Recovery changed; reload the current record.");
+    }
+
+    private static async Task<StoredDesignRecovery> ResolveLayoutAsync(DesignRecoveryStore store, NativeClient client,
+        StoredDesignRecovery saved, CancellationToken token, Func<string, CancellationToken, Task>? checkpoint)
+    {
+        var intent = saved.State.PendingLayout!;
+        var initial = saved.State.PendingNativeState!;
+        if (initial.ProcessEpoch != client.Epoch)
+            throw Error("instance_changed", "The pending connected move belongs to another native process.");
+        if (!saved.State.DesiredFileBytes.AsSpan().SequenceEqual(intent.ExpectedFileBytes)
+            || !(await File.ReadAllBytesAsync(intent.DesignPath, token)).AsSpan().SequenceEqual(intent.ExpectedFileBytes))
+            throw Error("publication_target_changed", "XML changed before the pending move was resolved; no native request was replayed.");
+        Read(store, saved.RevisionToken);
+        var request = new CheckedSchematicBatch { Batch = saved.State.PendingMutation!.Clone(), ExpectedState = initial.Clone() };
+        var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, token);
+        CheckedSchematicContract.ValidateResult(request, receipt, inspect: false);
+        if (receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted)
+            throw Error("native_sync_not_committed", receipt.ErrorMessage.Length == 0
+                ? "Inspect the retained connected-move operation before continuing." : receipt.ErrorMessage);
+        var observed = await Capture(client, saved.State, token);
+        if (!observed.State.Equals(receipt.ObservedAfter))
+            throw Error("native_changed_during_sync", "Native state changed after the move; preserve the pending versions for reconciliation.");
+        var planned = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.PlannedDesignFileBytes), saved.State.KnowledgeLibraries);
+        var resolved = SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token);
+        byte[] candidate = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(resolved, saved.State.KnowledgeLibraries));
+        if (!(await File.ReadAllBytesAsync(intent.DesignPath, token)).AsSpan().SequenceEqual(intent.ExpectedFileBytes))
+            throw Error("publication_target_changed", "XML changed while resolving the move; retain the pending native result.");
+        saved = store.Save(saved.State with { PendingLayout = null, PendingPublication = DesignPublicationIntent.Create(
+            intent.DesignPath, intent.ExpectedFileBytes, candidate, intent.OperationId, intent.RequestedRecoveryRevisionToken) }, saved.RevisionToken);
+        if (checkpoint is not null) await checkpoint("layout-resolved", token);
+        return saved;
     }
 
     private static async Task<CheckedSchematicState> Capture(NativeClient client, DesignRecoveryState state, CancellationToken token)

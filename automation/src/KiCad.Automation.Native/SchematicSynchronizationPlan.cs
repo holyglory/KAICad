@@ -12,7 +12,8 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
     SchematicModelProjectionResult? Properties, IReadOnlyList<SchematicBindingIssue> BindingIssues,
     IReadOnlyList<SchematicBindingDifference> ProjectionDifferences,
     SchematicElectricalComparisonResult? ObservedConnectivity, IReadOnlyList<HierarchyCoverageGap> CoverageGaps,
-    bool NativeConnectivityValidationRequired, string? ErrorCode = null, string? ErrorMessage = null)
+    bool NativeConnectivityValidationRequired, string? ErrorCode = null, string? ErrorMessage = null,
+    bool NativeLayoutResolutionRequired = false)
 {
     // Preparation from saved observations is not live mutation admission or permission
     // to publish XML. The executor must revalidate native state and resulting connectivity.
@@ -24,6 +25,12 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
 public static class SchematicSynchronizationPlanner
 {
     public static SchematicSynchronizationPlan Plan(DesignRecoveryState state, CancellationToken token = default)
+        => Prepare(state, false, token);
+
+    internal static SchematicSynchronizationPlan PlanForExecution(DesignRecoveryState state, CancellationToken token = default)
+        => Prepare(state, true, token);
+
+    private static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, bool allowConnectedLayout, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         SchematicHierarchyMergeResult? hierarchy = null;
@@ -74,7 +81,18 @@ public static class SchematicSynchronizationPlanner
                 if (placement != occurrence.Placement)
                     differences.Add(new(occurrence.Id, "placement", JsonSerializer.Serialize(occurrence.Placement), JsonSerializer.Serialize(placement)));
             }
-            if (differences.Count != 0)
+            IReadOnlyList<SchematicItemOperation> moves = [];
+            if (differences.Count != 0 && allowConnectedLayout && differences.All(d => d.Field == "placement"))
+            {
+                var placement = SchematicPlacementPlan.Plan(state.Baseline, candidate.Engineering, candidate.Schematic,
+                    state.KnowledgeLibraries, token);
+                if (placement.ReconciledModel is null || placement.Issues.Count != 0 || placement.Conflicts.Count != 0)
+                    return Failure(placement.Issues.FirstOrDefault()?.Code ?? "layout_conflict",
+                        placement.Issues.FirstOrDefault()?.Message ?? "Resolve conflicting placement before moving connected objects.");
+                moves = placement.Operations;
+                if (moves.Count == 0) return Failure("unresolved_layout", "The requested placement has no matching native connected move.");
+            }
+            else if (differences.Count != 0)
                 return Failure("native_projection_required", "Project the requested engineering properties into the native schematic before preparing a consistent design.",
                     bindings.Issues, differences);
 
@@ -87,10 +105,10 @@ public static class SchematicSynchronizationPlanner
             if (SchematicDesignXml.Write(decoded, state.KnowledgeLibraries) != xml)
                 return Failure("inconsistent_design_serialization", "The combined candidate must round-trip without information loss.");
             token.ThrowIfCancellationRequested();
-            var operations = SchematicHierarchyDelta.Plan(state.Observed, candidate.Schematic, token);
+            var operations = SchematicHierarchyDelta.Plan(state.Observed, candidate.Schematic, token).Concat(moves).ToArray();
             return new(candidate, xml, operations.Select(x => x.Clone()).ToArray(), hierarchy, electrical,
                 properties, [], [], connectivity, gaps.Distinct().ToArray(),
-                operations.Count != 0 || !connectivity.ConnectivityEquivalent);
+                operations.Length != 0 || !connectivity.ConnectivityEquivalent, NativeLayoutResolutionRequired: moves.Count != 0);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
 

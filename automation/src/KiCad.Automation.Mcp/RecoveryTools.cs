@@ -166,6 +166,14 @@ public sealed class RecoveryTools
             savedNativeRevision = saved.State.NativeRevision, trackingComplete = saved.State.TrackingComplete,
             pendingOperationId = saved.State.PendingMutation?.OperationId,
             pendingSaveOperationId = saved.State.PendingNativeSave?.OperationId,
+            pendingLayout = saved.State.PendingLayout is not { } layout ? null : new
+            {
+                operationId = layout.OperationId, designPath = layout.DesignPath,
+                requestedRecoveryRevisionToken = layout.RequestedRecoveryRevisionToken,
+                expectedSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(layout.ExpectedFileBytes)),
+                plannedDesignSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(layout.PlannedDesignFileBytes)),
+                geometryResolved = false, liveFilesVerified = false
+            },
             pendingPublication = saved.State.PendingPublication is not { } publication ? null : new
             {
                 operationId = publication.OperationId, phase = publication.Phase.ToString(),

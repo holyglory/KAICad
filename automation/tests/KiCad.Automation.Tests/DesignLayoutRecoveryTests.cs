@@ -11,6 +11,26 @@ namespace KiCad.Automation.Tests;
 public sealed class DesignLayoutRecoveryTests
 {
     [TestMethod]
+    public void RecoveryToolReportsUnresolvedLayoutWithoutPublishingOrEditingIt()
+    {
+        using var f = new Fixture(); byte[] before = File.ReadAllBytes(f.Path);
+        var tools = new KiCad.Automation.Mcp.RecoveryTools();
+        var result = tools.Plan(f.Saved.State.InstanceId.ToString("D"), f.Path, CancellationToken.None);
+        Assert.IsFalse(result.IsError ?? false);
+        var data = System.Text.Json.JsonSerializer.SerializeToElement(result.StructuredContent);
+        var layout = data.GetProperty("pendingLayout");
+        Assert.AreEqual(f.Intent.OperationId, layout.GetProperty("operationId").GetGuid());
+        Assert.IsFalse(layout.GetProperty("geometryResolved").GetBoolean());
+        Assert.IsFalse(layout.GetProperty("liveFilesVerified").GetBoolean());
+        Assert.AreEqual(System.Text.Json.JsonValueKind.Null, data.GetProperty("pendingPublication").ValueKind);
+        Assert.IsFalse(data.GetProperty("liveMutationAuthorized").GetBoolean());
+        Assert.IsTrue(tools.Plan(Guid.NewGuid().ToString("D"), f.Path, CancellationToken.None).IsError ?? false);
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        Assert.ThrowsExactly<OperationCanceledException>(() => tools.Plan(f.Saved.State.InstanceId.ToString("D"), f.Path, cancel.Token));
+        CollectionAssert.AreEqual(before, File.ReadAllBytes(f.Path));
+    }
+
+    [TestMethod]
     public void RequestedLayoutReopensWithoutPretendingItsWireGeometryIsFinal()
     {
         using var f = new Fixture();

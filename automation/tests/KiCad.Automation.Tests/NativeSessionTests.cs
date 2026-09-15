@@ -63,7 +63,11 @@ public sealed partial class NativeSessionTests
         // The earlier composed journey took 433s before expanded Setup and
         // annotation coverage. Keep all per-action limits and focused ceilings;
         // only the full two-editor sequence receives the measured workload margin.
-        int aggregateSeconds = journey == NativeJourney.Foundation ? 600 : 300;
+        // Connected-layout recovery adds twelve real service stop/restart
+        // cases. The first editor took 159.5s in aa4d8d; the old 300s ceiling
+        // cut off the second. Per-action deadlines remain unchanged.
+        int aggregateSeconds = journey == NativeJourney.Foundation ? 600
+            : journey == NativeJourney.CheckedBatch ? 420 : 300;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)

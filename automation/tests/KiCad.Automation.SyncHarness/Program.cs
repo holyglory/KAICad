@@ -51,7 +51,8 @@ public sealed class PauseGate
     public PauseGate(string stage, string? marker)
     {
         if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
-            or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"))
+            or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"
+            or "layout-prepared" or "layout-resolved"))
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));

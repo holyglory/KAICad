@@ -51,22 +51,30 @@ public sealed class LandingBrowserTests
             await State("document.documentElement.dataset.theme", "dark");
             await State("[...document.images].every(i=>i.complete && i.naturalWidth>0)", true);
             string? candidatePath = Environment.GetEnvironmentVariable("KICAD_CAPTION_CANDIDATE_CATALOGUE");
+            string platform = Environment.GetEnvironmentVariable("KICAD_LANDING_PLATFORM") ?? "linux-x64";
+            string? candidateName = Environment.GetEnvironmentVariable("KICAD_LANDING_CANDIDATE_NAME");
+            string? candidateVersion = Environment.GetEnvironmentVariable("KICAD_LANDING_CANDIDATE_VERSION");
             if (candidatePath is not null)
             {
                 var catalogue = await DownloadCatalogue.LoadAsync(candidatePath, deadline.Token);
-                var candidate = catalogue.Manifest.Artifacts.Single(item => item.Platform == "linux-x64");
+                var candidate = catalogue.Manifest.Artifacts.Single(item => item.Platform == platform);
+                candidateName = candidate.FileName; candidateVersion = candidate.Version;
+            }
+            if (candidateName is not null)
+            {
+                Assert.IsNotNull(candidateVersion);
                 foreach (string theme in new[] { "light", "dark" })
                 {
-                    await Browser("open", origin.TrimEnd('/') + "/?theme=" + theme + "&platform=linux-x64");
+                    await Browser("open", origin.TrimEnd('/') + "/?theme=" + theme + "&platform=" + Uri.EscapeDataString(platform));
                     await State("document.documentElement.dataset.theme", theme);
                     await State("document.querySelector('#recommended a').getAttribute('href')",
-                        "/artifacts/" + candidate.FileName);
+                        "/artifacts/" + candidateName);
                     await Browser("click", "a[href='#releases']");
-                    await Browser("select", "#platform-filter", "linux-x64");
+                    await Browser("select", "#platform-filter", platform);
                     await State("[...document.querySelectorAll('.release-row')].filter(e=>!e.hidden)"
-                        + ".some(e=>e.textContent.includes(" + JsonSerializer.Serialize(candidate.Version)
+                        + ".some(e=>e.textContent.includes(" + JsonSerializer.Serialize(candidateVersion)
                         + ") && [...e.querySelectorAll('a')].some(a=>a.getAttribute('href')==="
-                        + JsonSerializer.Serialize("/artifacts/" + candidate.FileName) + "))", true);
+                        + JsonSerializer.Serialize("/artifacts/" + candidateName) + "))", true);
                 }
             }
             Assert.IsTrue(string.IsNullOrWhiteSpace(await Browser("errors")), "The browser reported page errors.");

@@ -22,20 +22,30 @@ public sealed class DeliveryReceiptTests
         string output = Directory.CreateDirectory(Required("KICAD_DELIVERY_EVIDENCE")).FullName;
         var origin = new Uri(Required("KICAD_PUBLIC_DOWNLOAD_URL"));
         Assert.AreEqual("https", origin.Scheme);
+        string platform = Environment.GetEnvironmentVariable("KICAD_DELIVERY_PLATFORM") ?? "linux-x64";
+        (string target, string format) = platform switch
+        {
+            "linux-x64" => ("linux-x64", "tar.gz"),
+            "osx-arm64" => ("macos-arm64", "tar.gz"),
+            "osx-x64" => ("macos-x64", "tar.gz"),
+            "win-x64" => ("windows-x64", "zip"),
+            _ => throw new AssertFailedException("Unsupported delivery target.")
+        };
+        var feedOrigin = platform == "linux-x64" ? origin : new Uri(origin, "platforms/" + platform + "/");
         string digest = (await Command(Required("KICAD_COORDINATOR_EXECUTOR"), "source-digest", "--worktree", root))
             .GetProperty("sha256").GetString()!;
         Assert.AreEqual(64, digest.Length);
         byte[] key = await File.ReadAllBytesAsync(Required("KICAD_UPDATE_PUBLISHER_SPKI_FILE"), deadline.Token);
-        using var source = new UpdateDownloader(origin);
+        using var source = new UpdateDownloader(feedOrigin);
         byte[] envelope = await source.FetchManifestAsync("preview", deadline.Token);
         var verified = UpdateManifestCodec.Verify(envelope, key, "preview");
         Assert.AreEqual(Required("KICAD_DELIVERY_COMMIT"), verified.Release.Commit);
-        var artifact = verified.ForInstallation("linux-x64", "tar.gz");
+        var artifact = verified.ForInstallation(platform, format);
         Assert.IsNotNull(artifact);
         string scratch = Directory.CreateTempSubdirectory("kicad-delivery-proof-").FullName;
         try
         {
-            var downloaded = await source.DownloadAsync(verified, "linux-x64", "tar.gz", scratch,
+            var downloaded = await source.DownloadAsync(verified, platform, format, scratch,
                 cancellationToken: deadline.Token);
             string archive = Path.Combine(output, artifact.FileName);
             File.Copy(downloaded.Path, archive, overwrite: true);
@@ -44,12 +54,12 @@ public sealed class DeliveryReceiptTests
                 string hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, deadline.Token));
                 Assert.AreEqual(artifact.Sha256, hash);
                 Assert.AreEqual(artifact.Bytes, stream.Length);
-                await Write("linux.verification.json", new
+                await Write(platform == "linux-x64" ? "linux.verification.json" : target + ".verification.json", new
                 {
-                    version = 1, kind = "artifact", target = "linux-x64", source_sha256 = digest,
+                    version = 1, kind = "artifact", target, source_sha256 = digest,
                     file = artifact.FileName, observed_sha256 = hash,
                     checked_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    access = new Uri(origin, "artifacts/" + Uri.EscapeDataString(artifact.FileName)).AbsoluteUri,
+                    access = new Uri(feedOrigin, "artifacts/" + Uri.EscapeDataString(artifact.FileName)).AbsoluteUri,
                     observation = "download_matched"
                 });
             }

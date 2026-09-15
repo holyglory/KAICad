@@ -13,11 +13,15 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, mac, mac-arm64, mac-x64, windows]
+        options: [all, mac, mac-arm64, mac-x64, windows, windows-cache-check]
       checks_only:
         description: Run only small native delivery fixtures (no KiCad package)
         type: boolean
         default: false
+      windows_dependency_cache:
+        description: Restore and retain ABI-keyed public Windows dependency archives
+        type: boolean
+        default: true
       mac_fixture:
         description: With checks_only, select all Mac checks or a focused native fixture
         type: choice
@@ -374,6 +378,30 @@ jobs:
             --filter $kicad_package_filter `
             --logger trx --results-directory "$env:RUNNER_TEMP/kicad-windows-preflight"
           if ($LASTEXITCODE -ne 0) { throw 'The actual Windows package staging fixture failed.' }
+      - name: Identify the Windows dependency cache
+        if: '!inputs.checks_only'
+        id: dependency-cache-key
+        shell: pwsh
+        run: |
+          $cacheDirectory = Join-Path $env:RUNNER_TEMP 'kicad-vcpkg-binary-cache'
+          New-Item -ItemType Directory -Force -Path $cacheDirectory | Out-Null
+          "VCPKG_DEFAULT_BINARY_CACHE=$cacheDirectory" >> $env:GITHUB_ENV
+          $compiler = (Get-Item (Get-Command cl.exe).Source).VersionInfo.FileVersion
+          if (!$compiler) { throw 'MSVC version is required for the dependency cache family.' }
+          $compiler = $compiler -replace '[^0-9A-Za-z._-]', '_'
+          $family = "kicad-vcpkg-v1-windows2022-x64-$env:VCPKG_COMMIT-$compiler"
+          "family=$family" >> $env:GITHUB_OUTPUT
+          "key=$family-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'tools/custom_vcpkg_triplets/**') }}" >> $env:GITHUB_OUTPUT
+      - name: Restore compiled Windows dependencies
+        if: steps.dependency-cache-key.outcome == 'success' && inputs.windows_dependency_cache
+        id: dependency-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/kicad-vcpkg-binary-cache
+          key: ${{ steps.dependency-cache-key.outputs.key }}
+          restore-keys: ${{ steps.dependency-cache-key.outputs.family }}-
+          enableCrossOsArchive: false
       - name: Prepare Windows dependencies and native build configuration
         if: steps.stages.outputs.split == 'true' && !inputs.checks_only
         id: prepare
@@ -385,6 +413,13 @@ jobs:
             --architecture x64 --output "$env:RUNNER_TEMP/kicad-delivery" `
             --dependency-commit "$env:VCPKG_COMMIT" --phase prepare
           if ($LASTEXITCODE -ne 0) { throw 'Windows preparation failed; see retained evidence.' }
+      - name: Retain compiled Windows dependencies before native tests
+        if: success() && steps.prepare.outcome == 'success' && inputs.windows_dependency_cache && steps.dependency-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/kicad-vcpkg-binary-cache
+          key: ${{ steps.dependency-cache-key.outputs.key }}
       - name: Retain preparation evidence before native compilation
         if: always() && steps.stages.outputs.split == 'true' && !inputs.checks_only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -398,6 +433,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
+
       - name: Build, inspect and package Windows x64
         if: success() && !inputs.checks_only
         working-directory: automation
@@ -427,3 +463,80 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
+
+  windows-cache-seed:
+    if: inputs.target == 'windows-cache-check'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.compile.outputs.sha256 }}
+    steps:
+      - name: Check exact fixture source
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          if ($env:SOURCE_COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw 'An exact source commit is required.' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Compile and execute the native fixture
+        id: compile
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC is unavailable.' }
+          Import-Module (Join-Path $vs 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          $cache = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/kicad-native-cache-probe"
+          $scratch = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/kicad-cache-seed-output"
+          $binary = Join-Path $cache.FullName 'file-mode.exe'
+          & cl.exe /nologo /std:c++20 /EHsc /MD /O2 "/I$env:GITHUB_WORKSPACE/libs/kiplatform/os/windows" "$env:GITHUB_WORKSPACE/automation/tests/fixtures/windows-file-mode/probe.cpp" "/Fe$binary" "/Fo$env:RUNNER_TEMP/file-mode.obj"
+          if ($LASTEXITCODE -ne 0) { throw 'Native fixture compilation failed.' }
+          & $binary $scratch.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Cold native fixture execution failed.' }
+          $hash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+      - name: Save compiled fixture through the official cache backend
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: ${{ runner.temp }}/kicad-native-cache-probe
+          key: kicad-cache-transfer-v1-${{ github.run_id }}-${{ github.run_attempt }}
+  windows-cache-restore:
+    if: inputs.target == 'windows-cache-check'
+    needs: windows-cache-seed
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Restore on a fresh runner
+        id: restore
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: ${{ runner.temp }}/kicad-native-cache-probe
+          key: kicad-cache-transfer-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+          enableCrossOsArchive: false
+      - name: Verify and execute without recompilation
+        shell: pwsh
+        env:
+          EXPECTED_SHA256: ${{ needs.windows-cache-seed.outputs.sha256 }}
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+        run: |
+          if ($env:CACHE_HIT -ne 'true') { throw 'The exact cache was not restored.' }
+          $binary = "$env:RUNNER_TEMP/kicad-native-cache-probe/file-mode.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
+          if ($hash -cne $env:EXPECTED_SHA256) { throw 'Restored bytes differ from the compiled fixture.' }
+          $scratch = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/kicad-cache-restored-output"
+          & $binary $scratch.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'The restored native fixture failed.' }
+          @{schemaVersion=1; actualCacheTransfer=$true; cacheHit=$true; sha256=$hash; rebuilt=$false; fullVcpkgSpeedupMeasured=$false} | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/windows-cache-transfer.json"
+      - name: Retain the transfer receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-cache-transfer-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/windows-cache-transfer.json
+          if-no-files-found: error
+          retention-days: 14

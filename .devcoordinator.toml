@@ -2660,6 +2660,23 @@ env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
+[test.windows-dependency-cache]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.windows-dependency-cache.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.windows-dependency-cache.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~HostedDeliveryTests", "--logger", "trx", "--results-directory", "automation/artifacts/windows-dependency-cache-tests"]
+retained_artifacts = [{ name = "cache-contracts", path = "automation/artifacts/windows-dependency-cache-tests", max_bytes = 16777216 }]
+
 [[test.windows-file-mode-native.check]]
 name = "managed-build"
 tier = "development"

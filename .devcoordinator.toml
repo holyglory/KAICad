@@ -29,7 +29,7 @@ command = ["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port = true
 route = true
 health = { path = "/healthz", timeout_seconds = 300 }
-env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-f825-signed-000008", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-signed-000007", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 
 [test]
 default = "automation"
@@ -2668,3 +2668,62 @@ name = "contracts"
 tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeCaptionMcpProbeTests", "--logger", "trx", "--results-directory", "automation/artifacts/caption-mcp-capability-tests"]
 retained_artifacts = [{ name = "capability-contracts", path = "automation/artifacts/caption-mcp-capability-tests", max_bytes = 16777216 }]
+
+[test.mac-intel-f825-stage]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[test.mac-intel-f825-public]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "f825814e421a36496855081cf077c9784d3eb38a", KICAD_DELIVERY_PLATFORM = "osx-x64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-intel-f825-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "osx-x64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-f825814e421a36496855081cf077c9784d3eb38a-macos-x64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260915-f825814e421a" }
+
+[[test.mac-intel-f825-public.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["observations", "browser"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.mac-intel-f825-public.check]]
+name = "observations"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/mac-intel-f825-public-tests"]
+retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/mac-intel-f825-public", max_bytes = 536870912 }, { name = "receipt-tests", path = "automation/artifacts/mac-intel-f825-public-tests", max_bytes = 16777216 }]
+
+[[test.mac-intel-f825-public.check]]
+name = "browser"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/mac-intel-f825-browser"]
+retained_artifacts = [{ name = "browser-tests", path = "automation/artifacts/mac-intel-f825-browser", max_bytes = 16777216 }]
+
+[[test.mac-intel-f825-stage.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts", "import", "sign", "feeds"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.mac-intel-f825-stage.check]]
+name = "contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["import", "sign", "feeds"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~PlatformUpdateFeedTests", "--logger", "trx", "--results-directory", "automation/artifacts/mac-intel-f825-stage"]
+retained_artifacts = [{ name = "staging-contracts", path = "automation/artifacts/mac-intel-f825-stage", max_bytes = 16777216 }]
+
+[[test.mac-intel-f825-stage.check]]
+name = "import"
+tier = "development"
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-34910693349-intel-passed/kicad-delivery", "--commit", "f825814e421a36496855081cf077c9784d3eb38a", "--platform", "osx-x64", "--run-id", "34910693349", "--version", "preview-20260915-f825814e421a", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-f825-signed-000008", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-import"]
+
+[[test.mac-intel-f825-stage.check]]
+name = "sign"
+tier = "development"
+requires = ["import"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/tmp/kicad-mac-intel-f825-release7.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-preview7.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-f825-signed-000008/updates/platforms/osx-x64/preview.json"]
+
+[[test.mac-intel-f825-stage.check]]
+name = "feeds"
+tier = "development"
+requires = ["sign"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-f825-signed-000007", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/tmp/kicad-mac-intel-f825-feeds7.json"]

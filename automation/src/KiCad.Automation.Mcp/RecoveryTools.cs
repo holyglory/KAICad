@@ -16,24 +16,26 @@ public sealed class RecoveryTools
     // Qualification pending (p7e712f1bb764e327): do not advertise a mutation tool
     // before competing-file writes and interrupted commits have native evidence.
     internal async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
-        string designPath, string expectedRevisionToken, CancellationToken cancellationToken)
+        string designPath, string expectedRevisionToken, string operationId, CancellationToken cancellationToken)
     {
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var (store, saved) = Read(instanceId, recoveryPath);
-            if (saved.RevisionToken != expectedRevisionToken)
-                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect it before applying synchronization.");
+            var (store, _) = Read(instanceId, recoveryPath);
+            if (!Guid.TryParseExact(operationId, "D", out var id) || id == Guid.Empty || id.ToString("D") != operationId)
+                throw new AutomationException("invalid_operation_id", "Provide a caller-stable canonical operation UUID.");
             if (registry is null)
                 throw new AutomationException("instance_registry_unavailable", "The synchronization executor requires the service instance registry.");
             var result = await SchematicSynchronizationExecutor.ApplyAsync(store, registry.Client(instanceId),
-                designPath, expectedRevisionToken, cancellationToken);
+                designPath, expectedRevisionToken, id, cancellationToken);
             var data = JsonSerializer.SerializeToElement(new
             {
                 instanceId, recoveryRevisionToken = result.RecoveryRevisionToken,
                 designFileSha256 = result.DesignFileSha256, nativeRevision = result.NativeRevision,
                 nativeMutationCommitted = result.NativeMutationCommitted, nativeFilesSaved = result.NativeFilesSaved,
                 synchronizationCommitted = result.SynchronizationCommitted,
+                operationId = result.PublicationId, replayed = result.Replayed, liveStateStillCurrent = false,
+                previousXmlPath = result.PreviousXmlPath,
                 nativeReceipt = result.NativeReceipt is null ? (JsonElement?)null : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result.NativeReceipt))
             });
             return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };

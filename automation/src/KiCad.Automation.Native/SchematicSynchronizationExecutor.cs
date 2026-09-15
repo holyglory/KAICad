@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Google.Protobuf;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 using NativeRevision = KiCad.Automation.Model.DocumentRevision;
@@ -9,29 +10,49 @@ namespace KiCad.Automation.Native;
 public sealed record SchematicSynchronizationExecution(string RecoveryRevisionToken, string DesignFileSha256,
     NativeRevision NativeRevision, bool NativeMutationCommitted, bool NativeFilesSaved,
     bool SynchronizationCommitted, CheckedSchematicBatchReceipt? NativeReceipt,
-    Guid? PublicationId = null, string? PreviousXmlPath = null);
+    Guid? PublicationId = null, string? PreviousXmlPath = null, bool Replayed = false);
 
 /// <summary>Journaled execution of a supported design candidate. Still internal
 /// until the complete executor and retained-file lifecycle are qualified.</summary>
 internal static class SchematicSynchronizationExecutor
 {
     public static async Task<SchematicSynchronizationExecution> ApplyAsync(DesignRecoveryStore store,
-        NativeClient client, string designPath, string expectedRevisionToken, CancellationToken cancellationToken = default)
+        NativeClient client, string designPath, string expectedRevisionToken, Guid operationId,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (operationId == Guid.Empty) throw Error("invalid_operation_id", "A caller-stable synchronization operation ID is required.");
         if (!Path.IsPathFullyQualified(designPath)) throw Error("invalid_design_path", "An absolute design XML path is required.");
         designPath = Path.GetFullPath(designPath);
-        var saved = Read(store, expectedRevisionToken);
+        var saved = store.Read() ?? throw Error("missing_design_recovery", "No design recovery record exists.");
+        var receipts = new DesignSynchronizationReceipts(store.StatePath);
+        if (Completed(saved, receipts, operationId) is { } historical)
+        {
+            historical.RequireRequest(saved.State.InstanceId, designPath, expectedRevisionToken);
+            return historical.Result(saved.RevisionToken, replayed: true);
+        }
+        RequireRequest(saved, operationId, designPath, expectedRevisionToken);
         var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != saved.State.InstanceId.ToString("D"))
             throw Error("recovery_instance_mismatch", "The native connection belongs to another saved instance.");
+        using var ownership = receipts.Acquire();
+        saved = store.Read() ?? throw Error("missing_design_recovery", "No design recovery record exists.");
+        // The latest result and baseline were committed together. Never replace
+        // that only receipt until its immutable archive is safely available.
+        if (saved.State.LastSynchronization is { } previous) receipts.Archive(previous);
+        if (Completed(saved, receipts, operationId) is { } completed)
+        {
+            completed.RequireRequest(saved.State.InstanceId, designPath, expectedRevisionToken);
+            return completed.Result(saved.RevisionToken, replayed: true);
+        }
+        RequireRequest(saved, operationId, designPath, expectedRevisionToken);
         if (saved.State.HasPendingWork)
         {
             if (saved.State.PendingPublication is null)
                 throw Error("pending_recovery_requires_reconciliation", "Legacy pending operations have no recorded publication destination; inspect and reconcile them first.");
             if (saved.State.PendingPublication.DesignPath != designPath)
                 throw Error("publication_target_mismatch", "Resume only the exact recorded XML destination.");
-            return await ResumeAsync(store, client, saved, cancellationToken);
+            return await ResumeAsync(store, receipts, client, saved, cancellationToken);
         }
 
         byte[] original = await File.ReadAllBytesAsync(designPath, cancellationToken);
@@ -52,10 +73,15 @@ internal static class SchematicSynchronizationExecutor
         bool unchangedXml = Equivalent(desired, plan.Candidate, saved.State, cancellationToken);
         byte[] candidateBytes = unchangedXml ? original : Encoding.UTF8.GetBytes(plan.CandidateXml);
         if (unchangedXml && plan.NativeOperations.Count == 0 && !checkpoint.State.NativeContentDirty
+            && checkpoint.State.CleanCheckpointSha256 == checkpoint.State.StateSha256
             && Equivalent(saved.State.Baseline, plan.Candidate, saved.State, cancellationToken))
         {
             Read(store, saved.RevisionToken);
-            return new(saved.RevisionToken, Hash(original), saved.State.NativeRevision, false, false, true, null);
+            var noOp = new DesignSynchronizationReceipt(1, operationId, saved.State.InstanceId, designPath,
+                expectedRevisionToken, Hash(original), client.Epoch, saved.State.NativeRevision.Epoch,
+                saved.State.NativeRevision.Sequence, false, false, null, null);
+            receipts.Archive(noOp);
+            return noOp.Result(saved.RevisionToken, replayed: false);
         }
 
         ApplySchematicItemBatch? batch = null;
@@ -70,11 +96,11 @@ internal static class SchematicSynchronizationExecutor
         // An interrupted publication must have a journal even without a batch.
         saved = store.Save(saved.State with { PendingMutation = batch, PendingNativeState = checkpoint.State.Clone(),
             PendingNativeSave = null, PendingCandidateFileBytes = null,
-            PendingPublication = DesignPublicationIntent.Create(designPath, original, candidateBytes) }, saved.RevisionToken);
-        return await ResumeAsync(store, client, saved, cancellationToken);
+            PendingPublication = DesignPublicationIntent.Create(designPath, original, candidateBytes, operationId, expectedRevisionToken) }, saved.RevisionToken);
+        return await ResumeAsync(store, receipts, client, saved, cancellationToken);
     }
 
-    private static async Task<SchematicSynchronizationExecution> ResumeAsync(DesignRecoveryStore store,
+    private static async Task<SchematicSynchronizationExecution> ResumeAsync(DesignRecoveryStore store, DesignSynchronizationReceipts receipts,
         NativeClient client, StoredDesignRecovery saved, CancellationToken token)
     {
         var intent = saved.State.PendingPublication!;
@@ -84,6 +110,20 @@ internal static class SchematicSynchronizationExecutor
         if (!saved.State.DesiredFileBytes.AsSpan().SequenceEqual(intent.ExpectedFileBytes)
             && !saved.State.DesiredFileBytes.AsSpan().SequenceEqual(intent.CandidateFileBytes))
             throw Error("publication_desired_changed", "Reconcile the newer XML with the pending candidate before continuing.");
+        // File intake may not yet have observed a just-saved XML change. Check
+        // the actual file BEFORE replaying any native edit or save request.
+        try
+        {
+            byte[] liveXml = await File.ReadAllBytesAsync(intent.DesignPath, token);
+            if (!liveXml.AsSpan().SequenceEqual(intent.ExpectedFileBytes) && !liveXml.AsSpan().SequenceEqual(intent.CandidateFileBytes))
+                throw Error("publication_target_changed", "The live XML changed; no pending native action was replayed.");
+        }
+        catch (FileNotFoundException) when (OperatingSystem.IsWindows() && intent.Phase == DesignPublicationPhase.Attempting
+            && File.Exists(intent.PreviousPath) && File.Exists(intent.StagedPath))
+        {
+            // A recorded ReplaceFileW partial move is reconciled by the file
+            // committer; it will never overwrite a reappearing destination.
+        }
         var candidate = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.CandidateFileBytes), saved.State.KnowledgeLibraries);
         CheckedSchematicBatchReceipt? receipt = null;
 
@@ -137,16 +177,39 @@ internal static class SchematicSynchronizationExecutor
         // Preserve native enumeration in its own electrical checkpoint. XML
         // enumeration is not an object-property change and need not be rewritten.
         var baseline = candidate with { Schematic = final.Electrical.Hierarchy.Data.Clone() };
+        var resultReceipt = new DesignSynchronizationReceipt(1, intent.OperationId, saved.State.InstanceId,
+            intent.DesignPath, intent.RequestedRecoveryRevisionToken!, publication.FileSha256, client.Epoch,
+            final.State.Revision.Epoch, final.State.Revision.Sequence, receipt is not null, true,
+            receipt?.ToByteArray(), publication.PreviousPath);
         var complete = store.Save(saved.State with
         {
             Baseline = baseline, DesiredFileBytes = intent.CandidateFileBytes,
             Observed = final.Electrical.Hierarchy.Data.Clone(), NativeRevision = new(final.State.Revision.Epoch, final.State.Revision.Sequence),
             TrackingComplete = final.Electrical.Hierarchy.TrackingComplete, BaselineElectrical = final.Electrical.Clone(),
             ObservedElectrical = final.Electrical.Clone(), PendingMutation = null, PendingNativeState = null,
-            PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null
+            PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null,
+            LastSynchronization = resultReceipt
         }, saved.RevisionToken);
-        return new(complete.RevisionToken, publication.FileSha256, complete.State.NativeRevision,
-            receipt is not null, true, true, receipt, intent.OperationId, publication.PreviousPath);
+        // A failure here leaves the complete result in the atomic recovery
+        // record. Retry returns it and the next operation must archive it first.
+        receipts.Archive(resultReceipt);
+        return resultReceipt.Result(complete.RevisionToken, replayed: false);
+    }
+
+    private static DesignSynchronizationReceipt? Completed(StoredDesignRecovery saved,
+        DesignSynchronizationReceipts receipts, Guid operationId) => saved.State.LastSynchronization?.OperationId == operationId
+            ? saved.State.LastSynchronization : receipts.Read(operationId);
+
+    private static void RequireRequest(StoredDesignRecovery saved, Guid operationId, string path, string token)
+    {
+        if (saved.State.PendingPublication is { } pending)
+        {
+            if (pending.DesignPath != path) throw Error("publication_target_mismatch", "Resume only the exact recorded XML destination.");
+            if (pending.OperationId != operationId || pending.RequestedRecoveryRevisionToken != token)
+                throw Error("sync_operation_id_conflict", "The pending publication belongs to another exact request; inspect it before continuing.");
+        }
+        else if (saved.RevisionToken != token)
+            throw Error("design_recovery_changed", "Recovery changed; reload the current record.");
     }
 
     private static async Task<CheckedSchematicState> Capture(NativeClient client, DesignRecoveryState state, CancellationToken token)

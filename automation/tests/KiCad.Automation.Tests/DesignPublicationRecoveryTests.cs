@@ -151,7 +151,7 @@ public sealed class DesignPublicationRecoveryTests
         }
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly string directory = Directory.CreateTempSubdirectory("design-publication-recovery-").FullName;
         internal string RecordPath { get; }

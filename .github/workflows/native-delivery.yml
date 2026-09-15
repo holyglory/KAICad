@@ -128,7 +128,7 @@ jobs:
           fi
           if [ "$MAC_FIXTURE" = sync-publication ]; then
             test "$CHECKS_ONLY" = true
-            kicad_mac_test_filter='FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio'
+            kicad_mac_test_filter='FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio'
           fi
           if [ "$MAC_FIXTURE" = integrated-update ] || [ "$MAC_FIXTURE" = integrated-mcp-update ]; then
             test "$CHECKS_ONLY" = true
@@ -276,7 +276,7 @@ jobs:
           if ($env:WINDOWS_FIXTURE -eq 'sync-publication') {
             if ($env:CHECKS_ONLY -ne 'true') { throw 'Synchronization publication verification is a checks-only fixture.' }
             dotnet test KiCad.Automation.slnx --configuration Release `
-              --filter 'FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio' `
+              --filter 'FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio' `
               --logger trx --results-directory "$env:RUNNER_TEMP/kicad-windows-preflight"
             if ($LASTEXITCODE -ne 0) { throw 'Synchronization publication verification failed.' }
             exit 0

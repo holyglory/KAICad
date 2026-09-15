@@ -15,7 +15,8 @@ public sealed record DesignRecoveryState(Guid OriginId, Guid InstanceId, NativeR
     ApplySchematicItemBatch? PendingMutation = null, DesignHierarchyResolution? HierarchyResolution = null,
     SchematicElectricalState? BaselineElectrical = null, SchematicElectricalState? ObservedElectrical = null,
     DocumentLifecycleState? PendingNativeState = null, CheckedSaveDocument? PendingNativeSave = null,
-    byte[]? PendingCandidateFileBytes = null, DesignPublicationIntent? PendingPublication = null)
+    byte[]? PendingCandidateFileBytes = null, DesignPublicationIntent? PendingPublication = null,
+    DesignSynchronizationReceipt? LastSynchronization = null)
 {
     public bool HasPendingWork => PendingMutation is not null || PendingPublication is not null;
 }
@@ -49,7 +50,8 @@ public sealed class DesignRecoveryStore(string statePath)
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeState = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeSave = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingCandidateFileBytes = null,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignPublicationIntent? PendingPublication = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignPublicationIntent? PendingPublication = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignSynchronizationReceipt? LastSynchronization = null);
     private sealed record ElectricalEnvelope([property: JsonRequired] string Epoch,
         [property: JsonRequired] ulong Sequence, [property: JsonRequired] bool TrackingComplete,
         [property: JsonRequired] string[] NetsXml, [property: JsonRequired] string[] Limitations);
@@ -104,7 +106,8 @@ public sealed class DesignRecoveryStore(string statePath)
                 .Any(p => string.Equals(p, path, comparison) || string.Equals(p, path + ".lock", comparison)))
                 throw Failure("invalid_design_publication", "Design publication and recovery files must remain separate.");
         }
-        var envelope = new Envelope(state.PendingPublication is not null ? 6
+        var envelope = new Envelope(state.LastSynchronization is not null || state.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
+            : state.PendingPublication is not null ? 6
             : state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
             : state.PendingNativeState is not null ? 4
             : state.BaselineElectrical is not null || state.ObservedElectrical is not null ? 3
@@ -115,7 +118,7 @@ public sealed class DesignRecoveryStore(string statePath)
             state.PendingMutation?.ToByteArray(), state.HierarchyResolution,
             EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic), EncodeElectrical(state.ObservedElectrical, state.Observed),
             state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes,
-            state.PendingPublication);
+            state.PendingPublication, state.LastSynchronization);
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
         // Verify complete recoverability before touching the previous recovery file.
         var next = Decode(bytes);
@@ -129,6 +132,7 @@ public sealed class DesignRecoveryStore(string statePath)
             var current = ReadCore();
             if (current?.RevisionToken != expectedRevisionToken)
                 throw Failure("design_recovery_changed", "Recovery state changed; reload it before saving.");
+            ValidateTransition(current?.State, state);
             if (current?.RevisionToken == next.RevisionToken) return current;
             temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -189,7 +193,8 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            int requiredVersion = envelope.PendingPublication is not null ? 6
+            int requiredVersion = envelope.LastSynchronization is not null || envelope.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
+                : envelope.PendingPublication is not null ? 6
                 : envelope.PendingNativeSave is not null || envelope.PendingCandidateFileBytes is not null ? 5
                 : envelope.PendingNativeState is not null ? 4 : electrical ? 3
                 : envelope.HierarchyResolution is not null ? 2 : 1;
@@ -206,7 +211,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 DecodeElectrical(envelope.BaselineElectrical, baseline.Schematic), DecodeElectrical(envelope.ObservedElectrical, observed),
                 envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState),
                 envelope.PendingNativeSave is null ? null : CheckedSaveDocument.Parser.ParseFrom(envelope.PendingNativeSave),
-                envelope.PendingCandidateFileBytes, envelope.PendingPublication);
+                envelope.PendingCandidateFileBytes, envelope.PendingPublication, envelope.LastSynchronization);
             Validate(state);
             return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), state);
         }
@@ -227,6 +232,12 @@ public sealed class DesignRecoveryStore(string statePath)
             throw Failure("invalid_design_recovery", "Native and baseline versions must identify the same hierarchy root.");
         _ = EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic);
         _ = EncodeElectrical(state.ObservedElectrical, state.Observed);
+        if (state.LastSynchronization is { } completed)
+        {
+            completed.Validate();
+            if (completed.InstanceId != state.InstanceId)
+                throw Failure("invalid_sync_receipt", "The completed operation belongs to another instance.");
+        }
         if (state.ObservedElectrical is { } current
             && (current.Hierarchy.Revision.Epoch != state.NativeRevision.Epoch
                 || current.Hierarchy.Revision.Sequence != state.NativeRevision.Sequence
@@ -289,6 +300,8 @@ public sealed class DesignRecoveryStore(string statePath)
     private static void ValidatePublication(DesignRecoveryState state, DesignPublicationIntent publication)
     {
         if (publication.OperationId == Guid.Empty || !Enum.IsDefined(publication.Phase)
+            || (publication.RequestedRecoveryRevisionToken is { } requestToken
+                && (requestToken.Length != 64 || !requestToken.All(char.IsAsciiHexDigitLower)))
             || string.IsNullOrWhiteSpace(publication.DesignPath) || !Path.IsPathFullyQualified(publication.DesignPath)
             || Path.GetFullPath(publication.DesignPath) != publication.DesignPath
             || !string.Equals(Path.GetExtension(publication.DesignPath), ".xml", StringComparison.OrdinalIgnoreCase)
@@ -307,6 +320,34 @@ public sealed class DesignRecoveryStore(string statePath)
         }
         if (publication.Phase != DesignPublicationPhase.Prepared && state.PendingNativeSave is null)
             throw Failure("invalid_design_publication", "Native-save identity must be retained before publishing XML.");
+    }
+
+    private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next)
+    {
+        if (current?.PendingPublication is not { RequestedRecoveryRevisionToken: not null } before) return;
+        if (next.PendingPublication is { } after)
+        {
+            byte[] a = JsonSerializer.SerializeToUtf8Bytes(before with { Phase = DesignPublicationPhase.Prepared }, Json);
+            byte[] b = JsonSerializer.SerializeToUtf8Bytes(after with { Phase = DesignPublicationPhase.Prepared }, Json);
+            if (!a.AsSpan().SequenceEqual(b) || !Equals(current.PendingMutation, next.PendingMutation)
+                || !Equals(current.PendingNativeState, next.PendingNativeState)
+                || (current.PendingNativeSave is not null && !Equals(current.PendingNativeSave, next.PendingNativeSave)))
+                throw Failure("sync_intent_changed", "The exact request and pending native identities cannot change during synchronization.");
+            bool validPhase = before.Phase == after.Phase || ((before.Phase, after.Phase) switch
+            {
+                (DesignPublicationPhase.Prepared, DesignPublicationPhase.Staged or DesignPublicationPhase.Converged) => true,
+                (DesignPublicationPhase.Staged, DesignPublicationPhase.Attempting or DesignPublicationPhase.Converged) => true,
+                (DesignPublicationPhase.Attempting, DesignPublicationPhase.Published) => true,
+                _ => false
+            });
+            if (!validPhase) throw Failure("sync_phase_changed", "Publication phases cannot be rewound or skipped.");
+        }
+        else if (before.Phase is not (DesignPublicationPhase.Published or DesignPublicationPhase.Converged)
+            || next.LastSynchronization is not { } result || result.OperationId != before.OperationId
+            || result.RequestedRecoveryRevisionToken != before.RequestedRecoveryRevisionToken
+            || result.DesignPath != before.DesignPath
+            || result.DesignFileSha256 != Convert.ToHexStringLower(SHA256.HashData(before.CandidateFileBytes)))
+            throw Failure("missing_sync_completion_receipt", "Clear the pending publication only together with its matching completed result.");
     }
 
     private static void ValidatePublicationSave(DesignRecoveryState state, CheckedSaveDocument save)

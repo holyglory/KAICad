@@ -19,7 +19,7 @@ public sealed class SchematicSynchronizationAdmissionTests
             var peer = new NativeClientTests.FixtureTransport();
             var client = new NativeClient(peer, NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")));
             var failure = await Assert.ThrowsExactlyAsync<AutomationException>(() =>
-                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, saved.RevisionToken));
+                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, saved.RevisionToken, Guid.NewGuid()));
             Assert.AreEqual("recovery_instance_mismatch", failure.Code);
             Assert.IsTrue(peer.LastRequest!.Message.Is(KiCad.Automation.Protocol.GetAutomationSession.Descriptor));
             Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
@@ -40,9 +40,9 @@ public sealed class SchematicSynchronizationAdmissionTests
             var peer = new NativeClientTests.FixtureTransport();
             var client = new NativeClient(peer, NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")));
             Assert.AreEqual("design_recovery_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
-                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, "stale"))).Code);
+                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, "stale", Guid.NewGuid()))).Code);
             await Assert.ThrowsAsync<OperationCanceledException>(() =>
-                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, saved.RevisionToken, new CancellationToken(true)));
+                SchematicSynchronizationExecutor.ApplyAsync(store, client, path, saved.RevisionToken, Guid.NewGuid(), new CancellationToken(true)));
             Assert.IsNull(peer.LastRequest);
             Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
         }

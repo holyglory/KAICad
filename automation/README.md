@@ -772,6 +772,18 @@ surface or the automatic event loop. Retained-file cleanup remains open.
 Existing version-1 through version-5 records remain
 readable and are not rewritten merely because the reader supports version 6.
 
+Version 7 binds pending synchronization to a caller-stable operation ID and the
+original recovery token. Its latest completed receipt is committed atomically
+with the new baseline, then retained as an immutable operation file before later
+work can replace that receipt. Historical replay returns the recorded native
+result without contacting KiCad; it is not a current design observation. Reusing
+an ID with different inputs is rejected. The executor also checks the actual XML
+before resuming native actions, even if file intake has not yet seen a save.
+The focused Linux journey verifies these paths. A first synchronization may need
+to establish a known full-content save checkpoint; later unchanged requests do
+not rewrite the design or baseline. The high-level MCP tool, full process-crash
+journey, retained-file cleanup and automatic event loop remain unqualified.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including

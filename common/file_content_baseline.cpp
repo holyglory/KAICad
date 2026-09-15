@@ -162,23 +162,3 @@ FILE_CONTENT_BASELINE DIGESTING_FILE_LINE_READER::FinishBaseline()
     if( ferror( m_fp ) ) THROW_IO_ERROR( "Error finishing native file read: " + m_source );
     return FILE_CONTENT_BASELINE::FromDigest( m_source, m_state->hash.Hex(), m_state->hash.Bytes() );
 }
-
-thread_local FILE_WRITE_OBSERVER* FILE_WRITE_OBSERVER::s_current = nullptr;
-
-FILE_WRITE_OBSERVER::FILE_WRITE_OBSERVER( BEFORE aBefore, AFTER aAfter ) :
-        m_before( std::move( aBefore ) ), m_after( std::move( aAfter ) ), m_previous( s_current )
-{
-    s_current = this;
-}
-
-FILE_WRITE_OBSERVER::~FILE_WRITE_OBSERVER() { s_current = m_previous; }
-
-void FILE_WRITE_OBSERVER::BeforeWrite( const wxString& aPath )
-{
-    if( s_current && s_current->m_before ) s_current->m_before( aPath );
-}
-
-void FILE_WRITE_OBSERVER::AfterWrite( const FILE_CONTENT_BASELINE& aWritten )
-{
-    if( s_current && s_current->m_after ) s_current->m_after( aWritten );
-}

@@ -2555,3 +2555,40 @@ name = "observations"
 tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/preview18-delivery-receipt-tests"]
 retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/preview18-delivery-receipts", max_bytes = 536870912 }, { name = "delivery-receipt-tests", path = "automation/artifacts/preview18-delivery-receipt-tests", max_bytes = 16777216 }]
+
+[test.write-observer-boundary]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.write-observer-boundary.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["dll-boundary", "configure", "native-build", "native-contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.write-observer-boundary.check]]
+name = "dll-boundary"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "native-build", "native-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=WriteObserverBoundary", "--logger", "trx", "--results-directory", "automation/artifacts/write-observer-boundary"]
+retained_artifacts = [{ name = "dll-boundary", path = "automation/artifacts/write-observer-boundary", max_bytes = 16777216 }]
+
+[[test.write-observer-boundary.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["native-build", "native-contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.write-observer-boundary.check]]
+name = "native-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_common"]
+
+[[test.write-observer-boundary.check]]
+name = "native-contracts"
+tier = "development"
+requires = ["native-build"]
+command = ["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_file_content_baseline$", "--output-on-failure", "--no-tests=error"]

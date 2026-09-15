@@ -5,6 +5,9 @@
 #include <kiid.h>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
+#include <barrier>
+#include <thread>
 
 namespace
 {
@@ -144,6 +147,42 @@ BOOST_AUTO_TEST_CASE( CommitObserverRejectsBeforeReplacementAndRestoresItsScope 
     PRETTIFIED_FILE_OUTPUTFORMATTER ordinary( directory.File() );
     ordinary.Print( "(normal-save)" ); BOOST_REQUIRE( ordinary.Finish() );
     BOOST_CHECK_EQUAL( committed, 1 );
+}
+
+BOOST_AUTO_TEST_CASE( NestedObserversRestoreAndOtherThreadsCannotBorrowTheScope )
+{
+    BASELINE_DIRECTORY directory;
+    const wxString path = directory.File();
+    const auto baseline = FILE_CONTENT_BASELINE::FromBytes( path, "native" );
+    std::atomic<int> outer = 0, worker = 0;
+    int nested = 0;
+    {
+        FILE_WRITE_OBSERVER scope( [&]( const wxString& ) { ++outer; },
+                                   [&]( const FILE_CONTENT_BASELINE& ) { ++outer; } );
+        FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+        {
+            FILE_WRITE_OBSERVER inner( [&]( const wxString& ) { ++nested; },
+                                       [&]( const FILE_CONTENT_BASELINE& ) { ++nested; } );
+            FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+        }
+        BOOST_CHECK_EQUAL( nested, 2 ); BOOST_CHECK_EQUAL( outer.load(), 2 );
+        std::barrier gate( 2 );
+        std::thread thread( [&]
+        {
+            FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+            FILE_WRITE_OBSERVER own( [&]( const wxString& ) { ++worker; },
+                                     [&]( const FILE_CONTENT_BASELINE& ) { ++worker; } );
+            gate.arrive_and_wait();
+            FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+            gate.arrive_and_wait();
+        } );
+        gate.arrive_and_wait();
+        FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+        gate.arrive_and_wait(); thread.join();
+        BOOST_CHECK_EQUAL( outer.load(), 4 ); BOOST_CHECK_EQUAL( worker.load(), 2 );
+    }
+    FILE_WRITE_OBSERVER::BeforeWrite( path ); FILE_WRITE_OBSERVER::AfterWrite( baseline );
+    BOOST_CHECK_EQUAL( outer.load(), 4 ); BOOST_CHECK_EQUAL( worker.load(), 2 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

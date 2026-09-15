@@ -341,6 +341,7 @@ set( KICOMMON_SRCS
     reporter.cpp
     richio.cpp
     file_content_baseline.cpp
+    file_write_observer.cpp
     scintilla_tricks.cpp
     search_stack.cpp
     searchhelpfilefullpath.cpp

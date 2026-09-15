@@ -4,6 +4,10 @@ Development branch: `main` (the original `feature/codex-kicad-automation` branch
 `f638a860a05b3e48d1074314a656ad9b8f597466`. This is an incomplete implementation
 of the approved six-milestone program, not a release.
 
+Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
+[Mac preview installation guide](distribution/mac-preview-install.md) covers the
+September 15 Apple Silicon and Intel builds, including managed-update setup.
+
 ## Try provisional Schematic Setup edits in a source build
 
 The feature branch contains the native Setup change from
@@ -80,7 +84,7 @@ rejection and subsequent recovery passed without changing the selected version.
 That is not a two-version upgrade or editor restart. The actual Windows
 Update-button and post-update MCP journey remain under qualification.
 
-## Latest Apple Silicon preview — September 11, 2026
+## Earlier Apple Silicon checkpoint — September 11, 2026
 
 [Apple Silicon application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-macos-arm64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-source.tar.gz)
@@ -105,7 +109,7 @@ images, and native undo were observed. This is more than a standalone MCP harnes
 but does not establish native-Mac Codex frontend identity, automatic reverse XML
 synchronization, or complete Desktop qualification. Those outcomes remain open.
 
-### Latest Intel preview — September 11, 2026
+### Earlier Intel checkpoint — September 11, 2026
 
 [Intel application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-macos-x64.tar.gz)
 now uses the same `3ac5af02cb7eee653578e0d5c85b7d841eb8724a` source as Apple

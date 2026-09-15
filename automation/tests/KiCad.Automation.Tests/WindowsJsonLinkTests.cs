@@ -8,6 +8,50 @@ public sealed class WindowsJsonLinkTests
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [TestMethod, TestCategory("WriteObserverBoundary")]
+    public async Task NativeWriteObserverDllPreservesThreadIsolationNestingAndFailureRecovery()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-observer-link-").FullName;
+        string evidence = Directory.CreateDirectory(Path.Combine(
+            Environment.GetEnvironmentVariable("KICAD_HOSTED_FIXTURE_EVIDENCE") ?? TestContext.TestResultsDirectory!,
+            "write-observer-link")).FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        try
+        {
+            Assert.AreEqual(0, (await Run("configure", "cmake", "-S",
+                Path.Combine(Repository(), "automation/tests/fixtures/write-observer-link"),
+                "-B", root, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release")).ExitCode);
+            Assert.AreEqual(0, (await Run("build", "cmake", "--build", root,
+                "--target", "observer_consumer")).ExitCode);
+            Assert.AreEqual(0, (await Run("execute", Path.Combine(root,
+                OperatingSystem.IsWindows() ? "observer_consumer.exe" : "observer_consumer"))).ExitCode);
+            if (OperatingSystem.IsWindows())
+            {
+                var rejected = await Run("exported-tls-negative", "cmake", "--build", root,
+                    "--target", "rejected_tls_interface");
+                Assert.AreNotEqual(0, rejected.ExitCode);
+                StringAssert.Contains(rejected.Diagnostic, "C2492", "The original MSVC rejection must be reproduced.");
+                var missing = await Run("missing-provider-negative", "cmake", "--build", root,
+                    "--target", "observer_missing_provider");
+                Assert.AreNotEqual(0, missing.ExitCode);
+                StringAssert.Contains(missing.Diagnostic, "LNK2019");
+                StringAssert.Contains(missing.Diagnostic, "FILE_WRITE_OBSERVER");
+            }
+        }
+        finally { Directory.Delete(root, recursive: true); }
+
+        async Task<(int ExitCode, string Diagnostic)> Run(string name, string executable, params string[] arguments)
+        {
+            var result = await WindowsLauncherTests.Invoke(executable, arguments, root, deadline.Token, input: null);
+            string stdout = Path.Combine(evidence, name + ".stdout.log");
+            string stderr = Path.Combine(evidence, name + ".stderr.log");
+            await File.WriteAllTextAsync(stdout, result.Output, deadline.Token);
+            await File.WriteAllTextAsync(stderr, result.Error, deadline.Token);
+            TestContext.AddResultFile(stdout); TestContext.AddResultFile(stderr);
+            return (result.ExitCode, result.Output + result.Error);
+        }
+    }
+
     [TestMethod]
     public void UpdaterHeaderUsesTheExistingSharedJsonImports()
     {

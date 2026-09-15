@@ -287,6 +287,10 @@ kicad_add_boost_test( qa_common qa_common )
 
 setup_qa_env( qa_common )
 
+add_test( NAME qa_file_content_baseline
+    COMMAND $<TARGET_FILE:qa_common> --run_test=FileContentBaseline --log_level=test_suite )
+setup_qa_env( qa_file_content_baseline )
+
 # A focused project-copy target avoids rebuilding unrelated editor test modules.
 add_executable( qa_project_analysis_snapshot
     ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp

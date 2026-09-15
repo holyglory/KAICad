@@ -1908,7 +1908,7 @@ void SCH_EDIT_FRAME::initScreenZoom()
 
 
 void SCH_EDIT_FRAME::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
-                                             PROGRESS_REPORTER* aProgressReporter )
+                                             PROGRESS_REPORTER* aProgressReporter, bool aPreserveGeometry )
 {
     wxString highlightedConn = GetHighlightedConnection();
     bool     hasHighlightedConn = !highlightedConn.IsEmpty();
@@ -1942,7 +1942,8 @@ void SCH_EDIT_FRAME::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FL
                                         GetCanvas()->GetView(),
                                         &changeHandler,
                                         m_undoList.m_CommandsList.empty() ? nullptr
-                                                                          : m_undoList.m_CommandsList.back() );
+                                                                          : m_undoList.m_CommandsList.back(),
+                                        aPreserveGeometry );
 
     GetCanvas()->GetView()->UpdateAllItemsConditionally(
             [&]( KIGFX::VIEW_ITEM* aItem ) -> int

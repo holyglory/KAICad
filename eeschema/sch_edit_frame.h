@@ -812,7 +812,7 @@ public:
      * Generate the connection data for the entire schematic hierarchy.
      */
     void RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
-                                 PROGRESS_REPORTER* aProgressReporter = nullptr );
+                                 PROGRESS_REPORTER* aProgressReporter = nullptr, bool aPreserveGeometry = false );
 
     /**
      * Called after the preferences dialog is run.

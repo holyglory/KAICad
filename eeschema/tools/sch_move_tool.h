@@ -89,7 +89,7 @@ public:
     // commit, rollback and restoration of the user's original selection.
     bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError );
 
-    // Uses an explicit, non-displayed screen without changing editor navigation.
+    // Uses an explicit instance and private selection without editor navigation.
     bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
                           const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems );
 

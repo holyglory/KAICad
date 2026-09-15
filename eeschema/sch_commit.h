@@ -78,6 +78,7 @@ public:
     bool Empty() const override;
     void SetAutomationOrigin( const std::string& aOriginId, const std::string& aOperationId )
     {
+        m_automationBatch = true;
         m_originId = aOriginId;
         m_operationId = aOperationId;
     }
@@ -120,6 +121,7 @@ public:
 private:
     std::string m_originId;
     std::string m_operationId;
+    bool m_automationBatch = false;
     std::vector<std::unique_ptr<SCH_MARKER>> m_ercAddedMarkers;
     EDA_ITEM* undoLevelItem( EDA_ITEM* aItem ) const override;
 

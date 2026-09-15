@@ -527,7 +527,7 @@ public:
      * @param aCommit Transaction container used to record changes for undo/redo
      * @param aScreen is the screen to examine, or nullptr to examine the current screen
      */
-    void CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen = nullptr );
+    void CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen = nullptr, bool aUpdateEditorSelection = true );
 
     /**
      * Generate the connection data for the entire schematic hierarchy.
@@ -537,7 +537,8 @@ public:
                                  PROGRESS_REPORTER* aProgressReporter = nullptr,
                                  KIGFX::SCH_VIEW* aSchView = nullptr,
                                  std::function<void( SCH_ITEM* )>* aChangedItemHandler = nullptr,
-                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr );
+                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr,
+                                 bool aPreserveGeometry = false );
 
     /**
      * Store all existing annotations in the REFDES_TRACKER.

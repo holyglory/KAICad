@@ -22,8 +22,29 @@
 #include <sch_commit.h>
 #include <sch_group.h>
 #include <sch_text.h>
+#include <sch_line.h>
+#include <sch_screen.h>
 
 BOOST_AUTO_TEST_SUITE( SchCommit )
+
+BOOST_AUTO_TEST_CASE( AppliedAutomationWireRemovalRetainsTheOriginalImage )
+{
+    TOOL_MANAGER manager;
+    SCH_SCREEN screen;
+    auto line = std::make_unique<SCH_LINE>( VECTOR2I( 0, 0 ), LAYER_WIRE );
+    line->SetEndPoint( VECTOR2I( 1000, 0 ) );
+    screen.Append( line.get() );
+    SCH_COMMIT commit( &manager );
+    commit.SetAutomationOrigin( "fixture", "applied-wire-removal" );
+    commit.Modify( line.get(), &screen );
+    line->SetEndPoint( VECTOR2I( 2000, 0 ) );
+    line->SetFlags( IS_MOVING | STRUCT_DELETED );
+    screen.Remove( line.get() );
+    commit.Removed( line.get(), &screen );
+    BOOST_CHECK( line->GetEndPoint() == VECTOR2I( 1000, 0 ) );
+    BOOST_CHECK( !( line->GetFlags() & ( IS_MOVING | IS_NEW | IN_EDIT | STRUCT_DELETED ) ) );
+    BOOST_CHECK_EQUAL( commit.GetStatus( line.get(), &screen ), CHT_REMOVE | CHT_DONE );
+}
 
 BOOST_AUTO_TEST_CASE( RecursesThroughGroups )
 {
@@ -58,4 +79,3 @@ BOOST_AUTO_TEST_CASE( ClearsSelectedByDragFlag )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-

@@ -1734,7 +1734,7 @@ bool SCHEMATIC::IsComplexHierarchy() const
 }
 
 
-void SCHEMATIC::CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen )
+void SCHEMATIC::CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen, bool aUpdateEditorSelection )
 {
     SCH_SELECTION_TOOL*          selectionTool = m_schematicHolder ? m_schematicHolder->GetSelectionTool() : nullptr;
     std::vector<SCH_LINE*>       lines;
@@ -1747,7 +1747,7 @@ void SCHEMATIC::CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen )
         aScreen = GetCurrentScreen();
 
     // Cleanup of a non-displayed screen must not change the human selection.
-    if( aScreen != GetCurrentScreen() )
+    if( !aUpdateEditorSelection || aScreen != GetCurrentScreen() )
         selectionTool = nullptr;
 
     auto remove_item = [&]( SCH_ITEM* aItem ) -> void
@@ -1936,7 +1936,7 @@ void SCHEMATIC::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS a
                                         TOOL_MANAGER* aToolManager, PROGRESS_REPORTER* aProgressReporter,
                                         KIGFX::SCH_VIEW*                  aSchView,
                                         std::function<void( SCH_ITEM* )>* aChangedItemHandler,
-                                        PICKED_ITEMS_LIST*                aLastChangeList )
+                                        PICKED_ITEMS_LIST*                aLastChangeList, bool aPreserveGeometry )
 {
     SCHEMATIC_SETTINGS& settings = Settings();
     RefreshHierarchy();
@@ -1949,11 +1949,11 @@ void SCHEMATIC::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS a
     PROF_TIMER timer;
 
     // Ensure schematic graph is accurate
-    if( aCleanupFlags == LOCAL_CLEANUP )
+    if( !aPreserveGeometry && aCleanupFlags == LOCAL_CLEANUP )
     {
         CleanUp( aCommit, GetCurrentScreen() );
     }
-    else if( aCleanupFlags == GLOBAL_CLEANUP )
+    else if( !aPreserveGeometry && aCleanupFlags == GLOBAL_CLEANUP )
     {
         for( const SCH_SHEET_PATH& sheet : list )
             CleanUp( aCommit, sheet.LastScreen() );

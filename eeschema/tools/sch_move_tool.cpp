@@ -733,10 +733,10 @@ void SCH_MOVE_TOOL::removeDragSelection()
 bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
                                     const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems )
 {
-    if( !aCommit || aItems.empty() || !aPath.LastScreen() || m_inMoveTool || m_moveInProgress
-        || m_explicitMovePath || aPath.LastScreen() == m_frame->GetScreen() )
+    if( !aCommit || aItems.empty() || aPath.size() == 0 || !aPath.LastScreen() || m_inMoveTool || m_moveInProgress
+        || m_explicitMovePath )
     {
-        aError = "Private connected movement requires an idle tool and a non-displayed screen";
+        aError = "Private connected movement requires an idle tool and an explicit sheet instance";
         return false;
     }
 
@@ -784,6 +784,14 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
     };
     try
     {
+        // Existing human selection is not input to this finite operation.
+        // Preserve it by identity while the shared physical screen is edited.
+        auto isolate = []( SCH_ITEM* item ) { item->ClearFlags( SELECTED | STARTPOINT | ENDPOINT | SELECTED_BY_DRAG ); };
+        for( SCH_ITEM* item : aPath.LastScreen()->Items() )
+        {
+            isolate( item );
+            item->RunOnChildren( isolate, RECURSE_MODE::RECURSE );
+        }
         for( SCH_ITEM* item : aItems ) addDragSelection( item );
         bool result = DragSelectionBy( aCommit, aDelta, aError );
         release();
@@ -2405,7 +2413,7 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
     for( EDA_ITEM* item : selectionCopy )
         item->ClearTempFlags();
 
-    m_frame->Schematic().CleanUp( aCommit, moveScreen() );
+    m_frame->Schematic().CleanUp( aCommit, moveScreen(), !m_privateMoveSelection );
 
     // Mirror the IS_MOVING flag propagation done at the start of the move so that child items
     // (e.g. label fields, symbol pins/fields) don't keep their edit flags after the move ends.
@@ -2505,7 +2513,7 @@ void SCH_MOVE_TOOL::moveSelectionToSheet( SCH_SELECTION& aSelection, SCH_SHEET* 
 void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 {
     // Need a local cleanup first to ensure we remove unneeded junctions
-    m_frame->Schematic().CleanUp( aCommit, moveScreen() );
+    m_frame->Schematic().CleanUp( aCommit, moveScreen(), !m_privateMoveSelection );
 
     std::set<SCH_ITEM*> danglers;
 

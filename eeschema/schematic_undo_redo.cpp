@@ -92,7 +92,7 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( SCH_SCREEN* aScreen, SCH_ITEM* aItem, U
     // If the last stack was empty, use that one instead of creating a new stack
     if( lastUndo )
     {
-        if( aAppend || !lastUndo->GetCount() )
+        if( ( aAppend && !lastUndo->PreserveSchematicGeometry() ) || !lastUndo->GetCount() )
             commandToUndo = lastUndo;
         else
             PushCommandToUndoList( lastUndo );
@@ -103,6 +103,7 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( SCH_SCREEN* aScreen, SCH_ITEM* aItem, U
         commandToUndo = new PICKED_ITEMS_LIST();
     }
 
+    commandToUndo->SetPreserveSchematicGeometry( false );
     ITEM_PICKER itemWrapper( aScreen, aItem, aCommandType );
     itemWrapper.SetFlags( aItem->GetFlags() );
 
@@ -151,7 +152,8 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( const PICKED_ITEMS_LIST& aItemsList, UN
     // If the last stack was empty, use that one instead of creating a new stack
     if( lastUndo )
     {
-        if( aAppend || !lastUndo->GetCount() )
+        if( ( aAppend && lastUndo->PreserveSchematicGeometry() == aItemsList.PreserveSchematicGeometry() )
+            || !lastUndo->GetCount() )
             commandToUndo = lastUndo;
         else
             PushCommandToUndoList( lastUndo );
@@ -578,7 +580,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
 
         SCH_COMMIT localCommit( m_toolManager );
 
-        RecalculateConnections( &localCommit, connectivityCleanUp );
+        RecalculateConnections( &localCommit, connectivityCleanUp, nullptr, aList->PreserveSchematicGeometry() );
         if( netSettingsChanged ) SCH_PAGE_SETTINGS_UNDO_ITEM::RefreshNetSettings( this );
 
         if( connectivityCleanUp == GLOBAL_CLEANUP )

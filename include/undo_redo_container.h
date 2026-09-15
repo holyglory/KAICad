@@ -275,9 +275,16 @@ public:
     wxString GetDescription() const                     { return m_description; }
     void SetDescription( const wxString& aDescription ) { m_description = aDescription; }
 
+    // Automation records complete schematic geometry. Replaying it must not
+    // introduce a separate cleanup edit. Other editors and manual commands
+    // retain their existing default policy.
+    bool PreserveSchematicGeometry() const { return m_preserveSchematicGeometry; }
+    void SetPreserveSchematicGeometry( bool aPreserve ) { m_preserveSchematicGeometry = aPreserve; }
+
 private:
     wxString                 m_description;
     std::vector<ITEM_PICKER> m_ItemsList;
+    bool m_preserveSchematicGeometry = false;
 };
 
 

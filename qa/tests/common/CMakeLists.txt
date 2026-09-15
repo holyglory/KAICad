@@ -290,6 +290,9 @@ setup_qa_env( qa_common )
 
 add_test( NAME qa_file_content_baseline
     COMMAND $<TARGET_FILE:qa_common> --run_test=FileContentBaseline --log_level=test_suite )
+
+add_test( NAME qa_undo_geometry_policy
+    COMMAND $<TARGET_FILE:qa_common> --run_test=Commit/SchematicGeometryPolicyFollowsTheUndoCommand --log_level=test_suite )
 setup_qa_env( qa_file_content_baseline )
 
 # A focused project-copy target avoids rebuilding unrelated editor test modules.

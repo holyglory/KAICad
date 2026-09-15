@@ -47,6 +47,22 @@ private:
 
 BOOST_AUTO_TEST_SUITE( Commit )
 
+BOOST_AUTO_TEST_CASE( SchematicGeometryPolicyFollowsTheUndoCommand )
+{
+    PICKED_ITEMS_LIST ordinary;
+    BOOST_CHECK( !ordinary.PreserveSchematicGeometry() );
+    PICKED_ITEMS_LIST exact;
+    exact.SetPreserveSchematicGeometry( true );
+    ordinary.CopyList( exact );
+    BOOST_CHECK( ordinary.PreserveSchematicGeometry() );
+    ordinary.ReversePickersListOrder();
+    BOOST_CHECK( ordinary.PreserveSchematicGeometry() );
+    ordinary.ClearItemsList();
+    BOOST_CHECK( !ordinary.PreserveSchematicGeometry() );
+    exact.CopyList( ordinary );
+    BOOST_CHECK( !exact.PreserveSchematicGeometry() );
+}
+
 BOOST_AUTO_TEST_CASE( StageAndStatus )
 {
     TEST_COMMIT commit;
@@ -113,4 +129,3 @@ BOOST_AUTO_TEST_CASE( UnstageRemovesNewItem )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-

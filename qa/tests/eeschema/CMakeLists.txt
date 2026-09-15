@@ -358,6 +358,7 @@ add_executable( qa_symbol_graphic_identity
     test_schematic_state_format.cpp
     test_sch_parity_netlist.cpp
     test_module.cpp
+    test_sch_commit.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
@@ -448,4 +449,7 @@ setup_qa_env( qa_checked_schematic_controller )
 
 add_test( NAME qa_net_settings_capture
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )
+
+add_test( NAME qa_automation_wire_rollback
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchCommit --log_level=test_suite )
 setup_qa_env( qa_net_settings_capture )

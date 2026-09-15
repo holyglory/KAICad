@@ -948,7 +948,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( delta == VECTOR2I( 0, 0 ) )
                     continue;
                 auto* selectionTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
-                if( displayed && !savedSelection )
+                if( targetSheet->LastScreen() == m_frame->GetScreen() && !savedSelection )
                 {
                     savedSelection.emplace();
                     auto& selection = selectionTool->GetSelection();
@@ -2518,7 +2518,10 @@ std::optional<ApiResponseStatus> API_HANDLER_SCH::checkForStableObservation()
         {
             ApiResponseStatus error;
             error.set_status( ApiStatusCode::AS_BUSY );
-            error.set_error_message( "Finish or cancel the current schematic edit before observing or applying automation changes" );
+            error.set_error_message( fmt::format(
+                    "Finish or cancel the current schematic edit before observing or applying automation changes (item {}, transient flags {})",
+                    item->m_Uuid.AsStdString(),
+                    static_cast<unsigned long long>( item->GetFlags() & ( IN_EDIT | IS_MOVING | IS_NEW ) ) ) );
             return error;
         }
         item->RunOnChildren( [&]( SCH_ITEM* child ) { pending.push_back( child ); },

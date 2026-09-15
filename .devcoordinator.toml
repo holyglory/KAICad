@@ -3052,13 +3052,13 @@ command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja
 [[test.native-offscreen-move.check]]
 name = "model-build"
 tier = "development"
-command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_common", "qa_symbol_graphic_identity"]
 
 [[test.native-offscreen-move.check]]
 name = "codec"
 tier = "development"
 requires = ["model-build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$|^qa_undo_geometry_policy$|^qa_automation_wire_rollback$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-offscreen-move.check]]
 name = "native-build"

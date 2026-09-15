@@ -576,12 +576,14 @@ COMMIT& SCH_COMMIT::Stage( EDA_ITEM *aItem, CHANGE_TYPE aChangeType, BASE_SCREEN
 {
     wxCHECK( aItem, *this );
 
-    // A deferred removal supersedes earlier modifications to this object.
-    // Restore its pre-commit value before COMMIT::Stage discards the modify
-    // entry, so both cancellation and the deletion's undo retain that value.
-    // Already-applied removals and child-to-parent undo remapping have different
-    // ownership semantics and must not update an absent screen item here.
-    if( !m_isLibEditor && aChangeType == CHT_REMOVE && undoLevelItem( aItem ) == aItem )
+    // A removal supersedes the earlier modify entry. Automation wire cleanup
+    // may have removed an already-moved wire from its screen; retain the original
+    // geometry before COMMIT::Stage discards that image. Do not update an absent
+    // screen entry, or change the ownership rules for remapped child objects.
+    const bool appliedAutomationWire = m_automationBatch && aItem->Type() == SCH_LINE_T
+            && aChangeType == ( CHT_REMOVE | CHT_DONE );
+    if( !m_isLibEditor && ( aChangeType == CHT_REMOVE || appliedAutomationWire )
+        && undoLevelItem( aItem ) == aItem )
     {
         COMMIT_LINE* previous = findEntry( aItem, aScreen );
 
@@ -590,7 +592,14 @@ COMMIT& SCH_COMMIT::Stage( EDA_ITEM *aItem, CHANGE_TYPE aChangeType, BASE_SCREEN
             auto item = static_cast<SCH_ITEM*>( aItem );
             item->SwapItemData( static_cast<SCH_ITEM*>( previous->m_copy ) );
 
-            if( auto screen = dynamic_cast<SCH_SCREEN*>( aScreen ) )
+            if( appliedAutomationWire )
+            {
+                // SwapItemData intentionally retains edit flags. These were
+                // set by the finished drag, not by another live user edit.
+                item->ClearEditFlags();
+                item->ClearFlags( IN_EDIT | SELECTED_BY_DRAG );
+            }
+            else if( auto screen = dynamic_cast<SCH_SCREEN*>( aScreen ) )
                 screen->Update( item );
 
             Unmodify( aItem, aScreen );
@@ -686,7 +695,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
     SCH_EDIT_FRAME*     frame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
     SCH_SCREEN*         currentScreen = frame ? frame->GetScreen() : nullptr;
     SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
-    SCH_GROUP*          enteredGroup = selTool ? selTool->GetEnteredGroup() : nullptr;
+    SCH_GROUP*          enteredGroup = selTool && !m_automationBatch ? selTool->GetEnteredGroup() : nullptr;
     bool                itemsDeselected = false;
     bool                selectedModified = false;
     bool                dirtyConnectivity = m_connectivitySettingsChanged;
@@ -698,6 +707,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         return;
 
     undoList.SetDescription( aMessage );
+    undoList.SetPreserveSchematicGeometry( m_automationBatch );
     // Graphical/hierarchy entries undo first, then page records resolve their
     // exact sheet identities in the restored hierarchy.
     if( m_pageSettingsUndo && frame && !( aCommitFlags & SKIP_UNDO ) )
@@ -1043,7 +1053,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         if( frame )
             frame->RecalculateConnections( this,
                     connectivityCleanUp == LOCAL_CLEANUP && !cleanupVisibleScreen
-                            ? NO_CLEANUP : connectivityCleanUp );
+                            ? NO_CLEANUP : connectivityCleanUp, nullptr, m_automationBatch );
         else if( schematic )
             schematic->RecalculateConnections( this, connectivityCleanUp, m_toolMgr );
     }
@@ -1099,6 +1109,7 @@ void SCH_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     m_netSettingsChanged = false;
     m_originId.clear();
     m_operationId.clear();
+    m_automationBatch = false;
     clear();
 }
 
@@ -1362,5 +1373,6 @@ void SCH_COMMIT::Revert()
     m_netSettingsChanged = false;
     m_originId.clear();
     m_operationId.clear();
+    m_automationBatch = false;
     clear();
 }

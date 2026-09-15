@@ -342,6 +342,9 @@ public sealed partial class NativeSessionTests
                         {
                             await VerifyOffscreenConnectedMove(client, opened.Document, electrical, hierarchyFixture,
                                 focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id,
+                                target.Id == launched.Last().Id, deadline.Token);
                         }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         {

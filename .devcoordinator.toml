@@ -2880,3 +2880,53 @@ tier = "development"
 requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeHierarchyPolicy", "--logger", "trx", "--results-directory", "automation/artifacts/native-hierarchy-policy-tests"]
 retained_artifacts = [{ name = "native-hierarchy-policy-tests", path = "automation/artifacts/native-hierarchy-policy-tests", max_bytes = 16777216 }, { name = "native-hierarchy-policy-evidence", path = "automation/artifacts/native-hierarchy-policy/native-session-current", max_bytes = 33554432 }]
+
+[test.native-synchronization-plan]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-synchronization-plan.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-synchronization-plan.check]]
+name = "input-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/synchronization-plan-input-contracts"]
+retained_artifacts = [{ name = "synchronization-plan-input-contracts", path = "automation/artifacts/synchronization-plan-input-contracts", max_bytes = 16777216 }]
+
+[[test.native-synchronization-plan.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["model-build", "codec", "native-build", "rendered"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-synchronization-plan.check]]
+name = "model-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity"]
+
+[[test.native-synchronization-plan.check]]
+name = "codec"
+tier = "development"
+requires = ["model-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_erc_override_edits$|^qa_net_chain_terminals$|^qa_schematic_state_format$", "--output-on-failure", "--no-tests=error"]
+
+[[test.native-synchronization-plan.check]]
+name = "native-build"
+tier = "development"
+requires = ["codec"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-synchronization-plan.check]]
+name = "rendered"
+tier = "development"
+requires = ["native-build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSynchronizationPlan", "--logger", "trx", "--results-directory", "automation/artifacts/native-synchronization-plan-tests"]
+retained_artifacts = [{ name = "native-synchronization-plan-tests", path = "automation/artifacts/native-synchronization-plan-tests", max_bytes = 16777216 }, { name = "native-synchronization-plan-evidence", path = "automation/artifacts/native-synchronization-plan/native-session-current", max_bytes = 33554432 }]

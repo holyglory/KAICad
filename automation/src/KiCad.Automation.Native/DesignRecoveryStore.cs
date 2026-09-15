@@ -71,7 +71,7 @@ public sealed class DesignRecoveryStore(string statePath)
     public static string HierarchySnapshotToken(DesignRecoveryState state) =>
         SchematicHierarchyMerge.SnapshotToken(state.Baseline.Schematic, ReadDesired(state).Schematic, state.Observed);
 
-    private static SchematicDesign ReadDesired(DesignRecoveryState state)
+    internal static SchematicDesign ReadDesired(DesignRecoveryState state)
     {
         try { return SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(state.DesiredFileBytes), state.KnowledgeLibraries); }
         catch (System.Text.DecoderFallbackException error) { throw Failure("invalid_desired_design", error.Message); }

@@ -290,6 +290,35 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_design_recovery_plan");
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve");
             CollectionAssert.Contains(names, "kicad_design_nets_reconcile");
+            CollectionAssert.Contains(names, "kicad_design_sync_plan");
+            string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
+            var syncFixture = SchematicSynchronizationPlanTests.Fixture();
+            var syncStore = new DesignRecoveryStore(syncRecoveryPath);
+            var syncSaved = syncStore.Save(syncFixture, null);
+            byte[] syncOriginal = await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token);
+            var syncPlan = await Request(4080, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken } });
+            Assert.IsFalse(syncPlan.GetProperty("result").GetProperty("isError").GetBoolean(),
+                syncPlan.GetProperty("result").GetProperty("structuredContent").GetProperty("errorMessage").GetString());
+            var syncData = syncPlan.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(syncData.GetProperty("canPrepare").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("liveMutationAuthorized").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("designFileWritten").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("baselineAdvanced").GetBoolean());
+            Assert.AreEqual(SchematicDesignXml.Write(syncFixture.Baseline, syncFixture.KnowledgeLibraries),
+                syncData.GetProperty("candidateDesignXml").GetString());
+            var staleSync = await Request(4081, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = "stale" } });
+            Assert.AreEqual("design_recovery_changed", staleSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var wrongSync = await Request(4082, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken } });
+            Assert.AreEqual("recovery_instance_mismatch", wrongSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.ThrowsExactly<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
+                syncFixture.InstanceId.ToString("D"), syncRecoveryPath, syncSaved.RevisionToken, new CancellationToken(true)));
+            CollectionAssert.AreEqual(syncOriginal, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
             string netRecoveryPath = Path.Combine(state, "designs", "net-recovery.json");
             var netFixture = SchematicNetReconciliationTests.Fixture();
             var netStore = new DesignRecoveryStore(netRecoveryPath);

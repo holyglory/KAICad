@@ -36,7 +36,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeHierarchyPolicy")]
     public Task ProjectElectricalPolicySurvivesNativeHierarchyRoundTrips() => RunNativeSessions(NativeJourney.HierarchyPolicy);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy }
+    [TestMethod, TestCategory("NativeSynchronizationPlan")]
+    public Task ManualNativeMovesPrepareOneConsistentXmlDesign() => RunNativeSessions(NativeJourney.SynchronizationPlan);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -50,6 +53,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Setup => "native-setup-draft", NativeJourney.BomSettings => "native-bom-settings",
                 NativeJourney.NetSettings => "native-net-settings",
                 NativeJourney.HierarchyPolicy => "native-hierarchy-policy",
+                NativeJourney.SynchronizationPlan => "native-synchronization-plan",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -306,6 +310,9 @@ public sealed partial class NativeSessionTests
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
                     }
+                    else if (journey == NativeJourney.SynchronizationPlan)
+                        await VerifyInteractiveMoveAdmission(client, opened.Document, electrical, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.HierarchyPolicy)
                         await VerifyHierarchyProjectPolicy(client, opened.Document, hierarchyFixture,
                             focusProcessId, ":" + displayNumber, evidence, deadline.Token);

@@ -99,6 +99,20 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(new byte[] { 0xff }, recovery.Read()!.State.DesiredFileBytes);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + (split ? "-manual-split-plan.xml" : "-manual-undo-plan.xml")),
                 Model.EngineeringDesignXml.Write(plan.Candidate, []), token);
+            var combined = SchematicSynchronizationPlanner.Plan(input, token);
+            Assert.IsTrue(combined.CanPrepare, combined.ErrorCode + ": " + combined.ErrorMessage);
+            Assert.IsEmpty(combined.NativeOperations, "A pure native edit already exists in the observed schematic.");
+            Assert.IsTrue(combined.ObservedConnectivity!.ConnectivityEquivalent);
+            Assert.IsFalse(combined.NativeConnectivityValidationRequired);
+            Assert.IsNotNull(combined.CandidateXml);
+            var fullDesign = SchematicDesignXml.Read(combined.CandidateXml, []);
+            Assert.AreEqual(saved.State.Observed, fullDesign.Schematic);
+            Assert.AreEqual(requirement.Text, fullDesign.Engineering.Structure.Statements.Single(s => s.Id == requirement.Id).Text);
+            Assert.AreEqual(split, fullDesign.Engineering.Structure.HasUnresolvedNetBindings);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + (split ? "-manual-split-design.xml" : "-manual-undo-design.xml")),
+                combined.CandidateXml, token);
+            Assert.AreEqual(saved.RevisionToken, recovery.Read()!.RevisionToken);
+            CollectionAssert.AreEqual(new byte[] { 0xff }, recovery.Read()!.State.DesiredFileBytes);
         }
         Assert.AreEqual(NetOf(netsBefore, fixture.PinA), NetOf(netsBefore, fixture.PinB));
         var select = new AddToSelection { Header = header };

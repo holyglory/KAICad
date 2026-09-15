@@ -781,8 +781,15 @@ an ID with different inputs is rejected. The executor also checks the actual XML
 before resuming native actions, even if file intake has not yet seen a save.
 The focused Linux journey verifies these paths. A first synchronization may need
 to establish a known full-content save checkpoint; later unchanged requests do
-not rewrite the design or baseline. The high-level MCP tool, full process-crash
-journey, retained-file cleanup and automatic event loop remain unqualified.
+not rewrite the design or baseline. A compiled test-only STDIO host now calls
+the same synchronization handler and is forcibly terminated after native-edit
+reply, native-save reply, or completion before the MCP reply. The focused Linux
+journey repeats those three boundaries for two real editor instances, reattaches
+from a fresh host and verifies the same operation and revision, preserved dirty
+work, native/XML agreement and connectivity. It is not a shipped server mode or
+Codex Desktop proof. File-publication crash boundaries, retained-file cleanup,
+broader edit qualification and the automatic event loop remain open; the normal
+MCP server still does not advertise the high-level apply tool.
 
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact

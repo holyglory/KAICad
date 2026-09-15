@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="KiCad.Automation.Tests" />
+    <InternalsVisibleTo Include="KiCad.Automation.SyncHarness" />
     <ProjectReference Include="../KiCad.Automation.Distribution/KiCad.Automation.Distribution.csproj" />
     <ProjectReference Include="../KiCad.Automation.Native/KiCad.Automation.Native.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />

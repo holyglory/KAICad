@@ -57,6 +57,13 @@ internal sealed class StdioMcpFixture : IMcpToolClient
     public async Task<JsonElement> ListTools(string? cursor) =>
         (await Request("tools/list", cursor is null ? new { } : (object)new { cursor })).GetProperty("result").Clone();
 
+    internal async Task TerminateAsync()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (!process.HasExited) { ForcedTermination = true; process.Kill(entireProcessTree: true); }
+        await process.WaitForExitAsync();
+    }
+
     private async Task<JsonElement> Request(string method, object parameters)
     {
         int id = ++nextId;

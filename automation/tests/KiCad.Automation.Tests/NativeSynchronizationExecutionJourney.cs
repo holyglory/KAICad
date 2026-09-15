@@ -122,6 +122,7 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(historical.Replayed); Assert.AreEqual(reverse.NativeRevision, historical.NativeRevision);
         Assert.AreEqual(0, historicalAudit.Requests, "Historical completion lookup must not contact or edit KiCad.");
         CollectionAssert.AreEqual(beforeHistoricalReplay, await File.ReadAllBytesAsync(recordPath, token));
+        await VerifySynchronizationServiceRestart(client, document, store, designPath, evidence, instanceId, token);
         var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document }, token);
         Assert.AreEqual(image.Snapshot.Revision, image.Preview.Revision);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-sync-execution.png"), image.Preview.Png.ToByteArray(), token);

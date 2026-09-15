@@ -4,6 +4,7 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../KiCad.Automation.SyncHarness/KiCad.Automation.SyncHarness.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../tools/KiCad.Automation.Downloads/KiCad.Automation.Downloads.csproj" />
     <ProjectReference Include="../../tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj" />
     <ProjectReference Include="../../tools/KiCad.Automation.PackageProbe/KiCad.Automation.PackageProbe.csproj" ReferenceOutputAssembly="false" />

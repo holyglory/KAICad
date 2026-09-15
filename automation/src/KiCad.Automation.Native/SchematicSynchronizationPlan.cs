@@ -47,12 +47,13 @@ public static class SchematicSynchronizationPlanner
                     hierarchy.ErrorMessage ?? electrical.ErrorMessage ?? "Resolve the reported hierarchy or electrical conflicts first.");
 
             properties = SchematicModelProjection.Reconcile(state.Baseline, electrical.Candidate,
-                state.Observed, state.KnowledgeLibraries, token);
+                hierarchy.Merged!, state.KnowledgeLibraries, token);
             gaps.AddRange(properties.CoverageGaps);
             if (properties.Candidate is null)
                 return Failure(properties.ErrorCode ?? "design_property_conflict", properties.ErrorMessage ?? "Resolve the reported native/model property conflicts first.");
             var candidate = desired with { Engineering = properties.Candidate,
                 Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic) };
+            candidate = SchematicPropertyProjection.Project(state.Baseline, candidate, state.KnowledgeLibraries, token);
             var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
             gaps.AddRange(bindings.CoverageGaps);
             if (!bindings.IdentitiesResolved)
@@ -86,9 +87,10 @@ public static class SchematicSynchronizationPlanner
             if (SchematicDesignXml.Write(decoded, state.KnowledgeLibraries) != xml)
                 return Failure("inconsistent_design_serialization", "The combined candidate must round-trip without information loss.");
             token.ThrowIfCancellationRequested();
-            return new(candidate, xml, hierarchy.NativeOperations.Select(x => x.Clone()).ToArray(), hierarchy, electrical,
+            var operations = SchematicHierarchyDelta.Plan(state.Observed, candidate.Schematic, token);
+            return new(candidate, xml, operations.Select(x => x.Clone()).ToArray(), hierarchy, electrical,
                 properties, [], [], connectivity, gaps.Distinct().ToArray(),
-                hierarchy.NativeOperations.Count != 0 || !connectivity.ConnectivityEquivalent);
+                operations.Count != 0 || !connectivity.ConnectivityEquivalent);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
 

@@ -132,10 +132,20 @@ public sealed class SchematicSynchronizationPlanTests
                 : circuit with { Components = circuit.Components.Select((x, i) => x with { Reference = "U" + (90 + i) }).ToArray() };
             state = SchematicNetReconciliationTests.Desired(state, state.Baseline.Engineering with { Circuit = circuit });
             var result = SchematicSynchronizationPlanner.Plan(state);
-            Assert.IsFalse(result.CanPrepare);
-            Assert.AreEqual("native_projection_required", result.ErrorCode);
-            Assert.IsNotEmpty(result.ProjectionDifferences);
-            Assert.IsNull(result.CandidateXml); Assert.IsEmpty(result.NativeOperations);
+            if (placement)
+            {
+                Assert.IsFalse(result.CanPrepare);
+                Assert.AreEqual("native_projection_required", result.ErrorCode);
+                Assert.IsNotEmpty(result.ProjectionDifferences);
+                Assert.IsNull(result.CandidateXml); Assert.IsEmpty(result.NativeOperations);
+            }
+            else
+            {
+                Assert.IsTrue(result.CanPrepare, result.ErrorMessage);
+                Assert.IsEmpty(result.ProjectionDifferences);
+                Assert.IsNotEmpty(result.NativeOperations);
+                Assert.IsEmpty(SchematicDesignBindings.Inspect(result.Candidate!, state.KnowledgeLibraries).Differences);
+            }
         }
     }
 

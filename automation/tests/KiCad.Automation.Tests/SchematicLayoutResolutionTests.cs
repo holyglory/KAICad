@@ -11,7 +11,7 @@ namespace KiCad.Automation.Tests;
 public sealed class SchematicLayoutResolutionTests
 {
     [TestMethod]
-    public void CorrectPositionsCannotHideDisconnectedPinsOrRenamedLabels()
+    public void CorrectPositionsCannotHideDisconnectedPinsAndDisplayNamesDoNotDefineConnectivity()
     {
         var f = Fixture(); var changed = f.Native.Clone();
         changed.Nets.Clear();
@@ -19,6 +19,38 @@ public sealed class SchematicLayoutResolutionTests
             SchematicLayoutResolution.Resolve(f.Plan.Candidate!, changed, f.Batch, f.State.KnowledgeLibraries)).Code);
         var renamed = f.Native.Clone(); renamed.Nets[0].Name = "Different native display name";
         Assert.IsNotNull(SchematicLayoutResolution.Resolve(f.Plan.Candidate!, renamed, f.Batch, f.State.KnowledgeLibraries));
+    }
+
+    [TestMethod]
+    public void ConnectedLabelMovementPreservesTextAndLockedWireGeometry()
+    {
+        var f = Fixture(); var planned = f.Plan.Candidate! with { Schematic = f.Plan.Candidate!.Schematic.Clone() };
+        var observed = f.Native.Clone();
+        var document = f.Plan.NativeOperations.Single().TargetDocument;
+        string physical = planned.Schematic.Instances.Single(s => s.Metadata.Document.Equals(document)).Metadata.ScreenId.Value;
+        var label = new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new() { XNm = 10000000, YNm = 20000000 },
+            Text = new() { Position = new() { XNm = 10000000, YNm = 20000000 }, Text_ = "Preserved signal" },
+            Locked = LockedState.LsUnlocked };
+        var wire = new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Start = new() { XNm = 30000000, YNm = 20000000 }, End = new() { XNm = 40000000, YNm = 20000000 },
+            Type = SchematicLineType.SltWire, Locked = LockedState.LsLocked };
+        foreach (var screen in planned.Schematic.Instances.Where(s => s.Metadata.ScreenId.Value == physical))
+        { screen.Items.Add(Any.Pack(label)); screen.Items.Add(Any.Pack(wire)); }
+        var movedLabel = label.Clone(); movedLabel.Position.XNm += 2540000; movedLabel.Text.Position.XNm += 2540000;
+        foreach (var screen in observed.Hierarchy.Data.Instances.Where(s => s.Metadata.ScreenId.Value == physical))
+        { screen.Items.Add(Any.Pack(movedLabel)); screen.Items.Add(Any.Pack(wire)); }
+        Assert.IsNotNull(SchematicLayoutResolution.Resolve(planned, observed, f.Batch, f.State.KnowledgeLibraries));
+        foreach (bool changeWire in new[] { false, true })
+        {
+            var changed = observed.Clone();
+            foreach (var screen in changed.Hierarchy.Data.Instances.Where(s => s.Metadata.ScreenId.Value == physical))
+            {
+                if (changeWire) { var altered = wire.Clone(); altered.End.XNm++; screen.Items[^1] = Any.Pack(altered); }
+                else { var altered = movedLabel.Clone(); altered.Text.Text_ = "Different signal"; screen.Items[^2] = Any.Pack(altered); }
+            }
+            Assert.ThrowsExactly<AutomationException>(() => SchematicLayoutResolution.Resolve(planned, changed, f.Batch, f.State.KnowledgeLibraries));
+        }
     }
 
     [TestMethod]

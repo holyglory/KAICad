@@ -6,6 +6,8 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class NativeCaptionMcpProbeTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     private static readonly string[] RequiredTools = ["kicad_instance_attach", "kicad_instance_reattach",
         "kicad_schematic_observe", "kicad_instance_reconnect_after_update"];
 
@@ -127,6 +129,52 @@ public sealed class NativeCaptionMcpProbeTests
             Assert.IsFalse(child.ForcedTermination);
         }
         finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [TestMethod, TestCategory("ExternalIntegration"), TestCategory("NativeWindowsMcpCapabilities")]
+    public async Task ActualWindowsClientChecksLiveCapabilitiesAndClosesItsOwnedProcess()
+    {
+        if (!OperatingSystem.IsWindows()) { Assert.Inconclusive("Requires the native Windows MCP client."); return; }
+        DirectoryInfo? repository = new(AppContext.BaseDirectory);
+        while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "KiCad.Automation.slnx")))
+            repository = repository.Parent;
+        Assert.IsNotNull(repository);
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        string executable = Path.Combine(repository.FullName, "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.exe");
+        Assert.IsTrue(File.Exists(executable), "Build the actual Windows MCP apphost before this check.");
+        string scratch = Directory.CreateTempSubdirectory("kicad-win-catalog-").FullName;
+        string state = Path.Combine(scratch, "registry");
+        string evidence = Directory.CreateDirectory(Path.Combine(Environment.GetEnvironmentVariable("KICAD_HOSTED_FIXTURE_EVIDENCE")
+            ?? TestContext.TestResultsDirectory!, "windows-mcp-capabilities")).FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using var job = new WindowsProcessJob();
+        try
+        {
+            await WindowsFixtureCleanup.PreserveFailuresAsync(async () =>
+            {
+                await using (var probe = new NativeCaptionMcpProbe(state, evidence, deadline.Token, async (path, name) =>
+                    await WindowsInstalledPackageTests.Mcp.Start(path, scratch, state, evidence, name, job, deadline.Token)))
+                    await probe.StartAsync(executable);
+                using var request = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "caption-mcp-0-mcp-request.json"), deadline.Token));
+                Assert.AreEqual("tools/list", request.RootElement.GetProperty("method").GetString());
+                Assert.AreEqual("received", request.RootElement.GetProperty("phase").GetString());
+                using var capture = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "caption-mcp-0-mcp-capture.json"), deadline.Token));
+                // Reader cancellation is intentional when an inherited writer remains;
+                // require completed capture and released handles, not an EOF scheduling race.
+                await using var log = new FileStream(Path.Combine(evidence, "caption-mcp-0-mcp.stderr.log"),
+                    FileMode.Open, FileAccess.Read, FileShare.None);
+                Assert.AreEqual(capture.RootElement.GetProperty("bytes").GetInt64(), log.Length);
+            }, async () =>
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                await job.StopAndWaitAsync(cleanup.Token);
+                await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(scratch);
+            });
+        }
+        finally
+        {
+            foreach (string file in Directory.GetFiles(evidence)) TestContext.AddResultFile(file);
+        }
     }
 
     private static NativeCaptionMcpProbe Probe(CatalogClient client) => new("unused", "unused", CancellationToken.None,

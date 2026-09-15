@@ -2931,6 +2931,23 @@ requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSynchronizationPlan", "--logger", "trx", "--results-directory", "automation/artifacts/native-synchronization-plan-tests"]
 retained_artifacts = [{ name = "native-synchronization-plan-tests", path = "automation/artifacts/native-synchronization-plan-tests", max_bytes = 16777216 }, { name = "native-synchronization-plan-evidence", path = "automation/artifacts/native-synchronization-plan/native-session-current", max_bytes = 33554432 }]
 
+[test.sync-recovery-contracts]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.sync-recovery-contracts.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.sync-recovery-contracts.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/sync-recovery-contracts"]
+retained_artifacts = [{ name = "sync-recovery-contracts", path = "automation/artifacts/sync-recovery-contracts", max_bytes = 16777216 }]
+
 [test.native-checked-batch]
 timeout_seconds = 3600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

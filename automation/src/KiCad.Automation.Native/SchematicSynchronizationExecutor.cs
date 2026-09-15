@@ -10,9 +10,9 @@ public sealed record SchematicSynchronizationExecution(string RecoveryRevisionTo
     NativeRevision NativeRevision, bool NativeMutationCommitted, bool NativeFilesSaved,
     bool SynchronizationCommitted, CheckedSchematicBatchReceipt? NativeReceipt);
 
-/// <summary>Executes one complete, recoverable XML-to-native synchronization.
-/// Planning remains pure; this type owns the guarded commit and its recovery journal.</summary>
-public static class SchematicSynchronizationExecutor
+/// <summary>Draft synchronization executor. File publication and interruption
+/// handling remain under qualification; not exposed as an MCP capability.</summary>
+internal static class SchematicSynchronizationExecutor
 {
     public static async Task<SchematicSynchronizationExecution> ApplyAsync(DesignRecoveryStore store,
         NativeClient client, string designPath, string expectedRevisionToken,
@@ -25,6 +25,9 @@ public static class SchematicSynchronizationExecutor
         var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
         if (saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery changed; inspect it before applying synchronization.");
+        var session = await client.HandshakeAsync(cancellationToken);
+        if (session.InstanceId != saved.State.InstanceId.ToString("D"))
+            throw new AutomationException("recovery_instance_mismatch", "The native connection belongs to another saved instance.");
         if (saved.State.PendingMutation is not null)
         {
             if (saved.State.PendingCandidateFileBytes is null)
@@ -82,9 +85,7 @@ public static class SchematicSynchronizationExecutor
             await SaveNativeAsync(client, saveRequest, receipt.ProcessEpoch, cancellationToken);
         }
 
-        var observation = plan.NativeOperations.Count == 0
-            ? await DesignRecoveryInspector.ObserveAsync(store, client, cancellationToken, includeElectrical: true)
-            : await DesignRecoveryInspector.ObserveAsync(store, client, cancellationToken, includeElectrical: true);
+        var observation = await DesignRecoveryInspector.ObserveAsync(store, client, cancellationToken, includeElectrical: true);
         if (observation.Inspection.Disposition != DesignRecoveryDisposition.CompletedNeedsReconciliation
             && pending.State.PendingMutation is not null)
             throw new AutomationException("native_sync_receipt_missing", "The native commit cannot be reconciled from its exact receipt.");
@@ -95,16 +96,16 @@ public static class SchematicSynchronizationExecutor
         if (!comparison.PinBindingsComplete || !comparison.ConnectivityEquivalent)
             throw new AutomationException("native_sync_connectivity_mismatch", "The committed native schematic does not match the XML connectivity candidate.");
 
+        RequireRecoveryToken(store, pending.RevisionToken);
         string designHash = await PublishCandidateAsync(designPath, originalXml, candidateXml, cancellationToken);
-        var current = store.Read() ?? throw new AutomationException("design_recovery_changed", "Recovery disappeared during synchronization.");
-        var finalized = store.Save(current.State with
+        var finalized = store.Save(pending.State with
         {
             Baseline = plan.Candidate, DesiredFileBytes = candidateXml, Observed = observation.Snapshot.Data,
             NativeRevision = new(observation.Snapshot.Revision.Epoch, observation.Snapshot.Revision.Sequence),
             TrackingComplete = observation.Snapshot.TrackingComplete, BaselineElectrical = observation.Electrical,
             ObservedElectrical = observation.Electrical, PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, HierarchyResolution = null
-        }, current.RevisionToken);
+        }, pending.RevisionToken);
         return new(finalized.RevisionToken, designHash, finalized.State.NativeRevision,
             receipt is not null, receipt is not null, true, receipt);
     }
@@ -113,6 +114,8 @@ public static class SchematicSynchronizationExecutor
         NativeClient client, string designPath, StoredDesignRecovery saved, CancellationToken token)
     {
         var inspection = await DesignRecoveryInspector.InspectAsync(store, client, token);
+        if (inspection.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "Recovery changed before the pending operation was inspected.");
         if (inspection.CheckedReceipt?.Status != CheckedSchematicBatchStatus.CsbsCompleted)
             throw new AutomationException("pending_recovery_requires_reconciliation", "The saved native batch is not confirmed; inspect its exact receipt before retrying.");
         var pendingState = saved.State;
@@ -142,13 +145,10 @@ public static class SchematicSynchronizationExecutor
             pendingState.KnowledgeLibraries, token);
         if (!comparison.PinBindingsComplete || !comparison.ConnectivityEquivalent)
             throw new AutomationException("native_sync_connectivity_mismatch", "The recovered native schematic does not match its saved XML connectivity candidate.");
-        byte[] originalXml = await File.ReadAllBytesAsync(designPath, token);
-        if (!originalXml.AsSpan().SequenceEqual(pendingState.DesiredFileBytes))
-            throw new AutomationException("design_file_changed_during_sync", "The design XML changed before the pending synchronization could be finalized.");
         byte[] candidateBytes = pendingState.PendingCandidateFileBytes!;
-        string designHash = await PublishCandidateAsync(designPath, originalXml, candidateBytes, token);
-        var current = store.Read() ?? throw new AutomationException("design_recovery_changed", "Recovery disappeared during synchronization recovery.");
-        var finalized = store.Save(current.State with
+        RequireRecoveryToken(store, saved.RevisionToken);
+        string designHash = await PublishCandidateAsync(designPath, pendingState.DesiredFileBytes, candidateBytes, token);
+        var finalized = store.Save(pendingState with
         {
             Baseline = candidate, DesiredFileBytes = candidateBytes,
             Observed = observation.Snapshot.Data,
@@ -156,9 +156,15 @@ public static class SchematicSynchronizationExecutor
             TrackingComplete = observation.Snapshot.TrackingComplete, BaselineElectrical = observation.Electrical,
             ObservedElectrical = observation.Electrical, PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, HierarchyResolution = null
-        }, current.RevisionToken);
+        }, saved.RevisionToken);
         return new(finalized.RevisionToken, designHash, finalized.State.NativeRevision, true, true, true,
             inspection.CheckedReceipt);
+    }
+
+    private static void RequireRecoveryToken(DesignRecoveryStore store, string token)
+    {
+        if (store.Read()?.RevisionToken != token)
+            throw new AutomationException("design_recovery_changed", "A newer recovery record must be reconciled before publishing this candidate.");
     }
 
     private static async Task SaveNativeAsync(NativeClient client, CheckedSaveDocument request,

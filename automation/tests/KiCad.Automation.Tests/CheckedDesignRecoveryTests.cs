@@ -167,12 +167,54 @@ public sealed class CheckedDesignRecoveryTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task FailedSavesDoNotHideCommittedEditsAndLateRecoveryChangesAreRejected()
+    {
+        string directory = Directory.CreateTempSubdirectory("checked-save-inspection-").FullName;
+        try
+        {
+            var peer = new ReceiptTransport { Status = CheckedSchematicBatchStatus.CsbsCompleted };
+            var state = Fixture(directory, peer.Session.Epoch, peer.Session.InstanceId);
+            var after = state.PendingNativeState!.Clone(); after.Revision.Sequence++;
+            state = state with { PendingCandidateFileBytes = state.DesiredFileBytes.ToArray(), PendingNativeSave = new()
+            { Document = state.PendingMutation!.Document.Clone(), ExpectedState = after, OperationId = Guid.NewGuid().ToString("D") } };
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json")); var saved = store.Save(state, null);
+            var client = new NativeClient(peer, NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), peer.Session.Epoch);
+            foreach (var status in new[] { LifecycleOperationStatus.LosSaved, LifecycleOperationStatus.LosFailed,
+                         LifecycleOperationStatus.LosRejected, LifecycleOperationStatus.LosIndeterminate })
+            {
+                peer.SaveStatus = status;
+                var result = await DesignRecoveryInspector.InspectAsync(store, client);
+                Assert.AreEqual(DesignRecoveryDisposition.CompletedNeedsReconciliation, result.Disposition,
+                    "Saving and committing an edit are different operations; a failed save cannot undo or hide a committed edit.");
+                Assert.AreEqual(status, result.SaveReceipt!.Status);
+                Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+            }
+            foreach (var status in new[] { LifecycleOperationStatus.LosUnknown, LifecycleOperationStatus.LosClosed, (LifecycleOperationStatus)999 })
+            {
+                peer.SaveStatus = status;
+                var error = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryInspector.InspectAsync(store, client));
+                Assert.AreEqual("invalid_recovery_save_receipt", error.Code);
+            }
+            peer.SaveStatus = LifecycleOperationStatus.LosSaved;
+            peer.BeforeSaveReply = () => store.Save(saved.State with { DesiredFileBytes = [0xff] }, saved.RevisionToken);
+            var changed = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryInspector.InspectAsync(store, client));
+            Assert.AreEqual("design_recovery_changed", changed.Code);
+            CollectionAssert.AreEqual(new byte[] { 0xff }, store.Read()!.State.DesiredFileBytes);
+            Assert.IsNotNull(store.Read()!.State.PendingMutation);
+            Assert.AreEqual(0, peer.Mutations);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private sealed class ReceiptTransport : INativeTransport
     {
         internal NativeClientTests.FixtureTransport Session { get; } = new() { Epoch = Guid.NewGuid().ToString("D") };
         internal CheckedSchematicBatchStatus Status { get; set; }
         internal bool WrongReceipt { get; set; }
         internal Action? BeforeReply { get; set; }
+        internal Action? BeforeSaveReply { get; set; }
+        internal LifecycleOperationStatus SaveStatus { get; set; } = LifecycleOperationStatus.LosSaved;
         internal int Inspections { get; private set; }
         internal int LegacyInspections { get; private set; }
         internal int Mutations { get; private set; }
@@ -180,8 +222,18 @@ public sealed class CheckedDesignRecoveryTests
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var envelope = ApiRequest.Parser.ParseFrom(bytes);
-            if (envelope.Message.Is(ApplySchematicItemBatch.Descriptor) || envelope.Message.Is(CheckedSchematicBatch.Descriptor)) Mutations++;
+            if (envelope.Message.Is(ApplySchematicItemBatch.Descriptor) || envelope.Message.Is(CheckedSchematicBatch.Descriptor)
+                || envelope.Message.Is(CheckedSaveDocument.Descriptor)) Mutations++;
             if (envelope.Message.Is(InspectSchematicOperation.Descriptor)) LegacyInspections++;
+            if (envelope.Message.Is(ReadLifecycleOperation.Descriptor))
+            {
+                var query = envelope.Message.Unpack<ReadLifecycleOperation>();
+                var saved = new LifecycleOperationResult { Document = query.Document.Clone(), OperationId = query.OperationId,
+                    ProcessEpoch = query.ProcessEpoch, Status = SaveStatus };
+                BeforeSaveReply?.Invoke();
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(saved) }.ToByteArray());
+            }
             if (!envelope.Message.Is(ReadCheckedSchematicBatchReceipt.Descriptor)) return Session.ExchangeAsync(endpoint, bytes, timeout, cancellationToken);
             Inspections++; Last = envelope.Message.Unpack<ReadCheckedSchematicBatchReceipt>();
             var result = new CheckedSchematicBatchReceipt { Document = Last.Document.Clone(), ProcessEpoch = Last.ProcessEpoch,

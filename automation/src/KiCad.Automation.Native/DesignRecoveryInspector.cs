@@ -73,8 +73,6 @@ public static class DesignRecoveryInspector
         var inspection = await InspectAsync(store, client, cancellationToken);
         if (inspection.RevisionToken != saved.RevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery state changed before observation; reload it before continuing.");
-        if (saved.State.PendingNativeSave is not null && inspection.SaveReceipt?.Status != LifecycleOperationStatus.LosSaved)
-            throw new AutomationException("native_save_requires_recovery", "The synchronized native save is not confirmed; inspect or retry its exact saved operation.");
         // InspectAsync intentionally makes no IPC call when there is no pending operation.
         // Observation always verifies the saved instance, including that case.
         var session = await client.HandshakeAsync(cancellationToken);
@@ -176,17 +174,17 @@ public static class DesignRecoveryInspector
                     ProcessEpoch = saveRequest.ExpectedState.ProcessEpoch
                 }, cancellationToken);
                 if (!Equals(saveReceipt.Document, saveRequest.Document) || saveReceipt.OperationId != saveRequest.OperationId
-                    || saveReceipt.ProcessEpoch != saveRequest.ExpectedState.ProcessEpoch)
+                    || saveReceipt.ProcessEpoch != saveRequest.ExpectedState.ProcessEpoch
+                    || saveReceipt.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
+                        or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate))
                     throw new AutomationException("invalid_recovery_save_receipt", "The native save receipt identifies a different operation.");
-                if (checkedDisposition == DesignRecoveryDisposition.CompletedNeedsReconciliation)
-                    checkedDisposition = saveReceipt.Status switch
-                    {
-                        LifecycleOperationStatus.LosSaved => DesignRecoveryDisposition.CompletedNeedsReconciliation,
-                        LifecycleOperationStatus.LosRejected => DesignRecoveryDisposition.Rejected,
-                        LifecycleOperationStatus.LosIndeterminate => DesignRecoveryDisposition.Indeterminate,
-                        _ => DesignRecoveryDisposition.NotFound
-                    };
             }
+            // A failed save is not a rejected (or missing) schematic mutation.
+            // Keep both outcomes available so observation can inspect recovery
+            // without retrying, erasing, or misreporting the committed edit.
+            cancellationToken.ThrowIfCancellationRequested();
+            if (store.Read()?.RevisionToken != saved.RevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed during native save receipt inspection.");
             return new(saved.RevisionToken, checkedDisposition, null, checkedReceipt, saveReceipt);
         }
         var request = new InspectSchematicOperation

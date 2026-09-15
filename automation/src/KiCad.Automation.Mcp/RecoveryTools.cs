@@ -13,9 +13,9 @@ public sealed class RecoveryTools
     private readonly InstanceRegistry? registry;
     public RecoveryTools() { }
     public RecoveryTools(InstanceRegistry registry) => this.registry = registry;
-    [McpServerTool(Name = "kicad_design_sync_apply", ReadOnly = false),
-     Description("Execute one complete XML-to-native synchronization for an explicit instance. Recomputes the candidate from the saved recovery record, verifies the live checked native checkpoint, journals the exact pending batch before mutation, applies and saves native edits, atomically publishes the engineering XML, then advances baseline and observations together. Requires an absolute design XML path whose bytes still equal the saved desired version. Conflicts, stale checkpoints, file changes, failed native saves or persistence failures leave the pending recovery record available for inspection; there is no unchecked fallback. Reuse recovery inspection before retrying an uncertain operation.")]
-    public async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
+    // Qualification pending (p7e712f1bb764e327): do not advertise a mutation tool
+    // before competing-file writes and interrupted commits have native evidence.
+    internal async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
         string designPath, string expectedRevisionToken, CancellationToken cancellationToken)
     {
         try

@@ -135,6 +135,40 @@ public sealed partial class NativeSessionTests
             while ((await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, limit.Token)).Title != title)
                 await Task.Delay(50, limit.Token);
         }
+        // A committed edit remains observable even when saving it was refused.
+        // Exercise the actual STDIO recovery surface, not just receipt handlers.
+        string recoveryPath = Path.Combine(evidence, instanceId + "-checked-save-recovery.json");
+        var saveRecovery = new DesignRecoveryStore(recoveryPath);
+        var rejectedSave = new CheckedSaveDocument { Document = document.Clone(),
+            OperationId = Guid.NewGuid().ToString("D"), ExpectedState = initial.Clone() };
+        var pendingSave = saveRecovery.Save(pending.State with { PendingNativeSave = rejectedSave,
+            PendingCandidateFileBytes = pending.State.DesiredFileBytes.ToArray() }, null);
+        var refused = await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(rejectedSave, token);
+        Assert.AreEqual(LifecycleOperationStatus.LosRejected, refused.Status);
+        var refusedObservation = await mcp.Tool("kicad_design_recovery_observe", new
+            { instanceId, recoveryPath, expectedRevisionToken = pendingSave.RevisionToken });
+        RequireToolSuccess(refusedObservation);
+        var refusedData = refusedObservation.GetProperty("structuredContent");
+        Assert.AreEqual("CompletedNeedsReconciliation", refusedData.GetProperty("disposition").GetString());
+        Assert.AreEqual(refused, SchematicJson.Parser.Parse<LifecycleOperationResult>(refusedData.GetProperty("saveReceipt").GetRawText()));
+        Assert.AreEqual(pendingSave.RevisionToken, saveRecovery.Read()!.RevisionToken);
+
+        // Retry uses a new, explicitly observed save after the rejected save was
+        // inspected. Its receipt is independent of the original schematic batch.
+        var acceptedSave = new CheckedSaveDocument { Document = document.Clone(),
+            OperationId = Guid.NewGuid().ToString("D"), ExpectedState = await State() };
+        pendingSave = saveRecovery.Save(pendingSave.State with { PendingNativeSave = acceptedSave }, pendingSave.RevisionToken);
+        var saved = await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(acceptedSave, token);
+        Assert.AreEqual(LifecycleOperationStatus.LosSaved, saved.Status);
+        Assert.AreEqual(saved, await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(acceptedSave, token));
+        var savedObservation = await mcp.Tool("kicad_design_recovery_observe", new
+            { instanceId, recoveryPath, expectedRevisionToken = pendingSave.RevisionToken });
+        RequireToolSuccess(savedObservation);
+        var savedData = savedObservation.GetProperty("structuredContent");
+        Assert.AreEqual(receipt, SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(savedData.GetProperty("checkedReceipt").GetRawText()));
+        Assert.AreEqual(saved, SchematicJson.Parser.Parse<LifecycleOperationResult>(savedData.GetProperty("saveReceipt").GetRawText()));
+        Assert.AreEqual(pendingSave.RevisionToken, saveRecovery.Read()!.RevisionToken);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-checked-save-observation.json"), savedData.GetRawText(), token);
         var observation = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document }, token);
         Assert.AreEqual(observation.Preview.Revision, observation.Snapshot.Revision);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-checked-batch.png"), observation.Preview.Png.ToByteArray(), token);

@@ -37,6 +37,7 @@ class SCH_SELECTION;
 class SCH_SHEET;
 class SCH_COMMIT;
 class SCH_ITEM;
+class SCH_PIN;
 class EE_GRID_HELPER;
 
 enum GRID_HELPER_GRIDS : int;
@@ -99,8 +100,13 @@ private:
     void updateItem( EDA_ITEM* aItem, bool aUpdateRTree ) const;
     void addDragSelection( EDA_ITEM* aItem );
     void removeDragSelection();
+    std::vector<VECTOR2I> moveConnectionPoints( SCH_ITEM* aItem ) const;
+    bool moveConnectedAt( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const;
+    std::set<SCH_ITEM*> moveConnectionCandidates( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const;
     const SCH_SHEET_PATH* m_explicitMovePath = nullptr;
     SCH_SELECTION* m_privateMoveSelection = nullptr;
+    std::map<SCH_ITEM*, std::vector<SCH_PIN*>> m_contextPins;
+    std::map<VECTOR2I, std::set<SCH_ITEM*>> m_contextPinOwners;
 
     bool doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aCommit );
 

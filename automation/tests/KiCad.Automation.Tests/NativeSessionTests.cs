@@ -187,7 +187,7 @@ public sealed partial class NativeSessionTests
                 Directory.CreateDirectory(hotkeyDirectory);
                 // Only the fixture's isolated user configuration is changed.
                 await File.WriteAllTextAsync(Path.Combine(hotkeyDirectory, "user.hotkeys"),
-                    "common.Control.pageSettings\tCtrl+F12\t\n", deadline.Token);
+                    "common.Control.pageSettings\tCtrl+F12\t\ncommon.Interactive.groupEnter\tCtrl+Shift+J\t\ncommon.Interactive.groupLeave\tCtrl+Shift+K\t\n", deadline.Token);
                 string schematic = Path.ChangeExtension(target.Project, ".kicad_sch");
                 var missing = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                     client.InvokeAsync<OpenDocument, OpenDocumentResponse>(
@@ -345,6 +345,8 @@ public sealed partial class NativeSessionTests
                             await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture,
                                 focusProcessId, ":" + displayNumber, evidence, target.Id,
                                 target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyMultiUnitConnectedMove(client, opened.Document, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
                         }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         {

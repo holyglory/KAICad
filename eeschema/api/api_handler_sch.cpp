@@ -642,6 +642,53 @@ static HANDLER_RESULT<PAGE_INFO> PreparePageGeometry( const types::PageSettings&
 }
 
 
+using MOVE_PIN_PARTITIONS = std::set<std::set<std::string>>;
+
+// Compare electrical membership, not generated net names or codes. Include
+// singleton pins omitted from the net map and every loaded sheet instance.
+static bool captureMovePinPartitions( SCHEMATIC& aSchematic, MOVE_PIN_PARTITIONS& aPartitions )
+{
+    CONNECTION_GRAPH* graph = aSchematic.ConnectionGraph();
+    if( !graph ) return false;
+    graph->Recalculate( aSchematic.Hierarchy(), true );
+    std::set<std::string> pins;
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        const std::string prefix = path.Path().AsString().ToStdString() + "#";
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( item )->GetPins( &path ) )
+            {
+                if( pin->m_Uuid == niluuid || !pins.insert( prefix + pin->m_Uuid.AsStdString() ).second )
+                    return false;
+            }
+    }
+    std::set<std::string> assigned;
+    for( const auto& entry : graph->GetNetMap() )
+    {
+        if( entry.second.empty() ) continue;
+        const auto* driver = entry.second.front()->GetDriverConnection();
+        if( driver && driver->IsBus() ) continue;
+        std::set<std::string> members;
+        for( CONNECTION_SUBGRAPH* subgraph : entry.second )
+        {
+            const std::string prefix = subgraph->GetSheet().Path().AsString().ToStdString() + "#";
+            for( SCH_ITEM* item : subgraph->GetItems() )
+            {
+                std::string id = prefix + item->m_Uuid.AsStdString();
+                if( item->Type() == SCH_PIN_T && !pins.count( id ) ) return false;
+                if( pins.count( id ) ) members.insert( std::move( id ) );
+            }
+        }
+        for( const std::string& id : members )
+            if( !assigned.insert( id ).second ) return false;
+        if( !members.empty() ) aPartitions.insert( std::move( members ) );
+    }
+    for( const std::string& pin : pins )
+        if( !assigned.count( pin ) ) aPartitions.insert( { pin } );
+    return true;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH::handleApplyItemBatch(
         const HANDLER_CONTEXT<kiapi::automation::v1::ApplySchematicItemBatch>& aCtx )
 {
@@ -893,7 +940,6 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             {
                 if( !m_frame )
                     return reject( prefix + "Connected movement requires an editor context" );
-                const bool displayed = targetSheet->Path() == m_frame->GetCurrentSheet().Path();
                 if( operationId.empty() || !aCtx.Request.has_expected_revision() )
                     return reject( prefix + "Connected movement requires revision and retry identity" );
                 if( !createdItems.empty() )
@@ -947,6 +993,9 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 }
                 if( delta == VECTOR2I( 0, 0 ) )
                     continue;
+                MOVE_PIN_PARTITIONS originalPins;
+                if( !captureMovePinPartitions( *schematic(), originalPins ) )
+                    return reject( prefix + "Cannot establish exact pin connections in all loaded sheet instances" );
                 auto* selectionTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
                 if( targetSheet->LastScreen() == m_frame->GetScreen() && !savedSelection )
                 {
@@ -959,23 +1008,16 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                         savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
                 }
                 wxString failure;
-                bool moved;
-                if( displayed )
-                {
-                    selectionTool->ClearSelection( true );
-                    for( const KIID& id : targets )
-                        selectionTool->AddItemToSel( available.at( id ), true );
-                    moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy( nativeCommit, delta, failure );
-                }
-                else
-                {
-                    std::vector<SCH_ITEM*> selected;
-                    for( const KIID& id : targets ) selected.push_back( available.at( id ) );
-                    moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy(
-                            nativeCommit, delta, failure, *targetSheet, selected );
-                }
+                std::vector<SCH_ITEM*> selected;
+                for( const KIID& id : targets ) selected.push_back( available.at( id ) );
+                const bool moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy(
+                        nativeCommit, delta, failure, *targetSheet, selected );
                 if( !moved )
                     return reject( prefix + failure.ToStdString() );
+
+                MOVE_PIN_PARTITIONS movedPins;
+                if( !captureMovePinPartitions( *schematic(), movedPins ) || movedPins != originalPins )
+                    return reject( prefix + "Connected movement would change pin connectivity in a loaded sheet instance" );
 
                 std::map<KIID, google::protobuf::Any> after;
                 for( SCH_ITEM* item : targetSheet->LastScreen()->Items() )

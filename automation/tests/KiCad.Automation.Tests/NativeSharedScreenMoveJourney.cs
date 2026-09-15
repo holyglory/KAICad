@@ -198,11 +198,15 @@ public sealed partial class NativeSessionTests
         string Path(SheetPath path) => string.Join('/', path.Path.Select(p => p.Value));
         var pins = state.Hierarchy.Data.Instances.SelectMany(screen => screen.Items
             .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
-            .SelectMany(symbol => symbol.Definition.Items.Where(i => i.Item.Is(SchematicPin.Descriptor))
+            .SelectMany(symbol => symbol.Definition.Items.Where(i => i.Item.Is(SchematicPin.Descriptor)
+                    && (i.Unit is null || i.Unit.Unit == 0 || i.Unit.Unit == symbol.Unit.Unit))
                 .Select(i => i.Item.Unpack<SchematicPin>()).Where(pin => pin.LibraryPinId is not null)
                 .Select(pin => Path(screen.Metadata.Document.SheetPath) + "#" + pin.Id.Value))).ToHashSet(StringComparer.Ordinal);
-        return state.Nets.Select(net => net.Sheets.SelectMany(sheet => sheet.Items.Select(id => Path(sheet.Path) + "#" + id.Value))
+        var groups = state.Nets.Select(net => net.Sheets.SelectMany(sheet => sheet.Items.Select(id => Path(sheet.Path) + "#" + id.Value))
                 .Where(pins.Contains).Order(StringComparer.Ordinal).ToArray()).Where(group => group.Length != 0)
-            .Select(group => string.Join("|", group)).Order(StringComparer.Ordinal).ToArray();
+            .ToList();
+        var assigned = groups.SelectMany(group => group).ToHashSet(StringComparer.Ordinal);
+        groups.AddRange(pins.Where(pin => !assigned.Contains(pin)).Select(pin => new[] { pin }));
+        return groups.Select(group => string.Join("|", group)).Order(StringComparer.Ordinal).ToArray();
     }
 }

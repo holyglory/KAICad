@@ -730,6 +730,46 @@ void SCH_MOVE_TOOL::removeDragSelection()
 }
 
 
+std::vector<VECTOR2I> SCH_MOVE_TOOL::moveConnectionPoints( SCH_ITEM* aItem ) const
+{
+    if( auto found = m_contextPins.find( aItem ); m_privateMoveSelection && found != m_contextPins.end() )
+    {
+        std::set<VECTOR2I> points;
+        for( SCH_PIN* pin : found->second ) points.insert( pin->GetPosition() );
+        return { points.begin(), points.end() };
+    }
+    return aItem->GetConnectionPoints();
+}
+
+
+bool SCH_MOVE_TOOL::moveConnectedAt( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const
+{
+    if( aItem->GetFlags() & ( STRUCT_DELETED | SKIP_STRUCT ) ) return false;
+    if( m_privateMoveSelection && m_contextPins.count( aItem ) )
+    {
+        const auto points = moveConnectionPoints( aItem );
+        return std::find( points.begin(), points.end(), aPoint ) != points.end();
+    }
+    return aItem->IsConnected( aPoint );
+}
+
+
+std::set<SCH_ITEM*> SCH_MOVE_TOOL::moveConnectionCandidates( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const
+{
+    std::set<SCH_ITEM*> candidates;
+    for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aItem->GetBoundingBox() ) )
+        candidates.insert( item );
+    if( m_privateMoveSelection )
+    {
+        // Another unit's pins can lie outside the visible unit's cached box.
+        for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aPoint, 1 ) ) candidates.insert( item );
+        if( auto found = m_contextPinOwners.find( aPoint ); found != m_contextPinOwners.end() )
+            candidates.insert( found->second.begin(), found->second.end() );
+    }
+    return candidates;
+}
+
+
 bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
                                     const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems )
 {
@@ -740,16 +780,29 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         return false;
     }
 
-    // Pin geometry still belongs to the loaded symbol unit. Never use another
-    // repeated instance's displayed unit to infer the target's connections.
+    // The physical drawing is shared. Include every pin actually used by a
+    // loaded instance, without switching the visible unit or changing symbols.
+    std::map<SCH_ITEM*, std::vector<SCH_PIN*>> contextPins;
+    std::map<VECTOR2I, std::set<SCH_ITEM*>> contextOwners;
     for( SCH_ITEM* item : aPath.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
     {
         auto* symbol = static_cast<SCH_SYMBOL*>( item );
-        if( symbol->GetUnitSelection( &aPath ) != symbol->GetUnit() )
+        std::set<SCH_PIN*> pins;
+        for( const SCH_SHEET_PATH& instance : m_frame->Schematic().Hierarchy() )
         {
-            aError = "The target's repeated-instance unit geometry requires explicit reconciliation";
-            return false;
+            if( instance.LastScreen() != aPath.LastScreen() ) continue;
+            for( SCH_PIN* pin : symbol->GetPins( &instance ) )
+            {
+                if( !pin->GetLibPin() )
+                {
+                    aError = "Connected movement requires resolved library pin geometry for every instance";
+                    return false;
+                }
+                pins.insert( pin );
+                contextOwners[pin->GetPosition()].insert( symbol );
+            }
         }
+        contextPins[item] = { pins.begin(), pins.end() };
     }
 
     std::map<KIID, EDA_ITEM_FLAGS> flags;
@@ -760,6 +813,8 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         item->RunOnChildren( remember, RECURSE_MODE::RECURSE );
     }
     SCH_SELECTION selection;
+    m_contextPins = std::move( contextPins );
+    m_contextPinOwners = std::move( contextOwners );
     m_explicitMovePath = &aPath;
     m_privateMoveSelection = &selection;
     auto release = [&]()
@@ -781,6 +836,8 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         }
         m_privateMoveSelection = nullptr;
         m_explicitMovePath = nullptr;
+        m_contextPins.clear();
+        m_contextPinOwners.clear();
     };
     try
     {
@@ -1490,7 +1547,7 @@ void SCH_MOVE_TOOL::setupItemsForDrag( SCH_SELECTION& aSelection, SCH_COMMIT* aC
             break;
 
         default:
-            connections = item->GetConnectionPoints();
+            connections = moveConnectionPoints( item );
         }
 
         for( const VECTOR2I& point : connections )
@@ -1536,7 +1593,16 @@ void SCH_MOVE_TOOL::setupItemsForMove( SCH_SELECTION& aSelection, std::vector<DA
 {
     // Mark the edges of the block with dangling flags for a move
     for( EDA_ITEM* item : aSelection )
-        static_cast<SCH_ITEM*>( item )->GetEndPoints( aInternalPoints );
+    {
+        auto found = m_contextPins.find( static_cast<SCH_ITEM*>( item ) );
+        if( m_privateMoveSelection && found != m_contextPins.end() )
+        {
+            for( SCH_PIN* pin : found->second )
+                aInternalPoints.emplace_back( PIN_END, pin->GetLibPin(), pin->GetPosition(), static_cast<SCH_ITEM*>( item ) );
+        }
+        else
+            static_cast<SCH_ITEM*>( item )->GetEndPoints( aInternalPoints );
+    }
 
     std::vector<DANGLING_END_ITEM> endPointsByType = aInternalPoints;
     std::vector<DANGLING_END_ITEM> endPointsByPos = endPointsByType;
@@ -2512,6 +2578,14 @@ void SCH_MOVE_TOOL::moveSelectionToSheet( SCH_SELECTION& aSelection, SCH_SHEET* 
 
 void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 {
+    if( m_privateMoveSelection )
+    {
+        // The setup index used pre-move positions. Dangling-line cleanup must
+        // recognize pins at their new positions in every active unit.
+        m_contextPinOwners.clear();
+        for( const auto& [symbol, pins] : m_contextPins )
+            for( SCH_PIN* pin : pins ) m_contextPinOwners[pin->GetPosition()].insert( symbol );
+    }
     // Need a local cleanup first to ensure we remove unneeded junctions
     m_frame->Schematic().CleanUp( aCommit, moveScreen(), !m_privateMoveSelection );
 
@@ -2530,10 +2604,14 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 
                 if( !line )
                     return;
+                const bool startDangling = line->IsStartDangling()
+                        && !( m_privateMoveSelection && m_contextPinOwners.count( line->GetStartPoint() ) );
+                const bool endDangling = line->IsEndDangling()
+                        && !( m_privateMoveSelection && m_contextPinOwners.count( line->GetEndPoint() ) );
 
                 // Split segments that are dangling get trimmed back since they extend
                 // past the break point.
-                if( line->HasFlag( IS_BROKEN ) && line->IsDangling() )
+                if( line->HasFlag( IS_BROKEN ) && ( startDangling || endDangling ) )
                 {
                     danglers.insert( aChangedItem );
                 }
@@ -2541,7 +2619,7 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
                 // stubs that should be removed. Wires with only one connected end are
                 // still providing connectivity and must be preserved.
                 else if( line->HasFlag( IS_NEW ) && !line->HasFlag( IS_BROKEN )
-                         && line->IsStartDangling() && line->IsEndDangling() )
+                         && startDangling && endDangling )
                 {
                     danglers.insert( aChangedItem );
                 }
@@ -2561,8 +2639,18 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 
 void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& aPoint, EDA_ITEMS& aList )
 {
-    EE_RTREE&         items = moveScreen()->Items();
-    EE_RTREE::EE_TYPE itemsOverlapping = items.Overlapping( aOriginalItem->GetBoundingBox() );
+    std::vector<SCH_ITEM*> itemsOverlapping;
+    if( m_privateMoveSelection )
+    {
+        const auto candidates = moveConnectionCandidates( aOriginalItem, aPoint );
+        itemsOverlapping.assign( candidates.begin(), candidates.end() );
+    }
+    else
+    {
+        // Preserve ordinary mouse-drag spatial traversal and tie breaking.
+        for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aOriginalItem->GetBoundingBox() ) )
+            itemsOverlapping.push_back( item );
+    }
     SCH_ITEM*         foundJunction = nullptr;
     SCH_ITEM*         foundSymbol   = nullptr;
 
@@ -2573,7 +2661,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
     // we need to prioritize the pin version in some cases.
     for( SCH_ITEM* item : itemsOverlapping )
     {
-        if( item != aOriginalItem && item->IsConnected( aPoint ) )
+        if( item != aOriginalItem && moveConnectedAt( item, aPoint ) )
         {
             if( item->Type() == SCH_JUNCTION_T )
                 foundJunction = item;
@@ -2616,7 +2704,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
                 continue;
             }
 
-            if( test->IsConnected( aPoint ) )
+            if( moveConnectedAt( test, aPoint ) )
                 aList.push_back( test );
 
             // Labels can connect to a wire (or bus) anywhere along the length
@@ -2651,7 +2739,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
         case SCH_SYMBOL_T:
         case SCH_JUNCTION_T:
         case SCH_NO_CONNECT_T:
-            if( test->IsConnected( aPoint ) )
+            if( moveConnectedAt( test, aPoint ) )
                 aList.push_back( test );
 
             break;
@@ -2696,12 +2784,9 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
                                            EDA_ITEMS& aList )
 {
     EE_RTREE&              items = moveScreen()->Items();
-    std::set<SCH_ITEM*>    connectableCandidates;
+    auto                  connectableCandidates = moveConnectionCandidates( aSelectedItem, aPoint );
     std::vector<SCH_ITEM*> itemsConnectable;
     bool                   ptHasUnselectedJunction = false;
-
-    for( SCH_ITEM* item : items.Overlapping( aSelectedItem->GetBoundingBox() ) )
-        connectableCandidates.insert( item );
 
     // Labels can connect at their anchor even if the label bbox doesn't overlap the target, e.g.
     // sheet pins can do this sometimes with just net labels and no wires.
@@ -2982,7 +3067,7 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
 
         case SCH_SYMBOL_T:
         case SCH_JUNCTION_T:
-            if( test->IsConnected( aPoint ) && !newWire )
+            if( moveConnectedAt( test, aPoint ) && !newWire )
             {
                 // Add a new wire between the symbol or junction and the selected item so
                 // the selected item can be dragged.

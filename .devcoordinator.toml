@@ -1903,6 +1903,28 @@ env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
+[test.mac-bom-portability]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.mac-bom-portability.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.mac-bom-portability.check]]
+name = "build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_symbol_graphic_identity", "qa_eeschema", "qa_document_change_journal"]
+
+[[test.mac-bom-portability.check]]
+name = "contracts"
+tier = "development"
+requires = ["build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_symbol_graphic_identity$|^qa_document_change_journal$|^qa_schematic_symbol_library_identity$|^qa_schematic_formatting$", "--output-on-failure", "--no-tests=error"]
+
 [[test.schematic-parity-input.check]]
 name = "configure"
 tier = "development"

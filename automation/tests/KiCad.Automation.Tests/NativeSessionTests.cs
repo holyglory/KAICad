@@ -168,6 +168,7 @@ public sealed partial class NativeSessionTests
 
             // Open actual graphical editors through the manager's own IPC peer.
             // The fixture has native drawing content, not a mocked editor result.
+            var synchronizationFailures = new List<Exception>();
             foreach (var target in launched)
             {
                 Console.WriteLine($"Native editor journey {target.Id} started at {elapsed.Elapsed.TotalSeconds:F1}s.");
@@ -315,8 +316,21 @@ public sealed partial class NativeSessionTests
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
                     }
                     else if (journey == NativeJourney.CheckedBatch)
+                    {
                         await VerifyCheckedSchematicBatch(client, opened.Document, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        try
+                        {
+                            await VerifySynchronizationExecution(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-sync-execution-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Synchronization failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
                     else if (journey == NativeJourney.SynchronizationPlan)
                         await VerifyInteractiveMoveAdmission(client, opened.Document, electrical, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);
@@ -652,6 +666,8 @@ public sealed partial class NativeSessionTests
             foreach (var target in launched)
                 Assert.AreEqual(registry.Get(target.Id).Epoch,
                     (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);
+            if (synchronizationFailures.Count != 0)
+                throw new AggregateException("Native synchronization execution failed; each independent project was exercised.", synchronizationFailures);
         }
         catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
         {

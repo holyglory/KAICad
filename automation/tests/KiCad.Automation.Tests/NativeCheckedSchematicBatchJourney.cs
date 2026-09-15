@@ -79,6 +79,10 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(current, combined.State);
         Assert.AreEqual(current.Revision, combined.Electrical.Hierarchy.Revision);
         Assert.AreEqual(document, combined.Electrical.Hierarchy.Data.Document);
+        var standaloneElectrical = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(
+            new() { Document = document.Clone(), SchemaVersion = 9 }, token);
+        Assert.AreEqual(standaloneElectrical, combined.Electrical,
+            "Combined capture must preserve the same current-schema project metadata as the normal electrical reader.");
         var checkedRequest = Request(current, "Accepted exact-state edit");
         Guid origin = Guid.NewGuid(); checkedRequest.Batch.OriginId = origin.ToString("D");
         var electrical = combined.Electrical;

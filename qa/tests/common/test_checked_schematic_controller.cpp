@@ -17,6 +17,7 @@ struct CHECKED_FIXTURE
     DocumentLifecycleState state;
     std::string process = KIID().AsStdString();
     unsigned reads = 0, mutations = 0;
+    unsigned electricalSchema = 0;
     bool failBefore = false, failAfter = false, reject = false, partialRejection = false;
     bool throwMutation = false, wrongResult = false, noOp = false, wrongAfter = false;
     bool changeDuringCapture = false, wrongElectricalRevision = false;
@@ -77,6 +78,9 @@ struct CHECKED_FIXTURE
         }
         else if( request.message().Is<ReadSchematicElectricalState>() )
         {
+            ReadSchematicElectricalState query;
+            if( !request.message().UnpackTo( &query ) ) return error();
+            electricalSchema = query.schema_version();
             SchematicElectricalState electrical;
             electrical.mutable_hierarchy()->mutable_data()->mutable_document()->CopyFrom( state.document() );
             electrical.mutable_hierarchy()->mutable_revision()->CopyFrom( state.revision() );
@@ -134,6 +138,7 @@ BOOST_AUTO_TEST_CASE( CombinedCaptureBindsElectricalDataToOneUnchangedNativeStat
     CheckedSchematicState state; BOOST_REQUIRE( response->message().UnpackTo( &state ) );
     BOOST_CHECK( MessageDifferencer::Equals( state.state(), f.state ) );
     BOOST_CHECK( MessageDifferencer::Equals( state.electrical().hierarchy().revision(), f.state.revision() ) );
+    BOOST_CHECK_EQUAL( f.electricalSchema, 9 );
     BOOST_CHECK_EQUAL( f.mutations, 0 );
     f.changeDuringCapture = true;
     BOOST_CHECK( !f.Handle( query ) ); BOOST_CHECK_EQUAL( f.mutations, 0 );

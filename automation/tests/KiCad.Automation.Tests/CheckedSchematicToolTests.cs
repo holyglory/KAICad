@@ -115,6 +115,14 @@ public sealed class CheckedSchematicToolTests
         var result = new CheckedSchematicState { State = request.ExpectedState.Clone(), Electrical = new()
         { Hierarchy = new() { Data = new() { Document = request.Batch.Document.Clone() }, Revision = request.Batch.ExpectedRevision.Clone() } } };
         CheckedSchematicContract.ValidateObservation(result, request.Batch.Document, request.ExpectedState.ProcessEpoch);
+        var projected = result.Clone();
+        projected.Electrical.Hierarchy.Data.Instances.Add(new Kiapi.Schematic.Types.SchematicScreenData { Metadata = new() });
+        projected.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Add("net_settings_require_snapshot_schema_9");
+        Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() =>
+            CheckedSchematicContract.ValidateObservation(projected, request.Batch.Document, request.ExpectedState.ProcessEpoch));
+        projected.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Clear();
+        projected.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Add("unsupported_future_graphic");
+        CheckedSchematicContract.ValidateObservation(projected, request.Batch.Document, request.ExpectedState.ProcessEpoch);
         foreach (int invalid in Enumerable.Range(0, 4))
         {
             var changed = result.Clone();

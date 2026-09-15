@@ -90,6 +90,9 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::ReadState( ApiRequest& envelope,
     };
     ReadDocumentLifecycleState stateQuery; stateQuery.mutable_document()->CopyFrom( request.document() );
     ReadSchematicElectricalState electricalQuery; electricalQuery.mutable_document()->CopyFrom( request.document() );
+    // Zero selects legacy projection and drops current project settings. The
+    // planner and this combined capture must describe the same supported schema.
+    electricalQuery.set_schema_version( 9 );
     try
     {
         auto beforeReply = call( stateQuery );

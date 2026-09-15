@@ -19,6 +19,9 @@ public static class CheckedSchematicContract
             || state.Scope != DocumentLifecycleScope.DlsSchematicHierarchy || !state.ProjectSettingsIncluded
             || state.StateSha256.Length != 64 || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             throw Invalid("The combined observation must identify one exact native schematic checkpoint.");
+        if (electrical.Hierarchy.Data.Instances.Any(screen => screen.Metadata?.UnrepresentedState.Any(
+                limitation => limitation.Contains("_snapshot_schema_", StringComparison.Ordinal)) == true))
+            throw Invalid("The native reader returned a legacy-projected snapshot; use the matching current-schema KiCad build.");
     }
 
     public static void ValidateRequest(CheckedSchematicBatch request, string processEpoch)

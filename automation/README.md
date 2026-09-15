@@ -749,9 +749,9 @@ before the write. Native application and automatic synchronization remain separa
 The high-level synchronization executor is internal development work and is not
 advertised as `kicad_design_sync_apply`. Version-5 recovery records can retain
 candidate XML and a native-save request, but serialization tests do not establish
-safe execution. Concurrent file replacement, interrupted publication, no-change
-recovery and the complete rendered native journey still require implementation
-and qualification under Coordinator outcome `p7e712f1bb764e327`. Use the existing
+safe execution. Retained-file lifecycle, complete executor qualification and
+automatic event-driven synchronization remain open under Coordinator outcome
+`p7e712f1bb764e327`. Use the existing
 read-only synchronization planner and individually qualified native tools; do not
 treat the draft executor as automatic synchronization or cross-platform evidence.
 
@@ -762,9 +762,14 @@ happened from one still needing execution, without swapping the files back. A
 changed or incomplete retained file pauses recovery; matching independent saves
 converge without another replacement. Publication alone never advances the design
 baseline. The record also covers publication without a schematic mutation, and
-pending publication blocks fresh planning and observation refresh. Integration
-with the native executor and retained-file cleanup remains part of the open
-synchronization outcome. Existing version-1 through version-5 records remain
+pending publication blocks fresh planning and observation refresh. The internal
+native executor now uses this journal, validates native structure/connectivity,
+and replays the exact saved edit/save requests after lost replies. A focused
+two-editor Linux journey verifies title-metadata changes in both directions,
+lost edit/save replies, unchanged reapplication and keyboard-undo write-back.
+This is not proof of every edit type, process-crash recovery, the high-level MCP
+surface or the automatic event loop. Retained-file cleanup remains open.
+Existing version-1 through version-5 records remain
 readable and are not rewritten merely because the reader supports version 6.
 
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into

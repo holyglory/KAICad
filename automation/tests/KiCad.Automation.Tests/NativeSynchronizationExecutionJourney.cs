@@ -14,7 +14,7 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task VerifySynchronizationExecution(NativeClient client, DocumentSpecifier document,
-        int processId, string display, string evidence, string instanceId, CancellationToken token)
+        int processId, string display, string evidence, string instanceId, CancellationToken token, bool transformsOnly = false)
     {
         string designPath = Path.Combine(evidence, instanceId + "-sync-design.xml");
         string recordPath = Path.Combine(evidence, instanceId + "-sync-recovery.json");
@@ -37,6 +37,12 @@ public sealed partial class NativeSessionTests
         var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, saved.RevisionToken, Guid.NewGuid(), token);
         Assert.IsTrue(noOp.SynchronizationCommitted); Assert.IsFalse(noOp.NativeMutationCommitted);
         Assert.AreEqual(saved.RevisionToken, noOp.RecoveryRevisionToken);
+
+        if (transformsOnly)
+        {
+            await VerifySynchronizationLayout(client, document, store, designPath, processId, display, evidence, instanceId, token, transforms: true);
+            return;
+        }
 
         Console.WriteLine($"Native synchronization {instanceId}: native edit to XML");
         await client.InvokeAsync<SetTitleBlockInfo, Empty>(new()

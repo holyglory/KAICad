@@ -686,14 +686,24 @@ models. Its candidate is only a property-level proposal: other native snapshot
 changes and coverage gaps remain explicit. It performs no file writes, connectivity
 comparison, live revision admission or synchronization checkpoint advancement.
 
-`kicad_design_plan_placement` prepares forward connected-symbol translations from
+`kicad_design_plan_placement` prepares forward connected-symbol placement from
 the same baseline, desired engineering model, observed hierarchy and declared
 libraries. It combines equal-displacement symbols on one sheet into a native
 selection and resolves repeated-screen geometry once by exact identity. Existing
-locks, conflicting shared placements, rotation/mirroring changes and unsupported
-electrical changes prevent partial movement proposals. Missing coordinates do not
-request movement. Results retain coverage gaps and unprojected native changes;
-they require live revision admission and connectivity verification before use.
+locks, conflicting shared placements and unsupported electrical changes prevent
+partial proposals. Ordered quarter-turn/reflection proposals run before grouped
+translations, with exact native pivots. Equivalent angle/mirror encodings do not
+request another edit. Missing coordinates do not request movement. Results retain
+coverage gaps and unprojected native changes; they require live state admission
+and connectivity verification before use.
+
+The internal executor has two-editor Linux proof for root-sheet XML transforms,
+native geometry capture, all six service-interruption checkpoints, no-op
+convergence and native undo/redo back into XML. Its large native replies are
+budgeted before commit, so a reply-capacity rejection does not leave an unreported
+edit. This does not advertise production automatic synchronization or complete
+cross-platform qualification. Run the focused test with
+`devcoordinator2 test start . --test native-transform-sync --tier development --client codex`.
 
 The internal `DesignRecoveryStore` preserves the full composed baseline, observed
 hierarchy, declared library snapshots, exact desired-file bytes (including invalid

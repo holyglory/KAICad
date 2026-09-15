@@ -78,7 +78,7 @@ public static class SchematicSynchronizationPlanner
                 var symbol = screen.Items.Where(x => x.Is(SchematicSymbolInstance.Descriptor))
                     .Select(x => x.Unpack<SchematicSymbolInstance>()).Single(x => x.Id.Value == binding.NativeObjectId.ToString("D"));
                 var placement = SchematicModelProjection.Placement(symbol);
-                if (placement != occurrence.Placement)
+                if (!SchematicOrientation.Equivalent(placement, occurrence.Placement))
                     differences.Add(new(occurrence.Id, "placement", JsonSerializer.Serialize(occurrence.Placement), JsonSerializer.Serialize(placement)));
             }
             IReadOnlyList<SchematicItemOperation> moves = [];

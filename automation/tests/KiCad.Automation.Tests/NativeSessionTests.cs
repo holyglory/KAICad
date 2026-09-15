@@ -45,7 +45,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
     public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove }
+    [TestMethod, TestCategory("NativeTransformSynchronization")]
+    public Task XmlTransformsRecoverAfterServiceInterruptionAndNativeHistory() => RunNativeSessions(NativeJourney.TransformSync);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -62,6 +65,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.SynchronizationPlan => "native-synchronization-plan",
                 NativeJourney.CheckedBatch => "native-checked-batch",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
+                NativeJourney.TransformSync => "native-transform-sync",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -355,14 +359,15 @@ public sealed partial class NativeSessionTests
                             Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
                         }
                     }
-                    else if (journey == NativeJourney.CheckedBatch)
+                    else if (journey is NativeJourney.CheckedBatch or NativeJourney.TransformSync)
                     {
-                        await VerifyCheckedSchematicBatch(client, opened.Document, focusProcessId,
-                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        if (journey == NativeJourney.CheckedBatch)
+                            await VerifyCheckedSchematicBatch(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token);
                         try
                         {
                             await VerifySynchronizationExecution(client, opened.Document, focusProcessId,
-                                ":" + displayNumber, evidence, target.Id, deadline.Token);
+                                ":" + displayNumber, evidence, target.Id, deadline.Token, journey == NativeJourney.TransformSync);
                         }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         {

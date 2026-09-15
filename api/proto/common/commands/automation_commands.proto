@@ -495,6 +495,10 @@ message ApplySchematicItemBatch {
   // Optional synchronization origin. Requires retry identity and expected
   // revision. Recorded only when this batch actually commits a change.
   string origin_id = 7;
+  // Optional serialized reply allowance, enforced before the native commit.
+  // Zero retains the ordinary native receipt budget. The checked controller
+  // sets a bounded allowance from its remaining process-owned receipt space.
+  uint32 maximum_result_bytes = 8;
 }
 
 // A separate command, not an optional guard on a legacy batch: an older peer

@@ -31,9 +31,10 @@ public sealed class DesignLayoutRecoveryTests
     }
 
     [TestMethod]
-    public void RequestedLayoutReopensWithoutPretendingItsWireGeometryIsFinal()
+    [DataRow(false), DataRow(true)]
+    public void RequestedLayoutReopensWithoutPretendingItsWireGeometryIsFinal(bool transform)
     {
-        using var f = new Fixture();
+        using var f = new Fixture(transform);
         byte[] before = File.ReadAllBytes(f.Path);
         Assert.AreEqual(8, JsonNode.Parse(before)!["Version"]!.GetValue<int>());
         var restored = new DesignRecoveryStore(f.Path).Read()!;
@@ -133,7 +134,7 @@ public sealed class DesignLayoutRecoveryTests
         internal DesignRecoveryStore Store { get; }
         internal StoredDesignRecovery Saved { get; }
         internal DesignLayoutIntent Intent { get; }
-        internal Fixture()
+        internal Fixture(bool transform = false)
         {
             Path = Publication.RecordPath + ".layout.json"; Store = new(Path);
             var state = Publication.Saved.State;
@@ -143,6 +144,14 @@ public sealed class DesignLayoutRecoveryTests
             var movement = new SchematicConnectedSymbolMove { Delta = new() { XNm = 2540000 } };
             movement.Symbols.Add(new KIID { Value = state.Baseline.SymbolBindings[0].NativeObjectId.ToString("D") });
             mutation.Operations.Add(new SchematicItemOperation { MoveConnectedSymbols = movement });
+            if (transform)
+            {
+                mutation.Operations.Clear();
+                var rotation = new SchematicConnectedSymbolTransform { Pivot = new() { XNm = 10000000, YNm = 20000000 },
+                    Kind = SchematicConnectedTransformKind.SctRotateCounterclockwise };
+                rotation.Symbols.Add(movement.Symbols.Select(s => s.Clone()));
+                mutation.Operations.Add(new SchematicItemOperation { TransformConnectedSymbols = rotation });
+            }
             Intent = DesignLayoutIntent.Create(Publication.Intent.DesignPath, Publication.Intent.ExpectedFileBytes,
                 Publication.Intent.CandidateFileBytes, Guid.NewGuid(), Publication.Saved.RevisionToken);
             Saved = Store.Save(state with { PendingMutation = mutation, PendingPublication = null, PendingNativeSave = null,

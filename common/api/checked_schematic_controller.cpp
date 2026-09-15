@@ -170,9 +170,13 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
     const size_t requestBytes = request.ByteSizeLong();
     if( requestBytes > ( budget - overhead ) / 6 || m_receipts.size() >= 4096 )
         return Error( "Checked batch receipt capacity exhausted; no mutation was attempted" );
-    const size_t reservation = requestBytes * 6 + overhead;
-    if( reservation > budget - m_reservedBytes )
+    const size_t baseReservation = requestBytes * 5 + overhead;
+    if( baseReservation + 4096 > budget - m_reservedBytes )
         return Error( "Checked batch receipt capacity exhausted; no mutation was attempted" );
+    const size_t availableResult = budget - m_reservedBytes - baseReservation;
+    const size_t resultBudget = batch.maximum_result_bytes()
+            ? std::min( availableResult, size_t{ batch.maximum_result_bytes() } ) : availableResult;
+    const size_t reservation = baseReservation + resultBudget;
     RECEIPT receipt;
     receipt.request = request;
     auto& initial = receipt.result;
@@ -182,6 +186,19 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
     initial.set_error_code( "operation_in_progress" );
     auto& result = m_receipts.emplace( batch.operation_id(), std::move( receipt ) ).first->second.result;
     m_reservedBytes += reservation;
+    struct RESERVATION_GUARD
+    {
+        size_t& reserved;
+        size_t reservation, requestBytes, overhead;
+        const CheckedSchematicBatchReceipt& result;
+        ~RESERVATION_GUARD()
+        {
+            // Dispatch is synchronous. Return unused room only after the
+            // permanent receipt has its terminal contents, never by eviction.
+            const size_t retained = std::min( reservation, requestBytes + result.ByteSizeLong() + overhead );
+            reserved -= reservation - retained;
+        }
+    } reservationGuard{ m_reservedBytes, reservation, requestBytes, overhead, result };
     bool dispatched = false;
     auto fail = [&]( CheckedSchematicBatchStatus status, const char* code, const std::string& message ) -> API_RESULT
     {
@@ -220,7 +237,9 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
         // API dispatch is synchronous on the owning GUI thread. Do not yield to
         // other editor events between this observation and the native commit.
         ApiRequest mutation;
-        mutation.mutable_header()->CopyFrom( envelope.header() ); mutation.mutable_message()->PackFrom( batch );
+        auto limitedBatch = batch;
+        limitedBatch.set_maximum_result_bytes( static_cast<uint32_t>( resultBudget ) );
+        mutation.mutable_header()->CopyFrom( envelope.header() ); mutation.mutable_message()->PackFrom( limitedBatch );
         dispatched = true;
         auto applied = dispatch( mutation );
         if( !applied || applied->status().status() != ApiStatusCode::AS_OK )
@@ -234,7 +253,7 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
         }
         SchematicItemBatchResult nativeResult;
         if( !applied->message().UnpackTo( &nativeResult )
-                || nativeResult.ByteSizeLong() > requestBytes + 4096
+                || nativeResult.ByteSizeLong() > resultBudget
                 || nativeResult.revision().epoch() != batch.document_epoch()
                 || nativeResult.revision().sequence() < batch.expected_revision().sequence() )
             return fail( CSBS_INDETERMINATE, "invalid_native_result", "Native execution may have occurred; inspect the saved request and document" );

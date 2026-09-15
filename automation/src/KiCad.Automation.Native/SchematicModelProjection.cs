@@ -56,10 +56,12 @@ public static class SchematicModelProjection
         var oldComponents = source.Components.ToDictionary(c => c.Id);
         bool remainder = HasUnprojectedChanges(baseline.Schematic, observed);
 
-        T Merge<T>(Guid owner, string field, T originalModel, T wanted, T originalNative, T currentNative)
+        T Merge<T>(Guid owner, string field, T originalModel, T wanted, T originalNative, T currentNative,
+            Func<T, T, bool>? equivalent = null)
         {
-            if (EqualityComparer<T>.Default.Equals(originalNative, currentNative)) return wanted;
-            if (EqualityComparer<T>.Default.Equals(wanted, originalModel) || EqualityComparer<T>.Default.Equals(wanted, currentNative))
+            equivalent ??= EqualityComparer<T>.Default.Equals;
+            if (equivalent(originalNative, currentNative)) return wanted;
+            if (equivalent(wanted, originalModel) || equivalent(wanted, currentNative))
                 return currentNative;
             conflicts.Add(new(owner, field, "competing_edit", JsonSerializer.SerializeToElement(originalModel),
                 JsonSerializer.SerializeToElement(wanted), JsonSerializer.SerializeToElement(currentNative)));
@@ -118,11 +120,12 @@ public static class SchematicModelProjection
                 try
                 {
                     var previous = Placement(oldNative); var current = Placement(newNative);
-                    if (occurrence.Placement is not null && occurrence.Placement != previous)
+                    if (occurrence.Placement is not null && !SchematicOrientation.Equivalent(occurrence.Placement, previous))
                         conflicts.Add(new(occurrence.Id, "placement", "unaligned_projection_baseline",
                             JsonSerializer.SerializeToElement(occurrence.Placement), JsonSerializer.SerializeToElement(wanted.Placement),
                             JsonSerializer.SerializeToElement(new { previous, current })));
-                    else placement = Merge(occurrence.Id, "placement", occurrence.Placement, wanted.Placement, previous, current);
+                    else placement = Merge(occurrence.Id, "placement", occurrence.Placement, wanted.Placement, previous, current,
+                        (a, b) => SchematicOrientation.Equivalent(a, b));
                 }
                 catch (AutomationException error)
                 {

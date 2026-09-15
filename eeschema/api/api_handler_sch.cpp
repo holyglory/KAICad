@@ -1615,6 +1615,10 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         result.mutable_revision()->set_sequence( std::numeric_limits<uint64_t>::max() );
         result.set_tracking_complete( false );
 
+        if( aCtx.Request.maximum_result_bytes()
+                && result.ByteSizeLong() > aCtx.Request.maximum_result_bytes() )
+            return reject( "Batch result exceeds the reserved reply capacity; no changes were committed" );
+
         // Allocate the retained result before the irreversible commit. An
         // exceptional failure keeps the identity indeterminate, never retryable
         // as a new mutation. Result inspection/recovery remains separate work.

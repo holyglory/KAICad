@@ -12,7 +12,7 @@ public sealed partial class NativeSessionTests
 {
     private static async Task VerifySynchronizationLayout(NativeClient client, DocumentSpecifier document,
         DesignRecoveryStore store, string designPath, int processId, string display, string evidence,
-        string instanceId, CancellationToken token)
+        string instanceId, CancellationToken token, bool transforms = false)
     {
         string hostState = Path.Combine(evidence, instanceId + "-layout-host-state");
         var results = new List<object>();
@@ -25,7 +25,31 @@ public sealed partial class NativeSessionTests
             var before = await Capture();
             var first = baseline.Engineering.Circuit.Symbols[0];
             var old = SchematicModelProjection.Placement(SchematicModelProjection.NativeSymbols(baseline, before.Electrical.Hierarchy.Data)[first.Id]);
+            if (transforms && stage == "layout-prepared")
+            {
+                var rotation = new SchematicConnectedSymbolTransform { Kind = SchematicConnectedTransformKind.SctRotateClockwise,
+                    Pivot = new() { XNm = Coordinates.MillimetersToNanometers(old.XMillimeters), YNm = Coordinates.MillimetersToNanometers(old.YMillimeters) } };
+                rotation.Symbols.Add(new Kiapi.Common.Types.KIID { Value = baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == first.Id).NativeObjectId.ToString("D") });
+                var limited = new ApplySchematicItemBatch { Document = document.Clone(), DocumentEpoch = before.State.Revision.Epoch,
+                    ExpectedRevision = before.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), MaximumResultBytes = 1 };
+                limited.Operations.Add(new SchematicItemOperation { TransformConnectedSymbols = rotation });
+                var rejected = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new()
+                    { Batch = limited, ExpectedState = before.State.Clone() }, limit.Token);
+                Assert.AreEqual(CheckedSchematicBatchStatus.CsbsRejected, rejected.Status);
+                StringAssert.Contains(rejected.ErrorMessage, "reply capacity");
+                Assert.AreEqual(before, await Capture(), "Insufficient reply space must reject before native commit.");
+            }
             var wanted = old with { XMillimeters = old.XMillimeters + 2.54m, YMillimeters = old.YMillimeters + 2.54m };
+            if (transforms)
+                wanted = stage switch
+                {
+                    "layout-prepared" => old with { RotationDegrees = (old.RotationDegrees + 90) % 360 },
+                    "native-edit" => old with { MirrorY = !old.MirrorY },
+                    "layout-resolved" => old with { RotationDegrees = (old.RotationDegrees + 180) % 360 },
+                    "native-save" => old with { MirrorX = !old.MirrorX },
+                    "publication-replaced" => wanted with { RotationDegrees = (old.RotationDegrees + 270) % 360 },
+                    _ => wanted with { MirrorX = !old.MirrorX, MirrorY = !old.MirrorY }
+                };
             var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
             {
                 Symbols = baseline.Engineering.Circuit.Symbols.Select(s => s.Id == first.Id ? s with { Placement = wanted } : s).ToArray(),
@@ -54,8 +78,8 @@ public sealed partial class NativeSessionTests
                     { RequireToolSuccess(await call); Assert.Fail("The host completed without reaching the requested interruption."); }
                     await markerReady;
                     stopped = await Capture();
-                    Assert.AreEqual(stage == "layout-prepared" ? old : wanted,
-                        SchematicModelProjection.Placement(SchematicModelProjection.NativeSymbols(baseline, stopped.Electrical.Hierarchy.Data)[first.Id]));
+                    Assert.IsTrue(SchematicOrientation.Equivalent(stage == "layout-prepared" ? old : wanted,
+                        SchematicModelProjection.Placement(SchematicModelProjection.NativeSymbols(baseline, stopped.Electrical.Hierarchy.Data)[first.Id])));
                     await host.TerminateAsync(); Assert.IsTrue(host.ForcedTermination);
                     await Assert.ThrowsAsync<IOException>(async () => { await call; });
                 }
@@ -95,18 +119,25 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(stage == "completed", data.GetProperty("replayed").GetBoolean());
             }
             var final = await Capture();
+            var completedNative = CheckedSchematicBatchReceipt.Parser.ParseFrom(store.Read()!.State.LastSynchronization!.NativeReceipt!);
+            int requestBytes = recovered.State.PendingMutation is null ? 0 : new CheckedSchematicBatch
+                { Batch = recovered.State.PendingMutation, ExpectedState = recovered.State.PendingNativeState }.CalculateSize();
+            if (transforms && stage == "layout-resolved")
+                Assert.IsTrue(completedNative.Result.CalculateSize() > requestBytes + 4096,
+                    "The real half-turn result must exercise the formerly undersized reply allowance.");
             Assert.AreEqual(before.State.ProcessEpoch, final.State.ProcessEpoch);
             if (stage != "layout-prepared") Assert.AreEqual(stopped.State.Revision, final.State.Revision, "Restart must not repeat the move.");
             var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, limit.Token), []);
             Assert.AreEqual(wanted, xml.Engineering.Circuit.Symbols.Single(s => s.Id == first.Id).Placement);
-            Assert.AreEqual(wanted, SchematicModelProjection.Placement(SchematicModelProjection.NativeSymbols(xml, final.Electrical.Hierarchy.Data)[first.Id]));
+            Assert.IsTrue(SchematicOrientation.Equivalent(wanted, SchematicModelProjection.Placement(SchematicModelProjection.NativeSymbols(xml, final.Electrical.Hierarchy.Data)[first.Id])));
             Assert.AreEqual(0, SchematicHierarchyDelta.Plan(final.Electrical.Hierarchy.Data, xml.Schematic, limit.Token).Count);
             Assert.IsTrue(SchematicElectricalComparison.Compare(xml, final.Electrical, [], limit.Token).ConnectivityEquivalent);
             Assert.IsFalse(store.Read()!.State.HasPendingWork);
             var unchanged = store.Read()!;
             var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, unchanged.RevisionToken, Guid.NewGuid(), limit.Token);
             Assert.AreEqual(unchanged.RevisionToken, noOp.RecoveryRevisionToken); Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
-            results.Add(new { stage, operationId, requestedPlacementReached = true, sameNativeEpoch = true,
+            results.Add(new { stage, operationId, requestBytes, nativeResultBytes = completedNative.Result.CalculateSize(),
+                requestedPlacementReached = true, sameNativeEpoch = true,
                 actualWireGeometryCaptured = true, connectivityPreserved = true, duplicateMovementPrevented = true });
 
             Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
@@ -130,9 +161,26 @@ public sealed partial class NativeSessionTests
             var actual = store.Read()!.State;
             Assert.IsTrue(SchematicElectricalComparison.Compare(actual.Baseline, actual.ObservedElectrical!, [], token).ConnectivityEquivalent);
         }
-        Assert.AreEqual(SchematicDesignXml.Write(last, []), SchematicDesignXml.Write(store.Read()!.State.Baseline, []));
+        var restored = store.Read()!.State.Baseline;
+        if (transforms)
+        {
+            // Native history reports its canonical orientation after a real
+            // undo/redo. Only equivalent angle/mirror encodings may differ;
+            // retain exact checks for every other engineering/native field.
+            var restoredSymbols = restored.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+            last = last with { Engineering = last.Engineering with { Circuit = last.Engineering.Circuit with
+            { Symbols = last.Engineering.Circuit.Symbols.Select(s =>
+            {
+                Assert.IsTrue(SchematicOrientation.Equivalent(s.Placement, restoredSymbols[s.Id].Placement));
+                return s with { Placement = restoredSymbols[s.Id].Placement };
+            }).ToArray() } } };
+        }
+        Assert.AreEqual(SchematicDesignXml.Write(last, []), SchematicDesignXml.Write(restored, []));
+        var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document }, token);
+        Assert.AreEqual(image.Snapshot.Revision, image.Preview.Revision);
+        await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-sync-layout.png"), image.Preview.Png.ToByteArray(), token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-sync-layout.json"), JsonSerializer.Serialize(new
         { instanceId, cases = results, nativeKeyboardUndoRedo = true, testOnlyHost = true,
-            productionToolAdvertised = false, rotationMirroringQualified = false, crossPlatformReady = false }), token);
+            productionToolAdvertised = false, rotationMirroringQualified = transforms, crossPlatformReady = false }), token);
     }
 }

@@ -21,6 +21,8 @@ struct CHECKED_FIXTURE
     bool failBefore = false, failAfter = false, reject = false, partialRejection = false;
     bool throwMutation = false, wrongResult = false, noOp = false, wrongAfter = false;
     bool changeDuringCapture = false, wrongElectricalRevision = false;
+    size_t payloadBytes = 0;
+    bool ignoreReplyLimit = false;
 
     CHECKED_FIXTURE()
     {
@@ -91,6 +93,10 @@ struct CHECKED_FIXTURE
         else if( request.message().Is<ApplySchematicItemBatch>() )
         {
             ++mutations;
+            ApplySchematicItemBatch batch;
+            if( !request.message().UnpackTo( &batch ) ) return error();
+            if( payloadBytes && !ignoreReplyLimit && payloadBytes + 256 > batch.maximum_result_bytes() )
+                return error();
             if( throwMutation ) throw std::runtime_error( "Fixture native exception" );
             if( reject )
             {
@@ -103,6 +109,7 @@ struct CHECKED_FIXTURE
                 state.set_state_sha256( std::string( 64, 'd' ) );
             }
             SchematicItemBatchResult result; result.mutable_revision()->CopyFrom( state.revision() );
+            if( payloadBytes ) result.add_items()->set_value( std::string( payloadBytes, 'x' ) );
             if( wrongResult ) result.mutable_revision()->set_epoch( KIID().AsStdString() );
             response.mutable_message()->PackFrom( result );
         }
@@ -263,6 +270,38 @@ BOOST_AUTO_TEST_CASE( OversizedRequestIsRefusedBeforeObservationOrMutation )
     request.mutable_batch()->set_description( std::string( 3 * 1024 * 1024, 'x' ) );
     BOOST_CHECK( !f.Handle( request ) );
     BOOST_CHECK_EQUAL( f.mutations, 0 ); BOOST_CHECK_EQUAL( f.reads, 0 );
+}
+
+BOOST_AUTO_TEST_CASE( ShortRequestsCanReturnLargeObjectsAndReleaseUnusedReservation )
+{
+    CHECKED_FIXTURE f; f.payloadBytes = 64 * 1024;
+    auto firstRequest = f.Request(); const auto first = f.Apply( firstRequest );
+    BOOST_REQUIRE_EQUAL( first.status(), CSBS_COMPLETED );
+    BOOST_CHECK_GT( first.result().ByteSizeLong(), firstRequest.ByteSizeLong() + 4096 );
+    BOOST_CHECK_EQUAL( first.result().items( 0 ).value().size(), f.payloadBytes );
+    const auto calls = f.mutations;
+    BOOST_CHECK( MessageDifferencer::Equals( first, f.Apply( firstRequest ) ) );
+    BOOST_CHECK_EQUAL( f.mutations, calls );
+    BOOST_CHECK_EQUAL( f.Apply( f.Request() ).status(), CSBS_COMPLETED );
+}
+
+BOOST_AUTO_TEST_CASE( ReplyAllowanceRejectsBeforeCommitAndDoesNotPreventLaterRecovery )
+{
+    CHECKED_FIXTURE f; f.payloadBytes = 64 * 1024;
+    auto request = f.Request(); request.mutable_batch()->set_maximum_result_bytes( 1024 );
+    const auto before = f.state; auto result = f.Apply( request );
+    BOOST_CHECK_EQUAL( result.status(), CSBS_REJECTED );
+    BOOST_CHECK( MessageDifferencer::Equals( before, f.state ) );
+    BOOST_CHECK_EQUAL( f.Apply( f.Request() ).status(), CSBS_COMPLETED );
+    // A broken peer which ignores the negotiated limit is still indeterminate,
+    // not a successful edit and never an invitation to repeat the operation.
+    f.ignoreReplyLimit = true;
+    request = f.Request(); request.mutable_batch()->set_maximum_result_bytes( 1024 );
+    result = f.Apply( request );
+    BOOST_CHECK_EQUAL( result.status(), CSBS_INDETERMINATE );
+    const auto calls = f.mutations;
+    BOOST_CHECK( MessageDifferencer::Equals( result, f.Apply( request ) ) );
+    BOOST_CHECK_EQUAL( f.mutations, calls );
 }
 
 BOOST_AUTO_TEST_CASE( ReceiptBudgetStopsAdmissionWithoutEvictingTheFirstSuccessfulIdentity )

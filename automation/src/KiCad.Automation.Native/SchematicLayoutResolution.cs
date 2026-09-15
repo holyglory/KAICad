@@ -21,20 +21,34 @@ internal static class SchematicLayoutResolution
             throw Error("Native symbol properties or identities differ from the requested design.");
         var symbols = SchematicModelProjection.NativeSymbols(candidate, actual);
         foreach (var occurrence in planned.Engineering.Circuit.Symbols.Where(s => s.Placement is not null))
-            if (SchematicModelProjection.Placement(symbols[occurrence.Id]) != occurrence.Placement)
+            if (!SchematicOrientation.Equivalent(SchematicModelProjection.Placement(symbols[occurrence.Id]), occurrence.Placement))
                 throw Error("Native connected movement did not reach the exact requested placement.");
 
         var wanted = planned.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document));
         var observed = actual.Instances.ToDictionary(s => Path(s.Metadata.Document));
         if (!wanted.Keys.ToHashSet().SetEquals(observed.Keys)) throw Error("Connected movement cannot change sheet ownership.");
         var moves = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
-        foreach (var operation in batch.Operations.Where(o => o.MoveConnectedSymbols is not null))
+        var transforms = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
+        var mirrors = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
+        foreach (var operation in batch.Operations.Where(o => o.MoveConnectedSymbols is not null || o.TransformConnectedSymbols is not null))
         {
             string path = Path(operation.TargetDocument ?? batch.Document);
             if (!wanted.TryGetValue(path, out var screen)) throw Error("The connected move has no exact sheet target.");
             string physical = screen.Metadata.ScreenId.Value;
             if (!moves.TryGetValue(physical, out var ids)) moves.Add(physical, ids = []);
-            ids.UnionWith(operation.MoveConnectedSymbols.Symbols.Select(s => Guid.Parse(s.Value)));
+            var affected = (operation.MoveConnectedSymbols?.Symbols ?? operation.TransformConnectedSymbols.Symbols)
+                .Select(s => Guid.Parse(s.Value)).ToArray();
+            ids.UnionWith(affected);
+            if (operation.TransformConnectedSymbols is { } transform)
+            {
+                if (!transforms.TryGetValue(physical, out var transformed)) transforms.Add(physical, transformed = []);
+                transformed.UnionWith(affected);
+                if (transform.Kind is SchematicConnectedTransformKind.SctMirrorLeftRight or SchematicConnectedTransformKind.SctMirrorUpDown)
+                {
+                    if (!mirrors.TryGetValue(physical, out var mirrored)) mirrors.Add(physical, mirrored = []);
+                    mirrored.UnionWith(affected);
+                }
+            }
         }
         if (moves.Count == 0) throw Error("No connected movement was recorded.");
         foreach (var (path, before) in wanted)
@@ -47,6 +61,8 @@ internal static class SchematicLayoutResolution
             var oldItems = SchematicItemDelta.Index(before.Items);
             var newItems = SchematicItemDelta.Index(after.Items);
             bool moving = moves.TryGetValue(before.Metadata.ScreenId.Value, out var movedIds);
+            bool transforming = transforms.TryGetValue(before.Metadata.ScreenId.Value, out var transformedIds);
+            mirrors.TryGetValue(before.Metadata.ScreenId.Value, out var mirroredIds);
             foreach (Guid id in oldItems.Keys.Union(newItems.Keys))
             {
                 oldItems.TryGetValue(id, out var oldItem); newItems.TryGetValue(id, out var newItem);
@@ -58,8 +74,11 @@ internal static class SchematicLayoutResolution
                     continue;
                 }
                 if (oldItem.Descriptor != newItem.Descriptor) throw Error("A native object changed its type.");
-                var oldProperties = WithoutGeometry(oldItem, movedIds!.Contains(id));
-                var newProperties = WithoutGeometry(newItem, movedIds.Contains(id));
+                bool transformed = transformedIds?.Contains(id) == true, mirrored = mirroredIds?.Contains(id) == true;
+                if (mirrored && newItem is SchematicSymbolInstance { FieldsAutoplaced: true })
+                    throw Error("A mirrored symbol must retain native manual field placement.");
+                var oldProperties = WithoutGeometry(oldItem, movedIds!.Contains(id), transformed, mirrored, transforming);
+                var newProperties = WithoutGeometry(newItem, movedIds.Contains(id), transformed, mirrored, transforming);
                 if (!oldProperties.Equals(newProperties)) throw Error("Connected movement changed non-layout properties or unrelated symbol placement.");
             }
         }
@@ -74,7 +93,7 @@ internal static class SchematicLayoutResolution
         && item.Descriptor.FindFieldByName("locked")?.Accessor.GetValue(item) is LockedState.LsLocked;
     private static bool WireGeometry(IMessage item) => item is Junction
         || item is SchematicLine { Type: SchematicLineType.SltWire or SchematicLineType.SltBus };
-    private static IMessage WithoutGeometry(IMessage input, bool movedSymbol)
+    private static IMessage WithoutGeometry(IMessage input, bool movedSymbol, bool transformedSymbol, bool mirroredSymbol, bool transformedScreen)
     {
         var item = input.Descriptor.Parser.ParseFrom(input.ToByteArray());
         switch (item)
@@ -82,25 +101,39 @@ internal static class SchematicLayoutResolution
             case SchematicLine line when line.Type is SchematicLineType.SltWire or SchematicLineType.SltBus:
                 line.Start = null; line.End = null; break;
             case Junction junction: junction.Position = null; break;
-            case BusEntry entry: entry.Position = null; break;
+            case BusEntry entry: entry.Position = null; if (transformedScreen) entry.Size = null; break;
             case NoConnectMarker marker: marker.Position = null; break;
             case LocalLabel label:
-                label.Position = null; Text(label.Text); Fields(label.Fields); break;
+                label.Position = null; if (transformedScreen) label.SpinStyle = 0;
+                Text(label.Text, transformedScreen); Fields(label.Fields, transformedScreen); break;
             case GlobalLabel label:
-                label.Position = null; Text(label.Text); Fields(label.Fields); Field(label.IntersheetRefsField); break;
+                label.Position = null; if (transformedScreen) label.SpinStyle = 0;
+                Text(label.Text, transformedScreen); Fields(label.Fields, transformedScreen); Field(label.IntersheetRefsField, transformedScreen); break;
             case HierarchicalLabel label:
-                label.Position = null; Text(label.Text); Fields(label.Fields); break;
+                label.Position = null; if (transformedScreen) label.SpinStyle = 0;
+                Text(label.Text, transformedScreen); Fields(label.Fields, transformedScreen); break;
             case DirectiveLabel label:
-                label.Position = null; Text(label.Text); Fields(label.Fields); break;
+                label.Position = null; if (transformedScreen) label.SpinStyle = 0;
+                Text(label.Text, transformedScreen); Fields(label.Fields, transformedScreen); break;
             case SchematicSymbolInstance symbol when movedSymbol:
                 symbol.Position = null;
+                if (transformedSymbol) symbol.Transform = null;
+                if (mirroredSymbol) symbol.FieldsAutoplaced = false;
                 Field(symbol.ReferenceField); Field(symbol.ValueField); Field(symbol.FootprintField);
                 Field(symbol.DatasheetField); Field(symbol.DescriptionField); Fields(symbol.UserFields); break;
         }
         return item;
     }
-    private static void Text(Kiapi.Common.Types.Text? text) { if (text is not null) text.Position = null; }
-    private static void Field(SchematicField? field) { if (field is not null) Text(field.Text); }
-    private static void Fields(IEnumerable<SchematicField> fields) { foreach (var field in fields) Field(field); }
+    private static void Text(Kiapi.Common.Types.Text? text, bool transformed = false)
+    {
+        if (text is null) return;
+        text.Position = null;
+        if (transformed && text.Attributes is { } attributes)
+        {
+            attributes.Angle = null; attributes.HorizontalAlignment = 0; attributes.VerticalAlignment = 0;
+        }
+    }
+    private static void Field(SchematicField? field, bool transformed = false) { if (field is not null) Text(field.Text, transformed); }
+    private static void Fields(IEnumerable<SchematicField> fields, bool transformed = false) { foreach (var field in fields) Field(field, transformed); }
     private static AutomationException Error(string message) => new("native_layout_projection_mismatch", message);
 }

@@ -104,7 +104,7 @@ public sealed class SchematicLayoutResolutionTests
     }
 
     [TestMethod]
-    public void RotationMirroringAndLocksAreNotPassedOffAsTranslation()
+    public void RotationAndMirroringUseNativeTransformsWhileLockChangesRemainExplicit()
     {
         foreach (int change in new[] { 0, 1, 2 })
         {
@@ -117,8 +117,36 @@ public sealed class SchematicLayoutResolutionTests
                 _ => s.Placement! with { Locked = true }
             } }).ToArray() } };
             var plan = SchematicSynchronizationPlanner.PlanForExecution(SchematicNetReconciliationTests.Desired(state, wanted));
-            Assert.IsFalse(plan.CanPrepare); Assert.IsEmpty(plan.NativeOperations); Assert.IsNull(plan.CandidateXml);
-            Assert.AreEqual("nontranslation_placement_change", plan.ErrorCode);
+            if (change == 2)
+            {
+                Assert.IsFalse(plan.CanPrepare); Assert.IsEmpty(plan.NativeOperations); Assert.IsNull(plan.CandidateXml);
+                Assert.AreEqual("placement_lock_change", plan.ErrorCode);
+                continue;
+            }
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorMessage);
+            Assert.IsTrue(plan.NativeOperations.All(o => o.TransformConnectedSymbols is not null));
+            var actual = state.ObservedElectrical!.Clone();
+            Edit(actual.Hierarchy.Data, symbol =>
+            {
+                if (change == 0) symbol.Transform.Orientation = (SchematicSymbolOrientation)2;
+                else { symbol.Transform.MirrorX = true; symbol.FieldsAutoplaced = false; }
+            });
+            var batch = new ApplySchematicItemBatch { Document = state.Observed.Document.Clone() };
+            batch.Operations.Add(plan.NativeOperations.Select(o => o.Clone()));
+            Assert.AreEqual(actual.Hierarchy.Data,
+                SchematicLayoutResolution.Resolve(plan.Candidate!, actual, batch, state.KnowledgeLibraries).Schematic);
+            // Geometric acceptance cannot hide changed properties or a wrong orientation.
+            foreach (int corruption in new[] { 0, 1, 2 })
+            {
+                var bad = actual.Clone();
+                Edit(bad.Hierarchy.Data, symbol =>
+                {
+                    if (corruption == 0) symbol.Transform.Orientation = (SchematicSymbolOrientation)4;
+                    if (corruption == 1) symbol.ValueField.Text.Text_ = "unrequested";
+                    if (corruption == 2) symbol.Locked = LockedState.LsLocked;
+                });
+                Assert.ThrowsExactly<AutomationException>(() => SchematicLayoutResolution.Resolve(plan.Candidate!, bad, batch, state.KnowledgeLibraries));
+            }
         }
     }
 
@@ -136,6 +164,23 @@ public sealed class SchematicLayoutResolutionTests
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicLayoutResolution.Resolve(f.Plan.Candidate!, f.Native, f.Batch,
             f.State.KnowledgeLibraries, cancelled.Token));
+    }
+
+    [TestMethod]
+    public void EquivalentNativeOrientationDoesNotRequestAnotherSynchronizationEdit()
+    {
+        var state = SchematicSynchronizationPlanTests.Fixture();
+        var equivalent = state.Baseline.Engineering with { Circuit = state.Baseline.Engineering.Circuit with
+        { Symbols = state.Baseline.Engineering.Circuit.Symbols.Select(s => s with { Placement = s.Placement! with
+            { RotationDegrees = 180, MirrorX = true, MirrorY = true } }).ToArray() } };
+        state = SchematicNetReconciliationTests.Desired(state, equivalent);
+        foreach (var plan in new[] { SchematicSynchronizationPlanner.Plan(state), SchematicSynchronizationPlanner.PlanForExecution(state) })
+        {
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorMessage);
+            Assert.IsEmpty(plan.NativeOperations); Assert.IsFalse(plan.NativeLayoutResolutionRequired);
+            Assert.AreEqual(EngineeringDesignXml.Write(equivalent, state.KnowledgeLibraries),
+                EngineeringDesignXml.Write(plan.Candidate!.Engineering, state.KnowledgeLibraries));
+        }
     }
 
     private static (DesignRecoveryState State, SchematicSynchronizationPlan Plan, SchematicElectricalState Native, ApplySchematicItemBatch Batch) Fixture()

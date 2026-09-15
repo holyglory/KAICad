@@ -15,7 +15,10 @@ public sealed record DesignRecoveryState(Guid OriginId, Guid InstanceId, NativeR
     ApplySchematicItemBatch? PendingMutation = null, DesignHierarchyResolution? HierarchyResolution = null,
     SchematicElectricalState? BaselineElectrical = null, SchematicElectricalState? ObservedElectrical = null,
     DocumentLifecycleState? PendingNativeState = null, CheckedSaveDocument? PendingNativeSave = null,
-    byte[]? PendingCandidateFileBytes = null);
+    byte[]? PendingCandidateFileBytes = null, DesignPublicationIntent? PendingPublication = null)
+{
+    public bool HasPendingWork => PendingMutation is not null || PendingPublication is not null;
+}
 
 public sealed record DesignHierarchyResolution(string SnapshotToken,
     IReadOnlyDictionary<string, SchematicConflictChoice> Choices, string NativeEpoch, ulong NativeSequence);
@@ -30,6 +33,7 @@ public sealed record StoredDesignRecovery(string RevisionToken, DesignRecoverySt
 public sealed class DesignRecoveryStore(string statePath)
 {
     private readonly string path = Path.GetFullPath(statePath);
+    internal string StatePath => path;
     private static readonly JsonSerializerOptions Json = new()
         { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     private sealed record Envelope([property: JsonRequired] int Version,
@@ -44,7 +48,8 @@ public sealed class DesignRecoveryStore(string statePath)
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ElectricalEnvelope? ObservedElectrical = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeState = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingNativeSave = null,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingCandidateFileBytes = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingCandidateFileBytes = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignPublicationIntent? PendingPublication = null);
     private sealed record ElectricalEnvelope([property: JsonRequired] string Epoch,
         [property: JsonRequired] ulong Sequence, [property: JsonRequired] bool TrackingComplete,
         [property: JsonRequired] string[] NetsXml, [property: JsonRequired] string[] Limitations);
@@ -92,7 +97,15 @@ public sealed class DesignRecoveryStore(string statePath)
     public StoredDesignRecovery Save(DesignRecoveryState state, string? expectedRevisionToken)
     {
         Validate(state);
-        var envelope = new Envelope(state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
+        if (state.PendingPublication is { } publication)
+        {
+            var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (new[] { publication.DesignPath, publication.StagedPath, publication.PreviousPath, publication.DesignPath + ".sync.lock" }
+                .Any(p => string.Equals(p, path, comparison) || string.Equals(p, path + ".lock", comparison)))
+                throw Failure("invalid_design_publication", "Design publication and recovery files must remain separate.");
+        }
+        var envelope = new Envelope(state.PendingPublication is not null ? 6
+            : state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
             : state.PendingNativeState is not null ? 4
             : state.BaselineElectrical is not null || state.ObservedElectrical is not null ? 3
             : state.HierarchyResolution is null ? 1 : 2, state.OriginId, state.InstanceId, state.NativeRevision.Epoch,
@@ -101,7 +114,8 @@ public sealed class DesignRecoveryStore(string statePath)
             SchematicDataXml.Write(state.Observed), state.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray(),
             state.PendingMutation?.ToByteArray(), state.HierarchyResolution,
             EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic), EncodeElectrical(state.ObservedElectrical, state.Observed),
-            state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes);
+            state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes,
+            state.PendingPublication);
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
         // Verify complete recoverability before touching the previous recovery file.
         var next = Decode(bytes);
@@ -175,16 +189,11 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            if (envelope.Version is not (1 or 2 or 3 or 4 or 5) || envelope.KnowledgeLibraryXml is null
-                || (envelope.Version == 1 && envelope.HierarchyResolution is not null)
-                || (envelope.Version == 2 && envelope.HierarchyResolution is null)
-                || (envelope.Version < 4 && (envelope.Version == 3) != electrical)
-                || (envelope.Version == 4) != (envelope.PendingNativeState is not null
-                    && envelope.PendingNativeSave is null && envelope.PendingCandidateFileBytes is null)
-                || (envelope.Version == 5) != (envelope.PendingNativeSave is not null
-                    || envelope.PendingCandidateFileBytes is not null)
-                || (envelope.Version < 5 && (envelope.PendingNativeSave is not null
-                    || envelope.PendingCandidateFileBytes is not null)))
+            int requiredVersion = envelope.PendingPublication is not null ? 6
+                : envelope.PendingNativeSave is not null || envelope.PendingCandidateFileBytes is not null ? 5
+                : envelope.PendingNativeState is not null ? 4 : electrical ? 3
+                : envelope.HierarchyResolution is not null ? 2 : 1;
+            if (envelope.Version != requiredVersion || envelope.KnowledgeLibraryXml is null)
                 throw Failure("invalid_design_recovery", "Unsupported or incomplete recovery state.");
             var libraries = envelope.KnowledgeLibraryXml.Select(ComponentKnowledgeXml.ReadLibrary).ToArray();
             var observed = SchematicDataXml.Read(envelope.ObservedXml) as SchematicHierarchyData
@@ -197,7 +206,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 DecodeElectrical(envelope.BaselineElectrical, baseline.Schematic), DecodeElectrical(envelope.ObservedElectrical, observed),
                 envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState),
                 envelope.PendingNativeSave is null ? null : CheckedSaveDocument.Parser.ParseFrom(envelope.PendingNativeSave),
-                envelope.PendingCandidateFileBytes);
+                envelope.PendingCandidateFileBytes, envelope.PendingPublication);
             Validate(state);
             return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), state);
         }
@@ -234,16 +243,20 @@ public sealed class DesignRecoveryStore(string statePath)
                 throw Failure("invalid_design_resolution", "Saved hierarchy choices require their exact snapshot token.");
             _ = PlanHierarchy(state);
         }
+        if (state.PendingPublication is { } publication)
+            ValidatePublication(state, publication);
+        if (state.PendingNativeSave is { } save && state.PendingPublication is not null)
+            ValidatePublicationSave(state, save);
         if (state.PendingMutation is not { } pending)
         {
-            if (state.PendingNativeState is not null || state.PendingNativeSave is not null
-                || state.PendingCandidateFileBytes is not null)
+            if (state.PendingPublication is null && (state.PendingNativeState is not null || state.PendingNativeSave is not null
+                || state.PendingCandidateFileBytes is not null))
                 throw Failure("invalid_design_recovery", "A pending native precondition requires its exact saved mutation.");
             return;
         }
         if (state.PendingNativeState is { } nativeState)
             CheckedSchematicContract.ValidateRequest(new() { Batch = pending, ExpectedState = nativeState }, nativeState.ProcessEpoch);
-        if (state.PendingNativeSave is { } nativeSave)
+        if (state.PendingNativeSave is { } nativeSave && state.PendingPublication is null)
         {
             if (state.PendingCandidateFileBytes is null || nativeSave.ExpectedState is null
                 || !nativeSave.Document.Equals(pending.Document) || string.IsNullOrWhiteSpace(nativeSave.OperationId)
@@ -271,6 +284,40 @@ public sealed class DesignRecoveryStore(string statePath)
         }
         if (!SameOwner(pending.Document) || pending.Operations.Any(o => o.TargetDocument is not null && !SameOwner(o.TargetDocument)))
             throw Failure("invalid_design_recovery", "Pending mutation targets must belong to the recorded native design.");
+    }
+
+    private static void ValidatePublication(DesignRecoveryState state, DesignPublicationIntent publication)
+    {
+        if (publication.OperationId == Guid.Empty || !Enum.IsDefined(publication.Phase)
+            || string.IsNullOrWhiteSpace(publication.DesignPath) || !Path.IsPathFullyQualified(publication.DesignPath)
+            || Path.GetFullPath(publication.DesignPath) != publication.DesignPath
+            || !string.Equals(Path.GetExtension(publication.DesignPath), ".xml", StringComparison.OrdinalIgnoreCase)
+            || publication.StagedPath != publication.DesignPath + ".sync-" + publication.OperationId.ToString("N")
+            || (publication.PreviousPath != publication.StagedPath && publication.PreviousPath != publication.StagedPath + ".previous")
+            || publication.ExpectedFileBytes is null || publication.CandidateFileBytes is null
+            || state.PendingCandidateFileBytes is not null || state.PendingNativeState is null || state.ObservedElectrical is null)
+            throw Failure("invalid_design_publication", "Publication requires exact paths, versions, phase and its original native checkpoint.");
+        CheckedSchematicContract.ValidateObservation(new() { State = state.PendingNativeState, Electrical = state.ObservedElectrical },
+            state.Baseline.Schematic.Document, state.PendingNativeState.ProcessEpoch);
+        foreach (byte[] bytes in new[] { publication.ExpectedFileBytes, publication.CandidateFileBytes })
+        {
+            var design = ReadDesired(state with { DesiredFileBytes = bytes });
+            if (!design.Schematic.Document.Equals(state.Baseline.Schematic.Document))
+                throw Failure("invalid_design_publication", "Both XML versions must belong to the saved native design.");
+        }
+        if (publication.Phase != DesignPublicationPhase.Prepared && state.PendingNativeSave is null)
+            throw Failure("invalid_design_publication", "Native-save identity must be retained before publishing XML.");
+    }
+
+    private static void ValidatePublicationSave(DesignRecoveryState state, CheckedSaveDocument save)
+    {
+        var native = state.PendingNativeState!;
+        if (!Guid.TryParseExact(save.OperationId, "D", out var operation) || operation == Guid.Empty
+            || !Equals(save.Document, native.Document) || !Equals(save.ExpectedState?.Document, native.Document)
+            || save.ExpectedState!.ProcessEpoch != native.ProcessEpoch || save.ExpectedState.NativeIdentity != native.NativeIdentity
+            || save.ExpectedState.Revision?.Epoch != native.Revision.Epoch
+            || save.ExpectedState.Revision.Sequence < native.Revision.Sequence)
+            throw Failure("invalid_design_publication", "The pending save must identify the same native document and process.");
     }
 
     private static ElectricalEnvelope? EncodeElectrical(SchematicElectricalState? state, SchematicHierarchyData hierarchy)

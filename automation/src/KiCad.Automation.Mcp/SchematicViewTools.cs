@@ -93,6 +93,8 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
             instanceId, recoveryRevisionToken = observed.Inspection.RevisionToken,
             electricalBaselineAvailable = saved.State.BaselineElectrical is not null,
             electricalObservationAvailable = saved.State.ObservedElectrical is not null,
+            pendingPublicationOperationId = saved.State.PendingPublication?.OperationId,
+            pendingPublicationPhase = saved.State.PendingPublication?.Phase.ToString(),
             disposition = observed.Inspection.Disposition.ToString(), trackingComplete = observed.Snapshot.TrackingComplete,
             receipt = observed.Inspection.Receipt is null ? (JsonElement?)null :
                 JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Inspection.Receipt)),

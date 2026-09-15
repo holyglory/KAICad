@@ -23,7 +23,7 @@ public static class SchematicNetReconciliation
         {
             if (state.OriginId == Guid.Empty || state.InstanceId == Guid.Empty)
                 throw Failure("invalid_electrical_recovery", "An exact recovery origin and instance are required.");
-            if (state.PendingMutation is not null) throw Failure("pending_recovery_requires_reconciliation", "Reconcile the exact pending operation first.");
+            if (state.HasPendingWork) throw Failure("pending_recovery_requires_reconciliation", "Reconcile the exact pending operation first.");
             var baseline = state.BaselineElectrical ?? throw Failure("missing_electrical_baseline", "Initialize the matched electrical baseline first.");
             var observed = state.ObservedElectrical ?? throw Failure("missing_electrical_observation", "Capture current matching electrical state first.");
             if (!Equals(baseline.Hierarchy?.Data, state.Baseline.Schematic) || !Equals(observed.Hierarchy?.Data, state.Observed)

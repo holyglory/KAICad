@@ -755,6 +755,18 @@ and qualification under Coordinator outcome `p7e712f1bb764e327`. Use the existin
 read-only synchronization planner and individually qualified native tools; do not
 treat the draft executor as automatic synchronization or cross-platform evidence.
 
+Version-6 recovery records additionally bind an XML publication to its exact
+operation ID, destination, staged/displaced paths, original bytes, candidate bytes
+and phase. File-level recovery can distinguish a replacement that has already
+happened from one still needing execution, without swapping the files back. A
+changed or incomplete retained file pauses recovery; matching independent saves
+converge without another replacement. Publication alone never advances the design
+baseline. The record also covers publication without a schematic mutation, and
+pending publication blocks fresh planning and observation refresh. Integration
+with the native executor and retained-file cleanup remains part of the open
+synchronization outcome. Existing version-1 through version-5 records remain
+readable and are not rewritten merely because the reader supports version 6.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including

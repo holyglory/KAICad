@@ -78,7 +78,7 @@ public static class CheckedSchematicContract
             throw Invalid("A failed or indeterminate checked receipt must explain its failure.");
     }
 
-    private static bool FileCoverage(DocumentLifecycleState state)
+    internal static bool FileCoverage(DocumentLifecycleState state)
     {
         var files = state.NativeFiles.ToHashSet(StringComparer.Ordinal);
         if (files.Count == 0 || files.Count != state.NativeFiles.Count || files.Count != state.FileBaselines.Count) return false;

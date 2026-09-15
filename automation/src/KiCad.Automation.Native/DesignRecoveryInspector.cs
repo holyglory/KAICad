@@ -9,7 +9,8 @@ public enum DesignRecoveryDisposition
     NotFound,
     CompletedNeedsReconciliation,
     Rejected,
-    Indeterminate
+    Indeterminate,
+    PublicationNeedsReconciliation
 }
 
 public sealed record DesignRecoveryInspection(string RevisionToken, DesignRecoveryDisposition Disposition,
@@ -34,7 +35,7 @@ public static class DesignRecoveryInspector
         var saved = store.Read();
         if (saved is null || saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Reload the recovery record before refreshing its native observation.");
-        if (saved.State.PendingMutation is not null)
+        if (saved.State.HasPendingWork)
             throw new AutomationException("pending_recovery_requires_reconciliation",
                 "Inspect and reconcile the saved pending operation before replacing its observed revision.");
         var observed = await ObserveAsync(store, client, cancellationToken, includeElectrical);
@@ -110,7 +111,7 @@ public static class DesignRecoveryInspector
         var saved = store.Read();
         if (saved is null || saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Reload recovery before initializing its electrical baseline.");
-        if (saved.State.PendingMutation is not null)
+        if (saved.State.HasPendingWork)
             throw new AutomationException("pending_recovery_requires_reconciliation", "Reconcile the pending edit before initializing a baseline.");
         if (saved.State.BaselineElectrical is not null)
             throw new AutomationException("electrical_baseline_exists", "An established electrical baseline cannot be replaced by initialization.");
@@ -141,10 +142,22 @@ public static class DesignRecoveryInspector
         cancellationToken.ThrowIfCancellationRequested();
         var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
         var pending = saved.State.PendingMutation;
-        if (pending is null) return new(saved.RevisionToken, DesignRecoveryDisposition.NoPendingOperation, null);
+        if (pending is null && saved.State.PendingPublication is null)
+            return new(saved.RevisionToken, DesignRecoveryDisposition.NoPendingOperation, null);
         var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != saved.State.InstanceId.ToString("D"))
             throw new AutomationException("recovery_instance_mismatch", "Reattach the exact instance recorded by this design before recovery.");
+        if (pending is null)
+        {
+            if (saved.State.PendingNativeState?.ProcessEpoch != session.Epoch)
+                throw new AutomationException("instance_changed", "The pending publication belongs to another native process.");
+            var saveResult = saved.State.PendingNativeSave is { } requestSave
+                ? await ReadSaveReceiptAsync(client, requestSave, cancellationToken) : null;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (store.Read()?.RevisionToken != saved.RevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed during publication inspection.");
+            return new(saved.RevisionToken, DesignRecoveryDisposition.PublicationNeedsReconciliation, null, null, saveResult);
+        }
         if (saved.State.PendingNativeState is { } nativeState)
         {
             var expected = new CheckedSchematicBatch { Batch = pending.Clone(), ExpectedState = nativeState.Clone() };
@@ -168,16 +181,7 @@ public static class DesignRecoveryInspector
             LifecycleOperationResult? saveReceipt = null;
             if (saved.State.PendingNativeSave is { } saveRequest)
             {
-                saveReceipt = await client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(new()
-                {
-                    Document = saveRequest.Document.Clone(), OperationId = saveRequest.OperationId,
-                    ProcessEpoch = saveRequest.ExpectedState.ProcessEpoch
-                }, cancellationToken);
-                if (!Equals(saveReceipt.Document, saveRequest.Document) || saveReceipt.OperationId != saveRequest.OperationId
-                    || saveReceipt.ProcessEpoch != saveRequest.ExpectedState.ProcessEpoch
-                    || saveReceipt.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
-                        or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate))
-                    throw new AutomationException("invalid_recovery_save_receipt", "The native save receipt identifies a different operation.");
+                saveReceipt = await ReadSaveReceiptAsync(client, saveRequest, cancellationToken);
             }
             // A failed save is not a rejected (or missing) schematic mutation.
             // Keep both outcomes available so observation can inspect recovery
@@ -218,5 +222,21 @@ public static class DesignRecoveryInspector
             _ => throw new AutomationException("invalid_recovery_receipt", "The native receipt has an unknown or inconsistent outcome.")
         };
         return new(saved.RevisionToken, disposition, receipt);
+    }
+
+    private static async Task<LifecycleOperationResult> ReadSaveReceiptAsync(NativeClient client,
+        CheckedSaveDocument request, CancellationToken token)
+    {
+        var receipt = await client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(new()
+        {
+            Document = request.Document.Clone(), OperationId = request.OperationId,
+            ProcessEpoch = request.ExpectedState.ProcessEpoch
+        }, token);
+        if (!Equals(receipt.Document, request.Document) || receipt.OperationId != request.OperationId
+            || receipt.ProcessEpoch != request.ExpectedState.ProcessEpoch
+            || receipt.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
+                or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate))
+            throw new AutomationException("invalid_recovery_save_receipt", "The native save receipt identifies a different operation.");
+        return receipt;
     }
 }

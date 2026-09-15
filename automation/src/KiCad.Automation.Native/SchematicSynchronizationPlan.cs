@@ -32,7 +32,7 @@ public static class SchematicSynchronizationPlanner
         var gaps = new List<HierarchyCoverageGap>();
         try
         {
-            if (state.PendingMutation is not null)
+            if (state.HasPendingWork)
                 return Failure("pending_recovery_requires_reconciliation", "Inspect the saved native operation before preparing another synchronization.");
             var desired = DesignRecoveryStore.ReadDesired(state);
             hierarchy = state.HierarchyResolution is { } choices

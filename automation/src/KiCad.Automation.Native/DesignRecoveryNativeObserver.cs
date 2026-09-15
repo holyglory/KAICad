@@ -68,7 +68,7 @@ public sealed class DesignRecoveryNativeObserver : IDisposable
                     if (delivery.Disposition == NativeEventDisposition.Change
                         && SameHierarchy(commit.Document, saved.State.Baseline.Schematic.Document)
                         && commit.Revision.Epoch == saved.State.NativeRevision.Epoch
-                        && saved.State.PendingMutation is null && saved.State.ObservedElectrical is not null
+                        && !saved.State.HasPendingWork && saved.State.ObservedElectrical is not null
                         && commit.Revision.Sequence <= saved.State.NativeRevision.Sequence)
                     { pendingReason = null; pendingDelivery = null; continue; }
                 }

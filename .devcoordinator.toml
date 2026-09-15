@@ -2945,7 +2945,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.sync-recovery-contracts.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/sync-recovery-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/sync-recovery-contracts"]
 retained_artifacts = [{ name = "sync-recovery-contracts", path = "automation/artifacts/sync-recovery-contracts", max_bytes = 16777216 }]
 
 [test.native-checked-batch]

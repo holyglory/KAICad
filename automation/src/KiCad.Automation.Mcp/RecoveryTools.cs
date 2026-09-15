@@ -161,6 +161,15 @@ public sealed class RecoveryTools
             snapshotToken = DesignRecoveryStore.HierarchySnapshotToken(saved.State),
             savedNativeRevision = saved.State.NativeRevision, trackingComplete = saved.State.TrackingComplete,
             pendingOperationId = saved.State.PendingMutation?.OperationId,
+            pendingSaveOperationId = saved.State.PendingNativeSave?.OperationId,
+            pendingPublication = saved.State.PendingPublication is not { } publication ? null : new
+            {
+                operationId = publication.OperationId, phase = publication.Phase.ToString(),
+                designPath = publication.DesignPath, stagedPath = publication.StagedPath, previousPath = publication.PreviousPath,
+                expectedSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(publication.ExpectedFileBytes)),
+                candidateSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(publication.CandidateFileBytes)),
+                liveFilesVerified = false
+            },
             electricalBaselineAvailable = saved.State.BaselineElectrical is not null,
             electricalObservationAvailable = saved.State.ObservedElectrical is not null,
             liveMutationAuthorized = false, canPlan = plan.CanApply,

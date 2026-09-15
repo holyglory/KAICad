@@ -119,7 +119,7 @@ public sealed class CheckedSchematicToolTests
         };
         state.Document.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
         string file = Path.Combine(root, "fixture.kicad_sch"); state.NativeFiles.Add(file);
-        state.FileBaselines.Add(new() { Path = file, BaselinePath = file, BaselineKnown = true, CurrentKnown = true,
+        state.FileBaselines.Add(new NativeFileBaselineState { Path = file, BaselinePath = file, BaselineKnown = true, CurrentKnown = true,
             BaselineExists = true, CurrentExists = true, BaselineSha256 = new string('b', 64), CurrentSha256 = new string('b', 64),
             BaselineBytes = 3, CurrentBytes = 3, Status = NativeFileBaselineStatus.NfbsUnchanged });
         var batch = new ApplySchematicItemBatch { Document = state.Document.Clone(), ExpectedRevision = state.Revision.Clone(),

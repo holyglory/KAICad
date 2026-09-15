@@ -120,7 +120,8 @@ public sealed class CheckedDesignRecoveryTests
                 }, observed.Disposition);
                 Assert.IsNull(observed.Receipt); Assert.IsNotNull(observed.CheckedReceipt);
                 Assert.AreEqual(state.PendingMutation, transport.Last!.ExpectedRequest.Batch);
-                Assert.AreEqual(state.PendingNativeState, transport.Last.ExpectedRequest.ExpectedState);
+                var expectedGuard = state.PendingNativeState;
+                Assert.AreEqual(expectedGuard, transport.Last.ExpectedRequest.ExpectedState);
                 Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
             }
             Assert.AreEqual(4, transport.Inspections);

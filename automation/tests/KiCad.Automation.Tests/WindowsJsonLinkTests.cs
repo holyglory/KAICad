@@ -8,6 +8,47 @@ public sealed class WindowsJsonLinkTests
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [TestMethod, TestCategory("WindowsFileMode")]
+    public async Task NativeDescriptorModesMatchTheBytesRecordedByFileBaselines()
+    {
+        if (!OperatingSystem.IsWindows()) { Assert.Inconclusive("Requires native MSVC and the Windows CRT."); return; }
+        string root = Directory.CreateTempSubdirectory("kwfile-mode-").FullName;
+        string evidence = Directory.CreateDirectory(Path.Combine(
+            Environment.GetEnvironmentVariable("KICAD_HOSTED_FIXTURE_EVIDENCE") ?? TestContext.TestResultsDirectory!,
+            "windows-file-mode")).FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        await WindowsFixtureCleanup.PreserveFailuresAsync(async () =>
+        {
+            var build = await Run("build", "cl.exe", "/nologo", "/std:c++20", "/EHsc", "/MD", "/O2",
+                "/I" + Path.Combine(Repository(), "libs/kiplatform/os/windows"),
+                Path.Combine(Repository(), "automation/tests/fixtures/windows-file-mode/probe.cpp"),
+                "/Fefile-mode.exe");
+            Assert.AreEqual(0, build.ExitCode, build.Error);
+            var executed = await Run("execute", Path.Combine(root, "file-mode.exe"), root);
+            Assert.AreEqual(0, executed.ExitCode, executed.Error);
+            using var result = System.Text.Json.JsonDocument.Parse(executed.Output);
+            Assert.IsTrue(result.RootElement.GetProperty("legacyMismatchReproduced").GetBoolean());
+            Assert.IsTrue(result.RootElement.GetProperty("textBytesMatched").GetBoolean());
+            Assert.IsTrue(result.RootElement.GetProperty("binaryBytesMatched").GetBoolean());
+            Assert.IsTrue(result.RootElement.GetProperty("embeddedNulPreserved").GetBoolean());
+            Assert.AreEqual(5, result.RootElement.GetProperty("cases").GetInt32());
+        }, async () =>
+        {
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(root);
+            Assert.IsFalse(Directory.Exists(root));
+        });
+
+        async Task<(int ExitCode, string Output, string Error)> Run(string name, string executable, params string[] arguments)
+        {
+            var result = await WindowsLauncherTests.Invoke(executable, arguments, root, deadline.Token, input: null);
+            string stdout = Path.Combine(evidence, name + ".stdout.log"), stderr = Path.Combine(evidence, name + ".stderr.log");
+            await File.WriteAllTextAsync(stdout, result.Output, deadline.Token);
+            await File.WriteAllTextAsync(stderr, result.Error, deadline.Token);
+            TestContext.AddResultFile(stdout); TestContext.AddResultFile(stderr);
+            return (result.ExitCode, result.Output, result.Error);
+        }
+    }
+
     [TestMethod, TestCategory("WriteObserverBoundary")]
     public async Task NativeWriteObserverDllPreservesThreadIsolationNestingAndFailureRecovery()
     {

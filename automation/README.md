@@ -7,6 +7,8 @@ of the approved six-milestone program, not a release.
 Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
 [Mac preview installation guide](distribution/mac-preview-install.md) covers the
 September 15 Apple Silicon and Intel builds, including managed-update setup.
+The [Windows preview installation guide](distribution/windows-preview-install.md)
+covers the September 15 Windows package and its managed updater.
 
 ## Try provisional Schematic Setup edits in a source build
 
@@ -57,7 +59,7 @@ fields they cannot preserve; current clients request the complete supported
 snapshot. Native Mac/Windows and actual Codex Desktop qualification of this
 increment remain open. Older previews and platform feeds remain available.
 
-## Windows preview — September 11, 2026
+## Earlier Windows checkpoint — September 11, 2026
 
 [Windows x64 application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-433c5e1fdf5954955a19df546236dce78e78b5b0-windows-x64.zip)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-433c5e1fdf5954955a19df546236dce78e78b5b0-source.tar.gz)

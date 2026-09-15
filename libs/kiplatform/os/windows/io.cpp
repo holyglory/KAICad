@@ -31,6 +31,7 @@
 #include <windows.h>
 #include <shlwapi.h>
 #include <winternl.h>
+#include "file_stream_mode.h"
 
 // NtQueryDirectoryFile-based directory enumeration for fast file listing.
 // This approach is based on git-for-windows fscache implementation:
@@ -210,7 +211,8 @@ FILE* KIPLATFORM::IO::OpenUniqueSiblingTempFile( const wxString& aTargetPath,
 
         if( h != INVALID_HANDLE_VALUE )
         {
-            int fd = _open_osfhandle( reinterpret_cast<intptr_t>( h ), _O_WRONLY | _O_BINARY );
+            int fd = _open_osfhandle( reinterpret_cast<intptr_t>( h ),
+                                     DETAIL::WritableFileDescriptorFlags( aMode.wc_str() ) );
 
             if( fd < 0 )
             {

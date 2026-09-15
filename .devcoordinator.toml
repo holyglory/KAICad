@@ -2656,6 +2656,33 @@ command = ["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
+[test.windows-file-mode-native]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.windows-file-mode-native.check]]
+name = "managed-build"
+tier = "development"
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.windows-file-mode-native.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["native-build", "native-contracts"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.windows-file-mode-native.check]]
+name = "native-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_common", "qa_symbol_graphic_identity"]
+
+[[test.windows-file-mode-native.check]]
+name = "native-contracts"
+tier = "development"
+requires = ["native-build"]
+command = ["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_(file_content_baseline|schematic_state_format)$", "--output-on-failure", "--no-tests=error"]
+
 [[test.caption-mcp-capabilities.check]]
 name = "build"
 tier = "development"

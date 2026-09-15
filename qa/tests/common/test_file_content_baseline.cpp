@@ -8,6 +8,7 @@
 #include <atomic>
 #include <barrier>
 #include <thread>
+#include <kiplatform/io.h>
 
 namespace
 {
@@ -117,6 +118,30 @@ BOOST_AUTO_TEST_CASE( OutputBaselineUsesCommittedBytesNotSubsequentDiskContents 
     directory.Write( "external change" );
     BOOST_CHECK_EQUAL( writer.CommittedBaseline().Sha256(), baseline.Sha256() );
     BOOST_CHECK( writer.CommittedBaseline().Check( directory.File() ) == FILE_BASELINE_CHECK::CHANGED );
+}
+
+BOOST_AUTO_TEST_CASE( NativeSiblingStreamHonorsTextAndBinaryBytes )
+{
+    BASELINE_DIRECTORY directory;
+    const char input[] = "one\ntwo\r\nthree\0tail\n";
+    const std::string bytes( input, sizeof( input ) - 1 );
+    for( const wxString& mode : { wxString( "wt" ), wxString( "wb" ) } )
+    {
+        wxString temporary, error;
+        FILE* stream = KIPLATFORM::IO::OpenUniqueSiblingTempFile(
+                directory.File(), mode, &temporary, &error );
+        BOOST_REQUIRE_MESSAGE( stream, error.ToStdString() );
+        const size_t written = fwrite( bytes.data(), 1, bytes.size(), stream );
+        const int closed = fclose( stream );
+        BOOST_CHECK_EQUAL( written, bytes.size() );
+        BOOST_REQUIRE_EQUAL( closed, 0 );
+        const auto expected = FILE_CONTENT_BASELINE::FromBytes( temporary, bytes, mode == "wt" );
+        const auto actual = FILE_CONTENT_BASELINE::Read( temporary );
+        BOOST_CHECK_EQUAL( expected.Bytes(), actual.Bytes() );
+        BOOST_CHECK_EQUAL( expected.Sha256(), actual.Sha256() );
+        BOOST_CHECK( expected.Check( temporary ) == FILE_BASELINE_CHECK::UNCHANGED );
+        BOOST_CHECK( !fs::exists( directory.path / "native.txt" ) );
+    }
 }
 
 BOOST_AUTO_TEST_CASE( CommitObserverRejectsBeforeReplacementAndRestoresItsScope )

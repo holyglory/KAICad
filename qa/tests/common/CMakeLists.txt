@@ -187,6 +187,7 @@ set( QA_COMMON_SRCS
     test_native_state_digest.cpp
     test_file_content_baseline.cpp
     test_document_lifecycle_controller.cpp
+    test_checked_schematic_controller.cpp
     test_net_settings.cpp
     test_component_class_settings.cpp
     test_project_local_settings.cpp

@@ -288,7 +288,7 @@ jobs:
           if ($env:WINDOWS_FIXTURE -eq 'registry') {
             if ($env:CHECKS_ONLY -ne 'true') { throw 'Registry verification is a checks-only fixture.' }
             dotnet test KiCad.Automation.slnx --configuration Release `
-              --filter 'FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~InstanceRegistryTests.PlatformLocalLaunchReceiptUsesTheSameEndpointAsNativeStartup|FullyQualifiedName~NativeCaptionMcpProbeTests' `
+              --filter 'FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~InstanceRegistryTests.PlatformLocalLaunchReceiptUsesTheSameEndpointAsNativeStartup|FullyQualifiedName~NativeCaptionMcpProbeTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests' `
               --logger trx --results-directory "$env:RUNNER_TEMP/kicad-windows-preflight"
             if ($LASTEXITCODE -ne 0) { throw 'Windows registry fixture failed.' }
             exit 0

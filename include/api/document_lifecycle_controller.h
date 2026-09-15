@@ -14,6 +14,7 @@ public:
     void RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& aState );
     void AnnotateCleanState( kiapi::automation::v1::DocumentLifecycleState& aState ) const;
     bool IsCleanCloseActive() const { return m_cleanCloseActive; }
+    static bool HasUnchangedFileBaselines( const kiapi::automation::v1::DocumentLifecycleState& aState );
 
 private:
     struct RECEIPT

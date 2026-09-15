@@ -79,6 +79,12 @@ bool DOCUMENT_LIFECYCLE_CONTROLLER::Handles( const ApiRequest& aRequest )
             || aRequest.message().Is<kiapi::automation::v1::ReadLifecycleOperation>();
 }
 
+bool DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines(
+        const kiapi::automation::v1::DocumentLifecycleState& aState )
+{
+    return FileCoverage( aState );
+}
+
 void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& state )
 {
     if( state.native_content_dirty() || !FileCoverage( state ) || !Digest( state.state_sha256() )

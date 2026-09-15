@@ -497,6 +497,43 @@ message ApplySchematicItemBatch {
   string origin_id = 7;
 }
 
+// A separate command, not an optional guard on a legacy batch: an older peer
+// must reject it rather than ignore the precondition and execute unchecked.
+message CheckedSchematicBatch {
+  ApplySchematicItemBatch batch = 1;
+  DocumentLifecycleState expected_state = 2;
+}
+
+message ReadCheckedSchematicBatchReceipt {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedSchematicBatch expected_request = 4;
+}
+
+enum CheckedSchematicBatchStatus {
+  CSBS_UNKNOWN = 0;
+  CSBS_NOT_FOUND = 1;
+  CSBS_REJECTED = 2;
+  CSBS_COMPLETED = 3;
+  // Native execution may have occurred. Inspect preserved state; never retry
+  // with a new operation ID merely because its post-observation failed.
+  CSBS_INDETERMINATE = 4;
+}
+
+message CheckedSchematicBatchReceipt {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedSchematicBatchStatus status = 4;
+  bool expected_request_verified = 5;
+  SchematicItemBatchResult result = 6;
+  DocumentLifecycleState observed_before = 7;
+  DocumentLifecycleState observed_after = 8;
+  string error_code = 9;
+  string error_message = 10;
+}
+
 message SchematicItemOperation {
   // Optional per-operation target within the same loaded schematic. Absence
   // uses the enclosing batch target. All operations share one native commit.

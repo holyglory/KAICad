@@ -39,7 +39,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSynchronizationPlan")]
     public Task ManualNativeMovesPrepareOneConsistentXmlDesign() => RunNativeSessions(NativeJourney.SynchronizationPlan);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan }
+    [TestMethod, TestCategory("NativeCheckedSchematicBatch")]
+    public Task CheckedBatchesRejectChangedStateAndPreserveNativeUndo() => RunNativeSessions(NativeJourney.CheckedBatch);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -54,6 +57,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.NetSettings => "native-net-settings",
                 NativeJourney.HierarchyPolicy => "native-hierarchy-policy",
                 NativeJourney.SynchronizationPlan => "native-synchronization-plan",
+                NativeJourney.CheckedBatch => "native-checked-batch",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -310,6 +314,9 @@ public sealed partial class NativeSessionTests
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
                     }
+                    else if (journey == NativeJourney.CheckedBatch)
+                        await VerifyCheckedSchematicBatch(client, opened.Document, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SynchronizationPlan)
                         await VerifyInteractiveMoveAdmission(client, opened.Document, electrical, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);

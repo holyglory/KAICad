@@ -13,7 +13,7 @@ public enum DesignRecoveryDisposition
 }
 
 public sealed record DesignRecoveryInspection(string RevisionToken, DesignRecoveryDisposition Disposition,
-    SchematicOperationReceipt? Receipt);
+    SchematicOperationReceipt? Receipt, CheckedSchematicBatchReceipt? CheckedReceipt = null);
 
 public sealed record DesignRecoveryObservation(DesignRecoveryInspection Inspection,
     SchematicHierarchyDataSnapshot Snapshot, SchematicElectricalState? Electrical = null);
@@ -89,7 +89,8 @@ public static class DesignRecoveryInspector
         if (snapshot.Data?.Document is null || !snapshot.Data.Document.Equals(saved.State.Baseline.Schematic.Document))
             throw new AutomationException("invalid_recovery_snapshot", "The native snapshot identifies a different design.");
         ulong minimumSequence = Math.Max(saved.State.NativeRevision.Sequence,
-            inspection.Receipt?.Result?.Revision?.Sequence ?? 0);
+            Math.Max(inspection.Receipt?.Result?.Revision?.Sequence ?? 0,
+                inspection.CheckedReceipt?.Result?.Revision?.Sequence ?? 0));
         if (snapshot.Revision is not { } revision || revision.Epoch != saved.State.NativeRevision.Epoch
             || revision.Sequence < minimumSequence)
             throw new AutomationException("invalid_recovery_revision", "The native snapshot predates recovery or belongs to a different document session.");
@@ -143,6 +144,28 @@ public static class DesignRecoveryInspector
         var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != saved.State.InstanceId.ToString("D"))
             throw new AutomationException("recovery_instance_mismatch", "Reattach the exact instance recorded by this design before recovery.");
+        if (saved.State.PendingNativeState is { } nativeState)
+        {
+            var expected = new CheckedSchematicBatch { Batch = pending.Clone(), ExpectedState = nativeState.Clone() };
+            CheckedSchematicContract.ValidateRequest(expected, session.Epoch);
+            var checkedReceipt = await client.InvokeAsync<ReadCheckedSchematicBatchReceipt, CheckedSchematicBatchReceipt>(new()
+            {
+                Document = pending.Document.Clone(), ProcessEpoch = nativeState.ProcessEpoch,
+                OperationId = pending.OperationId, ExpectedRequest = expected
+            }, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (store.Read()?.RevisionToken != saved.RevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed during checked receipt inspection.");
+            CheckedSchematicContract.ValidateResult(expected, checkedReceipt, inspect: true);
+            var checkedDisposition = checkedReceipt.Status switch
+            {
+                CheckedSchematicBatchStatus.CsbsNotFound => DesignRecoveryDisposition.NotFound,
+                CheckedSchematicBatchStatus.CsbsCompleted => DesignRecoveryDisposition.CompletedNeedsReconciliation,
+                CheckedSchematicBatchStatus.CsbsRejected => DesignRecoveryDisposition.Rejected,
+                _ => DesignRecoveryDisposition.Indeterminate
+            };
+            return new(saved.RevisionToken, checkedDisposition, null, checkedReceipt);
+        }
         var request = new InspectSchematicOperation
         {
             Document = pending.Document.Clone(), DocumentEpoch = pending.DocumentEpoch,

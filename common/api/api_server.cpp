@@ -29,6 +29,7 @@
 #include <api/api_utils.h> // traceApi
 #include <api/api_server.h>
 #include <api/document_lifecycle_controller.h>
+#include <api/checked_schematic_controller.h>
 #include <api/api_socket_url.h>
 #include <kiid.h>
 #include <kinng.h>
@@ -61,6 +62,7 @@ KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
         m_readyToReply( false )
 {
     m_lifecycle = std::make_unique<DOCUMENT_LIFECYCLE_CONTROLLER>();
+    m_checkedSchematic = std::make_unique<CHECKED_SCHEMATIC_CONTROLLER>();
     if( !aAutoStart )
         return;
 
@@ -420,6 +422,18 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
 API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
 {
     wxASSERT( wxIsMainThread() );
+    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( aRequest ) )
+    {
+        if( !IsAutomation() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+            error.set_error_message( "Checked schematic batches require an explicit automation instance" );
+            return tl::unexpected( error );
+        }
+        return m_checkedSchematic->Handle( aRequest, m_token,
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+    }
     if( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( aRequest ) )
     {
         if( !IsAutomation() )

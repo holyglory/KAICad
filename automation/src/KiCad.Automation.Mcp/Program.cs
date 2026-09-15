@@ -68,6 +68,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<EventTools>()
     .WithTools<SchematicViewTools>()
     .WithTools<SchematicMutationTools>()
+    .WithTools<CheckedSchematicTools>()
     .WithTools<SchematicXmlTools>()
     .WithTools<DocumentTools>()
     .WithTools<DocumentStateTools>()

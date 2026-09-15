@@ -19,6 +19,7 @@ struct CHECKED_FIXTURE
     unsigned reads = 0, mutations = 0;
     bool failBefore = false, failAfter = false, reject = false, partialRejection = false;
     bool throwMutation = false, wrongResult = false, noOp = false, wrongAfter = false;
+    bool changeDuringCapture = false, wrongElectricalRevision = false;
 
     CHECKED_FIXTURE()
     {
@@ -74,6 +75,15 @@ struct CHECKED_FIXTURE
             if( mutations && wrongAfter ) observed.set_process_epoch( KIID().AsStdString() );
             response.mutable_message()->PackFrom( observed );
         }
+        else if( request.message().Is<ReadSchematicElectricalState>() )
+        {
+            SchematicElectricalState electrical;
+            electrical.mutable_hierarchy()->mutable_data()->mutable_document()->CopyFrom( state.document() );
+            electrical.mutable_hierarchy()->mutable_revision()->CopyFrom( state.revision() );
+            if( wrongElectricalRevision ) electrical.mutable_hierarchy()->mutable_revision()->set_sequence( 0 );
+            if( changeDuringCapture ) state.set_state_sha256( std::string( 64, 'c' ) );
+            response.mutable_message()->PackFrom( electrical );
+        }
         else if( request.message().Is<ApplySchematicItemBatch>() )
         {
             ++mutations;
@@ -114,6 +124,27 @@ struct CHECKED_FIXTURE
 }
 
 BOOST_AUTO_TEST_SUITE( CheckedSchematicBatchController )
+
+BOOST_AUTO_TEST_CASE( CombinedCaptureBindsElectricalDataToOneUnchangedNativeState )
+{
+    CHECKED_FIXTURE f;
+    ReadCheckedSchematicState query;
+    query.mutable_document()->CopyFrom( f.state.document() ); query.set_process_epoch( f.process );
+    auto response = f.Handle( query ); BOOST_REQUIRE( response );
+    CheckedSchematicState state; BOOST_REQUIRE( response->message().UnpackTo( &state ) );
+    BOOST_CHECK( MessageDifferencer::Equals( state.state(), f.state ) );
+    BOOST_CHECK( MessageDifferencer::Equals( state.electrical().hierarchy().revision(), f.state.revision() ) );
+    BOOST_CHECK_EQUAL( f.mutations, 0 );
+    f.changeDuringCapture = true;
+    BOOST_CHECK( !f.Handle( query ) ); BOOST_CHECK_EQUAL( f.mutations, 0 );
+    f.changeDuringCapture = false; f.wrongElectricalRevision = true;
+    BOOST_CHECK( !f.Handle( query ) );
+    f.wrongElectricalRevision = false;
+    query.mutable_document()->mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+    BOOST_CHECK( !f.Handle( query ) );
+    query.mutable_document()->CopyFrom( f.state.document() ); query.set_process_epoch( KIID().AsStdString() );
+    BOOST_CHECK( !f.Handle( query ) );
+}
 
 BOOST_AUTO_TEST_CASE( ContentAndDiskChangesRejectWithoutDependingOnTheCursor )
 {

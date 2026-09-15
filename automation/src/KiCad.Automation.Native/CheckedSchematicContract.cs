@@ -7,6 +7,20 @@ namespace KiCad.Automation.Native;
 /// Does not contact native code or establish current-state admission.</summary>
 public static class CheckedSchematicContract
 {
+    public static void ValidateObservation(CheckedSchematicState result, Kiapi.Common.Types.DocumentSpecifier document, string processEpoch)
+    {
+        var state = result.State; var electrical = result.Electrical;
+        if (state?.Revision is null || electrical?.Hierarchy?.Data?.Document is null
+            || document?.SheetPath?.Path.Count != 1 || (int)document.Type != 1
+            || !Uuid(processEpoch) || state.ProcessEpoch != processEpoch
+            || !Uuid(state.NativeIdentity) || !Uuid(state.Revision.Epoch)
+            || !Equals(state.Document, document) || !Equals(electrical.Hierarchy.Data.Document, document)
+            || !Equals(state.Revision, electrical.Hierarchy.Revision)
+            || state.Scope != DocumentLifecycleScope.DlsSchematicHierarchy || !state.ProjectSettingsIncluded
+            || state.StateSha256.Length != 64 || !state.StateSha256.All(char.IsAsciiHexDigitLower))
+            throw Invalid("The combined observation must identify one exact native schematic checkpoint.");
+    }
+
     public static void ValidateRequest(CheckedSchematicBatch request, string processEpoch)
     {
         var batch = request.Batch; var expected = request.ExpectedState;

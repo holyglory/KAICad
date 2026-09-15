@@ -12,6 +12,32 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class CheckedSchematicTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_schematic_checked_state", ReadOnly = true),
+     Description("Capture whole-schematic electrical data, typed hierarchy and full native admission state together at one native checkpoint. Requires an explicit root documentJson and instance ID. The native reader rejects changed or pending captures. The returned state can guard a CheckedSchematicBatch planned from its paired electrical snapshot; it may become stale afterward. Reports existing file conflicts and incomplete tracking without authorizing mutation. No design edits, file writes, navigation or image capture occur.")]
+    public async Task<CallToolResult> Observe(string instanceId, string documentJson, CancellationToken cancellationToken)
+    {
+        CheckedSchematicState? result = null;
+        var response = await InstanceToolBoundary.Run(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var document = SchematicJson.Parser.Parse<Kiapi.Common.Types.DocumentSpecifier>(documentJson);
+            DocumentStateTools.ValidateTarget(document);
+            if ((int)document.Type != 1 || document.SheetPath?.Path.Count != 1)
+                throw new AutomationException("invalid_checked_document", "Select the explicit schematic root for combined capture.");
+            var client = registry.Client(instanceId);
+            result = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+                { Document = document, ProcessEpoch = client.Epoch }, cancellationToken);
+            CheckedSchematicContract.ValidateObservation(result, document, client.Epoch);
+            return SchematicJson.Formatter.Format(result);
+        });
+        if (result is not null && !(response.IsError ?? false))
+        {
+            using var json = JsonDocument.Parse(SchematicJson.Formatter.Format(result));
+            response.StructuredContent = json.RootElement.Clone();
+        }
+        return response;
+    }
+
     [McpServerTool(Name = "kicad_schematic_apply_checked_batch", ReadOnly = false),
      Description("Apply a typed schematic batch only to its exact observed native document state, including process epoch, native content digest, project settings and file baselines. requestJson is CheckedSchematicBatch with batch and expectedState from kicad_document_state; its batch requires an operation UUID and matching document epoch/revision. Reuse the identical request after a timeout or inspect its checked receipt. Old peers reject this distinct command; no unchecked fallback exists. Native commits remain undoable. A rejected or indeterminate result is not success; cancellation or transport failure does not prove rollback. Does not save files or complete XML synchronization.")]
     public Task<CallToolResult> Apply(string instanceId, string requestJson, CancellationToken cancellationToken) =>

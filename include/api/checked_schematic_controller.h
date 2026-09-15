@@ -15,6 +15,8 @@ public:
                        const DISPATCH& aDispatch );
 
 private:
+    API_RESULT ReadState( ApiRequest& aRequest, const std::string& aProcessEpoch,
+                          const DISPATCH& aDispatch );
     struct RECEIPT
     {
         kiapi::automation::v1::CheckedSchematicBatch request;

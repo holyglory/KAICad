@@ -504,6 +504,18 @@ message CheckedSchematicBatch {
   DocumentLifecycleState expected_state = 2;
 }
 
+// Capture the planner input and the checked-batch precondition at one native
+// checkpoint. Only a root schematic target is valid for this whole-design read.
+message ReadCheckedSchematicState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+}
+
+message CheckedSchematicState {
+  DocumentLifecycleState state = 1;
+  SchematicElectricalState electrical = 2;
+}
+
 message ReadCheckedSchematicBatchReceipt {
   kiapi.common.types.DocumentSpecifier document = 1;
   string process_epoch = 2;

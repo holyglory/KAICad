@@ -70,12 +70,63 @@ bool ValidRequest( const CheckedSchematicBatch& request, const std::string& proc
 bool CHECKED_SCHEMATIC_CONTROLLER::Handles( const ApiRequest& request )
 {
     return request.message().Is<CheckedSchematicBatch>()
-            || request.message().Is<ReadCheckedSchematicBatchReceipt>();
+            || request.message().Is<ReadCheckedSchematicBatchReceipt>()
+            || request.message().Is<ReadCheckedSchematicState>();
+}
+
+API_RESULT CHECKED_SCHEMATIC_CONTROLLER::ReadState( ApiRequest& envelope,
+        const std::string& processEpoch, const DISPATCH& dispatch )
+{
+    ReadCheckedSchematicState request;
+    if( !envelope.message().UnpackTo( &request ) || request.process_epoch() != processEpoch
+            || !Uuid( processEpoch ) || request.document().type() != kiapi::common::types::DOCTYPE_SCHEMATIC
+            || request.document().sheet_path().path_size() != 1
+            || !Uuid( request.document().sheet_path().path( 0 ).value() ) )
+        return Error( "Combined schematic state requires an exact root document and process epoch" );
+    auto call = [&]( const google::protobuf::Message& message )
+    {
+        ApiRequest query; query.mutable_header()->CopyFrom( envelope.header() );
+        query.mutable_message()->PackFrom( message ); return dispatch( query );
+    };
+    ReadDocumentLifecycleState stateQuery; stateQuery.mutable_document()->CopyFrom( request.document() );
+    ReadSchematicElectricalState electricalQuery; electricalQuery.mutable_document()->CopyFrom( request.document() );
+    try
+    {
+        auto beforeReply = call( stateQuery );
+        if( !beforeReply ) return beforeReply;
+        DocumentLifecycleState before;
+        if( beforeReply->status().status() != ApiStatusCode::AS_OK || !beforeReply->message().UnpackTo( &before ) )
+            return Error( "Initial combined-state observation failed" );
+        auto electricalReply = call( electricalQuery );
+        if( !electricalReply ) return electricalReply;
+        SchematicElectricalState electrical;
+        if( electricalReply->status().status() != ApiStatusCode::AS_OK || !electricalReply->message().UnpackTo( &electrical ) )
+            return Error( "Combined electrical observation failed" );
+        auto afterReply = call( stateQuery );
+        if( !afterReply ) return afterReply;
+        DocumentLifecycleState after;
+        if( afterReply->status().status() != ApiStatusCode::AS_OK || !afterReply->message().UnpackTo( &after )
+                || !MessageDifferencer::Equals( before, after )
+                || !MessageDifferencer::Equals( before.document(), request.document() )
+                || !MessageDifferencer::Equals( electrical.hierarchy().data().document(), request.document() )
+                || !MessageDifferencer::Equals( electrical.hierarchy().revision(), before.revision() )
+                || before.process_epoch() != processEpoch || before.scope() != DLS_SCHEMATIC_HIERARCHY
+                || !before.project_settings_included() || !Uuid( before.native_identity() )
+                || !Uuid( before.revision().epoch() ) || !Digest( before.state_sha256() ) )
+            return Error( "Schematic state changed during combined capture; discard the observation" );
+        CheckedSchematicState result;
+        result.mutable_state()->Swap( &after ); result.mutable_electrical()->Swap( &electrical );
+        ApiResponse response; response.mutable_status()->set_status( ApiStatusCode::AS_OK );
+        response.mutable_message()->PackFrom( result ); return response;
+    }
+    catch( const std::exception& error ) { return Error( std::string( "Combined-state observation failed: " ) + error.what() ); }
 }
 
 API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
         const std::string& processEpoch, const DISPATCH& dispatch )
 {
+    if( envelope.message().Is<ReadCheckedSchematicState>() )
+        return ReadState( envelope, processEpoch, dispatch );
     if( envelope.message().Is<ReadCheckedSchematicBatchReceipt>() )
     {
         ReadCheckedSchematicBatchReceipt query;

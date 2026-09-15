@@ -108,6 +108,25 @@ public sealed class CheckedSchematicToolTests
         Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() => CheckedSchematicTools.ValidateResult(request, rejected, false));
     }
 
+    [TestMethod]
+    public void CombinedObservationRejectsMixedRevisionAndProcessTargets()
+    {
+        var request = Request(Path.GetTempPath(), Guid.NewGuid().ToString("D"));
+        var result = new CheckedSchematicState { State = request.ExpectedState.Clone(), Electrical = new()
+        { Hierarchy = new() { Data = new() { Document = request.Batch.Document.Clone() }, Revision = request.Batch.ExpectedRevision.Clone() } } };
+        CheckedSchematicContract.ValidateObservation(result, request.Batch.Document, request.ExpectedState.ProcessEpoch);
+        foreach (int invalid in Enumerable.Range(0, 4))
+        {
+            var changed = result.Clone();
+            if (invalid == 0) changed.Electrical.Hierarchy.Revision.Sequence++;
+            if (invalid == 1) changed.State.ProcessEpoch = Guid.NewGuid().ToString("D");
+            if (invalid == 2) changed.State.StateSha256 = "bad";
+            if (invalid == 3) changed.Electrical.Hierarchy.Data.Document.SheetPath.Path[0].Value = Guid.NewGuid().ToString("D");
+            Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() =>
+                CheckedSchematicContract.ValidateObservation(changed, request.Batch.Document, request.ExpectedState.ProcessEpoch));
+        }
+    }
+
     internal static CheckedSchematicBatch Request(string root, string processEpoch)
     {
         var state = new DocumentLifecycleState

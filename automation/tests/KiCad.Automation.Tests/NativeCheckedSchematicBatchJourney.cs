@@ -72,9 +72,16 @@ public sealed partial class NativeSessionTests
         await using var mcp = await StdioMcpFixture.StartAsync(Path.Combine(evidence, instanceId + "-checked-mcp"),
             Path.Combine(evidence, instanceId + "-checked-mcp.stderr.log"), token);
         RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        var observed = await mcp.Tool("kicad_schematic_checked_state", new
+            { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
+        RequireToolSuccess(observed);
+        var combined = SchematicJson.Parser.Parse<CheckedSchematicState>(observed.GetProperty("structuredContent").GetRawText());
+        Assert.AreEqual(current, combined.State);
+        Assert.AreEqual(current.Revision, combined.Electrical.Hierarchy.Revision);
+        Assert.AreEqual(document, combined.Electrical.Hierarchy.Data.Document);
         var checkedRequest = Request(current, "Accepted exact-state edit");
         Guid origin = Guid.NewGuid(); checkedRequest.Batch.OriginId = origin.ToString("D");
-        var electrical = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document }, token);
+        var electrical = combined.Electrical;
         var design = ProbeElectricalModel(electrical);
         var recovery = new DesignRecoveryStore(Path.Combine(evidence, instanceId + "-checked-recovery.json"));
         var recoveryState = new DesignRecoveryState(origin, Guid.Parse(instanceId),

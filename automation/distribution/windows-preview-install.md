@@ -1,8 +1,8 @@
-# Install the September 15 Windows preview
+# Install the September 16 Windows preview
 
-[Download the Windows x64 package](https://kicad.vr.ae/platforms/win-x64/artifacts/kicad-codex-4975b884f73ee19eff74c2fc1e9d00414b603199-windows-x64.zip)
-for version `preview-20260915-4975b884f73e`, commit
-`4975b884f73ee19eff74c2fc1e9d00414b603199`. Other platforms and versions are on
+[Download the Windows x64 package](https://kicad.vr.ae/platforms/win-x64/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-windows-x64.zip)
+for version `preview-20260915-a519e52fc30a`, commit
+`a519e52fc30ada3b0a7f45695433f5157731a0e1`. Other platforms and versions are on
 [the download page](https://kicad.vr.ae/).
 
 This is a development preview, not the completed XML/routing/simulation product.
@@ -16,7 +16,7 @@ Obtain the trusted public key through the existing
 helper, compare the ZIP's SHA-256 with the value from your trusted Git/source
 copy of this guide:
 
-`f1ad84a1b822afe342294fdf0117cfdbf5a88fcca0d424b6dada2befe41b9593`
+`6cfbd228210510d32f2fe647585925e3014a1202f18df02ca2c0121df06169bf`
 
 PowerShell prints the hash with `Get-FileHash -Algorithm SHA256` followed by the
 ZIP's path. Keep the verified ZIP and save its matching
@@ -32,7 +32,7 @@ own absolute paths:
 {
   "schemaVersion": 1,
   "installationRoot": "C:/Users/you/Applications/KAICad",
-  "archivePath": "C:/Users/you/Downloads/kicad-codex-4975b884f73ee19eff74c2fc1e9d00414b603199-windows-x64.zip",
+  "archivePath": "C:/Users/you/Downloads/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-windows-x64.zip",
   "envelopePath": "C:/Users/you/Downloads/preview.json",
   "origin": "https://kicad.vr.ae/platforms/win-x64/",
   "channel": "preview"
@@ -62,8 +62,14 @@ When a newer compatible package has downloaded and verified, an **Update**
 button appears. It is absent when the installation is already current. Updating
 requires your action; cancelling the unsaved-work dialog leaves the design open.
 
-The [real Windows update test](https://github.com/holyglory/KAICad/actions/runs/34970361837)
-passed the preceding public release's upgrade to this package: two preserved
-designs, cancel/save, both native restarts, exact object identities and packaged
-MCP reconnection. This is preview/update evidence, not full automatic XML
-synchronization or Codex Desktop qualification.
+The [current Windows build](https://github.com/holyglory/KAICad/actions/runs/35018673451/job/104548478441)
+passed installed-editor checks for two isolated designs, packaged MCP loading,
+dirty-object preservation across MCP restart, and native save/close. The signed
+public feed and complete download were separately verified on the download site.
+
+The earlier [real Windows update test](https://github.com/holyglory/KAICad/actions/runs/34970361837)
+proved an upgrade to `4975b884f73e`, including cancel/save, both native restarts,
+exact object identities and packaged MCP reconnection. It does not prove a
+two-version upgrade to this newer package. Full automatic XML synchronization,
+Codex Desktop qualification and the remaining update-recovery journeys are
+still unfinished.

@@ -8,7 +8,7 @@ Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
 [Mac preview installation guide](distribution/mac-preview-install.md) covers the
 September 15 Apple Silicon and Intel builds, including managed-update setup.
 The [Windows preview installation guide](distribution/windows-preview-install.md)
-covers the September 15 Windows package and its managed updater.
+covers the September 16 Windows package and its managed updater.
 
 ## Try provisional Schematic Setup edits in a source build
 
@@ -906,6 +906,15 @@ active pins still fail comparison. Linux real-editor run
 connectivity, preservation of another visible sheet, replay and undrawn-pin
 accounting in two instances. Automatic ownership-change reconciliation and
 native Mac/Windows qualification remain separate unfinished work.
+
+The model's `PinPartitionEvolution` merges connections when exact pin sets
+change. A pin absent on one side is not treated as deliberately disconnected.
+Independent additions and removals can merge; deletion versus rewiring,
+contradictory new-pin connections and inconsistent transitive joins return no
+candidate. `t20260916T013559Z-afb38f` checks every three-/four-pin presence and
+partition combination against an independent pairwise definition, plus large
+sparse inputs. This does not infer component ownership or replacement identities;
+the native ownership guard remains until that separate workflow is qualified.
 
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an

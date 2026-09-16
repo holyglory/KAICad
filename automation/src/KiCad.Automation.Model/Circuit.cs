@@ -69,7 +69,10 @@ public sealed record Circuit(
         {
             Identity(component.Id);
             RequireText(component.Reference, "Component reference");
-            if (!references.Add(component.Reference)) throw Invalid("Component references must be unique in the design.");
+            // Native SCH_SYMBOL::IsAnnotated treats a trailing '?' as an
+            // unassigned reference. Placeholder text is not component identity.
+            if (!component.Reference.EndsWith('?') && !references.Add(component.Reference))
+                throw Invalid("Assigned component references must be unique in the design.");
             if (!instances.TryGetValue(component.SheetInstanceId, out var instance)
                 || !sheets[instance.DefinitionId].Components.Any(c => c.Id == component.DefinitionId))
                 throw Invalid("Component does not belong to its sheet definition.");

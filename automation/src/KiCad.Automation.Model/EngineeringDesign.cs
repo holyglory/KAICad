@@ -4,12 +4,17 @@ namespace KiCad.Automation.Model;
 /// Library definitions remain declared repository dependencies. Native schematic representation
 /// has a separate owner; this model alone does not reconstruct a KiCad schematic.</summary>
 public sealed record EngineeringDesign(Circuit Circuit, StructuralDiagram Structure,
-    IReadOnlyList<HardwareLibrary> KnowledgeLibraries, IReadOnlyList<ComponentKnowledgeBinding> ComponentBindings)
+    IReadOnlyList<HardwareLibrary> KnowledgeLibraries, IReadOnlyList<ComponentKnowledgeBinding> ComponentBindings,
+    IReadOnlyList<UnresolvedGuidanceBinding>? UnresolvedGuidanceBindings = null)
 {
+    public bool HasUnresolvedComponentReferences => Structure.UnresolvedComponentReferences is { Count: > 0 }
+        || UnresolvedGuidanceBindings is { Count: > 0 };
+
     public IReadOnlyDictionary<Guid, GuidanceResolution> Validate(IReadOnlyCollection<ComponentKnowledgeLibrary> libraries)
     {
         Circuit.Validate();
         Structure.Validate(Circuit);
+        var unresolvedGuidance = ComponentReferenceValidation.Guidance(this);
         var available = IndexLibraries(libraries);
         var declared = new Dictionary<Guid, HardwareLibrary>();
         var paths = new HashSet<string>(StringComparer.Ordinal);
@@ -26,6 +31,7 @@ public sealed record EngineeringDesign(Circuit Circuit, StructuralDiagram Struct
             ComponentGuidance.Validate(library);
         }
         var resolved = new Dictionary<Guid, GuidanceResolution>();
+        var owners = new HashSet<Guid>();
         var localStatements = new HashSet<Guid>(Structure.Statements.Select(s => s.Id));
         foreach (var binding in ComponentBindings)
         {
@@ -33,12 +39,15 @@ public sealed record EngineeringDesign(Circuit Circuit, StructuralDiagram Struct
                 throw Invalid("Instance guidance must refer to a declared knowledge library.");
             if (declaration.Revision != binding.LibraryRevision)
                 throw new AutomationException("library_revision_mismatch", "Instance guidance and its library declaration require the same revision.");
-            if (resolved.ContainsKey(binding.ComponentInstanceId))
+            if (!owners.Add(binding.ComponentInstanceId))
                 throw Invalid("A component instance must have one explicit knowledge-class binding.");
             foreach (var statement in binding.Guidance)
                 if (!localStatements.Add(statement.Id))
                     throw Invalid("Design-owned statement identities cannot be shared by unrelated owners.");
-            resolved.Add(binding.ComponentInstanceId, ComponentGuidance.Resolve(Circuit, available[binding.LibraryId], binding));
+            if (unresolvedGuidance.Contains(binding.ComponentInstanceId))
+                _ = ComponentGuidance.Resolve(available[binding.LibraryId], binding);
+            else
+                resolved.Add(binding.ComponentInstanceId, ComponentGuidance.Resolve(Circuit, available[binding.LibraryId], binding));
         }
         // Conflicting statements are retained, not discarded or promoted to validated requirements.
         return resolved;

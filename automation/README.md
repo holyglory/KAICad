@@ -873,6 +873,17 @@ active observer. Native Mac/Windows and actual Codex Desktop qualification of
 these new tools remain separate, unfinished release work.
 
 The engineering structure also has optional typed `unresolved-net-bindings`.
+Optional `unresolved-component-references` and `unresolved-guidance-bindings`
+also retain component targets, either endpoint of a concrete pin instruction,
+block realizations and class/instance guidance when ownership disappears or is
+reidentified. Former identities, exact owner/slot, reasons and explicit candidate
+identities remain typed data. Retained text, strength and provenance are unchanged.
+The normal validator reports `componentReferencesResolved: false`; detached
+guidance is excluded from the live assignment map. Explicit model resolution
+changes only the chosen reference and refuses to overwrite another component's
+guidance. This is model/XML and recovery support, not yet native ownership
+reconciliation or automatic application.
+
 These preserve an affected statement or structural connection, its former net
 identity, change reason and possible current-net candidates after an explicit
 split, merge, removal or identity change. Candidates are not assignments:

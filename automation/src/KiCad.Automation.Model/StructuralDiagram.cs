@@ -24,13 +24,15 @@ public sealed record StructuralConnection(Guid Id, Guid FirstPortId, Guid Second
 public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> Blocks,
     IReadOnlyList<StructuralPort> Ports, IReadOnlyList<StructuralConnection> Connections,
     IReadOnlyList<EngineeringStatement> Statements,
-    IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null)
+    IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null,
+    IReadOnlyList<UnresolvedComponentReference>? UnresolvedComponentReferences = null)
 {
     public bool HasUnresolvedNetBindings => UnresolvedNetBindings is { Count: > 0 };
 
     public void Validate(Circuit circuit)
     {
         circuit.Validate();
+        var unresolvedComponents = ComponentReferenceValidation.Structure(this, circuit);
         var electricalIds = new HashSet<Guid>(circuit.Parts.Select(p => p.Id)
             .Concat(circuit.Sheets.Select(s => s.Id)).Concat(circuit.Sheets.SelectMany(s => s.Components).Select(c => c.Id))
             .Concat(circuit.SheetInstances.Select(s => s.Id)).Concat(circuit.Components.Select(c => c.Id))
@@ -101,8 +103,9 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
         foreach (var statement in Statements)
         {
             Add(statement.Id);
-            if (!targets.Contains(statement.TargetId) && !unresolved.ContainsKey((statement.Id, statement.TargetId)))
-                throw Invalid("Statement target is unresolved without an explicit retained net binding.");
+            if (!targets.Contains(statement.TargetId) && !unresolved.ContainsKey((statement.Id, statement.TargetId))
+                && !unresolvedComponents.Contains(new(statement.Id, ComponentReferenceSlot.StatementTarget, new(statement.TargetId))))
+                throw Invalid("Statement target is unresolved without an explicit retained binding.");
             if (!Enum.IsDefined(statement.Role) || (statement.Strength is GuidanceStrength strength && !Enum.IsDefined(strength)))
                 throw Invalid("Unknown statement role or strength.");
             if (statement.Role == EngineeringStatementRole.Intent && statement.Strength is null)
@@ -112,7 +115,10 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
             if (string.IsNullOrWhiteSpace(statement.Text) && statement.Connection is null)
                 throw Invalid("Statement needs text or concrete connection details.");
             if (statement.Connection is PinConnectionDetail detail
-                && (!PinExists(detail.First) || !PinExists(detail.Second) || detail.First == detail.Second))
+                && ((!PinExists(detail.First) && !unresolvedComponents.Contains(new(statement.Id, ComponentReferenceSlot.FirstPin,
+                        new(detail.First.ComponentId, detail.First.Pin))))
+                    || (!PinExists(detail.Second) && !unresolvedComponents.Contains(new(statement.Id, ComponentReferenceSlot.SecondPin,
+                        new(detail.Second.ComponentId, detail.Second.Pin)))) || detail.First == detail.Second))
                 throw Invalid("Concrete connection details need distinct existing component pins.");
             if (statement.DerivedFrom.Distinct().Count() != statement.DerivedFrom.Count)
                 throw Invalid("Repeated statement provenance reference.");
@@ -164,6 +170,15 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
     public StructuralDiagram RetainUnresolvedNets(Circuit before, Circuit after, IReadOnlyList<NetIdentityChange> changes)
     {
         Validate(before); after.Validate();
+        var result = RetainNetReferences(before, after, changes);
+        result.Validate(after);
+        return result;
+    }
+
+    // Ownership and net changes may invalidate references together. Their
+    // composed model operation validates once after retaining both families.
+    internal StructuralDiagram RetainNetReferences(Circuit before, Circuit after, IReadOnlyList<NetIdentityChange> changes)
+    {
         if (changes.Select(c => c.FormerNetId).Distinct().Count() != changes.Count
             || changes.Any(c => !before.Nets.Any(net => net.Id == c.FormerNetId)
                 || !Enum.IsDefined(c.Change) || string.IsNullOrWhiteSpace(c.Reason)
@@ -196,7 +211,6 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
             Connections = Connections.Select(c => c with { NetIds = c.NetIds.Where(id => !formerIds.Contains(id)).ToArray() }).ToArray(),
             UnresolvedNetBindings = retained.Count == 0 ? null : retained
         };
-        result.Validate(after);
         return result;
     }
 

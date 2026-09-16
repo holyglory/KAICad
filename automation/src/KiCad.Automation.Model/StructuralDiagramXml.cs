@@ -53,7 +53,11 @@ public static class StructuralDiagramXml
                         (string?)p.Attribute("table"), (string?)p.Attribute("part-variant"))).ToArray())).ToArray(),
                 root.Element(Ns + "unresolved-net-bindings")?.Elements(Ns + "binding").Select(b => new UnresolvedNetBinding(
                     Id(b, "owner"), Id(b, "former-net"), Enum.Parse<NetBindingChangeKind>(Text(b, "change")),
-                    b.Element(Ns + "reason")!.Value, b.Elements(Ns + "candidate").Select(n => Id(n, "ref")).ToArray())).ToArray());
+                    b.Element(Ns + "reason")!.Value, b.Elements(Ns + "candidate").Select(n => Id(n, "ref")).ToArray())).ToArray(),
+                root.Element(Ns + "unresolved-component-references")?.Elements(Ns + "reference").Select(r => new UnresolvedComponentReference(
+                    Id(r, "owner"), Enum.Parse<ComponentReferenceSlot>(Text(r, "slot")), ComponentTarget(r.Element(Ns + "former")!),
+                    Enum.Parse<ComponentReferenceChangeKind>(Text(r, "change")), r.Element(Ns + "reason")!.Value,
+                    r.Elements(Ns + "candidate").Select(e => ComponentTarget(e)).ToArray())).ToArray());
             result.Validate(circuit);
             return result;
         }
@@ -84,12 +88,22 @@ public static class StructuralDiagramXml
             diagram.UnresolvedNetBindings is not { Count: > 0 } ? null : E("unresolved-net-bindings",
                 diagram.UnresolvedNetBindings.OrderBy(b => b.OwnerId).ThenBy(b => b.FormerNetId).Select(b => E("binding",
                     A("owner", b.OwnerId), A("former-net", b.FormerNetId), A("change", b.Change), E("reason", b.Reason),
-                    b.CandidateNetIds.Order().Select(id => E("candidate", A("ref", id)))))));
+                    b.CandidateNetIds.Order().Select(id => E("candidate", A("ref", id)))))),
+            diagram.UnresolvedComponentReferences is not { Count: > 0 } ? null : E("unresolved-component-references",
+                diagram.UnresolvedComponentReferences.OrderBy(r => r.OwnerId).ThenBy(r => r.Slot)
+                    .ThenBy(r => r.FormerTarget.ComponentId).ThenBy(r => r.FormerTarget.PinNumber, StringComparer.Ordinal)
+                    .Select(r => E("reference", A("owner", r.OwnerId), A("slot", r.Slot), A("change", r.Change),
+                        ComponentTarget("former", r.FormerTarget), E("reason", r.Reason),
+                        r.CandidateTargets.OrderBy(t => t.ComponentId).ThenBy(t => t.PinNumber, StringComparer.Ordinal)
+                            .Select(t => ComponentTarget("candidate", t))))));
         // Entitize CR and attribute whitespace rather than letting XML newline normalization
         // silently change user-authored text or source coordinates on reload.
         return EngineeringXmlText.Render(root);
     }
 
+    private static ComponentReferenceTarget ComponentTarget(XElement element) => new(Id(element, "component"), (string?)element.Attribute("pin"));
+    private static XElement ComponentTarget(string name, ComponentReferenceTarget target) => E(name, A("component", target.ComponentId),
+        target.PinNumber is null ? null : A("pin", target.PinNumber));
     private static XElement Pin(string name, PinEndpoint p) => E(name, A("component", p.ComponentId), A("number", p.Pin));
     private static PinEndpoint Endpoint(XElement e) => new(Id(e, "component"), Text(e, "number"));
     // SA-05: repository evidence stays data; no DTD expansion or implicit document retrieval.

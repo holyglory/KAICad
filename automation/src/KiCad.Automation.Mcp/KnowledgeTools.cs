@@ -10,9 +10,13 @@ public sealed record GuidanceToolResult(bool Valid, Guid? ComponentInstanceId, G
 
 public sealed record EngineeringDesignToolResult(bool ModelValid, Guid? DesignId,
     IReadOnlyDictionary<Guid, GuidanceResolution>? Guidance, IReadOnlyList<Guid>? UnrealizedConnections,
-    string? ErrorCode, string? ErrorMessage, IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null)
+    string? ErrorCode, string? ErrorMessage, IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null,
+    IReadOnlyList<UnresolvedComponentReference>? UnresolvedComponentReferences = null,
+    IReadOnlyList<UnresolvedGuidanceBinding>? UnresolvedGuidanceBindings = null)
 {
     public bool NetBindingsResolved => ModelValid && UnresolvedNetBindings is not { Count: > 0 };
+    public bool ComponentReferencesResolved => ModelValid && UnresolvedComponentReferences is not { Count: > 0 }
+        && UnresolvedGuidanceBindings is not { Count: > 0 };
 }
 
 public sealed record DesignBindingToolResult(bool DocumentParsed, SchematicBindingReport? BindingReport,
@@ -95,7 +99,7 @@ public sealed class KnowledgeTools
     }
 
     [McpServerTool(Name = "kicad_engineering_design_validate", ReadOnly = true, UseStructuredContent = true),
-     Description("Validate supplied engineering-design:1 XML and its exact declared knowledge-library XML documents. Checks electrical/structural references and resolves inherited versus local component guidance without changing either. Returns conflicting named-property assignments and abstract connections with no explicit net realization. Does not read files, infer prose contradictions, verify electrical performance, compare a live schematic, generate native files or synchronize edits. This engineering intent model is not a complete native schematic snapshot.")]
+     Description("Validate supplied engineering-design:1 XML and its exact declared knowledge-library XML documents. Checks electrical/structural references and resolves inherited versus local component guidance without changing either. Reports retained unresolved component/pin/guidance references separately; detached guidance is not reported as assigned to a live component. Returns conflicting named-property assignments and abstract connections with no explicit net realization. Does not read files, infer prose contradictions, verify electrical performance, compare a live schematic, generate native files or synchronize edits. This engineering intent model is not a complete native schematic snapshot.")]
     public EngineeringDesignToolResult ValidateDesign(string designXml, string[] knowledgeLibraryXml,
         CancellationToken cancellationToken)
     {
@@ -112,7 +116,7 @@ public sealed class KnowledgeTools
             cancellationToken.ThrowIfCancellationRequested();
             return new(true, design.Circuit.Id, design.Validate(libraries),
                 design.Structure.Connections.Where(c => c.NetIds.Count == 0).Select(c => c.Id).Order().ToArray(), null, null,
-                design.Structure.UnresolvedNetBindings);
+                design.Structure.UnresolvedNetBindings, design.Structure.UnresolvedComponentReferences, design.UnresolvedGuidanceBindings);
         }
         catch (AutomationException error)
         {

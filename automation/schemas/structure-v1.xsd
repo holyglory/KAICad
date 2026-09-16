@@ -24,6 +24,17 @@
     <xs:attribute name="component" type="identity" use="required"/>
     <xs:attribute name="number" type="xs:string" use="required"/>
   </xs:complexType>
+  <xs:simpleType name="component-reference-slot"><xs:restriction base="xs:string">
+    <xs:enumeration value="StatementTarget"/><xs:enumeration value="FirstPin"/>
+    <xs:enumeration value="SecondPin"/><xs:enumeration value="BlockRealization"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="component-reference-change"><xs:restriction base="xs:string">
+    <xs:enumeration value="Removed"/><xs:enumeration value="Reidentified"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="component-reference-target">
+    <xs:attribute name="component" type="identity" use="required"/>
+    <xs:attribute name="pin" type="xs:string"/>
+  </xs:complexType>
   <xs:element name="structure"><xs:complexType><xs:sequence>
     <xs:element name="blocks"><xs:complexType><xs:sequence>
       <xs:element name="block" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
@@ -72,6 +83,16 @@
       </xs:sequence><xs:attribute name="owner" type="identity" use="required"/>
         <xs:attribute name="former-net" type="identity" use="required"/>
         <xs:attribute name="change" type="net-change" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="unresolved-component-references" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="reference" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="former" type="component-reference-target"/>
+        <xs:element name="reason" type="xs:string"/>
+        <xs:element name="candidate" type="component-reference-target" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence><xs:attribute name="owner" type="identity" use="required"/>
+        <xs:attribute name="slot" type="component-reference-slot" use="required"/>
+        <xs:attribute name="change" type="component-reference-change" use="required"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
   </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>

@@ -20,6 +20,16 @@
     <xs:element name="component-bindings"><xs:complexType><xs:sequence>
       <xs:element ref="k:component-binding" minOccurs="0" maxOccurs="unbounded"/>
     </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="unresolved-guidance-bindings" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="binding" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="reason" type="xs:string"/>
+        <xs:element name="candidate" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+          <xs:attribute name="component" type="c:identity" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence><xs:attribute name="component" type="c:identity" use="required"/>
+        <xs:attribute name="change" type="s:component-reference-change" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
   </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>
   </xs:complexType></xs:element>
 </xs:schema>

@@ -19,6 +19,7 @@ internal static class EngineeringXmlText
     // SA-05: source references are evidence, not implicit fetches or executable instructions.
     public static XElement Parse(string xml)
     {
+        if (xml.Length > 0 && xml[0] == '\uFEFF') xml = xml[1..];
         using var text = new StringReader(xml);
         using var reader = XmlReader.Create(text, new XmlReaderSettings
             { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });

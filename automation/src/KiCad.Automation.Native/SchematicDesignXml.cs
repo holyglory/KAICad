@@ -30,6 +30,7 @@ public static class SchematicDesignXml
     {
         try
         {
+            xml = StripUtf8Bom(xml);
             var root = Parse(xml);
             if (root.Name != Ns + "design") throw Invalid("Expected the supported design XML namespace and root.");
             new XDocument(root).Validate(Schema.Value, null);
@@ -49,6 +50,8 @@ public static class SchematicDesignXml
             throw Invalid("Invalid design XML: " + error.Message);
         }
     }
+
+    private static string StripUtf8Bom(string xml) => xml.Length > 0 && xml[0] == '\uFEFF' ? xml[1..] : xml;
 
     public static string Write(SchematicDesign design, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries)
     {

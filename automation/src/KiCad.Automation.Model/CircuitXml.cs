@@ -26,6 +26,7 @@ public static class CircuitXml
     {
         try
         {
+            if (xml.Length > 0 && xml[0] == '\uFEFF') xml = xml[1..];
             using var input = new StringReader(xml);
             using XmlReader reader = XmlReader.Create(input, ReaderSettings());
             XDocument document = XDocument.Load(reader, LoadOptions.SetLineInfo);

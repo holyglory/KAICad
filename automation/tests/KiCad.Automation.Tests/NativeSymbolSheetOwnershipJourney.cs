@@ -222,6 +222,7 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
         await VerifySynchronizationServiceRestart(client, root, store, designPath, evidence, instanceId, token,
             ["publication-replaced", "baseline-committed", "retained-archived"]);
+        await VerifyAutomaticSynchronization(client, root, store, designPath, evidence, instanceId, token);
         Assert.AreEqual(3, restorationStops.Count);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-owner-restoration-restarts.json"), JsonSerializer.Serialize(restorationStops), token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new

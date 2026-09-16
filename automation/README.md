@@ -932,6 +932,18 @@ qualification. Native undo/redo restoration, interrupted recovery for ownership
 changes, broader creation/rebinding and Mac/Windows qualification remain open.
 This source increment is not in the frozen `c26503fdc3` build or published previews.
 
+New synchronization receipts use version 2 and bind retained prior XML to its
+SHA-256 digest, derived from the immutable publication request. History inspection
+and verified reading reject changed or missing bytes; archiving does not move a
+changed file. Version-1 receipts remain readable for replay and inspection but do
+not prove prior content and cannot supply verified automatic identity restoration.
+The 49 focused checks in `t20260916T020853Z-02f629` cover compatibility, exact
+digest/path binding, persistence, changed content and cancellation. Linux native
+run `t20260916T022832Z-a313c3` additionally verifies exact retained bytes after
+deletion and service termination/restart at publication replacement, baseline
+commit and history archival in both editor instances. Native undo/redo identity
+restoration itself is still unfinished; this is its verified history foundation.
+
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an
 optional expected revision; the sheet does not have to be visible. The native

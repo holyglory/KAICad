@@ -11,11 +11,12 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task VerifySynchronizationServiceRestart(NativeClient client, DocumentSpecifier document,
-        DesignRecoveryStore store, string designPath, string evidence, string instanceId, CancellationToken token)
+        DesignRecoveryStore store, string designPath, string evidence, string instanceId, CancellationToken token,
+        IReadOnlyList<string>? stages = null)
     {
         string hostState = Path.Combine(evidence, instanceId + "-sync-host-state");
         var results = new List<object>();
-        foreach (string stage in new[] { "native-edit", "native-save", "completed", "publication-staged",
+        foreach (string stage in stages ?? new[] { "native-edit", "native-save", "completed", "publication-staged",
                      "publication-replaced", "baseline-committed", "receipt-archived", "retained-archived" })
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -41,6 +42,7 @@ public sealed partial class NativeSessionTests
                 saved = store.Save(saved.State with { DesiredFileBytes = xml }, saved.RevisionToken);
             }
             Guid operationId = Guid.NewGuid();
+            byte[] expectedPrevious = saved.State.DesiredFileBytes.ToArray();
             var arguments = new { instanceId, recoveryPath = store.StatePath, designPath,
                 expectedRevisionToken = saved.RevisionToken, operationId = operationId.ToString("D") };
             string marker = Path.Combine(evidence, instanceId + "-" + stage + "-pause.json");
@@ -99,8 +101,16 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(0, SchematicHierarchyDelta.Plan(final.Electrical.Hierarchy.Data, recoveredXml.Schematic, limit.Token).Count);
             Assert.IsTrue(SchematicElectricalComparison.Compare(recoveredXml, final.Electrical, [], limit.Token).ConnectivityEquivalent);
             Assert.IsFalse(store.Read()!.State.HasPendingWork);
+            var completed = store.Read()!.State.LastSynchronization!;
+            Assert.AreEqual(2, completed.Version);
+            if (fileBoundary)
+            {
+                Assert.IsNotNull(completed.PreviousXmlPath);
+                CollectionAssert.AreEqual(expectedPrevious, await RetainedXmlHistory.ReadVerifiedAsync(completed, limit.Token));
+                Assert.IsTrue(RetainedXmlHistory.Inspect(completed).ContentVerified);
+            }
             results.Add(new { stage, operationId, nativeEpochPreserved = true, sameRevisionAfterRestart = true,
-                sourceAndNativeAgree = true, actualServiceProcessTerminated = true });
+                sourceAndNativeAgree = true, actualServiceProcessTerminated = true, retainedContentVerified = fileBoundary });
 
             Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
                 new() { Document = document.Clone(), ProcessEpoch = client.Epoch }, limit.Token);

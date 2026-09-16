@@ -174,21 +174,36 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(retiredDesign.Engineering.Structure.UnresolvedComponentReferences!.Any(r => r.OwnerId == instruction.Id));
         }
         Assert.IsTrue(SchematicElectricalComparison.Compare(retiredDesign, (await Capture()).Electrical, [], token).ConnectivityEquivalent);
+        // The separate service-restart fixture uses the standard title-block
+        // command, whose existing contract requires the displayed sheet. The
+        // offscreen-view preservation assertions above have already completed.
+        await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
+        await VerifySynchronizationServiceRestart(client, root, store, designPath, evidence, instanceId, token,
+            ["publication-replaced", "baseline-committed", "retained-archived"]);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new
         { instanceId, physicalComponentsAcrossSheets = true, exactNativeBindings = true, referenceAndPlacementApplied = true,
             actualConnectivityVerified = true, visibleOtherInstancePreserved = true, operationReplayedOnce = true,
             knownUndrawnPinsReported = true, nativeUnitRemovalReversePublication = true, nativeComponentRemovalReversePublication = true,
-            removedComponentInstructionsRetained = true, automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
+            removedComponentInstructionsRetained = true, retainedXmlContentVerified = true,
+            retainedXmlServiceRecoveryVerified = true,
+            automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
 
         async Task PublishNativeChange(CheckedSchematicState observed)
         {
             var prior = store.Read()!;
+            byte[] expectedPrevious = prior.State.DesiredFileBytes.ToArray();
             var intake = store.Save(prior.State with { Observed = observed.Electrical.Hierarchy.Data.Clone(),
                 ObservedElectrical = observed.Electrical.Clone(), NativeRevision = new(observed.State.Revision.Epoch, observed.State.Revision.Sequence),
                 TrackingComplete = observed.Electrical.Hierarchy.TrackingComplete }, prior.RevisionToken);
             Guid sync = Guid.NewGuid();
             var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token);
             Assert.IsTrue(applied.SynchronizationCommitted); Assert.IsFalse(applied.NativeMutationCommitted);
+            var receipt = store.Read()!.State.LastSynchronization!;
+            Assert.AreEqual(2, receipt.Version);
+            string expectedDigest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(expectedPrevious));
+            Assert.AreEqual(expectedDigest, receipt.PreviousXmlSha256);
+            Assert.IsTrue(RetainedXmlHistory.Inspect(receipt).ContentVerified);
+            CollectionAssert.AreEqual(expectedPrevious, await RetainedXmlHistory.ReadVerifiedAsync(receipt, token));
             var current = await Capture();
             var design = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
             Assert.IsEmpty(SchematicHierarchyDelta.Plan(current.Electrical.Hierarchy.Data, design.Schematic, token));

@@ -98,7 +98,13 @@ public sealed partial class NativeSessionTests
             Nets = [.. baseline.Engineering.Circuit.Nets, new(connection, "Cross-sheet link", components.SelectMany(c => new[]
                 { new PinEndpoint(c, "1"), new PinEndpoint(c, "2") }).ToArray())]
         };
-        baseline = baseline with { Engineering = baseline.Engineering with { Circuit = circuit }, Schematic = initial.Electrical.Hierarchy.Data.Clone(), SymbolBindings = bindings };
+        var removalInstructions = components.Select(c => new EngineeringStatement(Guid.NewGuid(), c, EngineeringStatementRole.Intent,
+            GuidanceStrength.Requirement, "Keep this component instruction if its drawing is removed.", null, [], [])).ToArray();
+        baseline = baseline with { Engineering = baseline.Engineering with { Circuit = circuit,
+            Structure = baseline.Engineering.Structure with { Statements = [.. baseline.Engineering.Structure.Statements,
+                .. removalInstructions, new(Guid.NewGuid(), connection, EngineeringStatementRole.Intent, GuidanceStrength.Requirement,
+                    "Preserve the cross-sheet connection requirement when connectivity changes.", null, [], [])] } },
+            Schematic = initial.Electrical.Hierarchy.Data.Clone(), SymbolBindings = bindings };
         var comparison = SchematicElectricalComparison.Compare(baseline, initial.Electrical, [], token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-initial-comparison.json"), JsonSerializer.Serialize(comparison), token);
         Assert.IsTrue(comparison.PinBindingsComplete); Assert.IsTrue(comparison.ConnectivityEquivalent); Assert.IsEmpty(comparison.UndrawnPins!);
@@ -143,18 +149,52 @@ public sealed partial class NativeSessionTests
         var remove = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Undrawn symbol unit fixture" };
         remove.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[2] } });
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(remove, token);
-        var undrawn = await Capture(); var retained = parsed.Engineering.Circuit.Symbols.Where(s => !occurrences.Any(o => o.Id == s.Id && o.Unit == 2)).ToArray();
-        var kept = retained.Select(s => s.Id).ToHashSet();
-        var undrawnDesign = parsed with { Engineering = parsed.Engineering with { Circuit = parsed.Engineering.Circuit with
-        { Symbols = retained, Nets = parsed.Engineering.Circuit.Nets.Select(n => n.Id == connection ? n with { Pins = n.Pins.Where(p => p.Pin == "1").ToArray() } : n).ToArray() } },
-            SymbolBindings = parsed.SymbolBindings.Where(b => kept.Contains(b.SymbolOccurrenceId)).ToArray(), Schematic = undrawn.Electrical.Hierarchy.Data.Clone() };
-        var unused = SchematicElectricalComparison.Compare(undrawnDesign, undrawn.Electrical, [], token);
+        var undrawn = await Capture();
+        await PublishNativeChange(undrawn);
+        var undrawnDesign = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        var unused = SchematicElectricalComparison.Compare(undrawnDesign, (await Capture()).Electrical, [], token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-undrawn-comparison.json"), JsonSerializer.Serialize(unused), token);
         Assert.IsTrue(unused.PinBindingsComplete); Assert.IsTrue(unused.ConnectivityEquivalent); Assert.AreEqual(2, unused.UndrawnPins!.Count);
+        Assert.IsFalse(undrawnDesign.Engineering.Circuit.Symbols.Any(s => occurrences.Any(o => o.Id == s.Id && o.Unit == 2)));
+        Assert.IsTrue(components.All(c => undrawnDesign.Engineering.Circuit.Components.Any(owner => owner.Id == c)));
+        foreach (var instruction in removalInstructions)
+            Assert.AreEqual(instruction, undrawnDesign.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id));
+
+        var removeLast = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Remove final component drawings" };
+        removeLast.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[0] } });
+        removeLast.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[1] } });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(removeLast, token);
+        await PublishNativeChange(await Capture());
+        var retiredDesign = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsFalse(retiredDesign.Engineering.Circuit.Components.Any(c => components.Contains(c.Id)));
+        Assert.IsTrue(retiredDesign.Engineering.HasUnresolvedComponentReferences);
+        foreach (var instruction in removalInstructions)
+        {
+            Assert.AreEqual(instruction, retiredDesign.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id));
+            Assert.IsTrue(retiredDesign.Engineering.Structure.UnresolvedComponentReferences!.Any(r => r.OwnerId == instruction.Id));
+        }
+        Assert.IsTrue(SchematicElectricalComparison.Compare(retiredDesign, (await Capture()).Electrical, [], token).ConnectivityEquivalent);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new
         { instanceId, physicalComponentsAcrossSheets = true, exactNativeBindings = true, referenceAndPlacementApplied = true,
             actualConnectivityVerified = true, visibleOtherInstancePreserved = true, operationReplayedOnce = true,
-            knownUndrawnPinsReported = true, automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
+            knownUndrawnPinsReported = true, nativeUnitRemovalReversePublication = true, nativeComponentRemovalReversePublication = true,
+            removedComponentInstructionsRetained = true, automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
+
+        async Task PublishNativeChange(CheckedSchematicState observed)
+        {
+            var prior = store.Read()!;
+            var intake = store.Save(prior.State with { Observed = observed.Electrical.Hierarchy.Data.Clone(),
+                ObservedElectrical = observed.Electrical.Clone(), NativeRevision = new(observed.State.Revision.Epoch, observed.State.Revision.Sequence),
+                TrackingComplete = observed.Electrical.Hierarchy.TrackingComplete }, prior.RevisionToken);
+            Guid sync = Guid.NewGuid();
+            var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token);
+            Assert.IsTrue(applied.SynchronizationCommitted); Assert.IsFalse(applied.NativeMutationCommitted);
+            var current = await Capture();
+            var design = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(current.Electrical.Hierarchy.Data, design.Schematic, token));
+            Assert.IsTrue((await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token)).Replayed);
+            Assert.AreEqual(current, await Capture());
+        }
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);

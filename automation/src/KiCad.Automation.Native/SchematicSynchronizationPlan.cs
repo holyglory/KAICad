@@ -53,13 +53,20 @@ public static class SchematicSynchronizationPlanner
                 return Failure(hierarchy.ErrorCode ?? electrical.ErrorCode ?? "design_sync_conflict",
                     hierarchy.ErrorMessage ?? electrical.ErrorMessage ?? "Resolve the reported hierarchy or electrical conflicts first.");
 
-            properties = SchematicModelProjection.Reconcile(state.Baseline, electrical.Candidate,
-                hierarchy.Merged!, state.KnowledgeLibraries, token);
+            bool nativeRemovals = electrical.RemovedSymbolOccurrences is { Count: > 0 };
+            properties = nativeRemovals
+                ? SchematicModelProjection.ReconcileAfterRemovals(state.Baseline, electrical.Candidate,
+                    hierarchy.Merged!, state.KnowledgeLibraries, token)
+                : SchematicModelProjection.Reconcile(state.Baseline, electrical.Candidate,
+                    hierarchy.Merged!, state.KnowledgeLibraries, token);
             gaps.AddRange(properties.CoverageGaps);
             if (properties.Candidate is null)
                 return Failure(properties.ErrorCode ?? "design_property_conflict", properties.ErrorMessage ?? "Resolve the reported native/model property conflicts first.");
+            var survivingSymbols = properties.Candidate.Circuit.Symbols.Select(s => s.Id).ToHashSet();
             var candidate = desired with { Engineering = properties.Candidate,
-                Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic) };
+                Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic),
+                SymbolBindings = nativeRemovals ? desired.SymbolBindings.Where(b => survivingSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
+                    : desired.SymbolBindings };
             candidate = SchematicPropertyProjection.Project(state.Baseline, candidate, state.KnowledgeLibraries, token);
             var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
             gaps.AddRange(bindings.CoverageGaps);

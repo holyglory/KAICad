@@ -891,8 +891,9 @@ identities remain typed data. Retained text, strength and provenance are unchang
 The normal validator reports `componentReferencesResolved: false`; detached
 guidance is excluded from the live assignment map. Explicit model resolution
 changes only the chosen reference and refuses to overwrite another component's
-guidance. This is model/XML and recovery support, not yet native ownership
-reconciliation or automatic application.
+guidance. Native-only deletion now uses this retention support through the
+internal executor described below; general automatic ownership reconciliation
+remains unfinished.
 
 Each symbol occurrence may specify `sheet-instance` independently of its physical
 component's owner sheet. Omission retains the original owner-sheet default.
@@ -913,8 +914,23 @@ Independent additions and removals can merge; deletion versus rewiring,
 contradictory new-pin connections and inconsistent transitive joins return no
 candidate. `t20260916T013559Z-afb38f` checks every three-/four-pin presence and
 partition combination against an independent pairwise definition, plus large
-sparse inputs. This does not infer component ownership or replacement identities;
-the native ownership guard remains until that separate workflow is qualified.
+sparse inputs. The net reconciler now uses this merge without inferring component
+ownership or replacement identities.
+
+The internal synchronization executor can project native-only symbol deletion
+into XML through exact saved sheet paths and UUIDs. Removing one drawn unit keeps
+its physical component; removing its last drawing retires the component only
+when shared-definition ownership remains valid. Detached component/pin guidance,
+structural instructions and retired-net requirements remain explicit. Concurrent
+engineering XML edits, sheet changes, new symbols and ambiguous shared-definition
+retirement pause preparation without discarding either version.
+Linux run `t20260916T015039Z-c53380` verifies unit and whole-component deletion,
+actual pin connectivity, preserving instructions and repeat-safe XML publication
+in two editors. These deletions use native API operations and explicit internal
+executor calls; this is not manual rendered-UI or event-driven automatic-apply
+qualification. Native undo/redo restoration, interrupted recovery for ownership
+changes, broader creation/rebinding and Mac/Windows qualification remain open.
+This source increment is not in the frozen `c26503fdc3` build or published previews.
 
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an

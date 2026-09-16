@@ -79,7 +79,8 @@ public sealed partial class NativeSessionTests
         // cases. The first editor took 159.5s in aa4d8d; the old 300s ceiling
         // cut off the second. Per-action deadlines remain unchanged.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 600
-            : journey == NativeJourney.CheckedBatch ? 420 : 300;
+            : journey == NativeJourney.CheckedBatch ? 420
+            : journey == NativeJourney.SymbolSheets ? 600 : 300;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)

@@ -57,6 +57,7 @@ string stateDirectory = builder.Configuration["state-directory"]
 builder.Services.AddSingleton<INativeTransport, NngTransport>();
 builder.Services.AddSingleton<FileIntakeRegistry>();
 builder.Services.AddSingleton<NativeIntakeRegistry>();
+builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), stateDirectory));
 builder.Services.AddMcpServer(options =>
 {
@@ -78,5 +79,6 @@ builder.Services.AddMcpServer(options =>
     .WithTools<PlacementTools>()
     .WithTools<RecoveryTools>()
     .WithTools<FileIntakeTools>()
-    .WithTools<NativeIntakeTools>();
+    .WithTools<NativeIntakeTools>()
+    .WithTools<AutomaticDesignTools>();
 await builder.Build().RunAsync();

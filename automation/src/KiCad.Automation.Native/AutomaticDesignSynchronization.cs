@@ -3,12 +3,12 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
-internal enum AutomaticDesignPhase { Starting, Watching, Applying, InvalidDesign, Paused, Stopped }
+public enum AutomaticDesignPhase { Starting, Watching, Applying, InvalidDesign, Paused, Stopped }
 [Flags]
 internal enum AutomaticDesignSignal { Initial = 1, File = 2, Native = 4, Recovery = 8, Resume = 16 }
 internal sealed record AutomaticDesignInput(AutomaticDesignSignal Reasons, DocumentRevision? MinimumRevision = null,
     bool ReattachRequired = false, string? ErrorCode = null, string? ErrorMessage = null);
-internal sealed record AutomaticDesignStatus(ulong Sequence, AutomaticDesignPhase Phase, string? RecoveryRevisionToken,
+public sealed record AutomaticDesignStatus(ulong Sequence, AutomaticDesignPhase Phase, string? RecoveryRevisionToken,
     Guid? OperationId, bool ReattachRequired, string? ErrorCode, string? ErrorMessage);
 
 internal interface IAutomaticDesignDriver : IAsyncDisposable
@@ -22,7 +22,7 @@ internal interface IAutomaticDesignDriver : IAsyncDisposable
 
 /// <summary>One serial event-to-application owner. Internal until live service
 /// lifecycle, ownership and conflict behavior are qualified.</summary>
-internal sealed class AutomaticDesignSynchronization : IAsyncDisposable
+public sealed class AutomaticDesignSynchronization : IAsyncDisposable
 {
     private readonly IAutomaticDesignDriver driver;
     private readonly object gate = new();
@@ -46,9 +46,13 @@ internal sealed class AutomaticDesignSynchronization : IAsyncDisposable
         worker = Task.Run(RunAsync);
     }
 
-    internal AutomaticDesignStatus Inspect() { lock (gate) return status; }
+    public static async Task<AutomaticDesignSynchronization> StartAsync(DesignRecoveryStore store, NativeClient client,
+        string designPath, string expectedRecoveryRevision, CancellationToken token = default)
+        => new(await AutomaticDesignDriver.CreateAsync(store, client, designPath, expectedRecoveryRevision, token));
 
-    internal async Task<AutomaticDesignStatus> WaitAsync(ulong afterSequence, CancellationToken token = default)
+    public AutomaticDesignStatus Inspect() { lock (gate) return status; }
+
+    public async Task<AutomaticDesignStatus> WaitAsync(ulong afterSequence, CancellationToken token = default)
     {
         while (true)
         {
@@ -63,7 +67,7 @@ internal sealed class AutomaticDesignSynchronization : IAsyncDisposable
         }
     }
 
-    internal void Resume(ulong expectedSequence)
+    public void Resume(ulong expectedSequence)
     {
         lock (gate)
         {

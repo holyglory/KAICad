@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "feeds": [{
+    "platform": "osx-x64",
+    "channel": "preview",
+    "envelopePath": "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-preview9.json"
+  }]
+}

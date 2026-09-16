@@ -34,6 +34,85 @@ env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build
 [test]
 default = "automation"
 
+[test.stage-arm64-c265]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.stage-arm64-c265.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["import", "sign", "feeds"]
+command = ["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
+
+[[test.stage-arm64-c265.check]]
+name = "import"
+tier = "development"
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35044945459-arm64-c265/kicad-delivery", "--commit", "c26503fdc350abf63e4d2588955ccdc2690d682e", "--platform", "osx-arm64", "--run-id", "35044945459", "--version", "preview-20260916-c26503fdc350", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-a519-signed-000007", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import"]
+
+[[test.stage-arm64-c265.check]]
+name = "sign"
+tier = "development"
+requires = ["import"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-osx-arm64-000010.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-preview10.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-a519-signed-000007/updates/platforms/osx-arm64/preview.json"]
+
+[[test.stage-arm64-c265.check]]
+name = "feeds"
+tier = "development"
+requires = ["sign"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-arm64-000010.json"]
+
+[test.mac-arm64-c265-public]
+timeout_seconds = 900
+env = { KICAD_DELIVERY_ROUTE_ONLY = "true", TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "c26503fdc350abf63e4d2588955ccdc2690d682e", KICAD_DELIVERY_PLATFORM = "osx-arm64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/artifacts/mac-arm64-c265-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "osx-arm64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-c26503fdc350abf63e4d2588955ccdc2690d682e-macos-arm64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260916-c26503fdc350" }
+
+[[test.mac-arm64-c265-public.check]]
+name = "restore"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "observations", "browser"]
+command = ["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.mac-arm64-c265-public.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["observations", "browser"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.mac-arm64-c265-public.check]]
+name = "observations"
+tier = "development"
+role = "preflight"
+requires = ["scope-contracts"]
+invalidates = ["browser", "formal"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/mac-arm64-c265-public-tests"]
+retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/mac-arm64-c265-public", max_bytes = 536870912 }, { name = "receipt-tests", path = "automation/artifacts/mac-arm64-c265-public-tests", max_bytes = 16777216 }]
+
+[[test.mac-arm64-c265-public.check]]
+name = "browser"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/mac-arm64-c265-browser"]
+retained_artifacts = [{ name = "browser-tests", path = "automation/artifacts/mac-arm64-c265-browser", max_bytes = 16777216 }]
+
+[[test.mac-arm64-c265-public.check]]
+name = "verifier-self-test"
+tier = "development"
+command = ["devcoordinator2-tooling", "formal-ui", "self-test", "--phase", "rendering", "--workspace-parent", "/tmp", "--timeout-seconds", "300"]
+
+[[test.mac-arm64-c265-public.check]]
+name = "formal"
+tier = "development"
+requires = ["verifier-self-test"]
+command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-arm64-c265.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/mac-arm64-a519-review/manual-review.json", "--fail-on", "critical"]
+
+[[test.mac-arm64-c265-public.check]]
+name = "scope-contracts"
+tier = "development"
+requires = ["build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DeliveryObservationScopeTests", "--logger", "trx", "--results-directory", "automation/artifacts/delivery-observation-scope"]
+retained_artifacts = [{ name = "delivery-observation-scope", path = "automation/artifacts/delivery-observation-scope", max_bytes = 16777216 }]
+
 [test.mac-arm64-a519-public]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "a519e52fc30ada3b0a7f45695433f5157731a0e1", KICAD_DELIVERY_PLATFORM = "osx-arm64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-arm64-a519-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "osx-arm64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260915-a519e52fc30a" }
@@ -120,6 +199,34 @@ tier = "development"
 requires = ["verifier-self-test"]
 command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-intel-a519.json", "--fail-on", "critical"]
 
+[test.stage-intel-c265]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.stage-intel-c265.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["import", "sign", "feeds"]
+command = ["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
+
+[[test.stage-intel-c265.check]]
+name = "import"
+tier = "development"
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35045777030-intel-c265/kicad-delivery", "--commit", "c26503fdc350abf63e4d2588955ccdc2690d682e", "--platform", "osx-x64", "--run-id", "35045777030", "--version", "preview-20260916-c26503fdc350", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-signed-000008", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-import"]
+
+[[test.stage-intel-c265.check]]
+name = "sign"
+tier = "development"
+requires = ["import"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-osx-x64-000009.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-preview9.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-signed-000008/updates/platforms/osx-x64/preview.json"]
+
+[[test.stage-intel-c265.check]]
+name = "feeds"
+tier = "development"
+requires = ["sign"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-signed-000009", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-intel-000009.json"]
+
 [test.stage-intel-a519]
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -190,6 +297,34 @@ name = "formal"
 tier = "development"
 requires = ["verifier-self-test"]
 command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-windows-a519.json", "--fail-on", "critical"]
+
+[test.stage-windows-c265]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.stage-windows-c265.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["import", "sign", "feeds"]
+command = ["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
+
+[[test.stage-windows-c265.check]]
+name = "import"
+tier = "development"
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35044945459-windows-c265/kicad-delivery", "--commit", "c26503fdc350abf63e4d2588955ccdc2690d682e", "--platform", "win-x64", "--run-id", "35044945459", "--version", "preview-20260916-c26503fdc350", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import"]
+
+[[test.stage-windows-c265.check]]
+name = "sign"
+tier = "development"
+requires = ["import"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-win-x64-000008.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-preview8.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010/updates/platforms/win-x64/preview.json"]
+
+[[test.stage-windows-c265.check]]
+name = "feeds"
+tier = "development"
+requires = ["sign"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-signed-000008", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-windows-000008.json"]
 
 [test.stage-windows-a519]
 timeout_seconds = 1800

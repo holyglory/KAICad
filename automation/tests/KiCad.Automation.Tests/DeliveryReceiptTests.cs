@@ -23,6 +23,7 @@ public sealed class DeliveryReceiptTests
         var origin = new Uri(Required("KICAD_PUBLIC_DOWNLOAD_URL"));
         Assert.AreEqual("https", origin.Scheme);
         string platform = Environment.GetEnvironmentVariable("KICAD_DELIVERY_PLATFORM") ?? "linux-x64";
+        bool routeOnly = Environment.GetEnvironmentVariable("KICAD_DELIVERY_ROUTE_ONLY") == "true";
         (string target, string format) = platform switch
         {
             "linux-x64" => ("linux-x64", "tar.gz"),
@@ -76,12 +77,12 @@ public sealed class DeliveryReceiptTests
             await File.WriteAllBytesAsync(Path.Combine(output, "index.html"), html, deadline.Token);
             var after = await Deployment();
             Assert.AreEqual(before.GetProperty("current_generation").GetInt32(), after.GetProperty("current_generation").GetInt32());
-            await Write("web.verification.json", new
+            await Write(RouteObservationFile(routeOnly), new
             {
-                version = 1, kind = "web-deployment", target = "downloads-web", source_sha256 = digest,
+                version = 1, kind = RouteObservationKind(routeOnly), target = routeOnly ? target : "downloads-web", source_sha256 = digest,
                 file = "index.html", observed_sha256 = Convert.ToHexStringLower(SHA256.HashData(html)),
                 checked_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), access = origin.AbsoluteUri,
-                observation = "web_route_passed", deployment = new
+                observation = routeOnly ? "package_route_passed" : "web_route_passed", deployment = new
                 {
                     deployment_id = deploymentId, generation_number = after.GetProperty("current_generation").GetInt32(),
                     http_status = (int)response.StatusCode, content_type = response.Content.Headers.ContentType!.ToString()
@@ -95,9 +96,7 @@ public sealed class DeliveryReceiptTests
                 var result = await Command("devcoordinator2", "deployment", "status", "--deployment-id", deploymentId, "--format", "json");
                 Assert.IsTrue(result.GetProperty("ok").GetBoolean());
                 var state = result.GetProperty("data");
-                Assert.AreEqual(deploymentId, state.GetProperty("deployment_id").GetString());
-                Assert.AreEqual("running", state.GetProperty("state").GetString());
-                Assert.IsTrue(state.GetProperty("readiness").GetProperty("ready").GetBoolean());
+                ValidateDeployment(state, deploymentId, requireCurrentSource: !routeOnly);
                 return state.Clone();
             }
         }
@@ -112,5 +111,24 @@ public sealed class DeliveryReceiptTests
             using var document = JsonDocument.Parse(result.Output);
             return document.RootElement.Clone();
         }
+    }
+
+    internal static string RouteObservationFile(bool routeOnly) => routeOnly ? "package-route.observation.json" : "web.verification.json";
+    internal static string RouteObservationKind(bool routeOnly) => routeOnly ? "package-route" : "web-deployment";
+
+    internal static void ValidateDeployment(JsonElement state, string deploymentId, bool requireCurrentSource)
+    {
+        Assert.AreEqual(deploymentId, state.GetProperty("deployment_id").GetString());
+        Assert.AreEqual("running", state.GetProperty("state").GetString());
+        Assert.IsTrue(state.GetProperty("public").GetBoolean());
+        int generation = state.GetProperty("current_generation").GetInt32(); Assert.IsTrue(generation > 0);
+        string route = state.GetProperty("route_component").GetString()!;
+        var components = state.GetProperty("components").EnumerateArray().Where(c => c.GetProperty("name").GetString() == route).ToArray();
+        Assert.HasCount(1, components); var component = components[0];
+        Assert.IsTrue(component.GetProperty("owned").GetBoolean());
+        Assert.AreEqual("running", component.GetProperty("state").GetString());
+        Assert.AreEqual("healthy", component.GetProperty("health").GetString());
+        Assert.AreEqual(generation, component.GetProperty("generation").GetInt32());
+        if (requireCurrentSource) Assert.IsTrue(state.GetProperty("readiness").GetProperty("ready").GetBoolean());
     }
 }

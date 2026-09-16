@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using System.Text;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 
@@ -96,6 +98,67 @@ public sealed class DesignSynchronizationReceiptTests
         var newer = fixture.Store.Save(saved.State with { DesiredFileBytes = [0xff] }, saved.RevisionToken);
         CollectionAssert.AreEqual(new byte[] { 0xff }, newer.State.DesiredFileBytes);
         Assert.AreEqual(publication.OperationId, newer.State.PendingPublication!.OperationId);
+    }
+
+    [TestMethod]
+    public void VersionedPreviousContentSurvivesReceiptAndRecoveryRoundTripsWithoutChangingLegacyBytes()
+    {
+        string directory = Directory.CreateTempSubdirectory("sync-content-receipt-").FullName;
+        try
+        {
+            var legacy = Receipt(directory);
+            string original = JsonSerializer.Serialize(legacy);
+            Assert.IsFalse(original.Contains("PreviousXmlSha256", StringComparison.Ordinal));
+            Assert.AreEqual(original, JsonSerializer.Serialize(JsonSerializer.Deserialize<DesignSynchronizationReceipt>(original)));
+            var receipt = legacy with { Version = 2, PreviousXmlPath = legacy.DesignPath + ".sync-" + legacy.OperationId.ToString("N"),
+                PreviousXmlSha256 = new string('c', 64), NativeFilesSaved = true };
+            var archive = new DesignSynchronizationReceipts(Path.Combine(directory, "archive")); archive.Archive(receipt);
+            Assert.AreEqual(receipt, archive.Read(receipt.OperationId));
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery"));
+            var state = DesignRecoveryStoreTests.Fixture(); receipt = receipt with { InstanceId = state.InstanceId };
+            var saved = store.Save(state with { LastSynchronization = receipt }, null);
+            Assert.AreEqual(receipt, store.Read()!.State.LastSynchronization);
+            Assert.AreEqual(saved.RevisionToken, store.Save(store.Read()!.State, saved.RevisionToken).RevisionToken);
+            foreach (var invalid in new[]
+            {
+                receipt with { Version = 1 }, receipt with { Version = 3 }, receipt with { PreviousXmlSha256 = null },
+                receipt with { PreviousXmlPath = null }, receipt with { PreviousXmlSha256 = "not-a-digest" },
+                receipt with { PreviousXmlSha256 = new string('C', 64) }
+            })
+                Assert.ThrowsExactly<AutomationException>(() => invalid.Validate());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task CompletionReceiptMustBindTheImmutableDisplacedBytesAndExactOperationPath()
+    {
+        using var fixture = new DesignPublicationRecoveryTests.Fixture();
+        var intent = fixture.Intent with { RequestedRecoveryRevisionToken = fixture.Saved.RevisionToken };
+        var prepared = fixture.Store.Save(fixture.Saved.State with { PendingPublication = intent }, fixture.Saved.RevisionToken);
+        var publication = await DesignPublicationCommitter.CommitAsync(fixture.Store, prepared.RevisionToken, fixture.SaveReceipt);
+        var current = publication.Recovery;
+        var candidate = SchematicDesignXml.Read(Encoding.UTF8.GetString(intent.CandidateFileBytes), current.State.KnowledgeLibraries);
+        var electrical = current.State.ObservedElectrical!.Clone(); electrical.Hierarchy.Data = candidate.Schematic.Clone();
+        var receipt = new DesignSynchronizationReceipt(2, intent.OperationId, current.State.InstanceId, intent.DesignPath,
+            intent.RequestedRecoveryRevisionToken!, publication.FileSha256, fixture.SaveReceipt.ProcessEpoch,
+            electrical.Hierarchy.Revision.Epoch, electrical.Hierarchy.Revision.Sequence, false, true, null, publication.PreviousPath,
+            Convert.ToHexStringLower(SHA256.HashData(intent.ExpectedFileBytes)));
+        Assert.IsNotNull(receipt.PreviousXmlPath);
+        var next = current.State with { Baseline = candidate, DesiredFileBytes = intent.CandidateFileBytes,
+            Observed = candidate.Schematic.Clone(), BaselineElectrical = electrical.Clone(), ObservedElectrical = electrical,
+            PendingPublication = null, PendingNativeState = null, PendingNativeSave = null, LastSynchronization = receipt };
+        foreach (var invalid in new[] { receipt with { PreviousXmlSha256 = new string('d', 64) },
+                     receipt with { PreviousXmlPath = Path.Combine(Path.GetDirectoryName(intent.DesignPath)!, "unrelated.xml") } })
+        {
+            Assert.AreEqual("missing_sync_completion_receipt", Assert.ThrowsExactly<AutomationException>(() =>
+                fixture.Store.Save(next with { LastSynchronization = invalid }, current.RevisionToken)).Code);
+            Assert.AreEqual(current.RevisionToken, fixture.Store.Read()!.RevisionToken);
+            CollectionAssert.AreEqual(intent.CandidateFileBytes, File.ReadAllBytes(intent.DesignPath));
+        }
+        var complete = fixture.Store.Save(next, current.RevisionToken);
+        Assert.AreEqual(receipt, complete.State.LastSynchronization);
+        CollectionAssert.AreEqual(intent.ExpectedFileBytes, await RetainedXmlHistory.ReadVerifiedAsync(receipt));
     }
 
     private static DesignSynchronizationReceipt Receipt(string directory) => new(1, Guid.NewGuid(), Guid.NewGuid(),

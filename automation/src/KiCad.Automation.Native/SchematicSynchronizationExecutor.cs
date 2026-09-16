@@ -85,7 +85,7 @@ internal static class SchematicSynchronizationExecutor
             && Equivalent(saved.State.Baseline, plan.Candidate, saved.State, cancellationToken))
         {
             Read(store, saved.RevisionToken);
-            var noOp = new DesignSynchronizationReceipt(1, operationId, saved.State.InstanceId, designPath,
+            var noOp = new DesignSynchronizationReceipt(2, operationId, saved.State.InstanceId, designPath,
                 expectedRevisionToken, Hash(original), client.Epoch, saved.State.NativeRevision.Epoch,
                 saved.State.NativeRevision.Sequence, false, false, null, null);
             receipts.Archive(noOp);
@@ -193,10 +193,11 @@ internal static class SchematicSynchronizationExecutor
         // Preserve native enumeration in its own electrical checkpoint. XML
         // enumeration is not an object-property change and need not be rewritten.
         var baseline = candidate with { Schematic = final.Electrical.Hierarchy.Data.Clone() };
-        var resultReceipt = new DesignSynchronizationReceipt(1, intent.OperationId, saved.State.InstanceId,
+        var resultReceipt = new DesignSynchronizationReceipt(2, intent.OperationId, saved.State.InstanceId,
             intent.DesignPath, intent.RequestedRecoveryRevisionToken!, publication.FileSha256, client.Epoch,
             final.State.Revision.Epoch, final.State.Revision.Sequence, receipt is not null, true,
-            receipt?.ToByteArray(), publication.PreviousPath);
+            receipt?.ToByteArray(), publication.PreviousPath,
+            publication.PreviousPath is null ? null : Hash(intent.ExpectedFileBytes));
         var complete = store.Save(saved.State with
         {
             Baseline = baseline, DesiredFileBytes = intent.CandidateFileBytes,

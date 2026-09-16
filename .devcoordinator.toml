@@ -1717,6 +1717,30 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~UnresolvedNetBindingTests", "--logger", "trx", "--results-directory", "automation/artifacts/native-removal-projection"]
 retained_artifacts = [{ name = "native-removal-projection", path = "automation/artifacts/native-removal-projection", max_bytes = 16777216 }]
 
+[test.retained-xml-content]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.retained-xml-content.check]]
+name = "restore"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.retained-xml-content.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-restore"]
+
+[[test.retained-xml-content.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~PreservingFileReplacementTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignLayoutRecoveryTests", "--logger", "trx", "--results-directory", "automation/artifacts/retained-xml-content"]
+retained_artifacts = [{ name = "retained-xml-content", path = "automation/artifacts/retained-xml-content", max_bytes = 16777216 }]
+
 [test.pin-partition-evolution]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

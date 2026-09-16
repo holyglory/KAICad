@@ -1,4 +1,6 @@
 using KiCad.Automation.Native;
+using KiCad.Automation.Model;
+using System.Security.Cryptography;
 
 namespace KiCad.Automation.Tests;
 
@@ -92,6 +94,59 @@ public sealed class RetainedXmlHistoryTests
         Assert.AreEqual("missing", RetainedXmlHistory.Inspect(fixture.Receipt).Status);
         Assert.IsNull(fixture.Receipt.Result("current", true).PreviousXmlPath);
         Assert.AreEqual("none", RetainedXmlHistory.Inspect(fixture.Receipt with { PreviousXmlPath = null }).Status);
+    }
+
+    [TestMethod]
+    public async Task VerifiedHistoryBindsTheReturnedBytesBeforeAndAfterArchiving()
+    {
+        using var fixture = new Fixture();
+        string expected = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes));
+        var receipt = fixture.Receipt with { Version = 2, PreviousXmlSha256 = expected };
+        var staged = RetainedXmlHistory.Inspect(receipt);
+        Assert.IsTrue(staged.ContentVerified); Assert.AreEqual(expected, staged.ExpectedSha256);
+        CollectionAssert.AreEqual(fixture.Bytes, await RetainedXmlHistory.ReadVerifiedAsync(receipt));
+        var archived = RetainedXmlHistory.Archive(receipt);
+        Assert.AreEqual("archived", archived.Status); Assert.IsTrue(archived.ContentVerified);
+        CollectionAssert.AreEqual(fixture.Bytes, await RetainedXmlHistory.ReadVerifiedAsync(receipt));
+        var interrupted = RetainedXmlHistory.Archive(receipt);
+        Assert.AreEqual(archived, interrupted);
+    }
+
+    [TestMethod]
+    public async Task ChangedHistoryIsPreservedAndCannotRestoreIdentities()
+    {
+        using var fixture = new Fixture();
+        var receipt = fixture.Receipt with { Version = 2, PreviousXmlSha256 = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes)) };
+        string archive = RetainedXmlHistory.Inspect(receipt).ArchivePath!;
+        File.WriteAllText(receipt.PreviousXmlPath!, "<changed-before-archive/>");
+        var refused = RetainedXmlHistory.Archive(receipt);
+        Assert.AreEqual("retained_xml_changed", refused.ErrorCode); Assert.IsFalse(refused.ContentVerified);
+        Assert.IsFalse(File.Exists(archive)); Assert.AreEqual("<changed-before-archive/>", File.ReadAllText(receipt.PreviousXmlPath!));
+        Assert.AreEqual("retained_xml_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(
+            () => RetainedXmlHistory.ReadVerifiedAsync(receipt))).Code);
+        File.WriteAllBytes(receipt.PreviousXmlPath!, fixture.Bytes);
+        Assert.AreEqual("archived", RetainedXmlHistory.Archive(receipt).Status);
+        File.WriteAllText(archive, "<changed-after-archive/>");
+        Assert.AreEqual("retained_xml_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(
+            () => RetainedXmlHistory.ReadVerifiedAsync(receipt))).Code);
+        Assert.AreEqual("<changed-after-archive/>", File.ReadAllText(archive));
+    }
+
+    [TestMethod]
+    public async Task LegacyMissingAndCancelledHistoryDoNotClaimContentVerification()
+    {
+        using var fixture = new Fixture();
+        Assert.IsNull(RetainedXmlHistory.Inspect(fixture.Receipt).ContentVerified);
+        Assert.AreEqual("unverified_retained_xml", (await Assert.ThrowsExactlyAsync<AutomationException>(
+            () => RetainedXmlHistory.ReadVerifiedAsync(fixture.Receipt))).Code);
+        var receipt = fixture.Receipt with { Version = 2, PreviousXmlSha256 = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes)) };
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => RetainedXmlHistory.ReadVerifiedAsync(receipt, new(true)));
+        Assert.IsTrue(File.Exists(receipt.PreviousXmlPath));
+        File.Delete(receipt.PreviousXmlPath!);
+        Assert.AreEqual("retained_xml_missing", (await Assert.ThrowsExactlyAsync<AutomationException>(
+            () => RetainedXmlHistory.ReadVerifiedAsync(receipt))).Code);
+        Assert.AreEqual("missing_retained_xml", (await Assert.ThrowsExactlyAsync<AutomationException>(
+            () => RetainedXmlHistory.ReadVerifiedAsync(receipt with { PreviousXmlPath = null, PreviousXmlSha256 = null }))).Code);
     }
 
     private sealed class Fixture : IDisposable

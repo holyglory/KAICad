@@ -20,17 +20,22 @@ public sealed record DesignSynchronizationReceipt(
     [property: JsonRequired] bool NativeMutationCommitted,
     [property: JsonRequired] bool NativeFilesSaved,
     [property: JsonRequired] byte[]? NativeReceipt,
-    [property: JsonRequired] string? PreviousXmlPath)
+    [property: JsonRequired] string? PreviousXmlPath,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousXmlSha256 = null)
 {
     internal void Validate()
     {
-        if (Version != 1 || OperationId == Guid.Empty || InstanceId == Guid.Empty
+        if (Version is not (1 or 2) || OperationId == Guid.Empty || InstanceId == Guid.Empty
             || !Path.IsPathFullyQualified(DesignPath) || Path.GetFullPath(DesignPath) != DesignPath
             || !Digest(RequestedRecoveryRevisionToken) || !Digest(DesignFileSha256)
             || !Uuid(NativeProcessEpoch) || !Uuid(NativeDocumentEpoch)
             || NativeMutationCommitted != (NativeReceipt is not null)
             || (PreviousXmlPath is not null && !Path.IsPathFullyQualified(PreviousXmlPath)))
             throw Invalid("Synchronization receipt has incomplete identity or result fields.");
+        if ((Version == 1 && PreviousXmlSha256 is not null)
+            || (Version == 2 && ((PreviousXmlPath is null) != (PreviousXmlSha256 is null)
+                || (PreviousXmlSha256 is not null && !Digest(PreviousXmlSha256)))))
+            throw Invalid("Versioned retained XML requires an exact prior-content digest paired with its path.");
         if (NativeReceipt is not null)
         {
             try

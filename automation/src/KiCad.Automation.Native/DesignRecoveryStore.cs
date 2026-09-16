@@ -399,7 +399,10 @@ public sealed class DesignRecoveryStore(string statePath)
             || next.LastSynchronization is not { } result || result.OperationId != before.OperationId
             || result.RequestedRecoveryRevisionToken != before.RequestedRecoveryRevisionToken
             || result.DesignPath != before.DesignPath
-            || result.DesignFileSha256 != Convert.ToHexStringLower(SHA256.HashData(before.CandidateFileBytes)))
+            || result.DesignFileSha256 != Convert.ToHexStringLower(SHA256.HashData(before.CandidateFileBytes))
+            || (result.Version == 2 && result.PreviousXmlPath is not null
+                && (result.PreviousXmlSha256 != Convert.ToHexStringLower(SHA256.HashData(before.ExpectedFileBytes))
+                    || (result.PreviousXmlPath != before.StagedPath && result.PreviousXmlPath != before.PreviousPath))))
             throw Failure("missing_sync_completion_receipt", "Clear the pending publication only together with its matching completed result.");
     }
 

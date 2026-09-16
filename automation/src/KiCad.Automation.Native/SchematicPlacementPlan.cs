@@ -25,8 +25,10 @@ public static class SchematicPlacementPlan
         var issues = new List<PlacementPlanIssue>();
         var operations = new List<SchematicItemOperation>();
         var transforms = new List<SchematicItemOperation>();
+        var unlocks = new List<SchematicItemOperation>();
+        var locks = new List<SchematicItemOperation>();
         SchematicPlacementPlanResult Result() => new(projection.Candidate,
-            issues.Count == 0 && projection.Candidate is not null ? transforms.Concat(operations).ToArray() : [], issues,
+            issues.Count == 0 && projection.Candidate is not null ? unlocks.Concat(transforms).Concat(operations).Concat(locks).ToArray() : [], issues,
             projection.Conflicts, projection.BindingIssues, projection.CoverageGaps, projection.UnprojectedSnapshotChanges);
         if (projection.Candidate is null)
         {
@@ -61,9 +63,7 @@ public static class SchematicPlacementPlan
                 var wanted = symbol.Placement ?? current;
                 if (symbol.Unit != native[symbol.Id].Unit.Unit)
                     issues.Add(new("unit_change_requires_electrical_update", symbol.Id, "Apply and verify the symbol-unit change before placement."));
-                if (current.Locked != wanted.Locked)
-                    issues.Add(new("placement_lock_change", symbol.Id, "Apply an explicit lock change before planning placement."));
-                if (current.Locked && !SchematicOrientation.Equivalent(current, wanted))
+                if (current.Locked && wanted.Locked && !SchematicOrientation.Equivalent(current, wanted))
                     issues.Add(new("locked_symbol", symbol.Id, "Preserve the locked native symbol placement."));
                 foreach (decimal coordinate in new[] { current.XMillimeters, current.YMillimeters,
                     wanted.XMillimeters, wanted.YMillimeters })
@@ -95,6 +95,13 @@ public static class SchematicPlacementPlan
             }
             try
             {
+                if (first.Current.Locked != first.Desired.Locked)
+                {
+                    var change = new SchematicSymbolLocks { Locked = first.Desired.Locked ? LockedState.LsLocked : LockedState.LsUnlocked };
+                    change.Symbols.Add(new KIID { Value = first.NativeId.ToString("D") });
+                    (first.Desired.Locked ? locks : unlocks).Add(new SchematicItemOperation
+                        { TargetDocument = first.Document.Clone(), SetSymbolLocks = change });
+                }
                 foreach (var kind in SchematicOrientation.Plan(first.Current, first.Desired))
                 {
                     var transform = new SchematicConnectedSymbolTransform { Kind = kind, Pivot = new()

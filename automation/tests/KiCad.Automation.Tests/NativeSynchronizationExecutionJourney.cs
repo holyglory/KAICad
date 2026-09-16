@@ -41,6 +41,7 @@ public sealed partial class NativeSessionTests
         if (transformsOnly)
         {
             await VerifySynchronizationLayout(client, document, store, designPath, processId, display, evidence, instanceId, token, transforms: true);
+            await VerifySynchronizationLocks(client, document, store, designPath, processId, display, evidence, instanceId, token);
             return;
         }
 

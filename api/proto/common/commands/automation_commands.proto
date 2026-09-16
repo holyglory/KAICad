@@ -584,6 +584,7 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicBomSettings set_bom_settings = 23;
     kiapi.schematic.types.SchematicNetSettings set_net_settings = 24;
     SchematicConnectedSymbolTransform transform_connected_symbols = 25;
+    SchematicSymbolLocks set_symbol_locks = 26;
   }
 }
 
@@ -611,6 +612,13 @@ message SchematicConnectedSymbolTransform {
   repeated kiapi.common.types.KIID symbols = 1;
   kiapi.common.types.Vector2 pivot = 2;
   SchematicConnectedTransformKind kind = 3;
+}
+
+// Changes only the lock flag, preserving geometry already produced earlier in
+// the same native batch. Shared sheet instances refer to one physical symbol.
+message SchematicSymbolLocks {
+  repeated kiapi.common.types.KIID symbols = 1;
+  kiapi.common.types.LockedState locked = 2;
 }
 
 message SchematicLibraryCacheState {

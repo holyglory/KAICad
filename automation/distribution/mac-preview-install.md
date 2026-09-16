@@ -1,18 +1,15 @@
 # Install the September 15 Mac preview
 
-These development previews contain KiCad and its MCP companion. Apple Silicon
-uses `preview-20260915-a519e52fc30a` from commit
-`a519e52fc30ada3b0a7f45695433f5157731a0e1`; Intel remains on
-`preview-20260915-f825814e421a` from commit
-`f825814e421a36496855081cf077c9784d3eb38a`. Both are ad-hoc signed, not notarized.
+These development previews contain KiCad and its MCP companion. Both Apple
+Silicon and Intel use `preview-20260915-a519e52fc30a` from commit
+`a519e52fc30ada3b0a7f45695433f5157731a0e1`. Both are ad-hoc signed, not notarized.
 
 | Mac | Application archive | Signed update feed |
 | --- | --- | --- |
 | Apple Silicon | [Download](https://kicad.vr.ae/platforms/osx-arm64/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz) | [Apple Silicon feed](https://kicad.vr.ae/platforms/osx-arm64/updates/preview.json) |
-| Intel | [Download](https://kicad.vr.ae/platforms/osx-x64/artifacts/kicad-codex-f825814e421a36496855081cf077c9784d3eb38a-macos-x64.tar.gz) | [Intel feed](https://kicad.vr.ae/platforms/osx-x64/updates/preview.json) |
+| Intel | [Download](https://kicad.vr.ae/platforms/osx-x64/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-x64.tar.gz) | [Intel feed](https://kicad.vr.ae/platforms/osx-x64/updates/preview.json) |
 
-[Apple Silicon source](https://kicad.vr.ae/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-source.tar.gz),
-[Intel source](https://kicad.vr.ae/artifacts/kicad-codex-f825814e421a36496855081cf077c9784d3eb38a-source.tar.gz)
+[Matching source](https://kicad.vr.ae/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-source.tar.gz)
 and other versions are available from [the download page](https://kicad.vr.ae/).
 The feeds can advance: keep the downloaded archive and its matching signed feed
 together. If they no longer match, obtain a matching pair; do not edit the feed.
@@ -29,7 +26,7 @@ helper, compare the archive's SHA-256 with the matching value from your trusted
 Git/source copy of this guide:
 
 - Apple Silicon: `064a45c91f8463a2fa4c5636621ef62fd38bc95f5bb4b820af37ad4a235e85c5`
-- Intel: `b53b6af9798fcda1948548f10c43538f44ba9fb630ee27540c2ef354726830a5`
+- Intel: `e548a2e0290c5b3dcdab55d08d350f717a3da4c85116ca4902a332e4913be9bd`
 
 On the Mac, `shasum -a 256 /absolute/path/to/the/downloaded/archive.tar.gz`
 prints that hash. Keep the verified archive, save its matching feed as

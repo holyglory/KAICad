@@ -263,7 +263,8 @@ public sealed class DesignRecoveryStore(string statePath)
         if (state.PendingLayout is { } layout)
         {
             if (state.PendingPublication is not null || state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null
-                || state.PendingMutation is null || !state.PendingMutation.Operations.Any(o => o.MoveConnectedSymbols is not null || o.TransformConnectedSymbols is not null)
+                || state.PendingMutation is null || !state.PendingMutation.Operations.Any(o => o.MoveConnectedSymbols is not null
+                    || o.TransformConnectedSymbols is not null || o.SetSymbolLocks is not null)
                 || layout.ExpectedFileBytes is null || layout.PlannedDesignFileBytes is null
                 || string.IsNullOrEmpty(layout.RequestedRecoveryRevisionToken))
                 throw Failure("invalid_layout_intent", "Unresolved layout requires its exact connected-move request, not a save or final publication.");

@@ -31,10 +31,10 @@ public sealed class DesignLayoutRecoveryTests
     }
 
     [TestMethod]
-    [DataRow(false), DataRow(true)]
-    public void RequestedLayoutReopensWithoutPretendingItsWireGeometryIsFinal(bool transform)
+    [DataRow(false, false), DataRow(true, false), DataRow(false, true)]
+    public void RequestedLayoutReopensWithoutPretendingItsWireGeometryIsFinal(bool transform, bool lockOnly)
     {
-        using var f = new Fixture(transform);
+        using var f = new Fixture(transform, lockOnly);
         byte[] before = File.ReadAllBytes(f.Path);
         Assert.AreEqual(8, JsonNode.Parse(before)!["Version"]!.GetValue<int>());
         var restored = new DesignRecoveryStore(f.Path).Read()!;
@@ -134,7 +134,7 @@ public sealed class DesignLayoutRecoveryTests
         internal DesignRecoveryStore Store { get; }
         internal StoredDesignRecovery Saved { get; }
         internal DesignLayoutIntent Intent { get; }
-        internal Fixture(bool transform = false)
+        internal Fixture(bool transform = false, bool lockOnly = false)
         {
             Path = Publication.RecordPath + ".layout.json"; Store = new(Path);
             var state = Publication.Saved.State;
@@ -151,6 +151,13 @@ public sealed class DesignLayoutRecoveryTests
                     Kind = SchematicConnectedTransformKind.SctRotateCounterclockwise };
                 rotation.Symbols.Add(movement.Symbols.Select(s => s.Clone()));
                 mutation.Operations.Add(new SchematicItemOperation { TransformConnectedSymbols = rotation });
+            }
+            if (lockOnly)
+            {
+                mutation.Operations.Clear();
+                var locks = new SchematicSymbolLocks { Locked = Kiapi.Common.Types.LockedState.LsLocked };
+                locks.Symbols.Add(movement.Symbols.Select(s => s.Clone()));
+                mutation.Operations.Add(new SchematicItemOperation { SetSymbolLocks = locks });
             }
             Intent = DesignLayoutIntent.Create(Publication.Intent.DesignPath, Publication.Intent.ExpectedFileBytes,
                 Publication.Intent.CandidateFileBytes, Guid.NewGuid(), Publication.Saved.RevisionToken);

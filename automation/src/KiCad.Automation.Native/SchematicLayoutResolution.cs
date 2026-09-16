@@ -30,11 +30,19 @@ internal static class SchematicLayoutResolution
         var moves = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
         var transforms = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
         var mirrors = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
-        foreach (var operation in batch.Operations.Where(o => o.MoveConnectedSymbols is not null || o.TransformConnectedSymbols is not null))
+        var lockTargets = new Dictionary<string, Dictionary<Guid, LockedState>>(StringComparer.Ordinal);
+        foreach (var operation in batch.Operations.Where(o => o.MoveConnectedSymbols is not null
+            || o.TransformConnectedSymbols is not null || o.SetSymbolLocks is not null))
         {
             string path = Path(operation.TargetDocument ?? batch.Document);
             if (!wanted.TryGetValue(path, out var screen)) throw Error("The connected move has no exact sheet target.");
             string physical = screen.Metadata.ScreenId.Value;
+            if (operation.SetSymbolLocks is { } lockChange)
+            {
+                if (!lockTargets.TryGetValue(physical, out var targets)) lockTargets.Add(physical, targets = []);
+                foreach (var id in lockChange.Symbols) targets[Guid.Parse(id.Value)] = lockChange.Locked;
+                continue;
+            }
             if (!moves.TryGetValue(physical, out var ids)) moves.Add(physical, ids = []);
             var affected = (operation.MoveConnectedSymbols?.Symbols ?? operation.TransformConnectedSymbols.Symbols)
                 .Select(s => Guid.Parse(s.Value)).ToArray();
@@ -50,7 +58,7 @@ internal static class SchematicLayoutResolution
                 }
             }
         }
-        if (moves.Count == 0) throw Error("No connected movement was recorded.");
+        if (moves.Count == 0 && lockTargets.Count == 0) throw Error("No connected placement or lock change was recorded.");
         foreach (var (path, before) in wanted)
         {
             token.ThrowIfCancellationRequested();
@@ -63,11 +71,16 @@ internal static class SchematicLayoutResolution
             bool moving = moves.TryGetValue(before.Metadata.ScreenId.Value, out var movedIds);
             bool transforming = transforms.TryGetValue(before.Metadata.ScreenId.Value, out var transformedIds);
             mirrors.TryGetValue(before.Metadata.ScreenId.Value, out var mirroredIds);
+            lockTargets.TryGetValue(before.Metadata.ScreenId.Value, out var lockIds);
             foreach (Guid id in oldItems.Keys.Union(newItems.Keys))
             {
                 oldItems.TryGetValue(id, out var oldItem); newItems.TryGetValue(id, out var newItem);
                 if (Equals(oldItem, newItem)) continue;
-                if (!moving || Locked(oldItem) || Locked(newItem)) throw Error("Connected movement changed an unrelated sheet or locked object.");
+                bool lockChanged = lockIds?.ContainsKey(id) == true;
+                if ((!moving && !lockChanged) || ((Locked(oldItem) || Locked(newItem)) && !lockChanged))
+                    throw Error("Connected movement changed an unrelated sheet or locked object.");
+                if (lockChanged && (newItem is not SchematicSymbolInstance lockedSymbol || lockedSymbol.Locked != lockIds![id]))
+                    throw Error("Native placement did not preserve the explicitly requested lock state.");
                 if (oldItem is null || newItem is null)
                 {
                     if (!WireGeometry(oldItem ?? newItem!)) throw Error("Connected movement created or removed a non-wire object.");
@@ -77,8 +90,8 @@ internal static class SchematicLayoutResolution
                 bool transformed = transformedIds?.Contains(id) == true, mirrored = mirroredIds?.Contains(id) == true;
                 if (mirrored && newItem is SchematicSymbolInstance { FieldsAutoplaced: true })
                     throw Error("A mirrored symbol must retain native manual field placement.");
-                var oldProperties = WithoutGeometry(oldItem, movedIds!.Contains(id), transformed, mirrored, transforming);
-                var newProperties = WithoutGeometry(newItem, movedIds.Contains(id), transformed, mirrored, transforming);
+                var oldProperties = WithoutGeometry(oldItem, movedIds?.Contains(id) == true, transformed, mirrored, transforming, lockChanged);
+                var newProperties = WithoutGeometry(newItem, movedIds?.Contains(id) == true, transformed, mirrored, transforming, lockChanged);
                 if (!oldProperties.Equals(newProperties)) throw Error("Connected movement changed non-layout properties or unrelated symbol placement.");
             }
         }
@@ -93,7 +106,7 @@ internal static class SchematicLayoutResolution
         && item.Descriptor.FindFieldByName("locked")?.Accessor.GetValue(item) is LockedState.LsLocked;
     private static bool WireGeometry(IMessage item) => item is Junction
         || item is SchematicLine { Type: SchematicLineType.SltWire or SchematicLineType.SltBus };
-    private static IMessage WithoutGeometry(IMessage input, bool movedSymbol, bool transformedSymbol, bool mirroredSymbol, bool transformedScreen)
+    private static IMessage WithoutGeometry(IMessage input, bool movedSymbol, bool transformedSymbol, bool mirroredSymbol, bool transformedScreen, bool lockChanged)
     {
         var item = input.Descriptor.Parser.ParseFrom(input.ToByteArray());
         switch (item)
@@ -115,7 +128,9 @@ internal static class SchematicLayoutResolution
             case DirectiveLabel label:
                 label.Position = null; if (transformedScreen) label.SpinStyle = 0;
                 Text(label.Text, transformedScreen); Fields(label.Fields, transformedScreen); break;
-            case SchematicSymbolInstance symbol when movedSymbol:
+            case SchematicSymbolInstance symbol when movedSymbol || lockChanged:
+                if (lockChanged) symbol.Locked = 0;
+                if (!movedSymbol) break;
                 symbol.Position = null;
                 if (transformedSymbol) symbol.Transform = null;
                 if (mirroredSymbol) symbol.FieldsAutoplaced = false;

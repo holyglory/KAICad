@@ -691,8 +691,10 @@ the same baseline, desired engineering model, observed hierarchy and declared
 libraries. It combines equal-displacement symbols on one sheet into a native
 selection and resolves repeated-screen geometry once by exact identity. Existing
 locks, conflicting shared placements and unsupported electrical changes prevent
-partial proposals. Ordered quarter-turn/reflection proposals run before grouped
-translations, with exact native pivots. Equivalent angle/mirror encodings do not
+partial proposals. Explicit unlocks run first, followed by ordered quarter-turn/
+reflection proposals, grouped translations, and requested locks. A containing
+group's lock must be removed explicitly before an individual unlock can succeed.
+Transforms use exact native pivots. Equivalent angle/mirror encodings do not
 request another edit. Missing coordinates do not request movement. Results retain
 coverage gaps and unprojected native changes; they require live state admission
 and connectivity verification before use.
@@ -704,6 +706,8 @@ budgeted before commit, so a reply-capacity rejection does not leave an unreport
 edit. This does not advertise production automatic synchronization or complete
 cross-platform qualification. Run the focused test with
 `devcoordinator2 test start . --test native-transform-sync --tier development --client codex`.
+That journey also checks lock-only changes, unlock-and-move, move-and-lock,
+protected group rejection, failed-batch rollback and lock history back into XML.
 
 The internal `DesignRecoveryStore` preserves the full composed baseline, observed
 hierarchy, declared library snapshots, exact desired-file bytes (including invalid

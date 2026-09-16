@@ -117,19 +117,14 @@ public sealed class SchematicLayoutResolutionTests
                 _ => s.Placement! with { Locked = true }
             } }).ToArray() } };
             var plan = SchematicSynchronizationPlanner.PlanForExecution(SchematicNetReconciliationTests.Desired(state, wanted));
-            if (change == 2)
-            {
-                Assert.IsFalse(plan.CanPrepare); Assert.IsEmpty(plan.NativeOperations); Assert.IsNull(plan.CandidateXml);
-                Assert.AreEqual("placement_lock_change", plan.ErrorCode);
-                continue;
-            }
             Assert.IsTrue(plan.CanPrepare, plan.ErrorMessage);
-            Assert.IsTrue(plan.NativeOperations.All(o => o.TransformConnectedSymbols is not null));
+            Assert.IsTrue(plan.NativeOperations.All(o => change == 2 ? o.SetSymbolLocks is not null : o.TransformConnectedSymbols is not null));
             var actual = state.ObservedElectrical!.Clone();
             Edit(actual.Hierarchy.Data, symbol =>
             {
                 if (change == 0) symbol.Transform.Orientation = (SchematicSymbolOrientation)2;
-                else { symbol.Transform.MirrorX = true; symbol.FieldsAutoplaced = false; }
+                else if (change == 1) { symbol.Transform.MirrorX = true; symbol.FieldsAutoplaced = false; }
+                else symbol.Locked = LockedState.LsLocked;
             });
             var batch = new ApplySchematicItemBatch { Document = state.Observed.Document.Clone() };
             batch.Operations.Add(plan.NativeOperations.Select(o => o.Clone()));
@@ -143,7 +138,7 @@ public sealed class SchematicLayoutResolutionTests
                 {
                     if (corruption == 0) symbol.Transform.Orientation = (SchematicSymbolOrientation)4;
                     if (corruption == 1) symbol.ValueField.Text.Text_ = "unrequested";
-                    if (corruption == 2) symbol.Locked = LockedState.LsLocked;
+                    if (corruption == 2) symbol.Locked = change == 2 ? LockedState.LsUnlocked : LockedState.LsLocked;
                 });
                 Assert.ThrowsExactly<AutomationException>(() => SchematicLayoutResolution.Resolve(plan.Candidate!, bad, batch, state.KnowledgeLibraries));
             }

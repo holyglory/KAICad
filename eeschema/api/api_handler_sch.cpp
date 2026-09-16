@@ -949,7 +949,45 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             header.mutable_document()->CopyFrom( document );
             result.add_operation_targets()->CopyFrom( document );
 
-            if( operation.has_move_connected_symbols() || operation.has_transform_connected_symbols() )
+            if( operation.has_set_symbol_locks() )
+            {
+                const auto& locks = operation.set_symbol_locks();
+                auto known = operation;
+                known.DiscardUnknownFields();
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                        || locks.symbols().empty()
+                        || ( locks.locked() != kiapi::common::types::LS_LOCKED
+                             && locks.locked() != kiapi::common::types::LS_UNLOCKED ) )
+                    return reject( prefix + "Symbol locks require explicit targets and a supported lock state" );
+                if( operationId.empty() || !aCtx.Request.has_expected_revision() )
+                    return reject( prefix + "Symbol locks require revision and retry identity" );
+                std::map<KIID, SCH_SYMBOL*> symbols;
+                for( SCH_ITEM* item : targetSheet->LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                    symbols.emplace( item->m_Uuid, static_cast<SCH_SYMBOL*>( item ) );
+                std::set<KIID> targets;
+                for( const auto& target : locks.symbols() )
+                {
+                    const KIID id( target.value() );
+                    if( id == niluuid || id.AsStdString() != target.value() || !targets.insert( id ).second || !symbols.count( id ) )
+                        return reject( prefix + "Each lock target must be a distinct loaded symbol UUID on the target screen" );
+                    if( locks.locked() == kiapi::common::types::LS_UNLOCKED )
+                        if( EDA_GROUP* group = symbols.at( id )->GetParentGroup(); group && group->AsEdaItem()->IsLocked() )
+                            return reject( prefix + "Unlock the containing group before unlocking this symbol" );
+                }
+                const bool locked = locks.locked() == kiapi::common::types::LS_LOCKED;
+                for( const KIID& id : targets )
+                {
+                    SCH_SYMBOL* symbol = symbols.at( id );
+                    if( symbol->IsLocked() == locked ) continue;
+                    nativeCommit->Modify( symbol, targetSheet->LastScreen() );
+                    symbol->SetLocked( locked );
+                    google::protobuf::Any item;
+                    if( !packSchItem( item, symbol, *targetSheet ) )
+                        return reject( prefix + "Cannot serialize the resulting symbol lock state" );
+                    result.add_items()->Swap( &item );
+                }
+            }
+            else if( operation.has_move_connected_symbols() || operation.has_transform_connected_symbols() )
             {
                 if( !m_frame )
                     return reject( prefix + "Connected movement requires an editor context" );

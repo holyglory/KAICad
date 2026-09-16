@@ -69,7 +69,12 @@ public sealed record Circuit(
         {
             Identity(component.Id);
             RequireText(component.Reference, "Component reference");
-            if (!references.Add(component.Reference)) throw Invalid("Component references must be unique in the design.");
+            // KiCad uses a trailing '?' for an unannotated reference. Such
+            // placeholders are intentionally repeatable until annotation;
+            // assigned references remain unique design-wide.
+            if (!component.Reference.EndsWith("?", StringComparison.Ordinal)
+                && !references.Add(component.Reference))
+                throw Invalid("Assigned component references must be unique in the design.");
             if (!instances.TryGetValue(component.SheetInstanceId, out var instance)
                 || !sheets[instance.DefinitionId].Components.Any(c => c.Id == component.DefinitionId))
                 throw Invalid("Component does not belong to its sheet definition.");

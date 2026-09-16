@@ -322,7 +322,7 @@ public sealed class McpProcessTests
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = syncRecoveryPath,
                     expectedRevisionToken = syncSaved.RevisionToken } });
             Assert.AreEqual("recovery_instance_mismatch", wrongSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
-            Assert.ThrowsExactly<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
+            await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
                 syncFixture.InstanceId.ToString("D"), syncRecoveryPath, syncSaved.RevisionToken, new CancellationToken(true)));
             CollectionAssert.AreEqual(syncOriginal, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
             string netRecoveryPath = Path.Combine(state, "designs", "net-recovery.json");

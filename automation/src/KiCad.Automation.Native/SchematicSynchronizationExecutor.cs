@@ -66,7 +66,7 @@ internal static class SchematicSynchronizationExecutor
         byte[] original = await File.ReadAllBytesAsync(designPath, cancellationToken);
         if (!original.AsSpan().SequenceEqual(saved.State.DesiredFileBytes))
             throw Error("design_file_changed", "Capture the latest saved XML before planning synchronization.");
-        var plan = SchematicSynchronizationPlanner.PlanForExecution(saved.State, cancellationToken);
+        var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store, saved, cancellationToken);
         if (!plan.CanPrepare || plan.Candidate is null || plan.CandidateXml is null)
             throw Error(plan.ErrorCode ?? "design_sync_conflict", plan.ErrorMessage ?? "Resolve the design conflicts before applying changes.");
         var checkpoint = await Capture(client, saved.State, cancellationToken);

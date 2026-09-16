@@ -10,6 +10,14 @@ public static class SchematicPropertyProjection
 {
     public static SchematicDesign Project(SchematicDesign baseline, SchematicDesign candidate,
         IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
+        => ProjectCore(baseline, candidate, libraries, token, null);
+
+    internal static SchematicDesign ProjectAfterRestoration(SchematicDesign baseline, SchematicDesign candidate,
+        SchematicNativeRestorationResult restoration, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token)
+        => ProjectCore(baseline, candidate, libraries, token, restoration);
+
+    private static SchematicDesign ProjectCore(SchematicDesign baseline, SchematicDesign candidate,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token, SchematicNativeRestorationResult? restoration)
     {
         var report = SchematicDesignBindings.Inspect(candidate, libraries, token);
         if (!report.IdentitiesResolved)
@@ -30,10 +38,11 @@ public static class SchematicPropertyProjection
             string id = bindings[occurrence.Id];
             int index = screen.Items.ToList().FindIndex(item => item.Is(SchematicSymbolInstance.Descriptor)
                 && item.Unpack<SchematicSymbolInstance>().Id.Value == id);
-            if (index < 0 || !oldOccurrences.TryGetValue(occurrence.Id, out var original))
+            bool restored = restoration?.RestoredOccurrences.Contains(occurrence.Id) == true;
+            if (index < 0 || (!oldOccurrences.TryGetValue(occurrence.Id, out var original) && !restored))
                 throw Error("unresolved_design_bindings", "Property changes require an existing exact symbol occurrence.");
             var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>();
-            if (occurrence.Unit != original.Unit || symbol.Unit?.Unit != occurrence.Unit)
+            if ((!restored && occurrence.Unit != original!.Unit) || symbol.Unit?.Unit != occurrence.Unit)
                 throw Error("unit_change_requires_electrical_update", "Unit changes require explicit pin-ownership and electrical reconciliation.");
             string key = screen.Metadata.ScreenId.Value + "#" + id;
             if (!grouped.TryGetValue(key, out var entries)) grouped.Add(key, entries = []);

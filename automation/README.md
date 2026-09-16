@@ -922,14 +922,14 @@ into XML through exact saved sheet paths and UUIDs. Removing one drawn unit keep
 its physical component; removing its last drawing retires the component only
 when shared-definition ownership remains valid. Detached component/pin guidance,
 structural instructions and retired-net requirements remain explicit. Concurrent
-engineering XML edits, sheet changes, new symbols and ambiguous shared-definition
+circuit/layout XML edits, sheet changes, new symbols and ambiguous shared-definition
 retirement pause preparation without discarding either version.
 Linux run `t20260916T015039Z-c53380` verifies unit and whole-component deletion,
 actual pin connectivity, preserving instructions and repeat-safe XML publication
 in two editors. These deletions use native API operations and explicit internal
 executor calls; this is not manual rendered-UI or event-driven automatic-apply
-qualification. Native undo/redo restoration, interrupted recovery for ownership
-changes, broader creation/rebinding and Mac/Windows qualification remain open.
+qualification. Interrupted recovery during ownership changes, broader
+creation/rebinding and Mac/Windows qualification remain open.
 This source increment is not in the frozen `c26503fdc3` build or published previews.
 
 New synchronization receipts use version 2 and bind retained prior XML to its
@@ -941,8 +941,24 @@ The 49 focused checks in `t20260916T020853Z-02f629` cover compatibility, exact
 digest/path binding, persistence, changed content and cancellation. Linux native
 run `t20260916T022832Z-a313c3` additionally verifies exact retained bytes after
 deletion and service termination/restart at publication replacement, baseline
-commit and history archival in both editor instances. Native undo/redo identity
-restoration itself is still unfinished; this is its verified history foundation.
+commit and history archival in both editor instances.
+
+Native undo restoration now reads verified historical declarations without
+replacing current instructions or live objects with an old XML document. It
+requires exact native owners and a compatible deletion predecessor, rejects
+ambiguous mappings, and restores a historical net ID only for its exact pin group.
+Only bindings that were resolved in the selected predecessor are reinstated.
+Restored geometry comes from the current native checkpoint. Missing, changed,
+legacy-only, foreign-circuit or future-revision history cannot authorize a candidate.
+The public read-only `kicad_design_sync_plan` and internal executor use the same
+history-aware preparation. Instruction-only edits can merge; competing circuit
+and layout changes still pause synchronization.
+Linux native run `t20260916T032035Z-c12d41` verifies real keyboard undo/redo of
+unit and component deletions in two editors, including history older than the
+latest receipt, exact restored identities, preserved newer instructions, actual
+connectivity, normal STDIO planning and repeat-safe reverse publication.
+This does not qualify event-driven automatic application, arbitrary creation or
+rebinding, conflicting-history resolution, or the Mac/Windows/Codex Desktop journey.
 
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an

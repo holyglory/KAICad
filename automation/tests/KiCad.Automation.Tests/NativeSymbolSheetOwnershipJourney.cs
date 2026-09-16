@@ -12,7 +12,7 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task VerifyNativeSymbolSheetOwnership(NativeClient client, DocumentSpecifier root,
-        HierarchyFixture hierarchy, string evidence, string instanceId, CancellationToken token)
+        HierarchyFixture hierarchy, string evidence, string instanceId, int processId, string display, CancellationToken token)
     {
         var first = root.Clone(); first.SheetPath.Path.Add(new KIID { Value = hierarchy.First });
         var second = root.Clone(); second.SheetPath.Path.Add(new KIID { Value = hierarchy.Second });
@@ -112,6 +112,8 @@ public sealed partial class NativeSessionTests
         string designPath = Path.Combine(evidence, instanceId + "-symbol-sheets.xml");
         byte[] xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])); await File.WriteAllBytesAsync(designPath, xml, token);
         var store = new DesignRecoveryStore(Path.Combine(evidence, instanceId + "-symbol-sheets-recovery.json"));
+        await using var planningHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
+            Path.Combine(evidence, instanceId + "-owner-plan-host"), Path.Combine(evidence, instanceId + "-owner-plan-host.log"), token);
         var saved = store.Save(new(Guid.NewGuid(), Guid.Parse(instanceId), new(initial.State.Revision.Epoch, initial.State.Revision.Sequence),
             initial.Electrical.Hierarchy.TrackingComplete, baseline, xml, baseline.Schematic.Clone(), [],
             BaselineElectrical: initial.Electrical.Clone(), ObservedElectrical: initial.Electrical.Clone()), null);
@@ -159,6 +161,14 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(components.All(c => undrawnDesign.Engineering.Circuit.Components.Any(owner => owner.Id == c)));
         foreach (var instruction in removalInstructions)
             Assert.AreEqual(instruction, undrawnDesign.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id));
+        await NativeHistory("z");
+        var unitUndo = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsTrue(occurrences.All(o => unitUndo.Engineering.Circuit.Symbols.Any(s => s.Id == o.Id)));
+        Assert.IsTrue(unitUndo.Engineering.Circuit.Nets.Any(n => n.Id == connection));
+        Assert.IsFalse(unitUndo.Engineering.Structure.HasUnresolvedNetBindings);
+        await NativeHistory("y");
+        Assert.IsFalse(SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []).Engineering.Circuit.Symbols
+            .Any(s => occurrences.Any(o => o.Id == s.Id && o.Unit == 2)));
 
         var removeLast = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Remove final component drawings" };
         removeLast.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[0] } });
@@ -174,6 +184,37 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(retiredDesign.Engineering.Structure.UnresolvedComponentReferences!.Any(r => r.OwnerId == instruction.Id));
         }
         Assert.IsTrue(SchematicElectricalComparison.Compare(retiredDesign, (await Capture()).Electrical, [], token).ConnectivityEquivalent);
+        // A newer instruction-only synchronization has no displaced XML. Undo
+        // must find the older verified identity receipt, not overwrite this text.
+        var beforeNotes = store.Read()!;
+        var withNotes = retiredDesign with { Engineering = retiredDesign.Engineering with { Structure = retiredDesign.Engineering.Structure with
+        { Statements = retiredDesign.Engineering.Structure.Statements.Select(s => removalInstructions.Any(i => i.Id == s.Id)
+            ? s with { Text = s.Text + " New instruction after deletion." } : s).ToArray() } } };
+        byte[] noteXml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(withNotes, []));
+        await File.WriteAllBytesAsync(designPath, noteXml, token);
+        var noteInput = store.Save(beforeNotes.State with { DesiredFileBytes = noteXml }, beforeNotes.RevisionToken);
+        var noteResult = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, noteInput.RevisionToken, Guid.NewGuid(), token);
+        Assert.IsTrue(noteResult.SynchronizationCommitted); Assert.IsFalse(noteResult.NativeMutationCommitted);
+        Assert.IsNull(store.Read()!.State.LastSynchronization!.PreviousXmlPath);
+        await NativeHistory("z");
+        var componentUndo = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsTrue(components.All(c => componentUndo.Engineering.Circuit.Components.Any(owner => owner.Id == c)));
+        Assert.IsFalse(componentUndo.Engineering.HasUnresolvedComponentReferences);
+        foreach (var instruction in removalInstructions)
+            Assert.AreEqual(withNotes.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text,
+                componentUndo.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text);
+        await NativeHistory("z");
+        var fullUndo = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsTrue(occurrences.All(o => fullUndo.Engineering.Circuit.Symbols.Any(s => s.Id == o.Id)));
+        Assert.IsTrue(fullUndo.Engineering.Circuit.Nets.Any(n => n.Id == connection));
+        Assert.IsFalse(fullUndo.Engineering.Structure.HasUnresolvedNetBindings);
+        await NativeHistory("y"); await NativeHistory("y");
+        var redo = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsFalse(redo.Engineering.Circuit.Components.Any(c => components.Contains(c.Id)));
+        Assert.IsTrue(redo.Engineering.HasUnresolvedComponentReferences);
+        foreach (var instruction in removalInstructions)
+            Assert.AreEqual(withNotes.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text,
+                redo.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text);
         // The separate service-restart fixture uses the standard title-block
         // command, whose existing contract requires the displayed sheet. The
         // offscreen-view preservation assertions above have already completed.
@@ -186,6 +227,7 @@ public sealed partial class NativeSessionTests
             knownUndrawnPinsReported = true, nativeUnitRemovalReversePublication = true, nativeComponentRemovalReversePublication = true,
             removedComponentInstructionsRetained = true, retainedXmlContentVerified = true,
             retainedXmlServiceRecoveryVerified = true,
+            nativeKeyboardOwnerUndoRedo = true, newerInstructionsPreservedThroughUndoRedo = true,
             automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
 
         async Task PublishNativeChange(CheckedSchematicState observed)
@@ -195,6 +237,8 @@ public sealed partial class NativeSessionTests
             var intake = store.Save(prior.State with { Observed = observed.Electrical.Hierarchy.Data.Clone(),
                 ObservedElectrical = observed.Electrical.Clone(), NativeRevision = new(observed.State.Revision.Epoch, observed.State.Revision.Sequence),
                 TrackingComplete = observed.Electrical.Hierarchy.TrackingComplete }, prior.RevisionToken);
+            RequireToolSuccess(await planningHost.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = intake.RevisionToken }));
             Guid sync = Guid.NewGuid();
             var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token);
             Assert.IsTrue(applied.SynchronizationCommitted); Assert.IsFalse(applied.NativeMutationCommitted);
@@ -209,6 +253,21 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(SchematicHierarchyDelta.Plan(current.Electrical.Hierarchy.Data, design.Schematic, token));
             Assert.IsTrue((await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token)).Replayed);
             Assert.AreEqual(current, await Capture());
+        }
+
+        async Task NativeHistory(string key)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token); limit.CancelAfter(TimeSpan.FromSeconds(20));
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, limit.Token);
+            var beforeHistory = await Capture();
+            await FocusedSchematicShortcut(client, root, processId, display, key, limit.Token);
+            CheckedSchematicState current;
+            do
+            {
+                current = await Capture();
+                if (current.State.Revision.Equals(beforeHistory.State.Revision)) await Task.Delay(40, limit.Token);
+            } while (current.State.Revision.Equals(beforeHistory.State.Revision));
+            await PublishNativeChange(current);
         }
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()

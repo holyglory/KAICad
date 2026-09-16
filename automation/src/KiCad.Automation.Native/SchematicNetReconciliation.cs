@@ -12,13 +12,24 @@ public sealed record SchematicNetReconciliationResult(EngineeringDesign? Candida
     IReadOnlyList<ElectricalBindingIssue> BindingIssues, IReadOnlyList<HierarchyCoverageGap> CoverageGaps,
     string? ErrorCode = null, string? ErrorMessage = null,
     IReadOnlyList<Guid>? RemovedSymbolOccurrences = null,
-    IReadOnlyList<ComponentReferenceChange>? ComponentChanges = null);
+    IReadOnlyList<ComponentReferenceChange>? ComponentChanges = null,
+    IReadOnlyList<Guid>? RestoredSymbolOccurrences = null, IReadOnlyList<Guid>? RestoredNetIds = null)
+{
+    internal SchematicNativeRestorationResult? Restoration { get; init; }
+}
 
 /// <summary>Pure three-way electrical-model reconciliation over stable exact
 /// component/sheet/pin ownership. Does not apply native edits or advance recovery.</summary>
 public static class SchematicNetReconciliation
 {
     public static SchematicNetReconciliationResult Plan(DesignRecoveryState state, CancellationToken token = default)
+        => PlanCore(state, token, null);
+
+    internal static SchematicNetReconciliationResult Plan(DesignRecoveryState state,
+        IReadOnlyList<SchematicOwnershipHistory>? history, CancellationToken token) => PlanCore(state, token, history);
+
+    private static SchematicNetReconciliationResult PlanCore(DesignRecoveryState state, CancellationToken token,
+        IReadOnlyList<SchematicOwnershipHistory>? history)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -42,21 +53,27 @@ public static class SchematicNetReconciliation
                 || Bindings(state.Baseline) != Bindings(desiredDocument))
                 throw Failure("electrical_ownership_changed", "Reconcile changed component, sheet, unit or pin ownership before merging nets.");
             SchematicNativeRemovalResult? removal = null;
+            SchematicNativeRestorationResult? restoration = null;
             if (NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed))
             {
                 removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed, state.KnowledgeLibraries, token);
                 if (removal.BindingCandidate is null)
-                    return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage);
-                // Concurrent engineering edits need their own three-way owner
-                // resolution. Preserve both versions rather than dropping either.
-                if (EngineeringDesignXml.Write(desired, state.KnowledgeLibraries)
-                    != EngineeringDesignXml.Write(state.Baseline.Engineering, state.KnowledgeLibraries))
-                    throw Failure("ownership_change_with_xml_edits", "Resolve concurrent XML edits and native component removal before applying either version.");
+                {
+                    if (removal.ErrorCode != "electrical_ownership_changed" || history is null)
+                        return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage);
+                    restoration = SchematicNativeRestorationProjection.Project(state, history, token);
+                    removal = null;
+                }
+                // Circuit/layout edits need their own three-way owner resolution.
+                // Independent instruction changes are retained in the candidate.
+                if (CircuitXml.Write(desired.Circuit) != CircuitXml.Write(state.Baseline.Engineering.Circuit))
+                    throw Failure("ownership_change_with_xml_edits", "Resolve concurrent circuit or layout XML edits and native ownership changes before applying either version.");
             }
             var before = SchematicElectricalComparison.Compare(state.Baseline, baseline, state.KnowledgeLibraries, token);
             if (!before.PinBindingsComplete || !before.ConnectivityEquivalent)
                 return new(null, [], [], before.Issues, before.CoverageGaps, "unaligned_electrical_baseline", "The saved baseline must agree with its native pin partition.");
-            var current = SchematicElectricalComparison.Compare(removal?.BindingCandidate ?? state.Baseline, observed, state.KnowledgeLibraries, token);
+            var current = SchematicElectricalComparison.Compare(restoration?.BindingCandidate ?? removal?.BindingCandidate ?? state.Baseline,
+                observed, state.KnowledgeLibraries, token);
             var gaps = before.CoverageGaps.Concat(current.CoverageGaps).Distinct().ToArray();
             if (!current.PinBindingsComplete) return new(null, [], [], current.Issues, gaps, "unresolved_electrical_bindings");
             var universe = before.PinPartitions!.SelectMany(g => g.Pins).ToArray();
@@ -72,14 +89,31 @@ public static class SchematicNetReconciliation
             var desiredIds = desired.Circuit.Nets.Select(n => n.Id).ToHashSet();
             var desiredPins = desired.Circuit.Nets.SelectMany(n => n.Pins).ToHashSet();
             var resultById = new Dictionary<Guid, CircuitNet>();
+            var historicalByGroup = restoration?.History.Design.Engineering.Circuit.Nets.Where(n => n.Pins.Count > 0)
+                .ToDictionary(n => Key(n.Pins), StringComparer.Ordinal);
+            var restoredNets = new HashSet<Guid>();
+            var historicalImplicit = new HashSet<PinEndpoint>();
+            if (restoration is not null)
+            {
+                var past = restoration.History.Design.Engineering.Circuit;
+                var parts = past.Parts.ToDictionary(p => p.Id);
+                var definitions = past.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
+                historicalImplicit = past.Components.SelectMany(c => parts[definitions[c.DefinitionId].PartId].Pins
+                    .Select(p => new PinEndpoint(c.Id, p.Number))).Except(past.Nets.SelectMany(n => n.Pins)).ToHashSet();
+            }
             foreach (var empty in desired.Circuit.Nets.Where(n => n.Pins.Count == 0)) resultById.Add(empty.Id, empty);
             foreach (var group in merged.Groups)
             {
                 token.ThrowIfCancellationRequested(); string key = Key(group);
                 if (desiredByGroup.TryGetValue(key, out var explicitNet)) { resultById.Add(explicitNet.Id, explicitNet); continue; }
+                if (historicalByGroup is not null && historicalByGroup.TryGetValue(key, out var historical)
+                    && !desiredIds.Contains(historical.Id))
+                {
+                    resultById.Add(historical.Id, historical); restoredNets.Add(historical.Id); continue;
+                }
                 // An unchanged implicit unconnected pin must not acquire a new
                 // net merely because it appeared in a native observation.
-                if (group.Count == 1 && baselineGroups.Contains(key)
+                if (group.Count == 1 && (baselineGroups.Contains(key) || historicalImplicit.Contains(group[0]))
                     && !desiredPins.Contains(group[0])) continue;
                 Guid id = GeneratedIdentity(state.OriginId, desired.Circuit.Id, group);
                 string name = nativeByGroup.TryGetValue(key, out var nativeGroup) && !string.IsNullOrWhiteSpace(nativeGroup.NativeName)
@@ -89,7 +123,8 @@ public static class SchematicNetReconciliation
             }
             var ordered = desired.Circuit.Nets.Where(n => resultById.ContainsKey(n.Id)).Select(n => resultById[n.Id])
                 .Concat(resultById.Values.Where(n => !desiredIds.Contains(n.Id)).OrderBy(n => n.Id)).ToArray();
-            var circuit = (removal?.BindingCandidate?.Engineering.Circuit ?? desired.Circuit) with { Nets = ordered }; circuit.Validate();
+            var circuit = (restoration?.BindingCandidate.Engineering.Circuit ?? removal?.BindingCandidate?.Engineering.Circuit ?? desired.Circuit)
+                with { Nets = ordered }; circuit.Validate();
             var finalByPin = ordered.SelectMany(net => net.Pins.Select(pin => (pin, net))).ToDictionary(x => x.pin, x => x.net);
             var changes = new List<NetIdentityChange>();
             foreach (var retired in desired.Circuit.Nets.Where(n => !resultById.ContainsKey(n.Id)))
@@ -102,9 +137,12 @@ public static class SchematicNetReconciliation
                     candidates.Select(n => n.Id).Order().ToArray()));
             }
             var candidate = ComponentReferenceRetention.Retain(desired, circuit, removal?.ComponentChanges ?? [], state.KnowledgeLibraries, changes);
+            if (restoration is not null)
+                candidate = SchematicNativeRestorationProjection.ResolveRetained(candidate, restoration, restoredNets, state.KnowledgeLibraries);
             candidate.Validate(state.KnowledgeLibraries);
             return new(candidate, [], changes, [], gaps, RemovedSymbolOccurrences: removal?.RemovedOccurrences,
-                ComponentChanges: removal?.ComponentChanges);
+                ComponentChanges: removal?.ComponentChanges, RestoredSymbolOccurrences: restoration?.RestoredOccurrences,
+                RestoredNetIds: restoration is null ? null : restoredNets.Order().ToArray()) { Restoration = restoration };
         }
         catch (DecoderFallbackException error) { return new(null, [], [], [], [], "invalid_desired_design", error.Message); }
         catch (AutomationException error) { return new(null, [], [], [], [], error.Code, error.Message); }
@@ -117,7 +155,7 @@ public static class SchematicNetReconciliation
             .Concat(universe.Where(p => !assigned.Contains(p)).Select(p => (IReadOnlyList<PinEndpoint>)new[] { p })).ToArray();
     }
 
-    private static string Key(IEnumerable<PinEndpoint> pins) => JsonSerializer.Serialize(pins
+    internal static string Key(IEnumerable<PinEndpoint> pins) => JsonSerializer.Serialize(pins
         .OrderBy(p => p.ComponentId).ThenBy(p => p.Pin, StringComparer.Ordinal).Select(p => new { p.ComponentId, p.Pin }));
 
     private static Guid GeneratedIdentity(Guid origin, Guid circuit, IEnumerable<PinEndpoint> pins)
@@ -144,7 +182,7 @@ public static class SchematicNetReconciliation
         });
     }
 
-    private static string Bindings(SchematicDesign design) => JsonSerializer.Serialize(new
+    internal static string Bindings(SchematicDesign design) => JsonSerializer.Serialize(new
     {
         sheets = design.SheetBindings.OrderBy(b => b.SheetInstanceId).Select(b => new { b.SheetInstanceId, b.NativePath }),
         symbols = design.SymbolBindings.OrderBy(b => b.SymbolOccurrenceId)

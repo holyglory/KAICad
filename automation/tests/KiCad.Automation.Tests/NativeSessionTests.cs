@@ -367,7 +367,8 @@ public sealed partial class NativeSessionTests
                     {
                         try
                         {
-                            await VerifyNativeSymbolSheetOwnership(client, opened.Document, hierarchyFixture, evidence, target.Id, deadline.Token);
+                            await VerifyNativeSymbolSheetOwnership(client, opened.Document, hierarchyFixture, evidence, target.Id,
+                                focusProcessId, ":" + displayNumber, deadline.Token);
                         }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         {

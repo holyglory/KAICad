@@ -30,7 +30,33 @@ public static class SchematicSynchronizationPlanner
     internal static SchematicSynchronizationPlan PlanForExecution(DesignRecoveryState state, CancellationToken token = default)
         => Prepare(state, true, token);
 
-    private static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, bool allowConnectedLayout, CancellationToken token)
+    public static Task<SchematicSynchronizationPlan> PlanWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
+        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, false, token);
+
+    internal static Task<SchematicSynchronizationPlan> PlanForExecutionWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
+        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, true, token);
+
+    private static async Task<SchematicSynchronizationPlan> PrepareWithHistoryAsync(DesignRecoveryStore store,
+        StoredDesignRecovery saved, bool allowConnectedLayout, CancellationToken token)
+    {
+        var plan = Prepare(saved.State, allowConnectedLayout, token);
+        if (plan.CanPrepare || plan.ErrorCode != "electrical_ownership_changed"
+            || SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed))
+            return plan;
+        try
+        {
+            var history = await SchematicOwnershipHistoryReader.ReadAsync(store, saved.State, token);
+            return Prepare(saved.State, allowConnectedLayout, token, history);
+        }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return plan with { ErrorCode = error is AutomationException automation ? automation.Code : "native_ownership_history_io",
+                ErrorMessage = error.Message };
+        }
+    }
+
+    private static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, bool allowConnectedLayout, CancellationToken token,
+        IReadOnlyList<SchematicOwnershipHistory>? history = null)
     {
         token.ThrowIfCancellationRequested();
         SchematicHierarchyMergeResult? hierarchy = null;
@@ -46,7 +72,7 @@ public static class SchematicSynchronizationPlanner
                 ? SchematicHierarchyMerge.Resolve(state.Baseline.Schematic, desired.Schematic, state.Observed,
                     choices.SnapshotToken, choices.Choices, token)
                 : SchematicHierarchyMerge.Plan(state.Baseline.Schematic, desired.Schematic, state.Observed, token);
-            electrical = SchematicNetReconciliation.Plan(state, token);
+            electrical = SchematicNetReconciliation.Plan(state, history, token);
             gaps.AddRange(hierarchy.CoverageGaps); gaps.AddRange(electrical.CoverageGaps);
             // Retain both independent diagnostics. Neither successful half is a full design.
             if (!hierarchy.CanApply || electrical.Candidate is null)
@@ -54,7 +80,10 @@ public static class SchematicSynchronizationPlanner
                     hierarchy.ErrorMessage ?? electrical.ErrorMessage ?? "Resolve the reported hierarchy or electrical conflicts first.");
 
             bool nativeRemovals = electrical.RemovedSymbolOccurrences is { Count: > 0 };
-            properties = nativeRemovals
+            properties = electrical.Restoration is { } restoration
+                ? SchematicModelProjection.ReconcileAfterRestoration(state.Baseline, electrical.Candidate,
+                    hierarchy.Merged!, restoration, state.KnowledgeLibraries, token)
+                : nativeRemovals
                 ? SchematicModelProjection.ReconcileAfterRemovals(state.Baseline, electrical.Candidate,
                     hierarchy.Merged!, state.KnowledgeLibraries, token)
                 : SchematicModelProjection.Reconcile(state.Baseline, electrical.Candidate,
@@ -65,9 +94,12 @@ public static class SchematicSynchronizationPlanner
             var survivingSymbols = properties.Candidate.Circuit.Symbols.Select(s => s.Id).ToHashSet();
             var candidate = desired with { Engineering = properties.Candidate,
                 Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic),
-                SymbolBindings = nativeRemovals ? desired.SymbolBindings.Where(b => survivingSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
+                SymbolBindings = electrical.Restoration is not null ? electrical.Restoration.BindingCandidate.SymbolBindings
+                    : nativeRemovals ? desired.SymbolBindings.Where(b => survivingSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
                     : desired.SymbolBindings };
-            candidate = SchematicPropertyProjection.Project(state.Baseline, candidate, state.KnowledgeLibraries, token);
+            candidate = electrical.Restoration is not null
+                ? SchematicPropertyProjection.ProjectAfterRestoration(state.Baseline, candidate, electrical.Restoration, state.KnowledgeLibraries, token)
+                : SchematicPropertyProjection.Project(state.Baseline, candidate, state.KnowledgeLibraries, token);
             var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
             gaps.AddRange(bindings.CoverageGaps);
             if (!bindings.IdentitiesResolved)

@@ -28,15 +28,21 @@ public static class SchematicModelProjection
         SchematicHierarchyData observed, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token)
         => ReconcileCore(baseline, desired, observed, libraries, true, token);
 
+    internal static SchematicModelProjectionResult ReconcileAfterRestoration(SchematicDesign baseline, EngineeringDesign desired,
+        SchematicHierarchyData observed, SchematicNativeRestorationResult restoration,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token)
+        => ReconcileCore(baseline, desired, observed, libraries, false, token, restoration);
+
     private static SchematicModelProjectionResult ReconcileCore(SchematicDesign baseline, EngineeringDesign desired,
         SchematicHierarchyData observed, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries,
-        bool allowNativeRemovals, CancellationToken cancellationToken)
+        bool allowNativeRemovals, CancellationToken cancellationToken, SchematicNativeRestorationResult? restoration = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var beforeReport = SchematicDesignBindings.Inspect(baseline, libraries, cancellationToken);
         var desiredSymbols = desired.Circuit.Symbols.Select(s => s.Id).ToHashSet();
         var afterDesign = baseline with { Engineering = desired, Schematic = observed,
-            SymbolBindings = allowNativeRemovals ? baseline.SymbolBindings.Where(b => desiredSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
+            SymbolBindings = restoration is not null ? restoration.BindingCandidate.SymbolBindings
+                : allowNativeRemovals ? baseline.SymbolBindings.Where(b => desiredSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
                 : baseline.SymbolBindings };
         var afterReport = SchematicDesignBindings.Inspect(afterDesign, libraries, cancellationToken);
         var issues = beforeReport.Issues.Concat(afterReport.Issues).Distinct().ToArray();
@@ -56,7 +62,14 @@ public static class SchematicModelProjection
         var components = desired.Circuit.Components.ToDictionary(c => c.Id);
         // This projection handles properties, not rebinding or structural edits. Preserve such
         // input for the hierarchy/electrical reconciler instead of indexing stale owners.
-        if (allowNativeRemovals)
+        if (restoration is not null)
+        {
+            if (SchematicNetReconciliation.Topology(restoration.BindingCandidate.Engineering.Circuit)
+                != SchematicNetReconciliation.Topology(desired.Circuit)
+                || SchematicNetReconciliation.NativeOwners(restoration.BindingCandidate.Schematic) != SchematicNetReconciliation.NativeOwners(observed))
+                return new(null, [], [], true, gaps, "model_topology_changed", "Only verified historical owners can use this projection.");
+        }
+        else if (allowNativeRemovals)
         {
             var removal = SchematicNativeRemovalProjection.Project(baseline, observed, libraries, cancellationToken);
             if (removal.BindingCandidate is null || SchematicNetReconciliation.Topology(removal.BindingCandidate.Engineering.Circuit)
@@ -91,12 +104,13 @@ public static class SchematicModelProjection
         }
 
         string? Shared(Guid owner, string field, string original, string wanted,
-            IEnumerable<SymbolOccurrence> occurrences, Func<SchematicSymbolInstance, string?> read)
+            IEnumerable<SymbolOccurrence> occurrences, Func<SchematicSymbolInstance, string?> read,
+            IEnumerable<SymbolOccurrence>? expanded = null)
         {
             var ids = occurrences.Where(s => desiredSymbols.Contains(s.Id)).Select(s => s.Id).ToArray();
             if (ids.Length == 0) return wanted;
             var previous = ids.Select(id => read(before[id])).Distinct(StringComparer.Ordinal).ToArray();
-            var current = ids.Select(id => read(after[id])).Distinct(StringComparer.Ordinal).ToArray();
+            var current = (expanded?.Select(s => s.Id) ?? ids).Select(id => read(after[id])).Distinct(StringComparer.Ordinal).ToArray();
             if (previous.Length != 1 || current.Length != 1 || previous[0] is null || current[0] is null)
             {
                 conflicts.Add(new(owner, field, "inconsistent_native_owners", JsonSerializer.SerializeToElement(previous),
@@ -111,7 +125,8 @@ public static class SchematicModelProjection
             cancellationToken.ThrowIfCancellationRequested();
             var wanted = components[component.Id];
             string? reference = Shared(component.Id, "reference", component.Reference, wanted.Reference,
-                source.Symbols.Where(s => s.ComponentId == component.Id), s => s.ReferenceField?.Text?.Text_);
+                source.Symbols.Where(s => s.ComponentId == component.Id), s => s.ReferenceField?.Text?.Text_,
+                restoration is null ? null : desired.Circuit.Symbols.Where(s => s.ComponentId == component.Id));
             components[component.Id] = wanted with { Reference = reference! };
         }
         foreach (var definition in source.Sheets.SelectMany(s => s.Components).Where(c => definitions.ContainsKey(c.Id)))
@@ -119,7 +134,8 @@ public static class SchematicModelProjection
             cancellationToken.ThrowIfCancellationRequested();
             var wanted = definitions[definition.Id];
             string? value = Shared(definition.Id, "value", definition.Value, wanted.Value,
-                source.Symbols.Where(s => oldComponents[s.ComponentId].DefinitionId == definition.Id), s => s.ValueField?.Text?.Text_);
+                source.Symbols.Where(s => oldComponents[s.ComponentId].DefinitionId == definition.Id), s => s.ValueField?.Text?.Text_,
+                restoration is null ? null : desired.Circuit.Symbols.Where(s => components[s.ComponentId].DefinitionId == definition.Id));
             definitions[definition.Id] = wanted with { Value = value! };
         }
         foreach (var occurrence in source.Symbols.Where(s => desiredSymbols.Contains(s.Id)))

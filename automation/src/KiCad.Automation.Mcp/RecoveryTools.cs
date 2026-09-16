@@ -51,15 +51,15 @@ public sealed class RecoveryTools
     }
 
     [McpServerTool(Name = "kicad_design_sync_plan", ReadOnly = true),
-     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Conflicts or unresolved property projection return no partial candidate. Preserves textual requirements and unresolved net bindings. Returns candidate XML and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
-    public CallToolResult PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,
-        CancellationToken cancellationToken) => Execute(() =>
+     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
+    public Task<CallToolResult> PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,
+        CancellationToken cancellationToken) => ExecuteAsync(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         var (store, saved) = Read(instanceId, recoveryPath);
         if (saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before planning.");
-        var plan = SchematicSynchronizationPlanner.Plan(saved.State, cancellationToken);
+        var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, saved, cancellationToken);
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
@@ -70,6 +70,7 @@ public sealed class RecoveryTools
             nativeConnectivityValidationRequired = plan.NativeConnectivityValidationRequired,
             hierarchyConflicts = plan.Hierarchy?.Conflicts.Select(x => new { x.InstancePath, x.Reason }),
             electricalConflicts = plan.Electrical?.Conflicts, netChanges = plan.Electrical?.NetChanges,
+            restoredSymbolOccurrences = plan.Electrical?.RestoredSymbolOccurrences, restoredNetIds = plan.Electrical?.RestoredNetIds,
             propertyConflicts = plan.Properties?.Conflicts, bindingIssues = plan.BindingIssues,
             electricalBindingIssues = plan.Electrical?.BindingIssues, propertyBindingIssues = plan.Properties?.BindingIssues,
             projectionDifferences = plan.ProjectionDifferences, observedConnectivity = plan.ObservedConnectivity,
@@ -202,6 +203,17 @@ public sealed class RecoveryTools
     private static CallToolResult Execute(Func<CallToolResult> action)
     {
         try { return action(); }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            var data = JsonSerializer.SerializeToElement(new
+                { errorCode = error is AutomationException a ? a.Code : "design_recovery_io", errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
+    private static async Task<CallToolResult> ExecuteAsync(Func<Task<CallToolResult>> action)
+    {
+        try { return await action(); }
         catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
         {
             var data = JsonSerializer.SerializeToElement(new

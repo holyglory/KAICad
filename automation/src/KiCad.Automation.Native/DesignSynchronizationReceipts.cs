@@ -61,6 +61,26 @@ internal sealed class DesignSynchronizationReceipts(string statePath)
         }
     }
 
+    internal IReadOnlyList<DesignSynchronizationReceipt> ReadAll()
+    {
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(directory); }
+        catch (FileNotFoundException) { return []; }
+        catch (DirectoryNotFoundException) { return []; }
+        if ((attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+            throw new AutomationException("invalid_sync_history", "Receipt history requires its ordinary owned directory.");
+        var result = new List<DesignSynchronizationReceipt>();
+        foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.json").OrderBy(f => f.Name, StringComparer.Ordinal))
+        {
+            string name = Path.GetFileNameWithoutExtension(file.Name);
+            if (!Guid.TryParseExact(name, "N", out Guid id) || id == Guid.Empty || name != id.ToString("N")
+                || (file.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new AutomationException("invalid_sync_history", "Receipt history contains an unrecognized identity or redirected file.");
+            result.Add(Read(id) ?? throw new AutomationException("sync_history_changed", "Receipt history changed during inspection."));
+        }
+        return result;
+    }
+
     internal IDisposable Acquire()
     {
         Directory.CreateDirectory(directory);

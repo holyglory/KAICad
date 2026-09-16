@@ -71,7 +71,7 @@ public static class SchematicSynchronizationPlanner
             {
                 token.ThrowIfCancellationRequested();
                 var component = candidate.Engineering.Circuit.Components.Single(x => x.Id == occurrence.ComponentId);
-                var sheet = candidate.SheetBindings.Single(x => x.SheetInstanceId == component.SheetInstanceId);
+                var sheet = candidate.SheetBindings.Single(x => x.SheetInstanceId == occurrence.EffectiveSheetInstanceId(component));
                 string path = SchematicDesignBindings.PathKey(sheet.NativePath);
                 var screen = candidate.Schematic.Instances.Single(x => string.Join('/', x.Metadata.Document.SheetPath.Path.Select(id => id.Value)) == path);
                 var binding = candidate.SymbolBindings.Single(x => x.SymbolOccurrenceId == occurrence.Id);

@@ -112,7 +112,7 @@ public static class SchematicDesignBindings
                 Issue("ambiguous_symbol_binding", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
             else if (!occurrences.TryGetValue(binding.SymbolOccurrenceId, out var occurrence))
                 Issue("unknown_model_symbol", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
-            else if (!mappedSheets.TryGetValue(components[occurrence.ComponentId].SheetInstanceId, out var sheet))
+            else if (!mappedSheets.TryGetValue(occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId]), out var sheet))
                 Issue("unresolved_symbol_sheet", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
             else candidates.Add((binding, occurrence, sheet.Path, ObjectKey(sheet.Path, binding.NativeObjectId)));
         }

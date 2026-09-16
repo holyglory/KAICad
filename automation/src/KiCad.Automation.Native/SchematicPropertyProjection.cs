@@ -26,7 +26,7 @@ public static class SchematicPropertyProjection
         {
             token.ThrowIfCancellationRequested();
             var component = components[occurrence.ComponentId];
-            var screen = screens[sheetPaths[component.SheetInstanceId]];
+            var screen = screens[sheetPaths[occurrence.EffectiveSheetInstanceId(component)]];
             string id = bindings[occurrence.Id];
             int index = screen.Items.ToList().FindIndex(item => item.Is(SchematicSymbolInstance.Descriptor)
                 && item.Unpack<SchematicSymbolInstance>().Id.Value == id);

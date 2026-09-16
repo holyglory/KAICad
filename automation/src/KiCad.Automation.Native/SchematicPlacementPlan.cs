@@ -40,7 +40,7 @@ public static class SchematicPlacementPlan
         var native = SchematicModelProjection.NativeSymbols(baseline, observed);
         var oldNative = SchematicModelProjection.NativeSymbols(baseline, baseline.Schematic);
         var originalSymbols = baseline.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
-        var componentSheets = candidate.Circuit.Components.ToDictionary(c => c.Id, c => c.SheetInstanceId);
+        var components = candidate.Circuit.Components.ToDictionary(c => c.Id);
         var paths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId,
             b => SchematicDesignBindings.PathKey(b.NativePath));
         var screens = observed.Instances.ToDictionary(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(id => id.Value)));
@@ -72,7 +72,7 @@ public static class SchematicPlacementPlan
                     if (units < int.MinValue || units > int.MaxValue)
                         throw new AutomationException("native_coordinate_range", "Placement exceeds the native schematic coordinate range.");
                 }
-                var screen = screens[paths[componentSheets[symbol.ComponentId]]];
+                var screen = screens[paths[symbol.EffectiveSheetInstanceId(components[symbol.ComponentId])]];
                 string key = screen.Metadata.ScreenId.Value + "#" + bindings[symbol.Id];
                 if (!shared.TryGetValue(key, out var owners)) shared.Add(key, owners = []);
                 owners.Add((symbol.Id, screen.Metadata.Document, bindings[symbol.Id], current, wanted));

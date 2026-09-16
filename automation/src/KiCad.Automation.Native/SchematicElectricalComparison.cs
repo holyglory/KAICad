@@ -9,10 +9,11 @@ public sealed record ElectricalBindingIssue(string Code, string? NativePath, str
 public sealed record ElectricalConnectivityDifference(string Kind, IReadOnlyList<Guid> ModelNetIds,
     IReadOnlyList<int> SnapshotNetIndexes, IReadOnlyList<PinEndpoint> Pins);
 public sealed record NativePinPartition(int? SnapshotNetIndex, string? NativeName, IReadOnlyList<PinEndpoint> Pins);
+public sealed record UndrawnComponentPin(PinEndpoint Pin, int Unit, IReadOnlyList<string> LibraryPinIds);
 public sealed record SchematicElectricalComparisonResult(bool PinBindingsComplete, bool ConnectivityEquivalent,
     IReadOnlyList<ElectricalBindingIssue> Issues, IReadOnlyList<ElectricalConnectivityDifference> Differences,
     IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null,
-    IReadOnlyList<NativePinPartition>? PinPartitions = null);
+    IReadOnlyList<NativePinPartition>? PinPartitions = null, IReadOnlyList<UndrawnComponentPin>? UndrawnPins = null);
 
 /// <summary>Compare pin partitions through exact sheet/symbol/placed-pin bindings.
 /// Snapshot indexes are ephemeral; this never transfers net requirement identities.</summary>
@@ -61,19 +62,27 @@ public static class SchematicElectricalComparison
                         issues.Add(new("ambiguous_sheet_pin", path, pin.Id?.Value));
         }
         var modelPins = new Dictionary<PinEndpoint, List<(string Path, string Id)>>();
+        var componentSymbols = new Dictionary<Guid, List<SchematicSymbolInstance>>();
         foreach (var occurrence in circuit.Symbols)
         {
             token.ThrowIfCancellationRequested();
-            var component = components[occurrence.ComponentId]; string path = sheets[component.SheetInstanceId];
+            var component = components[occurrence.ComponentId]; string path = sheets[occurrence.EffectiveSheetInstanceId(component)];
             var symbol = screens[path].Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
                 .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == symbols[occurrence.Id]);
+            if (!componentSymbols.TryGetValue(component.Id, out var owned)) componentSymbols.Add(component.Id, owned = []);
+            owned.Add(symbol);
             if (!symbol.SeparatePinIdentities || symbol.Definition is null)
             { issues.Add(new("missing_placed_pin_identity", path, symbol.Id.Value, component.Id)); continue; }
+            if (symbol.Definition.UnitCount < occurrence.Unit || symbol.BodyStyle?.Style is <= 0)
+            { issues.Add(new("invalid_native_unit_definition", path, symbol.Id.Value, component.Id)); continue; }
             if (symbol.Definition.Items.Any(child => child.Item is null))
             { issues.Add(new("invalid_symbol_child", path, symbol.Id.Value, component.Id)); continue; }
             var part = parts[definitions[component.DefinitionId].PartId];
             foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
             {
+                if ((child.Unit?.Unit is > 0 && child.Unit.Unit != occurrence.Unit)
+                    || (child.BodyStyle?.Style is > 0 && child.BodyStyle.Style != (symbol.BodyStyle?.Style ?? 1)))
+                    continue;
                 var pin = child.Item.Unpack<SchematicPin>();
                 if (pin.LibraryPinId is null) continue; // Inactive/library-only definitions are not placed pins.
                 var declared = part.Pins.SingleOrDefault(p => p.Number == pin.Number && (p.Unit == 0 || p.Unit == occurrence.Unit));
@@ -87,10 +96,32 @@ public static class SchematicElectricalComparison
                 placements.Add(key);
             }
         }
+        var undrawn = new List<UndrawnComponentPin>();
         foreach (var component in circuit.Components)
         foreach (var pin in parts[definitions[component.DefinitionId].PartId].Pins)
             if (!modelPins.ContainsKey(new(component.Id, pin.Number)))
+            {
+                // A known physical pin on a unit which is deliberately not
+                // drawn has no placed UUID/net membership. Account for its
+                // actual library declarations, never fabricate a placement.
+                if (pin.Unit > 0 && componentSymbols.TryGetValue(component.Id, out var owned)
+                    && owned.All(s => s.Unit.Unit != pin.Unit && s.Definition is not null))
+                {
+                    var declarations = owned.Select(symbol => symbol.Definition.Items
+                        .Where(c => c.Unit?.Unit == pin.Unit && c.Item?.Is(SchematicPin.Descriptor) == true)
+                        .Select(c => c.Item.Unpack<SchematicPin>()).Where(p => p.Number == pin.Number)
+                        .Select(p => p.LibraryPinId?.Value ?? p.Id?.Value).ToArray()).ToArray();
+                    if (declarations.All(ids => ids.Length > 0 && ids.All(Id)))
+                    {
+                        var endpoint = new PinEndpoint(component.Id, pin.Number);
+                        modelPins.Add(endpoint, []);
+                        undrawn.Add(new(endpoint, pin.Unit, declarations.SelectMany(ids => ids).Select(id => id!)
+                            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
+                        continue;
+                    }
+                }
                 issues.Add(new("unmapped_model_pin", sheets[component.SheetInstanceId], pin.Number, component.Id));
+            }
 
         var nativeMembership = new Dictionary<(string Path, string Id), int>();
         for (int index = 0; index < observed.Nets.Count; ++index)
@@ -143,7 +174,8 @@ public static class SchematicElectricalComparison
             .Select(g => new NativePinPartition(g.Key, observed.Nets[g.Key].Name, Ordered(g.Select(p => p.Key))))
             .Concat(endpointNets.Where(p => p.Value is null).Select(p => new NativePinPartition(null, null, [p.Key])))
             .OrderBy(g => g.Pins[0].ComponentId).ThenBy(g => g.Pins[0].Pin, StringComparer.Ordinal).ToArray();
-        return new(true, differences.Count == 0, [], differences, report.CoverageGaps, PinPartitions: nativePartitions);
+        return new(true, differences.Count == 0, [], differences, report.CoverageGaps, PinPartitions: nativePartitions,
+            UndrawnPins: undrawn.OrderBy(p => p.Pin.ComponentId).ThenBy(p => p.Pin.Pin, StringComparer.Ordinal).ToArray());
     }
 
     private static IReadOnlyList<PinEndpoint> Ordered(IEnumerable<PinEndpoint> pins) =>

@@ -1,0 +1,162 @@
+using System.Text;
+using System.Text.Json;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+
+namespace KiCad.Automation.Tests;
+
+public sealed partial class NativeSessionTests
+{
+    private static async Task VerifyNativeSymbolSheetOwnership(NativeClient client, DocumentSpecifier root,
+        HierarchyFixture hierarchy, string evidence, string instanceId, CancellationToken token)
+    {
+        var first = root.Clone(); first.SheetPath.Path.Add(new KIID { Value = hierarchy.First });
+        var second = root.Clone(); second.SheetPath.Path.Add(new KIID { Value = hierarchy.Second });
+        var before = await Capture(); var baseline = ProbeElectricalModel(before.Electrical);
+        var template = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(root)).Items
+            .First(i => i.Is(SchematicSymbolInstance.Descriptor)).Unpack<SchematicSymbolInstance>();
+        string[] libraryPins = [Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D")];
+        string[] nativeIds = [Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D")];
+        SchematicSymbolInstance Symbol(int index, DocumentSpecifier document, int unit, long x)
+        {
+            var symbol = template.Clone(); symbol.Id.Value = nativeIds[index];
+            long dx = x - symbol.Position.XNm, dy = 150000000 - symbol.Position.YNm;
+            foreach (var field in new[] { symbol.ReferenceField, symbol.ValueField, symbol.FootprintField,
+                symbol.DatasheetField, symbol.DescriptionField }.Concat(symbol.UserFields))
+                if (field?.Text?.Position is { } position) { position.XNm += dx; position.YNm += dy; }
+            symbol.Position = new() { XNm = x, YNm = 150000000 }; symbol.Path = document.SheetPath.Clone();
+            symbol.Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 }; symbol.Locked = LockedState.LsUnlocked;
+            symbol.Unit = new() { Unit = unit }; symbol.ReferenceField.Text.Text_ = index == 1 ? "U501" : "U500";
+            symbol.ValueField.Text.Text_ = "Cross-sheet probe";
+            symbol.Definition.Id.EntryName = "CrossSheetUnits"; symbol.Definition.UnitCount = 2;
+            symbol.Definition.PinsUseLocalCoordinates = true; symbol.LibraryId = symbol.Definition.Id.Clone(); symbol.LibName = "";
+            symbol.Definition.ReferenceField.Text.Text_ = "U"; symbol.Definition.ValueField.Text.Text_ = "Cross-sheet probe";
+            var child = symbol.Definition.Items.First(i => i.Item.Is(SchematicPin.Descriptor)).Clone();
+            foreach (var old in symbol.Definition.Items.Where(i => i.Item.Is(SchematicPin.Descriptor)).ToArray()) symbol.Definition.Items.Remove(old);
+            for (int pinUnit = 1; pinUnit <= 2; pinUnit++)
+            {
+                var item = child.Clone(); var pin = item.Item.Unpack<SchematicPin>();
+                pin.Id.Value = Guid.NewGuid().ToString("D"); pin.LibraryPinId = new() { Value = libraryPins[pinUnit - 1] };
+                pin.Number = pinUnit.ToString(); pin.Name = "P" + pinUnit; pin.Position = new();
+                item.Unit = new() { Unit = pinUnit }; item.Item = Any.Pack(pin); symbol.Definition.Items.Add(item);
+            }
+            symbol.InstanceRecords = new();
+            foreach (var (path, reference) in index == 2 ? new[] { (first, "U500"), (second, "U501") } : new[] { (root, symbol.ReferenceField.Text.Text_) })
+            {
+                var record = new SymbolSheetRecord { ProjectName = root.Project.Name, Reference = reference, Unit = unit, Variants = new() };
+                record.Path.Add(path.SheetPath.Path.Select(p => p.Clone())); symbol.InstanceRecords.Records.Add(record);
+            }
+            return symbol;
+        }
+        GlobalLabel Label(Vector2 position) => new() { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = position.Clone(),
+            Text = new() { Text_ = "CROSS_SHEET_LINK", Position = position.Clone(), Attributes = new()
+                { Size = new() { XNm = 1270000, YNm = 1270000 }, HorizontalAlignment = HorizontalAlignment.HaLeft,
+                    VerticalAlignment = VerticalAlignment.VaCenter } }, Shape = SchematicLabelShape.SlshBidi, SpinStyle = SchematicLabelSpinStyle.SlssRight };
+        var rootBatch = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Cross-sheet component root units" };
+        for (int index = 0; index < 2; index++)
+        {
+            var symbol = Symbol(index, root, 1, 150000000 + index * 30000000L);
+            rootBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(symbol) });
+            rootBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(Label(symbol.Position)) });
+        }
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(rootBatch, token);
+        var shared = Symbol(2, first, 2, 150000000);
+        var childBatch = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Cross-sheet shared second unit" };
+        childBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(shared) });
+        childBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(Label(shared.Position)) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(childBatch, token);
+
+        var initial = await Capture();
+        Guid ModelSheet(DocumentSpecifier document) => baseline.SheetBindings.Single(b => SchematicDesignBindings.PathKey(b.NativePath)
+            == string.Join('/', document.SheetPath.Path.Select(p => p.Value))).SheetInstanceId;
+        Guid part = Guid.NewGuid(), definition = Guid.NewGuid(), connection = Guid.NewGuid();
+        Guid[] components = [Guid.NewGuid(), Guid.NewGuid()];
+        var instances = new[] { first, second };
+        var occurrences = new List<SymbolOccurrence>(); var bindings = baseline.SymbolBindings.ToList();
+        for (int index = 0; index < 2; index++)
+        foreach (int unit in new[] { 1, 2 })
+        {
+            Guid id = Guid.NewGuid(); var document = unit == 1 ? root : instances[index]; string nativeId = unit == 1 ? nativeIds[index] : nativeIds[2];
+            var native = initial.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document)).Items
+                .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == nativeId);
+            occurrences.Add(new(id, components[index], unit, SchematicModelProjection.Placement(native), unit == 1 ? ModelSheet(root) : null));
+            bindings.Add(new(id, Guid.Parse(nativeId)));
+        }
+        Guid childDefinition = baseline.Engineering.Circuit.SheetInstances.Single(s => s.Id == ModelSheet(first)).DefinitionId;
+        var circuit = baseline.Engineering.Circuit with
+        {
+            Parts = [.. baseline.Engineering.Circuit.Parts, new(part, "Cross-sheet two-unit device", 2, [new("1", "P1", 1), new("2", "P2", 2)])],
+            Sheets = baseline.Engineering.Circuit.Sheets.Select(s => s.Id == childDefinition
+                ? s with { Components = [.. s.Components, new(definition, part, "Cross-sheet probe")] } : s).ToArray(),
+            Components = [.. baseline.Engineering.Circuit.Components, new(components[0], definition, ModelSheet(first), "U500"),
+                new(components[1], definition, ModelSheet(second), "U501")],
+            Symbols = [.. baseline.Engineering.Circuit.Symbols, .. occurrences],
+            Nets = [.. baseline.Engineering.Circuit.Nets, new(connection, "Cross-sheet link", components.SelectMany(c => new[]
+                { new PinEndpoint(c, "1"), new PinEndpoint(c, "2") }).ToArray())]
+        };
+        baseline = baseline with { Engineering = baseline.Engineering with { Circuit = circuit }, Schematic = initial.Electrical.Hierarchy.Data.Clone(), SymbolBindings = bindings };
+        var comparison = SchematicElectricalComparison.Compare(baseline, initial.Electrical, [], token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-initial-comparison.json"), JsonSerializer.Serialize(comparison), token);
+        Assert.IsTrue(comparison.PinBindingsComplete); Assert.IsTrue(comparison.ConnectivityEquivalent); Assert.IsEmpty(comparison.UndrawnPins!);
+
+        string designPath = Path.Combine(evidence, instanceId + "-symbol-sheets.xml");
+        byte[] xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])); await File.WriteAllBytesAsync(designPath, xml, token);
+        var store = new DesignRecoveryStore(Path.Combine(evidence, instanceId + "-symbol-sheets-recovery.json"));
+        var saved = store.Save(new(Guid.NewGuid(), Guid.Parse(instanceId), new(initial.State.Revision.Epoch, initial.State.Revision.Sequence),
+            initial.Electrical.Hierarchy.TrackingComplete, baseline, xml, baseline.Schematic.Clone(), [],
+            BaselineElectrical: initial.Electrical.Clone(), ObservedElectrical: initial.Electrical.Clone()), null);
+        await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, saved.RevisionToken, Guid.NewGuid(), token);
+        await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = second }, token);
+        var visible = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = second }, token);
+        saved = store.Read()!; baseline = saved.State.Baseline;
+        var target = occurrences.Single(o => o.ComponentId == components[0] && o.Unit == 1);
+        var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
+        {
+            Components = baseline.Engineering.Circuit.Components.Select(c => c.Id == components[0] ? c with { Reference = "U550" } : c).ToArray(),
+            Symbols = baseline.Engineering.Circuit.Symbols.Select(s => s.Id == target.Id ? s with
+                { Placement = s.Placement! with { XMillimeters = s.Placement.XMillimeters + 2.54m } } : s).ToArray()
+        } } };
+        xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, [])); await File.WriteAllBytesAsync(designPath, xml, token);
+        saved = store.Save(saved.State with { DesiredFileBytes = xml }, saved.RevisionToken);
+        Guid operation = Guid.NewGuid();
+        var result = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, saved.RevisionToken, operation, token);
+        Assert.IsTrue(result.SynchronizationCommitted); Assert.IsTrue(result.NativeMutationCommitted);
+        var changed = await Capture(); var parsed = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(changed.Electrical.Hierarchy.Data, parsed.Schematic, token));
+        Assert.IsTrue(SchematicElectricalComparison.Compare(parsed, changed.Electrical, [], token).ConnectivityEquivalent);
+        var actual = SchematicModelProjection.NativeSymbols(parsed, changed.Electrical.Hierarchy.Data);
+        foreach (var unit in occurrences.Where(o => o.ComponentId == components[0])) Assert.AreEqual("U550", actual[unit.Id].ReferenceField.Text.Text_);
+        foreach (var unit in occurrences.Where(o => o.ComponentId == components[1])) Assert.AreEqual("U501", actual[unit.Id].ReferenceField.Text.Text_);
+        Assert.AreEqual(target.Placement!.XMillimeters + 2.54m, SchematicModelProjection.Placement(actual[target.Id]).XMillimeters);
+        var afterView = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = second }, token);
+        Assert.AreEqual(visible.Preview.Viewport, afterView.Preview.Viewport); Assert.AreEqual(visible.Preview.Png, afterView.Preview.Png);
+        Assert.IsTrue((await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, saved.RevisionToken, operation, token)).Replayed);
+        Assert.AreEqual(changed, await Capture());
+        await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-visible.png"), afterView.Preview.Png.ToByteArray(), token);
+
+        // Removing the shared second-unit drawing does not remove either
+        // physical component or invent a placed pin for its undrawn unit.
+        var remove = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Undrawn symbol unit fixture" };
+        remove.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[2] } });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(remove, token);
+        var undrawn = await Capture(); var retained = parsed.Engineering.Circuit.Symbols.Where(s => !occurrences.Any(o => o.Id == s.Id && o.Unit == 2)).ToArray();
+        var kept = retained.Select(s => s.Id).ToHashSet();
+        var undrawnDesign = parsed with { Engineering = parsed.Engineering with { Circuit = parsed.Engineering.Circuit with
+        { Symbols = retained, Nets = parsed.Engineering.Circuit.Nets.Select(n => n.Id == connection ? n with { Pins = n.Pins.Where(p => p.Pin == "1").ToArray() } : n).ToArray() } },
+            SymbolBindings = parsed.SymbolBindings.Where(b => kept.Contains(b.SymbolOccurrenceId)).ToArray(), Schematic = undrawn.Electrical.Hierarchy.Data.Clone() };
+        var unused = SchematicElectricalComparison.Compare(undrawnDesign, undrawn.Electrical, [], token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-undrawn-comparison.json"), JsonSerializer.Serialize(unused), token);
+        Assert.IsTrue(unused.PinBindingsComplete); Assert.IsTrue(unused.ConnectivityEquivalent); Assert.AreEqual(2, unused.UndrawnPins!.Count);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new
+        { instanceId, physicalComponentsAcrossSheets = true, exactNativeBindings = true, referenceAndPlacementApplied = true,
+            actualConnectivityVerified = true, visibleOtherInstancePreserved = true, operationReplayedOnce = true,
+            knownUndrawnPinsReported = true, automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
+
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+            { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
+    }
+}

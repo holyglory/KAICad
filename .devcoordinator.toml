@@ -29,7 +29,7 @@ command = ["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port = true
 route = true
 health = { path = "/healthz", timeout_seconds = 300 }
-env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-a519-signed-000008", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/windows-a519-signed-000007", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 
 [test]
 default = "automation"
@@ -1622,6 +1622,30 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~McpProcessTests", "--logger", "trx", "--results-directory", "automation/artifacts/native-intake-model"]
 retained_artifacts = [{ name = "native-intake-model", path = "automation/artifacts/native-intake-model", max_bytes = 16777216 }]
 
+[test.symbol-sheet-ownership]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.symbol-sheet-ownership.check]]
+name = "restore"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.symbol-sheet-ownership.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-restore"]
+
+[[test.symbol-sheet-ownership.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests", "--logger", "trx", "--results-directory", "automation/artifacts/symbol-sheet-ownership"]
+retained_artifacts = [{ name = "symbol-sheet-ownership", path = "automation/artifacts/symbol-sheet-ownership", max_bytes = 16777216 }]
+
 [test.component-reference-retention]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -3106,6 +3130,65 @@ tier = "development"
 requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSynchronizationPlan", "--logger", "trx", "--results-directory", "automation/artifacts/native-synchronization-plan-tests"]
 retained_artifacts = [{ name = "native-synchronization-plan-tests", path = "automation/artifacts/native-synchronization-plan-tests", max_bytes = 16777216 }, { name = "native-synchronization-plan-evidence", path = "automation/artifacts/native-synchronization-plan/native-session-current", max_bytes = 33554432 }]
+
+[test.native-symbol-sheet-ownership]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "connected-tool-contracts"
+tier = "development"
+role = "preflight"
+requires = ["managed-build"]
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~ConnectedMoveToolTests", "--logger", "trx", "--results-directory", "automation/artifacts/connected-tool-contracts"]
+retained_artifacts = [{ name = "connected-tool-contracts", path = "automation/artifacts/connected-tool-contracts", max_bytes = 16777216 }]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "input-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/symbol-sheet-input-contracts"]
+retained_artifacts = [{ name = "symbol-sheet-input-contracts", path = "automation/artifacts/symbol-sheet-input-contracts", max_bytes = 16777216 }]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["model-build", "codec", "native-build", "rendered"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "model-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_common", "qa_symbol_graphic_identity"]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "codec"
+tier = "development"
+requires = ["model-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$|^qa_undo_geometry_policy$|^qa_automation_wire_rollback$", "--output-on-failure", "--no-tests=error"]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "native-build"
+tier = "development"
+requires = ["codec"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-symbol-sheet-ownership.check]]
+name = "rendered"
+tier = "development"
+requires = ["native-build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSymbolSheetOwnership", "--logger", "trx", "--results-directory", "automation/artifacts/native-symbol-sheet-ownership-tests"]
+retained_artifacts = [{ name = "native-symbol-sheet-ownership-tests", path = "automation/artifacts/native-symbol-sheet-ownership-tests", max_bytes = 16777216 }, { name = "native-symbol-sheet-ownership-evidence", path = "automation/artifacts/native-symbol-sheet-ownership/native-session-current", max_bytes = 33554432 }]
 
 [test.native-transform-sync]
 timeout_seconds = 3600

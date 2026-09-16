@@ -105,6 +105,8 @@ public sealed record Circuit(
             if (symbol.Unit < 1 || symbol.Unit > parts[definitions[component.DefinitionId].PartId].Units
                 || !units.Add((symbol.ComponentId, symbol.Unit)))
                 throw Invalid("Symbol units must be declared and unique per component instance.");
+            if (!instances.ContainsKey(symbol.EffectiveSheetInstanceId(component)))
+                throw Invalid("Symbol occurrence references an unknown sheet instance.");
             symbol.Placement?.Validate();
         }
     }
@@ -130,7 +132,12 @@ public sealed record SheetInstance(Guid Id, Guid DefinitionId, Guid? ParentId);
 public sealed record ComponentInstance(Guid Id, Guid DefinitionId, Guid SheetInstanceId, string Reference);
 public sealed record PinEndpoint(Guid ComponentId, string Pin);
 public sealed record CircuitNet(Guid Id, string Name, IReadOnlyList<PinEndpoint> Pins);
-public sealed record SymbolOccurrence(Guid Id, Guid ComponentId, int Unit, SymbolPlacement? Placement);
+public sealed record SymbolOccurrence(Guid Id, Guid ComponentId, int Unit, SymbolPlacement? Placement, Guid? SheetInstanceId = null)
+{
+    public Guid EffectiveSheetInstanceId(ComponentInstance component) => component.Id == ComponentId
+        ? SheetInstanceId ?? component.SheetInstanceId
+        : throw Circuit.Invalid("Resolve a symbol location only through its exact component owner.");
+}
 
 // Millimetres and degrees are explicit in the field names and XML attributes.
 // Mirror is represented independently from rotation; neither affects connectivity.

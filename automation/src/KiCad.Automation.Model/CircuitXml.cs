@@ -47,7 +47,8 @@ public static class CircuitXml
                 Rows("symbols", "symbol").Select(s => new SymbolOccurrence(Id(s), Id(s, "component"), Int(s, "unit"),
                     s.Element(Ns + "placement") is XElement p
                         ? new SymbolPlacement(Decimal(p, "x-mm"), Decimal(p, "y-mm"), Int(p, "rotation-deg"),
-                            Bool(p, "mirror-x"), Bool(p, "mirror-y"), Bool(p, "locked")) : null)).ToArray());
+                            Bool(p, "mirror-x"), Bool(p, "mirror-y"), Bool(p, "locked")) : null,
+                    s.Attribute("sheet-instance") is null ? null : Id(s, "sheet-instance"))).ToArray());
             circuit.Validate();
             return circuit;
         }
@@ -72,6 +73,7 @@ public static class CircuitXml
             E("nets", circuit.Nets.OrderBy(n => n.Id).Select(n => E("net", A("id", n.Id), A("name", n.Name),
                 n.Pins.OrderBy(p => p.ComponentId).ThenBy(p => p.Pin, StringComparer.Ordinal).Select(p => E("pin", A("component", p.ComponentId), A("number", p.Pin)))))),
             E("symbols", circuit.Symbols.OrderBy(s => s.Id).Select(s => E("symbol", A("id", s.Id), A("component", s.ComponentId), A("unit", s.Unit),
+                s.SheetInstanceId is Guid sheet ? A("sheet-instance", sheet) : null,
                 s.Placement is SymbolPlacement p ? E("placement", A("x-mm", p.XMillimeters), A("y-mm", p.YMillimeters),
                     A("rotation-deg", p.RotationDegrees), A("mirror-x", p.MirrorX), A("mirror-y", p.MirrorY), A("locked", p.Locked)) : null))));
         return EngineeringXmlText.Render(root);

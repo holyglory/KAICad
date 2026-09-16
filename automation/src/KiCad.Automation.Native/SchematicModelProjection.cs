@@ -39,6 +39,8 @@ public static class SchematicModelProjection
         var before = NativeSymbols(baseline, baseline.Schematic);
         var after = NativeSymbols(baseline, observed);
         var source = baseline.Engineering.Circuit;
+        var oldComponents = source.Components.ToDictionary(c => c.Id);
+        var components = desired.Circuit.Components.ToDictionary(c => c.Id);
         // This projection handles properties, not rebinding or structural edits. Preserve such
         // input for the hierarchy/electrical reconciler instead of indexing stale owners.
         if (!source.Components.Select(c => (c.Id, c.DefinitionId, c.SheetInstanceId)).ToHashSet().SetEquals(
@@ -46,14 +48,14 @@ public static class SchematicModelProjection
             || !source.SheetInstances.ToHashSet().SetEquals(desired.Circuit.SheetInstances)
             || !source.Sheets.SelectMany(s => s.Components.Select(c => (Sheet: s.Id, c.Id, c.PartId))).ToHashSet().SetEquals(
                 desired.Circuit.Sheets.SelectMany(s => s.Components.Select(c => (Sheet: s.Id, c.Id, c.PartId))))
-            || !source.Symbols.Select(s => (s.Id, s.ComponentId)).ToHashSet().SetEquals(
-                desired.Circuit.Symbols.Select(s => (s.Id, s.ComponentId))))
+            || !source.Symbols.Select(s => (s.Id, s.ComponentId,
+                    Sheet: s.EffectiveSheetInstanceId(oldComponents[s.ComponentId]))).ToHashSet().SetEquals(
+                desired.Circuit.Symbols.Select(s => (s.Id, s.ComponentId,
+                    Sheet: s.EffectiveSheetInstanceId(components[s.ComponentId])))))
             return new(null, [], [], true, gaps, "model_topology_changed", "Reconcile changed model ownership before projecting native properties.");
         var conflicts = new List<SchematicProjectionConflict>();
-        var components = desired.Circuit.Components.ToDictionary(c => c.Id);
         var definitions = desired.Circuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
         var symbols = desired.Circuit.Symbols.ToDictionary(s => s.Id);
-        var oldComponents = source.Components.ToDictionary(c => c.Id);
         bool remainder = HasUnprojectedChanges(baseline.Schematic, observed);
 
         T Merge<T>(Guid owner, string field, T originalModel, T wanted, T originalNative, T currentNative,
@@ -159,7 +161,8 @@ public static class SchematicModelProjection
             .Select(p => (Path: string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(id => id.Value)), Symbol: p.Unpack<SchematicSymbolInstance>())))
             .ToDictionary(p => p.Path + "#" + p.Symbol.Id.Value, p => p.Symbol, StringComparer.Ordinal);
         return design.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => native[
-            sheets[components[occurrences[b.SymbolOccurrenceId].ComponentId].SheetInstanceId] + "#" + b.NativeObjectId.ToString("D")]);
+            sheets[occurrences[b.SymbolOccurrenceId].EffectiveSheetInstanceId(components[occurrences[b.SymbolOccurrenceId].ComponentId])]
+                + "#" + b.NativeObjectId.ToString("D")]);
     }
 
     internal static SymbolPlacement Placement(SchematicSymbolInstance symbol)

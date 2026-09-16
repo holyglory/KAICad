@@ -114,8 +114,11 @@ public static class SchematicNetReconciliation
         return new Guid(bytes.AsSpan(0, 16), bigEndian: true);
     }
 
-    private static string Topology(Circuit circuit) => JsonSerializer.Serialize(new
+    private static string Topology(Circuit circuit)
     {
+        var owners = circuit.Components.ToDictionary(c => c.Id);
+        return JsonSerializer.Serialize(new
+        {
         circuit.Id,
         parts = circuit.Parts.OrderBy(p => p.Id).Select(p => new { p.Id, p.Units,
             pins = p.Pins.OrderBy(p => p.Number, StringComparer.Ordinal).Select(p => new { p.Number, p.Unit }) }),
@@ -123,8 +126,10 @@ public static class SchematicNetReconciliation
             components = s.Components.OrderBy(c => c.Id).Select(c => new { c.Id, c.PartId }) }),
         instances = circuit.SheetInstances.OrderBy(s => s.Id),
         components = circuit.Components.OrderBy(c => c.Id).Select(c => new { c.Id, c.DefinitionId, c.SheetInstanceId }),
-        symbols = circuit.Symbols.OrderBy(s => s.Id).Select(s => new { s.Id, s.ComponentId, s.Unit })
-    });
+        symbols = circuit.Symbols.OrderBy(s => s.Id).Select(s => new { s.Id, s.ComponentId, s.Unit,
+            Sheet = s.EffectiveSheetInstanceId(owners[s.ComponentId]) })
+        });
+    }
 
     private static string Bindings(SchematicDesign design) => JsonSerializer.Serialize(new
     {

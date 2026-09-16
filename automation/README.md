@@ -873,6 +873,16 @@ active observer. Native Mac/Windows and actual Codex Desktop qualification of
 these new tools remain separate, unfinished release work.
 
 The engineering structure also has optional typed `unresolved-net-bindings`.
+These preserve an affected statement or structural connection, its former net
+identity, change reason and possible current-net candidates after an explicit
+split, merge, removal or identity change. Candidates are not assignments:
+`kicad_engineering_design_validate` reports them separately and returns
+`netBindingsResolved: false`. Requirement text, strength and provenance remain
+unchanged, and explicit reassignment resolves only the selected owner. Ordinary
+undeclared dangling references are still rejected. This model/XML support is
+not yet connected to automatic native electrical reconciliation and is not in
+the currently published packages.
+
 Optional `unresolved-component-references` and `unresolved-guidance-bindings`
 also retain component targets, either endpoint of a concrete pin instruction,
 block realizations and class/instance guidance when ownership disappears or is
@@ -884,15 +894,18 @@ changes only the chosen reference and refuses to overwrite another component's
 guidance. This is model/XML and recovery support, not yet native ownership
 reconciliation or automatic application.
 
-These preserve an affected statement or structural connection, its former net
-identity, change reason and possible current-net candidates after an explicit
-split, merge, removal or identity change. Candidates are not assignments:
-`kicad_engineering_design_validate` reports them separately and returns
-`netBindingsResolved: false`. Requirement text, strength and provenance remain
-unchanged, and explicit reassignment resolves only the selected owner. Ordinary
-undeclared dangling references are still rejected. This model/XML support is
-not yet connected to automatic native electrical reconciliation and is not in
-the currently published packages.
+Each symbol occurrence may specify `sheet-instance` independently of its physical
+component's owner sheet. Omission retains the original owner-sheet default.
+This allows units of one component to occupy different sheets without duplicating
+the component or its pin identities. Binding, property and placement operations
+use the occurrence's exact sheet. Electrical comparison uses only active-unit
+and active-body-style pins; known library pins on undrawn units are reported as
+`undrawnPins`, without inventing placed identities or net connections. Missing
+active pins still fail comparison. Linux real-editor run
+`t20260916T011840Z-31098d` verifies cross-sheet reference/placement updates,
+connectivity, preservation of another visible sheet, replay and undrawn-pin
+accounting in two instances. Automatic ownership-change reconciliation and
+native Mac/Windows qualification remain separate unfinished work.
 
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an

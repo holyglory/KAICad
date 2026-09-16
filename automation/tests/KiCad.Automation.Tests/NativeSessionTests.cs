@@ -48,7 +48,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeTransformSynchronization")]
     public Task XmlTransformsRecoverAfterServiceInterruptionAndNativeHistory() => RunNativeSessions(NativeJourney.TransformSync);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync }
+    [TestMethod, TestCategory("NativeSymbolSheetOwnership")]
+    public Task MultiUnitComponentsKeepOneIdentityAcrossNativeSheets() => RunNativeSessions(NativeJourney.SymbolSheets);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -66,6 +69,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.CheckedBatch => "native-checked-batch",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
+                NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -357,6 +361,18 @@ public sealed partial class NativeSessionTests
                             synchronizationFailures.Add(error);
                             await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-offscreen-failure.txt"), error.ToString(), deadline.Token);
                             Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.SymbolSheets)
+                    {
+                        try
+                        {
+                            await VerifyNativeSymbolSheetOwnership(client, opened.Document, hierarchyFixture, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-symbol-sheets-failure.txt"), error.ToString(), deadline.Token);
                         }
                     }
                     else if (journey is NativeJourney.CheckedBatch or NativeJourney.TransformSync)

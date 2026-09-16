@@ -60,16 +60,32 @@ public sealed partial class NativeSessionTests
         string missed = "Automatic reattach " + instanceId;
         await client.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = root.Clone(), TitleBlock = new() { Title = missed } }, deadline.Token);
         var newDriver = await AutomaticDesignDriver.CreateAsync(store, client, designPath, store.Read()!.RevisionToken, deadline.Token);
-        await using var reattached = new AutomaticDesignSynchronization(newDriver);
+        var reattached = new AutomaticDesignSynchronization(newDriver);
         await Wait(reattached, s => s.Phase == AutomaticDesignPhase.Watching
             && Read().Schematic.Instances.Single(item => item.Metadata.Document.Equals(root)).Metadata.TitleBlock.Title == missed);
         Assert.IsTrue(SchematicElectricalComparison.Compare(Read(), (await Capture()).Electrical, [], deadline.Token).ConnectivityEquivalent);
+        await reattached.DisposeAsync();
+        await using var publicHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
+            Path.Combine(evidence, instanceId + "-automatic-public-host"), Path.Combine(evidence, instanceId + "-automatic-public-host.log"), deadline.Token);
+        RequireToolSuccess(await publicHost.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        var current = store.Read()!;
+        var publicStart = await publicHost.Tool("kicad_design_automatic_sync_start", new
+        { instanceId, recoveryPath = store.StatePath, designPath, expectedRecoveryRevision = current.RevisionToken });
+        RequireToolSuccess(publicStart);
+        string publicSession = publicStart.GetProperty("structuredContent").GetProperty("sessionId").GetString()!;
+        var listed = await publicHost.Tool("kicad_design_automatic_sync_list", new { instanceId });
+        RequireToolSuccess(listed); Assert.HasCount(1, listed.GetProperty("structuredContent").GetProperty("sessions").EnumerateArray());
+        var waited = await publicHost.Tool("kicad_design_automatic_sync_wait", new { instanceId, sessionId = publicSession, afterSequence = 0UL });
+        RequireToolSuccess(waited);
+        var publicStop = await publicHost.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId = publicSession });
+        RequireToolSuccess(publicStop);
+        Assert.AreEqual("Stopped", publicStop.GetProperty("structuredContent").GetProperty("status").GetProperty("phase").GetString());
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-sync-result.json"), JsonSerializer.Serialize(new
         {
             instanceId, nativeCommitPublishedWithoutApplyCall = true, xmlSaveAppliedWithoutApplyCall = true,
             invalidXmlPreserved = true, correctedXmlResumed = true, competingOwnerRejected = true,
             stopPreservedEditor = true, missedEditRecoveredAfterReattach = true,
-            publicToolsQualified = false, crossPlatformReady = false
+            publicToolsQualified = true, crossPlatformReady = false
         }), deadline.Token);
 
         SchematicDesign Read() => SchematicDesignXml.Read(File.ReadAllText(designPath), []);

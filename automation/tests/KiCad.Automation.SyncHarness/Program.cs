@@ -23,9 +23,11 @@ builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogL
 builder.Services.AddSingleton(pause);
 builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause));
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), state));
+builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddMcpServer().WithStdioServerTransport()
     .WithTools<InstanceTools>().WithTools<RecoveryTools>().WithTools<SchematicViewTools>()
-    .WithTools<CheckedSchematicTools>().WithTools<QualificationSynchronizationTools>();
+    .WithTools<CheckedSchematicTools>().WithTools<QualificationSynchronizationTools>()
+    .WithTools<AutomaticDesignTools>();
 await builder.Build().RunAsync();
 
 [McpServerToolType]

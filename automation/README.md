@@ -958,7 +958,23 @@ unit and component deletions in two editors, including history older than the
 latest receipt, exact restored identities, preserved newer instructions, actual
 connectivity, normal STDIO planning and repeat-safe reverse publication.
 This does not qualify event-driven automatic application, arbitrary creation or
-rebinding, conflicting-history resolution, or the Mac/Windows/Codex Desktop journey.
+rebinding, or the Mac/Windows/Codex Desktop journey.
+
+When verified histories disagree, `kicad_design_owner_history_inspect` returns
+the eligible mappings and an exact input-snapshot token. The corresponding
+`kicad_design_owner_history_resolve` records one operation choice using both that
+token and the current recovery revision; `kicad_design_owner_history_clear`
+removes a stale choice without editing XML or native objects. Recovery envelope
+version 9 persists a selected choice while older records retain their encoding.
+History/content, XML, native revision and library changes invalidate the choice.
+Pending synchronization freezes it; successful baseline commit clears it.
+Focused checks cover competing mappings, stale/wrong targets, corruption,
+cancellation, reopening and normal STDIO calls. Linux run
+`t20260916T042123Z-84519a` also selects history through MCP, applies native keyboard
+restoration, and terminates/restarts the service during publication replacement,
+baseline commit and retained-history archival in two editors. Both the chosen
+mapping and newer instructions survive without repeated native mutation.
+These later source changes are not included in the frozen `c26503fdc3` packages.
 
 `kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
 memberships in one native request. It accepts an explicit loaded sheet and an

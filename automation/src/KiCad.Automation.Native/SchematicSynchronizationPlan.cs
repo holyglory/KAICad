@@ -40,17 +40,23 @@ public static class SchematicSynchronizationPlanner
         StoredDesignRecovery saved, bool allowConnectedLayout, CancellationToken token)
     {
         var plan = Prepare(saved.State, allowConnectedLayout, token);
-        if (plan.CanPrepare || plan.ErrorCode != "electrical_ownership_changed"
-            || SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed))
+        if (saved.State.HasPendingWork) return plan;
+        bool selected = saved.State.OwnershipResolution is not null;
+        bool sameOwners = SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed);
+        if (!selected && (plan.CanPrepare || plan.ErrorCode != "electrical_ownership_changed" || sameOwners))
             return plan;
         try
         {
+            if (selected && sameOwners)
+                throw new AutomationException("native_owner_resolution_stale", "The selected restoration no longer applies; clear it or inspect the current owners.");
             var history = await SchematicOwnershipHistoryReader.ReadAsync(store, saved.State, token);
+            if (selected) _ = SchematicNativeRestorationProjection.Project(saved.State, history, token);
             return Prepare(saved.State, allowConnectedLayout, token, history);
         }
         catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
         {
-            return plan with { ErrorCode = error is AutomationException automation ? automation.Code : "native_ownership_history_io",
+            return plan with { Candidate = null, CandidateXml = null, NativeOperations = [],
+                ErrorCode = error is AutomationException automation ? automation.Code : "native_ownership_history_io",
                 ErrorMessage = error.Message };
         }
     }

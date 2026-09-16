@@ -114,6 +114,7 @@ public sealed partial class NativeSessionTests
         var store = new DesignRecoveryStore(Path.Combine(evidence, instanceId + "-symbol-sheets-recovery.json"));
         await using var planningHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
             Path.Combine(evidence, instanceId + "-owner-plan-host"), Path.Combine(evidence, instanceId + "-owner-plan-host.log"), token);
+        var restorationStops = new List<object>();
         var saved = store.Save(new(Guid.NewGuid(), Guid.Parse(instanceId), new(initial.State.Revision.Epoch, initial.State.Revision.Sequence),
             initial.Electrical.Hierarchy.TrackingComplete, baseline, xml, baseline.Schematic.Clone(), [],
             BaselineElectrical: initial.Electrical.Clone(), ObservedElectrical: initial.Electrical.Clone()), null);
@@ -221,6 +222,8 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
         await VerifySynchronizationServiceRestart(client, root, store, designPath, evidence, instanceId, token,
             ["publication-replaced", "baseline-committed", "retained-archived"]);
+        Assert.AreEqual(3, restorationStops.Count);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-owner-restoration-restarts.json"), JsonSerializer.Serialize(restorationStops), token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new
         { instanceId, physicalComponentsAcrossSheets = true, exactNativeBindings = true, referenceAndPlacementApplied = true,
             actualConnectivityVerified = true, visibleOtherInstancePreserved = true, operationReplayedOnce = true,
@@ -228,6 +231,7 @@ public sealed partial class NativeSessionTests
             removedComponentInstructionsRetained = true, retainedXmlContentVerified = true,
             retainedXmlServiceRecoveryVerified = true,
             nativeKeyboardOwnerUndoRedo = true, newerInstructionsPreservedThroughUndoRedo = true,
+            explicitOwnershipChoiceUsed = true, restorationServiceRecoveryVerified = true,
             automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
 
         async Task PublishNativeChange(CheckedSchematicState observed)
@@ -237,11 +241,30 @@ public sealed partial class NativeSessionTests
             var intake = store.Save(prior.State with { Observed = observed.Electrical.Hierarchy.Data.Clone(),
                 ObservedElectrical = observed.Electrical.Clone(), NativeRevision = new(observed.State.Revision.Epoch, observed.State.Revision.Sequence),
                 TrackingComplete = observed.Electrical.Hierarchy.TrackingComplete }, prior.RevisionToken);
-            RequireToolSuccess(await planningHost.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
-                expectedRevisionToken = intake.RevisionToken }));
+            var plan = await planningHost.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = intake.RevisionToken });
+            RequireToolSuccess(plan);
+            bool restoring = plan.GetProperty("structuredContent").GetProperty("restoredSymbolOccurrences") is { ValueKind: JsonValueKind.Array } restored
+                && restored.GetArrayLength() > 0;
+            if (restoring)
+            {
+                var inspection = await planningHost.Tool("kicad_design_owner_history_inspect", new { instanceId,
+                    recoveryPath = store.StatePath, expectedRevisionToken = intake.RevisionToken });
+                RequireToolSuccess(inspection);
+                var options = inspection.GetProperty("structuredContent");
+                var selected = await planningHost.Tool("kicad_design_owner_history_resolve", new { instanceId,
+                    recoveryPath = store.StatePath, expectedRevisionToken = intake.RevisionToken,
+                    expectedSnapshotToken = options.GetProperty("snapshotToken").GetString(),
+                    historyOperationId = options.GetProperty("choices")[0].GetProperty("historyOperationId").GetString() });
+                RequireToolSuccess(selected); intake = store.Read()!;
+                Assert.IsNotNull(intake.State.OwnershipResolution);
+            }
             Guid sync = Guid.NewGuid();
+            if (restoring)
+                await RestoreAcrossServiceStop(intake, sync, new[] { "publication-replaced", "baseline-committed", "retained-archived" }[restorationStops.Count]);
             var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token);
             Assert.IsTrue(applied.SynchronizationCommitted); Assert.IsFalse(applied.NativeMutationCommitted);
+            Assert.IsNull(store.Read()!.State.OwnershipResolution);
             var receipt = store.Read()!.State.LastSynchronization!;
             Assert.AreEqual(2, receipt.Version);
             string expectedDigest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(expectedPrevious));
@@ -253,6 +276,52 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(SchematicHierarchyDelta.Plan(current.Electrical.Hierarchy.Data, design.Schematic, token));
             Assert.IsTrue((await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, intake.RevisionToken, sync, token)).Replayed);
             Assert.AreEqual(current, await Capture());
+        }
+
+        async Task RestoreAcrossServiceStop(StoredDesignRecovery intake, Guid operationId, string stage)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token); limit.CancelAfter(TimeSpan.FromSeconds(45));
+            string name = instanceId + "-owner-restore-" + stage;
+            string marker = Path.Combine(evidence, name + "-pause.json");
+            string hostState = Path.Combine(evidence, instanceId + "-owner-restore-host");
+            var args = new { instanceId, recoveryPath = store.StatePath, designPath,
+                expectedRevisionToken = intake.RevisionToken, operationId = operationId.ToString("D") };
+            CheckedSchematicState beforeStop;
+            await using (var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(stage, marker), hostState,
+                Path.Combine(evidence, name + "-first.log"), limit.Token))
+            {
+                RequireToolSuccess(await host.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                Task ready = SyncHarnessProcessTests.WaitForMarkerAsync(marker, limit.Token);
+                var call = host.Tool("kicad_design_sync_apply", args);
+                try
+                {
+                    if (await Task.WhenAny(ready, call) == call)
+                    { RequireToolSuccess(await call); Assert.Fail("Restoration completed without the requested interruption checkpoint."); }
+                    await ready; beforeStop = await Capture();
+                    var pending = store.Read()!;
+                    if (stage == "publication-replaced") Assert.IsNotNull(pending.State.OwnershipResolution);
+                    else Assert.IsNull(pending.State.OwnershipResolution);
+                    await host.TerminateAsync(); Assert.IsTrue(host.ForcedTermination);
+                    await Assert.ThrowsAsync<IOException>(async () => { await call; });
+                }
+                catch { await host.TerminateAsync(); try { await call; } catch (Exception) { } throw; }
+            }
+            Assert.AreEqual(beforeStop, await Capture(), "Stopping the service must not modify the native restored objects.");
+            await using (var restarted = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(), hostState,
+                Path.Combine(evidence, name + "-restarted.log"), limit.Token))
+            {
+                RequireToolSuccess(await restarted.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                var result = await restarted.Tool("kicad_design_sync_apply", args); RequireToolSuccess(result);
+                var data = result.GetProperty("structuredContent");
+                Assert.IsTrue(data.GetProperty("synchronizationCommitted").GetBoolean());
+                Assert.IsFalse(data.GetProperty("nativeMutationCommitted").GetBoolean());
+                Assert.AreEqual(stage != "publication-replaced", data.GetProperty("replayed").GetBoolean());
+            }
+            var after = await Capture(); Assert.AreEqual(beforeStop.State.Revision, after.State.Revision);
+            Assert.AreEqual(beforeStop.State.ProcessEpoch, after.State.ProcessEpoch);
+            Assert.IsFalse(store.Read()!.State.HasPendingWork); Assert.IsNull(store.Read()!.State.OwnershipResolution);
+            restorationStops.Add(new { stage, operationId, actualServiceProcessTerminated = true,
+                nativeEpochAndRevisionPreserved = true, selectedMappingConsumedOnce = true });
         }
 
         async Task NativeHistory(string key)

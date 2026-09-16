@@ -16,7 +16,8 @@ public sealed record DesignRecoveryState(Guid OriginId, Guid InstanceId, NativeR
     SchematicElectricalState? BaselineElectrical = null, SchematicElectricalState? ObservedElectrical = null,
     DocumentLifecycleState? PendingNativeState = null, CheckedSaveDocument? PendingNativeSave = null,
     byte[]? PendingCandidateFileBytes = null, DesignPublicationIntent? PendingPublication = null,
-    DesignSynchronizationReceipt? LastSynchronization = null, DesignLayoutIntent? PendingLayout = null)
+    DesignSynchronizationReceipt? LastSynchronization = null, DesignLayoutIntent? PendingLayout = null,
+    DesignOwnershipResolution? OwnershipResolution = null)
 {
     public bool HasPendingWork => PendingMutation is not null || PendingPublication is not null || PendingLayout is not null;
 }
@@ -25,6 +26,8 @@ public sealed record DesignHierarchyResolution(string SnapshotToken,
     IReadOnlyDictionary<string, SchematicConflictChoice> Choices, string NativeEpoch, ulong NativeSequence);
 
 public sealed record StoredDesignRecovery(string RevisionToken, DesignRecoveryState State);
+
+public sealed record DesignOwnershipResolution(string SnapshotToken, Guid HistoryOperationId, string HistoryXmlSha256);
 
 /// <summary>Durable full-design recovery, not a completion ledger or proof of synchronization.
 /// Keeps the last baseline, exact desired file bytes (including invalid XML), current native
@@ -52,7 +55,8 @@ public sealed class DesignRecoveryStore(string statePath)
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? PendingCandidateFileBytes = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignPublicationIntent? PendingPublication = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignSynchronizationReceipt? LastSynchronization = null,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignLayoutIntent? PendingLayout = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignLayoutIntent? PendingLayout = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignOwnershipResolution? OwnershipResolution = null);
     private sealed record ElectricalEnvelope([property: JsonRequired] string Epoch,
         [property: JsonRequired] ulong Sequence, [property: JsonRequired] bool TrackingComplete,
         [property: JsonRequired] string[] NetsXml, [property: JsonRequired] string[] Limitations);
@@ -110,7 +114,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 .Any(p => string.Equals(p, path, comparison) || string.Equals(p, path + ".lock", comparison)))
                 throw Failure("invalid_design_publication", "Design publication and recovery files must remain separate.");
         }
-        var envelope = new Envelope(state.PendingLayout is not null ? 8
+        var envelope = new Envelope(state.OwnershipResolution is not null ? 9 : state.PendingLayout is not null ? 8
             : state.LastSynchronization is not null || state.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
             : state.PendingPublication is not null ? 6
             : state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
@@ -123,7 +127,7 @@ public sealed class DesignRecoveryStore(string statePath)
             state.PendingMutation?.ToByteArray(), state.HierarchyResolution,
             EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic), EncodeElectrical(state.ObservedElectrical, state.Observed),
             state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes,
-            state.PendingPublication, state.LastSynchronization, state.PendingLayout);
+            state.PendingPublication, state.LastSynchronization, state.PendingLayout, state.OwnershipResolution);
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
         // Verify complete recoverability before touching the previous recovery file.
         var next = Decode(bytes);
@@ -198,7 +202,7 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            int requiredVersion = envelope.PendingLayout is not null ? 8
+            int requiredVersion = envelope.OwnershipResolution is not null ? 9 : envelope.PendingLayout is not null ? 8
                 : envelope.LastSynchronization is not null || envelope.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
                 : envelope.PendingPublication is not null ? 6
                 : envelope.PendingNativeSave is not null || envelope.PendingCandidateFileBytes is not null ? 5
@@ -217,7 +221,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 DecodeElectrical(envelope.BaselineElectrical, baseline.Schematic), DecodeElectrical(envelope.ObservedElectrical, observed),
                 envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState),
                 envelope.PendingNativeSave is null ? null : CheckedSaveDocument.Parser.ParseFrom(envelope.PendingNativeSave),
-                envelope.PendingCandidateFileBytes, envelope.PendingPublication, envelope.LastSynchronization, envelope.PendingLayout);
+                envelope.PendingCandidateFileBytes, envelope.PendingPublication, envelope.LastSynchronization, envelope.PendingLayout, envelope.OwnershipResolution);
             Validate(state);
             return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), state);
         }
@@ -244,6 +248,11 @@ public sealed class DesignRecoveryStore(string statePath)
             if (completed.InstanceId != state.InstanceId)
                 throw Failure("invalid_sync_receipt", "The completed operation belongs to another instance.");
         }
+        if (state.OwnershipResolution is { } ownership
+            && (ownership.HistoryOperationId == Guid.Empty
+                || ownership.SnapshotToken is not { Length: 64 } || !ownership.SnapshotToken.All(char.IsAsciiHexDigitLower)
+                || ownership.HistoryXmlSha256 is not { Length: 64 } || !ownership.HistoryXmlSha256.All(char.IsAsciiHexDigitLower)))
+            throw Failure("invalid_ownership_resolution", "A history choice requires its exact operation, content digest and snapshot token.");
         if (state.ObservedElectrical is { } current
             && (current.Hierarchy.Revision.Epoch != state.NativeRevision.Epoch
                 || current.Hierarchy.Revision.Sequence != state.NativeRevision.Sequence
@@ -344,6 +353,11 @@ public sealed class DesignRecoveryStore(string statePath)
 
     private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next)
     {
+        if (current?.HasPendingWork == true && !Equals(current.OwnershipResolution, next.OwnershipResolution)
+            && !(next.OwnershipResolution is null && !next.HasPendingWork
+                && next.LastSynchronization is { } completed
+                && completed.OperationId == (current.PendingPublication?.OperationId ?? current.PendingLayout?.OperationId)))
+            throw Failure("ownership_resolution_pending", "Keep the selected ownership mapping unchanged until the pending synchronization is completed.");
         if (current?.PendingLayout is { } layout)
         {
             if (!Equals(current.PendingMutation, next.PendingMutation) || !Equals(current.PendingNativeState, next.PendingNativeState)

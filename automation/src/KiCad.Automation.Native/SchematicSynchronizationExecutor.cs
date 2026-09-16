@@ -205,7 +205,7 @@ internal static class SchematicSynchronizationExecutor
             TrackingComplete = final.Electrical.Hierarchy.TrackingComplete, BaselineElectrical = final.Electrical.Clone(),
             ObservedElectrical = final.Electrical.Clone(), PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null,
-            LastSynchronization = resultReceipt
+            LastSynchronization = resultReceipt, OwnershipResolution = null
         }, saved.RevisionToken);
         if (checkpoint is not null) await checkpoint("baseline-committed", CancellationToken.None);
         // A failure here leaves the complete result in the atomic recovery

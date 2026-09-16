@@ -144,6 +144,56 @@ public sealed class RecoveryTools
         return Describe(written);
     });
 
+    [McpServerTool(Name = "kicad_design_owner_history_inspect", ReadOnly = true),
+     Description("Inspect content-verified historical ownership choices for this exact saved instance and recovery revision. Returns a snapshot token and the component/unit mappings each eligible history would restore. Does not contact KiCad, write XML or authorize a live mutation.")]
+    public Task<CallToolResult> InspectOwnershipHistory(string instanceId, string recoveryPath, string expectedRevisionToken,
+        CancellationToken cancellationToken) => ExecuteAsync(async () =>
+    {
+        var (store, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        var inspection = await SchematicOwnershipResolutionService.InspectAsync(store, saved, cancellationToken);
+        return OwnershipResult(saved, inspection, false);
+    });
+
+    [McpServerTool(Name = "kicad_design_owner_history_resolve", Destructive = false),
+     Description("Record one explicit verified history mapping against an inspected snapshot token and current recovery revision. This changes only the saved recovery choice, not XML or native editors. The normal synchronization planner revalidates the choice and content before use.")]
+    public Task<CallToolResult> ResolveOwnershipHistory(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string expectedSnapshotToken, string historyOperationId, CancellationToken cancellationToken) => ExecuteAsync(async () =>
+    {
+        var (store, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        if (!Guid.TryParseExact(historyOperationId, "D", out var operation) || operation == Guid.Empty)
+            throw new AutomationException("invalid_history_choice", "Select one exact history operation from inspection.");
+        var written = await SchematicOwnershipResolutionService.ResolveAsync(store, saved, expectedSnapshotToken, operation, cancellationToken);
+        return OwnershipResult(written, null, true);
+    });
+
+    [McpServerTool(Name = "kicad_design_owner_history_clear", Destructive = false),
+     Description("Clear a recorded history choice using the current recovery revision. Does not change XML, native editors or retained history. Pending synchronization must be recovered before its choice can change.")]
+    public CallToolResult ClearOwnershipHistory(string instanceId, string recoveryPath, string expectedRevisionToken,
+        CancellationToken cancellationToken) => Execute(() =>
+    {
+        var (store, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        return OwnershipResult(SchematicOwnershipResolutionService.Clear(store, saved, cancellationToken), null, true);
+    });
+
+    private static CallToolResult OwnershipResult(StoredDesignRecovery saved, SchematicOwnershipChoices? inspection, bool written)
+    {
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
+            snapshotToken = inspection?.SnapshotToken, choices = inspection?.Choices, selection = saved.State.OwnershipResolution,
+            recoveryChoiceWritten = written, designFileWritten = false, nativeMutationAuthorized = false
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
+
+    private static (DesignRecoveryStore Store, StoredDesignRecovery Saved) ReadAtRevision(string instanceId, string path, string token)
+    {
+        var value = Read(instanceId, path);
+        if (value.Saved.RevisionToken != token)
+            throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before choosing.");
+        return value;
+    }
+
     private static (DesignRecoveryStore Store, StoredDesignRecovery Saved) Read(string instanceId, string path)
     {
         if (!Path.IsPathFullyQualified(path))

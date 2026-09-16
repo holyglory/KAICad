@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using Google.Protobuf;
 using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
@@ -6,11 +9,30 @@ namespace KiCad.Automation.Native;
 internal sealed record SchematicNativeRestorationResult(SchematicDesign BindingCandidate, SchematicOwnershipHistory History,
     IReadOnlyList<Guid> RestoredOccurrences, IReadOnlyList<Guid> RestoredComponents);
 
+internal sealed record SchematicOwnershipInspection(string SnapshotToken, IReadOnlyList<SchematicNativeRestorationResult> Candidates);
+
 /// <summary>Recover identity declarations from verified deletion predecessors.
 /// Current requirements and live objects are never replaced with historical text.</summary>
 internal static class SchematicNativeRestorationProjection
 {
     internal static SchematicNativeRestorationResult Project(DesignRecoveryState state,
+        IReadOnlyList<SchematicOwnershipHistory> history, CancellationToken token)
+    {
+        var inspection = Inspect(state, history, token);
+        if (state.OwnershipResolution is { } selected)
+        {
+            var candidate = inspection.Candidates.SingleOrDefault(c => c.History.Receipt.OperationId == selected.HistoryOperationId);
+            if (selected.SnapshotToken != inspection.SnapshotToken || candidate is null
+                || candidate.History.Receipt.PreviousXmlSha256 != selected.HistoryXmlSha256)
+                throw Error("native_owner_resolution_stale", "The selected history no longer matches this snapshot; inspect and choose again.");
+            return candidate;
+        }
+        if (inspection.Candidates.Select(Key).Distinct(StringComparer.Ordinal).Skip(1).Any())
+            throw Error("ambiguous_native_ownership_history", "Verified histories disagree about restored identities or unresolved requirement bindings; select an explicit resolution.");
+        return inspection.Candidates.OrderBy(c => c.History.Receipt.OperationId).First();
+    }
+
+    internal static SchematicOwnershipInspection Inspect(DesignRecoveryState state,
         IReadOnlyList<SchematicOwnershipHistory> history, CancellationToken token)
     {
         string observedOwners = SchematicNetReconciliation.NativeOwners(state.Observed);
@@ -40,9 +62,27 @@ internal static class SchematicNativeRestorationProjection
             ulong newest = candidates.Max(c => c.History.Receipt.NativeRevisionSequence);
             candidates = candidates.Where(c => c.History.Receipt.NativeRevisionSequence == newest).ToList();
         }
-        if (candidates.Select(Key).Distinct(StringComparer.Ordinal).Skip(1).Any())
-            throw Error("ambiguous_native_ownership_history", "Verified histories disagree about restored identities or unresolved requirement bindings; select an explicit resolution.");
-        return candidates.OrderBy(c => c.History.Receipt.OperationId).First();
+        return new(SnapshotToken(state, history, token), candidates.OrderBy(c => c.History.Receipt.OperationId).ToArray());
+    }
+
+    private static string SnapshotToken(DesignRecoveryState state, IReadOnlyList<SchematicOwnershipHistory> history, CancellationToken token)
+    {
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Bytes(byte[] bytes)
+        {
+            token.ThrowIfCancellationRequested();
+            Span<byte> length = stackalloc byte[8]; System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(length, bytes.LongLength);
+            digest.AppendData(length); digest.AppendData(bytes);
+        }
+        void Text(string value) => Bytes(Encoding.UTF8.GetBytes(value));
+        Text("kicad-ownership-resolution-v1");
+        Text(JsonSerializer.Serialize(new { state.OriginId, state.InstanceId, state.NativeRevision, state.TrackingComplete, state.HierarchyResolution }));
+        Text(SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries)); Bytes(state.DesiredFileBytes);
+        Text(SchematicDataXml.Write(state.Observed));
+        Bytes(state.BaselineElectrical?.ToByteArray() ?? []); Bytes(state.ObservedElectrical?.ToByteArray() ?? []);
+        foreach (var library in state.KnowledgeLibraries) Text(ComponentKnowledgeXml.WriteLibrary(library));
+        foreach (var entry in history.OrderBy(h => h.Receipt.OperationId)) Text(JsonSerializer.Serialize(new { entry.Receipt, entry.Latest }));
+        return Convert.ToHexStringLower(digest.GetHashAndReset());
     }
 
     private static SchematicNativeRestorationResult Build(DesignRecoveryState state, SchematicOwnershipHistory history, CancellationToken token)

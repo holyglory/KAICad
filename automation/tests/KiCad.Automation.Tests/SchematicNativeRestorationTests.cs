@@ -126,29 +126,7 @@ public sealed class SchematicNativeRestorationTests
     public async Task ConflictingVerifiedMappingsAndFutureHistoryAreExplicitFailures()
     {
         using var fixture = new Fixture(newerInstructions: true);
-        var old = fixture.Original.Baseline; Guid former = old.Engineering.Circuit.Components[0].Id, replacement = Guid.NewGuid();
-        Guid Map(Guid id) => id == former ? replacement : id;
-        var alternative = old with { Engineering = old.Engineering with
-        {
-            Circuit = old.Engineering.Circuit with
-            {
-                Components = old.Engineering.Circuit.Components.Select(c => c with { Id = Map(c.Id) }).ToArray(),
-                Symbols = old.Engineering.Circuit.Symbols.Select(s => s with { ComponentId = Map(s.ComponentId) }).ToArray(),
-                Nets = old.Engineering.Circuit.Nets.Select(n => n with { Pins = n.Pins.Select(p => p with { ComponentId = Map(p.ComponentId) }).ToArray() }).ToArray()
-            },
-            ComponentBindings = old.Engineering.ComponentBindings.Select(b => b with { ComponentInstanceId = Map(b.ComponentInstanceId) }).ToArray(),
-            Structure = old.Engineering.Structure with
-            {
-                Blocks = old.Engineering.Structure.Blocks.Select(b => b with { ComponentIds = b.ComponentIds.Select(Map).ToArray() }).ToArray(),
-                Statements = old.Engineering.Structure.Statements.Select(s => s with { TargetId = Map(s.TargetId),
-                    Connection = s.Connection is not { } c ? null : c with
-                    { First = c.First with { ComponentId = Map(c.First.ComponentId) }, Second = c.Second with { ComponentId = Map(c.Second.ComponentId) } } }).ToArray()
-            }
-        } };
-        Guid id = Guid.NewGuid(); byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(alternative, fixture.Saved.State.KnowledgeLibraries));
-        var receipt = fixture.Receipt with { OperationId = id, PreviousXmlPath = fixture.Receipt.DesignPath + ".sync-" + id.ToString("N"), PreviousXmlSha256 = Hash(bytes) };
-        File.WriteAllBytes(receipt.PreviousXmlPath, bytes);
-        new DesignSynchronizationReceipts(fixture.Store.StatePath).Archive(receipt);
+        fixture.AddAlternativeMapping();
         var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(fixture.Store, fixture.Saved);
         Assert.IsFalse(plan.CanPrepare); Assert.AreEqual("ambiguous_native_ownership_history", plan.ErrorCode);
         Assert.IsNull(plan.Candidate); Assert.IsEmpty(plan.NativeOperations);
@@ -184,7 +162,7 @@ public sealed class SchematicNativeRestorationTests
 
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly string directory = Directory.CreateTempSubdirectory("native-owner-history-").FullName;
         internal DesignRecoveryState Original { get; }
@@ -229,6 +207,34 @@ public sealed class SchematicNativeRestorationTests
                 Observed = observed.Hierarchy.Data.Clone(), ObservedElectrical = observed, NativeRevision = new(epoch, observed.Hierarchy.Revision.Sequence),
                 LastSynchronization = latest }, null);
         }
+        internal DesignSynchronizationReceipt AddAlternativeMapping()
+        {
+            var old = Original.Baseline; Guid former = old.Engineering.Circuit.Components[0].Id, replacement = Guid.NewGuid();
+            Guid Map(Guid id) => id == former ? replacement : id;
+            var alternative = old with { Engineering = old.Engineering with
+            {
+                Circuit = old.Engineering.Circuit with
+                {
+                    Components = old.Engineering.Circuit.Components.Select(c => c with { Id = Map(c.Id) }).ToArray(),
+                    Symbols = old.Engineering.Circuit.Symbols.Select(s => s with { ComponentId = Map(s.ComponentId) }).ToArray(),
+                    Nets = old.Engineering.Circuit.Nets.Select(n => n with { Pins = n.Pins.Select(p => p with { ComponentId = Map(p.ComponentId) }).ToArray() }).ToArray()
+                },
+                ComponentBindings = old.Engineering.ComponentBindings.Select(b => b with { ComponentInstanceId = Map(b.ComponentInstanceId) }).ToArray(),
+                Structure = old.Engineering.Structure with
+                {
+                    Blocks = old.Engineering.Structure.Blocks.Select(b => b with { ComponentIds = b.ComponentIds.Select(Map).ToArray() }).ToArray(),
+                    Statements = old.Engineering.Structure.Statements.Select(s => s with { TargetId = Map(s.TargetId),
+                        Connection = s.Connection is not { } c ? null : c with
+                        { First = c.First with { ComponentId = Map(c.First.ComponentId) }, Second = c.Second with { ComponentId = Map(c.Second.ComponentId) } } }).ToArray()
+                }
+            } };
+            Guid id = Guid.NewGuid(); byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(alternative, Saved.State.KnowledgeLibraries));
+            var receipt = Receipt with { OperationId = id, PreviousXmlPath = Receipt.DesignPath + ".sync-" + id.ToString("N"), PreviousXmlSha256 = Hash(bytes) };
+            File.WriteAllBytes(receipt.PreviousXmlPath, bytes);
+            new DesignSynchronizationReceipts(Store.StatePath).Archive(receipt);
+            return receipt;
+        }
+
         public void Dispose() => Directory.Delete(directory, true);
     }
 }

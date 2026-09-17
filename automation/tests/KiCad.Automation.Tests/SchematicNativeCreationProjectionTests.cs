@@ -103,7 +103,7 @@ public sealed class SchematicNativeCreationProjectionTests
         };
     }
 
-    private static (SchematicDesign Design, ComponentKnowledgeLibrary Library) Fixture()
+    internal static (SchematicDesign Design, ComponentKnowledgeLibrary Library) Fixture()
     {
         var (design, library, _) = SchematicElectricalComparisonTests.Fixture();
         foreach (var screen in design.Schematic.Instances)

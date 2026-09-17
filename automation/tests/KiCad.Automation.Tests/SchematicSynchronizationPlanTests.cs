@@ -11,7 +11,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace KiCad.Automation.Tests;
 
 [TestClass]
-public sealed class SchematicSynchronizationPlanTests
+public sealed partial class SchematicSynchronizationPlanTests
 {
     internal static DesignRecoveryState Fixture()
     {

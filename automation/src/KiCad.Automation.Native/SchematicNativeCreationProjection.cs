@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
@@ -19,6 +20,42 @@ internal sealed record SchematicNativeCreationResult(SchematicDesign Candidate,
 /// </summary>
 internal static class SchematicNativeCreationProjection
 {
+    internal static bool IsSupportedAddition(SchematicDesign baseline, EngineeringDesign desired)
+    {
+        var oldCircuit = baseline.Engineering.Circuit;
+        var newCircuit = desired.Circuit;
+        var oldComponents = oldCircuit.Components.ToDictionary(c => c.Id);
+        var newComponents = newCircuit.Components.ToDictionary(c => c.Id);
+        bool added = newComponents.Keys.Except(oldComponents.Keys).Any();
+        bool removed = oldComponents.Keys.Except(newComponents.Keys).Any();
+        return added && !removed
+            && oldCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart)
+                .SequenceEqual(newCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart))
+            && oldCircuit.SheetInstances.OrderBy(instance => instance.Id).SequenceEqual(newCircuit.SheetInstances.OrderBy(instance => instance.Id))
+            && oldCircuit.Nets.OrderBy(net => net.Id).Select(NormalizeNet)
+                .SequenceEqual(newCircuit.Nets.OrderBy(net => net.Id).Select(NormalizeNet))
+            && oldCircuit.Components.All(c => newComponents.TryGetValue(c.Id, out var current) && c.Equals(current))
+            && oldCircuit.Symbols.All(s => newCircuit.Symbols.Any(current => current.Id == s.Id && current.Equals(s)))
+            && oldCircuit.Sheets.All(sheet => newCircuit.Sheets.SingleOrDefault(current => current.Id == sheet.Id) is { } current
+                && sheet.Components.All(component => current.Components.Any(next => next.Id == component.Id && next.Equals(component))));
+
+        static string NormalizeNet(CircuitNet net) => JsonSerializer.Serialize(new
+        {
+            net.Id,
+            net.Name,
+            Pins = net.Pins.OrderBy(pin => pin.ComponentId).ThenBy(pin => pin.Pin, StringComparer.Ordinal).ToArray()
+        });
+
+        static string NormalizePart(PartDefinition part) => JsonSerializer.Serialize(new
+        {
+            part.Id,
+            part.Name,
+            part.Units,
+            Pins = part.Pins.OrderBy(pin => pin.Number, StringComparer.Ordinal)
+                .ThenBy(pin => pin.Unit).Select(pin => new { pin.Number, pin.Name, pin.Unit }).ToArray()
+        });
+    }
+
     internal static SchematicNativeCreationResult Project(SchematicDesign baseline, EngineeringDesign desired,
         IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
     {
@@ -34,9 +71,9 @@ internal static class SchematicNativeCreationProjection
         var oldParts = oldCircuit.Parts.ToDictionary(p => p.Id);
         var newParts = newCircuit.Parts.ToDictionary(p => p.Id);
         if (!oldParts.Keys.ToHashSet().SetEquals(newParts.Keys)
-            || oldParts.Any(pair => !pair.Value.Equals(newParts[pair.Key])))
+            || oldParts.Any(pair => !SamePart(pair.Value, newParts[pair.Key])))
             throw Invalid("new_part_requires_library_definition", "Creating a new part requires an explicit native library definition.");
-        if (!oldCircuit.SheetInstances.SequenceEqual(newCircuit.SheetInstances)
+        if (!oldCircuit.SheetInstances.OrderBy(instance => instance.Id).SequenceEqual(newCircuit.SheetInstances.OrderBy(instance => instance.Id))
             || !oldCircuit.Sheets.Select(s => s.Id).ToHashSet().SetEquals(newCircuit.Sheets.Select(s => s.Id)))
             throw Invalid("sheet_ownership_change_requires_resolution", "Sheet insertion, removal or reparenting requires explicit ownership reconciliation.");
 
@@ -311,5 +348,9 @@ internal static class SchematicNativeCreationProjection
     }
 
     private static string Path(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(p => p.Value));
+    private static bool SamePart(PartDefinition left, PartDefinition right) => left.Id == right.Id
+        && left.Name == right.Name && left.Units == right.Units
+        && left.Pins.OrderBy(pin => pin.Number, StringComparer.Ordinal).ThenBy(pin => pin.Unit)
+            .SequenceEqual(right.Pins.OrderBy(pin => pin.Number, StringComparer.Ordinal).ThenBy(pin => pin.Unit));
     private static AutomationException Invalid(string code, string message) => new(code, message);
 }

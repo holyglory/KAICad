@@ -78,6 +78,8 @@ public static class SchematicSynchronizationPlanner
                 ? SchematicHierarchyMerge.Resolve(state.Baseline.Schematic, desired.Schematic, state.Observed,
                     choices.SnapshotToken, choices.Choices, token)
                 : SchematicHierarchyMerge.Plan(state.Baseline.Schematic, desired.Schematic, state.Observed, token);
+            if (SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering))
+                return PrepareCreation(state, desired, hierarchy, gaps, token);
             electrical = SchematicNetReconciliation.Plan(state, history, token);
             gaps.AddRange(hierarchy.CoverageGaps); gaps.AddRange(electrical.CoverageGaps);
             // Retain both independent diagnostics. Neither successful half is a full design.
@@ -156,6 +158,33 @@ public static class SchematicSynchronizationPlanner
                 operations.Length != 0 || !connectivity.ConnectivityEquivalent, NativeLayoutResolutionRequired: moves.Count != 0);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
+
+        SchematicSynchronizationPlan PrepareCreation(DesignRecoveryState current, SchematicDesign desiredDesign,
+            SchematicHierarchyMergeResult mergedHierarchy, List<HierarchyCoverageGap> currentGaps, CancellationToken cancellation)
+        {
+            currentGaps.AddRange(mergedHierarchy.CoverageGaps);
+            if (!mergedHierarchy.CanApply || mergedHierarchy.Merged is null)
+                return Failure(mergedHierarchy.ErrorCode ?? "design_sync_conflict",
+                    mergedHierarchy.ErrorMessage ?? "Resolve the reported hierarchy conflict before creating a component.");
+            if (SchematicHierarchyDelta.Plan(current.Baseline.Schematic, mergedHierarchy.Merged, cancellation).Count != 0)
+                return Failure("creation_requires_stable_native_hierarchy",
+                    "XML component creation cannot overwrite concurrent native hierarchy or layout edits.");
+            var creation = SchematicNativeCreationProjection.Project(current.Baseline, desiredDesign.Engineering,
+                current.KnowledgeLibraries, cancellation);
+            var bindings = SchematicDesignBindings.Inspect(creation.Candidate, current.KnowledgeLibraries, cancellation);
+            currentGaps.AddRange(bindings.CoverageGaps);
+            if (!bindings.IdentitiesResolved)
+                return Failure("created_binding_invalid", "The generated native identities do not resolve exactly.", bindings.Issues);
+            string xml = SchematicDesignXml.Write(creation.Candidate, current.KnowledgeLibraries);
+            var decoded = SchematicDesignXml.Read(xml, current.KnowledgeLibraries);
+            if (SchematicDesignXml.Write(decoded, current.KnowledgeLibraries) != xml)
+                return Failure("inconsistent_design_serialization", "The created candidate must round-trip without information loss.");
+            var operations = SchematicHierarchyDelta.Plan(current.Observed, creation.Candidate.Schematic, cancellation).ToArray();
+            var electricalResult = new SchematicNetReconciliationResult(creation.Candidate.Engineering, [], [], [], []);
+            return new(creation.Candidate, xml, operations.Select(operation => operation.Clone()).ToArray(),
+                mergedHierarchy, electricalResult, null, [], [], null, currentGaps.Distinct().ToArray(),
+                true);
+        }
 
         SchematicSynchronizationPlan Failure(string code, string? message,
             IReadOnlyList<SchematicBindingIssue>? bindings = null, IReadOnlyList<SchematicBindingDifference>? differences = null) =>

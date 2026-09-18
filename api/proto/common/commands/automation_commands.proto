@@ -408,6 +408,32 @@ message SchematicViewSet {
 
 // Native current-sheet geometry facts for presentation checks. These do not
 // imply independent rendering, full glyph/clip coverage or safe edit admission.
+// Read-only measurement of detached symbol proposals and existing obstacles.
+// Never inserts items or navigates the human editor to measure another sheet.
+message MeasureSchematicPlacement {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision expected_revision = 2;
+  repeated kiapi.schematic.types.SchematicSymbolInstance candidates = 3;
+  uint32 schema_version = 4;
+}
+
+message SchematicPlacementGeometry {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  kiapi.common.types.KIID screen_id = 3;
+  kiapi.common.types.Box2 page_bounds = 4;
+  repeated SchematicPlacementBounds obstacles = 5;
+  repeated SchematicPlacementBounds candidates = 6;
+  // Bounding envelopes are conservative. They are not a readability pass.
+  repeated string limitations = 7;
+}
+
+message SchematicPlacementBounds {
+  kiapi.common.types.KIID id = 1;
+  kiapi.common.types.Vector2 anchor = 2;
+  kiapi.common.types.Box2 bounds = 3;
+}
+
 message ReadSchematicPresentationFacts {
   kiapi.common.types.DocumentSpecifier document = 1;
 }

@@ -99,33 +99,23 @@ tier = "development"
 requires = ["sign-arm64", "sign-intel"]
 command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-mac-8e8.json"]
 
-[test.stage-arm64-c265]
-timeout_seconds = 1800
-env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+[test.retained-field-layout-diagnosis]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_FIELD_LAYOUT_DIAGNOSTIC_EVIDENCE = "/mnt/build-storage/codex/kicad/evidence/field-layout-2c7551/native-xml-component-creation-evidence" }
 
-[[test.stage-arm64-c265.check]]
+[[test.retained-field-layout-diagnosis.check]]
 name = "build"
 tier = "development"
 role = "preflight"
-invalidates = ["import", "sign", "feeds"]
-command = ["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
+invalidates = ["compare"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.stage-arm64-c265.check]]
-name = "import"
+[[test.retained-field-layout-diagnosis.check]]
+name = "compare"
 tier = "development"
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35044945459-arm64-c265/kicad-delivery", "--commit", "c26503fdc350abf63e4d2588955ccdc2690d682e", "--platform", "osx-arm64", "--run-id", "35044945459", "--version", "preview-20260916-c26503fdc350", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-a519-signed-000007", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=RetainedFieldLayoutDiagnosis", "--logger", "console;verbosity=normal", "--logger", "trx", "--results-directory", "automation/artifacts/retained-field-layout-diagnosis"]
+retained_artifacts = [{ name = "field-layout-diagnosis", path = "automation/artifacts/retained-field-layout-diagnosis", max_bytes = 16777216 }]
 
-[[test.stage-arm64-c265.check]]
-name = "sign"
-tier = "development"
-requires = ["import"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-osx-arm64-000010.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-preview10.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-a519-signed-000007/updates/platforms/osx-arm64/preview.json"]
-
-[[test.stage-arm64-c265.check]]
-name = "feeds"
-tier = "development"
-requires = ["sign"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-arm64-000010.json"]
 
 [test.mac-8e8-public]
 timeout_seconds = 1800
@@ -2088,7 +2078,7 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--configurati
 [[test.initial-schematic-layout.check]]
 name = "contracts"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~PresentationVerificationTests", "--logger", "trx", "--results-directory", "automation/artifacts/initial-schematic-layout"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~PresentationVerificationTests", "--logger", "trx", "--results-directory", "automation/artifacts/initial-schematic-layout"]
 retained_artifacts = [{ name = "initial-schematic-layout", path = "automation/artifacts/initial-schematic-layout", max_bytes = 16777216 }]
 
 [test.automatic-sync-model]
@@ -3710,7 +3700,7 @@ name = "input-contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
 retained_artifacts = [{ name = "component-creation-input-contracts", path = "automation/artifacts/component-creation-input-contracts", max_bytes = 16777216 }]
 
 [[test.native-xml-component-creation.check]]

@@ -3618,6 +3618,65 @@ requires = ["native-build"]
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSymbolSheetOwnership", "--logger", "trx", "--results-directory", "automation/artifacts/native-symbol-sheet-ownership-tests"]
 retained_artifacts = [{ name = "native-symbol-sheet-ownership-tests", path = "automation/artifacts/native-symbol-sheet-ownership-tests", max_bytes = 16777216 }, { name = "native-symbol-sheet-ownership-evidence", path = "automation/artifacts/native-symbol-sheet-ownership/native-session-current", max_bytes = 33554432 }]
 
+[test.native-xml-component-creation]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-xml-component-creation.check]]
+name = "connected-tool-contracts"
+tier = "development"
+role = "preflight"
+requires = ["managed-build"]
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~ConnectedMoveToolTests", "--logger", "trx", "--results-directory", "automation/artifacts/connected-tool-contracts"]
+retained_artifacts = [{ name = "connected-tool-contracts", path = "automation/artifacts/connected-tool-contracts", max_bytes = 16777216 }]
+
+[[test.native-xml-component-creation.check]]
+name = "managed-build"
+tier = "development"
+role = "preflight"
+invalidates = ["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-xml-component-creation.check]]
+name = "input-contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
+retained_artifacts = [{ name = "component-creation-input-contracts", path = "automation/artifacts/component-creation-input-contracts", max_bytes = 16777216 }]
+
+[[test.native-xml-component-creation.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["model-build", "codec", "native-build", "rendered"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-xml-component-creation.check]]
+name = "model-build"
+tier = "development"
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_common", "qa_symbol_graphic_identity"]
+
+[[test.native-xml-component-creation.check]]
+name = "codec"
+tier = "development"
+requires = ["model-build"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$|^qa_undo_geometry_policy$|^qa_automation_wire_rollback$", "--output-on-failure", "--no-tests=error"]
+
+[[test.native-xml-component-creation.check]]
+name = "native-build"
+tier = "development"
+requires = ["codec"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-xml-component-creation.check]]
+name = "rendered"
+tier = "development"
+requires = ["native-build"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlComponentCreation", "--logger", "trx", "--results-directory", "automation/artifacts/native-xml-component-creation-tests"]
+retained_artifacts = [{ name = "native-xml-component-creation-tests", path = "automation/artifacts/native-xml-component-creation-tests", max_bytes = 16777216 }, { name = "native-xml-component-creation-evidence", path = "automation/artifacts/native-xml-component-creation/native-session-current", max_bytes = 33554432 }]
+
 [test.native-transform-sync]
 timeout_seconds = 3600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

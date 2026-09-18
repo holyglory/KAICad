@@ -162,13 +162,23 @@ public static class SchematicSynchronizationPlanner
         SchematicSynchronizationPlan PrepareCreation(DesignRecoveryState current, SchematicDesign desiredDesign,
             SchematicHierarchyMergeResult mergedHierarchy, List<HierarchyCoverageGap> currentGaps, CancellationToken cancellation)
         {
+            var checkpoints = SchematicElectricalCheckpoints.Require(current);
             currentGaps.AddRange(mergedHierarchy.CoverageGaps);
             if (!mergedHierarchy.CanApply || mergedHierarchy.Merged is null)
                 return Failure(mergedHierarchy.ErrorCode ?? "design_sync_conflict",
                     mergedHierarchy.ErrorMessage ?? "Resolve the reported hierarchy conflict before creating a component.");
-            if (SchematicHierarchyDelta.Plan(current.Baseline.Schematic, mergedHierarchy.Merged, cancellation).Count != 0)
+            if (SchematicNetReconciliation.Bindings(current.Baseline) != SchematicNetReconciliation.Bindings(desiredDesign))
+                return Failure("creation_bindings_changed", "Preserve existing bindings until new symbol identities have been prepared.");
+            if (SchematicHierarchyDelta.Plan(current.Baseline.Schematic, current.Observed, cancellation).Count != 0
+                || SchematicHierarchyDelta.Plan(current.Baseline.Schematic, desiredDesign.Schematic, cancellation).Count != 0)
                 return Failure("creation_requires_stable_native_hierarchy",
                     "XML component creation cannot overwrite concurrent native hierarchy or layout edits.");
+            var before = SchematicElectricalComparison.Compare(current.Baseline, checkpoints.Baseline, current.KnowledgeLibraries, cancellation);
+            if (!before.PinBindingsComplete || !before.ConnectivityEquivalent)
+                return Failure("unaligned_electrical_baseline", "The saved baseline must agree with its native pin partition.");
+            var observed = SchematicElectricalComparison.Compare(current.Baseline, checkpoints.Observed, current.KnowledgeLibraries, cancellation);
+            if (!observed.PinBindingsComplete || !observed.ConnectivityEquivalent)
+                return Failure("creation_requires_stable_connectivity", "Reconcile current native connectivity before creating components.");
             var creation = SchematicNativeCreationProjection.Project(current.Baseline, desiredDesign.Engineering,
                 current.KnowledgeLibraries, cancellation);
             var bindings = SchematicDesignBindings.Inspect(creation.Candidate, current.KnowledgeLibraries, cancellation);
@@ -180,9 +190,8 @@ public static class SchematicSynchronizationPlanner
             if (SchematicDesignXml.Write(decoded, current.KnowledgeLibraries) != xml)
                 return Failure("inconsistent_design_serialization", "The created candidate must round-trip without information loss.");
             var operations = SchematicHierarchyDelta.Plan(current.Observed, creation.Candidate.Schematic, cancellation).ToArray();
-            var electricalResult = new SchematicNetReconciliationResult(creation.Candidate.Engineering, [], [], [], []);
             return new(creation.Candidate, xml, operations.Select(operation => operation.Clone()).ToArray(),
-                mergedHierarchy, electricalResult, null, [], [], null, currentGaps.Distinct().ToArray(),
+                mergedHierarchy, null, null, [], [], null, currentGaps.Distinct().ToArray(),
                 true);
         }
 

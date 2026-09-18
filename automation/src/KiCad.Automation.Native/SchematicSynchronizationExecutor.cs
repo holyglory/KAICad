@@ -289,10 +289,21 @@ internal static class SchematicSynchronizationExecutor
             throw Error("native_sync_connectivity_mismatch", "The native pin connections do not match the candidate; no XML is published.");
     }
 
-    private static bool Equivalent(SchematicDesign a, SchematicDesign b, DesignRecoveryState state, CancellationToken token) =>
-        SchematicHierarchyDelta.Plan(a.Schematic, b.Schematic, token).Count == 0
-        && SchematicDesignXml.Write(a with { Schematic = b.Schematic }, state.KnowledgeLibraries)
-            == SchematicDesignXml.Write(b, state.KnowledgeLibraries);
+    internal static bool Equivalent(SchematicDesign a, SchematicDesign b, DesignRecoveryState state, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        // Reloading a file saved by the pinned writer changes loaded-format
+        // provenance. It needs XML publication, not a native metadata mutation.
+        // The planner has already validated both formats. Do not swallow other
+        // unsupported deltas or compare only the engineering half of a design.
+        if (a.Schematic.Instances.Any(before => b.Schematic.Instances.FirstOrDefault(after =>
+                Equals(before.Metadata.Document, after.Metadata.Document)) is { } after
+            && before.Metadata.LoadedNativeFormatVersion != after.Metadata.LoadedNativeFormatVersion))
+            return false;
+        return SchematicHierarchyDelta.Plan(a.Schematic, b.Schematic, token).Count == 0
+            && SchematicDesignXml.Write(a with { Schematic = b.Schematic }, state.KnowledgeLibraries)
+                == SchematicDesignXml.Write(b, state.KnowledgeLibraries);
+    }
 
     private static StoredDesignRecovery Read(DesignRecoveryStore store, string expected)
     {

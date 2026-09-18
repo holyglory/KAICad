@@ -639,6 +639,45 @@ harness; it does not replace helpers inside either signed application package.
 
 ## Current source boundary
 
+### Automatic component creation and reattachment (Linux source qualification)
+
+The initialized design recovery workflow can now create unconnected components
+whose exact part/unit definitions already exist in the schematic. Supply new
+component definitions, component instances and symbol occurrences with placement
+in the engineering section of `design.xml`; retain the existing native snapshot
+and bindings. The planner generates deterministic symbol and placed-pin IDs,
+copies the required library cache to target sheets, and keeps repeated-sheet
+instances on one physical drawing. Existing circuit, sheet and binding changes
+must be reconciled separately. New libraries, connected additions and missing
+coordinates still require their unfinished definition, wiring and layout workflows.
+
+For an explicitly attached instance and initialized recovery record, use
+`kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,
+expectedRecoveryRevision)`. Its returned session is inspected through `_list`,
+waited on with `_wait` and stopped with `_stop`; `_resume` requires the current
+paused sequence. File notifications and native commit events drive supported
+application. Stopping the service leaves KiCad running and preserves dirty work.
+
+Reloading a document changes its native epoch. Ordinary recovery refresh refuses
+that change. Stop the old sync session, read the new epoch using
+`kicad_schematic_checked_state`, then call
+`kicad_design_recovery_reattach(instanceId, recoveryPath, expectedRevisionToken,
+expectedDocumentEpoch)`. This records a fresh observation without editing KiCad,
+writing XML or advancing the synchronized baseline. Pending old-session actions
+must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
+then start automatic synchronization with the returned recovery token.
+
+Run `devcoordinator2 test start . --test native-xml-component-creation --tier
+development --client codex` for the two-editor Linux journey. It checks XML-driven
+root/repeated-sheet creation, unchanged connectivity, exact retry, cancellation,
+stale-request rejection, service termination after native commit, automatic
+file-event creation, keyboard undo/redo, save/reload and public MCP reattachment.
+This is source qualification, not a claim that existing downloads contain these
+changes, that layouts are human-reviewed, or that Mac/Windows/Codex Desktop are
+qualified. General creation remains open in outcome `pd983fe2bff600f07`.
+
+### Engineering model and existing source capabilities
+
 The compiled C# service uses the official MCP SDK over STDIO and generated KiCad
 protobuf messages over a native NNG binding. It provides explicit session start,
 attach, reattach, inspection, root-schematic opening and open-document queries.

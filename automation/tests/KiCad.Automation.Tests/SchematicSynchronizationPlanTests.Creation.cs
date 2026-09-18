@@ -9,8 +9,9 @@ public sealed partial class SchematicSynchronizationPlanTests
     [TestMethod]
     public void CreationOnlyXmlUsesExactNativeCreationOperationsAndDefersElectricalValidation()
     {
-        var (baseline, library) = SchematicNativeCreationProjectionTests.Fixture();
-        CompleteSharedRecords(baseline.Schematic);
+        var recovery = Fixture();
+        var baseline = recovery.Baseline;
+        var library = recovery.KnowledgeLibraries.Single();
         var source = baseline.Engineering.Circuit.Components[0];
         var sourceDefinition = baseline.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
             .Single(c => c.Id == source.DefinitionId);
@@ -36,17 +37,8 @@ public sealed partial class SchematicSynchronizationPlanTests
         };
         var desired = baseline with { Engineering = engineering };
         Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(baseline, engineering), "creation-shape predicate rejected the fixture");
-        var recovery = SchematicSynchronizationPlanTests.Fixture();
-        var baselineElectrical = recovery.BaselineElectrical!.Clone();
-        baselineElectrical.Hierarchy.Data = baseline.Schematic.Clone();
-        var observedElectrical = baselineElectrical.Clone();
         var recoveryWithCreation = recovery with
         {
-            Baseline = baseline,
-            Observed = baseline.Schematic.Clone(),
-            KnowledgeLibraries = [library],
-            BaselineElectrical = baselineElectrical,
-            ObservedElectrical = observedElectrical,
             DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, [library]))
         };
         Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(recoveryWithCreation.Baseline,
@@ -59,6 +51,35 @@ public sealed partial class SchematicSynchronizationPlanTests
         Assert.AreEqual(symbols.Select(s => s.ComponentId).Distinct().Count(),
             plan.NativeOperations.Count(operation => operation.Create?.Is(Kiapi.Schematic.Types.SchematicSymbolInstance.Descriptor) == true));
         Assert.AreEqual(plan.CandidateXml, SchematicDesignXml.Write(SchematicDesignXml.Read(plan.CandidateXml!, [library]), [library]));
+        foreach (var invalid in new[]
+        {
+            recoveryWithCreation with { OriginId = Guid.Empty },
+            recoveryWithCreation with { InstanceId = Guid.Empty },
+            recoveryWithCreation with { BaselineElectrical = null },
+            recoveryWithCreation with { ObservedElectrical = null },
+            recoveryWithCreation with { NativeRevision = new("wrong-epoch", 1) },
+            recoveryWithCreation with { TrackingComplete = !recovery.TrackingComplete }
+        })
+        {
+            var rejected = SchematicSynchronizationPlanner.Plan(invalid);
+            Assert.IsFalse(rejected.CanPrepare); Assert.IsNull(rejected.CandidateXml);
+            Assert.IsEmpty(rejected.NativeOperations); Assert.IsNotNull(rejected.ErrorCode);
+        }
+        var foreignBaseline = recoveryWithCreation.BaselineElectrical!.Clone();
+        foreignBaseline.Nets.Clear();
+        Assert.AreEqual("unaligned_electrical_baseline", SchematicSynchronizationPlanner.Plan(
+            recoveryWithCreation with { BaselineElectrical = foreignBaseline }).ErrorCode);
+        var changedObservation = recoveryWithCreation.ObservedElectrical!.Clone();
+        changedObservation.Nets.Clear();
+        Assert.AreEqual("creation_requires_stable_connectivity", SchematicSynchronizationPlanner.Plan(
+            recoveryWithCreation with { ObservedElectrical = changedObservation }).ErrorCode);
+        var bindingChange = desired with { SymbolBindings = desired.SymbolBindings.Select((b, i) => i == 0
+            ? b with { NativeObjectId = Guid.NewGuid() } : b).ToArray() };
+        Assert.AreEqual("creation_bindings_changed", SchematicSynchronizationPlanner.Plan(recoveryWithCreation with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(bindingChange, [library])) }).ErrorCode);
+        var wrongCircuit = desired with { Engineering = engineering with { Circuit = engineering.Circuit with { Id = Guid.NewGuid() } } };
+        Assert.IsFalse(SchematicSynchronizationPlanner.Plan(recoveryWithCreation with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(wrongCircuit, [library])) }).CanPrepare);
     }
 
 }

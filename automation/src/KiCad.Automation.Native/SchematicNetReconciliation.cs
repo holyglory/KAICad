@@ -34,19 +34,7 @@ public static class SchematicNetReconciliation
         token.ThrowIfCancellationRequested();
         try
         {
-            if (state.OriginId == Guid.Empty || state.InstanceId == Guid.Empty)
-                throw Failure("invalid_electrical_recovery", "An exact recovery origin and instance are required.");
-            if (state.HasPendingWork) throw Failure("pending_recovery_requires_reconciliation", "Reconcile the exact pending operation first.");
-            var baseline = state.BaselineElectrical ?? throw Failure("missing_electrical_baseline", "Initialize the matched electrical baseline first.");
-            var observed = state.ObservedElectrical ?? throw Failure("missing_electrical_observation", "Capture current matching electrical state first.");
-            if (!Equals(baseline.Hierarchy?.Data, state.Baseline.Schematic) || !Equals(observed.Hierarchy?.Data, state.Observed)
-                || observed.Hierarchy?.Revision?.Epoch != state.NativeRevision.Epoch
-                || observed.Hierarchy.Revision.Sequence != state.NativeRevision.Sequence
-                || observed.Hierarchy.TrackingComplete != state.TrackingComplete)
-                throw Failure("invalid_electrical_recovery", "Electrical checkpoints must match their exact recovery owners and revisions.");
-            if (baseline.Hierarchy.Revision.Epoch == state.NativeRevision.Epoch
-                && baseline.Hierarchy.Revision.Sequence > state.NativeRevision.Sequence)
-                throw Failure("invalid_electrical_recovery", "The baseline cannot follow the current observation.");
+            var (baseline, observed) = SchematicElectricalCheckpoints.Require(state);
             var desiredDocument = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(state.DesiredFileBytes), state.KnowledgeLibraries);
             var desired = desiredDocument.Engineering;
             if (Topology(state.Baseline.Engineering.Circuit) != Topology(desired.Circuit)

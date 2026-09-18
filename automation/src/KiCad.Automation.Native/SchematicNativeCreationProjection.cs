@@ -28,7 +28,7 @@ internal static class SchematicNativeCreationProjection
         var newComponents = newCircuit.Components.ToDictionary(c => c.Id);
         bool added = newComponents.Keys.Except(oldComponents.Keys).Any();
         bool removed = oldComponents.Keys.Except(newComponents.Keys).Any();
-        return added && !removed
+        return added && !removed && oldCircuit.Id == newCircuit.Id
             && oldCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart)
                 .SequenceEqual(newCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart))
             && oldCircuit.SheetInstances.OrderBy(instance => instance.Id).SequenceEqual(newCircuit.SheetInstances.OrderBy(instance => instance.Id))
@@ -147,7 +147,7 @@ internal static class SchematicNativeCreationProjection
             string path = existingPaths[occurrence.EffectiveSheetInstanceId(component)];
             string physicalScreen = screens[path].Metadata.ScreenId.Value;
             return (PhysicalScreen: physicalScreen, Definition: definition.Id, Unit: occurrence.Unit);
-        }).ToArray();
+        }).OrderBy(g => g.Key.PhysicalScreen, StringComparer.Ordinal).ThenBy(g => g.Key.Definition).ThenBy(g => g.Key.Unit).ToArray();
         foreach (var group in groupedSymbols)
         {
             token.ThrowIfCancellationRequested();
@@ -174,13 +174,14 @@ internal static class SchematicNativeCreationProjection
                 if (!existingPaths.TryGetValue(sheetInstance, out var path) || !screens.TryGetValue(path, out var target))
                     throw Invalid("missing_native_sheet", "A created symbol must target a bound existing sheet instance.");
                 var symbol = CreateSymbol(template.Symbol, target, occurrence, component, definition.Value, part, nativeIds, nativeId, token);
+                CopyLibraryCache(screens[template.Path], target, template.Symbol);
                 target.Items.Add(Any.Pack(symbol));
                 createdSymbols.Add(symbol); targetScreens.Add(target);
                 bindings.Add(new(occurrence.Id, Guid.Parse(symbol.Id.Value)));
                 created.Add(occurrence.Id);
             }
             var records = new SymbolSheetRecords();
-            foreach (var occurrence in occurrences)
+            foreach (var occurrence in occurrences.OrderBy(s => existingPaths[s.EffectiveSheetInstanceId(newComponents[s.ComponentId])], StringComparer.Ordinal))
             {
                 var component = newComponents[occurrence.ComponentId];
                 var path = existingPaths[occurrence.EffectiveSheetInstanceId(component)];
@@ -219,7 +220,7 @@ internal static class SchematicNativeCreationProjection
         IReadOnlyDictionary<Guid, string> paths, CancellationToken token)
     {
         var candidates = new List<(SchematicSymbolInstance Symbol, string Path)>();
-        foreach (var existing in circuit.Symbols.Where(s => s.Unit == wanted.Unit))
+        foreach (var existing in circuit.Symbols.Where(s => s.Unit == wanted.Unit).OrderBy(s => s.Id))
         {
             token.ThrowIfCancellationRequested();
             var owner = components[existing.ComponentId];
@@ -294,7 +295,7 @@ internal static class SchematicNativeCreationProjection
         {
             token.ThrowIfCancellationRequested();
             var pin = child.Item.Unpack<SchematicPin>();
-            if (pin.Id is not null)
+            if (pin.LibraryPinId is not null)
                 pin.Id = new() { Value = StablePinId(nativeId, pin.LibraryPinId?.Value, pin.Number, pinOrdinal++) };
             child.Item = Any.Pack(pin);
         }
@@ -321,7 +322,9 @@ internal static class SchematicNativeCreationProjection
         var result = definition.Clone();
         foreach (var child in result.Items.Where(c => c.Item?.Is(SchematicPin.Descriptor) == true))
         {
-            var pin = child.Item.Unpack<SchematicPin>(); pin.Id = null; child.Item = Any.Pack(pin);
+            var pin = child.Item.Unpack<SchematicPin>();
+            if (pin.LibraryPinId is not null) pin.Id = null;
+            child.Item = Any.Pack(pin);
         }
         return result;
     }
@@ -330,6 +333,19 @@ internal static class SchematicNativeCreationProjection
     {
         symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField
     }.Concat(symbol.UserFields).Where(field => field is not null)!;
+
+    private static void CopyLibraryCache(SchematicScreenData source, SchematicScreenData target, SchematicSymbolInstance symbol)
+    {
+        var library = symbol.LibraryId ?? symbol.Definition.Id;
+        string key = symbol.LibName.Length != 0 ? symbol.LibName : library is null ? ""
+            : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
+        var entry = source.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
+        if (entry is null) return; // Legacy, explicitly incomplete DTOs remain inspectable, not live proof.
+        var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
+        if (existing is not null && !existing.Equals(entry))
+            throw Invalid("created_symbol_cache_conflict", "The target screen has a different definition for the selected library key.");
+        if (existing is null) target.CachedSymbols.Add(entry.Clone());
+    }
 
     private static string StablePhysicalId(string physicalScreen, Guid definition, int unit)
     {

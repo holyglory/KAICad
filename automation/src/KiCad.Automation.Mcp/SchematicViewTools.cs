@@ -71,6 +71,28 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         return new CallToolResult { Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
     });
 
+    [McpServerTool(Name = "kicad_design_recovery_reattach"),
+     Description("Explicitly adopt a checked native observation after reloading a schematic. Requires the exact saved instance, absolute recovery path, current recovery token and newly observed document epoch. Rejects pending old-session operations, wrong documents and concurrent writes. Preserves desired XML, baseline, libraries and historical receipts; invalidates old conflict choices. Does not edit or save KiCad, write XML, or resolve intervening edits. Inspect the synchronization plan before restarting automatic synchronization.")]
+    public Task<CallToolResult> ReattachRecovery(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string expectedDocumentEpoch, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Path.IsPathFullyQualified(recoveryPath))
+            throw new AutomationException("invalid_recovery_path", "Specify the absolute saved design recovery path.");
+        var store = new DesignRecoveryStore(recoveryPath);
+        var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
+        if (saved.State.InstanceId.ToString("D") != instanceId)
+            throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
+        var attached = await DesignRecoveryReattachment.ReattachAsync(store, registry.Client(instanceId),
+            expectedRevisionToken, expectedDocumentEpoch, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = attached.RevisionToken,
+            previousRevision = saved.State.NativeRevision, nativeRevision = attached.State.NativeRevision,
+            snapshotChanged = !Equals(saved.State.Observed, attached.State.Observed),
+            electricalSnapshotChanged = !Equals(saved.State.ObservedElectrical, attached.State.ObservedElectrical),
+            baselineAdvanced = false, designFileWritten = false, liveMutationAuthorized = false });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_design_recovery_observe", ReadOnly = true),
      Description("Observe a saved full-design recovery record against its explicitly attached KiCad instance. recoveryPath is an absolute DesignRecoveryStore file path; optional expectedRevisionToken rejects a changed recovery record. Verifies the exact pending command receipt, then reads the current native hierarchy with matching instance, root, epoch and non-regressing revision. Returns the original receipt separately from current state, which may include later edits or undo. Preserves invalid desired XML, baseline, pending operation and files. Does not resubmit edits, resolve conflicts, advance synchronization or imply full native coverage. The pending target (or saved root when none) must be readable by the native editor.")]
     public Task<CallToolResult> ObserveRecovery(string instanceId, string recoveryPath,

@@ -51,7 +51,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSymbolSheetOwnership")]
     public Task MultiUnitComponentsKeepOneIdentityAcrossNativeSheets() => RunNativeSessions(NativeJourney.SymbolSheets);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets }
+    [TestMethod, TestCategory("NativeXmlComponentCreation")]
+    public Task XmlComponentsAreCreatedAndRestoredThroughNativeHistory() => RunNativeSessions(NativeJourney.ComponentCreation);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -70,6 +73,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
+                NativeJourney.ComponentCreation => "native-xml-component-creation",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -362,6 +366,19 @@ public sealed partial class NativeSessionTests
                             synchronizationFailures.Add(error);
                             await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-offscreen-failure.txt"), error.ToString(), deadline.Token);
                             Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.ComponentCreation)
+                    {
+                        try
+                        {
+                            await VerifyXmlComponentCreation(client, opened.Document, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-creation-failure.txt"), error.ToString(), deadline.Token);
                         }
                     }
                     else if (journey == NativeJourney.SymbolSheets)

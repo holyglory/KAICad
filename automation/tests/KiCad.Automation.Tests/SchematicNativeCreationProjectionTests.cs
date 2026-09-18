@@ -38,6 +38,12 @@ public sealed class SchematicNativeCreationProjectionTests
         Assert.IsTrue(created.All(s => s.ValueField.Text.Text_ == "Created probe"));
         Assert.IsTrue(created.SelectMany(s => s.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
             .Select(c => c.Item.Unpack<SchematicPin>()).All(p => p.Id is not null && p.LibraryPinId is not null));
+        foreach (var symbol in created)
+        {
+            var paths = symbol.InstanceRecords.Records.Select(r => string.Join('/', r.Path.Select(p => p.Value))).ToArray();
+            CollectionAssert.AreEqual(paths.Order(StringComparer.Ordinal).ToArray(), paths,
+                "Native PackSymbol orders placement records by exact sheet path, not model occurrence UUID.");
+        }
     }
 
     [TestMethod]

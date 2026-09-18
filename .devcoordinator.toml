@@ -29,7 +29,7 @@ command = ["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port = true
 route = true
 health = { path = "/healthz", timeout_seconds = 300 }
-env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/linux-f120-signed-000020", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 
 [test]
 default = "automation"
@@ -729,40 +729,40 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/preview18-landing-browser"]
 retained_artifacts = [{ name = "download-browser", path = "automation/artifacts/preview18-landing-browser", max_bytes = 16777216 }]
 
-[test.preview19-public]
+[test.preview20-public]
 timeout_seconds = 900
-env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260914T220222Z-02703fe62087", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260918T134947Z-8e8de1fd68e3", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-8e8de1fd-signed-000019", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview19-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-signed-000009/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260918T134947Z-8e8de1fd68e3", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-f120-signed-000020", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview20-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
 
-[[test.preview19-public.check]]
+[[test.preview20-public.check]]
 name = "build"
 tier = "development"
 role = "preflight"
 invalidates = ["https", "rendered", "landing", "browser"]
 command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.preview19-public.check]]
+[[test.preview20-public.check]]
 name = "https"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicDownloads", "--logger", "trx", "--results-directory", "automation/artifacts/preview19-download-tests"]
-retained_artifacts = [{ name = "preview19-download-tests", path = "automation/artifacts/preview19-download-tests", max_bytes = 16777216 }, { name = "preview19-download-evidence", path = "automation/artifacts/preview19-download-evidence", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicDownloads", "--logger", "trx", "--results-directory", "automation/artifacts/preview20-download-tests"]
+retained_artifacts = [{ name = "preview20-download-tests", path = "automation/artifacts/preview20-download-tests", max_bytes = 16777216 }, { name = "preview20-download-evidence", path = "automation/artifacts/preview20-download-evidence", max_bytes = 16777216 }]
 
-[[test.preview19-public.check]]
+[[test.preview20-public.check]]
 name = "rendered"
 tier = "development"
 requires = ["https"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate", "--logger", "trx", "--results-directory", "automation/artifacts/preview19-caption-tests"]
-retained_artifacts = [{ name = "preview19-caption-tests", path = "automation/artifacts/preview19-caption-tests", max_bytes = 16777216 }, { name = "public-caption-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate", "--logger", "trx", "--results-directory", "automation/artifacts/preview20-caption-tests"]
+retained_artifacts = [{ name = "preview20-caption-tests", path = "automation/artifacts/preview20-caption-tests", max_bytes = 16777216 }, { name = "public-caption-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
 
-[[test.preview19-public.check]]
+[[test.preview20-public.check]]
 name = "landing"
 tier = "development"
-command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-page.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/download-recovery-228862-manual-review.json", "--fail-on", "critical"]
+command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-page.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/windows-8e8-6e5225-manual-review.json", "--fail-on", "critical"]
 
-[[test.preview19-public.check]]
+[[test.preview20-public.check]]
 name = "browser"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/preview19-landing-browser"]
-retained_artifacts = [{ name = "download-browser", path = "automation/artifacts/preview19-landing-browser", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/preview20-landing-browser"]
+retained_artifacts = [{ name = "download-browser", path = "automation/artifacts/preview20-landing-browser", max_bytes = 16777216 }]
 
 [test.preview-nine-stage]
 timeout_seconds = 600
@@ -1004,35 +1004,35 @@ tier = "development"
 requires = ["sign"]
 command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260914T220222Z-02703fe62087", "--commit", "02703fe62087a2266360e65d8e79893ca9f6454a", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-31dd2-signed-000005", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-02703-signed-000018", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/02703fe620-preview18.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
 
-[test.preview-8e8de1fd-linux-stage]
+[test.preview-f120-linux-stage]
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
-[[test.preview-8e8de1fd-linux-stage.check]]
+[[test.preview-f120-linux-stage.check]]
 name = "managed-build"
 tier = "development"
 role = "preflight"
 invalidates = ["contracts", "sign", "stage"]
 command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.preview-8e8de1fd-linux-stage.check]]
+[[test.preview-f120-linux-stage.check]]
 name = "contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["sign", "stage"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx", "--results-directory", "automation/artifacts/preview-8e8de1fd-stage-tests"]
-retained_artifacts = [{ name = "stage-tests", path = "automation/artifacts/preview-8e8de1fd-stage-tests", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx", "--results-directory", "automation/artifacts/preview-f120-stage-tests"]
+retained_artifacts = [{ name = "stage-tests", path = "automation/artifacts/preview-f120-stage-tests", max_bytes = 16777216 }]
 
-[[test.preview-8e8de1fd-linux-stage.check]]
+[[test.preview-f120-linux-stage.check]]
 name = "sign"
 tier = "development"
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/linux-8e8de1fd68-sequence19.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260918T134947Z-8e8de1fd68e3", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/8e8de1fd-preview19.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-signed-000009/updates/preview.json"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/linux-f120a47cfb-sequence20.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/f120-preview20.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009/updates/preview.json"]
 
-[[test.preview-8e8de1fd-linux-stage.check]]
+[[test.preview-f120-linux-stage.check]]
 name = "stage"
 tier = "development"
 requires = ["sign"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260918T134947Z-8e8de1fd68e3", "--commit", "8e8de1fd68e392e7cb55924a79e83ede5dddba1b", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-c265-signed-000009", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-8e8de1fd-signed-000019", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/8e8de1fd-preview19.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1", "--commit", "f120a47cfbd1832bc9133f6994b5e29aad082f3c", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-f120-signed-000020", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/f120-preview20.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
 
 [test.download-recovery]
 timeout_seconds = 1800

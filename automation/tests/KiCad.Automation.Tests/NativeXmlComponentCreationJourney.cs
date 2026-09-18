@@ -55,6 +55,8 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-creation-planned.xml"), plan.CandidateXml, token);
         var before = await Capture();
+        var geometry = await MeasureCreationCandidates(client, document, before, plan.Candidate!, baseline,
+            evidence, instanceId, token);
         using (var cancelled = new CancellationTokenSource())
         {
             cancelled.Cancel();
@@ -115,6 +117,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
         }
         await RequireAgreement(createdIds.Count);
+        await VerifyCreatedGeometry(client, document, geometry, token);
         var created = store.Read()!.State.Baseline;
         var createdBindings = created.SymbolBindings.Where(b => !baseline.SymbolBindings.Any(old => old.SymbolOccurrenceId == b.SymbolOccurrenceId)).ToArray();
         Assert.AreEqual(3, createdBindings.Length); Assert.AreEqual(2, createdBindings.Select(b => b.NativeObjectId).Distinct().Count());

@@ -2067,6 +2067,30 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~McpProcessTests", "--logger", "trx", "--results-directory", "automation/artifacts/native-intake-model"]
 retained_artifacts = [{ name = "native-intake-model", path = "automation/artifacts/native-intake-model", max_bytes = 16777216 }]
 
+[test.initial-schematic-layout]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.initial-schematic-layout.check]]
+name = "restore"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "contracts"]
+command = ["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.initial-schematic-layout.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-restore"]
+
+[[test.initial-schematic-layout.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~PresentationVerificationTests", "--logger", "trx", "--results-directory", "automation/artifacts/initial-schematic-layout"]
+retained_artifacts = [{ name = "initial-schematic-layout", path = "automation/artifacts/initial-schematic-layout", max_bytes = 16777216 }]
+
 [test.automatic-sync-model]
 timeout_seconds = 900
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -3686,7 +3710,7 @@ name = "input-contracts"
 tier = "development"
 role = "preflight"
 invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
 retained_artifacts = [{ name = "component-creation-input-contracts", path = "automation/artifacts/component-creation-input-contracts", max_bytes = 16777216 }]
 
 [[test.native-xml-component-creation.check]]

@@ -126,6 +126,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
         ReadSchematicElectricalState { SchemaVersion: 0 } value => new ReadSchematicElectricalState(value) { SchemaVersion = schemaVersion },
         CaptureSchematicObservation { SchemaVersion: 0 } value => new CaptureSchematicObservation(value) { SchemaVersion = schemaVersion },
         RenderSchematicViews { SchemaVersion: 0 } value => new RenderSchematicViews(value) { SchemaVersion = schemaVersion },
+        MeasureSchematicPlacement { SchemaVersion: 0 } value => new MeasureSchematicPlacement(value) { SchemaVersion = schemaVersion },
         _ => request
     };
 }

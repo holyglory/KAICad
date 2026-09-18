@@ -129,6 +129,8 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::InspectSchematicOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicPresentationFacts> handleReadPresentationFacts(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicPresentationFacts>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> handleMeasurePlacement(
+            const HANDLER_CONTEXT<kiapi::automation::v1::MeasureSchematicPlacement>& aCtx );
     HANDLER_RESULT<commands::GetBoundingBoxResponse> handleGetBoundingBox(
             const HANDLER_CONTEXT<commands::GetBoundingBox>& aCtx );
     bool m_atomicBatchActive = false;

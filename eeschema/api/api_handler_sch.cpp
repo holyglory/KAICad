@@ -204,6 +204,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_SCH::handleGetItems );
     registerHandler<GetItemsById, GetItemsResponse>( &API_HANDLER_SCH::handleGetItemsById );
     registerHandler<GetBoundingBox, GetBoundingBoxResponse>( &API_HANDLER_SCH::handleGetBoundingBox );
+    registerHandler<kiapi::automation::v1::MeasureSchematicPlacement, kiapi::automation::v1::SchematicPlacementGeometry>(
+            &API_HANDLER_SCH::handleMeasurePlacement );
     registerHandler<kiapi::automation::v1::ReadSchematicPresentationFacts, kiapi::automation::v1::SchematicPresentationFacts>(
             &API_HANDLER_SCH::handleReadPresentationFacts );
 

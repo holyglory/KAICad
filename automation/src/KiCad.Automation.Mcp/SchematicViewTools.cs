@@ -121,6 +121,31 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
+    [McpServerTool(Name = "kicad_design_propose_field_layout", ReadOnly = true),
+     Description("Propose field-only layout changes in a synchronized design recovery snapshot. Requires its absolute path, exact instance ID and recovery token. Each change addresses an exact model symbol occurrence, standard field slot or custom-field index plus expected name, nanometre position, cardinal text rotation and native alignment. Preserves text, visibility, circuit meaning, symbol placement and locks. Repeated sheet instances share field geometry; conflicting alias proposals fail. Returns desired XML only, without writing files or editing KiCad. Apply through normal revision-safe synchronization and then verify native connectivity and rendered readability; the proposal itself is not a readability certificate.")]
+    public Task<CallToolResult> ProposeFieldLayout(string instanceId, string recoveryPath,
+        string expectedRevisionToken, SchematicFieldPlacement[] changes, CancellationToken cancellationToken) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Path.IsPathFullyQualified(recoveryPath))
+            throw new AutomationException("invalid_recovery_path", "Specify the absolute saved design recovery path.");
+        var store = new DesignRecoveryStore(recoveryPath);
+        var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
+        if (saved.State.InstanceId.ToString("D") != instanceId)
+            throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
+        if (saved.RevisionToken != expectedRevisionToken)
+            throw new AutomationException("design_recovery_changed", "Reload the recovery record before proposing field layout.");
+        var proposal = SchematicFieldLayoutPlanner.Propose(saved.State, changes, cancellationToken);
+        if (store.Read()?.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "The recovery record changed during layout preparation.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = saved.RevisionToken,
+            nativeRevision = saved.State.NativeRevision, desiredXml = proposal.DesiredXml, affectedSymbols = proposal.AffectedSymbols,
+            nativeOperationCount = proposal.Operations.Count, requiresNativeConnectivityValidation = true, requiresRenderedReview = true,
+            nativeDocumentEdited = false, designFileWritten = false, recoveryWritten = false });
+        return Task.FromResult(new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data });
+    });
+
     [McpServerTool(Name = "kicad_design_recovery_observe", ReadOnly = true),
      Description("Observe a saved full-design recovery record against its explicitly attached KiCad instance. recoveryPath is an absolute DesignRecoveryStore file path; optional expectedRevisionToken rejects a changed recovery record. Verifies the exact pending command receipt, then reads the current native hierarchy with matching instance, root, epoch and non-regressing revision. Returns the original receipt separately from current state, which may include later edits or undo. Preserves invalid desired XML, baseline, pending operation and files. Does not resubmit edits, resolve conflicts, advance synchronization or imply full native coverage. The pending target (or saved root when none) must be readable by the native editor.")]
     public Task<CallToolResult> ObserveRecovery(string instanceId, string recoveryPath,

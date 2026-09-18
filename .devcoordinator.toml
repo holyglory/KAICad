@@ -3234,7 +3234,7 @@ retained_artifacts = [{ name = "upstream-release", path = "automation/artifacts/
 
 [test.delivery-receipts]
 timeout_seconds = 900
-env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "02703fe62087a2266360e65d8e79893ca9f6454a", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview18-delivery-receipts" }
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "8e8de1fd68e392e7cb55924a79e83ede5dddba1b", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview19-delivery-receipts" }
 
 [[test.delivery-receipts.check]]
 name = "build"
@@ -3246,8 +3246,8 @@ command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore"
 [[test.delivery-receipts.check]]
 name = "observations"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/preview18-delivery-receipt-tests"]
-retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/preview18-delivery-receipts", max_bytes = 536870912 }, { name = "delivery-receipt-tests", path = "automation/artifacts/preview18-delivery-receipt-tests", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/preview19-delivery-receipt-tests"]
+retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/preview19-delivery-receipts", max_bytes = 536870912 }, { name = "delivery-receipt-tests", path = "automation/artifacts/preview19-delivery-receipt-tests", max_bytes = 16777216 }]
 
 [test.write-observer-boundary]
 timeout_seconds = 1800

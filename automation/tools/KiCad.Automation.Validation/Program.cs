@@ -15,6 +15,7 @@ try
         Console.WriteLine("kicad-validate stage-requalified-windows --candidate ORIGINAL_FAILED_BUILD --qualification NATIVE_RERUN_ROOT --repository EXACT_NATIVE_SOURCE_WORKTREE --commit FULL_SHA --run-id QUALIFICATION_RUN_ID --version PREVIEW_VERSION --previous PUBLIC_ROOT --output NEW_PUBLIC_ROOT");
         Console.WriteLine("kicad-validate stage-signed-linux --candidate LINUX_PACKAGE_DIRECTORY --commit FULL_SHA --previous PUBLIC_ROOT --output NEW_PUBLIC_ROOT --feed SIGNED_PREVIEW_JSON --publisher TRUSTED_PUBLIC_SPKI");
         Console.WriteLine("kicad-validate stage-platform-feeds --previous PUBLIC_ROOT --output NEW_PUBLIC_ROOT --publisher TRUSTED_PUBLIC_SPKI --sources FEED_DECLARATION_JSON");
+        Console.WriteLine("kicad-validate prune-staging-archives --declaration EXACT_ROOTS_AND_CATALOGUE_HASHES_JSON --output NEW_RECEIPT_JSON");
         Console.WriteLine("kicad-validate verify --result RESULT_JSON --archive EVIDENCE_TAR_GZ --commit FULL_SHA [--architecture arm64|x64]");
         Console.WriteLine("kicad-validate stage-linux --build NATIVE_BUILD --managed SELF_CONTAINED_PUBLISH --nng NNG_SHARED_LIBRARY --output EXISTING_STAGING_DIRECTORY");
         Console.WriteLine("kicad-validate package-linux --staging STAGING_RECEIPT --repository COMMITTED_SOURCE --commit FULL_SHA --version VERSION --output NEW_DIRECTORY");
@@ -38,6 +39,7 @@ try
         : args[0] == "upstream-verify" ? ["repository", "commit", "output"]
         : args[0] == "hosted" ? ["repository", "commit", "architecture", "output", "dependency-commit", "phase"]
         : args[0] == "stage-platform-feeds" ? ["previous", "output", "publisher", "sources"]
+        : args[0] == "prune-staging-archives" ? ["declaration", "output"]
         : args[0] == "stage-signed-linux" ? ["candidate", "commit", "previous", "output", "feed", "publisher"]
         : args[0] == "stage-hosted" ? ["candidate", "commit", "platform", "run-id", "version", "previous", "output"]
         : args[0] == "stage-requalified-windows" ? ["candidate", "qualification", "repository", "commit", "run-id", "version", "previous", "output"]
@@ -82,6 +84,14 @@ try
         var sources = await SignedPlatformFeedStaging.ReadSourcesAsync(Required("sources"), cancel.Token);
         var result = await SignedPlatformFeedStaging.RunAsync(new(Required("previous"), Required("output"), Required("publisher"), sources.Feeds), cancel.Token);
         Console.WriteLine(JsonSerializer.Serialize(result, Evidence.JsonOptions));
+        return 0;
+    }
+    if (args[0] == "prune-staging-archives")
+    {
+        var request = await IntermediateArchivePruning.ReadAsync(Required("declaration"), cancel.Token);
+        var receipt = await IntermediateArchivePruning.RunAsync(request, Required("output"), cancel.Token);
+        Console.WriteLine(JsonSerializer.Serialize(new { receipt.Status, removedFiles = receipt.Archives.Count(a => a.Removed),
+            receipt.RemovedLogicalBytes, retainedCopies = receipt.RetainedDirectory }, Evidence.JsonOptions));
         return 0;
     }
     if (args[0] == "stage-hosted")

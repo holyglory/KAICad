@@ -98,6 +98,22 @@ name = "feeds"
 tier = "development"
 requires = ["sign-arm64", "sign-intel"]
 command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-mac-8e8.json"]
+[test.archive-pruning-contracts]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.archive-pruning-contracts.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.archive-pruning-contracts.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~IntermediateArchivePruningTests", "--logger", "trx", "--results-directory", "automation/artifacts/archive-pruning-contracts"]
+retained_artifacts = [{ name = "archive-pruning-contracts", path = "automation/artifacts/archive-pruning-contracts", max_bytes = 16777216 }]
 
 [test.retained-field-layout-diagnosis]
 timeout_seconds = 600

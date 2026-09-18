@@ -29,7 +29,7 @@ command = ["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port = true
 route = true
 health = { path = "/healthz", timeout_seconds = 300 }
-env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 
 [test]
 default = "automation"
@@ -185,51 +185,51 @@ requires = ["build", "scope-contracts"]
 command = ["env","KICAD_DELIVERY_PLATFORM=osx-x64","KICAD_DELIVERY_EVIDENCE=/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-8e8-intel-public","KICAD_LANDING_PLATFORM=osx-x64","KICAD_LANDING_CANDIDATE_NAME=kicad-codex-8e8de1fd68e392e7cb55924a79e83ede5dddba1b-macos-x64.tar.gz","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts|TestCategory=LandingBrowser","--logger","trx","--results-directory","automation/artifacts/mac-8e8-intel-public-tests"]
 retained_artifacts = [{ name = "intel-observations", path = "automation/artifacts/mac-8e8-intel-public", max_bytes = 536870912 }, { name = "intel-tests", path = "automation/artifacts/mac-8e8-intel-public-tests", max_bytes = 16777216 }]
 
-[test.windows-c265-public]
+[test.windows-8e8-public]
 timeout_seconds = 900
-env = { KICAD_DELIVERY_ROUTE_ONLY = "true", TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "c26503fdc350abf63e4d2588955ccdc2690d682e", KICAD_DELIVERY_PLATFORM = "win-x64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/artifacts/windows-c265-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "win-x64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-c26503fdc350abf63e4d2588955ccdc2690d682e-windows-x64.zip", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260916-c26503fdc350" }
+env = { KICAD_DELIVERY_ROUTE_ONLY = "true", TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "8e8de1fd68e392e7cb55924a79e83ede5dddba1b", KICAD_DELIVERY_PLATFORM = "win-x64", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/windows-8e8-public", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", KICAD_LANDING_PLATFORM = "win-x64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-8e8de1fd68e392e7cb55924a79e83ede5dddba1b-windows-x64.zip", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260918-8e8de1fd68e3" }
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "restore"
 tier = "development"
 role = "preflight"
 invalidates = ["build", "observations", "browser"]
 command = ["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "build"
 tier = "development"
 role = "preflight"
 invalidates = ["observations", "browser"]
 command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "observations"
 tier = "development"
 role = "preflight"
 requires = ["scope-contracts"]
 invalidates = ["browser", "formal"]
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/windows-c265-public-tests"]
-retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/windows-c265-public", max_bytes = 536870912 }, { name = "receipt-tests", path = "automation/artifacts/windows-c265-public-tests", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx", "--results-directory", "automation/artifacts/windows-8e8-public-tests"]
+retained_artifacts = [{ name = "delivery-observations", path = "automation/artifacts/windows-8e8-public", max_bytes = 536870912 }, { name = "receipt-tests", path = "automation/artifacts/windows-8e8-public-tests", max_bytes = 16777216 }]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "browser"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/windows-c265-browser"]
-retained_artifacts = [{ name = "browser-tests", path = "automation/artifacts/windows-c265-browser", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx", "--results-directory", "automation/artifacts/windows-8e8-browser"]
+retained_artifacts = [{ name = "browser-tests", path = "automation/artifacts/windows-8e8-browser", max_bytes = 16777216 }]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "verifier-self-test"
 tier = "development"
 command = ["devcoordinator2-tooling", "formal-ui", "self-test", "--phase", "rendering", "--workspace-parent", "/tmp", "--timeout-seconds", "300"]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "formal"
 tier = "development"
 requires = ["verifier-self-test"]
-command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-windows-c265.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/windows-a519-review/manual-review.json", "--fail-on", "critical"]
+command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-page.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/mac-8e8-e9928d-manual-review.json", "--fail-on", "critical"]
 
-[[test.windows-c265-public.check]]
+[[test.windows-8e8-public.check]]
 name = "scope-contracts"
 tier = "development"
 requires = ["build"]
@@ -472,33 +472,33 @@ tier = "development"
 requires = ["verifier-self-test"]
 command = ["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-windows-a519.json", "--fail-on", "critical"]
 
-[test.stage-windows-c265]
+[test.stage-windows-8e8]
 timeout_seconds = 1800
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
-[[test.stage-windows-c265.check]]
+[[test.stage-windows-8e8.check]]
 name = "build"
 tier = "development"
 role = "preflight"
 invalidates = ["import", "sign", "feeds"]
 command = ["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
 
-[[test.stage-windows-c265.check]]
+[[test.stage-windows-8e8.check]]
 name = "import"
 tier = "development"
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35044945459-windows-c265/kicad-delivery", "--commit", "c26503fdc350abf63e4d2588955ccdc2690d682e", "--platform", "win-x64", "--run-id", "35044945459", "--version", "preview-20260916-c26503fdc350", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import"]
+command = ["dotnet","automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll","stage-requalified-windows","--candidate","/mnt/build-storage/codex/kicad/evidence/github-35352182872-windows-8e8-failed/kicad-delivery","--qualification","/mnt/build-storage/codex/kicad/evidence/github-35384795477-windows-8e8-requalified/kicad-windows-preflight","--repository","/mnt/build-storage/codex/kicad/worktrees/source-release-8e8de1fd","--commit","8e8de1fd68e392e7cb55924a79e83ede5dddba1b","--run-id","35384795477","--version","preview-20260918-8e8de1fd68e3","--previous","/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed","--output","/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import"]
 
-[[test.stage-windows-c265.check]]
+[[test.stage-windows-8e8.check]]
 name = "sign"
 tier = "development"
 requires = ["import"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/preview-win-x64-000008.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-preview8.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-c265-signed-000010/updates/platforms/win-x64/preview.json"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-win-x64-000009.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-preview9.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed/updates/platforms/win-x64/preview.json"]
 
-[[test.stage-windows-c265.check]]
+[[test.stage-windows-8e8.check]]
 name = "feeds"
 tier = "development"
 requires = ["sign"]
-command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-c265-signed-000008", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/preview-a519-arm64/automation/distribution/releases/platform-windows-000008.json"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-windows-000009.json"]
 
 [test.stage-windows-a519]
 timeout_seconds = 1800

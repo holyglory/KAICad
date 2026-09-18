@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "feeds": [
+    {
+      "platform": "win-x64",
+      "channel": "preview",
+      "envelopePath": "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-preview9.json"
+    }
+  ]
+}

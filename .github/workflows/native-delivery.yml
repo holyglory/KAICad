@@ -354,6 +354,13 @@ jobs:
           }
           $retained = $env:KICAD_RETAINED_WINDOWS_INPUT.Split('/')
           $env:KICAD_HOSTED_FIXTURE_EVIDENCE = "$env:RUNNER_TEMP/kicad-windows-preflight/evidence"
+          # The validator must never run from a directory its checks rebuild.
+          $validatorRoot = Join-Path $env:RUNNER_TEMP 'kicad-isolated-validator'
+          dotnet publish tools/KiCad.Automation.Validation --configuration Release --output $validatorRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated validator publication failed.' }
+          dotnet "$validatorRoot/kicad-validate.dll" verify-build-isolation `
+            --repository "$env:GITHUB_WORKSPACE" --output "$env:KICAD_HOSTED_FIXTURE_EVIDENCE/validator-build-isolation"
+          if ($LASTEXITCODE -ne 0) { throw 'The isolated validator could not rebuild its source safely.' }
           dotnet test KiCad.Automation.slnx --configuration Release `
             --filter 'FullyQualifiedName~WindowsInstalledHarnessTests|FullyQualifiedName~WindowsFixtureCleanupTests|FullyQualifiedName~McpToolPayloadTests|FullyQualifiedName~WindowsRetainedPackageInputTests' `
             --logger trx --results-directory "$env:RUNNER_TEMP/kicad-windows-preflight/harness"
@@ -420,7 +427,11 @@ jobs:
         working-directory: automation
         shell: pwsh
         run: |
-          dotnet run --project tools/KiCad.Automation.Validation --configuration Release -- `
+          $validatorRoot = Join-Path $env:RUNNER_TEMP 'kicad-isolated-validator'
+          dotnet publish tools/KiCad.Automation.Validation --configuration Release --output $validatorRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated validator publication failed.' }
+          "KICAD_HOSTED_VALIDATOR=$validatorRoot/kicad-validate.dll" >> $env:GITHUB_ENV
+          dotnet "$validatorRoot/kicad-validate.dll" `
             hosted --repository "$env:GITHUB_WORKSPACE" --commit "$env:SOURCE_COMMIT" `
             --architecture x64 --output "$env:RUNNER_TEMP/kicad-delivery" `
             --dependency-commit "$env:VCPKG_COMMIT" --phase prepare
@@ -454,7 +465,13 @@ jobs:
           # Older exact source commits retain their original all-in-one command.
           $phaseArguments = @()
           if ('${{ steps.stages.outputs.split }}' -eq 'true') { $phaseArguments = @('--phase', 'build') }
-          dotnet run --project tools/KiCad.Automation.Validation --configuration Release -- `
+          if (!$env:KICAD_HOSTED_VALIDATOR) {
+            $validatorRoot = Join-Path $env:RUNNER_TEMP 'kicad-isolated-validator'
+            dotnet publish tools/KiCad.Automation.Validation --configuration Release --output $validatorRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Isolated validator publication failed.' }
+            $env:KICAD_HOSTED_VALIDATOR = "$validatorRoot/kicad-validate.dll"
+          }
+          dotnet "$env:KICAD_HOSTED_VALIDATOR" `
             hosted --repository "$env:GITHUB_WORKSPACE" --commit "$env:SOURCE_COMMIT" `
             --architecture x64 --output "$env:RUNNER_TEMP/kicad-delivery" `
             --dependency-commit "$env:VCPKG_COMMIT" @phaseArguments

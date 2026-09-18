@@ -34,6 +34,23 @@ env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build
 [test]
 default = "automation"
 
+[test.windows-validator-isolation]
+timeout_seconds = 900
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.windows-validator-isolation.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.windows-validator-isolation.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~HostedValidatorIsolationTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~WindowsDiagnosticPackageTests|FullyQualifiedName~WindowsRetainedPackageInputTests|FullyQualifiedName~HostedDeliveryTests", "--logger", "trx", "--results-directory", "automation/artifacts/windows-validator-isolation-tests"]
+retained_artifacts = [{ name = "isolation-contracts", path = "automation/artifacts/windows-validator-isolation-tests", max_bytes = 16777216 }]
+
 [test.stage-mac-8e8]
 timeout_seconds = 2400
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }

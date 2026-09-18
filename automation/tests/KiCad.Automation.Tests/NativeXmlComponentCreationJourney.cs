@@ -40,7 +40,7 @@ public sealed partial class NativeSessionTests
                 newDefinitions.Add(sheet.DefinitionId, definition = new(Guid.NewGuid(), part.Id, "XML-created probe"));
             Guid id = Guid.NewGuid(); createdIds.Add(id);
             components.Add(new(id, definition.Id, sheet.Id, "TP" + designator++));
-            occurrences.Add(new(Guid.NewGuid(), id, 1, new(175.26m, 120.65m, 0, false, false, false)));
+            occurrences.Add(new(Guid.NewGuid(), id, 1, null));
         }
         var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
         {
@@ -51,6 +51,58 @@ public sealed partial class NativeSessionTests
         bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, []));
         await File.WriteAllBytesAsync(path, bytes, token);
         saved = store.Read()!; saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
+        var layoutBefore = await Capture();
+        var regions = new List<SchematicLayoutRegion>();
+        foreach (var screen in baseline.Schematic.Instances.DistinctBy(s => s.Metadata.ScreenId.Value))
+        {
+            var page = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+            { Document = screen.Metadata.Document.Clone(), ExpectedRevision = layoutBefore.State.Revision.Clone() }, token);
+            // Explicit fixture policy: reserve the bottom 50 mm for the drawing
+            // sheet/title block. Production callers must supply their own actual
+            // page constraints; this is not an automatic title-block detector.
+            regions.Add(new(Guid.Parse(page.ScreenId.Value), new(page.PageBounds.Position.XNm + 10_000_000,
+                page.PageBounds.Position.YNm + 10_000_000, page.PageBounds.Position.XNm + page.PageBounds.Size.XNm - 10_000_000,
+                page.PageBounds.Position.YNm + page.PageBounds.Size.YNm - 50_000_000), []));
+        }
+        JsonElement initialLayout;
+        await using (var layoutHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
+            Path.Combine(evidence, instanceId + "-layout-host"), Path.Combine(evidence, instanceId + "-layout-host.log"), token))
+        {
+            RequireToolSuccess(await layoutHost.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+            var layoutArgs = new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = saved.RevisionToken,
+                gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L, regions,
+                userInstructions = "Keep the new test-point references visible and preserve existing work." };
+            var staleLayout = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs with { expectedRevisionToken = "stale" });
+            Assert.IsTrue(staleLayout.GetProperty("isError").GetBoolean());
+            var wrongLayout = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs with { instanceId = Guid.NewGuid().ToString("D") });
+            Assert.IsTrue(wrongLayout.GetProperty("isError").GetBoolean());
+            var smallRegions = regions.Select(r => r with { UsableBounds = new(0, 0, 100, 100) }).ToList();
+            var noSpace = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs with { regions = smallRegions });
+            RequireToolSuccess(noSpace);
+            Assert.IsFalse(noSpace.GetProperty("structuredContent").GetProperty("canPropose").GetBoolean());
+            Assert.AreEqual(JsonValueKind.Null, noSpace.GetProperty("structuredContent").GetProperty("desiredXml").ValueKind);
+            var invalidGrid = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs with { gridNm = 101L });
+            Assert.IsTrue(invalidGrid.GetProperty("isError").GetBoolean());
+            var reply = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs);
+            RequireToolSuccess(reply); initialLayout = reply.GetProperty("structuredContent").Clone();
+        }
+        Assert.IsTrue(initialLayout.GetProperty("canPropose").GetBoolean(), initialLayout.GetRawText());
+        Assert.AreNotEqual(JsonValueKind.Null, initialLayout.GetProperty("refinement").ValueKind);
+        Assert.IsTrue(initialLayout.GetProperty("requiresVisualReview").GetBoolean());
+        Assert.IsTrue(initialLayout.GetProperty("requiresNativeConnectivityValidation").GetBoolean());
+        var actualScope = initialLayout.GetProperty("refinement").GetProperty("AffectedSymbols").EnumerateArray()
+            .Select(s => Guid.Parse(s.GetString()!)).ToArray();
+        var baselineOccurrences = baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+        CollectionAssert.AreEquivalent(occurrences.Where(s => !baselineOccurrences.Contains(s.Id)).Select(s => s.Id).ToArray(), actualScope,
+            "Native symbols without optional XML coordinates are existing work, not permission to rearrange them.");
+        Assert.AreEqual(layoutBefore, await Capture(), "Initial placement preparation must not change the native document.");
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+        bytes = Encoding.UTF8.GetBytes(initialLayout.GetProperty("desiredXml").GetString()!);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-initial-layout.json"),
+            initialLayout.GetRawText(), token);
+        await File.WriteAllBytesAsync(path, bytes, token);
+        saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
         var plan = SchematicSynchronizationPlanner.Plan(saved.State, token);
         Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-creation-planned.xml"), plan.CandidateXml, token);
@@ -202,6 +254,7 @@ public sealed partial class NativeSessionTests
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-creation-window.png"), token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-creation-proof.json"), JsonSerializer.Serialize(new
         { instanceId, createdIds, operation, realStdioApply = true, repeatedScreenSingleCreate = true,
+            coordinateFreeInitialPlacement = true, nativeMeasurementReadOnly = true, explicitPageReservations = true,
             nativeUndoRedoAutomaticallyPublished = true, xmlFileEventCreation = true, interruptAfterNativeEdit,
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, crossPlatformReady = false }), token);

@@ -66,6 +66,21 @@ public sealed class LayoutRefinement
         return new(current, revision, reason, scope, userInstructions);
     }
 
+    /// <summary>Refine newly created symbols only. Existing native geometry
+    /// remains protected even when its optional XML coordinates are absent.</summary>
+    public static LayoutRefinement ForAddedSymbols(Circuit previous, Circuit current,
+        DocumentRevision revision, string userInstructions)
+    {
+        previous.Validate(); current.Validate();
+        if (previous.Id != current.Id || string.IsNullOrWhiteSpace(revision.Epoch))
+            throw Invalid("Additions require the same circuit and an explicit document revision.");
+        var old = previous.Symbols.Select(s => s.Id).ToHashSet();
+        var scope = current.Symbols.Where(s => !old.Contains(s.Id)).Select(s => s.Id).ToHashSet();
+        if (scope.Count == 0 || previous.Symbols.Any(s => !current.Symbols.Any(c => c.Id == s.Id && c.Equals(s))))
+            throw Invalid("Addition refinement must preserve existing symbols and contain a new symbol.");
+        return new(current, revision, LayoutRefinementReason.AddedSymbols, scope, userInstructions);
+    }
+
     // Exact identities and endpoint sets, never reference names or geometry.
     // Include both sides of removed/replaced connections so a split or pin swap
     // cannot leave the former connection region outside the refinement scope.

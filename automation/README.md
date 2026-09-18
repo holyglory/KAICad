@@ -648,8 +648,28 @@ in the engineering section of `design.xml`; retain the existing native snapshot
 and bindings. The planner generates deterministic symbol and placed-pin IDs,
 copies the required library cache to target sheets, and keeps repeated-sheet
 instances on one physical drawing. Existing circuit, sheet and binding changes
-must be reconciled separately. New libraries, connected additions and missing
-coordinates still require their unfinished definition, wiring and layout workflows.
+must be reconciled separately. New libraries and connected additions still
+require their unfinished definition and wiring workflows.
+
+For coordinate-free additions of those same supported parts, use the read-only
+`kicad_design_propose_initial_layout(instanceId, recoveryPath,
+expectedRevisionToken, gridNm, clearanceNm, pageInsetNm, regions,
+userInstructions)` tool. Each region names an affected physical screen UUID,
+usable bounds and reserved areas, including page artwork/title blocks. Distances
+are nanometres. Native KiCad measures the actual symbol and visible-field bounds
+without changing the displayed sheet; repeated instances contribute their union.
+Existing positions and explicit new placements remain unchanged. No-space or
+conflicting input produces no partial XML proposal.
+
+The result contains proposed `desiredXml` and a revision-bound visual-refinement
+request scoped only to new symbols. Existing native geometry stays protected
+even when its optional XML coordinates are absent. Review/publish that proposal
+through the normal synchronization workflow, then check connectivity and rendered
+presentation. The tool itself writes neither the recovery record nor design XML.
+This is an initial arrangement, not a readability certificate: inherited fields
+can still overlap internally, and field-layout refinement remains open. It does
+not create unknown parts, generate wiring, infer drawing-sheet reservations or
+perform AI reasoning inside the service.
 
 For an explicitly attached instance and initialized recovery record, use
 `kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,

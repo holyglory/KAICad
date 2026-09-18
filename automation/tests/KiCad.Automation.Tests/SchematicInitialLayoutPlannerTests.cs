@@ -1,0 +1,195 @@
+using System.Text;
+using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class SchematicInitialLayoutPlannerTests
+{
+    private static readonly InitialLayoutPolicy Policy = new(1_270_000, 1_270_000, 0);
+
+    [TestMethod]
+    public async Task MeasuredCandidatePreservesExistingGeometryRequirementsAndNativeBindings()
+    {
+        var state = Fixture(); byte[] original = state.DesiredFileBytes.ToArray();
+        var result = await Propose(state);
+        Assert.IsTrue(result.CanPropose);
+        Assert.IsTrue(result.RequiresVisualReview && result.RequiresNativeConnectivityValidation);
+        Assert.IsNotNull(result.DesiredDesign); Assert.IsNotNull(result.Refinement);
+        var old = state.Baseline.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+        foreach (var symbol in result.DesiredDesign.Engineering.Circuit.Symbols)
+        {
+            if (old.TryGetValue(symbol.Id, out var unchanged)) Assert.AreEqual(unchanged, symbol);
+            else
+            {
+                Assert.IsNotNull(symbol.Placement);
+                Assert.AreEqual(0, Coordinates.MillimetersToNanometers(symbol.Placement.XMillimeters) % Policy.GridNm);
+                Assert.AreEqual(0, Coordinates.MillimetersToNanometers(symbol.Placement.YMillimeters) % Policy.GridNm);
+            }
+        }
+        Assert.AreEqual("Keep the new group together.", result.Refinement.UserInstructions);
+        CollectionAssert.AreEquivalent(result.DesiredDesign.Engineering.Circuit.Symbols.Where(s => !old.ContainsKey(s.Id))
+            .Select(s => s.Id).ToArray(), result.Refinement.AffectedSymbols.ToArray());
+        Assert.AreEqual(state.Baseline.Schematic, result.DesiredDesign.Schematic);
+        CollectionAssert.AreEqual(DesignRecoveryStore.ReadDesired(state).SymbolBindings.ToArray(), result.DesiredDesign.SymbolBindings.ToArray(),
+            "Preserve the desired XML's canonical binding enumeration, not its pre-serialization construction order.");
+        CollectionAssert.AreEqual(original, state.DesiredFileBytes);
+        Assert.AreEqual(EngineeringDesignXml.Write(DesignRecoveryStore.ReadDesired(state).Engineering, state.KnowledgeLibraries),
+            EngineeringDesignXml.Write(result.DesiredDesign.Engineering with { Circuit = result.DesiredDesign.Engineering.Circuit with
+            { Symbols = DesignRecoveryStore.ReadDesired(state).Engineering.Circuit.Symbols } }, state.KnowledgeLibraries));
+        Assert.IsTrue(SchematicSynchronizationPlanner.Plan(state with { DesiredFileBytes = Encoding.UTF8.GetBytes(result.DesiredXml!) }).CanPrepare,
+            "The proposal must retain pre-creation bindings so normal synchronization can admit it.");
+        var retry = await Propose(state);
+        Assert.AreEqual(result.DesiredXml, retry.DesiredXml);
+        foreach (var body in result.Layout.Placements!)
+        {
+            Assert.AreEqual(7_000_000, body.Bounds.RightNm - body.Bounds.LeftNm,
+                "Repeated instance envelopes must use the widest measured reference, not the displayed instance.");
+            Assert.IsTrue(body.SymbolOccurrences.Count > 1);
+        }
+    }
+
+    [TestMethod]
+    public async Task ExplicitPlacementOnOneRepeatedOccurrenceIsPreservedForAllAliases()
+    {
+        var state = Fixture(); var wanted = DesignRecoveryStore.ReadDesired(state);
+        var first = wanted.Engineering.Circuit.Symbols.First(s => s.Placement is null);
+        var pinned = new SymbolPlacement(70.01m, 65.03m, 90, true, false, true);
+        wanted = wanted with { Engineering = wanted.Engineering with { Circuit = wanted.Engineering.Circuit with
+        { Symbols = wanted.Engineering.Circuit.Symbols.Select(s => s.Id == first.Id ? s with { Placement = pinned } : s).ToArray() } } };
+        state = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(wanted, state.KnowledgeLibraries)) };
+        var result = await Propose(state);
+        Assert.IsTrue(result.CanPropose);
+        var fixedBody = result.Layout.Placements!.Single(p => p.SymbolOccurrences.Contains(first.Id));
+        Assert.IsTrue(fixedBody.Fixed);
+        foreach (Guid id in fixedBody.SymbolOccurrences)
+            Assert.AreEqual(pinned, result.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.Id == id).Placement);
+    }
+
+    [TestMethod]
+    public async Task WrongOrIncompleteMeasurementNeverProducesAnApplicableCandidate()
+    {
+        Action<SchematicPlacementGeometry>[] corruptions =
+        [
+            m => m.Revision.Sequence++,
+            m => m.Revision.Epoch = Guid.NewGuid().ToString("D"),
+            m => m.Document.Project.Name += "foreign",
+            m => m.ScreenId.Value = Guid.NewGuid().ToString("D"),
+            m => m.Candidates.Clear(),
+            m => m.Candidates.Add(m.Candidates[0].Clone()),
+            m => m.Candidates[0].Anchor.XNm++,
+            m => m.Candidates[0].Bounds.Size.XNm = -1,
+            m => m.Candidates[0].Bounds.Position.XNm = long.MaxValue,
+            m => m.Obstacles.Clear(),
+            m => m.Obstacles.Add(new SchematicPlacementBounds { Id = new() { Value = Guid.NewGuid().ToString("D") } })
+        ];
+        foreach (var corrupt in corruptions)
+        {
+            var state = Fixture(); var before = state.DesiredFileBytes.ToArray();
+            await Assert.ThrowsAsync<AutomationException>(() => Propose(state, corrupt));
+            CollectionAssert.AreEqual(before, state.DesiredFileBytes);
+        }
+    }
+
+    [TestMethod]
+    public async Task NoSpaceOrMissingPageReservationsReturnsNoPartialApplicableLayout()
+    {
+        var state = Fixture(); var regions = Regions(state);
+        await Assert.ThrowsAsync<AutomationException>(() => Propose(state, regions: []));
+        var small = regions.Select(r => r with { UsableBounds = new(0, 0, 500, 500), Reservations = [] }).ToArray();
+        var result = await Propose(state, regions: small);
+        Assert.IsFalse(result.CanPropose); Assert.IsNull(result.DesiredXml); Assert.IsNull(result.Refinement);
+        Assert.IsNull(result.Layout.Placements); Assert.IsNotEmpty(result.Layout.Issues);
+        await Assert.ThrowsAsync<AutomationException>(() => Propose(state,
+            regions: regions.Select(r => r with { UsableBounds = new(-100, 0, 1_000_000, 1_000_000) }).ToArray()));
+    }
+
+    [TestMethod]
+    public async Task ChangedNativeCheckpointAndConflictingXmlAreRejectedBeforeMeasurement()
+    {
+        var state = Fixture(); int calls = 0;
+        Task<SchematicPlacementGeometry> Measure(MeasureSchematicPlacement request, CancellationToken token)
+        { calls++; return Task.FromResult(Measurement(state, request, 7_000_000)); }
+        await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            state with { NativeRevision = new(state.NativeRevision.Epoch, state.NativeRevision.Sequence + 1) }, Policy,
+            Regions(state), "", Measure));
+        await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            state with { PendingMutation = new() }, Policy, Regions(state), "", Measure));
+        var observed = state.Observed.Clone(); observed.Instances[0].Metadata.TitleBlock.Title = "Concurrent edit";
+        var electrical = state.ObservedElectrical!.Clone(); electrical.Hierarchy.Data = observed.Clone();
+        await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            state with { Observed = observed, ObservedElectrical = electrical }, Policy, Regions(state), "", Measure));
+        Assert.AreEqual(0, calls);
+    }
+
+    [TestMethod]
+    public async Task CancellationAfterMeasurementDoesNotPublishAnXmlCandidate()
+    {
+        var state = Fixture(); using var cancellation = new CancellationTokenSource();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            state, Policy, Regions(state), "", (request, token) =>
+            {
+                var value = Measurement(state, request, 7_000_000);
+                cancellation.Cancel(); return Task.FromResult(value);
+            }, cancellation.Token));
+        Assert.IsTrue(DesignRecoveryStore.ReadDesired(state).Engineering.Circuit.Symbols.Any(s => s.Placement is null));
+    }
+
+    private static DesignRecoveryState Fixture()
+    {
+        var state = SchematicSynchronizationPlanTests.Fixture();
+        return SchematicNetReconciliationTests.Desired(state,
+            SchematicNativeCreationProjectionTests.AddComponent(state.Baseline, coordinateFree: true));
+    }
+
+    private static SchematicLayoutRegion[] Regions(DesignRecoveryState state)
+    {
+        var wanted = DesignRecoveryStore.ReadDesired(state).Engineering.Circuit;
+        var components = wanted.Components.ToDictionary(c => c.Id);
+        var affected = wanted.Symbols.Where(s => !state.Baseline.Engineering.Circuit.Symbols.Any(old => old.Id == s.Id))
+            .Select(s => s.EffectiveSheetInstanceId(components[s.ComponentId])).ToHashSet();
+        var paths = state.Baseline.SheetBindings.Where(b => affected.Contains(b.SheetInstanceId))
+            .Select(b => SchematicDesignBindings.PathKey(b.NativePath)).ToHashSet();
+        return state.Baseline.Schematic.Instances.Where(s => paths.Contains(Path(s.Metadata.Document)))
+            .Select(s => Guid.Parse(s.Metadata.ScreenId.Value)).Distinct()
+            .Select(id => new SchematicLayoutRegion(id, new(0, 0, 300_000_000, 200_000_000),
+                [new(Guid.Parse("d0aef585-dddf-441f-9480-2765f53106fb"), new(250_000_000, 150_000_000, 300_000_000, 200_000_000))])).ToArray();
+    }
+
+    private static Task<SchematicInitialLayoutResult> Propose(DesignRecoveryState state,
+        Action<SchematicPlacementGeometry>? corrupt = null, SchematicLayoutRegion[]? regions = null)
+    {
+        int calls = 0;
+        return SchematicInitialLayoutPlanner.ProposeMeasuredAsync(state, Policy, regions ?? Regions(state),
+            "Keep the new group together.", (request, token) =>
+            {
+                var result = Measurement(state, request, ++calls == 1 ? 3_000_000 : 7_000_000);
+                corrupt?.Invoke(result); return Task.FromResult(result);
+            });
+    }
+
+    // Explicitly synthetic native geometry: these tests qualify the adapter's
+    // admission/union logic; the rendered native journey proves actual bounds.
+    private static SchematicPlacementGeometry Measurement(DesignRecoveryState state, MeasureSchematicPlacement request, long width)
+    {
+        var screen = state.Baseline.Schematic.Instances.Single(s => Path(s.Metadata.Document) == Path(request.Document));
+        var result = new SchematicPlacementGeometry { Document = request.Document.Clone(), Revision = request.ExpectedRevision.Clone(),
+            ScreenId = screen.Metadata.ScreenId.Clone(), PageBounds = new() { Position = new(), Size = new() { XNm = 300_000_000, YNm = 200_000_000 } } };
+        foreach (Guid id in SchematicItemDelta.Index(screen.Items).Where(p => p.Value is not Group).Select(p => p.Key))
+            result.Obstacles.Add(new SchematicPlacementBounds { Id = new() { Value = id.ToString("D") }, Anchor = new() { XNm = 10_000_000, YNm = 20_000_000 },
+                Bounds = new() { Position = new() { XNm = 8_000_000, YNm = 18_000_000 }, Size = new() { XNm = 5_000_000, YNm = 5_000_000 } } });
+        foreach (var symbol in request.Candidates)
+            result.Candidates.Add(new SchematicPlacementBounds { Id = symbol.Id.Clone(), Anchor = symbol.Position.Clone(), Bounds = new()
+            { Position = new() { XNm = symbol.Position.XNm - 1_000_000, YNm = symbol.Position.YNm - 2_000_000 },
+                Size = new() { XNm = width, YNm = 5_000_000 } } });
+        result.Limitations.Add("Synthetic adapter fixture, not native rendered evidence.");
+        return result;
+    }
+
+    private static string Path(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(p => p.Value));
+}

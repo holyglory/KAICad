@@ -82,7 +82,7 @@ public sealed class SchematicNativeCreationProjectionTests
             Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, coordinateFree, [library])).Code);
     }
 
-    private static EngineeringDesign AddComponent(SchematicDesign baseline, bool coordinateFree = false)
+    internal static EngineeringDesign AddComponent(SchematicDesign baseline, bool coordinateFree = false)
     {
         var source = baseline.Engineering.Circuit.Components[0];
         var sourceDefinition = baseline.Engineering.Circuit.Sheets.SelectMany(s => s.Components)

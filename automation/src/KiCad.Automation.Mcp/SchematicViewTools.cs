@@ -93,6 +93,34 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
+    [McpServerTool(Name = "kicad_design_propose_initial_layout", ReadOnly = true),
+     Description("Propose positions for coordinate-free additions of known, unconnected parts in an explicitly attached schematic. Requires the absolute recovery path and exact recovery token, nanometre grid/clearance/inset, and one usable-page region with title-block/artwork reservations per affected physical screen UUID. Uses revision-bound native body/visible-field measurements, combines repeated sheet envelopes and preserves existing or explicitly positioned symbols. Returns desired XML plus scoped visual-refinement context; no-space returns issues without a partial candidate. Does not write XML/recovery, edit KiCad, generate wiring or certify readability. Review and publish the proposed XML through normal revision-safe synchronization, then verify native connectivity and rendered presentation.")]
+    public Task<CallToolResult> ProposeInitialLayout(string instanceId, string recoveryPath,
+        string expectedRevisionToken, long gridNm, long clearanceNm, long pageInsetNm,
+        SchematicLayoutRegion[] regions, string userInstructions, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Path.IsPathFullyQualified(recoveryPath))
+            throw new AutomationException("invalid_recovery_path", "Specify the absolute saved design recovery path.");
+        var store = new DesignRecoveryStore(recoveryPath);
+        var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
+        if (saved.State.InstanceId.ToString("D") != instanceId)
+            throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
+        if (saved.RevisionToken != expectedRevisionToken)
+            throw new AutomationException("design_recovery_changed", "Reload the recovery record before proposing layout.");
+        var proposal = await SchematicInitialLayoutPlanner.ProposeAsync(registry.Client(instanceId), saved.State,
+            new(gridNm, clearanceNm, pageInsetNm), regions, userInstructions, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (store.Read()?.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "The recovery record changed during layout measurement; request a fresh proposal.");
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = saved.RevisionToken,
+            nativeRevision = saved.State.NativeRevision, canPropose = proposal.CanPropose, desiredXml = proposal.DesiredXml,
+            layout = proposal.Layout, refinement = proposal.Refinement, limitations = proposal.Limitations,
+            requiresVisualReview = true, requiresNativeConnectivityValidation = true,
+            nativeDocumentEdited = false, designFileWritten = false, recoveryWritten = false });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_design_recovery_observe", ReadOnly = true),
      Description("Observe a saved full-design recovery record against its explicitly attached KiCad instance. recoveryPath is an absolute DesignRecoveryStore file path; optional expectedRevisionToken rejects a changed recovery record. Verifies the exact pending command receipt, then reads the current native hierarchy with matching instance, root, epoch and non-regressing revision. Returns the original receipt separately from current state, which may include later edits or undo. Preserves invalid desired XML, baseline, pending operation and files. Does not resubmit edits, resolve conflicts, advance synchronization or imply full native coverage. The pending target (or saved root when none) must be readable by the native editor.")]
     public Task<CallToolResult> ObserveRecovery(string instanceId, string recoveryPath,

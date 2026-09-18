@@ -21,6 +21,7 @@
 #include <trigo.h>
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <set>
 #include <stdexcept>
 
@@ -103,6 +104,10 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
         ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST ); error.set_error_message( message );
         return tl::unexpected( error );
     };
+    auto known = aCtx.Request;
+    known.DiscardUnknownFields();
+    if( known.ByteSizeLong() != aCtx.Request.ByteSizeLong() )
+        return reject( "Placement measurement contains unsupported fields" );
     if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) ) return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
@@ -156,8 +161,19 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
                     || proposed.path().SerializeAsString() != aCtx.Request.document().sheet_path().SerializeAsString()
                     || !SchematicFieldTextModesArePersistable( proposed ) )
                 return reject( "Candidates need distinct new identities, exact target paths and complete native definitions" );
+            auto coordinate = []( int64_t value )
+            {
+                const int64_t quantum = schIUScale.IUToNm( 1 );
+                return value % quantum == 0 && value / quantum >= std::numeric_limits<int>::min()
+                        && value / quantum <= std::numeric_limits<int>::max();
+            };
+            if( !proposed.has_position() || !coordinate( proposed.position().x_nm() )
+                    || !coordinate( proposed.position().y_nm() ) || !proposed.has_unit()
+                    || proposed.unit().unit() < 1 )
+                return reject( "Candidate anchors must fit the native coordinate range and 100 nm quantum, with an explicit unit" );
             SCH_SYMBOL symbol;
-            if( !UnpackSymbol( &symbol, proposed ) ) return reject( "Candidate symbol cannot be decoded without loss" );
+            if( !UnpackSymbol( &symbol, proposed ) || proposed.unit().unit() > symbol.GetUnitCount() )
+                return reject( "Candidate symbol or unit cannot be decoded" );
             // Resolve project variables through the target, but never append,
             // register variants, create a commit or alter the displayed sheet.
             symbol.SetParent( screen );

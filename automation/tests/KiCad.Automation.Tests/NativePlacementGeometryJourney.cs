@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -39,6 +40,24 @@ public sealed partial class NativeSessionTests
                 var duplicate = request.Clone(); duplicate.Candidates.Add(request.Candidates[0].Clone());
                 Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
                     client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(duplicate, token))).Status);
+                Action<MeasureSchematicPlacement>[] malformed =
+                [
+                    r => r.Candidates[0].Position = null,
+                    r => r.Candidates[0].Position.XNm++,
+                    r => r.Candidates[0].Position.XNm = ((long)int.MaxValue + 1) * 100,
+                    r => r.Candidates[0].Unit.Unit = 0,
+                    r => r.Candidates[0].Path.Path.Clear()
+                ];
+                foreach (var corrupt in malformed)
+                {
+                    var invalid = request.Clone(); corrupt(invalid);
+                    Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
+                        client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(invalid, token))).Status);
+                }
+                byte[] unknownBytes = [.. request.ToByteArray(), 0xf8, 0x3e, 0x01];
+                var unknown = MeasureSchematicPlacement.Parser.ParseFrom(unknownBytes);
+                Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
+                    client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(unknown, token))).Status);
             }
             result.Add(measured);
         }

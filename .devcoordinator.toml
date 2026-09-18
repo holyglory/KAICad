@@ -34,6 +34,54 @@ env = { ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build
 [test]
 default = "automation"
 
+[test.prune-completed-8e8-imports]
+timeout_seconds = 3600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.prune-completed-8e8-imports.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts", "receipt-directory", "prune"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.prune-completed-8e8-imports.check]]
+name = "contracts"
+tier = "development"
+role = "preflight"
+invalidates = ["receipt-directory", "prune"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~IntermediateArchivePruningTests", "--logger", "trx", "--results-directory", "automation/artifacts/prune-8e8-contracts"]
+retained_artifacts = [{ name = "cleanup-contracts", path = "automation/artifacts/prune-8e8-contracts", max_bytes = 16777216 }]
+
+[[test.prune-completed-8e8-imports.check]]
+name = "receipt-directory"
+tier = "development"
+command = ["mkdir", "-p", "automation/artifacts/prune-8e8-imports"]
+
+[[test.prune-completed-8e8-imports.check]]
+name = "prune"
+tier = "development"
+requires = ["receipt-directory"]
+command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "prune-staging-archives", "--declaration", "/mnt/build-storage/codex/kicad/worktrees/component-generation.20260918/automation/distribution/maintenance/prune-8e8-imports.json", "--output", "/mnt/build-storage/codex/kicad/worktrees/component-generation.20260918/automation/artifacts/prune-8e8-imports/receipt.json"]
+retained_artifacts = [{ name = "cleanup-receipt", path = "automation/artifacts/prune-8e8-imports", max_bytes = 1048576 }]
+
+[test.archive-pruning-contracts]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.archive-pruning-contracts.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.archive-pruning-contracts.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~IntermediateArchivePruningTests", "--logger", "trx", "--results-directory", "automation/artifacts/archive-pruning-contracts"]
+retained_artifacts = [{ name = "archive-pruning-contracts", path = "automation/artifacts/archive-pruning-contracts", max_bytes = 16777216 }]
+
 [test.retained-field-layout-diagnosis]
 timeout_seconds = 600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_FIELD_LAYOUT_DIAGNOSTIC_EVIDENCE = "/mnt/build-storage/codex/kicad/evidence/field-layout-2c7551/native-xml-component-creation-evidence" }

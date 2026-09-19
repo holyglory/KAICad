@@ -47,8 +47,6 @@ set( QA_COMMON_SRCS
     test_design_block_library_adapter.cpp
     test_desktop_app_id.cpp
     test_dialog_shim.cpp
-    test_diagram_field_history.cpp
-    ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp
     test_eda_shape.cpp
     test_eda_text.cpp
     test_editor_tabs_panel.cpp
@@ -333,6 +331,19 @@ set_tests_properties( qa_automation_update_client PROPERTIES TIMEOUT 60 )
 
 if( UNIX AND NOT APPLE )
     pkg_check_modules( QA_CAPTION_GTK REQUIRED IMPORTED_TARGET gtk+-3.0 )
+    add_executable( qa_diagram_field_history
+        ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+        test_module.cpp
+        test_diagram_field_history.cpp
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp )
+    target_compile_definitions( qa_diagram_field_history PRIVATE KICAD_QA_GUI )
+    target_link_libraries( qa_diagram_field_history PRIVATE
+        common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework
+        ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} )
+    if( TARGET api_schema_build_copy )
+        add_dependencies( qa_diagram_field_history api_schema_build_copy )
+    endif()
+    add_dependencies( qa_all_tests qa_diagram_field_history )
     add_executable( qa_automation_caption test_automation_caption.cpp )
     target_link_libraries( qa_automation_caption PRIVATE kiplatform Boost::headers Boost::unit_test_framework ${wxWidgets_LIBRARIES} PkgConfig::QA_CAPTION_GTK )
     add_test( NAME qa_automation_caption COMMAND xvfb-run -a $<TARGET_FILE:qa_automation_caption> --log_level=all )

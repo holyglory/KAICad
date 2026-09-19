@@ -28,6 +28,7 @@
 
 #include <wx/image.h>
 #include <wx/init.h>
+#include <wx/app.h>
 
 #include <locale_io.h>
 
@@ -58,6 +59,11 @@ bool init_unit_test()
 
 int main( int argc, char* argv[] )
 {
+#ifdef KICAD_QA_GUI
+    // Dedicated rendered journeys need a real wxApp; ordinary common-library
+    // tests keep their existing headless initialization path.
+    wxApp::SetInstance( new wxApp );
+#endif
     int ret = boost::unit_test::unit_test_main( &init_unit_test, argc, argv );
 
     // This causes some glib warnings on GTK3 (http://trac.wxwidgets.org/ticket/18274)

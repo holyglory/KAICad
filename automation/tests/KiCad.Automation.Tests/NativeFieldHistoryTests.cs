@@ -18,8 +18,8 @@ public sealed class NativeFieldHistoryTests
     {
         if (!OperatingSystem.IsLinux()) Assert.Inconclusive("This native display journey qualifies Linux only.");
         string root = FindRoot();
-        string executable = Path.Combine(root, "automation", "artifacts", "native", "qa", "tests", "common", "qa_common");
-        Assert.IsTrue(File.Exists(executable), "Build the native common-test executable before this journey.");
+        string executable = Path.Combine(root, "automation", "artifacts", "native", "qa", "tests", "common", "qa_diagram_field_history");
+        Assert.IsTrue(File.Exists(executable), "Build the native GUI-test executable before this journey.");
         string evidence = NativeEvidenceDirectory.Begin(Path.Combine(root, "automation", "artifacts", "native-field-history", theme));
         string temporary = Directory.CreateTempSubdirectory("kicad-history-gui-").FullName;
         try
@@ -43,6 +43,8 @@ public sealed class NativeFieldHistoryTests
             start.Environment["KICAD_FIELD_HISTORY_INPUT"] = input;
             start.Environment["KICAD_FIELD_HISTORY_EVIDENCE"] = evidence;
             start.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "config");
+            start.Environment["KICAD_CONFIG_HOME"] = Path.Combine(temporary, "config", "kicad");
+            start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
             start.Environment["GTK_THEME"] = gtkTheme;
             start.Environment["GSETTINGS_BACKEND"] = "memory";
             start.Environment["LC_ALL"] = "C.UTF-8";

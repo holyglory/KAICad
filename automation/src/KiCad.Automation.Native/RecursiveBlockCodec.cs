@@ -11,6 +11,17 @@ namespace KiCad.Automation.Native;
 /// rejected, not simplified into a success. No I/O or agent execution occurs here.</summary>
 public static class RecursiveBlockCodec
 {
+    public static P.FieldHistoryPageData Encode(M.DiagramFieldHistoryPage page)
+    {
+        var result = new P.FieldHistoryPageData { DocumentId = Id(page.Scope.DocumentId), OwnerId = Id(page.Scope.OwnerId), StateId = Id(page.Scope.DesignStateId),
+            Field = (P.RequirementFieldKind)((int)page.Field + 1), ContextRevisionId = Id(page.ContextRevisionId), ContextVersion = checked((uint)page.ContextVersion),
+            RequirementRevisionId = Id(page.RequirementRevisionId), SavedText = page.SavedText, Offset = checked((uint)page.Offset), Total = checked((uint)page.Total) };
+        result.Entries.Add(page.Entries.Select(e => new P.FieldHistoryEntryData { RequirementRevisionId = Id(e.RequirementRevisionId),
+            ContextRevisionId = Id(e.ContextRevisionId), ContextVersion = checked((uint)e.ContextVersion), OwnerName = e.OwnerName, Text = e.Text,
+            Origin = Origin(e.Origin), IsSavedText = e.IsSavedText }));
+        return result;
+    }
+
     public static P.RecursiveBlockGraphData Encode(M.RecursiveBlockGraph graph)
     {
         var data = new P.RecursiveBlockGraphData { SchemaVersion = 1, DocumentId = Id(graph.DocumentId), SelectedRoot = Selection(graph.SelectedRoot) };

@@ -47,6 +47,8 @@ set( QA_COMMON_SRCS
     test_design_block_library_adapter.cpp
     test_desktop_app_id.cpp
     test_dialog_shim.cpp
+    test_diagram_field_history.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp
     test_eda_shape.cpp
     test_eda_text.cpp
     test_editor_tabs_panel.cpp

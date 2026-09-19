@@ -38,6 +38,28 @@ message RequirementHistoryData {
   string state_id = 3;
   repeated RequirementRevisionData revisions = 4;
 }
+message FieldHistoryEntryData {
+  string requirement_revision_id = 1;
+  string context_revision_id = 2;
+  uint32 context_version = 3;
+  string owner_name = 4;
+  string text = 5;
+  DiagramRevisionOriginData origin = 6;
+  bool is_saved_text = 7;
+}
+message FieldHistoryPageData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  RequirementFieldKind field = 4;
+  string context_revision_id = 5;
+  uint32 context_version = 6;
+  string requirement_revision_id = 7;
+  string saved_text = 8;
+  uint32 offset = 9;
+  uint32 total = 10;
+  repeated FieldHistoryEntryData entries = 11;
+}
 message BlockDesignStateData {
   string id = 1;
   string block_id = 2;

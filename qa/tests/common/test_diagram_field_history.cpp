@@ -1,0 +1,199 @@
+/* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
+#define BOOST_TEST_NO_MAIN
+#include <boost/test/unit_test.hpp>
+#include <qa_utils/wx_utils/unit_test_utils.h>
+#include <dialogs/dialog_diagram_field_history.h>
+#include <api/common/types/diagram_revision_types.pb.h>
+#include <nlohmann/json.hpp>
+#include <wx/app.h>
+#include <wx/button.h>
+#include <wx/dcmemory.h>
+#include <wx/dcscreen.h>
+#include <wx/evtloop.h>
+#include <wx/image.h>
+#include <wx/listbox.h>
+#include <wx/stopwatch.h>
+#include <wx/textctrl.h>
+#include <wx/timer.h>
+#include <wx/uiaction.h>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+
+namespace
+{
+namespace D = kiapi::automation::diagrams::v1;
+
+void waitFor( const std::function<bool()>& aCondition )
+{
+    wxEventLoop loop;
+    wxEventLoopActivator active( &loop );
+    wxEvtHandler events;
+    wxTimer timer( &events );
+    wxStopWatch time;
+    bool expired = false;
+    events.Bind( wxEVT_TIMER, [&]( wxTimerEvent& )
+    {
+        expired = time.Time() >= 5000;
+        if( aCondition() || expired ) loop.Exit();
+    } );
+    timer.Start( 20 ); loop.Run(); timer.Stop();
+    BOOST_REQUIRE( !expired );
+}
+
+template<typename T>
+T* control( wxWindow* aParent, const char* aName )
+{
+    auto* found = dynamic_cast<T*>( wxWindow::FindWindowByName( aName, aParent ) );
+    BOOST_REQUIRE( found ); return found;
+}
+
+void click( wxWindow* aControl )
+{
+    wxRect bounds = aControl->GetScreenRect();
+    wxUIActionSimulator input;
+    BOOST_REQUIRE( input.MouseMove( bounds.x + bounds.width / 2, bounds.y + bounds.height / 2 ) );
+    BOOST_REQUIRE( input.MouseClick() );
+    wxTheApp->Yield( true );
+}
+
+void key( int aKey )
+{
+    wxUIActionSimulator input;
+    BOOST_REQUIRE( input.KeyDown( aKey ) ); BOOST_REQUIRE( input.KeyUp( aKey ) );
+    wxTheApp->Yield( true );
+}
+
+void capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const char* aName )
+{
+    aWindow->Update(); wxTheApp->Yield( true );
+    wxRect bounds = aWindow->GetScreenRect();
+    wxBitmap bitmap( bounds.width, bounds.height, 24 );
+    wxScreenDC screen;
+    wxMemoryDC memory( bitmap );
+    BOOST_REQUIRE( memory.Blit( 0, 0, bounds.width, bounds.height, &screen, bounds.x, bounds.y ) );
+    memory.SelectObject( wxNullBitmap );
+    BOOST_REQUIRE( bitmap.ConvertToImage().SaveFile( ( aDirectory / aName ).string(), wxBITMAP_TYPE_PNG ) );
+}
+
+int show( DIALOG_DIAGRAM_FIELD_HISTORY* aDialog, const std::function<void()>& aScenario )
+{
+    std::exception_ptr failure;
+    bool expired = false;
+    wxEvtHandler events;
+    wxTimer deadline( &events );
+    events.Bind( wxEVT_TIMER, [&]( wxTimerEvent& )
+    { expired = true; if( aDialog->IsModal() ) aDialog->EndModal( wxID_CANCEL ); } );
+    deadline.StartOnce( 15000 );
+    wxTheApp->CallAfter( [&]
+    {
+        try { waitFor( [&] { return aDialog->IsShownOnScreen(); } ); aScenario(); }
+        catch( ... ) { failure = std::current_exception(); if( aDialog->IsModal() ) aDialog->EndModal( wxID_CANCEL ); }
+    } );
+    int result = aDialog->ShowModal(); deadline.Stop();
+    BOOST_CHECK( !expired );
+    if( failure ) std::rethrow_exception( failure );
+    return result;
+}
+}
+
+BOOST_AUTO_TEST_SUITE( DiagramFieldHistory )
+
+BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
+{
+    const char* inputPath = std::getenv( "KICAD_FIELD_HISTORY_INPUT" );
+    const char* outputPath = std::getenv( "KICAD_FIELD_HISTORY_EVIDENCE" );
+    if( !inputPath || !outputPath )
+    {
+        BOOST_TEST_MESSAGE( "Run the compiled native field-history journey to supply its versioned model fixture." );
+        return;
+    }
+    BOOST_REQUIRE( KI_TEST::CanDoDisplayTests() );
+    wxInitAllImageHandlers();
+    D::FieldHistoryPageData page;
+    std::ifstream input( inputPath, std::ios::binary );
+    BOOST_REQUIRE( input.good() ); BOOST_REQUIRE( page.ParseFromIstream( &input ) );
+    BOOST_REQUIRE_EQUAL( page.field(), D::RFK_ROUTING );
+    BOOST_REQUIRE_GE( page.entries_size(), 2 );
+    std::filesystem::path evidence( outputPath );
+    std::filesystem::create_directories( evidence );
+    auto text = []( const std::string& value ) { return wxString::FromUTF8( value ); };
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
+    for( const auto& entry : page.entries() )
+        rows.push_back( { entry.requirement_revision_id(), wxString::Format( "v%u", entry.context_version() ),
+                         text( entry.origin().actor() ), text( entry.text() ), wxEmptyString, entry.is_saved_text() } );
+    auto* dialog = new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "Routing requirements", "PSU",
+            wxString::Format( "v%u", page.context_version() ), text( page.saved_text() ), rows );
+    dialog->Move( wxPoint( 60, 60 ) );
+    auto* list = control<wxListBox>( dialog, "DiagramFieldHistoryRevisions" );
+    auto* selected = control<wxTextCtrl>( dialog, "DiagramFieldHistorySelectedText" );
+    auto* saved = control<wxTextCtrl>( dialog, "DiagramFieldHistorySavedText" );
+    auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
+    auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
+    int cancelled = show( dialog, [&]
+    {
+        capture( dialog, evidence, "01-current.png" );
+        list->SetFocus(); key( WXK_DOWN );
+        waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );
+        BOOST_CHECK_EQUAL( saved->GetValue(), text( page.saved_text() ) );
+        BOOST_CHECK( !dialog->RestoreRevision().has_value() );
+        capture( dialog, evidence, "02-earlier-text.png" );
+        key( WXK_ESCAPE );
+    } );
+    BOOST_CHECK_EQUAL( cancelled, wxID_CANCEL );
+    BOOST_CHECK( !dialog->RestoreRevision().has_value() );
+    bool cancelledWithoutRestore = cancelled == wxID_CANCEL && !dialog->RestoreRevision().has_value();
+    bool compactFits = false;
+
+    BOOST_CHECK_EQUAL( show( dialog, [&]
+    {
+        BOOST_CHECK( !dialog->RestoreRevision().has_value() );
+        dialog->SetClientSize( dialog->FromDIP( wxSize( 590, 380 ) ) ); dialog->Layout();
+        waitFor( [&] { return restore->IsShownOnScreen(); } );
+        wxRect client( dialog->ClientToScreen( wxPoint( 0, 0 ) ), dialog->GetClientSize() );
+        BOOST_CHECK( client.Contains( restore->GetScreenRect() ) );
+        BOOST_CHECK( client.Contains( close->GetScreenRect() ) );
+        BOOST_CHECK( client.Contains( saved->GetScreenRect() ) );
+        compactFits = client.Contains( restore->GetScreenRect() ) && client.Contains( close->GetScreenRect() )
+            && client.Contains( saved->GetScreenRect() );
+        capture( dialog, evidence, "03-compact.png" );
+        dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
+        click( restore );
+    } ), wxID_OK );
+    BOOST_REQUIRE( dialog->RestoreRevision().has_value() );
+    BOOST_CHECK_EQUAL( *dialog->RestoreRevision(), page.entries( 1 ).requirement_revision_id() );
+    std::string restored = *dialog->RestoreRevision();
+    dialog->SaveControlState();
+    bool reopenCleared = false;
+    BOOST_CHECK_EQUAL( show( dialog, [&]
+    {
+        BOOST_CHECK( !dialog->RestoreRevision().has_value() );
+        reopenCleared = !dialog->RestoreRevision().has_value();
+        click( close );
+    } ), wxID_CANCEL );
+    BOOST_CHECK( !dialog->RestoreRevision().has_value() );
+    dialog->Destroy(); wxTheApp->ProcessPendingEvents();
+
+    rows[0].text = "Different project's saved text";
+    auto* other = new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "Routing requirements", "Other system",
+            "v1", rows[0].text, rows );
+    bool scopeIsolation = false;
+    BOOST_CHECK_EQUAL( show( other, [&]
+    {
+        BOOST_CHECK_EQUAL( control<wxTextCtrl>( other, "DiagramFieldHistorySavedText" )->GetValue(), rows[0].text );
+        BOOST_CHECK_EQUAL( control<wxTextCtrl>( other, "DiagramFieldHistorySelectedText" )->GetValue(), rows[0].text );
+        scopeIsolation = control<wxTextCtrl>( other, "DiagramFieldHistorySavedText" )->GetValue() == rows[0].text
+            && control<wxTextCtrl>( other, "DiagramFieldHistorySelectedText" )->GetValue() == rows[0].text;
+        click( control<wxButton>( other, "DiagramFieldHistoryClose" ) );
+    } ), wxID_CANCEL );
+    other->Destroy(); wxTheApp->ProcessPendingEvents();
+    std::ofstream receipt( evidence / "interaction.json" );
+    receipt << nlohmann::json( { { "document_id", page.document_id() }, { "owner_id", page.owner_id() },
+        { "context_revision_id", page.context_revision_id() }, { "restore_requirement_revision_id", restored },
+        { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
+        { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits } } ).dump( 2 );
+    BOOST_REQUIRE( receipt.good() );
+}
+
+BOOST_AUTO_TEST_SUITE_END()

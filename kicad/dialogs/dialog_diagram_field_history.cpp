@@ -39,6 +39,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_history = new wxListBox( this, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 200, 300 ) ),
                               0, nullptr, wxLB_SINGLE | wxLB_HSCROLL );
     m_history->SetName( "DiagramFieldHistoryRevisions" );
+    OptOut( m_history );
     m_history->SetMinSize( FromDIP( wxSize( 170, 200 ) ) );
     for( const auto& entry : m_entries )
     {
@@ -55,6 +56,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_selectedText = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
     m_selectedText->SetName( "DiagramFieldHistorySelectedText" );
+    OptOut( m_selectedText );
     m_selectedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
     texts->Add( m_selectedText, 1, wxEXPAND );
     m_source = new wxButton( this, wxID_ANY, _( "View source instruction" ),
@@ -69,6 +71,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     auto* savedText = new wxTextCtrl( this, wxID_ANY, aSavedText, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
     savedText->SetName( "DiagramFieldHistorySavedText" );
+    OptOut( savedText );
     savedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
     texts->Add( savedText, 1, wxEXPAND );
     comparison->Add( texts, 1, wxEXPAND );

@@ -44,7 +44,6 @@ public sealed class StructuralDiagramPresentationTests
         Assert.AreEqual(diagram.Statements.Count, read.Statements.Count);
         Assert.AreEqual(diagram.Properties!.Count, read.Properties!.Count);
 
-        var (_, legacy) = StructuralDiagramTests.Fixture();
         // Use its own circuit, since identities are intentionally independent.
         var old = StructuralDiagramTests.Fixture();
         string oldXml = StructuralDiagramXml.Write(old.Item2, old.Item1);

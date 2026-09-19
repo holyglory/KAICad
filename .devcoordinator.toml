@@ -34,6 +34,39 @@ env={ ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-s
 [test]
 default="automation"
 
+[test.structural-editor-build]
+timeout_seconds=3600
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+[[test.structural-editor-build.check]]
+name="managed"
+tier="development"
+role="preflight"
+invalidates=["contracts","configure","native","rendered"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+[[test.structural-editor-build.check]]
+name="contracts"
+tier="development"
+role="preflight"
+invalidates=["configure","native","rendered"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~StructuralEditor|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/structural-editor-contracts"]
+retained_artifacts=[{name="contracts",path="automation/artifacts/structural-editor-contracts",max_bytes=16777216}]
+[[test.structural-editor-build.check]]
+name="configure"
+tier="development"
+role="preflight"
+invalidates=["native","rendered"]
+command=["cmake","-S",".","-B","automation/artifacts/native","-G","Ninja","-DCMAKE_BUILD_TYPE=Debug","-DKICAD_USE_CMAKE_FINDPROTOBUF=ON","-DKICAD_BUILD_QA_TESTS=ON","-DUSE_CCACHE=ON","-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+[[test.structural-editor-build.check]]
+name="native"
+tier="development"
+command=["cmake","--build","automation/artifacts/native","--target","kicad","kiapi","eeschema_kiface","pcbnew_kiface","cvpcb_kiface","schema_build_copy","api_schema_build_copy","bitmap_archive_build"]
+[[test.structural-editor-build.check]]
+name="rendered"
+tier="development"
+requires=["native"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeStructuralEditor","--logger","trx","--results-directory","automation/artifacts/structural-editor-rendered"]
+retained_artifacts=[{name="rendered",path="automation/artifacts/structural-editor-rendered",max_bytes=16777216},{name="editor-evidence",path="automation/artifacts/native-structural-editor/native-session-current",max_bytes=33554432}]
+
 [test.prune-completed-8e8-imports]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -1951,7 +1984,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", 
 name="contracts"
 tier="development"
 requires=["build"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~McpProcessTests", "--logger", "trx", "--results-directory", "automation/artifacts/engineering-model-results"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "(FullyQualifiedName~StructuralEditor|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession", "--logger", "trx", "--results-directory", "automation/artifacts/engineering-model-results"]
 retained_artifacts=[{ name = "engineering-model-results", path = "automation/artifacts/engineering-model-results", max_bytes = 16777216 }]
 
 [test.automation]

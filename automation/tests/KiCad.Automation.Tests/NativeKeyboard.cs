@@ -43,14 +43,15 @@ internal static class NativeKeyboard
     // focusCanvas controls the optional pre-click for keyboard input. Explicit
     // pointer commands still have to send their requested physical action.
     internal static bool RequestsPointerInput(string key, bool focusCanvas) => key.Length != 0
-        && (focusCanvas || key is "click" or "right-click" or "motion");
+        && (focusCanvas || key is "click" or "right-click" or "motion" or "drag");
 
     public static void SchematicShortcut(string fixtureDisplay, int processId, string key,
         string titleMatch = "Schematic Editor", bool controlKey = true, bool focusCanvas = true,
         int? clickFromRight = null, int? clickFromBottom = null, Action<string>? describe = null,
         int? clickFromLeft = null, int? clickFromTop = null, bool altKey = false,
         Action<nuint>? observeWindow = null, Action<(int X, int Y, int Width, int Height)>? observeGeometry = null,
-        nuint? excludeWindow = null, Action<int>? observePopupCount = null)
+        nuint? excludeWindow = null, Action<int>? observePopupCount = null,
+        int? dragToLeft = null, int? dragToTop = null)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         using var errors = new WindowErrorScope();
@@ -144,6 +145,23 @@ internal static class NativeKeyboard
             // where repeated clicks legitimately open Page Settings.
             if (RequestsPointerInput(key, focusCanvas))
             {
+                if (key == "drag")
+                {
+                    if (dragToLeft is not int endX || dragToTop is not int endY
+                        || XTranslateCoordinates(display, targets[0], root, endX, endY, out int finishX, out int finishY, out _) == 0)
+                        throw new InvalidOperationException("A fixture drag needs an explicit endpoint.");
+                    XTestFakeMotionEvent(display, -1, pointerX, pointerY, 0);
+                    try
+                    {
+                        if (XTestFakeButtonEvent(display, 1, 1, 0) == 0) throw new InvalidOperationException("Fixture drag press failed.");
+                        for (int step = 1; step <= 8; step++)
+                            if (XTestFakeMotionEvent(display, -1, pointerX + (finishX - pointerX) * step / 8,
+                                pointerY + (finishY - pointerY) * step / 8, 20) == 0)
+                                throw new InvalidOperationException("Fixture drag motion failed.");
+                    }
+                    finally { XTestFakeButtonEvent(display, 1, 0, 20); XSync(display, 0); }
+                    return;
+                }
                 XTestFakeMotionEvent(display, -1, pointerX, pointerY, 0);
                 if (key != "motion")
                 {

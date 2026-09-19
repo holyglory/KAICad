@@ -4,6 +4,16 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+if (args.FirstOrDefault() == "--structural-file")
+{
+    using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+    ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+    Console.CancelKeyPress += cancel;
+    try { Environment.ExitCode = await StructuralFileCommand.RunAsync(Console.In, Console.Out, cancellation.Token); }
+    finally { Console.CancelKeyPress -= cancel; }
+    return;
+}
+
 if (args.FirstOrDefault() == "--launch-installed")
 {
     // A forwarded STDIO MCP session is not a finite 15-minute update job.
@@ -68,6 +78,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<InstanceUpdateTools>()
     .WithTools<EventTools>()
     .WithTools<SchematicViewTools>()
+    .WithTools<StructuralEditorTools>()
     .WithTools<SchematicMutationTools>()
     .WithTools<CheckedSchematicTools>()
     .WithTools<SchematicXmlTools>()

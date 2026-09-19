@@ -15,6 +15,54 @@ namespace KiCad.Automation.Tests;
 public sealed class McpProcessTests
 {
     [TestMethod]
+    public async Task StructuralFileCommandWorksWithoutAnMcpSession()
+    {
+        string state = Directory.CreateTempSubdirectory("kicad-structural-command-").FullName;
+        try
+        {
+            var (circuit, diagram) = StructuralDiagramTests.Fixture();
+            string path = Path.Combine(state, "design.xml");
+            await File.WriteAllTextAsync(path, EngineeringDesignXml.Write(new(circuit, diagram, [], []), []));
+            var request = new KiCad.Automation.Protocol.Structural.StructuralFileRequest
+                { SchemaVersion = 1, RepositoryRoot = state, SourcePath = path };
+            var read = await Invoke(request);
+            Assert.IsTrue(read.Success); Assert.AreEqual(diagram.Id.ToString("D"), read.Document.DocumentId);
+            request.Action = KiCad.Automation.Protocol.Structural.StructuralFileAction.SfaSave;
+            request.ExpectedSourceToken = read.Document.SourceToken; request.Diagram = read.Document.Diagram.Clone();
+            request.Diagram.Blocks[0].Purpose = "Saved through the finite native-editor helper.";
+            var saved = await Invoke(request);
+            Assert.IsTrue(saved.Success); Assert.AreNotEqual(read.Document.SourceToken, saved.Document.SourceToken);
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("structural_file_changed", stale.ErrorCode);
+        }
+        finally { Directory.Delete(state, true); }
+
+        async Task<KiCad.Automation.Protocol.Structural.StructuralFileResult> Invoke(
+            KiCad.Automation.Protocol.Structural.StructuralFileRequest request)
+        {
+            string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+            var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardInput = true,
+                RedirectStandardOutput = true, RedirectStandardError = true };
+            start.ArgumentList.Add(Path.Combine(FindAutomationRoot(), "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll"));
+            start.ArgumentList.Add("--structural-file");
+            using var process = Process.Start(start)!;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            try
+            {
+                var diagnostics = process.StandardError.ReadToEndAsync(timeout.Token);
+                var response = process.StandardOutput.ReadToEndAsync(timeout.Token);
+                await process.StandardInput.WriteAsync(Google.Protobuf.JsonFormatter.Default.Format(request));
+                process.StandardInput.Close();
+                await process.WaitForExitAsync(timeout.Token);
+                var result = KiCad.Automation.Protocol.Structural.StructuralFileResult.Parser.ParseJson(await response);
+                Assert.AreEqual(result.Success ? 0 : 1, process.ExitCode, await diagnostics);
+                return result;
+            }
+            finally { if (!process.HasExited) { process.Kill(); await process.WaitForExitAsync(); } }
+        }
+    }
+
+    [TestMethod]
     public async Task InitializeDiscoverAndCallOverStdio()
     {
         string root = FindAutomationRoot();
@@ -76,6 +124,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
             CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
+            CollectionAssert.Contains(names, "kicad_structure_open");
+            CollectionAssert.Contains(names, "kicad_structure_state");
             var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
             Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());

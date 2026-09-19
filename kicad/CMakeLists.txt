@@ -19,6 +19,8 @@ include_directories(
 set( KICAD_SRCS
     automation_update_client.cpp
     automation_update_windows.cpp
+    structural_editor_control.cpp
+    structural_editor_frame.cpp
     dialogs/dialog_destination.cpp
     dialogs/dialog_destination_base.cpp
     dialogs/dialog_archive_job_settings.cpp

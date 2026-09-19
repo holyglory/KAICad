@@ -67,7 +67,7 @@ public sealed record HardwareRepository(Guid Id, string Name, IReadOnlyList<Hard
     {
         if (string.IsNullOrWhiteSpace(text)) throw Invalid(name + " is required.");
     }
-    internal static void ValidatePath(string path)
+    public static void ValidatePath(string path)
     {
         // A portable Git-relative spelling, independent of the current host OS.
         if (string.IsNullOrWhiteSpace(path) || path.Contains('\\') || path.Contains(':')

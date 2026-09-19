@@ -81,6 +81,7 @@
 #include <atomic>
 #include <update_manager.h>
 #include "automation_update_client.h"
+#include "structural_editor_control.h"
 #include <jobs/jobset.h>
 #include <widgets/wx_aui_art_providers.h>
 
@@ -307,6 +308,7 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
     m_acceptedExts.emplace( FILEEXT::DrillFileExtension, &KICAD_MANAGER_ACTIONS::viewDroppedGerbers );
 
     DragAcceptFiles( true );
+    m_structuralEditors = std::make_unique<STRUCTURAL_EDITOR_CONTROL>( this );
 
     // Explicit installed-launcher context, independent of whether a project is
     // already open. No engineering project can select a helper via its fields.
@@ -395,6 +397,7 @@ KICAD_MANAGER_FRAME::~KICAD_MANAGER_FRAME()
     // must complete before we uninitialize AUI or destroy child windows.
     m_updateManager.reset();
     m_automationUpdateClient.reset();
+    m_structuralEditors.reset();
 
     delete m_actions;
     delete m_toolManager;
@@ -851,6 +854,8 @@ void KICAD_MANAGER_FRAME::OnExit( wxCommandEvent& event )
 
 bool KICAD_MANAGER_FRAME::CloseProject( bool aSave )
 {
+    if( m_structuralEditors && !m_structuralEditors->CloseEditors() )
+        return false;
     if( !Kiway().PlayersClose( false ) )
         return false;
 

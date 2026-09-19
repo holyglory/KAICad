@@ -36,6 +36,7 @@ class PROJECT_TREE_PANE;
 class LOCAL_HISTORY_PANE;
 class UPDATE_MANAGER;
 class AUTOMATION_UPDATE_CLIENT;
+class STRUCTURAL_EDITOR_CONTROL;
 
 /**
  * The main KiCad project manager frame.  It is not a KIWAY_PLAYER.
@@ -278,6 +279,7 @@ private:
     int                                     m_pcmUpdateCount;
     std::unique_ptr<UPDATE_MANAGER>         m_updateManager;
     std::unique_ptr<AUTOMATION_UPDATE_CLIENT> m_automationUpdateClient;
+    std::unique_ptr<STRUCTURAL_EDITOR_CONTROL> m_structuralEditors;
     std::function<void( bool, bool )> m_updateCaption;
     bool m_updateRequested = false;
 };

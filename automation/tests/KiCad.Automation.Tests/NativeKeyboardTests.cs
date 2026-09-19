@@ -8,7 +8,7 @@ public sealed class NativeKeyboardTests
     [TestMethod]
     public void ExplicitPointerCommandsDoNotDependOnTheKeyboardFocusPreclick()
     {
-        foreach (string key in new[] { "click", "right-click", "motion" })
+        foreach (string key in new[] { "click", "right-click", "motion", "drag" })
             foreach (bool focus in new[] { false, true })
                 Assert.IsTrue(NativeKeyboard.RequestsPointerInput(key, focus));
         Assert.IsFalse(NativeKeyboard.RequestsPointerInput("Return", false));

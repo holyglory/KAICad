@@ -1,92 +1,40 @@
-# KiCad download landing page — design QA
+# Structural editor — option 1 comparison
 
-final result: passed
+final result: blocked
 
-Scope: the selected second landing-page concept, extended by the user's explicit
-request for light and dark themes. This is not qualification of the full KiCad
-engineering workflow or Windows two-version updating.
+## Evidence and state
 
-## Visual truth and captures
+Source visual: `/home/holyglory/.codex/generated_images/01a06e57-5f4c-7b23-8476-b42467c8c6c7/exec-14f611d6-b267-4632-a0ee-71436aff425f.png` (1487 × 1058).
 
-Selected reference:
-`/home/holyglory/.codex/generated_images/01a06e57-5f4c-7b23-8476-b42467c8c6c7/exec-b17bfa13-9076-485d-8b16-f2c92566bfb8.png`
-(1058×1487 pixels). Implementation: https://kicad.vr.ae/;
-public generation 35, source `d08b9fbbfa`.
+First native capture: `/mnt/build-storage/codex/kicad/evidence/structural-option1-528c0d/editor-evidence/6b23a438-cbca-4ab8-83f8-8c9f3fbce479-structural-initial.png` (1600 × 1150 display, 1440 × 1024 editor).
 
-Full-view comparison paired that reference and the rendered dark capture in one
-image-review input. Compare proportions at a common width, not raw pixel sizes:
-the implementation uses a 1440×1700 CSS viewport, density 1, with a 1440×1945
-full-page capture. The source normalizes to about 1440×2024. The slightly shorter
-page and the added install/archive disclosures are intentional, requested
-download functionality rather than a different visual direction.
+Both images were opened in the same comparison input. The source has MCU selected; the first capture has no block selected. Compare region organization and geometry only, not inspector content or exact pixel spacing. This is a native desktop surface; CSS viewport and browser device scale do not apply. A matching 1487 × 1058 editor capture with MCU selected is required for the next comparison.
 
-Public captures: `/tmp/kicad-public-dark.png`, `/tmp/kicad-public-light.png`.
-Retained eight-cell initial/full-page evidence, including both themes at
-390×844 and 1440×1700, and both expanded archives:
-`/mnt/build-storage/codex/kicad/evidence/landing-public-v1/`.
-The reviewed manifest is `manual-review.json` in that directory. All sixteen
-images were inspected. Expanded mobile initial captures supplied the focused
-control/text review; full-page captures supplied whole-archive topology.
-Native selector values are masked by the verifier, not absent from the page.
+## Findings
 
-## Required fidelity surfaces
+- P1: Default power paths leave through the wrong block sides and overlap block edges. The mock connects power ports from below. Draw side-aware orthogonal paths and honor stored waypoints, labels and directions.
+- P2: The diagram is anchored too high and block labels are much smaller. Center fit in the available canvas and increase label hierarchy without losing truncation.
+- P2: The first inspector has no selected object and omits the populated starting state of the reference. Select the initial block while keeping empty designs valid.
+- P2: Custom properties can be added but cannot yet be inspected or edited. Finish their real editing controls, including quantities, before calling the editor complete.
+- P2: Narrow-window and dark-theme interaction evidence is missing. Check supported desktop sizes, text scaling, keyboard focus, panel scrolling and toolbar overflow.
 
-- Typography: self-hosted Inter variable, readable body and metadata, centered
-  heading with intentional mobile wrapping; no clipped text. Wide/narrow
-  toolbar icons keep accessible names when labels collapse.
-- Spacing: selected centered hero and four-column download dock retained;
-  two-column mobile dock, compact header, one normal page scroll. No nested
-  scroll regions or unintended horizontal overflow at sampled widths.
-- Colors: graphite/mint dark theme and cool-white/deep-green light theme;
-  both have measured passing text contrast. System preference follows changes
-  until a stored manual override is selected.
-- Images: dedicated photographic hero variants, compiled into the host with
-  unmodified licensed icons. No rasterized UI, handmade substitute PCB, missing
-  artwork, stretched board or clipped mounting holes.
-- Copy: preview status is explicit; no fabricated benchmarks, customers or
-  completed-autonomous-design claims. Current downloads come from the signed
-  feed and actual catalogue, not mock dates or the last staged baseline.
+## Required surfaces
 
-## Comparison and repair history
+- Typography: native system UI font is appropriate for the KiCad platform; block label size/hierarchy needs repair. Reference mock typography is not a request to replace platform fonts.
+- Spacing/layout: correct Properties-above-Hierarchy organization; centered diagram, compact properties rows and toolbar density still need a matching-state comparison.
+- Colors: block fills and link colors follow the chosen direction. Dark-theme foreground/background contrast is not yet qualified.
+- Images/assets: blocks, ports and lines are actual editable engineering objects, not decorative assets. Existing KiCad icons are reused; no replacement raster illustration is needed.
+- Copy: native editing labels describe real operations. Source is plain text until navigation is implemented; no fake link or enabled schematic-navigation action is presented.
 
-1. First packaged preview omitted PNGs because of the repository's broad ignore
-   rule (P1). Explicitly tracked both intended assets; post-fix public images
-   decode and a browser-downloaded Windows ZIP matches its published SHA-256.
-2. The archive heading lacked heading semantics (P2). Converted it to a real
-   heading without visual drift. The final public audit has zero critical
-   findings and passing continuation coverage.
-3. Layout-complete local runs exposed cold response overhead: 25.7ms, then
-   13.2ms and 10.8ms during staged improvements. Prepared finite UTF-8 variants
-   and made deployment readiness require a real HTML response. The ready public
-   generation's local browser navigation measured 1ms; public LCP samples were
-   108–132ms. Earlier failed runs remain retained and are not relabelled passes.
+## Interaction evidence
 
-Public governed run `t20260911T092305Z-4f2613` passed page layout, all 56 archive
-GET/hash/HEAD/range checks, signed platform feeds, and the existing native
-caption Update/Cancel/Save/restart journey. Its eight visual decisions passed.
-Warnings were reviewed: the keyboard skip link is intentionally hidden before
-focus; the optional expanded archive starts in its existing document position
-and remains scroll-accessible. These are not missing primary downloads.
+Run `t20260919T155428Z-528c0d` proves real native opening in two independent instances, not the full editing journey. The save assertion in that version did not wait for an acknowledged save attempt; it cannot prove completed publication. The next fixture uses completed-save counts and changed content, then exercises undo/redo, creation cancellation, dirty-close cancellation, conflict preservation and reopen.
 
-## Interactions and limits
+## Comparison history
 
-Actual browser checks exercised light/dark button and keyboard activation,
-reload persistence, live system-theme changes, Mac-chip uncertainty, mobile
-fallback, release expansion/collapse, platform filtering/restoration, installation
-disclosure, source/instructions navigation and a real primary package download.
-No page console errors were observed. Additional responsive samples at 320 and
-900px and 200% text enlargement showed no horizontal overflow. Widths between
-samples and native Safari/Firefox engines were not exhaustively tested.
+1. First comparison found the issues above. Pending source changes address path direction, label scale, selection, fit, resizing and panning. Compilation is not post-fix visual proof.
+2. Matching 1487 × 1058 capture from `t20260919T161828Z-ddaf3b`: `/mnt/build-storage/codex/kicad/evidence/structural-option1-ddaf3b/editor-evidence/1223afdb-d9f2-45fa-a0f6-a9825e2cdfe0-structural-initial.png`. Opened together with the reference. Direction arrows, side-aware paths and populated MCU inspector now render. P2: hierarchy still highlights Memory when the canvas selects MCU; synchronize both selection surfaces. P2: fit enlarges blocks more than the reference; cap automatic fit scale while preserving manual zoom. Native font and icon rendering differ by platform as expected. Fields remain stacked rather than the compact reference rows. Two real instances renamed and saved the MCU, retained circuit data and completed unchanged saves, but immediate Redo after Undo timed out; this is a functional blocker, not a visual pass. Evidence remains sealed. Later checks must qualify cancellation/conflicts/reopen, dragging and resizing.
 
-The compiled repeatable public-browser journey also passed in governed run
-`t20260911T093445Z-97cac6`: keyboard theme activation, both persisted themes,
-release and installation expansion/collapse, filtering/restoration, live
-download-route selection, loaded artwork and absence of browser errors.
+## Next checks
 
-No actionable P0/P1/P2 visual findings remain. Minor P3: photographic lighting
-and the board angle differ slightly from the generated reference. Both retain
-its chosen composition and visual quality; no further redesign is proposed.
-
-Implementation checklist: selected layout complete; both themes complete;
-downloads and archive complete; original update/catalogue routes preserved;
-public visual and compatibility verification complete.
+Capture the revised native UI at the source dimensions and state, compare both images together, then review focused inspector and canvas regions. Keep the result blocked until the actionable findings and rendered interaction gaps are resolved.

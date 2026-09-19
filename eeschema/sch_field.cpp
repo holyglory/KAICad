@@ -222,7 +222,11 @@ bool SCH_FIELD::Deserialize( const kiapi::schematic::types::SchematicField& fiel
     SetCanAutoplace( field.allow_auto_place() );
     SetPrivate( field.is_private() );
 
-    return EDA_TEXT::Deserialize( field.text(), aScale );
+    if( !EDA_TEXT::Deserialize( field.text(), aScale ) )
+        return false;
+
+    kiapi::common::UnpackCustomProperties( field.custom_properties(), *this );
+    return true;
 }
 
 
@@ -239,7 +243,11 @@ bool SCH_FIELD::Deserialize( const google::protobuf::Any& aContainer )
 
 SCH_FIELD& SCH_FIELD::operator=( const SCH_FIELD& aField )
 {
+    if( this == &aField )
+        return *this;
+
     EDA_TEXT::operator=( aField );
+    SetCustomProperties( aField.GetCustomProperties() );
 
     m_private = aField.m_private;
     setId( aField.m_id ); // will also set the layer

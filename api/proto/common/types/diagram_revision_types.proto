@@ -1,0 +1,93 @@
+/* KiCad recursive diagram and requirement history data. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.diagrams.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Diagrams";
+
+import "google/protobuf/timestamp.proto";
+import "common/types/structural_types.proto";
+
+// Typed model exchange, not an independently enabled editing capability.
+// Revisions pin child occurrences exactly; reading never follows today's heads.
+message BlockSelectionData {
+  string block_id = 1;
+  string state_id = 2;
+  string revision_id = 3;
+}
+message RequirementFieldsData { string general = 1; string schematic = 2; string routing = 3; }
+enum DiagramActorKind { DAK_UNKNOWN = 0; DAK_USER = 1; DAK_AGENT = 2; DAK_IMPORT = 3; }
+enum RequirementFieldKind { RFK_UNKNOWN = 0; RFK_GENERAL = 1; RFK_SCHEMATIC = 2; RFK_ROUTING = 3; }
+message DiagramRevisionOriginData {
+  DiagramActorKind kind = 1;
+  string actor = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+  string summary = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  repeated string input_ids = 6;
+}
+message FieldRestorationData { RequirementFieldKind field = 1; string source_revision_id = 2; }
+message RequirementRevisionData {
+  string id = 1;
+  optional string parent_id = 2;
+  RequirementFieldsData fields = 3;
+  DiagramRevisionOriginData origin = 4;
+  repeated FieldRestorationData restorations = 5;
+}
+message RequirementHistoryData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  repeated RequirementRevisionData revisions = 4;
+}
+message BlockDesignStateData {
+  string id = 1;
+  string block_id = 2;
+  string name = 3;
+  string head_revision_id = 4;
+}
+message BlockRevisionData {
+  BlockSelectionData selection = 1;
+  optional string parent_revision_id = 2;
+  string name = 3;
+  string requirement_revision_id = 4;
+  repeated BlockSelectionData children = 5;
+  DiagramRevisionOriginData origin = 6;
+  BlockSelectionData restored_from = 7;
+}
+message RecursiveBlockGraphData {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  BlockSelectionData selected_root = 3;
+  repeated BlockDesignStateData states = 4;
+  repeated BlockRevisionData revisions = 5;
+  repeated RequirementHistoryData requirement_histories = 6;
+}
+
+enum DiagramEndpointKind {
+  DEK_UNKNOWN = 0;
+  DEK_UNRESOLVED = 1;
+  DEK_INTERFACE = 2;
+  DEK_COMPATIBLE = 3;
+  DEK_CANDIDATES = 4;
+  DEK_PIN = 5;
+}
+message DiagramPinTargetData {
+  string design_id = 1;
+  string component_id = 2;
+  repeated string sheet_instance_path = 3;
+  string pin = 4;
+}
+message DiagramPinSelectorData {
+  string role = 1;
+  string protocol = 2;
+  repeated string required_functions = 3;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 4;
+}
+message DiagramEndpointBindingData {
+  DiagramEndpointKind kind = 1;
+  string block_id = 2;
+  optional string interface_id = 3;
+  string intent = 4;
+  DiagramPinSelectorData selector = 5;
+  repeated DiagramPinTargetData candidates = 6;
+  DiagramPinTargetData pin = 7;
+}

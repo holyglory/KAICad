@@ -27,6 +27,7 @@ set( KIAPI_PROTO_SRCS
     common/types/jobs.proto
     common/types/project_settings.proto
     common/types/structural_types.proto
+    common/types/diagram_revision_types.proto
     common/types/wizards.proto
 
     common/commands/base_commands.proto

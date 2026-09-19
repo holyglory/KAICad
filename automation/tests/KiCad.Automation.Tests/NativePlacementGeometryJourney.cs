@@ -110,6 +110,7 @@ public sealed partial class NativeSessionTests
                     client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(unknown, token))).Status);
             }
             result.Add(measured);
+            await VerifyMcpGeometry(client, instanceId, request, measured, evidence, token);
         }
         Assert.AreEqual(human, await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = root.Clone() }, token));
         Assert.AreEqual(before, await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()

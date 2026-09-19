@@ -14,6 +14,44 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class SchematicViewTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_schematic_measure_placement", ReadOnly = true),
+     Description("Measure native schematic envelopes and exact pin connection points without changing the design or human view. requestJson is MeasureSchematicPlacement protobuf JSON with an explicit document/sheet path, expectedRevision and optional detached symbol candidates. Coordinates are sheet-space nanometres; pin directions are dimensionless signed unit vectors toward the symbol body. Each symbol reports whether its pin mapping is complete; unavailable or incomplete pins must not be guessed. Returns structured geometry only, not a matching image, wire routing, clearance approval or readability certificate. Older native builds explicitly report pin geometry unavailable; complete revision tracking remains unqualified.")]
+    public Task<CallToolResult> MeasurePlacement(string instanceId, string requestJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var request = SchematicJson.Parser.Parse<MeasureSchematicPlacement>(requestJson);
+        if (request.Document is null || request.Document.Type != (DocumentType)1
+            || request.Document.SheetPath is null || request.Document.SheetPath.Path.Count == 0
+            || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ExpectedRevision.Epoch))
+            throw new AutomationException("invalid_geometry_target", "Specify the schematic sheet and exact document revision.");
+        SchematicPlacementGeometry observed;
+        try
+        {
+            observed = await registry.Client(instanceId).InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(
+                request, cancellationToken);
+        }
+        catch (NngException error)
+        {
+            throw new AutomationException("native_observation_unavailable", error.Message);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!request.Document.Equals(observed.Document) || !request.ExpectedRevision.Equals(observed.Revision))
+            throw new AutomationException("native_observation_mismatch", "The returned geometry does not match the requested sheet and revision.");
+        if (observed.Obstacles.Concat(observed.Candidates).Any(item => item.SymbolPins is { Complete: false, Pins.Count: > 0 }))
+            throw new AutomationException("incomplete_pin_geometry", "An incomplete native pin mapping returned partial endpoints; discard this observation.");
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, coordinateSystem = "schematic-sheet", distanceUnit = "nm",
+            pinGeometryAvailable = observed.PinGeometryAvailable, trackingComplete = false,
+            geometry = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed)),
+            limitations = observed.PinGeometryAvailable ? Array.Empty<string>()
+                : ["This native build does not expose pin geometry; absent pin data does not mean the symbol has no pins."],
+            nativeDocumentEdited = false, viewChanged = false
+        });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_design_electrical_baseline_initialize"),
      Description("Initialize only a missing electrical recovery baseline for one explicitly attached native instance and absolute recovery path. Requires the exact recovery revision token, no pending native operation, unchanged baseline hierarchy, and matching exact model/native pin connectivity. Preserves desired XML and requirements; never writes native design files, edits KiCad or replaces an established baseline. Old recovery files without electrical checkpoints remain readable. Full revision admission and automatic synchronization are still separate.")]
     public Task<CallToolResult> InitializeElectricalBaseline(string instanceId, string recoveryPath,

@@ -75,6 +75,10 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_document_close");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
+            CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
+            var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
+            Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");
             CollectionAssert.Contains(names, "kicad_design_connectivity_compare");
             var electricalFixture = SchematicElectricalComparisonTests.Fixture();

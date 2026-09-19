@@ -3741,7 +3741,7 @@ tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["configure", "model-build", "codec", "native-build", "rendered"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicLibraryCacheEquivalenceTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicPartSymbolTests", "--logger", "trx", "--results-directory", "automation/artifacts/part-symbol-native-inputs"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicGeometryToolTests|FullyQualifiedName~SchematicLibraryCacheEquivalenceTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicPartSymbolTests", "--logger", "trx", "--results-directory", "automation/artifacts/part-symbol-native-inputs"]
 retained_artifacts=[{ name = "part-symbol-native-inputs", path = "automation/artifacts/part-symbol-native-inputs", max_bytes = 16777216 }]
 
 [[test.native-xml-component-creation.check]]

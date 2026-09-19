@@ -86,6 +86,36 @@ message RecursiveBlockGraphData {
   repeated ConnectionArchiveData connection_archives = 7;
 }
 
+message RecursiveEditorDocument {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  string source_path = 3;
+  string source_token = 4;
+  RecursiveBlockGraphData graph = 5;
+}
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; }
+message RecursiveFileRequest {
+  uint32 schema_version = 1;
+  RecursiveFileAction action = 2;
+  string repository_root = 3;
+  string source_path = 4;
+  string document_id = 5;
+  string expected_source_token = 6;
+  BlockSelectionData block = 7;
+  ConnectionSelectionData connection = 8;
+  RequirementFieldKind field = 9;
+  int32 offset = 10;
+  int32 limit = 11;
+}
+message RecursiveFileResult {
+  bool success = 1;
+  RecursiveEditorDocument document = 2;
+  FieldHistoryPageData history = 3;
+  string source_token = 4;
+  string error_code = 5;
+  string error_message = 6;
+}
+
 message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string intent = 3; }
 message BlockLocalDiagramData {
   repeated DiagramBoundaryInterfaceData interfaces = 1;

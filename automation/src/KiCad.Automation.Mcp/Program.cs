@@ -4,12 +4,17 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-if (args.FirstOrDefault() == "--structural-file")
+if (args.FirstOrDefault() is "--structural-file" or "--diagram-file")
 {
     using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
     ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; cancellation.Cancel(); };
     Console.CancelKeyPress += cancel;
-    try { Environment.ExitCode = await StructuralFileCommand.RunAsync(Console.In, Console.Out, cancellation.Token); }
+    try
+    {
+        Environment.ExitCode = args[0] == "--diagram-file"
+            ? await RecursiveFileCommand.RunAsync(Console.In, Console.Out, cancellation.Token)
+            : await StructuralFileCommand.RunAsync(Console.In, Console.Out, cancellation.Token);
+    }
     finally { Console.CancelKeyPress -= cancel; }
     return;
 }

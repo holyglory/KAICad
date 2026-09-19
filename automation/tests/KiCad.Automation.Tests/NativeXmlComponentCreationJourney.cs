@@ -48,14 +48,17 @@ public sealed partial class NativeSessionTests
             original.CacheKey = "Automation:DeclaredProbe";
             original.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "DeclaredProbeDefinition" };
             original.Definition.Keywords = "independent declared-part creation fixture";
+            original.Definition.UnitCount = 2;
             foreach (var child in original.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
             {
                 var pin = child.Item.Unpack<SchematicPin>();
                 Assert.IsNull(pin.LibraryPinId);
                 pin.Id.Value = Guid.NewGuid().ToString("D");
+                child.Unit = new() { Unit = 1 };
                 child.Item = Any.Pack(pin);
             }
             var extraChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+            extraChild.Unit = new() { Unit = 2 };
             var extra = extraChild.Item.Unpack<SchematicPin>();
             extra.Id.Value = Guid.NewGuid().ToString("D"); extra.Number += "_extra"; extra.Name = "Extra_declared_pin";
             extra.Position.YNm += 2_540_000; extraChild.Item = Any.Pack(extra);
@@ -66,8 +69,8 @@ public sealed partial class NativeSessionTests
             manufacturer.CustomProperties.Add(new CustomProperty { Key = "automation.guidance", Value = "Keep this field-owned instruction." });
             original.Definition.Items.Add(new SchematicSymbolChild { Item = Any.Pack(manufacturer),
                 IsPrivate = manufacturer.IsPrivate });
-            part = part with { Id = Guid.NewGuid(), Name = "Explicit declared two-pin probe",
-                Pins = [.. part.Pins, new(extra.Number, extra.Name, extraChild.Unit?.Unit ?? 0)] };
+            part = part with { Id = Guid.NewGuid(), Name = "Explicit declared two-unit probe", Units = 2,
+                Pins = [.. part.Pins.Select(p => p with { Unit = 1 }), new(extra.Number, extra.Name, 2)] };
             declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original);
         }
         int designator = 801;
@@ -77,7 +80,7 @@ public sealed partial class NativeSessionTests
                 newDefinitions.Add(sheet.DefinitionId, definition = new(Guid.NewGuid(), part.Id, "XML-created probe"));
             Guid id = Guid.NewGuid(); createdIds.Add(id);
             components.Add(new(id, definition.Id, sheet.Id, "TP" + designator++));
-            occurrences.Add(new(Guid.NewGuid(), id, 1, null));
+            occurrences.AddRange(Enumerable.Range(1, part.Units).Select(unit => new SymbolOccurrence(Guid.NewGuid(), id, unit, null)));
         }
         var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
         {
@@ -210,7 +213,9 @@ public sealed partial class NativeSessionTests
         await VerifyCreatedGeometry(client, document, geometry, token);
         var created = store.Read()!.State.Baseline;
         var createdBindings = created.SymbolBindings.Where(b => !baseline.SymbolBindings.Any(old => old.SymbolOccurrenceId == b.SymbolOccurrenceId)).ToArray();
-        Assert.AreEqual(3, createdBindings.Length); Assert.AreEqual(2, createdBindings.Select(b => b.NativeObjectId).Distinct().Count());
+        Assert.AreEqual(baseline.Engineering.Circuit.SheetInstances.Count * part.Units, createdBindings.Length);
+        Assert.AreEqual(baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).Distinct().Count() * part.Units,
+            createdBindings.Select(b => b.NativeObjectId).Distinct().Count());
         var beforeNoOp = await Capture();
         var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
         Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
@@ -234,7 +239,9 @@ public sealed partial class NativeSessionTests
                 Components = [.. current.Engineering.Circuit.Components, new(extraComponent, extraDefinition, rootSheet.Id, "TP899")],
                 Sheets = current.Engineering.Circuit.Sheets.Select(s => s.Id == rootSheet.DefinitionId
                     ? s with { Components = [.. s.Components, new(extraDefinition, part.Id, "Automatic XML addition")] } : s).ToArray(),
-                Symbols = [.. current.Engineering.Circuit.Symbols, new(extraSymbol, extraComponent, 1, new(200.66m, 130.81m, 0, false, false, false))]
+                Symbols = [.. current.Engineering.Circuit.Symbols, .. Enumerable.Range(1, part.Units).Select(unit =>
+                    new SymbolOccurrence(unit == 1 ? extraSymbol : Guid.NewGuid(), extraComponent, unit,
+                        new(200.66m, 130.81m + (unit - 1) * 15.24m, 0, false, false, false)))]
             } } };
             createdIds.Add(extraComponent);
             await File.WriteAllTextAsync(path, SchematicDesignXml.Write(extra, []), token);
@@ -296,7 +303,8 @@ public sealed partial class NativeSessionTests
             coordinateFreeInitialPlacement = true, nativeMeasurementReadOnly = true, explicitPageReservations = true,
             nativeUndoRedoAutomaticallyPublished = true, xmlFileEventCreation = true, interruptAfterNativeEdit,
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
-            exactReplay = true, declaredPartCreation = declaration is not null, crossPlatformReady = false }), token);
+            exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
+            crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);

@@ -8,6 +8,7 @@
 #include <wx/choice.h>
 #include <wx/clipbrd.h>
 #include <wx/dcbuffer.h>
+#include <wx/dataview.h>
 #include <wx/dialog.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
@@ -105,6 +106,18 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
     m_strength->Bind( wxEVT_CHOICE, [this]( wxCommandEvent& ) { propertiesChanged(); } );
     m_source = new wxStaticText( sidebar, wxID_ANY, {} ); properties->Add( m_source, 0, wxEXPAND | wxALL, 9 );
     m_part = new wxStaticText( sidebar, wxID_ANY, {} ); properties->Add( m_part, 0, wxEXPAND | wxALL, 9 );
+    m_customProperties = new wxDataViewListCtrl( sidebar, wxID_ANY, wxDefaultPosition,
+                                                wxSize( -1, 100 ), wxDV_ROW_LINES | wxDV_VERT_RULES );
+    m_customProperties->SetName( "Custom properties" );
+    m_customProperties->AppendTextColumn( _( "Property" ), wxDATAVIEW_CELL_INERT, 125 );
+    m_customProperties->AppendTextColumn( _( "Description" ), wxDATAVIEW_CELL_INERT, 200 );
+    properties->Add( m_customProperties, 0, wxEXPAND | wxLEFT | wxRIGHT, 9 );
+    m_editProperty = new wxButton( sidebar, wxID_ANY, _( "Edit property" ) );
+    properties->Add( m_editProperty, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 9 );
+    m_editProperty->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { editSelectedProperty(); } );
+    m_customProperties->Bind( wxEVT_DATAVIEW_ITEM_ACTIVATED, [this]( wxDataViewEvent& ) { editSelectedProperty(); } );
+    m_customProperties->Bind( wxEVT_DATAVIEW_SELECTION_CHANGED, [this]( wxDataViewEvent& )
+    { if( !m_updating ) m_editProperty->Enable( m_customProperties->GetSelectedRow() >= 0 ); } );
     m_addProperty = new wxButton( sidebar, wxID_ANY, _( "Add custom property" ) );
     properties->Add( m_addProperty, 0, wxEXPAND | wxALL, 9 ); m_addProperty->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { addProperty(); } );
     left->Add( properties, 0, wxEXPAND | wxALL, 4 );
@@ -158,6 +171,12 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
     } );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
+        auto* source = dynamic_cast<wxWindow*>( event.GetEventObject() );
+        if( source && wxGetTopLevelParent( source ) != this )
+        {
+            // A modal property/confirmation dialog owns its own keyboard.
+            event.StopPropagation(); event.Skip(); return;
+        }
         // This is a separate editor window. Its shortcuts must not bubble to
         // the owning manager (whose Ctrl+Y opens the drawing-sheet editor).
         if( event.CmdDown() && !event.AltDown() )
@@ -374,7 +393,30 @@ void STRUCTURAL_EDITOR_FRAME::fillInspector()
     wxString parts;
     if( block ) for( const auto& id : block->component_ids() ) for( const auto& c : m_document.components() ) if( c.component_id() == id )
     { if( !parts.empty() ) parts += ", "; parts += text( c.reference() + " " + c.part_name() ); }
-    m_part->SetLabel( parts.empty() ? _( "Part: Not selected" ) : _( "Part: " ) + parts ); m_updating = false; m_name->GetParent()->Layout();
+    m_part->SetLabel( parts.empty() ? _( "Part: Not selected" ) : _( "Part: " ) + parts );
+    fillCustomProperties(); m_updating = false; m_name->GetParent()->Layout();
+}
+void STRUCTURAL_EDITOR_FRAME::fillCustomProperties()
+{
+    std::string selected;
+    int oldRow = m_customProperties->GetSelectedRow();
+    if( oldRow >= 0 && size_t( oldRow ) < m_propertyIds.size() ) selected = m_propertyIds[oldRow];
+    m_customProperties->DeleteAllItems(); m_propertyIds.clear();
+    for( const auto& property : m_document.diagram().properties() ) if( property.owner_id() == m_selected )
+    {
+        wxVector<wxVariant> row; row.push_back( text( property.key() ) );
+        row.push_back( text( property.text() ).BeforeFirst( '\n' ) );
+        m_customProperties->AppendItem( row ); m_propertyIds.push_back( property.id() );
+        if( property.id() == selected ) m_customProperties->SelectRow( m_propertyIds.size() - 1 );
+    }
+    m_customProperties->Show( !m_propertyIds.empty() ); m_editProperty->Show( !m_propertyIds.empty() );
+    m_editProperty->Enable( m_customProperties->GetSelectedRow() >= 0 );
+}
+void STRUCTURAL_EDITOR_FRAME::editSelectedProperty()
+{
+    int row = m_customProperties->GetSelectedRow();
+    if( row >= 0 && size_t( row ) < m_propertyIds.size() )
+    { auto id = m_propertyIds[row]; addProperty( id ); }
 }
 void STRUCTURAL_EDITOR_FRAME::commit( const S::StructuralDiagramData& before )
 {
@@ -403,11 +445,23 @@ void STRUCTURAL_EDITOR_FRAME::addInstruction()
     // Select the newly created instruction explicitly, not by text similarity.
     m_instructionId = item->id(); m_instruction->ChangeValue( text( item->text() ) ); m_instruction->SetFocus(); m_instruction->SelectAll();
 }
-void STRUCTURAL_EDITOR_FRAME::addProperty()
+void STRUCTURAL_EDITOR_FRAME::addProperty( const std::string& propertyId )
 {
-    if( !selectedBlock() || !propertiesChanged() ) return; wxDialog dialog( this, wxID_ANY, _( "Add custom property" ) );
+    if( !selectedBlock() || !propertiesChanged() ) return;
+    // Copy the complete record, retaining quantities, classification, sources
+    // and applicability when the user changes only its name or description.
+    S::StructuralPropertyData draft;
+    bool editing = !propertyId.empty();
+    if( editing )
+    {
+        for( const auto& property : m_document.diagram().properties() )
+            if( property.id() == propertyId && property.owner_id() == m_selected ) draft = property;
+        if( draft.id().empty() ) return;
+    }
+    wxDialog dialog( this, wxID_ANY, editing ? _( "Edit custom property" ) : _( "Add custom property" ) );
     auto* sizer = new wxBoxSizer( wxVERTICAL );
     auto* name = new wxTextCtrl( &dialog, wxID_ANY ); auto* value = new wxTextCtrl( &dialog, wxID_ANY, {}, wxDefaultPosition, wxSize( 330, 90 ), wxTE_MULTILINE );
+    name->ChangeValue( text( draft.key() ) ); value->ChangeValue( text( draft.text() ) );
     sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Name" ) ), 0, wxALL, 8 ); sizer->Add( name, 0, wxEXPAND | wxALL, 8 );
     sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Value or instruction" ) ), 0, wxALL, 8 ); sizer->Add( value, 1, wxEXPAND | wxALL, 8 );
     sizer->Add( dialog.CreateStdDialogButtonSizer( wxOK | wxCANCEL ), 0, wxEXPAND | wxALL, 8 ); dialog.SetSizerAndFit( sizer ); name->SetFocus();
@@ -418,9 +472,22 @@ void STRUCTURAL_EDITOR_FRAME::addProperty()
         dialog.EndModal( wxID_OK );
     }, wxID_OK );
     if( dialog.ShowModal() != wxID_OK ) return;
-    auto before = m_document.diagram(); auto* p = m_document.mutable_diagram()->add_properties();
-    p->set_id( KIID().AsStdString() ); p->set_owner_id( m_selected ); p->set_key( utf8( name->GetValue() ) ); p->set_category( "custom" );
-    p->set_text( utf8( value->GetValue() ) ); p->set_strength( S::SGS_INFORMATION ); p->set_verification( S::SV_UNVERIFIED ); commit( before );
+    if( editing && draft.key() == utf8( name->GetValue() ) && draft.text() == utf8( value->GetValue() ) ) return;
+    auto before = m_document.diagram();
+    if( !editing )
+    {
+        draft.set_id( KIID().AsStdString() ); draft.set_owner_id( m_selected ); draft.set_category( "custom" );
+        draft.set_strength( S::SGS_INFORMATION );
+    }
+    draft.set_key( utf8( name->GetValue() ) ); draft.set_text( utf8( value->GetValue() ) );
+    draft.set_verification( S::SV_UNVERIFIED );
+    if( editing )
+    {
+        for( auto& property : *m_document.mutable_diagram()->mutable_properties() )
+            if( property.id() == propertyId ) { property = draft; break; }
+    }
+    else *m_document.mutable_diagram()->add_properties() = draft;
+    commit( before );
 }
 void STRUCTURAL_EDITOR_FRAME::undo()
 { if( !propertiesChanged() || m_undo.empty() ) return; m_redo.push_back( m_document.diagram() ); *m_document.mutable_diagram() = m_undo.back(); m_undo.pop_back(); ++m_revision; m_dirty = true; refreshModel(); }

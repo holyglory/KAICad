@@ -20,6 +20,7 @@ class wxStaticText;
 class wxButton;
 class wxToolBar;
 class wxDC;
+class wxDataViewListCtrl;
 
 namespace kiapi::automation::structure::v1 { class StructuralDiagramData; }
 
@@ -57,7 +58,9 @@ private:
     void commit( const kiapi::automation::structure::v1::StructuralDiagramData& aBefore );
     bool propertiesChanged();
     void addInstruction();
-    void addProperty();
+    void addProperty( const std::string& aPropertyId = {} );
+    void editSelectedProperty();
+    void fillCustomProperties();
     void undo();
     void redo();
     void removeSelection();
@@ -94,6 +97,9 @@ private:
     wxStaticText* m_source = nullptr;
     wxToolBar* m_toolbar = nullptr;
     wxButton* m_addProperty = nullptr;
+    wxButton* m_editProperty = nullptr;
+    wxDataViewListCtrl* m_customProperties = nullptr;
+    std::vector<std::string> m_propertyIds;
     std::string m_selected, m_instructionId, m_connectFrom;
     MODE m_mode = MODE::SELECT;
     double m_scale = 0.000006;

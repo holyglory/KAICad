@@ -39,7 +39,8 @@ public static class RecursiveBlockGraphXml
                 new XElement(Ns + "revision", Attr("id", r.Selection.RevisionId), Attr("block", r.Selection.BlockId), Attr("state", r.Selection.StateId),
                     r.ParentRevisionId is { } parent ? Attr("parent", parent) : null, new XAttribute("name", r.Name),
                     Attr("requirements", r.RequirementRevisionId), WriteOrigin(r.Origin),
-                    new XElement(Ns + "children", r.Children.Select(c => Selection("child", c)))))),
+                    new XElement(Ns + "children", r.Children.Select(c => Selection("child", c))),
+                    r.RestoredFrom is { } source ? Selection("restored-from", source) : null))),
             new XElement(Ns + "requirement-histories", graph.RequirementHistories.OrderBy(h => h.Scope.DesignStateId)
                 .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))));
         new XDocument(root).Validate(Schema.Value, null);
@@ -60,7 +61,7 @@ public static class RecursiveBlockGraphXml
                 new RecursiveBlockRevision(new(Id(r, "block"), Id(r, "state"), Id(r, "id")),
                     r.Attribute("parent") is null ? null : Id(r, "parent"), Text(r, "name"), Id(r, "requirements"),
                     r.Element(Ns + "children")!.Elements(Ns + "child").Select(ReadSelection).ToImmutableArray(),
-                    ReadOrigin(r.Element(Ns + "origin")!)));
+                    ReadOrigin(r.Element(Ns + "origin")!), r.Element(Ns + "restored-from") is { } source ? ReadSelection(source) : null));
             var histories = root.Element(Ns + "requirement-histories")!.Elements(XName.Get("requirement-history", DiagramRequirementHistoryXml.Namespace))
                 .Select(h => DiagramRequirementHistoryXml.Read(EngineeringXmlText.Render(h)));
             return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories);

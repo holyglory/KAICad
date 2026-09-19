@@ -109,9 +109,29 @@ public sealed class RecursiveBlockGraphTests
         Assert.AreEqual(second.SelectedRoot.RevisionId, third.Inspect(third.SelectedRoot).ParentRevisionId);
         Assert.HasCount(3, third.History(third.SelectedRoot.StateId));
         Assert.AreEqual(before.Requirements(before.SelectedRoot).Requirements, third.Requirements(third.SelectedRoot).Requirements);
+        Assert.AreEqual(before.SelectedRoot, third.Inspect(third.SelectedRoot).RestoredFrom);
+        var reloaded = RecursiveBlockGraphXml.Read(RecursiveBlockGraphXml.Write(third));
+        Assert.AreEqual(before.SelectedRoot, reloaded.Inspect(reloaded.SelectedRoot).RestoredFrom);
         Assert.ThrowsExactly<AutomationException>(() => third.Select(third.SelectedRoot, [third.SelectedRoot], before.SelectedRoot, [], Origin()));
         // Declining is discarding this immutable draft, not publishing an old snapshot.
         Assert.AreEqual("Revised system", second.Inspect(second.SelectedRoot).Name);
+    }
+
+    [TestMethod]
+    public void WholeDiagramRestoreCannotDiscardExistingDraftOrInventItsSource()
+    {
+        var graph = RecursiveBlockFixture.Create().Graph;
+        var draft = graph.StartDraft(graph.SelectedRoot);
+        var dirty = draft with { Name = "Unrelated unsaved name" };
+        Assert.ThrowsExactly<AutomationException>(() => graph.RestoreAsDraft(dirty, graph.SelectedRoot));
+        Assert.AreEqual("Unrelated unsaved name", dirty.Name);
+        var textDraft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "Unsaved text") };
+        Assert.ThrowsExactly<AutomationException>(() => graph.RestoreAsDraft(textDraft, graph.SelectedRoot));
+        var source = graph.States.First(s => s.BlockId != graph.SelectedRoot.BlockId);
+        var forged = draft with { Name = "New name", RestoredFrom = new(source.BlockId, source.Id, source.HeadRevisionId) };
+        Assert.ThrowsExactly<AutomationException>(() => graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], forged,
+            Guid.NewGuid(), Guid.NewGuid(), [], Origin()));
+        Assert.AreEqual("System", graph.Inspect(graph.SelectedRoot).Name);
     }
 
     [TestMethod]

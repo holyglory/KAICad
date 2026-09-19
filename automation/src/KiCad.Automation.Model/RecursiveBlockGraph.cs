@@ -12,13 +12,13 @@ public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid H
 /// the same contract as every child. Physical allocation is deliberately independent.</summary>
 public sealed record RecursiveBlockRevision(BlockSelection Selection, Guid? ParentRevisionId,
     string Name, Guid RequirementRevisionId, ImmutableArray<BlockSelection> Children,
-    RequirementRevisionOrigin Origin);
+    RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null);
 
 public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
     ImmutableArray<BlockSelection> CreatedAncestors, bool Changed);
 
 public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
-    ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements);
+    ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null);
 
 /// <summary>Immutable block occurrence/revision graph. Publishing an unselected revision
 /// and selecting it are separate operations. Persistence and native activation belong
@@ -81,6 +81,7 @@ public sealed class RecursiveBlockGraph
         foreach (var state in States) ValidateHistory(state);
         foreach (var revision in Revisions)
         {
+            ValidateRestoration(revision.Selection, revision.ParentRevisionId, revision.RestoredFrom);
             var children = new HashSet<Guid>();
             foreach (var child in revision.Children)
             {
@@ -149,13 +150,17 @@ public sealed class RecursiveBlockGraph
     public RecursiveBlockDraft RestoreAsDraft(RecursiveBlockDraft draft, BlockSelection source)
     {
         ValidateDraft(draft);
+        var baseline = Inspect(draft.Baseline);
+        if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
+            || draft.Requirements.Requirements != Requirements(draft.Baseline).Requirements)
+            throw new AutomationException("dirty_block_draft", "Save or explicitly decline the existing draft before restoring a whole diagram.");
         var previous = Inspect(source);
         if (source.BlockId != draft.Baseline.BlockId || source.StateId != draft.Baseline.StateId)
             throw Invalid("Restore history from this exact block implementation, not an unrelated alternative.");
         var fields = draft.Requirements;
         foreach (var field in Enum.GetValues<DiagramRequirementField>())
             fields = _requirements[source.StateId].RestoreField(fields, previous.RequirementRevisionId, field);
-        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields };
+        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields, RestoredFrom = source };
     }
 
     /// <summary>Atomically produces a new in-memory root and immutable history. A failed
@@ -177,7 +182,7 @@ public sealed class RecursiveBlockGraph
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return new(this, [], false);
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
-            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin);
+            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin, draft.RestoredFrom);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
         return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin);
     }
@@ -257,7 +262,7 @@ public sealed class RecursiveBlockGraph
                 throw new AutomationException("stale_parent_revision", "A containing implementation has a newer saved revision; compare it before selecting this child.");
             var next = new BlockSelection(parent.Selection.BlockId, parent.Selection.StateId, ancestorRevisionIds[i]);
             revisions.Add(parent with { Selection = next, ParentRevisionId = parent.Selection.RevisionId,
-                Children = parent.Children.Select(c => c == path[i + 1] ? child : c).ToImmutableArray(), Origin = origin });
+                Children = parent.Children.Select(c => c == path[i + 1] ? child : c).ToImmutableArray(), Origin = origin, RestoredFrom = null });
             states[states.IndexOf(state)] = state with { HeadRevisionId = next.RevisionId };
             created[i] = next; child = next;
         }
@@ -286,6 +291,18 @@ public sealed class RecursiveBlockGraph
         if (draft.Requirements.Baseline != Requirements(draft.Baseline))
             throw Invalid("The draft's requirement baseline must match its exact saved block revision.");
         _ = _requirements[draft.Baseline.StateId].PrepareMerge(draft.Requirements);
+        ValidateRestoration(draft.Baseline, draft.Baseline.RevisionId, draft.RestoredFrom);
+    }
+
+    private void ValidateRestoration(BlockSelection owner, Guid? parentId, BlockSelection? source)
+    {
+        if (source is null) return;
+        _ = Inspect(source);
+        if (source.BlockId != owner.BlockId || source.StateId != owner.StateId)
+            throw Invalid("A restored diagram must identify a saved source in the same block implementation.");
+        for (Guid? id = parentId; id is { } current; id = _revisions[current].ParentRevisionId)
+            if (current == source.RevisionId) return;
+        throw Invalid("The restoration source must be in the saved baseline history, not a future or unrelated revision.");
     }
 
     private static bool SameRequirementRevision(DiagramRequirementRevision a, DiagramRequirementRevision b) =>

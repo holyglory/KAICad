@@ -42,6 +42,7 @@
         <xs:element name="children"><xs:complexType><xs:sequence>
           <xs:element name="child" type="selection" minOccurs="0" maxOccurs="unbounded"/>
         </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="restored-from" type="selection" minOccurs="0"/>
       </xs:sequence>
         <xs:attribute name="id" type="h:identity" use="required"/>
         <xs:attribute name="block" type="h:identity" use="required"/>

@@ -79,6 +79,56 @@ struct TEMP_LIBRARY
 
 BOOST_AUTO_TEST_SUITE( SymbolApiSemantics )
 
+BOOST_AUTO_TEST_CASE( FieldCustomPropertiesSurviveDecodeAndLibraryReload )
+{
+    auto library = MakeLibrary( SST_NORMAL, 0 );
+    library.GetValueField().SetCustomProperty( wxS( "automation.source" ), wxS( "datasheet:page-2" ) );
+    auto* user = new SCH_FIELD( &library, FIELD_T::USER, wxS( "Manufacturer" ) );
+    user->SetText( wxS( "Fixture" ) );
+    user->SetCustomProperty( wxS( "automation.guidance" ), wxS( "Keep this instruction" ) );
+    library.AddField( user );
+    SchematicCachedSymbol packed;
+    BOOST_REQUIRE( PackCachedSymbol( packed, wxS( "Automation:PowerTraits" ), library ) );
+    auto restored = UnpackCachedSymbol( packed );
+    BOOST_REQUIRE( restored );
+    BOOST_CHECK( restored->GetValueField().GetCustomProperties() == library.GetValueField().GetCustomProperties() );
+    BOOST_REQUIRE( restored->GetField( wxS( "Manufacturer" ) ) );
+    BOOST_CHECK( restored->GetField( wxS( "Manufacturer" ) )->GetCustomProperties() == user->GetCustomProperties() );
+    SchematicCachedSymbol again;
+    BOOST_REQUIRE( PackCachedSymbol( again, wxS( "Automation:PowerTraits" ), *restored ) );
+    BOOST_CHECK_EQUAL( packed.SerializeAsString(), again.SerializeAsString() );
+
+    TEMP_LIBRARY file;
+    {
+        SCH_IO_KICAD_SEXPR writer;
+        writer.CreateLibrary( file.path );
+        writer.SaveSymbol( file.path, new LIB_SYMBOL( *restored ) );
+        writer.SaveLibrary( file.path );
+    }
+    SCH_IO_KICAD_SEXPR reader;
+    auto* loaded = reader.LoadSymbol( file.path, wxS( "PowerTraits" ) );
+    BOOST_REQUIRE( loaded );
+    BOOST_CHECK( loaded->GetValueField().GetCustomProperties() == library.GetValueField().GetCustomProperties() );
+    BOOST_REQUIRE( loaded->GetField( wxS( "Manufacturer" ) ) );
+    BOOST_CHECK( loaded->GetField( wxS( "Manufacturer" ) )->GetCustomProperties() == user->GetCustomProperties() );
+
+    SCH_FIELD assigned( &library, FIELD_T::USER, wxS( "Copied" ) );
+    assigned.SetCustomProperty( wxS( "stale" ), wxS( "must disappear" ) );
+    assigned = library.GetValueField();
+    BOOST_CHECK( assigned.GetCustomProperties() == library.GetValueField().GetCustomProperties() );
+    assigned.operator=( assigned );
+    BOOST_CHECK( assigned.GetCustomProperties() == library.GetValueField().GetCustomProperties() );
+
+    // A complete replacement must clear metadata that is no longer present.
+    SchematicField empty;
+    restored->GetValueField().Serialize( empty, schIUScale );
+    empty.clear_custom_properties();
+    BOOST_REQUIRE( restored->GetValueField().Deserialize( empty, schIUScale ) );
+    BOOST_CHECK( !restored->GetValueField().HasCustomProperties() );
+    assigned = restored->GetValueField();
+    BOOST_CHECK( !assigned.HasCustomProperties() );
+}
+
 BOOST_AUTO_TEST_CASE( ImplicitAndNamedBodyStylesRetainNativeCacheIdentity )
 {
     for( int mode = 0; mode < 3; ++mode )

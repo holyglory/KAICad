@@ -110,10 +110,12 @@ public sealed class DiagramRequirementHistory
 
     private static bool Same(DiagramRequirementRevision a, DiagramRequirementRevision b) =>
         a.Id == b.Id && a.ParentId == b.ParentId && a.Requirements == b.Requirements
-        && a.Origin.ActorKind == b.Origin.ActorKind && a.Origin.Actor == b.Origin.Actor
-        && a.Origin.RecordedAt == b.Origin.RecordedAt && a.Origin.Summary == b.Origin.Summary
-        && a.Origin.Sources.SequenceEqual(b.Origin.Sources) && a.Origin.InputIds.SequenceEqual(b.Origin.InputIds)
+        && SameOrigin(a.Origin, b.Origin)
         && a.Restorations.SequenceEqual(b.Restorations);
+
+    internal static bool SameOrigin(RequirementRevisionOrigin a, RequirementRevisionOrigin b) =>
+        a.ActorKind == b.ActorKind && a.Actor == b.Actor && a.RecordedAt == b.RecordedAt && a.Summary == b.Summary
+        && a.Sources.SequenceEqual(b.Sources) && a.InputIds.SequenceEqual(b.InputIds);
 
     public ImmutableArray<DiagramRequirementRevision> FieldHistory(DiagramRequirementField field)
     {

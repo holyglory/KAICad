@@ -99,6 +99,14 @@ public sealed record DiagramEndpointBinding(DiagramEndpointKind Kind, Guid Block
         result.Validate(); return result;
     }
 
+    public bool SameDefinition(DiagramEndpointBinding other) => other is not null && Kind == other.Kind
+        && BlockId == other.BlockId && InterfaceId == other.InterfaceId && Intent == other.Intent
+        && (Pin is null ? other.Pin is null : other.Pin is not null && Pin.SamePin(other.Pin))
+        && Candidates.Length == other.Candidates.Length && Candidates.Zip(other.Candidates).All(p => p.First.SamePin(p.Second))
+        && (Selector is null ? other.Selector is null : other.Selector is not null && Selector.Role == other.Selector.Role
+            && Selector.Protocol == other.Selector.Protocol && Selector.RequiredFunctions.SequenceEqual(other.Selector.RequiredFunctions)
+            && Selector.Sources.SequenceEqual(other.Selector.Sources));
+
     internal static void Text(string text)
     {
         try { XmlConvert.VerifyXmlChars(text); }

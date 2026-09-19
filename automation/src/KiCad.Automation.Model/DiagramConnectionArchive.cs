@@ -132,6 +132,18 @@ public sealed class DiagramConnectionArchive
         return result.ToImmutable();
     }
 
+    public bool Retains(DiagramConnectionArchive saved) => saved is not null && DocumentId == saved.DocumentId
+        && OwnerBlockId == saved.OwnerBlockId
+        && saved.States.All(s => _states.TryGetValue(s.Id, out var current) && s.ConnectionId == current.ConnectionId && s.Name == current.Name)
+        && saved.Revisions.All(r => _revisions.TryGetValue(r.Selection.RevisionId, out var current) && Same(r, current))
+        && saved.RequirementHistories.All(h => _requirements.TryGetValue(h.Scope.DesignStateId, out var current) && current.Retains(h));
+
+    private static bool Same(DiagramConnectionRevision a, DiagramConnectionRevision b) =>
+        a.Selection == b.Selection && a.ParentRevisionId == b.ParentRevisionId && a.Name == b.Name && a.Kind == b.Kind
+        && a.RequirementRevisionId == b.RequirementRevisionId && a.Members.SequenceEqual(b.Members)
+        && DiagramRequirementHistory.SameOrigin(a.Origin, b.Origin) && a.Endpoints.Length == b.Endpoints.Length
+        && a.Endpoints.Zip(b.Endpoints).All(p => p.First.SameDefinition(p.Second));
+
     public DiagramConnectionArchive AppendRevision(Guid expectedHead, DiagramConnectionRevision revision,
         DiagramRequirementHistory? requirementHistory = null)
     {

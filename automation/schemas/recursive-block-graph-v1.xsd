@@ -2,8 +2,10 @@
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            targetNamespace="urn:kicad:automation:recursive-block-graph:1"
            xmlns="urn:kicad:automation:recursive-block-graph:1"
-           xmlns:h="urn:kicad:automation:requirement-history:1" elementFormDefault="qualified">
+           xmlns:h="urn:kicad:automation:requirement-history:1"
+           xmlns:c="urn:kicad:automation:connection-archive:1" elementFormDefault="qualified">
   <xs:import namespace="urn:kicad:automation:requirement-history:1"/>
+  <xs:import namespace="urn:kicad:automation:connection-archive:1"/>
   <xs:complexType name="selection">
     <xs:attribute name="block" type="h:identity" use="required"/>
     <xs:attribute name="state" type="h:identity" use="required"/>
@@ -43,6 +45,18 @@
           <xs:element name="child" type="selection" minOccurs="0" maxOccurs="unbounded"/>
         </xs:sequence></xs:complexType></xs:element>
         <xs:element name="restored-from" type="selection" minOccurs="0"/>
+        <xs:element name="local-diagram" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="interfaces"><xs:complexType><xs:sequence>
+            <xs:element name="interface" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="intent" type="xs:string"/>
+            </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/>
+              <xs:attribute name="name" type="xs:string" use="required"/>
+            </xs:complexType></xs:element>
+          </xs:sequence></xs:complexType></xs:element>
+          <xs:element name="connections"><xs:complexType><xs:sequence>
+            <xs:element name="connection" type="c:selection" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence></xs:complexType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
       </xs:sequence>
         <xs:attribute name="id" type="h:identity" use="required"/>
         <xs:attribute name="block" type="h:identity" use="required"/>
@@ -54,6 +68,9 @@
     </xs:sequence></xs:complexType></xs:element>
     <xs:element name="requirement-histories"><xs:complexType><xs:sequence>
       <xs:element ref="h:requirement-history" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="connection-archives" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element ref="c:connection-archive" minOccurs="1" maxOccurs="unbounded"/>
     </xs:sequence></xs:complexType></xs:element>
   </xs:sequence>
     <xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>

@@ -23,18 +23,34 @@ public static class RecursiveBlockFiles
         Guid expectedDocumentId, string expectedContentSha256, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> blockPath, RecursiveBlockDraft draft, Guid newRevisionId,
         Guid newRequirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds, RequirementRevisionOrigin origin,
-        IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null, CancellationToken token = default)
+        IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null,
+        IReadOnlyCollection<DiagramConnectionArchive>? connectionArchives = null, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
         // Freeze caller-owned choices before any asynchronous file operation.
         var choices = resolutions?.ToImmutableArray();
+        var archives = connectionArchives?.ToImmutableArray() ?? [];
         var loaded = await Load(repositoryRoot, path, expectedDocumentId, token);
         if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
             throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain your draft and compare it with the latest version.");
         token.ThrowIfCancellationRequested();
-        var saved = loaded.Snapshot.Graph.SaveDraft(expectedRoot, blockPath, draft, newRevisionId,
+        var graph = loaded.Snapshot.Graph;
+        if (draft?.Baseline is null)
+            throw new AutomationException("invalid_block_draft", "Provide the exact saved block baseline and retained editing draft.");
+        foreach (var archive in archives)
+        {
+            if (archive is null || archive.OwnerBlockId != draft.Baseline.BlockId)
+                throw new AutomationException("wrong_connection_edit_scope", "Save connection changes in their exact owning block's draft.");
+            graph = graph.WithConnections(archive);
+        }
+        var saved = graph.SaveDraft(expectedRoot, blockPath, draft, newRevisionId,
             newRequirementRevisionId, ancestorRevisionIds, origin, choices);
-        if (!saved.Changed) return loaded.Snapshot;
+        if (!saved.Changed)
+        {
+            if (RecursiveBlockGraphXml.Write(graph) != RecursiveBlockGraphXml.Write(loaded.Snapshot.Graph))
+                throw new AutomationException("unselected_connection_change", "Select the changed connections in the block draft before saving them together.");
+            return loaded.Snapshot;
+        }
         byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(saved.Graph));
         string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
         return new(loaded.Snapshot.Path, hash, saved.Graph);

@@ -22,22 +22,11 @@ public static class RecursiveBlockCodec
                 RequirementRevisionId = Id(r.RequirementRevisionId), Origin = Origin(r.Origin) };
             if (r.ParentRevisionId is { } parent) row.ParentRevisionId = Id(parent);
             if (r.RestoredFrom is { } restored) row.RestoredFrom = Selection(restored);
+            if (r.Diagram is { } diagram) row.LocalDiagram = Local(diagram);
             row.Children.Add(r.Children.Select(Selection)); data.Revisions.Add(row);
         }
-        foreach (var history in graph.RequirementHistories)
-        {
-            var row = new P.RequirementHistoryData { DocumentId = Id(history.Scope.DocumentId), OwnerId = Id(history.Scope.OwnerId), StateId = Id(history.Scope.DesignStateId) };
-            foreach (var r in history.Revisions)
-            {
-                var revision = new P.RequirementRevisionData { Id = Id(r.Id), Origin = Origin(r.Origin),
-                    Fields = new() { General = r.Requirements.General, Schematic = r.Requirements.Schematic, Routing = r.Requirements.Routing } };
-                if (r.ParentId is { } parent) revision.ParentId = Id(parent);
-                revision.Restorations.Add(r.Restorations.Select(s => new P.FieldRestorationData
-                    { Field = (P.RequirementFieldKind)((int)s.Field + 1), SourceRevisionId = Id(s.SourceRevisionId) }));
-                row.Revisions.Add(revision);
-            }
-            data.RequirementHistories.Add(row);
-        }
+        data.RequirementHistories.Add(graph.RequirementHistories.Select(History));
+        data.ConnectionArchives.Add(graph.ConnectionArchives.Select(Encode));
         return data;
     }
 
@@ -49,12 +38,64 @@ public static class RecursiveBlockCodec
             data.States.Select(s => new M.BlockDesignState(GuidValue(s.Id), GuidValue(s.BlockId), s.Name, GuidValue(s.HeadRevisionId))),
             data.Revisions.Select(r => new M.RecursiveBlockRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
-                r.RestoredFrom is { } source ? Selection(source) : null)),
-            data.RequirementHistories.Select(h => new M.DiagramRequirementHistory(new(GuidValue(h.DocumentId), GuidValue(h.OwnerId), GuidValue(h.StateId)),
-                h.Revisions.Select(r => new M.DiagramRequirementRevision(GuidValue(r.Id), r.HasParentId ? GuidValue(r.ParentId) : null,
-                    new(Need(r.Fields).General, r.Fields.Schematic, r.Fields.Routing), Origin(Need(r.Origin)),
-                    r.Restorations.Select(s => new M.RequirementFieldRestoration((M.DiagramRequirementField)((int)s.Field - 1), GuidValue(s.SourceRevisionId))).ToImmutableArray())))));
+                r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null)),
+            data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode));
     }
+
+    public static P.ConnectionArchiveData Encode(M.DiagramConnectionArchive archive)
+    {
+        var data = new P.ConnectionArchiveData { DocumentId = Id(archive.DocumentId), OwnerBlockId = Id(archive.OwnerBlockId) };
+        data.States.Add(archive.States.Select(s => new P.ConnectionDesignStateData
+            { Id = Id(s.Id), ConnectionId = Id(s.ConnectionId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId) }));
+        foreach (var r in archive.Revisions)
+        {
+            var row = new P.ConnectionRevisionData { Selection = Selection(r.Selection), Name = r.Name,
+                Kind = (P.DiagramConnectionKind)((int)r.Kind + 1), RequirementRevisionId = Id(r.RequirementRevisionId), Origin = Origin(r.Origin) };
+            if (r.ParentRevisionId is { } parent) row.ParentRevisionId = Id(parent);
+            row.Endpoints.Add(r.Endpoints.Select(Encode)); row.Members.Add(r.Members.Select(Selection)); data.Revisions.Add(row);
+        }
+        data.RequirementHistories.Add(archive.RequirementHistories.Select(History)); return data;
+    }
+
+    public static M.DiagramConnectionArchive Decode(P.ConnectionArchiveData data)
+    {
+        Known(data, P.ConnectionArchiveData.Parser);
+        return new(GuidValue(data.DocumentId), GuidValue(data.OwnerBlockId),
+            data.States.Select(s => new M.ConnectionDesignState(GuidValue(s.Id), GuidValue(s.ConnectionId), s.Name, GuidValue(s.HeadRevisionId))),
+            data.Revisions.Select(r => new M.DiagramConnectionRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
+                r.Name, (M.DiagramConnectionKind)((int)r.Kind - 1), r.Endpoints.Select(Decode).ToImmutableArray(), GuidValue(r.RequirementRevisionId),
+                r.Members.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)))), data.RequirementHistories.Select(History));
+    }
+
+    private static P.RequirementHistoryData History(M.DiagramRequirementHistory history)
+    {
+        var row = new P.RequirementHistoryData { DocumentId = Id(history.Scope.DocumentId), OwnerId = Id(history.Scope.OwnerId), StateId = Id(history.Scope.DesignStateId) };
+        foreach (var r in history.Revisions)
+        {
+            var revision = new P.RequirementRevisionData { Id = Id(r.Id), Origin = Origin(r.Origin),
+                Fields = new() { General = r.Requirements.General, Schematic = r.Requirements.Schematic, Routing = r.Requirements.Routing } };
+            if (r.ParentId is { } parent) revision.ParentId = Id(parent);
+            revision.Restorations.Add(r.Restorations.Select(s => new P.FieldRestorationData
+                { Field = (P.RequirementFieldKind)((int)s.Field + 1), SourceRevisionId = Id(s.SourceRevisionId) }));
+            row.Revisions.Add(revision);
+        }
+        return row;
+    }
+    private static M.DiagramRequirementHistory History(P.RequirementHistoryData h) => new(new(GuidValue(h.DocumentId), GuidValue(h.OwnerId), GuidValue(h.StateId)),
+        h.Revisions.Select(r => new M.DiagramRequirementRevision(GuidValue(r.Id), r.HasParentId ? GuidValue(r.ParentId) : null,
+            new(Need(r.Fields).General, r.Fields.Schematic, r.Fields.Routing), Origin(Need(r.Origin)),
+            r.Restorations.Select(s => new M.RequirementFieldRestoration((M.DiagramRequirementField)((int)s.Field - 1), GuidValue(s.SourceRevisionId))).ToImmutableArray())));
+    private static P.BlockLocalDiagramData Local(M.BlockLocalDiagram diagram)
+    {
+        var result = new P.BlockLocalDiagramData();
+        result.Interfaces.Add(diagram.Interfaces.Select(i => new P.DiagramBoundaryInterfaceData { Id = Id(i.Id), Name = i.Name, Intent = i.Intent }));
+        result.Connections.Add(diagram.Connections.Select(Selection)); return result;
+    }
+    private static M.BlockLocalDiagram Local(P.BlockLocalDiagramData diagram) => new(
+        diagram.Interfaces.Select(i => new M.DiagramBoundaryInterface(GuidValue(i.Id), i.Name, i.Intent)).ToImmutableArray(),
+        diagram.Connections.Select(Selection).ToImmutableArray());
+    private static P.ConnectionSelectionData Selection(M.ConnectionSelection s) => new() { ConnectionId = Id(s.ConnectionId), StateId = Id(s.StateId), RevisionId = Id(s.RevisionId) };
+    private static M.ConnectionSelection Selection(P.ConnectionSelectionData s) => new(GuidValue(s.ConnectionId), GuidValue(s.StateId), GuidValue(s.RevisionId));
 
     public static P.DiagramEndpointBindingData Encode(M.DiagramEndpointBinding endpoint)
     {

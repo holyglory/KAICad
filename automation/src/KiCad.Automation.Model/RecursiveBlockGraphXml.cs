@@ -18,7 +18,7 @@ public static class RecursiveBlockGraphXml
     {
         var set = new XmlSchemaSet { XmlResolver = null };
         var assembly = typeof(RecursiveBlockGraphXml).Assembly;
-        foreach (string name in new[] { "requirement-history-v1.xsd", "recursive-block-graph-v1.xsd" })
+        foreach (string name in new[] { "requirement-history-v1.xsd", "connection-archive-v1.xsd", "recursive-block-graph-v1.xsd" })
         {
             string resource = assembly.GetManifestResourceNames().Single(n => n.EndsWith(name, StringComparison.Ordinal));
             using Stream stream = assembly.GetManifestResourceStream(resource)!;
@@ -40,9 +40,12 @@ public static class RecursiveBlockGraphXml
                     r.ParentRevisionId is { } parent ? Attr("parent", parent) : null, new XAttribute("name", r.Name),
                     Attr("requirements", r.RequirementRevisionId), WriteOrigin(r.Origin),
                     new XElement(Ns + "children", r.Children.Select(c => Selection("child", c))),
-                    r.RestoredFrom is { } source ? Selection("restored-from", source) : null))),
+                    r.RestoredFrom is { } source ? Selection("restored-from", source) : null,
+                    r.Diagram is { } diagram ? WriteLocal(diagram) : null))),
             new XElement(Ns + "requirement-histories", graph.RequirementHistories.OrderBy(h => h.Scope.DesignStateId)
-                .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))));
+                .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))),
+            graph.ConnectionArchives.IsEmpty ? null : new XElement(Ns + "connection-archives", graph.ConnectionArchives.OrderBy(a => a.OwnerBlockId)
+                .Select(a => EngineeringXmlText.Parse(DiagramConnectionArchiveXml.Write(a)))));
         new XDocument(root).Validate(Schema.Value, null);
         return EngineeringXmlText.Render(root);
     }
@@ -61,10 +64,13 @@ public static class RecursiveBlockGraphXml
                 new RecursiveBlockRevision(new(Id(r, "block"), Id(r, "state"), Id(r, "id")),
                     r.Attribute("parent") is null ? null : Id(r, "parent"), Text(r, "name"), Id(r, "requirements"),
                     r.Element(Ns + "children")!.Elements(Ns + "child").Select(ReadSelection).ToImmutableArray(),
-                    ReadOrigin(r.Element(Ns + "origin")!), r.Element(Ns + "restored-from") is { } source ? ReadSelection(source) : null));
+                    ReadOrigin(r.Element(Ns + "origin")!), r.Element(Ns + "restored-from") is { } source ? ReadSelection(source) : null,
+                    r.Element(Ns + "local-diagram") is { } diagram ? ReadLocal(diagram) : null));
             var histories = root.Element(Ns + "requirement-histories")!.Elements(XName.Get("requirement-history", DiagramRequirementHistoryXml.Namespace))
                 .Select(h => DiagramRequirementHistoryXml.Read(EngineeringXmlText.Render(h)));
-            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories);
+            var archives = root.Element(Ns + "connection-archives")?.Elements(XName.Get("connection-archive", DiagramConnectionArchiveXml.Namespace))
+                .Select(a => DiagramConnectionArchiveXml.Read(EngineeringXmlText.Render(a))) ?? [];
+            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)
         { throw Invalid("Invalid recursive block graph XML: " + error.Message); }
@@ -89,6 +95,16 @@ public static class RecursiveBlockGraphXml
     private static XElement Selection(string name, BlockSelection selection) => new(Ns + name,
         Attr("block", selection.BlockId), Attr("state", selection.StateId), Attr("revision", selection.RevisionId));
     private static BlockSelection ReadSelection(XElement e) => new(Id(e, "block"), Id(e, "state"), Id(e, "revision"));
+    private static XElement WriteLocal(BlockLocalDiagram diagram) => new(Ns + "local-diagram",
+        new XElement(Ns + "interfaces", diagram.Interfaces.Select(i => new XElement(Ns + "interface", Attr("id", i.Id),
+            new XAttribute("name", i.Name), new XElement(Ns + "intent", i.Intent)))),
+        new XElement(Ns + "connections", diagram.Connections.Select(c => new XElement(Ns + "connection",
+            Attr("connection", c.ConnectionId), Attr("state", c.StateId), Attr("revision", c.RevisionId)))));
+    private static BlockLocalDiagram ReadLocal(XElement diagram) => new(
+        diagram.Element(Ns + "interfaces")!.Elements(Ns + "interface").Select(i => new DiagramBoundaryInterface(
+            Id(i, "id"), Text(i, "name"), i.Element(Ns + "intent")!.Value)).ToImmutableArray(),
+        diagram.Element(Ns + "connections")!.Elements(Ns + "connection").Select(c => new ConnectionSelection(
+            Id(c, "connection"), Id(c, "state"), Id(c, "revision"))).ToImmutableArray());
     private static string Text(XElement element, string name) => element.Attribute(name)!.Value;
     private static Guid Id(XElement element, string name) => Guid.ParseExact(Text(element, name), "D");
     private static XAttribute Attr(string name, Guid value) => new(name, value.ToString("D"));

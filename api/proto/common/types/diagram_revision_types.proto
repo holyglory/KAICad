@@ -52,6 +52,7 @@ message BlockRevisionData {
   repeated BlockSelectionData children = 5;
   DiagramRevisionOriginData origin = 6;
   BlockSelectionData restored_from = 7;
+  BlockLocalDiagramData local_diagram = 8;
 }
 message RecursiveBlockGraphData {
   uint32 schema_version = 1;
@@ -60,6 +61,35 @@ message RecursiveBlockGraphData {
   repeated BlockDesignStateData states = 4;
   repeated BlockRevisionData revisions = 5;
   repeated RequirementHistoryData requirement_histories = 6;
+  repeated ConnectionArchiveData connection_archives = 7;
+}
+
+message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string intent = 3; }
+message BlockLocalDiagramData {
+  repeated DiagramBoundaryInterfaceData interfaces = 1;
+  repeated ConnectionSelectionData connections = 2;
+}
+message ConnectionSelectionData { string connection_id = 1; string state_id = 2; string revision_id = 3; }
+message ConnectionDesignStateData { string id = 1; string connection_id = 2; string name = 3; string head_revision_id = 4; }
+enum DiagramConnectionKind {
+  DCK_UNKNOWN = 0; DCK_ABSTRACT = 1; DCK_INTERFACE = 2; DCK_SIGNAL_GROUP = 3; DCK_DIFFERENTIAL_PAIR = 4; DCK_SIGNAL = 5;
+}
+message ConnectionRevisionData {
+  ConnectionSelectionData selection = 1;
+  optional string parent_revision_id = 2;
+  string name = 3;
+  DiagramConnectionKind kind = 4;
+  repeated DiagramEndpointBindingData endpoints = 5;
+  string requirement_revision_id = 6;
+  repeated ConnectionSelectionData members = 7;
+  DiagramRevisionOriginData origin = 8;
+}
+message ConnectionArchiveData {
+  string document_id = 1;
+  string owner_block_id = 2;
+  repeated ConnectionDesignStateData states = 3;
+  repeated ConnectionRevisionData revisions = 4;
+  repeated RequirementHistoryData requirement_histories = 5;
 }
 
 enum DiagramEndpointKind {

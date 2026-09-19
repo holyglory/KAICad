@@ -12,13 +12,20 @@ public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid H
 /// the same contract as every child. Physical allocation is deliberately independent.</summary>
 public sealed record RecursiveBlockRevision(BlockSelection Selection, Guid? ParentRevisionId,
     string Name, Guid RequirementRevisionId, ImmutableArray<BlockSelection> Children,
-    RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null);
+    RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null, BlockLocalDiagram? Diagram = null)
+{
+    public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
+}
 
 public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
     ImmutableArray<BlockSelection> CreatedAncestors, bool Changed);
 
 public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
-    ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null);
+    ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null,
+    BlockLocalDiagram? Diagram = null)
+{
+    public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
+}
 
 /// <summary>Immutable block occurrence/revision graph. Publishing an unselected revision
 /// and selecting it are separate operations. Persistence and native activation belong
@@ -30,19 +37,23 @@ public sealed class RecursiveBlockGraph
     public ImmutableArray<BlockDesignState> States { get; }
     public ImmutableArray<RecursiveBlockRevision> Revisions { get; }
     public ImmutableArray<DiagramRequirementHistory> RequirementHistories { get; }
+    public ImmutableArray<DiagramConnectionArchive> ConnectionArchives { get; }
     private readonly ImmutableDictionary<Guid, BlockDesignState> _states;
     private readonly ImmutableDictionary<Guid, RecursiveBlockRevision> _revisions;
     private readonly ImmutableDictionary<Guid, DiagramRequirementHistory> _requirements;
+    private readonly ImmutableDictionary<Guid, DiagramConnectionArchive> _connections;
 
     public RecursiveBlockGraph(Guid documentId, BlockSelection selectedRoot,
         IEnumerable<BlockDesignState> states, IEnumerable<RecursiveBlockRevision> revisions,
-        IEnumerable<DiagramRequirementHistory> requirementHistories)
+        IEnumerable<DiagramRequirementHistory> requirementHistories,
+        IEnumerable<DiagramConnectionArchive>? connectionArchives = null)
     {
         if (documentId == Guid.Empty || selectedRoot is null || states is null || revisions is null
             || requirementHistories is null) throw Invalid("Supply a document, selected root and immutable block histories.");
         DocumentId = documentId; SelectedRoot = selectedRoot;
         States = states.ToImmutableArray(); Revisions = revisions.ToImmutableArray();
         RequirementHistories = requirementHistories.ToImmutableArray();
+        ConnectionArchives = connectionArchives?.ToImmutableArray() ?? [];
         var stateIndex = ImmutableDictionary.CreateBuilder<Guid, BlockDesignState>();
         foreach (var state in States)
         {
@@ -73,11 +84,32 @@ public sealed class RecursiveBlockGraph
             _ = history.Inspect(revision.RequirementRevisionId);
         }
         _revisions = revisionIndex.ToImmutable();
+        var connectionIndex = ImmutableDictionary.CreateBuilder<Guid, DiagramConnectionArchive>();
+        foreach (var archive in ConnectionArchives)
+            if (archive is null || archive.DocumentId != DocumentId || !States.Any(s => s.BlockId == archive.OwnerBlockId)
+                || !connectionIndex.TryAdd(archive.OwnerBlockId, archive))
+                throw Invalid("Connection archives must belong to distinct exact block occurrences in this document.");
+        _connections = connectionIndex.ToImmutable();
         // Occurrences, implementations and revisions are different identity domains.
         var identities = States.Select(s => s.BlockId).Distinct().ToHashSet();
         if (!identities.Add(DocumentId) || States.Any(s => !identities.Add(s.Id))
             || Revisions.Any(r => !identities.Add(r.Selection.RevisionId)))
             throw Invalid("Document, block occurrence, implementation and revision identities cannot alias.");
+        foreach (var archive in ConnectionArchives)
+            if (archive.States.Select(s => s.ConnectionId).Distinct().Any(id => !identities.Add(id))
+                || archive.States.Any(s => !identities.Add(s.Id)) || archive.Revisions.Any(r => !identities.Add(r.Selection.RevisionId)))
+                throw Invalid("Connection identities cannot alias block or other connection identities.");
+        var interfaceOwners = new Dictionary<Guid, Guid>();
+        foreach (var revision in Revisions)
+        {
+            revision.LocalDiagram.Validate();
+            foreach (var boundary in revision.LocalDiagram.Interfaces)
+            {
+                if (identities.Contains(boundary.Id) || (interfaceOwners.TryGetValue(boundary.Id, out var owner) && owner != revision.Selection.BlockId))
+                    throw Invalid("An interface identity must remain owned by one exact block occurrence.");
+                interfaceOwners[boundary.Id] = revision.Selection.BlockId;
+            }
+        }
         foreach (var state in States) ValidateHistory(state);
         foreach (var revision in Revisions)
         {
@@ -86,8 +118,10 @@ public sealed class RecursiveBlockGraph
             foreach (var child in revision.Children)
             {
                 _ = Inspect(child);
-                if (!children.Add(child.BlockId)) throw Invalid("A local diagram cannot contain the same block occurrence twice.");
+                if (child.BlockId == revision.Selection.BlockId || !children.Add(child.BlockId))
+                    throw Invalid("A local diagram cannot contain itself or the same block occurrence twice.");
             }
+            ValidateConnections(revision);
         }
         _ = Inspect(SelectedRoot);
         // Validate inactive and historical states too. A later selection must not expose
@@ -143,7 +177,7 @@ public sealed class RecursiveBlockGraph
         var revision = Inspect(selection);
         var requirements = Requirements(selection);
         return new(selection, revision.Name, revision.Children,
-            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty));
+            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty), Diagram: revision.Diagram);
     }
 
     /// <summary>Restore old contents into a draft, not the selected hierarchy or saved heads.</summary>
@@ -152,6 +186,7 @@ public sealed class RecursiveBlockGraph
         ValidateDraft(draft);
         var baseline = Inspect(draft.Baseline);
         if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
+            || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             || draft.Requirements.Requirements != Requirements(draft.Baseline).Requirements)
             throw new AutomationException("dirty_block_draft", "Save or explicitly decline the existing draft before restoring a whole diagram.");
         var previous = Inspect(source);
@@ -160,7 +195,7 @@ public sealed class RecursiveBlockGraph
         var fields = draft.Requirements;
         foreach (var field in Enum.GetValues<DiagramRequirementField>())
             fields = _requirements[source.StateId].RestoreField(fields, previous.RequirementRevisionId, field);
-        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields, RestoredFrom = source };
+        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields, RestoredFrom = source, Diagram = previous.Diagram };
     }
 
     /// <summary>Atomically produces a new in-memory root and immutable history. A failed
@@ -179,10 +214,11 @@ public sealed class RecursiveBlockGraph
         var requirements = history.Commit(history.Current.Id, draft.Requirements, requirementRevisionId, origin, resolutions);
         var baseline = Inspect(draft.Baseline);
         if (draft.Name == baseline.Name && draft.Children.SequenceEqual(baseline.Children)
+            && draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return new(this, [], false);
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
-            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin, draft.RestoredFrom);
+            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin, draft.RestoredFrom, draft.Diagram);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
         return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin);
     }
@@ -207,7 +243,7 @@ public sealed class RecursiveBlockGraph
         }
         return new(DocumentId, SelectedRoot,
             States.Select(s => s.Id == state.Id ? s with { HeadRevisionId = selection.RevisionId } : s),
-            Revisions.Add(revision), histories);
+            Revisions.Add(revision), histories, ConnectionArchives);
     }
 
     /// <summary>Create an alternative for an existing occurrence; it remains unselected.
@@ -219,7 +255,7 @@ public sealed class RecursiveBlockGraph
             || !States.Any(s => s.BlockId == state.BlockId) || initial.ParentRevisionId is not null
             || initial.Selection != new BlockSelection(state.BlockId, state.Id, state.HeadRevisionId))
             throw Invalid("An alternative needs a fresh implementation of an existing occurrence and its initial revision.");
-        return new(DocumentId, SelectedRoot, States.Add(state), Revisions.Add(initial), RequirementHistories.Add(requirements));
+        return new(DocumentId, SelectedRoot, States.Add(state), Revisions.Add(initial), RequirementHistories.Add(requirements), ConnectionArchives);
     }
 
     /// <summary>Select a revision of an existing occurrence at an exact root-to-block path.
@@ -264,7 +300,7 @@ public sealed class RecursiveBlockGraph
             states[states.IndexOf(state)] = state with { HeadRevisionId = next.RevisionId };
             created[i] = next; child = next;
         }
-        return new(new(DocumentId, child, states, revisions, RequirementHistories), [.. created], true);
+        return new(new(DocumentId, child, states, revisions, RequirementHistories, ConnectionArchives), [.. created], true);
     }
 
     private void ValidateHistory(BlockDesignState state)
@@ -286,6 +322,7 @@ public sealed class RecursiveBlockGraph
         if (draft is null || draft.Requirements is null || draft.Children.IsDefault)
             throw Invalid("Provide the saved baseline, current fields and diagram children for this draft.");
         _ = Inspect(draft.Baseline); Text(draft.Name, "A block draft needs a name.");
+        draft.LocalDiagram.Validate();
         if (draft.Requirements.Baseline != Requirements(draft.Baseline))
             throw Invalid("The draft's requirement baseline must match its exact saved block revision.");
         _ = _requirements[draft.Baseline.StateId].PrepareMerge(draft.Requirements);
@@ -301,6 +338,36 @@ public sealed class RecursiveBlockGraph
         for (Guid? id = parentId; id is { } current; id = _revisions[current].ParentRevisionId)
             if (current == source.RevisionId) return;
         throw Invalid("The restoration source must be in the saved baseline history, not a future or unrelated revision.");
+    }
+
+    public DiagramConnectionArchive Connections(Guid ownerBlockId) => _connections.TryGetValue(ownerBlockId, out var archive)
+        ? archive : throw Invalid("This block has no saved connection archive.");
+
+    /// <summary>Publish an extended archive without changing any block's pinned local diagram.</summary>
+    public RecursiveBlockGraph WithConnections(DiagramConnectionArchive archive)
+    {
+        if (archive is null || archive.DocumentId != DocumentId || !States.Any(s => s.BlockId == archive.OwnerBlockId))
+            throw Invalid("The connection archive belongs to another document or block.");
+        var archives = ConnectionArchives;
+        if (_connections.TryGetValue(archive.OwnerBlockId, out var saved))
+        {
+            if (!archive.Retains(saved)) throw Invalid("Publishing connections cannot rewrite any saved connection history.");
+            archives = archives.SetItem(archives.IndexOf(saved), archive);
+        }
+        else archives = archives.Add(archive);
+        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, archives);
+    }
+
+    private void ValidateConnections(RecursiveBlockRevision revision)
+    {
+        if (revision.LocalDiagram.Connections.IsEmpty) return;
+        var archive = Connections(revision.Selection.BlockId);
+        var available = revision.Children.Select(Inspect).Append(revision).ToDictionary(r => r.Selection.BlockId);
+        foreach (var selection in archive.Walk(revision.LocalDiagram.Connections))
+            foreach (var endpoint in archive.Inspect(selection).Endpoints)
+                if (!available.TryGetValue(endpoint.BlockId, out var target)
+                    || (endpoint.InterfaceId is { } id && !target.LocalDiagram.Interfaces.Any(i => i.Id == id)))
+                    throw Invalid("A connection endpoint must target this diagram's boundary or an exact direct child and its pinned interface; do not guess a replacement.");
     }
 
     private static void Text(string? text, string message)

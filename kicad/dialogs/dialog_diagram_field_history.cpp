@@ -55,6 +55,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_selectedText = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
     m_selectedText->SetName( "DiagramFieldHistorySelectedText" );
+    m_selectedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
     texts->Add( m_selectedText, 1, wxEXPAND );
     m_source = new wxButton( this, wxID_ANY, _( "View source instruction" ),
                             wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
@@ -68,6 +69,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     auto* savedText = new wxTextCtrl( this, wxID_ANY, aSavedText, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
     savedText->SetName( "DiagramFieldHistorySavedText" );
+    savedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
     texts->Add( savedText, 1, wxEXPAND );
     comparison->Add( texts, 1, wxEXPAND );
     outer->Add( comparison, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
@@ -106,6 +108,11 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
         if( event.ControlDown() && ( event.GetKeyCode() == 'S' || event.GetKeyCode() == 'Z'
                                     || event.GetKeyCode() == 'Y' ) ) return;
         event.StopPropagation(); event.Skip();
+    } );
+    Bind( wxEVT_SHOW, [this]( wxShowEvent& event )
+    {
+        if( event.IsShown() ) m_restoreRevision.reset();
+        event.Skip();
     } );
 
     if( !m_entries.empty() ) m_history->SetSelection( 0 );

@@ -104,7 +104,7 @@ public static class DiagramRequirementHistoryFiles
         return new(path, bytes, history);
     }
 
-    private static string Contained(string root, string path, bool requireFile)
+    internal static string Contained(string root, string path, bool requireFile)
     {
         if (!Path.IsPathFullyQualified(root) || !Directory.Exists(root) || !Path.IsPathFullyQualified(path))
             throw Invalid("invalid_requirement_path", "Specify an existing repository and an absolute history file path.");

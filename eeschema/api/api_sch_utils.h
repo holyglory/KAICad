@@ -34,6 +34,14 @@ class SCH_SHEET;
 class SCH_SHEET_PATH;
 class SCHEMATIC;
 
+namespace kiapi::automation::v1 { class SchematicSymbolPinGeometry; }
+
+/// Observe exact active pin identities and sheet-space anchors. Incomplete
+/// mappings return no pins; previous output is cleared before every observation.
+void PackSchematicPinGeometry( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
+                              const wxString& aVariant,
+                              kiapi::automation::v1::SchematicSymbolPinGeometry& aOutput );
+
 std::unique_ptr<EDA_ITEM> CreateItemForType( KICAD_T aType, EDA_ITEM* aContainer );
 
 bool PackSymbol( kiapi::schematic::types::SchematicSymbolInstance* aOutput, const SCH_SYMBOL* aInput,

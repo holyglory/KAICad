@@ -6,6 +6,7 @@
 #include <google/protobuf/any.pb.h>
 #include <lib_symbol.h>
 #include <sch_symbol.h>
+#include <sch_pin.h>
 #include <sch_symbol_cache_state.h>
 #include <sch_screen.h>
 #include <sch_shape.h>
@@ -14,6 +15,7 @@
 #include <api/api_utils.h>
 #include <api/api_sch_symbol_definition.h>
 #include <api/api_sch_utils.h>
+#include <api/common/commands/automation_commands.pb.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_lib_cache.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_parser.h>
@@ -78,6 +80,93 @@ struct TEMP_LIBRARY
 }
 
 BOOST_AUTO_TEST_SUITE( SymbolApiSemantics )
+
+BOOST_AUTO_TEST_CASE( PinAnchorsRejectIncompleteMappings )
+{
+    auto library = MakeLibrary( SST_NORMAL, 0 );
+    library.SetUnitCount( 2, false );
+    library.SetBodyStyleNames( { "Primary", "Alternate" } );
+    auto addPin = [&]( int unit, int style, const wxString& number, bool visible )
+    {
+        auto* pin = new SCH_PIN( &library );
+        pin->SetUnit( unit );
+        pin->SetBodyStyle( style );
+        pin->SetNumber( number );
+        pin->SetVisible( visible );
+        library.AddDrawItem( pin );
+    };
+    addPin( 0, 0, wxS( "common" ), false );
+    addPin( 1, 2, wxS( "selected" ), true );
+    addPin( 2, 2, wxS( "other-unit" ), true );
+    addPin( 1, 1, wxS( "other-style" ), true );
+    SCH_SHEET sheet;
+    SCH_SHEET_PATH path;
+    path.push_back( &sheet );
+    SCH_SYMBOL symbol( library, library.GetLibId(), &path, 1, 2 );
+    kiapi::automation::v1::SchematicSymbolPinGeometry output;
+    auto complete = [&]()
+    {
+        PackSchematicPinGeometry( symbol, path, wxEmptyString, output );
+        BOOST_REQUIRE( output.complete() );
+        BOOST_CHECK_EQUAL( output.limitations_size(), 0 );
+        BOOST_REQUIRE_EQUAL( output.pins_size(), 2 );
+        std::set<std::string> numbers;
+        for( const auto& pin : output.pins() )
+        {
+            numbers.insert( pin.number() );
+            if( pin.number() == "common" )
+            {
+                BOOST_CHECK( !pin.visible() );
+                BOOST_CHECK_EQUAL( pin.unit(), 0 );
+                BOOST_CHECK_EQUAL( pin.body_style(), 0 );
+            }
+        }
+        BOOST_CHECK( numbers == ( std::set<std::string>{ "common", "selected" } ) );
+    };
+    auto incomplete = [&]()
+    {
+        BOOST_CHECK( !output.complete() );
+        BOOST_CHECK_EQUAL( output.pins_size(), 0 );
+        BOOST_CHECK_GT( output.limitations_size(), 0 );
+    };
+    complete();
+    SCH_SYMBOL unresolved;
+    PackSchematicPinGeometry( unresolved, path, wxEmptyString, output );
+    incomplete();  // Previous successful output must not escape on failure.
+    complete();
+    symbol.SetVariantSymbolOverride( path, wxS( "replacement" ), LIB_ID( "Other", "Part" ) );
+    PackSchematicPinGeometry( symbol, path, wxS( "replacement" ), output );
+    incomplete();
+    // An unrelated variant and an explicit same-definition override are exact.
+    complete();
+    symbol.SetVariantSymbolOverride( path, wxS( "same" ), symbol.GetLibId() );
+    PackSchematicPinGeometry( symbol, path, wxS( "same" ), output );
+    BOOST_CHECK( output.complete() );
+    BOOST_CHECK_EQUAL( output.pins_size(), 2 );
+
+    auto active = symbol.GetPins( &path );
+    std::erase_if( active, []( const SCH_PIN* pin )
+    { return pin->GetBodyStyle() && pin->GetBodyStyle() != 2; } );
+    BOOST_REQUIRE_EQUAL( active.size(), 2 );
+    const KIID original = active[0]->m_Uuid;
+    const_cast<KIID&>( active[0]->m_Uuid ) = niluuid;
+    PackSchematicPinGeometry( symbol, path, wxEmptyString, output );
+    incomplete();
+    const_cast<KIID&>( active[0]->m_Uuid ) = active[1]->m_Uuid;
+    PackSchematicPinGeometry( symbol, path, wxEmptyString, output );
+    incomplete();
+    const_cast<KIID&>( active[0]->m_Uuid ) = original;
+    complete();
+    const KIID owned = active[0]->GetLibPin()->m_Uuid;
+    const_cast<KIID&>( active[0]->GetLibPin()->m_Uuid ) = active[1]->GetLibPin()->m_Uuid;
+    PackSchematicPinGeometry( symbol, path, wxEmptyString, output );
+    incomplete();
+    const_cast<KIID&>( active[0]->GetLibPin()->m_Uuid ) = niluuid;
+    PackSchematicPinGeometry( symbol, path, wxEmptyString, output );
+    incomplete();
+    const_cast<KIID&>( active[0]->GetLibPin()->m_Uuid ) = owned;
+    complete();
+}
 
 BOOST_AUTO_TEST_CASE( FieldCustomPropertiesSurviveDecodeAndLibraryReload )
 {

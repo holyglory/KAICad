@@ -1,0 +1,30 @@
+/* KiCad recursive diagram editor control. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.diagrams.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Diagrams";
+import "common/types/diagram_revision_types.proto";
+
+message OpenRecursiveDiagramEditor {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  string repository_root = 3;
+  string source_path = 4;
+  string expected_source_token = 5;
+  string helper_path = 6;
+}
+message ReadRecursiveDiagramEditor { string document_id = 1; }
+message RecursiveDiagramEditorState {
+  string document_id = 1;
+  string source_path = 2;
+  string source_token = 3;
+  bool ready = 4;
+  bool busy = 5;
+  bool dirty = 6;
+  bool rendered = 7;
+  uint64 view_revision = 8;
+  uint64 completed_save_count = 9;
+  string error_code = 10;
+  string error_message = 11;
+  repeated BlockSelectionData diagram_path = 12;
+  BlockDraftData draft = 13;
+}

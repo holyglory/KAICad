@@ -21,6 +21,7 @@ set( KICAD_SRCS
     automation_update_windows.cpp
     structural_editor_control.cpp
     structural_editor_frame.cpp
+    recursive_diagram_frame.cpp
     dialogs/dialog_diagram_field_history.cpp
     dialogs/dialog_destination.cpp
     dialogs/dialog_destination_base.cpp

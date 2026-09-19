@@ -84,6 +84,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<EventTools>()
     .WithTools<SchematicViewTools>()
     .WithTools<StructuralEditorTools>()
+    .WithTools<RecursiveEditorTools>()
     .WithTools<SchematicMutationTools>()
     .WithTools<CheckedSchematicTools>()
     .WithTools<SchematicXmlTools>()

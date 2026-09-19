@@ -3,7 +3,7 @@ using System.Xml;
 
 namespace KiCad.Automation.Model;
 
-public enum RequirementRevisionActor { User, Agent, Import }
+public enum RequirementRevisionActor { User, Agent, Import, Editor }
 
 public sealed record RequirementRevisionOrigin(RequirementRevisionActor ActorKind, string Actor,
     DateTimeOffset RecordedAt, string Summary, ImmutableArray<SourceReference> Sources,

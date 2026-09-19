@@ -48,6 +48,53 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     [TestMethod]
+    public async Task CompiledSavePublishesOneSuccessorAndRejectsStaleRetriesWithoutLosingHistory()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-recursive-save-command-").FullName;
+        try
+        {
+            var fixture = LinkedDiagramFixture.Create(); var graph = fixture.Graph;
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var block = fixture.Blocks["PSU"]; var draft = graph.StartDraft(block);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "A native editor requirement.") };
+            var save = new P.SaveBlockDraftData
+            {
+                ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow), Summary = "Edit requirements" }
+            };
+            save.BlockPath.Add(save.ExpectedRoot.Clone()); save.BlockPath.Add(save.Draft.Baseline.Clone());
+            save.AncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            request.Action = P.RecursiveFileAction.RfaSaveBlock; request.ExpectedSourceToken = read.SourceToken; request.Save = save;
+            var saved = await Invoke(request);
+            Assert.IsTrue(saved.Success); Assert.AreNotEqual(read.SourceToken, saved.SourceToken);
+            var loaded = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var psu = loaded.Inspect(loaded.SelectedRoot).Children[0];
+            Assert.AreEqual("A native editor requirement.", loaded.Requirements(psu).Requirements.General);
+            Assert.AreEqual(graph.Requirements(block).Requirements.General, loaded.Requirements(block).Requirements.General);
+            Assert.AreEqual(RequirementRevisionActor.Editor, loaded.Inspect(psu).Origin.ActorKind);
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            var reread = request.Clone(); reread.Action = P.RecursiveFileAction.RfaRead; reread.Save = null; reread.ExpectedSourceToken = "";
+            var after = await Invoke(reread);
+            Assert.AreEqual(saved.SourceToken, after.SourceToken);
+            Assert.AreEqual(loaded.Revisions.Length, KiCad.Automation.Native.RecursiveBlockCodec.Decode(after.Document.Graph).Revisions.Length);
+            var unchanged = KiCad.Automation.Native.RecursiveBlockCodec.Encode(loaded.StartDraft(psu));
+            request.ExpectedSourceToken = saved.SourceToken; request.Save.Draft = unchanged;
+            request.Save.ExpectedRoot = saved.Document.Graph.SelectedRoot.Clone(); request.Save.BlockPath.Clear();
+            request.Save.BlockPath.Add(request.Save.ExpectedRoot.Clone()); request.Save.BlockPath.Add(unchanged.Baseline.Clone());
+            request.Save.NewRevisionId = Guid.NewGuid().ToString("D"); request.Save.NewRequirementRevisionId = Guid.NewGuid().ToString("D");
+            request.Save.AncestorRevisionIds[0] = Guid.NewGuid().ToString("D");
+            var noOp = await Invoke(request);
+            Assert.IsTrue(noOp.Success); Assert.AreEqual(saved.SourceToken, noOp.SourceToken);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task MalformedAndCancelledCommandsReturnFailureWithoutWritingOrStartingAnMcpSession()
     {
         using var output = new StringWriter();

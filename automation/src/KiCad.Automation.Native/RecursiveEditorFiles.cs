@@ -1,11 +1,12 @@
+using System.Collections.Immutable;
 using Google.Protobuf;
 using KiCad.Automation.Model;
 using P = KiCad.Automation.Protocol.Diagrams;
 
 namespace KiCad.Automation.Native;
 
-/// <summary>Finite read-only operations used by the native editor. All targets are exact,
-/// and the response carries the observed file token; history browsing cannot save or activate.</summary>
+/// <summary>Finite operations used by the native editor. Reads and history queries cannot
+/// save or activate; the separate save action requires the exact file, root and draft baseline.</summary>
 public static class RecursiveEditorFiles
 {
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)
@@ -16,19 +17,29 @@ public static class RecursiveEditorFiles
             throw Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields.");
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
-            || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null)
+            || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
+            || request.Action != P.RecursiveFileAction.RfaSaveBlock && request.Save is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
+        if (request.Action == P.RecursiveFileAction.RfaSaveBlock)
+        {
+            if (request.Save is not { } save || save.Draft is null || save.Origin is null || save.ExpectedRoot is null
+                || request.ExpectedSourceToken.Length != 64 || request.Block is not null || request.Connection is not null
+                || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
+                throw Invalid("invalid_diagram_save_request", "Save needs its exact source token, root, block path, draft and change origin.");
+            var saved = await RecursiveBlockFiles.SaveDraftAsync(request.RepositoryRoot, request.SourcePath, document,
+                request.ExpectedSourceToken, RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot),
+                save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(), RecursiveBlockCodec.Decode(save.Draft, document),
+                Id(save.NewRevisionId), Id(save.NewRequirementRevisionId), save.AncestorRevisionIds.Select(Id).ToImmutableArray(),
+                RecursiveBlockCodec.DecodeOrigin(save.Origin), token: token);
+            return Describe(saved);
+        }
         var loaded = await RecursiveBlockFiles.ReadAsync(request.RepositoryRoot, request.SourcePath, document, token);
         if (request.ExpectedSourceToken.Length != 0 && request.ExpectedSourceToken != loaded.ContentSha256)
             throw Invalid("recursive_block_file_changed", "The design file changed; retain the editing draft and reload its saved context.");
         var result = new P.RecursiveFileResult { Success = true, SourceToken = loaded.ContentSha256 };
         if (request.Action == P.RecursiveFileAction.RfaRead)
-        {
-            result.Document = new() { SchemaVersion = 1, DocumentId = document.ToString("D"), SourcePath = loaded.Path,
-                SourceToken = loaded.ContentSha256, Graph = RecursiveBlockCodec.Encode(loaded.Graph) };
-            return result;
-        }
+            return Describe(loaded);
         if (request.Block is null) throw Invalid("missing_diagram_target", "Select the exact block context for this history query.");
         var block = new BlockSelection(Id(request.Block.BlockId), Id(request.Block.StateId), Id(request.Block.RevisionId));
         var revision = loaded.Graph.Inspect(block);
@@ -46,6 +57,13 @@ public static class RecursiveEditorFiles
         }
         return result;
     }
+
+    private static P.RecursiveFileResult Describe(RecursiveBlockFileSnapshot loaded) => new()
+    {
+        Success = true, SourceToken = loaded.ContentSha256,
+        Document = new() { SchemaVersion = 1, DocumentId = loaded.Graph.DocumentId.ToString("D"), SourcePath = loaded.Path,
+            SourceToken = loaded.ContentSha256, Graph = RecursiveBlockCodec.Encode(loaded.Graph) }
+    };
 
     private static Guid Id(string value) => Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty && id.ToString("D") == value
         ? id : throw Invalid("invalid_diagram_identity", "Diagram targets require canonical non-empty UUIDs.");

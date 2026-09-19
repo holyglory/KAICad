@@ -11,6 +11,41 @@ namespace KiCad.Automation.Native;
 /// rejected, not simplified into a success. No I/O or agent execution occurs here.</summary>
 public static class RecursiveBlockCodec
 {
+    public static M.RecursiveBlockDraft Decode(P.BlockDraftData data, Guid documentId)
+    {
+        Known(data, P.BlockDraftData.Parser);
+        var baseline = Selection(Need(data.Baseline));
+        var scope = new M.DiagramRequirementScope(documentId, baseline.BlockId, baseline.StateId);
+        var restored = ImmutableDictionary.CreateBuilder<M.DiagramRequirementField, Guid>();
+        foreach (var field in data.RestoredFields)
+            if (!Enum.IsDefined((M.DiagramRequirementField)((int)field.Field - 1))
+                || !restored.TryAdd((M.DiagramRequirementField)((int)field.Field - 1), GuidValue(field.SourceRevisionId)))
+                throw Invalid("Field restorations need distinct supported categories and exact source revisions.");
+        return new(baseline, data.Name, data.Children.Select(Selection).ToImmutableArray(),
+            new(new(scope, GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))),
+                Fields(Need(data.Fields)), restored.ToImmutable()), data.RestoredFrom is { } source ? Selection(source) : null,
+            data.LocalDiagram is { } diagram ? Local(diagram) : null);
+    }
+
+    public static P.BlockDraftData Encode(M.RecursiveBlockDraft draft)
+    {
+        var result = new P.BlockDraftData { Baseline = Selection(draft.Baseline), Name = draft.Name,
+            BaselineRequirementRevisionId = Id(draft.Requirements.Baseline.RevisionId),
+            BaselineFields = Fields(draft.Requirements.Baseline.Requirements), Fields = Fields(draft.Requirements.Requirements) };
+        result.Children.Add(draft.Children.Select(Selection));
+        result.RestoredFields.Add(draft.Requirements.RestoredFields.Select(r => new P.FieldRestorationData
+            { Field = (P.RequirementFieldKind)((int)r.Key + 1), SourceRevisionId = Id(r.Value) }));
+        if (draft.RestoredFrom is { } source) result.RestoredFrom = Selection(source);
+        if (draft.Diagram is { } diagram) result.LocalDiagram = Local(diagram);
+        return result;
+    }
+
+    internal static M.RequirementRevisionOrigin DecodeOrigin(P.DiagramRevisionOriginData origin) => Origin(Need(origin));
+    internal static M.BlockSelection DecodeSelection(P.BlockSelectionData selection) => Selection(Need(selection));
+    internal static Guid DecodeIdentity(string value) => GuidValue(value);
+    private static M.DiagramRequirements Fields(P.RequirementFieldsData data) => new(data.General, data.Schematic, data.Routing);
+    private static P.RequirementFieldsData Fields(M.DiagramRequirements fields) => new() { General = fields.General, Schematic = fields.Schematic, Routing = fields.Routing };
+
     public static P.FieldHistoryPageData Encode(M.DiagramFieldHistoryPage page)
     {
         var result = new P.FieldHistoryPageData { DocumentId = Id(page.Scope.DocumentId), OwnerId = Id(page.Scope.OwnerId), StateId = Id(page.Scope.DesignStateId),

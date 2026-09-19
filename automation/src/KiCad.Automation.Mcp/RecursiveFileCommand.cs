@@ -20,7 +20,7 @@ public static class RecursiveFileCommand
         catch (OperationCanceledException)
         { result = new() { ErrorCode = "cancelled", ErrorMessage = "The diagram read was cancelled; no saved or draft content was changed." }; }
         catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException
-            or InvalidJsonException or InvalidProtocolBufferException or XmlException or DecoderFallbackException)
+            or InvalidJsonException or InvalidProtocolBufferException or XmlException or DecoderFallbackException or InvalidOperationException)
         {
             result = new() { ErrorCode = error is AutomationException a ? a.Code : "diagram_file_error", ErrorMessage = error.Message };
         }

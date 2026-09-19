@@ -14,7 +14,7 @@ message BlockSelectionData {
   string revision_id = 3;
 }
 message RequirementFieldsData { string general = 1; string schematic = 2; string routing = 3; }
-enum DiagramActorKind { DAK_UNKNOWN = 0; DAK_USER = 1; DAK_AGENT = 2; DAK_IMPORT = 3; }
+enum DiagramActorKind { DAK_UNKNOWN = 0; DAK_USER = 1; DAK_AGENT = 2; DAK_IMPORT = 3; DAK_EDITOR = 4; }
 enum RequirementFieldKind { RFK_UNKNOWN = 0; RFK_GENERAL = 1; RFK_SCHEMATIC = 2; RFK_ROUTING = 3; }
 message DiagramRevisionOriginData {
   DiagramActorKind kind = 1;
@@ -93,7 +93,27 @@ message RecursiveEditorDocument {
   string source_token = 4;
   RecursiveBlockGraphData graph = 5;
 }
-enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; }
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; }
+message BlockDraftData {
+  BlockSelectionData baseline = 1;
+  string name = 2;
+  repeated BlockSelectionData children = 3;
+  string baseline_requirement_revision_id = 4;
+  RequirementFieldsData baseline_fields = 5;
+  RequirementFieldsData fields = 6;
+  repeated FieldRestorationData restored_fields = 7;
+  BlockSelectionData restored_from = 8;
+  BlockLocalDiagramData local_diagram = 9;
+}
+message SaveBlockDraftData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  BlockDraftData draft = 3;
+  string new_revision_id = 4;
+  string new_requirement_revision_id = 5;
+  repeated string ancestor_revision_ids = 6;
+  DiagramRevisionOriginData origin = 7;
+}
 message RecursiveFileRequest {
   uint32 schema_version = 1;
   RecursiveFileAction action = 2;
@@ -106,6 +126,7 @@ message RecursiveFileRequest {
   RequirementFieldKind field = 9;
   int32 offset = 10;
   int32 limit = 11;
+  SaveBlockDraftData save = 12;
 }
 message RecursiveFileResult {
   bool success = 1;

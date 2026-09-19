@@ -6,7 +6,7 @@
     <xs:pattern value="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/>
   </xs:restriction></xs:simpleType>
   <xs:simpleType name="actor"><xs:restriction base="xs:string">
-    <xs:enumeration value="User"/><xs:enumeration value="Agent"/><xs:enumeration value="Import"/>
+    <xs:enumeration value="User"/><xs:enumeration value="Agent"/><xs:enumeration value="Import"/><xs:enumeration value="Editor"/>
   </xs:restriction></xs:simpleType>
   <xs:simpleType name="field"><xs:restriction base="xs:string">
     <xs:enumeration value="General"/><xs:enumeration value="Schematic"/><xs:enumeration value="Routing"/>

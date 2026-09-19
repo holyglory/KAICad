@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:kicad:automation:requirement-history:1"
+           xmlns="urn:kicad:automation:requirement-history:1" elementFormDefault="qualified">
+  <xs:simpleType name="identity"><xs:restriction base="xs:string">
+    <xs:pattern value="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="actor"><xs:restriction base="xs:string">
+    <xs:enumeration value="User"/><xs:enumeration value="Agent"/><xs:enumeration value="Import"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="field"><xs:restriction base="xs:string">
+    <xs:enumeration value="General"/><xs:enumeration value="Schematic"/><xs:enumeration value="Routing"/>
+  </xs:restriction></xs:simpleType>
+  <xs:element name="requirement-history"><xs:complexType><xs:sequence>
+    <xs:element name="revision" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+      <xs:element name="origin"><xs:complexType><xs:sequence>
+        <xs:element name="summary" type="xs:string"/>
+        <xs:element name="source" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+          <xs:attribute name="document" type="xs:string" use="required"/>
+          <xs:attribute name="revision" type="xs:string" use="required"/>
+          <xs:attribute name="page" type="xs:positiveInteger"/>
+          <xs:attribute name="table" type="xs:string"/>
+          <xs:attribute name="part-variant" type="xs:string"/>
+        </xs:complexType></xs:element>
+        <xs:element name="input" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+          <xs:attribute name="ref" type="identity" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence>
+        <xs:attribute name="actor-kind" type="actor" use="required"/>
+        <xs:attribute name="actor" type="xs:string" use="required"/>
+        <xs:attribute name="at" type="xs:dateTime" use="required"/>
+      </xs:complexType></xs:element>
+      <xs:element name="requirements"><xs:complexType><xs:sequence>
+        <xs:element name="general" type="xs:string"/>
+        <xs:element name="schematic" type="xs:string"/>
+        <xs:element name="routing" type="xs:string"/>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="restored-field" minOccurs="0" maxOccurs="3"><xs:complexType>
+        <xs:attribute name="field" type="field" use="required"/>
+        <xs:attribute name="source-revision" type="identity" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence>
+      <xs:attribute name="id" type="identity" use="required"/>
+      <xs:attribute name="parent" type="identity"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="version" use="required" fixed="1" type="xs:positiveInteger"/>
+    <xs:attribute name="document" type="identity" use="required"/>
+    <xs:attribute name="owner" type="identity" use="required"/>
+    <xs:attribute name="design-state" type="identity" use="required"/>
+  </xs:complexType></xs:element>
+</xs:schema>

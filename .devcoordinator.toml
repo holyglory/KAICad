@@ -123,6 +123,27 @@ tier="development"
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~HostedValidatorIsolationTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~WindowsDiagnosticPackageTests|FullyQualifiedName~WindowsRetainedPackageInputTests|FullyQualifiedName~HostedDeliveryTests", "--logger", "trx", "--results-directory", "automation/artifacts/windows-validator-isolation-tests"]
 retained_artifacts=[{ name = "isolation-contracts", path = "automation/artifacts/windows-validator-isolation-tests", max_bytes = 16777216 }]
 
+[test.prune-windows-f120-import]
+timeout_seconds=2400
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+[[test.prune-windows-f120-import.check]]
+name="contracts"
+tier="development"
+role="preflight"
+invalidates=["receipt-directory","prune"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~IntermediateArchivePruningTests","--logger","trx","--results-directory","automation/artifacts/prune-windows-f120-contracts"]
+retained_artifacts=[{name="contracts",path="automation/artifacts/prune-windows-f120-contracts",max_bytes=16777216}]
+[[test.prune-windows-f120-import.check]]
+name="receipt-directory"
+tier="development"
+command=["mkdir","-p","automation/artifacts/prune-windows-f120-import"]
+[[test.prune-windows-f120-import.check]]
+name="prune"
+tier="development"
+requires=["receipt-directory"]
+command=["dotnet","automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll","prune-staging-archives","--declaration","/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/maintenance/prune-windows-f120-import.json","--output","/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/prune-windows-f120-import/receipt.json"]
+retained_artifacts=[{name="cleanup-receipt",path="automation/artifacts/prune-windows-f120-import",max_bytes=1048576}]
+
 [test.prune-completed-f120-imports]
 timeout_seconds=2400
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}

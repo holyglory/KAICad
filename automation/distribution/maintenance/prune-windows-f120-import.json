@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "retained": {
+    "directory": "/mnt/build-storage/codex/kicad/public-candidates/windows-f120-signed-000010",
+    "catalogueSha256": "459673bae7dbd1c2196d830befef9c60990e0003ba96a4265cbc72396a4adf46"
+  },
+  "completedImports": [
+    {
+      "directory": "/mnt/build-storage/codex/kicad/public-candidates/windows-f120-import",
+      "catalogueSha256": "459673bae7dbd1c2196d830befef9c60990e0003ba96a4265cbc72396a4adf46"
+    }
+  ]
+}

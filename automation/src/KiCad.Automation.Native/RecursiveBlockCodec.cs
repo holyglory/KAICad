@@ -18,7 +18,7 @@ public static class RecursiveBlockCodec
         var scope = new M.DiagramRequirementScope(documentId, baseline.BlockId, baseline.StateId);
         var restored = ImmutableDictionary.CreateBuilder<M.DiagramRequirementField, Guid>();
         foreach (var field in data.RestoredFields)
-            if (!Enum.IsDefined((M.DiagramRequirementField)((int)field.Field - 1))
+            if (!System.Enum.IsDefined((M.DiagramRequirementField)((int)field.Field - 1))
                 || !restored.TryAdd((M.DiagramRequirementField)((int)field.Field - 1), GuidValue(field.SourceRevisionId)))
                 throw Invalid("Field restorations need distinct supported categories and exact source revisions.");
         return new(baseline, data.Name, data.Children.Select(Selection).ToImmutableArray(),

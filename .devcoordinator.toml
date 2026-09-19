@@ -48,7 +48,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 timeout_seconds=300
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~DiagramRequirement|FullyQualifiedName~DiagramEndpointBinding|FullyQualifiedName~DiagramConnection|FullyQualifiedName~DiagramFieldHistoryQuery|FullyQualifiedName~RecursiveBlock|FullyQualifiedName~StructuralEditorFileTests|FullyQualifiedName~StructuralDiagramTests)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~DiagramRequirement|FullyQualifiedName~DiagramEndpointBinding|FullyQualifiedName~DiagramConnection|FullyQualifiedName~DiagramFieldHistoryQuery|FullyQualifiedName~RecursiveBlock|FullyQualifiedName~RecursiveEditor|FullyQualifiedName~StructuralEditorFileTests|FullyQualifiedName~StructuralDiagramTests)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history",max_bytes=16777216}]
 [[test.diagram-requirement-history.check]]
 name="native-protocol"

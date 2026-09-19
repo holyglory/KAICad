@@ -29,27 +29,45 @@ public sealed class RecursiveBlockCodecTests
     }
 
     [TestMethod]
-    public void UnknownFieldsBadTargetsMissingFieldsAndUnsupportedPrecisionAreRejected()
+    [DataRow("future-version")]
+    [DataRow("wrong-target")]
+    [DataRow("noncanonical-identity")]
+    [DataRow("missing-origin")]
+    [DataRow("missing-time")]
+    [DataRow("unsupported-precision")]
+    [DataRow("invalid-seconds")]
+    [DataRow("negative-nanos")]
+    [DataRow("unnormalized-nanos")]
+    [DataRow("unknown-actor")]
+    [DataRow("missing-fields")]
+    [DataRow("empty-parent")]
+    [DataRow("unknown-root-field")]
+    [DataRow("unknown-nested-field")]
+    public void UnknownFieldsBadTargetsMissingFieldsAndUnsupportedPrecisionAreRejected(string scenario)
     {
         var data = RecursiveBlockCodec.Encode(RecursiveBlockFixture.Create().Graph);
-        void Reject(Action<P.RecursiveBlockGraphData> change)
+        switch (scenario)
         {
-            var copy = data.Clone(); change(copy); Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(copy));
+            case "future-version": data.SchemaVersion = 2; break;
+            case "wrong-target": data.SelectedRoot.BlockId = Guid.NewGuid().ToString("D"); break;
+            case "noncanonical-identity": data.SelectedRoot.StateId = data.SelectedRoot.StateId.ToUpperInvariant(); break;
+            case "missing-origin": data.Revisions[0].Origin = null; break;
+            case "missing-time": data.Revisions[0].Origin.RecordedAt = null; break;
+            case "unsupported-precision": data.Revisions[0].Origin.RecordedAt.Nanos = 1; break;
+            case "invalid-seconds": data.Revisions[0].Origin.RecordedAt.Seconds = long.MaxValue; break;
+            case "negative-nanos": data.Revisions[0].Origin.RecordedAt.Nanos = -1; break;
+            case "unnormalized-nanos": data.Revisions[0].Origin.RecordedAt.Nanos = 1000000000; break;
+            case "unknown-actor": data.Revisions[0].Origin.Kind = P.DiagramActorKind.DakUnknown; break;
+            case "missing-fields": data.RequirementHistories[0].Revisions[0].Fields = null; break;
+            case "empty-parent": data.RequirementHistories[0].Revisions[0].ParentId = ""; break;
+            case "unknown-root-field":
+                data = P.RecursiveBlockGraphData.Parser.ParseFrom(data.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 0x01 }).ToArray()); break;
+            case "unknown-nested-field":
+                data.Revisions[0].Selection = P.BlockSelectionData.Parser.ParseFrom(
+                    data.Revisions[0].Selection.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 0x01 }).ToArray()); break;
+            default: throw new ArgumentOutOfRangeException(nameof(scenario));
         }
-        Reject(d => d.SchemaVersion = 2);
-        Reject(d => d.SelectedRoot.BlockId = Guid.NewGuid().ToString("D"));
-        Reject(d => d.SelectedRoot.StateId = d.SelectedRoot.StateId.ToUpperInvariant());
-        Reject(d => d.Revisions[0].Origin = null);
-        Reject(d => d.Revisions[0].Origin.RecordedAt = null);
-        Reject(d => d.Revisions[0].Origin.RecordedAt.Nanos = 1);
-        Reject(d => d.Revisions[0].Origin.RecordedAt.Seconds = long.MaxValue);
-        Reject(d => d.Revisions[0].Origin.Kind = P.DiagramActorKind.DakUnknown);
-        Reject(d => d.RequirementHistories[0].Revisions[0].Fields = null);
-        Reject(d => d.RequirementHistories[0].Revisions[0].ParentId = "");
-        var unknown = P.RecursiveBlockGraphData.Parser.ParseFrom(data.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 0x01 }).ToArray());
-        Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(unknown));
-        Reject(d => d.Revisions[0].Selection = P.BlockSelectionData.Parser.ParseFrom(
-            d.Revisions[0].Selection.ToByteArray().Concat(new byte[] { 0xa0, 0x06, 0x01 }).ToArray()));
+        Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(data));
     }
 
     [TestMethod]
@@ -64,6 +82,7 @@ public sealed class RecursiveBlockCodecTests
         Assert.IsTrue(pin.SamePin(candidate.Candidates[0]));
         var chosen = RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(endpoint.Choose(pin)));
         Assert.AreEqual(DiagramEndpointKind.Pin, chosen.Kind); Assert.IsTrue(pin.SamePin(chosen.Pin!));
+        Assert.IsNotNull(endpoint.Selector);
         Assert.AreEqual(endpoint.Selector.Role, chosen.Selector!.Role);
         var unknown = RecursiveBlockCodec.Encode(endpoint); unknown.Kind = P.DiagramEndpointKind.DekUnknown;
         Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(unknown));

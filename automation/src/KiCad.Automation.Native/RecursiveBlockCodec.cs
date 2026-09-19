@@ -103,7 +103,7 @@ public static class RecursiveBlockCodec
         var result = new P.DiagramPinTargetData { DesignId = Id(pin.DesignId), ComponentId = Id(pin.ComponentId), Pin = pin.Pin };
         result.SheetInstancePath.Add(pin.SheetInstancePath.Select(Id)); return result;
     }
-    private static M.DiagramPinTarget Pin(P.DiagramPinTarget pin) => new(GuidValue(pin.DesignId), GuidValue(pin.ComponentId), pin.SheetInstancePath.Select(GuidValue).ToImmutableArray(), pin.Pin);
+    private static M.DiagramPinTarget Pin(P.DiagramPinTargetData pin) => new(GuidValue(pin.DesignId), GuidValue(pin.ComponentId), pin.SheetInstancePath.Select(GuidValue).ToImmutableArray(), pin.Pin);
     private static S.StructuralSourceReference Source(M.SourceReference source)
     {
         var result = new S.StructuralSourceReference { DocumentId = source.DocumentId, Revision = source.Revision };
@@ -117,8 +117,13 @@ public static class RecursiveBlockCodec
     private static void Known<T>(T data, MessageParser<T> parser) where T : class, IMessage<T>
     {
         Need(data);
-        if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))))
-            throw Invalid("The recursive diagram message contains unsupported fields; no history was simplified.");
+        try
+        {
+            if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))))
+                throw Invalid("The recursive diagram message contains unsupported fields; no history was simplified.");
+        }
+        catch (Exception error) when (error is InvalidOperationException or InvalidProtocolBufferException)
+        { throw Invalid("The diagram message has an invalid protobuf value; no history was changed."); }
     }
     private static T Need<T>(T? value) where T : class => value ?? throw Invalid("A required recursive diagram record is missing.");
     private static string Id(Guid id) => id.ToString("D");

@@ -27,20 +27,27 @@ public static class DiagramRequirementHistoryXml
         ArgumentNullException.ThrowIfNull(history);
         var root = new XElement(Ns + "requirement-history", new XAttribute("version", 1),
             Attr("document", history.Scope.DocumentId), Attr("owner", history.Scope.OwnerId), Attr("design-state", history.Scope.DesignStateId),
-            history.Revisions.Select(r => new XElement(Ns + "revision", Attr("id", r.Id),
-                r.ParentId is Guid parent ? Attr("parent", parent) : null,
-                new XElement(Ns + "origin", new XAttribute("actor-kind", r.Origin.ActorKind), new XAttribute("actor", r.Origin.Actor),
-                    new XAttribute("at", r.Origin.RecordedAt.ToString("O", CultureInfo.InvariantCulture)),
-                    new XElement(Ns + "summary", r.Origin.Summary),
-                    r.Origin.Sources.Select(s => new XElement(Ns + "source", new XAttribute("document", s.DocumentId),
-                        new XAttribute("revision", s.Revision), s.Page is int page ? new XAttribute("page", page) : null,
-                        s.Table is { } table ? new XAttribute("table", table) : null,
-                        s.PartVariant is { } variant ? new XAttribute("part-variant", variant) : null)),
-                    r.Origin.InputIds.Select(id => new XElement(Ns + "input", Attr("ref", id)))),
-                new XElement(Ns + "requirements", new XElement(Ns + "general", r.Requirements.General),
-                    new XElement(Ns + "schematic", r.Requirements.Schematic), new XElement(Ns + "routing", r.Requirements.Routing)),
-                r.Restorations.Select(s => new XElement(Ns + "restored-field", new XAttribute("field", s.Field), Attr("source-revision", s.SourceRevisionId)))));
+            history.Revisions.Select(WriteRevision));
         return EngineeringXmlText.Render(root);
+    }
+
+    private static XElement WriteRevision(DiagramRequirementRevision revision)
+    {
+        var metadata = revision.Origin;
+        var origin = new XElement(Ns + "origin", new XAttribute("actor-kind", metadata.ActorKind), new XAttribute("actor", metadata.Actor),
+            new XAttribute("at", metadata.RecordedAt.ToString("O", CultureInfo.InvariantCulture)),
+            new XElement(Ns + "summary", metadata.Summary),
+            metadata.Sources.Select(s => new XElement(Ns + "source", new XAttribute("document", s.DocumentId),
+                new XAttribute("revision", s.Revision), s.Page is int page ? new XAttribute("page", page) : null,
+                s.Table is { } table ? new XAttribute("table", table) : null,
+                s.PartVariant is { } variant ? new XAttribute("part-variant", variant) : null)),
+            metadata.InputIds.Select(id => new XElement(Ns + "input", Attr("ref", id))));
+        var fields = new XElement(Ns + "requirements", new XElement(Ns + "general", revision.Requirements.General),
+            new XElement(Ns + "schematic", revision.Requirements.Schematic), new XElement(Ns + "routing", revision.Requirements.Routing));
+        return new XElement(Ns + "revision", Attr("id", revision.Id),
+            revision.ParentId is Guid parent ? Attr("parent", parent) : null, origin, fields,
+            revision.Restorations.Select(s => new XElement(Ns + "restored-field", new XAttribute("field", s.Field),
+                Attr("source-revision", s.SourceRevisionId))));
     }
 
     public static DiagramRequirementHistory Read(string xml)

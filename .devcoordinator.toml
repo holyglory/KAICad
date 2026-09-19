@@ -34,6 +34,23 @@ env={ ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-s
 [test]
 default="automation"
 
+[test.diagram-requirement-history]
+timeout_seconds=3600
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+[[test.diagram-requirement-history.check]]
+name="build"
+tier="development"
+role="preflight"
+invalidates=["contracts"]
+timeout_seconds=300
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+[[test.diagram-requirement-history.check]]
+name="contracts"
+tier="development"
+timeout_seconds=300
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~DiagramRequirement|FullyQualifiedName~StructuralEditorFileTests|FullyQualifiedName~StructuralDiagramTests)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history"]
+retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history",max_bytes=16777216}]
+
 [test.structural-editor-build]
 timeout_seconds=3600
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}

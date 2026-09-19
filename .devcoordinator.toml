@@ -65,6 +65,23 @@ requires = ["receipt-directory"]
 command = ["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "prune-staging-archives", "--declaration", "/mnt/build-storage/codex/kicad/worktrees/component-generation.20260918/automation/distribution/maintenance/prune-8e8-imports.json", "--output", "/mnt/build-storage/codex/kicad/worktrees/component-generation.20260918/automation/artifacts/prune-8e8-imports/receipt.json"]
 retained_artifacts = [{ name = "cleanup-receipt", path = "automation/artifacts/prune-8e8-imports", max_bytes = 1048576 }]
 
+[test.part-symbol-contracts]
+timeout_seconds = 600
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.part-symbol-contracts.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["contracts"]
+command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.part-symbol-contracts.check]]
+name = "contracts"
+tier = "development"
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicPartSymbolTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests", "--logger", "trx", "--results-directory", "automation/artifacts/part-symbol-contracts"]
+retained_artifacts = [{ name = "part-symbol-contracts", path = "automation/artifacts/part-symbol-contracts", max_bytes = 16777216 }]
+
 [test.archive-pruning-contracts]
 timeout_seconds = 600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -82,22 +99,22 @@ tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~IntermediateArchivePruningTests", "--logger", "trx", "--results-directory", "automation/artifacts/archive-pruning-contracts"]
 retained_artifacts = [{ name = "archive-pruning-contracts", path = "automation/artifacts/archive-pruning-contracts", max_bytes = 16777216 }]
 
-[test.retained-field-layout-diagnosis]
+[test.retained-part-symbol-diagnosis]
 timeout_seconds = 600
-env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_FIELD_LAYOUT_DIAGNOSTIC_EVIDENCE = "/mnt/build-storage/codex/kicad/evidence/field-layout-2c7551/native-xml-component-creation-evidence" }
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PART_SYMBOL_DIAGNOSTIC_DIRECTORY = "/mnt/build-storage/codex/kicad/evidence/declared-field-bf43e1/native-xml-component-creation-evidence" }
 
-[[test.retained-field-layout-diagnosis.check]]
+[[test.retained-part-symbol-diagnosis.check]]
 name = "build"
 tier = "development"
 role = "preflight"
 invalidates = ["compare"]
 command = ["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.retained-field-layout-diagnosis.check]]
+[[test.retained-part-symbol-diagnosis.check]]
 name = "compare"
 tier = "development"
-command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=RetainedFieldLayoutDiagnosis", "--logger", "console;verbosity=normal", "--logger", "trx", "--results-directory", "automation/artifacts/retained-field-layout-diagnosis"]
-retained_artifacts = [{ name = "field-layout-diagnosis", path = "automation/artifacts/retained-field-layout-diagnosis", max_bytes = 16777216 }]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=RetainedPartSymbolDiagnosis", "--logger", "console;verbosity=normal", "--logger", "trx", "--results-directory", "automation/artifacts/retained-part-symbol-diagnosis"]
+retained_artifacts = [{ name = "part-symbol-diagnosis", path = "automation/artifacts/retained-part-symbol-diagnosis", max_bytes = 16777216 }]
 
 [test.stage-arm64-c265]
 timeout_seconds = 1800
@@ -3712,6 +3729,15 @@ timeout_seconds = 3600
 env = { TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
 [[test.native-xml-component-creation.check]]
+name = "part-symbol-contracts"
+tier = "development"
+role = "preflight"
+requires = ["managed-build"]
+invalidates = ["configure", "model-build", "codec", "native-build", "rendered"]
+command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicPartSymbolTests", "--logger", "trx", "--results-directory", "automation/artifacts/part-symbol-native-inputs"]
+retained_artifacts = [{ name = "part-symbol-native-inputs", path = "automation/artifacts/part-symbol-native-inputs", max_bytes = 16777216 }]
+
+[[test.native-xml-component-creation.check]]
 name = "connected-tool-contracts"
 tier = "development"
 role = "preflight"
@@ -3751,7 +3777,7 @@ command = ["cmake", "--build", "automation/artifacts/native", "--target", "qa_co
 name = "codec"
 tier = "development"
 requires = ["model-build"]
-command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$|^qa_undo_geometry_policy$|^qa_automation_wire_rollback$", "--output-on-failure", "--no-tests=error"]
+command = ["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_checked_schematic_controller$|^qa_document_lifecycle_controller$|^qa_file_content_baseline$|^qa_undo_geometry_policy$|^qa_automation_wire_rollback$|^qa_symbol_update_identity$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-xml-component-creation.check]]
 name = "native-build"

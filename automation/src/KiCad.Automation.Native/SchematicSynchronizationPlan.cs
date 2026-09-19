@@ -179,7 +179,7 @@ public static class SchematicSynchronizationPlanner
             var observed = SchematicElectricalComparison.Compare(current.Baseline, checkpoints.Observed, current.KnowledgeLibraries, cancellation);
             if (!observed.PinBindingsComplete || !observed.ConnectivityEquivalent)
                 return Failure("creation_requires_stable_connectivity", "Reconcile current native connectivity before creating components.");
-            var creation = SchematicNativeCreationProjection.Project(current.Baseline, desiredDesign.Engineering,
+            var creation = SchematicNativeCreationProjection.Project(current.Baseline, desiredDesign,
                 current.KnowledgeLibraries, cancellation);
             var bindings = SchematicDesignBindings.Inspect(creation.Candidate, current.KnowledgeLibraries, cancellation);
             currentGaps.AddRange(bindings.CoverageGaps);

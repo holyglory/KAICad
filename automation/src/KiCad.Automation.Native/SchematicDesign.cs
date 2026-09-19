@@ -7,7 +7,8 @@ namespace KiCad.Automation.Native;
 public sealed record SchematicSheetBinding(Guid SheetInstanceId, IReadOnlyList<Guid> NativePath);
 public sealed record SchematicSymbolBinding(Guid SymbolOccurrenceId, Guid NativeObjectId);
 public sealed record SchematicDesign(EngineeringDesign Engineering, SchematicHierarchyData Schematic,
-    IReadOnlyList<SchematicSheetBinding> SheetBindings, IReadOnlyList<SchematicSymbolBinding> SymbolBindings);
+    IReadOnlyList<SchematicSheetBinding> SheetBindings, IReadOnlyList<SchematicSymbolBinding> SymbolBindings,
+    IReadOnlyList<SchematicPartSymbol>? PartSymbols = null);
 public sealed record SchematicBindingIssue(string Code, Guid? ModelId, string? NativePath, Guid? NativeObjectId);
 public sealed record SchematicBindingDifference(Guid SymbolOccurrenceId, string Field, string? ModelValue, string? NativeValue);
 public sealed record SchematicBindingReport(IReadOnlyList<SchematicBindingIssue> Issues,
@@ -26,6 +27,7 @@ public static class SchematicDesignBindings
     {
         cancellationToken.ThrowIfCancellationRequested();
         design.Engineering.Validate(libraries);
+        SchematicPartSymbols.Validate(design);
         var topology = SchematicHierarchyTopology.Inspect(design.Schematic, cancellationToken);
         var issues = new List<SchematicBindingIssue>();
         var differences = new List<SchematicBindingDifference>();

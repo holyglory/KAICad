@@ -14,7 +14,8 @@ internal sealed record SchematicNativeCreationResult(SchematicDesign Candidate,
 
 /// <summary>
 /// Creates the native representation for a narrow, unambiguous XML-first
-/// addition. The new component must use an existing part/unit template, have
+/// addition. The new component must use an exact part/unit template or an explicitly
+/// declared standalone symbol definition, have
 /// explicit placement, and have no new net membership. Connectivity-changing
 /// creation remains a separate ownership operation and is never inferred here.
 /// </summary>
@@ -29,8 +30,8 @@ internal static class SchematicNativeCreationProjection
         bool added = newComponents.Keys.Except(oldComponents.Keys).Any();
         bool removed = oldComponents.Keys.Except(newComponents.Keys).Any();
         return added && !removed && oldCircuit.Id == newCircuit.Id
-            && oldCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart)
-                .SequenceEqual(newCircuit.Parts.OrderBy(part => part.Id).Select(NormalizePart))
+            && oldCircuit.Parts.All(part => newCircuit.Parts.SingleOrDefault(p => p.Id == part.Id) is { } next
+                && NormalizePart(part) == NormalizePart(next))
             && oldCircuit.SheetInstances.OrderBy(instance => instance.Id).SequenceEqual(newCircuit.SheetInstances.OrderBy(instance => instance.Id))
             && oldCircuit.Nets.OrderBy(net => net.Id).Select(NormalizeNet)
                 .SequenceEqual(newCircuit.Nets.OrderBy(net => net.Id).Select(NormalizeNet))
@@ -58,10 +59,17 @@ internal static class SchematicNativeCreationProjection
 
     internal static SchematicNativeCreationResult Project(SchematicDesign baseline, EngineeringDesign desired,
         IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
+        => Project(baseline, baseline with { Engineering = desired }, libraries, token);
+
+    internal static SchematicNativeCreationResult Project(SchematicDesign baseline, SchematicDesign desiredDesign,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
     {
+        var desired = desiredDesign.Engineering;
         token.ThrowIfCancellationRequested();
         baseline.Engineering.Validate(libraries);
         desired.Validate(libraries);
+        SchematicPartSymbols.Validate(desiredDesign, token);
+        var declared = (desiredDesign.PartSymbols ?? []).ToDictionary(s => s.PartId);
         var baselineReport = SchematicDesignBindings.Inspect(baseline, libraries, token);
         if (!baselineReport.IdentitiesResolved)
             throw Invalid("unresolved_design_bindings", "The existing design must have exact native bindings before creating a component.");
@@ -70,8 +78,9 @@ internal static class SchematicNativeCreationProjection
         var newCircuit = desired.Circuit;
         var oldParts = oldCircuit.Parts.ToDictionary(p => p.Id);
         var newParts = newCircuit.Parts.ToDictionary(p => p.Id);
-        if (!oldParts.Keys.ToHashSet().SetEquals(newParts.Keys)
-            || oldParts.Any(pair => !SamePart(pair.Value, newParts[pair.Key])))
+        if (oldParts.Any(pair => !newParts.TryGetValue(pair.Key, out var next) || !SamePart(pair.Value, next)))
+            throw Invalid("part_definition_change_requires_resolution", "Preserve existing part definitions while creating new components.");
+        if (newParts.Keys.Except(oldParts.Keys).Any(id => !declared.ContainsKey(id)))
             throw Invalid("new_part_requires_library_definition", "Creating a new part requires an explicit native library definition.");
         if (!oldCircuit.SheetInstances.OrderBy(instance => instance.Id).SequenceEqual(newCircuit.SheetInstances.OrderBy(instance => instance.Id))
             || !oldCircuit.Sheets.Select(s => s.Id).ToHashSet().SetEquals(newCircuit.Sheets.Select(s => s.Id)))
@@ -162,7 +171,10 @@ internal static class SchematicNativeCreationProjection
             var representativeComponent = newComponents[representative.ComponentId];
             var representativeDefinition = newSheets.Values.SelectMany(s => s.Components).Single(c => c.Id == representativeComponent.DefinitionId);
             var part = newParts[representativeDefinition.PartId];
-            var template = FindTemplate(baseline, oldCircuit, oldComponents, oldSheets, representative, part, screens, existingPaths, token);
+            var declaration = declared.GetValueOrDefault(part.Id);
+            var template = declaration is null
+                ? FindTemplate(baseline, oldCircuit, oldComponents, oldSheets, representative, part, screens, existingPaths, token)
+                : (Symbol: InstantiateDeclaration(declaration), Path: "");
             var createdSymbols = new List<SchematicSymbolInstance>();
             var targetScreens = new List<SchematicScreenData>();
             foreach (var occurrence in occurrences)
@@ -174,7 +186,8 @@ internal static class SchematicNativeCreationProjection
                 if (!existingPaths.TryGetValue(sheetInstance, out var path) || !screens.TryGetValue(path, out var target))
                     throw Invalid("missing_native_sheet", "A created symbol must target a bound existing sheet instance.");
                 var symbol = CreateSymbol(template.Symbol, target, occurrence, component, definition.Value, part, nativeIds, nativeId, token);
-                CopyLibraryCache(screens[template.Path], target, template.Symbol);
+                if (declaration is null) CopyLibraryCache(screens[template.Path], target, template.Symbol);
+                else CopyLibraryCache(declaration.Symbol, target);
                 target.Items.Add(Any.Pack(symbol));
                 createdSymbols.Add(symbol); targetScreens.Add(target);
                 bindings.Add(new(occurrence.Id, Guid.Parse(symbol.Id.Value)));
@@ -203,7 +216,7 @@ internal static class SchematicNativeCreationProjection
             nativeIds.Add(nativeId);
         }
 
-        var candidate = baseline with { Engineering = desired, Schematic = augmented,
+        var candidate = baseline with { Engineering = desired, Schematic = augmented, PartSymbols = desiredDesign.PartSymbols,
             SymbolBindings = bindings.OrderBy(b => b.SymbolOccurrenceId).ToArray() };
         var report = SchematicDesignBindings.Inspect(candidate, libraries, token);
         if (!report.IdentitiesResolved)
@@ -299,6 +312,7 @@ internal static class SchematicNativeCreationProjection
                 pin.Id = new() { Value = StablePinId(nativeId, pin.LibraryPinId?.Value, pin.Number, pinOrdinal++) };
             child.Item = Any.Pack(pin);
         }
+        OrderDefinitionPins(result.Definition, libraryIds: false);
         return result;
     }
 
@@ -334,6 +348,81 @@ internal static class SchematicNativeCreationProjection
         symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField
     }.Concat(symbol.UserFields).Where(field => field is not null)!;
 
+    private static SchematicSymbolInstance InstantiateDeclaration(SchematicPartSymbol source)
+    {
+        var definition = source.Symbol.Definition;
+        if (new[] { definition.ReferenceField, definition.ValueField, definition.FootprintField,
+                definition.DatasheetField, definition.DescriptionField }.Any(f => f?.Text?.Position is null))
+            throw Invalid("incomplete_symbol_fields", "A declared symbol requires all five standard fields with explicit local positions.");
+        var result = new SchematicSymbolInstance
+        {
+            Definition = definition.Clone(), LibraryId = source.LibraryId.Clone(), LibName = source.Symbol.CacheKey,
+            Position = new(), Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 },
+            Locked = LockedState.LsUnlocked,
+            BodyStyle = definition.BodyStyle.Count > 1 ? new() { Style = source.BodyStyle } : null,
+            Passthrough = SchematicPassthroughMode.SpmDefault,
+            SeparatePinIdentities = true, InstanceRecords = new(), Variants = new(),
+            ShowPinNames = source.Symbol.ShowPinNames, ShowPinNumbers = source.Symbol.ShowPinNumbers,
+            PinNameOffset = source.Symbol.PinNameOffset.Clone(), DefinitionPinNameOffset = source.Symbol.PinNameOffset.Clone(),
+            Attributes = definition.Attributes?.Clone() ?? new(),
+            ReferenceField = definition.ReferenceField.Clone(), ValueField = definition.ValueField.Clone(),
+            FootprintField = definition.FootprintField.Clone(), DatasheetField = definition.DatasheetField.Clone(),
+            DescriptionField = definition.DescriptionField.Clone()
+        };
+        foreach (var child in result.Definition.Items)
+        {
+            if (child.Item.Is(SchematicField.Descriptor)) result.UserFields.Add(child.Item.Unpack<SchematicField>());
+            if (!child.Item.Is(SchematicPin.Descriptor)) continue;
+            var pin = child.Item.Unpack<SchematicPin>();
+            int style = child.BodyStyle?.Style ?? 0;
+            if (style == 0 || style == source.BodyStyle)
+            {
+                // The declaration retains its owned UUID. CreateSymbol assigns the distinct
+                // deterministic placed UUID; inactive styles remain library-owned only.
+                pin.LibraryPinId = pin.Id.Clone();
+                child.Item = Any.Pack(pin);
+            }
+        }
+        // Native cache enumeration is not an identity. Assign deterministic placed
+        // IDs in owned-pin order, then match native PackSymbol's placed-pin order.
+        OrderNativeDefinitionChildren(result.Definition);
+        OrderDefinitionPins(result.Definition, libraryIds: true);
+        return result;
+    }
+
+    private static void OrderDefinitionPins(SchematicSymbol definition, bool libraryIds)
+    {
+        var others = definition.Items.Where(c => !c.Item.Is(SchematicPin.Descriptor)).ToArray();
+        var pins = definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).OrderBy(c =>
+        {
+            var pin = c.Item.Unpack<SchematicPin>();
+            return libraryIds ? pin.LibraryPinId?.Value ?? pin.Id.Value : pin.Id.Value;
+        }, StringComparer.Ordinal).ToArray();
+        definition.Items.Clear(); definition.Items.Add(others); definition.Items.Add(pins);
+    }
+
+    private static void OrderNativeDefinitionChildren(SchematicSymbol definition)
+    {
+        // LIB_ITEMS_CONTAINER is MULTIVECTOR<SCH_ITEM, SCH_SHAPE_T, SCH_PIN_T>.
+        // Match that pinned type-bucket traversal without changing the order within
+        // a bucket or mutating the independently retained declaration.
+        foreach (var child in definition.Items)
+        {
+            child.Unit ??= new();
+            child.BodyStyle ??= new();
+        }
+        var ordered = definition.Items.OrderBy(child => child.Item switch
+        {
+            var item when item.Is(SchematicGraphicShape.Descriptor) => 0,
+            var item when item.Is(SchematicField.Descriptor) => 1,
+            var item when item.Is(SchematicText.Descriptor) => 2,
+            var item when item.Is(SchematicTextBox.Descriptor) => 3,
+            var item when item.Is(SchematicPin.Descriptor) => 4,
+            _ => throw Invalid("unsupported_symbol_child", "The declared symbol contains an unsupported native library child.")
+        }).ToArray();
+        definition.Items.Clear(); definition.Items.Add(ordered);
+    }
+
     private static void CopyLibraryCache(SchematicScreenData source, SchematicScreenData target, SchematicSymbolInstance symbol)
     {
         var library = symbol.LibraryId ?? symbol.Definition.Id;
@@ -341,7 +430,14 @@ internal static class SchematicNativeCreationProjection
             : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
         var entry = source.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
         if (entry is null) return; // Legacy, explicitly incomplete DTOs remain inspectable, not live proof.
-        var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
+        CopyLibraryCache(entry, target);
+    }
+
+    private static void CopyLibraryCache(SchematicCachedSymbol entry, SchematicScreenData target)
+    {
+        entry = entry.Clone();
+        OrderNativeDefinitionChildren(entry.Definition);
+        var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == entry.CacheKey);
         if (existing is not null && !existing.Equals(entry))
             throw Invalid("created_symbol_cache_conflict", "The target screen has a different definition for the selected library key.");
         if (existing is null) target.CachedSymbols.Add(entry.Clone());

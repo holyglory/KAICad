@@ -339,7 +339,7 @@ if( UNIX AND NOT APPLE )
     target_compile_definitions( qa_diagram_field_history PRIVATE KICAD_QA_GUI )
     target_link_libraries( qa_diagram_field_history PRIVATE
         common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework
-        ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} )
+        ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} PkgConfig::QA_CAPTION_GTK )
     if( TARGET api_schema_build_copy )
         add_dependencies( qa_diagram_field_history api_schema_build_copy )
     endif()

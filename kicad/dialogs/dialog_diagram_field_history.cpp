@@ -1,6 +1,7 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "dialog_diagram_field_history.h"
 
+#include <algorithm>
 #include <utility>
 #include <wx/button.h>
 #include <wx/listbox.h>
@@ -20,7 +21,10 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
         m_entries( std::move( aEntries ) ), m_openSource( std::move( aOpenSource ) )
 {
     SetName( "DiagramFieldHistory" );
-    const int gap = FromDIP( 12 );
+    wxFont bodyFont = GetFont();
+    bodyFont.SetPointSize( std::max( 12, bodyFont.GetPointSize() ) );
+    SetFont( bodyFont );
+    const int gap = FromDIP( 18 );
     auto* outer = new wxBoxSizer( wxVERTICAL );
     auto* heading = new wxStaticText( this, wxID_ANY,
             wxString::Format( _( "%s — History" ), aFieldLabel ) );
@@ -40,7 +44,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
                               0, nullptr, wxLB_SINGLE | wxLB_HSCROLL );
     m_history->SetName( "DiagramFieldHistoryRevisions" );
     OptOut( m_history );
-    m_history->SetMinSize( FromDIP( wxSize( 170, 200 ) ) );
+    m_history->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
     for( const auto& entry : m_entries )
     {
         wxString label = entry.revisionLabel + wxS( " · " ) + entry.actor;
@@ -120,9 +124,13 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
 
     if( !m_entries.empty() ) m_history->SetSelection( 0 );
     updateSelection();
-    SetMinClientSize( FromDIP( wxSize( 590, 380 ) ) );
-    SetClientSize( FromDIP( wxSize( 740, 520 ) ) );
     finishDialogSettings();
+    wxSize minimum = GetSizer()->CalcMin();
+    minimum.IncTo( FromDIP( wxSize( 590, 440 ) ) );
+    SetMinClientSize( minimum );
+    wxSize preferred = FromDIP( wxSize( 740, 520 ) );
+    preferred.IncTo( minimum );
+    SetClientSize( preferred );
     m_history->SetFocus();
 }
 

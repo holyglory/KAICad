@@ -16,6 +16,7 @@
 #include <wx/textctrl.h>
 #include <wx/timer.h>
 #include <wx/uiaction.h>
+#include <gtk/gtk.h>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -67,14 +68,38 @@ void key( int aKey )
 
 void capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const char* aName )
 {
-    aWindow->Update(); wxTheApp->Yield( true );
-    wxRect bounds = aWindow->GetScreenRect();
-    wxBitmap bitmap( bounds.width, bounds.height, 24 );
-    wxScreenDC screen;
-    wxMemoryDC memory( bitmap );
-    BOOST_REQUIRE( memory.Blit( 0, 0, bounds.width, bounds.height, &screen, bounds.x, bounds.y ) );
-    memory.SelectObject( wxNullBitmap );
-    BOOST_REQUIRE( bitmap.ConvertToImage().SaveFile( ( aDirectory / aName ).string(), wxBITMAP_TYPE_PNG ) );
+    // A changed control value is not a rendering checkpoint. GTK can retain the
+    // preceding pixels until the next frame even after wxWindow::Update().
+    GtkWidget* widget = GTK_WIDGET( aWindow->GetHandle() );
+    GdkFrameClock* clock = gtk_widget_get_frame_clock( widget );
+    BOOST_REQUIRE( clock );
+    struct PAINT_STATE { gint64 before; bool complete = false; } state{ gdk_frame_clock_get_frame_counter( clock ) };
+    g_object_ref( clock );
+    gulong handler = g_signal_connect( clock, "after-paint", G_CALLBACK( +[]( GdkFrameClock* frame, gpointer data )
+    {
+        auto* observed = static_cast<PAINT_STATE*>( data );
+        observed->complete = gdk_frame_clock_get_frame_counter( frame ) > observed->before;
+    } ), &state );
+    struct SIGNAL_GUARD
+    {
+        GdkFrameClock* clock;
+        gulong handler;
+        ~SIGNAL_GUARD() { g_signal_handler_disconnect( clock, handler ); g_object_unref( clock ); }
+    } guard{ clock, handler };
+    gtk_widget_queue_draw( widget );
+    gdk_frame_clock_request_phase( clock, GDK_FRAME_CLOCK_PHASE_PAINT );
+    waitFor( [&] { return state.complete; } );
+    gdk_display_sync( gtk_widget_get_display( widget ) );
+    GdkWindow* window = gtk_widget_get_window( widget );
+    BOOST_REQUIRE( window );
+    GdkPixbuf* pixels = gdk_pixbuf_get_from_window( window, 0, 0, gdk_window_get_width( window ), gdk_window_get_height( window ) );
+    BOOST_REQUIRE( pixels );
+    GError* error = nullptr;
+    bool written = gdk_pixbuf_save( pixels, ( aDirectory / aName ).c_str(), "png", &error, nullptr );
+    g_object_unref( pixels );
+    std::string message = error ? error->message : "Native window capture failed";
+    if( error ) g_error_free( error );
+    BOOST_REQUIRE_MESSAGE( written, message );
 }
 
 int show( DIALOG_DIAGRAM_FIELD_HISTORY* aDialog, const std::function<void()>& aScenario )
@@ -149,7 +174,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     BOOST_CHECK_EQUAL( show( dialog, [&]
     {
         BOOST_CHECK( !dialog->RestoreRevision().has_value() );
-        dialog->SetClientSize( dialog->FromDIP( wxSize( 590, 380 ) ) ); dialog->Layout();
+        dialog->SetClientSize( dialog->FromDIP( wxSize( 590, 440 ) ) ); dialog->Layout();
         waitFor( [&] { return restore->IsShownOnScreen(); } );
         wxRect client( dialog->ClientToScreen( wxPoint( 0, 0 ) ), dialog->GetClientSize() );
         BOOST_CHECK( client.Contains( restore->GetScreenRect() ) );

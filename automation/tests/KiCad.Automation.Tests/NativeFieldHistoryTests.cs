@@ -74,6 +74,10 @@ public sealed class NativeFieldHistoryTests
                 Assert.IsTrue(result.GetProperty(check).GetBoolean(), check);
             foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, "A rendered capture is required: " + capture);
+            byte[] currentCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "01-current.png"));
+            byte[] earlierCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "02-earlier-text.png"));
+            Assert.IsFalse(currentCapture.SequenceEqual(earlierCapture),
+                "Changing the selected revision must produce a new rendered frame, not a stale screenshot.");
             var history = graph.RequirementHistories.Single(h => h.Scope.DesignStateId == psu.StateId);
             var working = graph.StartDraft(psu).Requirements.Edit(DiagramRequirementField.General, "Independent unsaved text.");
             var restoredDraft = history.RestoreField(working, restored, DiagramRequirementField.Routing);

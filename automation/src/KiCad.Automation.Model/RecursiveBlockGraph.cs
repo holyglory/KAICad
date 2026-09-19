@@ -201,9 +201,7 @@ public sealed class RecursiveBlockGraph
         if (requirementHistory is not null)
         {
             var saved = _requirements[state.Id];
-            if (requirementHistory.Scope != saved.Scope
-                || requirementHistory.Revisions.Length < saved.Revisions.Length
-                || !saved.Revisions.Select((r, i) => SameRequirementRevision(r, requirementHistory.Revisions[i])).All(x => x))
+            if (!requirementHistory.Retains(saved))
                 throw Invalid("Requirement history must preserve every saved revision and its provenance.");
             histories = histories.SetItem(histories.IndexOf(saved), requirementHistory);
         }
@@ -304,13 +302,6 @@ public sealed class RecursiveBlockGraph
             if (current == source.RevisionId) return;
         throw Invalid("The restoration source must be in the saved baseline history, not a future or unrelated revision.");
     }
-
-    private static bool SameRequirementRevision(DiagramRequirementRevision a, DiagramRequirementRevision b) =>
-        a.Id == b.Id && a.ParentId == b.ParentId && a.Requirements == b.Requirements
-        && a.Origin.ActorKind == b.Origin.ActorKind && a.Origin.Actor == b.Origin.Actor
-        && a.Origin.RecordedAt == b.Origin.RecordedAt && a.Origin.Summary == b.Origin.Summary
-        && a.Origin.Sources.SequenceEqual(b.Origin.Sources) && a.Origin.InputIds.SequenceEqual(b.Origin.InputIds)
-        && a.Restorations.SequenceEqual(b.Restorations);
 
     private static void Text(string? text, string message)
     {

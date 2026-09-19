@@ -103,6 +103,18 @@ public sealed class DiagramRequirementHistory
     public DiagramRequirementDraft StartDraft() => new(Inspect(Current.Id), Current.Requirements,
         ImmutableDictionary<DiagramRequirementField, Guid>.Empty);
 
+    /// <summary>Check the complete saved prefix, including provenance. Reloaded immutable
+    /// arrays compare by content, not by their allocation identity.</summary>
+    public bool Retains(DiagramRequirementHistory saved) => saved is not null && Scope == saved.Scope
+        && Revisions.Length >= saved.Revisions.Length && saved.Revisions.Select((r, i) => Same(r, Revisions[i])).All(x => x);
+
+    private static bool Same(DiagramRequirementRevision a, DiagramRequirementRevision b) =>
+        a.Id == b.Id && a.ParentId == b.ParentId && a.Requirements == b.Requirements
+        && a.Origin.ActorKind == b.Origin.ActorKind && a.Origin.Actor == b.Origin.Actor
+        && a.Origin.RecordedAt == b.Origin.RecordedAt && a.Origin.Summary == b.Origin.Summary
+        && a.Origin.Sources.SequenceEqual(b.Origin.Sources) && a.Origin.InputIds.SequenceEqual(b.Origin.InputIds)
+        && a.Restorations.SequenceEqual(b.Restorations);
+
     public ImmutableArray<DiagramRequirementRevision> FieldHistory(DiagramRequirementField field)
     {
         _ = Current.Requirements.Get(field);

@@ -6,9 +6,9 @@ of the approved six-milestone program, not a release.
 
 Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
 [Mac preview installation guide](distribution/mac-preview-install.md) covers the
-September 15 Apple Silicon and Intel builds, including managed-update setup.
+September 19 Apple Silicon and Intel previews, including managed-update setup.
 The [Windows preview installation guide](distribution/windows-preview-install.md)
-covers the September 16 Windows package and its managed updater.
+covers the matching September 19 Windows preview and its managed updater.
 
 ## Try provisional Schematic Setup edits in a source build
 

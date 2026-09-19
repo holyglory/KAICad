@@ -21,6 +21,7 @@ class wxButton;
 class wxToolBar;
 class wxDC;
 class wxDataViewListCtrl;
+class wxScrolledWindow;
 
 namespace kiapi::automation::structure::v1 { class StructuralDiagramData; }
 
@@ -99,6 +100,7 @@ private:
     wxButton* m_addProperty = nullptr;
     wxButton* m_editProperty = nullptr;
     wxDataViewListCtrl* m_customProperties = nullptr;
+    wxScrolledWindow* m_propertyPanel = nullptr;
     std::vector<std::string> m_propertyIds;
     std::string m_selected, m_instructionId, m_connectFrom;
     MODE m_mode = MODE::SELECT;

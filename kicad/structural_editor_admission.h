@@ -54,7 +54,13 @@ inline bool IsRenderableStructuralDiagram(
     for( const auto& s : d.statements() )
         if( !addId( s.id() ) || !owners.count( s.target_id() ) || !S::StructuralStatementRole_IsValid( s.role() )
             || ( s.has_strength() && !S::StructuralGuidanceStrength_IsValid( s.strength() ) ) ) return false;
-    for( const auto& p : d.properties() ) if( !addId( p.id() ) || !owners.count( p.owner_id() ) ) return false;
+    for( const auto& p : d.properties() )
+    {
+        if( !addId( p.id() ) || !owners.count( p.owner_id() ) || !p.has_strength()
+            || !S::StructuralGuidanceStrength_IsValid( p.strength() ) || !S::StructuralVerification_IsValid( p.verification() ) ) return false;
+        if( p.has_quantity() && ( !S::StructuralParameterKind_IsValid( p.quantity().kind() )
+            || ( p.quantity().has_tolerance() && !S::StructuralToleranceKind_IsValid( p.quantity().tolerance().kind() ) ) ) ) return false;
+    }
 
     constexpr int64_t LIMIT = 2147483647000LL;
     auto coordinate = []( int64_t value ) { return value >= -LIMIT && value <= LIMIT && value % 100 == 0; };

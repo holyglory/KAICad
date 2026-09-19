@@ -6,6 +6,7 @@
 #include <wx/artprov.h>
 #include <wx/button.h>
 #include <wx/choice.h>
+#include <wx/checkbox.h>
 #include <wx/clipbrd.h>
 #include <wx/dcbuffer.h>
 #include <wx/dataview.h>
@@ -17,6 +18,7 @@
 #include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
+#include <wx/scrolwin.h>
 #include <wx/statbox.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
@@ -74,12 +76,14 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
     m_toolbar->AddTool( ZOOM_OUT, _( "Zoom out" ), KiBitmap( BITMAPS::zoom_out ) ); m_toolbar->Realize();
 
     auto* split = new wxSplitterWindow( this ); split->SetMinimumPaneSize( 240 );
-    auto* sidebar = new wxPanel( split ); auto* left = new wxBoxSizer( wxVERTICAL );
-    auto* properties = new wxStaticBoxSizer( wxVERTICAL, sidebar, _( "Properties" ) );
+    auto* sidebar = new wxSplitterWindow( split ); sidebar->SetMinimumPaneSize( 120 );
+    m_propertyPanel = new wxScrolledWindow( sidebar, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL );
+    m_propertyPanel->SetScrollRate( 0, 10 );
+    auto* properties = new wxStaticBoxSizer( wxVERTICAL, m_propertyPanel, _( "Properties" ) );
     auto field = [&]( const wxString& label, bool multi )
     {
-        properties->Add( new wxStaticText( sidebar, wxID_ANY, label ), 0, wxLEFT | wxRIGHT | wxTOP, 9 );
-        auto* control = new wxTextCtrl( sidebar, wxID_ANY, {}, wxDefaultPosition,
+        properties->Add( new wxStaticText( m_propertyPanel, wxID_ANY, label ), 0, wxLEFT | wxRIGHT | wxTOP, 9 );
+        auto* control = new wxTextCtrl( m_propertyPanel, wxID_ANY, {}, wxDefaultPosition,
                 multi ? wxSize( -1, 78 ) : wxDefaultSize, multi ? wxTE_MULTILINE : wxTE_PROCESS_ENTER );
         control->SetName( label ); properties->Add( control, 0, wxEXPAND | wxALL, 7 );
         control->Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& e ) { propertiesChanged(); e.Skip(); } );
@@ -87,8 +91,8 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
         return control;
     };
     m_name = field( _( "Name" ), false ); m_purpose = field( _( "Purpose" ), true );
-    properties->Add( new wxStaticText( sidebar, wxID_ANY, _( "Instruction" ) ), 0, wxLEFT | wxTOP, 9 );
-    m_instructions = new wxChoice( sidebar, wxID_ANY ); properties->Add( m_instructions, 0, wxEXPAND | wxLEFT | wxRIGHT, 7 );
+    properties->Add( new wxStaticText( m_propertyPanel, wxID_ANY, _( "Instruction" ) ), 0, wxLEFT | wxTOP, 9 );
+    m_instructions = new wxChoice( m_propertyPanel, wxID_ANY ); properties->Add( m_instructions, 0, wxEXPAND | wxLEFT | wxRIGHT, 7 );
     m_instructions->Bind( wxEVT_CHOICE, [this]( wxCommandEvent& )
     {
         if( m_updating ) return;
@@ -99,32 +103,33 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
         { m_instructions->SetSelection( std::find( m_instructionIds.begin(), m_instructionIds.end(), m_instructionId ) - m_instructionIds.begin() ); return; }
         m_instructionId = id; fillInspector();
     } );
-    m_strength = new wxChoice( sidebar, wxID_ANY );
+    m_strength = new wxChoice( m_propertyPanel, wxID_ANY );
     m_strength->Append( _( "Information" ) ); m_strength->Append( _( "Preference" ) ); m_strength->Append( _( "Requirement" ) );
     properties->Add( m_strength, 0, wxEXPAND | wxALL, 7 );
     m_instruction = field( _( "Text" ), true );
     m_strength->Bind( wxEVT_CHOICE, [this]( wxCommandEvent& ) { propertiesChanged(); } );
-    m_source = new wxStaticText( sidebar, wxID_ANY, {} ); properties->Add( m_source, 0, wxEXPAND | wxALL, 9 );
-    m_part = new wxStaticText( sidebar, wxID_ANY, {} ); properties->Add( m_part, 0, wxEXPAND | wxALL, 9 );
-    m_customProperties = new wxDataViewListCtrl( sidebar, wxID_ANY, wxDefaultPosition,
+    m_source = new wxStaticText( m_propertyPanel, wxID_ANY, {} ); properties->Add( m_source, 0, wxEXPAND | wxALL, 9 );
+    m_part = new wxStaticText( m_propertyPanel, wxID_ANY, {} ); properties->Add( m_part, 0, wxEXPAND | wxALL, 9 );
+    m_customProperties = new wxDataViewListCtrl( m_propertyPanel, wxID_ANY, wxDefaultPosition,
                                                 wxSize( -1, 100 ), wxDV_ROW_LINES | wxDV_VERT_RULES );
     m_customProperties->SetName( "Custom properties" );
     m_customProperties->AppendTextColumn( _( "Property" ), wxDATAVIEW_CELL_INERT, 125 );
-    m_customProperties->AppendTextColumn( _( "Description" ), wxDATAVIEW_CELL_INERT, 200 );
+    m_customProperties->AppendTextColumn( _( "Value" ), wxDATAVIEW_CELL_INERT, 200 );
     properties->Add( m_customProperties, 0, wxEXPAND | wxLEFT | wxRIGHT, 9 );
-    m_editProperty = new wxButton( sidebar, wxID_ANY, _( "Edit property" ) );
+    m_editProperty = new wxButton( m_propertyPanel, wxID_ANY, _( "Edit property" ) );
     properties->Add( m_editProperty, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 9 );
     m_editProperty->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { editSelectedProperty(); } );
     m_customProperties->Bind( wxEVT_DATAVIEW_ITEM_ACTIVATED, [this]( wxDataViewEvent& ) { editSelectedProperty(); } );
     m_customProperties->Bind( wxEVT_DATAVIEW_SELECTION_CHANGED, [this]( wxDataViewEvent& )
     { if( !m_updating ) m_editProperty->Enable( m_customProperties->GetSelectedRow() >= 0 ); } );
-    m_addProperty = new wxButton( sidebar, wxID_ANY, _( "Add custom property" ) );
+    m_addProperty = new wxButton( m_propertyPanel, wxID_ANY, _( "&Add custom property" ) );
     properties->Add( m_addProperty, 0, wxEXPAND | wxALL, 9 ); m_addProperty->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { addProperty(); } );
-    left->Add( properties, 0, wxEXPAND | wxALL, 4 );
-    auto* hierarchy = new wxStaticBoxSizer( wxVERTICAL, sidebar, _( "Hierarchy" ) );
-    m_tree = new wxTreeCtrl( sidebar, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE );
+    m_propertyPanel->SetSizer( properties ); m_propertyPanel->FitInside();
+    auto* hierarchyPanel = new wxPanel( sidebar );
+    auto* hierarchy = new wxStaticBoxSizer( wxVERTICAL, hierarchyPanel, _( "Hierarchy" ) );
+    m_tree = new wxTreeCtrl( hierarchyPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE );
     m_tree->SetName( "StructuralHierarchy" ); hierarchy->Add( m_tree, 1, wxEXPAND | wxALL, 4 );
-    left->Add( hierarchy, 1, wxEXPAND | wxALL, 4 ); sidebar->SetSizer( left );
+    hierarchyPanel->SetSizer( hierarchy ); sidebar->SplitHorizontally( m_propertyPanel, hierarchyPanel, 530 );
     m_canvas = new wxPanel( split ); m_canvas->SetName( "StructuralCanvas" ); m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT );
     split->SplitVertically( sidebar, m_canvas, 390 );
     auto* main = new wxBoxSizer( wxVERTICAL ); main->Add( split, 1, wxEXPAND ); SetSizer( main );
@@ -394,7 +399,7 @@ void STRUCTURAL_EDITOR_FRAME::fillInspector()
     if( block ) for( const auto& id : block->component_ids() ) for( const auto& c : m_document.components() ) if( c.component_id() == id )
     { if( !parts.empty() ) parts += ", "; parts += text( c.reference() + " " + c.part_name() ); }
     m_part->SetLabel( parts.empty() ? _( "Part: Not selected" ) : _( "Part: " ) + parts );
-    fillCustomProperties(); m_updating = false; m_name->GetParent()->Layout();
+    fillCustomProperties(); m_updating = false; m_propertyPanel->Layout(); m_propertyPanel->FitInside();
 }
 void STRUCTURAL_EDITOR_FRAME::fillCustomProperties()
 {
@@ -405,7 +410,16 @@ void STRUCTURAL_EDITOR_FRAME::fillCustomProperties()
     for( const auto& property : m_document.diagram().properties() ) if( property.owner_id() == m_selected )
     {
         wxVector<wxVariant> row; row.push_back( text( property.key() ) );
-        row.push_back( text( property.text() ).BeforeFirst( '\n' ) );
+        wxString description = text( property.text() ).BeforeFirst( '\n' );
+        if( property.has_quantity() )
+        {
+            const auto& q = property.quantity();
+            if( q.has_nominal() ) description = text( q.nominal() );
+            else if( q.has_minimum() || q.has_maximum() ) description = ( q.has_minimum() ? text( q.minimum() ) : "?" ) + " … " + ( q.has_maximum() ? text( q.maximum() ) : "?" );
+            else description = _( "Unknown" );
+            description += " " + text( q.unit() );
+        }
+        row.push_back( description );
         m_customProperties->AppendItem( row ); m_propertyIds.push_back( property.id() );
         if( property.id() == selected ) m_customProperties->SelectRow( m_propertyIds.size() - 1 );
     }
@@ -464,15 +478,85 @@ void STRUCTURAL_EDITOR_FRAME::addProperty( const std::string& propertyId )
     name->ChangeValue( text( draft.key() ) ); value->ChangeValue( text( draft.text() ) );
     sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Name" ) ), 0, wxALL, 8 ); sizer->Add( name, 0, wxEXPAND | wxALL, 8 );
     sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Value or instruction" ) ), 0, wxALL, 8 ); sizer->Add( value, 1, wxEXPAND | wxALL, 8 );
+    auto* strength = new wxChoice( &dialog, wxID_ANY );
+    strength->Append( _( "Information" ) ); strength->Append( _( "Preference" ) ); strength->Append( _( "Requirement" ) );
+    strength->SetSelection( editing ? draft.strength() : 0 );
+    sizer->Add( strength, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8 );
+    sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Applies when" ) ), 0, wxLEFT | wxRIGHT, 8 );
+    auto* applicability = new wxTextCtrl( &dialog, wxID_ANY, text( draft.applicability() ) );
+    sizer->Add( applicability, 0, wxEXPAND | wxALL, 8 );
+    auto* numeric = new wxCheckBox( &dialog, wxID_ANY, _( "Numeric value" ) ); numeric->SetValue( draft.has_quantity() );
+    sizer->Add( numeric, 0, wxLEFT | wxRIGHT | wxTOP, 8 );
+    auto* numbers = new wxPanel( &dialog ); auto* grid = new wxFlexGridSizer( 2, 6, 8 ); grid->AddGrowableCol( 1 );
+    auto quantityField = [&]( const wxString& label, const std::string& initial )
+    {
+        grid->Add( new wxStaticText( numbers, wxID_ANY, label ), 0, wxALIGN_CENTER_VERTICAL );
+        auto* field = new wxTextCtrl( numbers, wxID_ANY, text( initial ) ); field->SetName( label ); grid->Add( field, 1, wxEXPAND ); return field;
+    };
+    grid->Add( new wxStaticText( numbers, wxID_ANY, _( "Classification" ) ), 0, wxALIGN_CENTER_VERTICAL );
+    auto* kind = new wxChoice( numbers, wxID_ANY );
+    for( const auto& label : { _( "Unclassified" ), _( "Nominal" ), _( "Operating limit" ), _( "Absolute maximum" ), _( "Measurement" ) } ) kind->Append( label );
+    kind->SetSelection( draft.has_quantity() ? draft.quantity().kind() : 0 ); grid->Add( kind, 1, wxEXPAND );
+    const auto& q = draft.quantity();
+    auto* unit = quantityField( _( "Unit" ), q.unit() );
+    auto* nominal = quantityField( _( "Nominal value" ), q.has_nominal() ? q.nominal() : "" );
+    auto* minimum = quantityField( _( "Minimum" ), q.has_minimum() ? q.minimum() : "" );
+    auto* maximum = quantityField( _( "Maximum" ), q.has_maximum() ? q.maximum() : "" );
+    auto* unknown = quantityField( _( "Unknown because" ), q.has_unknown_reason() ? q.unknown_reason() : "" );
+    grid->Add( new wxStaticText( numbers, wxID_ANY, _( "Tolerance" ) ), 0, wxALIGN_CENTER_VERTICAL );
+    auto* toleranceKind = new wxChoice( numbers, wxID_ANY ); toleranceKind->Append( _( "Absolute" ) ); toleranceKind->Append( _( "Percent" ) );
+    toleranceKind->SetSelection( q.has_tolerance() ? q.tolerance().kind() : 0 ); grid->Add( toleranceKind, 1, wxEXPAND );
+    auto* minus = quantityField( _( "Minus tolerance" ), q.has_tolerance() ? q.tolerance().minus() : "" );
+    auto* plus = quantityField( _( "Plus tolerance" ), q.has_tolerance() ? q.tolerance().plus() : "" );
+    numbers->SetSizer( grid ); sizer->Add( numbers, 0, wxEXPAND | wxALL, 8 ); numbers->Show( numeric->GetValue() );
+    numeric->Bind( wxEVT_CHECKBOX, [&]( wxCommandEvent& ) { numbers->Show( numeric->GetValue() ); dialog.GetSizer()->Fit( &dialog ); dialog.Layout(); } );
     sizer->Add( dialog.CreateStdDialogButtonSizer( wxOK | wxCANCEL ), 0, wxEXPAND | wxALL, 8 ); dialog.SetSizerAndFit( sizer ); name->SetFocus();
     dialog.Bind( wxEVT_BUTTON, [&]( wxCommandEvent& )
     {
         if( name->GetValue().Strip( wxString::both ).empty() || value->GetValue().Strip( wxString::both ).empty() )
-        { wxMessageBox( _( "Enter a name and value." ), _( "Property not added" ), wxOK | wxICON_INFORMATION, &dialog ); return; }
+        { wxMessageBox( _( "Enter a name and value." ), _( "Property incomplete" ), wxOK | wxICON_INFORMATION, &dialog ); return; }
+        if( numeric->GetValue() )
+        {
+            if( unit->GetValue().Strip( wxString::both ).empty()
+                || ( nominal->IsEmpty() && minimum->IsEmpty() && maximum->IsEmpty() && unknown->GetValue().Strip( wxString::both ).empty() ) )
+            { wxMessageBox( _( "Enter a unit and a value, range or reason the value is unknown." ), _( "Quantity incomplete" ), wxOK | wxICON_INFORMATION, &dialog ); return; }
+            auto decimal = []( const wxString& input )
+            {
+                if( input.empty() ) return true;
+                bool digit = false, dot = false;
+                for( size_t i = 0; i < input.size(); ++i )
+                {
+                    auto c = input[i];
+                    if( c >= '0' && c <= '9' ) digit = true;
+                    else if( c == '.' && !dot ) dot = true;
+                    else if( i != 0 || ( c != '-' && c != '+' ) ) return false;
+                }
+                return digit;
+            };
+            for( auto* field : { nominal, minimum, maximum, minus, plus } ) if( !decimal( field->GetValue() ) )
+            { wxMessageBox( _( "Use a decimal number with a period as the decimal separator." ), _( "Invalid number" ), wxOK | wxICON_INFORMATION, &dialog ); field->SetFocus(); return; }
+            auto negative = []( const wxString& input )
+            { return input.StartsWith( "-" ) && std::any_of( input.begin(), input.end(), []( auto c ) { return c >= '1' && c <= '9'; } ); };
+            if( minus->IsEmpty() != plus->IsEmpty() || negative( minus->GetValue() ) || negative( plus->GetValue() ) )
+            { wxMessageBox( _( "Enter both nonnegative tolerances, or leave both empty." ), _( "Invalid tolerance" ), wxOK | wxICON_INFORMATION, &dialog ); return; }
+        }
         dialog.EndModal( wxID_OK );
     }, wxID_OK );
     if( dialog.ShowModal() != wxID_OK ) return;
-    if( editing && draft.key() == utf8( name->GetValue() ) && draft.text() == utf8( value->GetValue() ) ) return;
+    auto original = draft;
+    if( numeric->GetValue() )
+    {
+        auto* quantity = draft.mutable_quantity(); quantity->Clear();
+        quantity->set_kind( static_cast<S::StructuralParameterKind>( kind->GetSelection() ) ); quantity->set_unit( utf8( unit->GetValue() ) );
+        if( !nominal->IsEmpty() ) quantity->set_nominal( utf8( nominal->GetValue() ) );
+        if( !minimum->IsEmpty() ) quantity->set_minimum( utf8( minimum->GetValue() ) );
+        if( !maximum->IsEmpty() ) quantity->set_maximum( utf8( maximum->GetValue() ) );
+        if( !unknown->IsEmpty() ) quantity->set_unknown_reason( utf8( unknown->GetValue() ) );
+        if( !minus->IsEmpty() )
+        { auto* tolerance = quantity->mutable_tolerance(); tolerance->set_kind( static_cast<S::StructuralToleranceKind>( toleranceKind->GetSelection() ) );
+          tolerance->set_minus( utf8( minus->GetValue() ) ); tolerance->set_plus( utf8( plus->GetValue() ) ); }
+    }
+    else draft.clear_quantity();
     auto before = m_document.diagram();
     if( !editing )
     {
@@ -480,6 +564,9 @@ void STRUCTURAL_EDITOR_FRAME::addProperty( const std::string& propertyId )
         draft.set_strength( S::SGS_INFORMATION );
     }
     draft.set_key( utf8( name->GetValue() ) ); draft.set_text( utf8( value->GetValue() ) );
+    draft.set_strength( static_cast<S::StructuralGuidanceStrength>( strength->GetSelection() ) );
+    draft.set_applicability( utf8( applicability->GetValue() ) );
+    if( editing && original.SerializeAsString() == draft.SerializeAsString() ) return;
     draft.set_verification( S::SV_UNVERIFIED );
     if( editing )
     {

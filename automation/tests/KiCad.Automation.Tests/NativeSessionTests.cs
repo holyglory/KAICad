@@ -374,8 +374,13 @@ public sealed partial class NativeSessionTests
                     }
                     else if (journey == NativeJourney.StructuralEditor)
                     {
-                        try { await VerifyStructuralEditor(client, opened.Document, focusProcessId, ":" + displayNumber,
-                            evidence, target.Id, deadline.Token); }
+                        try
+                        {
+                            await VerifyStructuralEditor(client, opened.Document, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, deadline.Token);
+                            await VerifyStructuralProperties(client, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, deadline.Token);
+                        }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         { synchronizationFailures.Add(error); await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-structural-failure.txt"), error.ToString(), deadline.Token); }
                     }

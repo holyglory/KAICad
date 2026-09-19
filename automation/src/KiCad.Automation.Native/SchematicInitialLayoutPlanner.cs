@@ -45,7 +45,7 @@ public static class SchematicInitialLayoutPlanner
         _ = SchematicElectricalCheckpoints.Require(state);
         var desired = DesignRecoveryStore.ReadDesired(state);
         if (!SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering))
-            throw Error("unsupported_layout_creation", "Initial placement currently requires additions of existing part definitions without rewiring or ownership changes.");
+            throw Error("unsupported_layout_creation", "Initial placement requires component additions without rewiring or changes to existing owners and parts.");
         var oldIds = state.Baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
         var added = desired.Engineering.Circuit.Symbols.Where(s => !oldIds.Contains(s.Id)).ToArray();
         if (!added.Any(s => s.Placement is null))
@@ -157,7 +157,7 @@ public static class SchematicInitialLayoutPlanner
         var result = desired with { Engineering = desired.Engineering with { Circuit = circuit } };
         // Leave existing native bindings unchanged in the desired XML. The
         // ordinary synchronizer owns creation and publication of new bindings.
-        _ = SchematicNativeCreationProjection.Project(state.Baseline, result.Engineering, state.KnowledgeLibraries, token);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, result, state.KnowledgeLibraries, token);
         string xml = SchematicDesignXml.Write(result, state.KnowledgeLibraries);
         var refinement = LayoutRefinement.ForAddedSymbols(state.Baseline.Engineering.Circuit, circuit, state.NativeRevision, userInstructions);
         token.ThrowIfCancellationRequested();

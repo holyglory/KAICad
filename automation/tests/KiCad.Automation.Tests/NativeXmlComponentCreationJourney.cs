@@ -33,6 +33,43 @@ public sealed partial class NativeSessionTests
         var components = baseline.Engineering.Circuit.Components.ToList();
         var occurrences = baseline.Engineering.Circuit.Symbols.ToList();
         var part = baseline.Engineering.Circuit.Parts.Single();
+        SchematicPartSymbol? declaration = null;
+        if (interruptAfterNativeEdit)
+        {
+            // One editor exercises the existing-template path; the other uses a new
+            // explicitly owned definition that has never had a placed component.
+            var sourceOccurrence = baseline.Engineering.Circuit.Symbols.OrderBy(s => s.Id).First();
+            var sourceSymbol = SchematicModelProjection.NativeSymbols(baseline, baseline.Schematic)[sourceOccurrence.Id];
+            var sourceLink = sourceSymbol.LibraryId ?? sourceSymbol.Definition.Id;
+            string sourceKey = sourceSymbol.LibName.Length != 0 ? sourceSymbol.LibName
+                : (sourceLink.LibraryNickname.Length == 0 ? "" : sourceLink.LibraryNickname + ":") + sourceLink.EntryName;
+            var original = baseline.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Equals(sourceSymbol.Path))
+                .CachedSymbols.Single(s => s.CacheKey == sourceKey).Clone();
+            original.CacheKey = "Automation:DeclaredProbe";
+            original.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "DeclaredProbeDefinition" };
+            original.Definition.Keywords = "independent declared-part creation fixture";
+            foreach (var child in original.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                Assert.IsNull(pin.LibraryPinId);
+                pin.Id.Value = Guid.NewGuid().ToString("D");
+                child.Item = Any.Pack(pin);
+            }
+            var extraChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+            var extra = extraChild.Item.Unpack<SchematicPin>();
+            extra.Id.Value = Guid.NewGuid().ToString("D"); extra.Number += "_extra"; extra.Name = "Extra_declared_pin";
+            extra.Position.YNm += 2_540_000; extraChild.Item = Any.Pack(extra);
+            original.Definition.Items.Add(extraChild);
+            original.Definition.ValueField.CustomProperties.Add(new CustomProperty { Key = "automation.source", Value = "fixture-datasheet:page-2" });
+            var manufacturer = original.Definition.DescriptionField.Clone();
+            manufacturer.Name = "Manufacturer"; manufacturer.Text.Text_ = "Declared fixture";
+            manufacturer.CustomProperties.Add(new CustomProperty { Key = "automation.guidance", Value = "Keep this field-owned instruction." });
+            original.Definition.Items.Add(new SchematicSymbolChild { Item = Any.Pack(manufacturer),
+                IsPrivate = manufacturer.IsPrivate });
+            part = part with { Id = Guid.NewGuid(), Name = "Explicit declared two-pin probe",
+                Pins = [.. part.Pins, new(extra.Number, extra.Name, extraChild.Unit?.Unit ?? 0)] };
+            declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original);
+        }
         int designator = 801;
         foreach (var sheet in baseline.Engineering.Circuit.SheetInstances.OrderBy(s => s.Id))
         {
@@ -44,10 +81,11 @@ public sealed partial class NativeSessionTests
         }
         var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
         {
+            Parts = declaration is null ? baseline.Engineering.Circuit.Parts : [.. baseline.Engineering.Circuit.Parts, part],
             Sheets = baseline.Engineering.Circuit.Sheets.Select(s => s with
                 { Components = [.. s.Components, newDefinitions[s.Id]] }).ToArray(),
             Components = components, Symbols = occurrences
-        } } };
+        } }, PartSymbols = declaration is null ? null : [declaration] };
         bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, []));
         await File.WriteAllBytesAsync(path, bytes, token);
         saved = store.Read()!; saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
@@ -258,13 +296,19 @@ public sealed partial class NativeSessionTests
             coordinateFreeInitialPlacement = true, nativeMeasurementReadOnly = true, explicitPageReservations = true,
             nativeUndoRedoAutomaticallyPublished = true, xmlFileEventCreation = true, interruptAfterNativeEdit,
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
-            exactReplay = true, crossPlatformReady = false }), token);
+            exactReplay = true, declaredPartCreation = declaration is not null, crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
         async Task RequireAgreement(int count, bool afterReload = false)
         {
             var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(path, token), []);
+            if (declaration is not null)
+            {
+                var persisted = xml.PartSymbols!.Single();
+                Assert.AreEqual(declaration.Symbol, persisted.Symbol);
+                Assert.AreEqual(declaration.LibraryId, persisted.LibraryId);
+            }
             var native = await Capture();
             Assert.AreEqual(count, xml.Engineering.Circuit.Components.Count(c => createdIds.Contains(c.Id)));
             if (afterReload)

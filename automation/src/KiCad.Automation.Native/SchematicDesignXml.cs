@@ -39,11 +39,22 @@ public static class SchematicDesignXml
             var schematic = SchematicDataXml.Read(SchematicDataXml.Render(root.Element(
                 XName.Get("schematic-data", SchematicDataXml.Namespace))!)) as SchematicHierarchyData
                 ?? throw Invalid("A design requires a typed schematic hierarchy, not an isolated native object.");
-            return new(engineering, schematic,
+            var result = new SchematicDesign(engineering, schematic,
                 root.Element(Ns + "sheet-bindings")!.Elements(Ns + "sheet").Select(s => new SchematicSheetBinding(Id(s, "model"),
                     s.Elements(Ns + "path-item").Select(p => Id(p, "id")).ToArray())).ToArray(),
                 root.Element(Ns + "symbol-bindings")!.Elements(Ns + "symbol").Select(s =>
-                    new SchematicSymbolBinding(Id(s, "model"), Id(s, "native"))).ToArray());
+                    new SchematicSymbolBinding(Id(s, "model"), Id(s, "native"))).ToArray(),
+                root.Element(Ns + "part-symbols")?.Elements(Ns + "part-symbol").Select(s =>
+                    new SchematicPartSymbol(Id(s, "part"), new()
+                    {
+                        LibraryNickname = s.Attribute("library")!.Value,
+                        EntryName = s.Attribute("entry")!.Value
+                    }, SchematicDataXml.Read(SchematicDataXml.Render(s.Element(
+                        XName.Get("schematic-data", SchematicDataXml.Namespace))!)) as SchematicCachedSymbol
+                        ?? throw Invalid("A part symbol requires a standalone typed definition, not a placement."),
+                        (int)s.Attribute("body-style")!)).ToArray());
+            SchematicPartSymbols.Validate(result);
+            return result;
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)
         {
@@ -55,6 +66,7 @@ public static class SchematicDesignXml
 
     public static string Write(SchematicDesign design, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries)
     {
+        SchematicPartSymbols.Validate(design);
         var root = new XElement(Ns + "design", new XAttribute("version", 1),
             Parse(EngineeringDesignXml.Write(design.Engineering, libraries)),
             Parse(SchematicDataXml.Write(design.Schematic)),
@@ -63,7 +75,12 @@ public static class SchematicDesignXml
                     new XElement(Ns + "sheet", new XAttribute("model", s.SheetInstanceId),
                         s.NativePath.Select(id => new XElement(Ns + "path-item", new XAttribute("id", id)))))),
             new XElement(Ns + "symbol-bindings", design.SymbolBindings.OrderBy(s => s.SymbolOccurrenceId).ThenBy(s => s.NativeObjectId)
-                .Select(s => new XElement(Ns + "symbol", new XAttribute("model", s.SymbolOccurrenceId), new XAttribute("native", s.NativeObjectId)))));
+                .Select(s => new XElement(Ns + "symbol", new XAttribute("model", s.SymbolOccurrenceId), new XAttribute("native", s.NativeObjectId)))),
+            design.PartSymbols is { Count: > 0 } sources ? new XElement(Ns + "part-symbols",
+                sources.OrderBy(s => s.PartId).Select(s => new XElement(Ns + "part-symbol",
+                    new XAttribute("part", s.PartId), new XAttribute("library", s.LibraryId.LibraryNickname),
+                    new XAttribute("entry", s.LibraryId.EntryName), new XAttribute("body-style", s.BodyStyle),
+                    Parse(SchematicDataXml.Write(s.Symbol))))) : null);
         try { new XDocument(root).Validate(Schema.Value, null); }
         catch (XmlSchemaException error) { throw Invalid(error.Message); }
         return SchematicDataXml.Render(root);

@@ -26,13 +26,16 @@ public sealed partial class NativeSessionTests
         try
         {
             await BeginMove();
+            await WaitWhileEditorIsBusy();
             NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: false);
             var cancelled = await Ready(before.State.Revision.Sequence, changed: false);
             Assert.AreEqual(before.State.Revision, cancelled.State.Revision);
             Assert.AreEqual(original, Symbol(cancelled.Electrical.Hierarchy.Data));
             Assert.IsFalse(cancelled.State.NativeContentDirty);
+            await Synchronized(cancelled);
 
             await BeginMove();
+            await WaitWhileEditorIsBusy();
             var query = new GetItemsById { Header = header.Clone() }; query.Items.Add(new KIID { Value = nativeId.ToString("D") });
             int x = 620, y = 460;
             using (var motion = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -70,7 +73,8 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-manual-field-proof.json"), JsonSerializer.Serialize(new
             { instanceId, occurrenceId, nativeId, actualKeyboardAndPointerMove = true, cancellationPreservedDesign = true,
                 parentPlacementPreserved = true, fieldTextPreserved = true, automaticReverseXml = true,
-                nativeUndoRedoReverseXml = true, connectivityPreserved = true, crossPlatformReady = false }), token);
+                nativeUndoRedoReverseXml = true, connectivityPreserved = true, busyWaitAndCancelRecovery = true,
+                crossPlatformReady = false }), token);
         }
         catch
         {
@@ -107,6 +111,24 @@ public sealed partial class NativeSessionTests
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, cancellation);
         SchematicSymbolInstance Symbol(SchematicHierarchyData data) => data.Instances.Single(s => s.Metadata.Document.Equals(root)).Items
             .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == nativeId.ToString("D"));
+        async Task WaitWhileEditorIsBusy()
+        {
+            // Wake the file subscription while the user is moving a field. The bytes
+            // remain unchanged; the worker must not capture staged geometry or pause.
+            byte[] unchanged = await File.ReadAllBytesAsync(designPath, token);
+            await File.WriteAllBytesAsync(designPath, unchanged, token);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(10));
+            var status = automatic.Inspect();
+            while (status.Phase != AutomaticDesignPhase.WaitingForEditor)
+            {
+                Assert.AreNotEqual(AutomaticDesignPhase.Paused, status.Phase, status.ErrorMessage);
+                status = await automatic.WaitAsync(status.Sequence, deadline.Token);
+            }
+            Assert.IsFalse(status.ReattachRequired);
+            CollectionAssert.AreEqual(unchanged, await File.ReadAllBytesAsync(designPath, token));
+        }
+
         async Task<CheckedSchematicState> Ready(ulong prior, bool changed)
         {
             using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(5));

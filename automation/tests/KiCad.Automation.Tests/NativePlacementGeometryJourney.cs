@@ -28,8 +28,32 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(request.Document, measured.Document); Assert.AreEqual(before.State.Revision, measured.Revision);
             Assert.AreEqual(screen.Metadata.ScreenId, measured.ScreenId);
             Assert.IsTrue(measured.PageBounds.Size.XNm > 0 && measured.PageBounds.Size.YNm > 0);
+            Assert.IsTrue(measured.PinGeometryAvailable);
             CollectionAssert.AreEquivalent(request.Candidates.Select(c => c.Id.Value).ToArray(), measured.Candidates.Select(c => c.Id.Value).ToArray());
-            foreach (var body in measured.Candidates) Assert.IsTrue(body.Bounds.Size.XNm > 0 && body.Bounds.Size.YNm > 0);
+            foreach (var body in measured.Candidates)
+            {
+                Assert.IsTrue(body.Bounds.Size.XNm > 0 && body.Bounds.Size.YNm > 0);
+                var symbol = request.Candidates.Single(s => s.Id.Equals(body.Id));
+                Assert.IsNotNull(body.SymbolPins); Assert.IsTrue(body.SymbolPins.Complete);
+                var expected = symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+                    .Select(c => (Child: c, Pin: c.Item.Unpack<SchematicPin>()))
+                    .Where(p => p.Pin.LibraryPinId is not null && ((p.Child.Unit?.Unit ?? 0) == 0 || p.Child.Unit!.Unit == symbol.Unit.Unit)
+                        && ((p.Child.BodyStyle?.Style ?? 0) == 0 || p.Child.BodyStyle!.Style == (symbol.BodyStyle?.Style ?? 1)))
+                    .ToDictionary(p => p.Pin.Id.Value);
+                CollectionAssert.AreEquivalent(expected.Keys.ToArray(), body.SymbolPins.Pins.Select(p => p.Id.Value).ToArray());
+                foreach (var pin in body.SymbolPins.Pins)
+                {
+                    var source = expected[pin.Id.Value];
+                    Assert.AreEqual(source.Pin.LibraryPinId, pin.LibraryPinId);
+                    Assert.AreEqual(source.Pin.Number, pin.Number);
+                    Assert.AreEqual(string.IsNullOrEmpty(source.Pin.ActiveAlternate) ? source.Pin.Name : source.Pin.ActiveAlternate, pin.Name);
+                    Assert.AreEqual(source.Child.Unit?.Unit ?? 0, pin.Unit);
+                    Assert.AreEqual(source.Child.BodyStyle?.Style ?? 0, pin.BodyStyle);
+                    Assert.AreEqual(source.Pin.Visible, pin.Visible);
+                    Assert.AreEqual(1, Math.Abs(pin.BodyDirectionX) + Math.Abs(pin.BodyDirectionY));
+                    Assert.AreEqual(0L, pin.Position.XNm % 100); Assert.AreEqual(0L, pin.Position.YNm % 100);
+                }
+            }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-measure-" + screen.Metadata.Document.SheetPath.Path[^1].Value + ".json"),
                 SchematicJson.Formatter.Format(measured), token);
             var stale = request.Clone(); stale.ExpectedRevision.Sequence++;
@@ -37,6 +61,7 @@ public sealed partial class NativeSessionTests
                 client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(stale, token))).Status);
             if (request.Candidates.Count > 0)
             {
+                await VerifyPinTransforms(request);
                 var duplicate = request.Clone(); duplicate.Candidates.Add(request.Candidates[0].Clone());
                 Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
                     client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(duplicate, token))).Status);
@@ -65,6 +90,42 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(before, await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token));
         return result;
+
+        async Task VerifyPinTransforms(MeasureSchematicPlacement original)
+        {
+            var request = original.Clone();
+            var symbol = request.Candidates[0].Clone(); request.Candidates.Clear(); request.Candidates.Add(symbol);
+            symbol.Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 };
+            var neutral = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+            var basePins = neutral.Candidates.Single().SymbolPins.Pins.ToDictionary(p => p.Id.Value);
+            foreach (int angle in new[] { 0, 90, 180, 270 })
+            foreach (bool mirrorX in new[] { false, true })
+            foreach (bool mirrorY in new[] { false, true })
+            {
+                symbol.Transform = new() { Orientation = (SchematicSymbolOrientation)(angle / 90 + 1),
+                    MirrorX = mirrorX, MirrorY = mirrorY };
+                var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+                var matrix = SchematicOrientation.Geometry(new(0, 0, angle, mirrorX, mirrorY, false));
+                foreach (var pin in measured.Candidates.Single().SymbolPins.Pins)
+                {
+                    var originalPin = basePins[pin.Id.Value];
+                    long x = originalPin.Position.XNm - symbol.Position.XNm;
+                    long y = originalPin.Position.YNm - symbol.Position.YNm;
+                    Assert.AreEqual(symbol.Position.XNm + matrix.Xx * x + matrix.Xy * y, pin.Position.XNm);
+                    Assert.AreEqual(symbol.Position.YNm + matrix.Yx * x + matrix.Yy * y, pin.Position.YNm);
+                    Assert.AreEqual(matrix.Xx * originalPin.BodyDirectionX + matrix.Xy * originalPin.BodyDirectionY, pin.BodyDirectionX);
+                    Assert.AreEqual(matrix.Yx * originalPin.BodyDirectionX + matrix.Yy * originalPin.BodyDirectionY, pin.BodyDirectionY);
+                }
+            }
+            foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>(); pin.Visible = false; child.Item = Any.Pack(pin);
+            }
+            var hidden = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+            Assert.AreEqual(basePins.Count, hidden.Candidates.Single().SymbolPins.Pins.Count,
+                "Hidden active pins are still electrical connection points.");
+            Assert.IsTrue(hidden.Candidates.Single().SymbolPins.Pins.All(p => !p.Visible));
+        }
     }
 
     private static async Task VerifyCreatedGeometry(NativeClient client, DocumentSpecifier root,
@@ -81,6 +142,32 @@ public sealed partial class NativeSessionTests
             for (int i = 0; i < actual.Items.Count; i++)
                 Assert.AreEqual(sheet.Candidates.Single(c => c.Id.Equals(actual.Items[i])).Bounds, actual.Boxes[i],
                     "A detached native proposal must measure the same complete body/field envelope as the created symbol.");
+            foreach (var proposal in sheet.Candidates)
+            {
+                // The existing item query exposes pins through their owning symbol,
+                // not as independently addressable top-level schematic objects.
+                var symbols = new GetItemsById { Header = new() { Document = sheet.Document.Clone() } };
+                symbols.Items.Add(proposal.Id.Clone());
+                var observed = await client.InvokeAsync<GetItemsById, GetItemsResponse>(symbols, token);
+                var nativeSymbol = observed.Items.Single().Unpack<SchematicSymbolInstance>();
+                Assert.AreEqual(proposal.Id, nativeSymbol.Id);
+                var nativePins = nativeSymbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+                    .Select(c => c.Item.Unpack<SchematicPin>()).Where(p => p.LibraryPinId is not null)
+                    .ToDictionary(p => p.Id.Value);
+                Assert.IsTrue(nativeSymbol.Definition.PinsUseLocalCoordinates);
+                var matrix = SchematicOrientation.Geometry(new(0, 0,
+                    ((int)nativeSymbol.Transform.Orientation - 1) * 90,
+                    nativeSymbol.Transform.MirrorX, nativeSymbol.Transform.MirrorY, false));
+                foreach (var pin in proposal.SymbolPins.Pins)
+                {
+                    // Native snapshot pins use unrotated symbol-local coordinates,
+                    // not the Y-up coordinates of the on-disk symbol grammar.
+                    var local = nativePins[pin.Id.Value].Position;
+                    Assert.AreEqual(nativeSymbol.Position.XNm + matrix.Xx * local.XNm + matrix.Xy * local.YNm, pin.Position.XNm);
+                    Assert.AreEqual(nativeSymbol.Position.YNm + matrix.Yx * local.XNm + matrix.Yy * local.YNm, pin.Position.YNm);
+                    Assert.AreEqual(pin.LibraryPinId, nativePins[pin.Id.Value].LibraryPinId);
+                }
+            }
         }
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
     }

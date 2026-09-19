@@ -426,12 +426,38 @@ message SchematicPlacementGeometry {
   repeated SchematicPlacementBounds candidates = 6;
   // Bounding envelopes are conservative. They are not a readability pass.
   repeated string limitations = 7;
+  // False on older servers; per-symbol completeness remains separate.
+  bool pin_geometry_available = 8;
 }
 
 message SchematicPlacementBounds {
   kiapi.common.types.KIID id = 1;
   kiapi.common.types.Vector2 anchor = 2;
   kiapi.common.types.Box2 bounds = 3;
+  // Absent for objects other than symbols. Never infer pins from the envelope.
+  SchematicSymbolPinGeometry symbol_pins = 4;
+}
+
+message SchematicSymbolPinGeometry {
+  bool complete = 1;
+  repeated SchematicPinAnchor pins = 2;
+  repeated string limitations = 3;
+}
+
+message SchematicPinAnchor {
+  kiapi.common.types.KIID id = 1;
+  kiapi.common.types.KIID library_pin_id = 2;
+  string number = 3;
+  string name = 4;
+  // Electrical connection point in schematic sheet-space nanometres.
+  kiapi.common.types.Vector2 position = 5;
+  // Dimensionless signed unit vector from the connection toward the pin body.
+  int32 body_direction_x = 6;
+  int32 body_direction_y = 7;
+  // Zero means common to all units/body styles, not the selected occurrence.
+  int32 unit = 8;
+  int32 body_style = 9;
+  bool visible = 10;
 }
 
 message ReadSchematicPresentationFacts {

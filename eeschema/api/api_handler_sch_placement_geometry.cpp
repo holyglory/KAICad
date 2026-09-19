@@ -9,6 +9,7 @@
 #include <sch_edit_frame.h>
 #include <sch_field.h>
 #include <sch_label.h>
+#include <sch_pin.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_sheet_pin.h>
@@ -27,6 +28,67 @@
 
 namespace
 {
+void measurePins( SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path, const wxString& variant,
+                  kiapi::automation::v1::SchematicSymbolPinGeometry& output )
+{
+    using namespace kiapi::automation::v1;
+    if( !symbol.GetLibSymbolRef() )
+    {
+        output.add_limitations( "The symbol definition is unresolved" );
+        return;
+    }
+    // Variant replacements currently use similarity-based MapLibPins matching.
+    // Do not advertise those guesses as exact identities for future wiring.
+    SCH_SYMBOL_INSTANCE instance;
+    if( !variant.IsEmpty() && symbol.GetInstance( instance, path.Path() ) )
+    {
+        const auto selected = instance.m_Variants.find( variant );
+        if( selected != instance.m_Variants.end() && selected->second.m_SymbolOverride
+                && *selected->second.m_SymbolOverride != symbol.GetLibId() )
+        {
+            output.add_limitations( "Alternate variant symbols require an exact persistent pin mapping" );
+            return;
+        }
+    }
+    auto pins = symbol.GetPins( &path );
+    std::erase_if( pins, [&]( const SCH_PIN* pin )
+    {
+        return pin->GetBodyStyle() && pin->GetBodyStyle() != symbol.GetBodyStyle();
+    } );
+    std::sort( pins.begin(), pins.end(), []( const auto* a, const auto* b ) { return a->m_Uuid < b->m_Uuid; } );
+    std::set<KIID> identities;
+    for( const SCH_PIN* pin : pins )
+    {
+        if( !pin->GetLibPin() || pin->m_Uuid == niluuid || pin->GetLibPin()->m_Uuid == niluuid
+                || !identities.insert( pin->m_Uuid ).second )
+        {
+            output.add_limitations( "Every active pin requires an exact placed and owned library identity" );
+            return;
+        }
+    }
+    for( const SCH_PIN* pin : pins )
+    {
+        SchematicPinAnchor* anchor = output.add_pins();
+        anchor->mutable_id()->set_value( pin->m_Uuid.AsStdString() );
+        anchor->mutable_library_pin_id()->set_value( pin->GetLibPin()->m_Uuid.AsStdString() );
+        anchor->set_number( pin->GetNumber().ToUTF8() );
+        anchor->set_name( pin->GetName().ToUTF8() );
+        kiapi::common::PackVector2( *anchor->mutable_position(), pin->GetPosition(), schIUScale );
+        switch( pin->PinDrawOrient( symbol.GetTransform() ) )
+        {
+        case PIN_ORIENTATION::PIN_RIGHT: anchor->set_body_direction_x( 1 ); break;
+        case PIN_ORIENTATION::PIN_LEFT:  anchor->set_body_direction_x( -1 ); break;
+        case PIN_ORIENTATION::PIN_UP:    anchor->set_body_direction_y( -1 ); break;
+        case PIN_ORIENTATION::PIN_DOWN:  anchor->set_body_direction_y( 1 ); break;
+        default: throw std::runtime_error( "Unsupported native pin drawing orientation" );
+        }
+        anchor->set_unit( pin->GetUnit() );
+        anchor->set_body_style( pin->GetBodyStyle() );
+        anchor->set_visible( pin->IsVisible() );
+    }
+    output.set_complete( true );
+}
+
 BOX2I measure( SCH_ITEM& item, const SCH_SHEET_PATH& path, const wxString& variant,
                const SCH_RENDER_SETTINGS& settings )
 {
@@ -126,6 +188,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
     result.mutable_document()->CopyFrom( aCtx.Request.document() );
     result.mutable_revision()->CopyFrom( aCtx.Request.expected_revision() );
     result.mutable_screen_id()->set_value( screen->GetUuid().AsStdString() );
+    result.set_pin_geometry_available( true );
     const auto& page = screen->GetPageSettings();
     PackBox2( *result.mutable_page_bounds(), BOX2I( VECTOR2I( 0, 0 ),
             VECTOR2I( page.GetWidthIU( schIUScale.IU_PER_MILS ), page.GetHeightIU( schIUScale.IU_PER_MILS ) ) ), schIUScale );
@@ -135,6 +198,8 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
         PackVector2( *output->mutable_anchor(), item.GetPosition(), schIUScale );
         BOX2I bounds = measure( item, *path, variant, *settings ); bounds.Normalize();
         PackBox2( *output->mutable_bounds(), bounds, schIUScale );
+        if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( &item ) )
+            measurePins( *symbol, *path, variant, *output->mutable_symbol_pins() );
     };
     try
     {

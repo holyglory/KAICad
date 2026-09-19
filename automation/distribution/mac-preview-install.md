@@ -1,15 +1,15 @@
-# Install the September 15 Mac preview
+# Install the September 19 Mac preview
 
 These development previews contain KiCad and its MCP companion. Both Apple
-Silicon and Intel use `preview-20260915-a519e52fc30a` from commit
-`a519e52fc30ada3b0a7f45695433f5157731a0e1`. Both are ad-hoc signed, not notarized.
+Silicon and Intel use `preview-20260918-f120a47cfbd1` from commit
+`f120a47cfbd1832bc9133f6994b5e29aad082f3c`. Both are ad-hoc signed, not notarized.
 
 | Mac | Application archive | Signed update feed |
 | --- | --- | --- |
-| Apple Silicon | [Download](https://kicad.vr.ae/platforms/osx-arm64/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz) | [Apple Silicon feed](https://kicad.vr.ae/platforms/osx-arm64/updates/preview.json) |
-| Intel | [Download](https://kicad.vr.ae/platforms/osx-x64/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-x64.tar.gz) | [Intel feed](https://kicad.vr.ae/platforms/osx-x64/updates/preview.json) |
+| Apple Silicon | [Download](https://kicad.vr.ae/platforms/osx-arm64/artifacts/kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-macos-arm64.tar.gz) | [Apple Silicon feed](https://kicad.vr.ae/platforms/osx-arm64/updates/preview.json) |
+| Intel | [Download](https://kicad.vr.ae/platforms/osx-x64/artifacts/kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-macos-x64.tar.gz) | [Intel feed](https://kicad.vr.ae/platforms/osx-x64/updates/preview.json) |
 
-[Matching source](https://kicad.vr.ae/artifacts/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-source.tar.gz)
+[Matching source](https://kicad.vr.ae/artifacts/kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-source.tar.gz)
 and other versions are available from [the download page](https://kicad.vr.ae/).
 The feeds can advance: keep the downloaded archive and its matching signed feed
 together. If they no longer match, obtain a matching pair; do not edit the feed.
@@ -25,8 +25,8 @@ Obtain the trusted public publisher key through the existing
 helper, compare the archive's SHA-256 with the matching value from your trusted
 Git/source copy of this guide:
 
-- Apple Silicon: `064a45c91f8463a2fa4c5636621ef62fd38bc95f5bb4b820af37ad4a235e85c5`
-- Intel: `e548a2e0290c5b3dcdab55d08d350f717a3da4c85116ca4902a332e4913be9bd`
+- Apple Silicon: `439ad587446d486d696b64218d374aea9d490dc42cf1f5d23d0ab6ada1a969b0`
+- Intel: `b03ef84339b1171a70e6b10814f5a8c0bee106ab02222586d9b65c1b4908ab01`
 
 On the Mac, `shasum -a 256 /absolute/path/to/the/downloaded/archive.tar.gz`
 prints that hash. Keep the verified archive, save its matching feed as
@@ -40,7 +40,7 @@ absolute Mac path:
 {
   "schemaVersion": 1,
   "installationRoot": "/Users/you/Applications/KiCad-Codex",
-  "archivePath": "/Users/you/Downloads/kicad-codex-a519e52fc30ada3b0a7f45695433f5157731a0e1-macos-arm64.tar.gz",
+  "archivePath": "/Users/you/Downloads/kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-macos-arm64.tar.gz",
   "envelopePath": "/Users/you/Downloads/preview.json",
   "origin": "https://kicad.vr.ae/platforms/osx-arm64/",
   "channel": "preview"
@@ -76,8 +76,10 @@ dialog leaves the current design open. Keep project repositories outside the
 installation directory.
 
 The real update journey from the preceding public build passed on
-[Apple Silicon](https://github.com/holyglory/KAICad/actions/runs/34921400698) and
-[Intel](https://github.com/holyglory/KAICad/actions/runs/34922856537), including two
+[Apple Silicon](https://github.com/holyglory/KAICad/actions/runs/35411689256) and
+[Intel](https://github.com/holyglory/KAICad/actions/runs/35411689256), including two
 preserved designs, cancellation, native restart and packaged MCP reconnection.
-This proves the preview/update journey, not the complete XML, routing or Codex
-Desktop workflow.
+These builds add measured initial schematic placement and field-layout proposals
+through MCP. The update journey proves this specific upgrade, not every automatic
+update or recovery scenario. Full XML reconstruction, routing and actual Codex
+Desktop qualification remain unfinished.

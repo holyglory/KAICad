@@ -1,6 +1,36 @@
-# Structural editor — option 1 comparison
+# Recursive structural editor — design QA
 
 final result: blocked
+
+## Active comparison: requirement field history
+
+The approved target is `/home/holyglory/kicad/automation/design/history-and-conflicts/02-field-history.png` (1536 × 1024 full scene, with the Routing requirements history dialog). The approved recursive System/PSU/CPU diagrams supersede the earlier option-1 layout retained below. This is native desktop UI; CSS viewport and browser density do not apply.
+
+The first component captures are the hash-verified `native-dialog` artifacts from `t20260919T225954Z-d035cc`, materialized at `/mnt/build-storage/codex/kicad/evidence/field-history-d035cc/`. The source, `light/02-earlier-text.png`, and `dark/02-earlier-text.png` were opened together in one comparison input. Both implementation images are 426 × 330. The fixture has no resolvable source instruction, so no source-opening control is enabled. This is a component test, not the complete editor journey or its background canvas.
+
+- P1, observation correctness: `01-current.png` and `02-earlier-text.png` have identical hashes and show v3 selected. Native control-state assertions reached v2, but capture ran before the next GTK paint. These images do not prove the intended historical state. Wait for a completed native frame and reject unchanged captures after this visible change.
+- P2, sizing and typography: the dialog opens at 426 × 330 instead of its intended 740 × 520 client area. KiCad's final sizer setup fits the dialog after its preferred size is assigned. Apply preferred sizing afterward, keep a usable compact minimum, and match the reference's readable text hierarchy using the native font family.
+- P1, integration: the dialog component is not yet connected to the recursive editor's History actions. Save/Decline, conflict recovery, navigation and source-document opening still require the full rendered editor journey. Passing component checks cannot close that gap.
+
+Fidelity review: typography and layout are blocked by the incorrect initial size; colors follow native light/dark themes but need review after a valid capture; there are no decorative bitmap assets to generate; copy uses the approved History/Close/Use-text-in-draft actions. Focused comparison of the revision list, comparison text and footer will follow a matching-state capture. No visual pass is claimed from the stale frames.
+
+Interaction evidence: the compiled model supplied revision-bound data to a real native dialog under a virtual display. Keyboard selection, Escape, restore, reopen, compact controls and cross-scope content isolation passed in both themes. The missing rendering checkpoint limits what those screenshots establish. The sealed run remains unchanged.
+
+Next comparison: inspect the repaired 740 × 520 and compact captures, confirm the selected row and text are v2 while saved text remains v3, compare both themes, then connect the component to the editor and verify the complete journey.
+
+### Second comparison: corrected native window captures
+
+Run `t20260919T232148Z-1ddc15` passes the focused managed checks, native compilation and both themed GUI journeys. Hash-verified captures are at `/mnt/build-storage/codex/kicad/evidence/field-history-1ddc15/`. Source, light/dark `02-earlier-text.png` and light `03-compact.png` were opened in the same comparison input. The normal captures are 740 × 520; compact is 590 × 440. These are native window pixels at the test display's normal density, with no browser/CSS scaling. The source is a full 1536 × 1024 scene; compare its modal region, not the unimplemented background editor.
+
+The capture now reads the actual native window after a GTK frame checkpoint. Current and earlier-state images have distinct hashes and show the correct row, heading and text. The original screen-DC captures remain sealed as failed visual evidence. Preferred sizing is applied after KiCad's sizer setup, and the native font hierarchy is larger. The observation mismatch and undersized initial dialog are repaired.
+
+Typography is readable in both themes; the two comparison fields and footer remain visible at compact size. Colors follow the native theme with visible focus and selection. No bitmap assets are approximated; all content is native controls. Copy distinguishes selected text from saved text and restoration from saving. The fixture's absent source provider explains the absent source action; its real editor integration is still unverified. The revision list is denser and the primary button less visually emphasized than the mock; refine those with the editor integration rather than claiming full visual parity now.
+
+The focused regions reviewed are the revision list, selected/saved text and footer actions. Component success does not qualify the editor route, source opening, Save/Decline, conflicts or a full system-level diagram journey. The overall result remains blocked on those concrete integration and visual gaps.
+
+## Historical comparison — superseded option 1
+
+The following records describe the earlier native editor and are retained as historical evidence. They are not the approved visual target for the recursive editor.
 
 ## Evidence and state
 

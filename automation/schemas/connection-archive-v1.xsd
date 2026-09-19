@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:kicad:automation:connection-archive:1"
+           xmlns="urn:kicad:automation:connection-archive:1"
+           xmlns:h="urn:kicad:automation:requirement-history:1" elementFormDefault="qualified">
+  <xs:import namespace="urn:kicad:automation:requirement-history:1"/>
+  <xs:simpleType name="kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Abstract"/><xs:enumeration value="Interface"/><xs:enumeration value="SignalGroup"/>
+    <xs:enumeration value="DifferentialPair"/><xs:enumeration value="Signal"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="endpoint-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unresolved"/><xs:enumeration value="Interface"/><xs:enumeration value="Compatible"/>
+    <xs:enumeration value="Candidates"/><xs:enumeration value="Pin"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="source">
+    <xs:attribute name="document" type="xs:string" use="required"/>
+    <xs:attribute name="revision" type="xs:string" use="required"/>
+    <xs:attribute name="page" type="xs:positiveInteger"/><xs:attribute name="table" type="xs:string"/>
+    <xs:attribute name="part-variant" type="xs:string"/>
+  </xs:complexType>
+  <xs:complexType name="origin"><xs:sequence>
+    <xs:element name="summary" type="xs:string"/>
+    <xs:element name="source" type="source" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:element name="input" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="ref" type="h:identity" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="actor-kind" type="h:actor" use="required"/>
+    <xs:attribute name="actor" type="xs:string" use="required"/>
+    <xs:attribute name="at" type="xs:dateTime" use="required"/>
+  </xs:complexType>
+  <xs:complexType name="pin"><xs:sequence>
+    <xs:element name="sheet" minOccurs="1" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="instance" type="h:identity" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="design" type="h:identity" use="required"/>
+    <xs:attribute name="component" type="h:identity" use="required"/>
+    <xs:attribute name="pin" type="xs:string" use="required"/>
+  </xs:complexType>
+  <xs:complexType name="endpoint"><xs:sequence>
+    <xs:element name="intent" type="xs:string"/>
+    <xs:element name="selector" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="function" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="source" type="source" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence><xs:attribute name="role" type="xs:string" use="required"/>
+      <xs:attribute name="protocol" type="xs:string" use="required"/>
+    </xs:complexType></xs:element>
+    <xs:element name="candidates"><xs:complexType><xs:sequence>
+      <xs:element name="pin" type="pin" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="chosen-pin" type="pin" minOccurs="0"/>
+  </xs:sequence><xs:attribute name="kind" type="endpoint-kind" use="required"/>
+    <xs:attribute name="block" type="h:identity" use="required"/>
+    <xs:attribute name="interface" type="h:identity"/>
+  </xs:complexType>
+  <xs:complexType name="selection">
+    <xs:attribute name="connection" type="h:identity" use="required"/>
+    <xs:attribute name="state" type="h:identity" use="required"/>
+    <xs:attribute name="revision" type="h:identity" use="required"/>
+  </xs:complexType>
+  <xs:element name="connection-archive"><xs:complexType><xs:sequence>
+    <xs:element name="states"><xs:complexType><xs:sequence>
+      <xs:element name="state" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+        <xs:attribute name="id" type="h:identity" use="required"/><xs:attribute name="connection" type="h:identity" use="required"/>
+        <xs:attribute name="name" type="xs:string" use="required"/><xs:attribute name="head" type="h:identity" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="revisions"><xs:complexType><xs:sequence>
+      <xs:element name="revision" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="origin" type="origin"/>
+        <xs:element name="endpoints"><xs:complexType><xs:sequence>
+          <xs:element name="endpoint" type="endpoint" minOccurs="2" maxOccurs="unbounded"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="members"><xs:complexType><xs:sequence>
+          <xs:element name="member" type="selection" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence></xs:complexType></xs:element>
+      </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/>
+        <xs:attribute name="connection" type="h:identity" use="required"/>
+        <xs:attribute name="state" type="h:identity" use="required"/>
+        <xs:attribute name="parent" type="h:identity"/><xs:attribute name="name" type="xs:string" use="required"/>
+        <xs:attribute name="kind" type="kind" use="required"/><xs:attribute name="requirements" type="h:identity" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="requirement-histories"><xs:complexType><xs:sequence>
+      <xs:element ref="h:requirement-history" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+  </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>
+    <xs:attribute name="document" type="h:identity" use="required"/><xs:attribute name="owner-block" type="h:identity" use="required"/>
+  </xs:complexType></xs:element>
+</xs:schema>

@@ -53,7 +53,8 @@ public sealed class RetainedPartSymbolDiagnosisTests
     {
         string root = Environment.GetEnvironmentVariable("KICAD_PART_SYMBOL_DIAGNOSTIC_DIRECTORY")
             ?? throw new AssertFailedException("Provide the exact retained field-creation evidence directory.");
-        const string instance = "c4b39d92-e1dd-45af-ac17-c98ccd60214f";
+        string instance = Path.GetFileName(Directory.GetFiles(root, "*-creation-actual.xml").Single())[..^"-creation-actual.xml".Length];
+        Assert.IsTrue(Guid.TryParseExact(instance, "D", out _));
         var desired = SchematicDesignXml.Read(File.ReadAllText(Path.Combine(root, instance + "-creation-planned.xml")), []).Schematic;
         var actual = (SchematicHierarchyData)SchematicDataXml.Read(File.ReadAllText(Path.Combine(root, instance + "-creation-actual.xml")));
         var results = new List<object>(); var failures = new List<string>();
@@ -70,6 +71,7 @@ public sealed class RetainedPartSymbolDiagnosisTests
                 left.Definition.Items.Clear(); right.Definition.Items.Clear();
                 bool propertiesEqual = left.Equals(right);
                 results.Add(new { symbol = expected.Id.Value, childrenEqual, propertiesEqual,
+                    nativePins = Pins(observed.Definition), expectedPins = Pins(expected.Definition),
                     differences = Differences(left, right).Take(16).ToArray() });
                 if (!childrenEqual || !propertiesEqual) failures.Add(expected.Id.Value);
             }
@@ -82,6 +84,7 @@ public sealed class RetainedPartSymbolDiagnosisTests
                 left.Definition.Items.Clear(); right.Definition.Items.Clear();
                 bool propertiesEqual = left.Equals(right);
                 results.Add(new { cache = expected.CacheKey, childrenEqual, propertiesEqual,
+                    nativePins = Pins(observed.Definition), expectedPins = Pins(expected.Definition),
                     differences = Differences(left, right).Take(16).ToArray() });
                 if (!childrenEqual || !propertiesEqual) failures.Add(expected.CacheKey);
             }
@@ -91,6 +94,10 @@ public sealed class RetainedPartSymbolDiagnosisTests
 
         static bool SameChildren(SchematicSymbol left, SchematicSymbol right) => left.Items.Select(c => Convert.ToBase64String(c.ToByteArray()))
             .Order(StringComparer.Ordinal).SequenceEqual(right.Items.Select(c => Convert.ToBase64String(c.ToByteArray())).Order(StringComparer.Ordinal));
+        static object[] Pins(SchematicSymbol symbol) => symbol.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+            .Select(c => (Child: c, Pin: c.Item.Unpack<SchematicPin>())).Select(p => (object)new
+            { owned = p.Pin.LibraryPinId?.Value ?? p.Pin.Id.Value, placed = p.Pin.LibraryPinId is null ? null : p.Pin.Id.Value,
+                number = p.Pin.Number, unit = p.Child.Unit?.Unit, style = p.Child.BodyStyle?.Style }).ToArray();
         static IEnumerable<object> Differences(IMessage actual, IMessage expected)
         {
             static Dictionary<string, string> Leaves(IMessage value) =>

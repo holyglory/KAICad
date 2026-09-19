@@ -438,7 +438,7 @@ internal static class SchematicNativeCreationProjection
         entry = entry.Clone();
         OrderNativeDefinitionChildren(entry.Definition);
         var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == entry.CacheKey);
-        if (existing is not null && !existing.Equals(entry))
+        if (existing is not null && !SchematicLibraryCacheEquivalence.Equal(existing, entry))
             throw Invalid("created_symbol_cache_conflict", "The target screen has a different definition for the selected library key.");
         if (existing is null) target.CachedSymbols.Add(entry.Clone());
     }

@@ -49,12 +49,14 @@ public sealed partial class NativeSessionTests
             original.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "DeclaredProbeDefinition" };
             original.Definition.Keywords = "independent declared-part creation fixture";
             original.Definition.UnitCount = 2;
+            original.Definition.BodyStyle.Add(new SchematicBodyStyle { Name = "Detailed" });
             foreach (var child in original.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
             {
                 var pin = child.Item.Unpack<SchematicPin>();
                 Assert.IsNull(pin.LibraryPinId);
                 pin.Id.Value = Guid.NewGuid().ToString("D");
                 child.Unit = new() { Unit = 1 };
+                child.BodyStyle = new() { Style = 2 };
                 child.Item = Any.Pack(pin);
             }
             var extraChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
@@ -63,6 +65,11 @@ public sealed partial class NativeSessionTests
             extra.Id.Value = Guid.NewGuid().ToString("D"); extra.Number += "_extra"; extra.Name = "Extra_declared_pin";
             extra.Position.YNm += 2_540_000; extraChild.Item = Any.Pack(extra);
             original.Definition.Items.Add(extraChild);
+            var inactiveChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+            inactiveChild.BodyStyle = new() { Style = 1 };
+            var inactivePin = inactiveChild.Item.Unpack<SchematicPin>();
+            inactivePin.Id.Value = Guid.NewGuid().ToString("D");
+            inactiveChild.Item = Any.Pack(inactivePin); original.Definition.Items.Add(inactiveChild);
             original.Definition.ValueField.CustomProperties.Add(new CustomProperty { Key = "automation.source", Value = "fixture-datasheet:page-2" });
             var manufacturer = original.Definition.DescriptionField.Clone();
             manufacturer.Name = "Manufacturer"; manufacturer.Text.Text_ = "Declared fixture";
@@ -71,7 +78,7 @@ public sealed partial class NativeSessionTests
                 IsPrivate = manufacturer.IsPrivate });
             part = part with { Id = Guid.NewGuid(), Name = "Explicit declared two-unit probe", Units = 2,
                 Pins = [.. part.Pins.Select(p => p with { Unit = 1 }), new(extra.Number, extra.Name, 2)] };
-            declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original);
+            declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original, BodyStyle: 2);
         }
         int designator = 801;
         foreach (var sheet in baseline.Engineering.Circuit.SheetInstances.OrderBy(s => s.Id))
@@ -176,6 +183,17 @@ public sealed partial class NativeSessionTests
                 Task reached = await Task.WhenAny(ready, call);
                 if (reached == call) { RequireToolSuccess(await call); Assert.Fail("The creation did not reach the interruption checkpoint."); }
                 await ready;
+                var pending = store.Read()!.State;
+                var nativeReceipt = await client.InvokeAsync<ReadCheckedSchematicBatchReceipt, CheckedSchematicBatchReceipt>(new()
+                {
+                    Document = document.Clone(), ProcessEpoch = client.Epoch,
+                    OperationId = pending.PendingMutation!.OperationId,
+                    ExpectedRequest = new() { Batch = pending.PendingMutation.Clone(), ExpectedState = pending.PendingNativeState!.Clone() }
+                }, limit.Token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-creation-native-receipt.json"),
+                    SchematicJson.Formatter.Format(nativeReceipt), limit.Token);
+                Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, nativeReceipt.Status,
+                    nativeReceipt.ErrorCode + ": " + nativeReceipt.ErrorMessage);
                 var edited = await Capture(); Assert.IsTrue(edited.State.NativeContentDirty);
                 interruptedNativeOperation = store.Read()!.State.PendingMutation!.OperationId;
                 interruptedNativeRevision = new(edited.State.Revision.Epoch, edited.State.Revision.Sequence);
@@ -304,6 +322,7 @@ public sealed partial class NativeSessionTests
             nativeUndoRedoAutomaticallyPublished = true, xmlFileEventCreation = true, interruptAfterNativeEdit,
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
+            selectedBodyStyle = declaration?.BodyStyle,
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()

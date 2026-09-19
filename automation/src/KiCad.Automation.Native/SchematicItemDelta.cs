@@ -225,7 +225,7 @@ public static class SchematicItemDelta
         var before = IndexCache(current);
         var after = IndexCache(desired);
         if (before.Count != after.Count || before.Any(entry =>
-                !after.TryGetValue(entry.Key, out var value) || !entry.Value.Equals(value)))
+                !after.TryGetValue(entry.Key, out var value) || !SchematicLibraryCacheEquivalence.Equal(entry.Value, value)))
         {
             var state = new SchematicLibraryCacheState { ScreenId = current.Metadata.ScreenId.Clone() };
             state.Definitions.Add(after.Values.OrderBy(c => c.CacheKey, StringComparer.Ordinal).Select(c => c.Clone()));

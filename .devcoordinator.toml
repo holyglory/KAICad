@@ -1386,7 +1386,7 @@ retained_artifacts=[{ name = "instance-tool-errors", path = "automation/artifact
 
 [test.codex-desktop-journey]
 timeout_seconds=1800
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_DESKTOP_PACKAGE_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/20260911T043346Z-8776ebe319af/assembly", KICAD_DESKTOP_CONTROL_ROOT = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/codex-desktop-current-2" }
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_DESKTOP_PACKAGE_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1/assembly", KICAD_DESKTOP_CONTROL_ROOT = "/mnt/build-storage/codex/kicad/worktrees/component-generation.20260918/automation/artifacts/codex-desktop-f120-20260919" }
 
 [[test.codex-desktop-journey.check]]
 name="build"
@@ -1399,7 +1399,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration
 name="actual-client"
 tier="development"
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "TestCategory=NativeCodexDesktop", "--logger", "trx", "--results-directory", "automation/artifacts/codex-desktop-tests"]
-retained_artifacts=[{ name = "codex-desktop-tests", path = "automation/artifacts/codex-desktop-tests", max_bytes = 16777216 }, { name = "codex-desktop-evidence", path = "automation/artifacts/codex-desktop-current-2", max_bytes = 33554432 }]
+retained_artifacts=[{ name = "codex-desktop-tests", path = "automation/artifacts/codex-desktop-tests", max_bytes = 16777216 }, { name = "codex-desktop-evidence", path = "automation/artifacts/codex-desktop-f120-20260919", max_bytes = 33554432 }]
 
 [test.native-updater-objects]
 timeout_seconds=1200

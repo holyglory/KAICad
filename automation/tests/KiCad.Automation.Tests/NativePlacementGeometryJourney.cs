@@ -29,6 +29,31 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(screen.Metadata.ScreenId, measured.ScreenId);
             Assert.IsTrue(measured.PageBounds.Size.XNm > 0 && measured.PageBounds.Size.YNm > 0);
             Assert.IsTrue(measured.PinGeometryAvailable);
+            var existingSymbols = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Select(i => i.Unpack<SchematicSymbolInstance>()).Where(s => !newIds.Contains(s.Id.Value))
+                .ToDictionary(s => s.Id.Value);
+            CollectionAssert.AreEquivalent(existingSymbols.Keys.ToArray(),
+                measured.Obstacles.Where(o => o.SymbolPins is not null).Select(o => o.Id.Value).ToArray());
+            foreach (var body in measured.Obstacles.Where(o => o.SymbolPins is not null))
+            {
+                Assert.IsTrue(body.SymbolPins.Complete);
+                var symbol = existingSymbols[body.Id.Value];
+                var expected = symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+                    .Select(c => (Child: c, Pin: c.Item.Unpack<SchematicPin>()))
+                    .Where(p => p.Pin.LibraryPinId is not null && ((p.Child.Unit?.Unit ?? 0) == 0 || p.Child.Unit!.Unit == symbol.Unit.Unit)
+                        && ((p.Child.BodyStyle?.Style ?? 0) == 0 || p.Child.BodyStyle!.Style == (symbol.BodyStyle?.Style ?? 1)))
+                    .ToDictionary(p => p.Pin.Id.Value);
+                CollectionAssert.AreEquivalent(expected.Keys.ToArray(), body.SymbolPins.Pins.Select(p => p.Id.Value).ToArray());
+                var matrix = SchematicOrientation.Geometry(new(0, 0, ((int)symbol.Transform.Orientation - 1) * 90,
+                    symbol.Transform.MirrorX, symbol.Transform.MirrorY, false));
+                foreach (var pin in body.SymbolPins.Pins)
+                {
+                    var source = expected[pin.Id.Value].Pin;
+                    Assert.AreEqual(source.LibraryPinId, pin.LibraryPinId);
+                    Assert.AreEqual(symbol.Position.XNm + matrix.Xx * source.Position.XNm + matrix.Xy * source.Position.YNm, pin.Position.XNm);
+                    Assert.AreEqual(symbol.Position.YNm + matrix.Yx * source.Position.XNm + matrix.Yy * source.Position.YNm, pin.Position.YNm);
+                }
+            }
             CollectionAssert.AreEquivalent(request.Candidates.Select(c => c.Id.Value).ToArray(), measured.Candidates.Select(c => c.Id.Value).ToArray());
             foreach (var body in measured.Candidates)
             {

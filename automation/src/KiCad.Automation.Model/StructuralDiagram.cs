@@ -2,6 +2,7 @@ namespace KiCad.Automation.Model;
 
 public enum EngineeringStatementRole { Intent, Interpretation, Realization }
 public enum StructuralConnectionKind { Unspecified, Power, Data, Control, Analog, Mechanical }
+public enum StructuralConnectionDirection { Unspecified, FirstToSecond, SecondToFirst, Bidirectional }
 public enum NetBindingChangeKind { Split, Merged, Removed, Reidentified }
 public sealed record UnresolvedNetBinding(Guid OwnerId, Guid FormerNetId, NetBindingChangeKind Change,
     string Reason, IReadOnlyList<Guid> CandidateNetIds);
@@ -14,10 +15,13 @@ public sealed record EngineeringStatement(Guid Id, Guid TargetId, EngineeringSta
     GuidanceStrength? Strength, string Text, PinConnectionDetail? Connection,
     IReadOnlyList<Guid> DerivedFrom, IReadOnlyList<SourceReference> Sources);
 public sealed record PinConnectionDetail(PinEndpoint First, PinEndpoint Second);
-public sealed record StructuralBlock(Guid Id, string Name, Guid? ParentId, IReadOnlyList<Guid> ComponentIds);
+public sealed record StructuralBlock(Guid Id, string Name, Guid? ParentId, IReadOnlyList<Guid> ComponentIds,
+    string Purpose = "");
 public sealed record StructuralPort(Guid Id, Guid BlockId, string Name);
 public sealed record StructuralConnection(Guid Id, Guid FirstPortId, Guid SecondPortId,
-    StructuralConnectionKind Kind, string Description, IReadOnlyList<Guid> NetIds);
+    StructuralConnectionKind Kind, string Description, IReadOnlyList<Guid> NetIds,
+    StructuralConnectionDirection Direction = StructuralConnectionDirection.Unspecified);
+public sealed record StructuralProperty(Guid OwnerId, GuidanceStatement Statement);
 
 /// <summary>Architectural entities and explicit realization links. Diagram
 /// coordinates belong to presentation, not connectivity or requirement strength.</summary>
@@ -25,7 +29,8 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
     IReadOnlyList<StructuralPort> Ports, IReadOnlyList<StructuralConnection> Connections,
     IReadOnlyList<EngineeringStatement> Statements,
     IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null,
-    IReadOnlyList<UnresolvedComponentReference>? UnresolvedComponentReferences = null)
+    IReadOnlyList<UnresolvedComponentReference>? UnresolvedComponentReferences = null,
+    IReadOnlyList<StructuralProperty>? Properties = null, StructuralPresentation? Presentation = null)
 {
     public bool HasUnresolvedNetBindings => UnresolvedNetBindings is { Count: > 0 };
 
@@ -61,6 +66,7 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
         {
             Add(block.Id);
             if (string.IsNullOrWhiteSpace(block.Name)) throw Invalid("A structural block needs a name.");
+            if (block.Purpose is null) throw Invalid("Block purpose must be text; an empty value remains unspecified.");
             if (block.ComponentIds.Distinct().Count() != block.ComponentIds.Count
                 || block.ComponentIds.Any(id => !componentIds.Contains(id)))
                 throw Invalid("Block realization must reference distinct existing component instances.");
@@ -88,12 +94,14 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
         {
             Add(connection.Id);
             if (!ports.ContainsKey(connection.FirstPortId) || !ports.ContainsKey(connection.SecondPortId)
-                || connection.FirstPortId == connection.SecondPortId || !Enum.IsDefined(connection.Kind))
+                || connection.FirstPortId == connection.SecondPortId || !Enum.IsDefined(connection.Kind)
+                || !Enum.IsDefined(connection.Direction))
                 throw Invalid("An architectural connection needs two different existing ports and a supported kind.");
             if (connection.NetIds.Distinct().Count() != connection.NetIds.Count
                 || connection.NetIds.Any(id => !netIds.Contains(id)))
                 throw Invalid("Connection realization references a missing or duplicate net.");
         }
+        var structuralTargets = identities.ToHashSet();
         var targets = identities.Concat(componentIds).Concat(netIds).ToHashSet();
         var definitions = circuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
         var parts = circuit.Parts.ToDictionary(p => p.Id);
@@ -127,6 +135,16 @@ public sealed record StructuralDiagram(Guid Id, IReadOnlyList<StructuralBlock> B
                     || source.Page is <= 0)
                     throw Invalid("Sources require a document and revision, with positive page numbers when specified.");
         }
+        foreach (var property in Properties ?? [])
+        {
+            if (!structuralTargets.Contains(property.OwnerId))
+                throw Invalid("Named structural properties require an existing diagram, block, port or connection owner.");
+            Add(property.Statement.Id);
+            ComponentGuidance.ValidateStatement(property.Statement, []);
+            if (property.Statement.Replaces is not null || property.Statement.ExceptionRationale is not null)
+                throw Invalid("Structural properties do not replace component-class guidance; use its explicit binding instead.");
+        }
+        Presentation?.Validate(this);
         var statements = Statements.ToDictionary(s => s.Id);
         var connections = Connections.ToDictionary(c => c.Id);
         foreach (var binding in unresolved.Values)

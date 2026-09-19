@@ -15,10 +15,13 @@ public static class StructuralDiagramXml
     {
         var schema = new XmlSchemaSet { XmlResolver = null };
         var assembly = typeof(StructuralDiagramXml).Assembly;
-        string resource = assembly.GetManifestResourceNames().Single(n => n.EndsWith("structure-v1.xsd", StringComparison.Ordinal));
-        using Stream stream = assembly.GetManifestResourceStream(resource)!;
-        using XmlReader reader = XmlReader.Create(stream, Settings());
-        schema.Add(Namespace, reader);
+        foreach (string file in new[] { "component-knowledge-v1.xsd", "structure-v1.xsd" })
+        {
+            string resource = assembly.GetManifestResourceNames().Single(n => n.EndsWith(file, StringComparison.Ordinal));
+            using Stream stream = assembly.GetManifestResourceStream(resource)!;
+            using XmlReader reader = XmlReader.Create(stream, Settings());
+            schema.Add(null, reader);
+        }
         schema.Compile();
         return schema;
     });
@@ -36,11 +39,14 @@ public static class StructuralDiagramXml
             IEnumerable<XElement> Rows(string group, string row) => root.Element(Ns + group)!.Elements(Ns + row);
             var result = new StructuralDiagram(Id(root),
                 Rows("blocks", "block").Select(b => new StructuralBlock(Id(b), Text(b, "name"), OptionalId(b, "parent"),
-                    b.Elements(Ns + "component").Select(c => Id(c, "ref")).ToArray())).ToArray(),
+                    b.Elements(Ns + "component").Select(c => Id(c, "ref")).ToArray(),
+                    (string?)b.Element(Ns + "purpose") ?? "")).ToArray(),
                 Rows("ports", "port").Select(p => new StructuralPort(Id(p), Id(p, "block"), Text(p, "name"))).ToArray(),
                 Rows("connections", "connection").Select(c => new StructuralConnection(Id(c), Id(c, "first-port"), Id(c, "second-port"),
                     Enum.Parse<StructuralConnectionKind>(Text(c, "kind")), c.Element(Ns + "description")!.Value,
-                    c.Elements(Ns + "net").Select(n => Id(n, "ref")).ToArray())).ToArray(),
+                    c.Elements(Ns + "net").Select(n => Id(n, "ref")).ToArray(),
+                    c.Attribute("direction") is { } direction ? Enum.Parse<StructuralConnectionDirection>(direction.Value)
+                        : StructuralConnectionDirection.Unspecified)).ToArray(),
                 Rows("statements", "statement").Select(s => new EngineeringStatement(Id(s), Id(s, "target"),
                     Enum.Parse<EngineeringStatementRole>(Text(s, "role")),
                     s.Attribute("strength") is null ? null : Enum.Parse<GuidanceStrength>(Text(s, "strength")),
@@ -57,7 +63,10 @@ public static class StructuralDiagramXml
                 root.Element(Ns + "unresolved-component-references")?.Elements(Ns + "reference").Select(r => new UnresolvedComponentReference(
                     Id(r, "owner"), Enum.Parse<ComponentReferenceSlot>(Text(r, "slot")), ComponentTarget(r.Element(Ns + "former")!),
                     Enum.Parse<ComponentReferenceChangeKind>(Text(r, "change")), r.Element(Ns + "reason")!.Value,
-                    r.Elements(Ns + "candidate").Select(e => ComponentTarget(e)).ToArray())).ToArray());
+                    r.Elements(Ns + "candidate").Select(e => ComponentTarget(e)).ToArray())).ToArray(),
+                root.Element(Ns + "properties")?.Elements(Ns + "property").Select(p => new StructuralProperty(Id(p, "owner"),
+                    ComponentKnowledgeXml.ReadStatement(p.Element(XName.Get("guidance", ComponentKnowledgeXml.Namespace))!))).ToArray(),
+                root.Element(Ns + "presentation") is { } presentation ? StructuralPresentationXml.Read(presentation) : null);
             result.Validate(circuit);
             return result;
         }
@@ -73,10 +82,12 @@ public static class StructuralDiagramXml
         XElement root = E("structure", A("version", 1), A("id", diagram.Id),
             E("blocks", diagram.Blocks.OrderBy(b => b.Id).Select(b => E("block", A("id", b.Id), A("name", b.Name),
                 b.ParentId is Guid parent ? A("parent", parent) : null,
+                b.Purpose.Length == 0 ? null : E("purpose", b.Purpose),
                 b.ComponentIds.Order().Select(id => E("component", A("ref", id)))))),
             E("ports", diagram.Ports.OrderBy(p => p.Id).Select(p => E("port", A("id", p.Id), A("block", p.BlockId), A("name", p.Name)))),
             E("connections", diagram.Connections.OrderBy(c => c.Id).Select(c => E("connection", A("id", c.Id),
-                A("first-port", c.FirstPortId), A("second-port", c.SecondPortId), A("kind", c.Kind), E("description", c.Description),
+                A("first-port", c.FirstPortId), A("second-port", c.SecondPortId), A("kind", c.Kind),
+                c.Direction == StructuralConnectionDirection.Unspecified ? null : A("direction", c.Direction), E("description", c.Description),
                 c.NetIds.Order().Select(id => E("net", A("ref", id)))))),
             E("statements", diagram.Statements.OrderBy(s => s.Id).Select(s => E("statement", A("id", s.Id), A("target", s.TargetId),
                 A("role", s.Role), s.Strength is GuidanceStrength strength ? A("strength", strength) : null, E("text", s.Text),
@@ -96,6 +107,10 @@ public static class StructuralDiagramXml
                         ComponentTarget("former", r.FormerTarget), E("reason", r.Reason),
                         r.CandidateTargets.OrderBy(t => t.ComponentId).ThenBy(t => t.PinNumber, StringComparer.Ordinal)
                             .Select(t => ComponentTarget("candidate", t))))));
+        if (diagram.Properties is { Count: > 0 })
+            root.Add(E("properties", diagram.Properties.OrderBy(p => p.OwnerId).ThenBy(p => p.Statement.Id)
+                .Select(p => E("property", A("owner", p.OwnerId), ComponentKnowledgeXml.WriteStatement(p.Statement)))));
+        if (diagram.Presentation is { } layout) root.Add(StructuralPresentationXml.Write(layout));
         // Entitize CR and attribute whitespace rather than letting XML newline normalization
         // silently change user-authored text or source coordinates on reload.
         return EngineeringXmlText.Render(root);

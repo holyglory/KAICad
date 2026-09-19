@@ -51,6 +51,7 @@
     <xs:attribute name="verification" type="verification" use="required"/>
     <xs:attribute name="replaces" type="identity"/>
   </xs:complexType>
+  <xs:element name="guidance" type="guidance"/>
   <xs:element name="component-library"><xs:complexType><xs:sequence>
     <xs:element name="class" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
       <xs:element name="guidance" type="guidance" minOccurs="0" maxOccurs="unbounded"/>

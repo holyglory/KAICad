@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            targetNamespace="urn:kicad:automation:structure:1"
-           xmlns="urn:kicad:automation:structure:1" elementFormDefault="qualified">
+           xmlns="urn:kicad:automation:structure:1" xmlns:k="urn:kicad:automation:knowledge:1" elementFormDefault="qualified">
+  <xs:import namespace="urn:kicad:automation:knowledge:1"/>
   <xs:simpleType name="identity"><xs:restriction base="xs:string">
     <xs:pattern value="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/>
   </xs:restriction></xs:simpleType>
@@ -12,6 +13,17 @@
   <xs:simpleType name="role"><xs:restriction base="xs:string">
     <xs:enumeration value="Intent"/><xs:enumeration value="Interpretation"/><xs:enumeration value="Realization"/>
   </xs:restriction></xs:simpleType>
+  <xs:simpleType name="direction"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unspecified"/><xs:enumeration value="FirstToSecond"/>
+    <xs:enumeration value="SecondToFirst"/><xs:enumeration value="Bidirectional"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="port-side"><xs:restriction base="xs:string">
+    <xs:enumeration value="Left"/><xs:enumeration value="Right"/>
+    <xs:enumeration value="Top"/><xs:enumeration value="Bottom"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="point">
+    <xs:attribute name="x-nm" type="xs:long" use="required"/><xs:attribute name="y-nm" type="xs:long" use="required"/>
+  </xs:complexType>
   <xs:simpleType name="strength"><xs:restriction base="xs:string">
     <xs:enumeration value="Requirement"/><xs:enumeration value="Preference"/><xs:enumeration value="Information"/>
   </xs:restriction></xs:simpleType>
@@ -38,6 +50,7 @@
   <xs:element name="structure"><xs:complexType><xs:sequence>
     <xs:element name="blocks"><xs:complexType><xs:sequence>
       <xs:element name="block" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="purpose" type="xs:string" minOccurs="0"/>
         <xs:element name="component" type="reference" minOccurs="0" maxOccurs="unbounded"/>
       </xs:sequence><xs:attribute name="id" type="identity" use="required"/>
         <xs:attribute name="name" type="xs:string" use="required"/><xs:attribute name="parent" type="identity"/>
@@ -56,6 +69,7 @@
       </xs:sequence><xs:attribute name="id" type="identity" use="required"/>
         <xs:attribute name="first-port" type="identity" use="required"/>
         <xs:attribute name="second-port" type="identity" use="required"/><xs:attribute name="kind" type="kind" use="required"/>
+        <xs:attribute name="direction" type="direction"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
     <xs:element name="statements"><xs:complexType><xs:sequence>
@@ -95,6 +109,36 @@
         <xs:attribute name="change" type="component-reference-change" use="required"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="properties" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="property" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element ref="k:guidance"/>
+      </xs:sequence><xs:attribute name="owner" type="identity" use="required"/></xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="presentation" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="blocks"><xs:complexType><xs:sequence>
+        <xs:element name="block" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+          <xs:attribute name="ref" type="identity" use="required"/>
+          <xs:attribute name="x-nm" type="xs:long" use="required"/><xs:attribute name="y-nm" type="xs:long" use="required"/>
+          <xs:attribute name="width-nm" type="xs:long" use="required"/><xs:attribute name="height-nm" type="xs:long" use="required"/>
+          <xs:attribute name="locked" type="xs:boolean"/>
+          <xs:attribute name="fill-rgb"><xs:simpleType><xs:restriction base="xs:unsignedInt"><xs:maxInclusive value="16777215"/></xs:restriction></xs:simpleType></xs:attribute>
+        </xs:complexType></xs:element>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="ports"><xs:complexType><xs:sequence>
+        <xs:element name="port" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+          <xs:attribute name="ref" type="identity" use="required"/><xs:attribute name="side" type="port-side" use="required"/>
+          <xs:attribute name="offset-nm" type="xs:long" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="connections"><xs:complexType><xs:sequence>
+        <xs:element name="connection" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+          <xs:element name="point" type="point" minOccurs="0" maxOccurs="unbounded"/>
+          <xs:element name="label" type="point" minOccurs="0"/>
+        </xs:sequence><xs:attribute name="ref" type="identity" use="required"/><xs:attribute name="locked" type="xs:boolean"/></xs:complexType></xs:element>
+      </xs:sequence></xs:complexType></xs:element>
+    </xs:sequence><xs:attribute name="coordinate-system" type="xs:string" use="required" fixed="structural-canvas"/>
+      <xs:attribute name="units" type="xs:string" use="required" fixed="nm"/>
+    </xs:complexType></xs:element>
   </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>
     <xs:attribute name="id" type="identity" use="required"/>
   </xs:complexType></xs:element>

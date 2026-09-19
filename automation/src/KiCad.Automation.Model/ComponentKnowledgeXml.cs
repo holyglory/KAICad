@@ -77,7 +77,7 @@ public static class ComponentKnowledgeXml
         }
     }
 
-    private static GuidanceStatement ReadStatement(XElement s) => new(Id(s), Text(s, "key"), Text(s, "category"),
+    internal static GuidanceStatement ReadStatement(XElement s) => new(Id(s), Text(s, "key"), Text(s, "category"),
         s.Element(Ns + "text")!.Value, Enum.Parse<GuidanceStrength>(Text(s, "strength")), Text(s, "applicability"),
         s.Elements(Ns + "source").Select(p => new SourceReference(Text(p, "document"), Text(p, "revision"),
             p.Attribute("page") is XAttribute page ? ReadPage(page.Value) : null,
@@ -126,7 +126,7 @@ public static class ComponentKnowledgeXml
         return page;
     }
 
-    private static XElement WriteStatement(GuidanceStatement s) => E("guidance", A("id", s.Id), A("key", s.Key),
+    internal static XElement WriteStatement(GuidanceStatement s) => E("guidance", A("id", s.Id), A("key", s.Key),
         A("category", s.Category), A("strength", s.Strength), A("applicability", s.Applicability), A("verification", s.Verification),
         s.Replaces is Guid target ? A("replaces", target) : null, E("text", s.Text),
         s.ExceptionRationale is string rationale ? E("exception-rationale", rationale) : null,

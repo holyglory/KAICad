@@ -125,7 +125,7 @@ public static class ComponentGuidance
         return new(ordered, replacements, conflicts, quantities);
     }
 
-    private static void ValidateStatement(GuidanceStatement statement, HashSet<Guid> ids)
+    internal static void ValidateStatement(GuidanceStatement statement, HashSet<Guid> ids)
     {
         AddId(statement.Id, ids);
         Required(statement.Key, "Guidance key");

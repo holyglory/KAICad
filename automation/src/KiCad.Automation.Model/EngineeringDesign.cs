@@ -32,7 +32,8 @@ public sealed record EngineeringDesign(Circuit Circuit, StructuralDiagram Struct
         }
         var resolved = new Dictionary<Guid, GuidanceResolution>();
         var owners = new HashSet<Guid>();
-        var localStatements = new HashSet<Guid>(Structure.Statements.Select(s => s.Id));
+        var localStatements = new HashSet<Guid>(Structure.Statements.Select(s => s.Id)
+            .Concat((Structure.Properties ?? []).Select(p => p.Statement.Id)));
         foreach (var binding in ComponentBindings)
         {
             if (!declared.TryGetValue(binding.LibraryId, out var declaration))

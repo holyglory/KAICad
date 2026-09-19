@@ -100,6 +100,7 @@ internal static class ComponentReferenceValidation
         var bindings = design.ComponentBindings.ToLookup(b => b.ComponentInstanceId);
         var structuralIds = design.Structure.Blocks.Select(b => b.Id).Concat(design.Structure.Ports.Select(p => p.Id))
             .Concat(design.Structure.Connections.Select(c => c.Id)).Concat(design.Structure.Statements.Select(s => s.Id))
+            .Concat((design.Structure.Properties ?? []).Select(p => p.Statement.Id))
             .Append(design.Structure.Id).ToHashSet();
         var owners = new HashSet<Guid>();
         var formerNets = (design.Structure.UnresolvedNetBindings ?? []).Select(r => r.FormerNetId).ToHashSet();

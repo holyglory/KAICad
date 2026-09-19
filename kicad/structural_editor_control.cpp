@@ -21,7 +21,7 @@ S::StructuralEditorState state( STRUCTURAL_EDITOR_FRAME& frame )
     S::StructuralEditorState result; *result.mutable_document() = frame.Document();
     result.set_dirty( frame.IsDirty() ); result.set_saving( frame.IsSaving() ); result.set_rendered( frame.HasRendered() );
     result.set_revision( frame.Revision() ); result.set_completed_save_count( frame.CompletedSaveCount() );
-    result.set_last_save_error( frame.LastSaveError() ); return result;
+    result.set_last_save_error( frame.LastSaveError() ); result.set_selected_block_id( frame.SelectedBlockId() ); return result;
 }
 }
 STRUCTURAL_EDITOR_CONTROL::STRUCTURAL_EDITOR_CONTROL( KICAD_MANAGER_FRAME* manager ) : m_manager( manager )
@@ -34,7 +34,7 @@ STRUCTURAL_EDITOR_CONTROL::~STRUCTURAL_EDITOR_CONTROL()
 { Pgm().GetApiServer().DeregisterHandler( this ); }
 bool STRUCTURAL_EDITOR_CONTROL::CloseEditors()
 {
-    for( auto& editor : m_editors ) if( editor && !editor->IsBeingDeleted() && !editor->Close() ) return false;
+    for( auto& editor : m_editors ) if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && !editor->Close() ) return false;
     return true;
 }
 HANDLER_RESULT<S::StructuralEditorState> STRUCTURAL_EDITOR_CONTROL::open( const HANDLER_CONTEXT<S::OpenStructuralEditor>& ctx )
@@ -52,7 +52,7 @@ HANDLER_RESULT<S::StructuralEditorState> STRUCTURAL_EDITOR_CONTROL::open( const 
         || !wxFileName::FileExists( wxString::FromUTF8( request.helper_path() ) )
         || !wxFileName::DirExists( wxString::FromUTF8( request.repository_root() ) ) )
         return failure( kiapi::common::AS_BAD_REQUEST, "An exact supported structural document and compiled helper are required" );
-    for( auto& editor : m_editors ) if( editor && !editor->IsBeingDeleted() && editor->DocumentId() == request.document().document_id() )
+    for( auto& editor : m_editors ) if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == request.document().document_id() )
     {
         if( editor->Document().source_path() != request.document().source_path()
             || editor->Document().source_token() != request.document().source_token() )
@@ -65,6 +65,6 @@ HANDLER_RESULT<S::StructuralEditorState> STRUCTURAL_EDITOR_CONTROL::open( const 
 }
 HANDLER_RESULT<S::StructuralEditorState> STRUCTURAL_EDITOR_CONTROL::read( const HANDLER_CONTEXT<S::ReadStructuralEditor>& ctx )
 {
-    for( auto& editor : m_editors ) if( editor && !editor->IsBeingDeleted() && editor->DocumentId() == ctx.Request.document_id() ) return state( *editor );
+    for( auto& editor : m_editors ) if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == ctx.Request.document_id() ) return state( *editor );
     return failure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified structural document is not open" );
 }

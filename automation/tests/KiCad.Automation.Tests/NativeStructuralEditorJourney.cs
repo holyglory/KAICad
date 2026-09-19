@@ -91,7 +91,27 @@ public sealed partial class NativeSessionTests
             void Key(string key, bool control = false, int? x = null, int? y = null, string title = "Structure") =>
                 NativeKeyboard.SchematicShortcut(display, processId, key, title, control, focusCanvas: x.HasValue,
                     clickFromLeft: x, clickFromTop: y);
-            void Type(string text) { foreach (char character in text) Key(character.ToString()); }
+            void Type(string text, string title = "Structure") { foreach (char character in text) Key(character.ToString(), title: title); }
+            async Task Window(string title, bool visible = true)
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(15));
+                try { while (NativeKeyboard.HasWindow(display, processId, title) != visible) await Task.Delay(50, deadline.Token); }
+                catch (OperationCanceledException)
+                {
+                    await CaptureStructural(display, Path.Combine(evidence, instanceId + "-structural-dialog-timeout.png"), token);
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-structural-dialog-timeout-state.json"), SchematicJson.Formatter.Format(await Read()), token);
+                    throw;
+                }
+            }
+            void AddProperty()
+            {
+                // Use the native focus order: Name -> Purpose -> strength ->
+                // instruction text -> Add custom property. The optional
+                // instruction chooser has just been hidden by Undo.
+                Key("click", x: 180, y: 160);
+                for (int tab = 0; tab < 4; tab++) Key("Tab");
+                Key("Return");
+            }
             async Task Save()
             {
                 ulong previous = (await Read()).CompletedSaveCount;
@@ -149,6 +169,46 @@ public sealed partial class NativeSessionTests
             await Wait(s => s.Document.Diagram.Blocks.Count == originalCount + 1);
             Key("click", x: 334, y: 48); Key("Escape"); Key("click", x: 1200, y: 950);
             Assert.AreEqual(originalCount + 1, (await Read()).Document.Diagram.Blocks.Count);
+
+            int linkCount = (await Read()).Document.Diagram.Connections.Count;
+            Key("click", x: 428, y: 48); Key("click", x: 640, y: 400); Key("click", x: 1040, y: 900);
+            var connected = await Wait(s => s.Document.Diagram.Connections.Count == linkCount + 1);
+            Assert.AreEqual(structure.Ports.Count + 2, connected.Document.Diagram.Ports.Count);
+            Key("z", true);
+            await Wait(s => s.Document.Diagram.Connections.Count == linkCount && s.Document.Diagram.Ports.Count == structure.Ports.Count);
+
+            Key("click", x: 640, y: 400);
+            int instructionCount = (await Read()).Document.Diagram.Statements.Count;
+            Key("click", x: 539, y: 48); Type("Keep this block near the heat sink.");
+            await Save();
+            await Wait(s => s.Document.Diagram.Statements.Count == instructionCount + 1
+                && s.Document.Diagram.Statements.Any(t => t.TargetId == mcu.ToString("D") && t.Text == "Keep this block near the heat sink."));
+            Key("click", x: 1050, y: 960); Key("z", true); Key("z", true);
+            await Wait(s => s.Document.Diagram.Statements.Count == instructionCount);
+
+            Key("click", x: 640, y: 400);
+            await Wait(s => s.SelectedBlockId == mcu.ToString("D"));
+            AddProperty();
+            await Window("Add custom property");
+            Type("Routing", "Add custom property"); Key("Tab", title: "Add custom property");
+            Type("Prefer short connections.", "Add custom property");
+            await CaptureStructural(display, Path.Combine(evidence, instanceId + "-structural-property-dialog.png"), token);
+            // Invoke the visible OK button rather than assuming the next
+            // tab stop is the affirmative button on every native platform.
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Add custom property", false, false,
+                clickFromRight: 60, clickFromBottom: 25);
+            await Window("Add custom property", false);
+            await Wait(s => s.Document.Diagram.Properties.Any(p => p.OwnerId == mcu.ToString("D") && p.Key == "Routing" && p.Text == "Prefer short connections."));
+            await Save();
+            var withProperty = EngineeringDesignXml.Read(await File.ReadAllTextAsync(source, token), []);
+            Assert.AreEqual("Prefer short connections.", withProperty.Structure.Properties!.Single().Statement.Text);
+            AddProperty(); await Window("Add custom property");
+            Type("Discard this", "Add custom property"); Key("Escape", title: "Add custom property");
+            await Window("Add custom property", false);
+            Assert.AreEqual(1, (await Read()).Document.Diagram.Properties.Count);
+            Key("click", x: 1050, y: 960); Key("z", true);
+            await Wait(s => s.Document.Diagram.Properties.Count == 0);
+
             await Save();
             string savedBytes = await File.ReadAllTextAsync(source, token);
             Key("z", true); await Wait(s => s.Document.Diagram.Blocks.Count == originalCount);

@@ -118,6 +118,7 @@ STRUCTURAL_EDITOR_FRAME::STRUCTURAL_EDITOR_FRAME( wxWindow* parent, const S::Str
     CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &STRUCTURAL_EDITOR_FRAME::mouseDown, this );
+    m_canvas->Bind( wxEVT_LEFT_DCLICK, &STRUCTURAL_EDITOR_FRAME::mouseDown, this );
     m_canvas->Bind( wxEVT_MOTION, &STRUCTURAL_EDITOR_FRAME::mouseMove, this );
     m_canvas->Bind( wxEVT_LEFT_UP, &STRUCTURAL_EDITOR_FRAME::mouseUp, this );
     m_canvas->Bind( wxEVT_MOUSEWHEEL, [this]( wxMouseEvent& e ) { zoom( e.GetWheelRotation() > 0 ? 1.15 : 1 / 1.15, e.GetPosition() ); } );
@@ -345,8 +346,7 @@ void STRUCTURAL_EDITOR_FRAME::refreshModel()
     }
     m_tree->ExpandAll(); m_updating = false; fillInspector(); m_canvas->Refresh();
     m_toolbar->EnableTool( wxID_UNDO, !m_undo.empty() ); m_toolbar->EnableTool( wxID_REDO, !m_redo.empty() );
-    // Update accelerator admission in the same mutation checkpoint. Waiting
-    // for the idle UI-update event can drop an immediate Undo -> Redo key.
+    // Keep the menu and toolbar state consistent at the mutation checkpoint.
     GetMenuBar()->Enable( wxID_UNDO, !m_undo.empty() ); GetMenuBar()->Enable( wxID_REDO, !m_redo.empty() );
     SetTitle( ( m_dirty ? "*" : "" ) + text( m_document.display_name() ) + _( " — Structure" ) );
 }
@@ -577,5 +577,6 @@ void STRUCTURAL_EDITOR_FRAME::closeEditor( wxCloseEvent& event )
         if( choice == wxCANCEL ) { event.Veto(); return; }
         if( choice == wxYES ) { m_closeAfterSave = true; save(); event.Veto(); return; }
     }
+    m_closing = true;
     Destroy();
 }

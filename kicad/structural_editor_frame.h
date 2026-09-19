@@ -38,10 +38,12 @@ public:
     const kiapi::automation::structure::v1::StructuralEditorDocument& Document() const { return m_document; }
     bool IsDirty() const { return m_dirty; }
     bool IsSaving() const { return m_process != nullptr; }
+    bool IsClosing() const { return m_closing; }
     bool HasRendered() const { return m_rendered; }
     uint64_t Revision() const { return m_revision; }
     uint64_t CompletedSaveCount() const { return m_completedSaveCount; }
     const std::string& LastSaveError() const { return m_lastSaveError; }
+    const std::string& SelectedBlockId() const { return m_selected; }
 
 private:
     enum class MODE { SELECT, ADD_BLOCK, CONNECT };
@@ -108,6 +110,7 @@ private:
     std::string m_stdout, m_stderr;
     long m_helperPid = 0;
     bool m_rendered = false;
+    bool m_closing = false;
     std::vector<std::string> m_instructionIds;
     uint64_t m_completedSaveCount = 0;
     std::string m_lastSaveError;

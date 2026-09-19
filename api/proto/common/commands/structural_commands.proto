@@ -19,4 +19,5 @@ message StructuralEditorState {
   uint64 revision = 5;
   uint64 completed_save_count = 6;
   string last_save_error = 7;
+  string selected_block_id = 8;
 }

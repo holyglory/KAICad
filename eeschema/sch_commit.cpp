@@ -120,6 +120,11 @@ bool SCH_COMMIT::ValidateLibraryCaches( wxString& aFailure )
                 return false;
 
             google::protobuf::util::MessageDifferencer comparer;
+            // Native pin sorting deliberately ignores UUID and can leave equal
+            // sort keys in different orders. These are complete owned objects,
+            // not an ordered design instruction. Treat only this collection as
+            // a multiset; all IDs, properties and duplicate counts remain exact.
+            comparer.TreatAsSet( kiapi::schematic::types::SchematicSymbol::descriptor()->FindFieldByName( "items" ) );
             std::string details;
             comparer.ReportDifferencesToString( &details );
             bool equal = comparer.Compare( cached, placed );

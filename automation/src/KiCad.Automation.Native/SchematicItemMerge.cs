@@ -41,7 +41,7 @@ public static class SchematicItemMerge
         {
             SchematicCachedSymbol? Find(SchematicScreenData state) => state.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
             var b = Find(baseline); var x = Find(xml); var n = Find(native);
-            if (!System.Enum.IsDefined(choice) || Choose(b, x, n, out _))
+            if (!System.Enum.IsDefined(choice) || SchematicLibraryCacheEquivalence.Choose(b, x, n, out _))
                 throw new AutomationException("invalid_sync_resolution", "Choose an existing conflicting cache definition by its exact key.");
             void Set(SchematicScreenData state, SchematicCachedSymbol? value)
             {
@@ -224,7 +224,7 @@ public static class SchematicItemMerge
         {
             var b = cacheBefore.GetValueOrDefault(key); var x = cacheXml.GetValueOrDefault(key);
             var n = cacheNative.GetValueOrDefault(key);
-            if (!Choose(b, x, n, out var selected))
+            if (!SchematicLibraryCacheEquivalence.Choose(b, x, n, out var selected))
                 conflicts.Add(new(null, "cache_definition_changed", Pack(b), Pack(x), Pack(n), key));
             else if (selected is not null) merged.CachedSymbols.Add(selected.Clone());
         }

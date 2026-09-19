@@ -105,10 +105,12 @@ public sealed partial class NativeSessionTests
         }
         var noOp = SchematicFieldLayoutPlanner.Propose(store.Read()!.State, changes, token);
         Assert.IsEmpty(noOp.Operations);
+        Guid manualOccurrence = added.First(s => nativeSymbols[s.Id].Path.Equals(root.SheetPath)).Id;
+        await VerifyManualFieldMoveRoundTrip(client, root, store, designPath, manualOccurrence, evidence, instanceId, processId, display, token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-fields-proof.json"), JsonSerializer.Serialize(new
         { instanceId, operation, fieldCount = changes.Count, publicMcpProposal = true, exactTextAndCircuitPreserved = true,
             renderedFieldBoundsSeparated = true, noPageClipping = true, automaticUndoRedoXml = true, unchangedReplay = true,
-            fullReadabilityQualified = false, manualFieldDragVerified = false, crossPlatformReady = false }), token);
+            fullReadabilityQualified = false, manualFieldDragVerified = true, crossPlatformReady = false }), token);
 
         async Task CheckRendered()
         {

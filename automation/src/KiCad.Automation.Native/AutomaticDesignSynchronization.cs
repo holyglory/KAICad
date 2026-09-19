@@ -3,9 +3,9 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
-public enum AutomaticDesignPhase { Starting, Watching, Applying, InvalidDesign, Paused, Stopped }
+public enum AutomaticDesignPhase { Starting, Watching, Applying, InvalidDesign, Paused, Stopped, WaitingForEditor }
 [Flags]
-internal enum AutomaticDesignSignal { Initial = 1, File = 2, Native = 4, Recovery = 8, Resume = 16 }
+internal enum AutomaticDesignSignal { Initial = 1, File = 2, Native = 4, Recovery = 8, Resume = 16, Heartbeat = 32 }
 internal sealed record AutomaticDesignInput(AutomaticDesignSignal Reasons, DocumentRevision? MinimumRevision = null,
     bool ReattachRequired = false, string? ErrorCode = null, string? ErrorMessage = null);
 public sealed record AutomaticDesignStatus(ulong Sequence, AutomaticDesignPhase Phase, string? RecoveryRevisionToken,
@@ -80,11 +80,13 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
         Queue(new(AutomaticDesignSignal.Resume | AutomaticDesignSignal.Recovery));
     }
 
-    private void Queue(AutomaticDesignInput input)
+    private void Queue(AutomaticDesignInput input, bool wake = true)
     {
         lock (gate)
         {
             if (stopping.IsCancellationRequested) return;
+            if (input.Reasons == AutomaticDesignSignal.Heartbeat && status.Phase != AutomaticDesignPhase.WaitingForEditor)
+                return;
             if (pending is null) pending = input;
             else
             {
@@ -97,7 +99,7 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                     pending.ErrorCode ?? input.ErrorCode ?? (epochChanged ? "native_document_changed" : null),
                     pending.ErrorMessage ?? input.ErrorMessage ?? (epochChanged ? "Native document identity changed; reattach the saved design." : null));
             }
-            ready.Writer.TryWrite(0);
+            if (wake) ready.Writer.TryWrite(0);
         }
     }
 
@@ -176,6 +178,16 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                     Publish(AutomaticDesignPhase.Watching, complete.RevisionToken, operation, false, null, null);
                 }
                 catch (OperationCanceledException) when (stopping.IsCancellationRequested) { throw; }
+                catch (NativeApiException error) when (error.Status == 7)
+                {
+                    // AS_BUSY rejects observation before serializing staged geometry.
+                    // Retain this input, but do not schedule an immediate retry. A native
+                    // heartbeat also wakes cancellation paths that create no new revision.
+                    // The executor's journal retains any already-issued operation identity.
+                    Queue(input, wake: false);
+                    Publish(AutomaticDesignPhase.WaitingForEditor, Inspect().RecoveryRevisionToken,
+                        operation, false, "native_busy", error.Message);
+                }
                 catch (Exception error)
                 {
                     string code = error is AutomationException known ? known.Code : error is NativeApiException native

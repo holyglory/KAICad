@@ -101,7 +101,14 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var delivery = await native.ReceiveAsync(deadline.Token);
-                if (delivery.Disposition is NativeEventDisposition.Heartbeat or NativeEventDisposition.Duplicate) continue;
+                if (delivery.Disposition == NativeEventDisposition.Duplicate) continue;
+                if (delivery.Disposition == NativeEventDisposition.Heartbeat)
+                {
+                    // The serial owner ignores these unless it is waiting for a busy
+                    // editor. Ordinary heartbeats never request a design snapshot.
+                    await inputs.Writer.WriteAsync(new(AutomaticDesignSignal.Heartbeat), stopping.Token);
+                    continue;
+                }
                 var saved = Read(); var commit = delivery.Event.SchematicCommit;
                 if (commit is not null)
                 {

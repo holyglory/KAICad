@@ -8,6 +8,68 @@ namespace KiCad.Automation.Tests;
 public sealed class AutomaticDesignSynchronizationTests
 {
     [TestMethod]
+    public async Task BusyObservationWaitsForAnEventAndIdleHeartbeatsDoNotRefreshDesigns()
+    {
+        using var driver = new Driver { RefreshError = new NativeApiException(7, "native edit in progress") };
+        await using var session = new AutomaticDesignSynchronization(driver);
+        var waiting = await Until(session, s => s.Phase == AutomaticDesignPhase.WaitingForEditor);
+        Assert.AreEqual("native_busy", waiting.ErrorCode);
+        Assert.AreEqual(1, driver.RefreshCount); Assert.AreEqual(0, driver.Applies);
+        await driver.ObservedReasons.Reader.ReadAsync();
+        driver.RefreshError = null;
+        driver.Inputs.Writer.TryWrite(new(AutomaticDesignSignal.Heartbeat));
+        await Until(session, s => s.Phase == AutomaticDesignPhase.Watching);
+        Assert.AreEqual(2, driver.RefreshCount); Assert.AreEqual(1, driver.Applies);
+        await driver.ObservedReasons.Reader.ReadAsync();
+        driver.Inputs.Writer.TryWrite(new(AutomaticDesignSignal.Heartbeat));
+        driver.Inputs.Writer.TryWrite(new(AutomaticDesignSignal.File));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.AreEqual(AutomaticDesignSignal.File, await driver.ObservedReasons.Reader.ReadAsync(deadline.Token));
+        Assert.AreEqual(3, driver.RefreshCount);
+    }
+
+    [TestMethod]
+    public async Task BusyPendingOperationKeepsItsIdentityAndWaitCanBeStopped()
+    {
+        using var fixture = new DesignPublicationRecoveryTests.Fixture();
+        var pending = fixture.Store.Save(fixture.Saved.State with { PendingPublication = fixture.Intent with
+            { RequestedRecoveryRevisionToken = fixture.Saved.RevisionToken } }, fixture.Saved.RevisionToken);
+        using var driver = new Driver(fixture.Store) { ApplyError = new NativeApiException(7, "busy") };
+        await using var session = new AutomaticDesignSynchronization(driver);
+        var waiting = await Until(session, s => s.Phase == AutomaticDesignPhase.WaitingForEditor);
+        Assert.AreEqual(fixture.Intent.OperationId, waiting.OperationId);
+        Assert.AreEqual(pending.RevisionToken, fixture.Store.Read()!.RevisionToken);
+        driver.Inputs.Writer.TryWrite(new(AutomaticDesignSignal.Heartbeat));
+        await Until(session, s => s.Phase == AutomaticDesignPhase.WaitingForEditor && driver.Applies == 2);
+        Assert.AreEqual(fixture.Intent.OperationId, driver.LastOperation);
+        Assert.AreEqual(fixture.Saved.RevisionToken, driver.LastRequest);
+        Assert.AreEqual(2, driver.Applies);
+        Assert.AreEqual(pending.RevisionToken, fixture.Store.Read()!.RevisionToken,
+            "A still-busy retry must not fabricate completion or discard a pending receipt.");
+        await session.DisposeAsync();
+        Assert.AreEqual(pending.RevisionToken, fixture.Store.Read()!.RevisionToken);
+
+        using var busyDriver = new Driver { RefreshError = new NativeApiException(7, "busy") };
+        await using var busy = new AutomaticDesignSynchronization(busyDriver);
+        await Until(busy, s => s.Phase == AutomaticDesignPhase.WaitingForEditor);
+        await busy.DisposeAsync();
+        Assert.IsTrue(busyDriver.Disposed);
+        Assert.AreEqual(AutomaticDesignPhase.Stopped, busy.Inspect().Phase);
+    }
+
+    [TestMethod]
+    [DataRow(3)]
+    [DataRow(6)]
+    public async Task NonBusyNativeErrorsStillPause(int status)
+    {
+        using var driver = new Driver { RefreshError = new NativeApiException(status, "not a temporary edit") };
+        await using var session = new AutomaticDesignSynchronization(driver);
+        var paused = await Until(session, s => s.Phase == AutomaticDesignPhase.Paused);
+        Assert.AreEqual("native_status_" + status, paused.ErrorCode);
+        Assert.AreEqual(0, driver.Applies);
+    }
+
+    [TestMethod]
     public async Task InitialSynchronizationAndSettledFeedbackDoNotRepeatApplication()
     {
         using var driver = new Driver();
@@ -88,6 +150,8 @@ public sealed class AutomaticDesignSynchronizationTests
         {
             Assert.AreNotEqual(AutomaticDesignPhase.Stopped, current.Phase, current.ErrorMessage);
             current = await session.WaitAsync(current.Sequence, timeout.Token);
+            if (!accept(current) && current.Phase == AutomaticDesignPhase.Paused)
+                Assert.Fail("Unexpected synchronization pause: " + current.ErrorCode + ": " + current.ErrorMessage);
         }
         return current;
     }
@@ -98,10 +162,12 @@ public sealed class AutomaticDesignSynchronizationTests
         public DesignRecoveryStore Store { get; }
         internal Channel<AutomaticDesignInput> Inputs { get; } = Channel.CreateUnbounded<AutomaticDesignInput>();
         internal Channel<int> Refreshes { get; } = Channel.CreateUnbounded<int>();
+        internal Channel<AutomaticDesignSignal> ObservedReasons { get; } = Channel.CreateUnbounded<AutomaticDesignSignal>();
         internal int Applies, RefreshCount;
         internal Guid LastOperation;
         internal string? LastRequest;
         internal Exception? ApplyError;
+        internal Exception? RefreshError;
         internal bool Disposed;
         internal Driver(DesignRecoveryStore? store = null)
         {
@@ -112,7 +178,9 @@ public sealed class AutomaticDesignSynchronizationTests
         public Task<AutomaticDesignInput> ReceiveAsync(CancellationToken token) => Inputs.Reader.ReadAsync(token).AsTask();
         public Task<StoredDesignRecovery> RefreshAsync(AutomaticDesignInput input, CancellationToken token)
         {
-            token.ThrowIfCancellationRequested(); Refreshes.Writer.TryWrite(++RefreshCount); return Task.FromResult(Store.Read()!);
+            token.ThrowIfCancellationRequested(); Refreshes.Writer.TryWrite(++RefreshCount);
+            ObservedReasons.Writer.TryWrite(input.Reasons);
+            return RefreshError is { } error ? Task.FromException<StoredDesignRecovery>(error) : Task.FromResult(Store.Read()!);
         }
         public Task<SchematicSynchronizationExecution> ApplyAsync(StoredDesignRecovery saved, Guid operationId, string requestRevisionToken, CancellationToken token)
         {

@@ -135,7 +135,9 @@ public sealed partial class NativeSessionTests
                     }
                 };
                 var observation = await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token);
-                Assert.IsFalse(observation.IsError == true, JsonSerializer.Serialize(observation));
+                if (observation.IsError == true)
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + label + "-observation-error.json"), JsonSerializer.Serialize(observation), token);
+                Assert.IsFalse(observation.IsError == true, "Native multi-view observation failed; its exact response is retained.");
                 var payload = JsonSerializer.SerializeToElement(observation);
                 var state = payload.GetProperty("structuredContent").GetProperty("observation");
                 Assert.AreEqual(before.ViewRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), state.GetProperty("viewRevision").GetString());
@@ -163,6 +165,18 @@ public sealed partial class NativeSessionTests
                 viewArguments["documentId"] = graph.DocumentId.ToString("D");
                 viewArguments["views"] = new[] { new { viewId = "invalid", pixelWidth = 1, pixelHeight = 600 } };
                 Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                viewArguments["views"] = new[] { new { viewId = "invalid", pixelWidth = 640, pixelHeight = 480,
+                    viewport = new { x = 0.0, y = 0.0, width = -1.0, height = 300.0 } } };
+                Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                viewArguments["views"] = new[] { new { viewId = "duplicate", pixelWidth = 640, pixelHeight = 480 }, new { viewId = "duplicate", pixelWidth = 640, pixelHeight = 480 } };
+                Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                using (var cancelledView = new CancellationTokenSource())
+                {
+                    cancelledView.Cancel();
+                    await Assert.ThrowsAsync<OperationCanceledException>(() => native.InvokeAsync<P.ObserveRecursiveDiagramEditor, P.RecursiveDiagramObservation>(
+                        new() { DocumentId = graph.DocumentId.ToString("D"), ExpectedSourceToken = before.SourceToken, ExpectedViewRevision = before.ViewRevision,
+                            Views = { new P.RecursiveDiagramViewRequest { ViewId = "cancelled", PixelWidth = 640, PixelHeight = 480 } } }, cancelledView.Token));
+                }
                 Assert.AreEqual(before, await Read());
             }
             await ObserveViews("saved-root", false);
@@ -519,6 +533,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements, newGraph.Requirements(newSelection).Requirements);
             Assert.HasCount(2, newGraph.Inspect(newSelection).LocalDiagram.Interfaces);
             Assert.IsEmpty(newGraph.Inspect(newSelection).Children);
+            await ObserveViews("empty-implementation", true, newSelection);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-new-implementation.png"), token);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 118, clickFromTop: 45);

@@ -2960,6 +2960,29 @@ returns a typed historical draft without writing the file or replacing an open
 window draft. The explicit context/source selections and observed file token
 remain distinct from choosing an implementation or saving a new revision.
 
+Block revisions also retain independent definition choices: purpose, type,
+manufacturer, family, model, orderable part, package and knowledge class. Each
+choice can be unspecified, explicitly unknown (with a reason), a candidate list,
+or selected. Strength, applicability, verification and source references remain
+attached to that choice. A package can therefore be constrained before a model
+is chosen; no completion percentage or invented electrical value is required.
+
+`kicad_diagram_definition_set` updates only these choices on an exact block path
+and saved-source token. It preserves requirement text, connections, sibling
+blocks and previous revisions; an unchanged definition produces no file churn.
+`kicad_diagram_definition_guidance` reads explicitly supplied repository-relative
+knowledge-library files and resolves each class against its declared identity
+and revision. Candidate classes stay separate. Missing libraries, revisions or
+classes remain explicit, and returned hashes identify the actual library bytes.
+Resolving a class does not fabricate a physical component or claim compatibility.
+
+Definition fields round-trip through XML and shared messages and survive native
+Save/Decline and history restoration. The first native preservation run is
+`t20260920T081144Z-d90a1f`; combined live guidance qualification is still in progress.
+There are no new raw-XML forms or component-choice controls in this increment.
+Exact native realization, physical allocation and component-selection UI remain
+separate unfinished work; these fields alone do not generate a schematic.
+
 `kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
 Read `kicad_diagram_state` first, then supply that document's `sourceToken` and
 `viewRevision`. Each view names its pixel dimensions and may select an exact

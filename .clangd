@@ -1,0 +1,4 @@
+CompileFlags:
+  CompilationDatabase: automation/artifacts/native
+Index:
+  Background: Skip

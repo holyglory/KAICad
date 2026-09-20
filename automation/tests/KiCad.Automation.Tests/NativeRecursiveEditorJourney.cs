@@ -380,7 +380,9 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1536, resizeHeight: 1024,
                 observeGeometry: bounds => { Assert.AreEqual(1536, bounds.Width); Assert.AreEqual(1024, bounds.Height); });
             await Wait(s => s.Rendered && !s.Busy && s.ViewRevision > narrowView);
-            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-expanded.png"), token);
+            string expandedCapture = Path.Combine(evidence, instanceId + "-recursive-expanded.png");
+            await CaptureRecursive(display, expandedCapture, token);
+            await VerifyExpandedCanvasContent(expandedCapture, token);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);
@@ -401,5 +403,34 @@ public sealed partial class NativeSessionTests
         var stdout = process.StandardOutput.ReadToEndAsync(token); var stderr = process.StandardError.ReadToEndAsync(token);
         try { await process.WaitForExitAsync(token); Assert.AreEqual(0, process.ExitCode, await stderr); await stdout; }
         finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
+    }
+
+    private static async Task VerifyExpandedCanvasContent(string path, CancellationToken token)
+    {
+        // This acceptance fixture has two visible peer blocks. Inspect only its
+        // canvas, excluding inspector, toolbar, other windows and the cursor at Save.
+        var start = new ProcessStartInfo("ffmpeg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string arg in new[] { "-nostdin", "-loglevel", "error", "-i", path, "-vf", "crop=1000:760:20:180",
+            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1" }) start.ArgumentList.Add(arg);
+        using var process = Process.Start(start)!;
+        using var pixels = new MemoryStream();
+        var copy = process.StandardOutput.BaseStream.CopyToAsync(pixels, token); var diagnostics = process.StandardError.ReadToEndAsync(token);
+        try
+        {
+            await process.WaitForExitAsync(token); await copy; Assert.AreEqual(0, process.ExitCode, await diagnostics);
+            byte[] image = pixels.ToArray(); Assert.AreEqual(1000 * 760 * 3, image.Length);
+            int ink = CountCanvasInk(image);
+            Assert.IsTrue(ink > 250, $"The known populated diagram rendered as a blank canvas after expansion ({ink} differing pixels).");
+        }
+        finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
+    }
+
+    internal static int CountCanvasInk(byte[] pixels)
+    {
+        if (pixels.Length < 3 || pixels.Length % 3 != 0) throw new ArgumentException("Supply RGB pixels for the declared canvas region.");
+        int count = 0;
+        for (int i = 0; i < pixels.Length; i += 3)
+            if (Math.Abs(pixels[i] - pixels[0]) + Math.Abs(pixels[i + 1] - pixels[1]) + Math.Abs(pixels[i + 2] - pixels[2]) > 30) ++count;
+        return count;
     }
 }

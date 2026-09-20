@@ -6,6 +6,24 @@ namespace KiCad.Automation.Tests;
 public sealed class NativeKeyboardTests
 {
     [TestMethod]
+    public void PopulatedCanvasGuardRejectsBlankLightAndDarkFramesWithoutTreatingMinorNoiseAsDrawing()
+    {
+        foreach (byte background in new byte[] { 45, 255 })
+        {
+            byte[] blank = Enumerable.Repeat(background, 32 * 32 * 3).ToArray();
+            Assert.AreEqual(0, NativeSessionTests.CountCanvasInk(blank));
+            byte[] noise = (byte[])blank.Clone(); noise[9] = (byte)(background - 1);
+            Assert.AreEqual(0, NativeSessionTests.CountCanvasInk(noise));
+            byte[] drawing = (byte[])blank.Clone();
+            for (int pixel = 100; pixel < 500; ++pixel)
+                for (int channel = 0; channel < 3; ++channel) drawing[pixel * 3 + channel] = background == 255 ? (byte)0 : (byte)255;
+            Assert.AreEqual(400, NativeSessionTests.CountCanvasInk(drawing));
+        }
+        Assert.ThrowsExactly<ArgumentException>(() => NativeSessionTests.CountCanvasInk([]));
+        Assert.ThrowsExactly<ArgumentException>(() => NativeSessionTests.CountCanvasInk([0, 1]));
+    }
+
+    [TestMethod]
     public void DragCoordinatesCannotBeSilentlyIgnoredByAClickCommand()
     {
         NativeKeyboard.ValidateDragArguments("drag", 10, 20);

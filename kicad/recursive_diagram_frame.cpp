@@ -73,7 +73,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_implementation = new wxButton( diagram, wxID_ANY, _( "Implementation" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_implementation->SetName( "RecursiveImplementation" ); pathRow->Add( m_implementation, 0, wxLEFT, FromDIP( 12 ) );
     main->Add( pathRow, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
-    m_canvas = new wxPanel( diagram, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS | wxBORDER_NONE );
+    m_canvas = new wxPanel( diagram, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS | wxBORDER_NONE | wxFULL_REPAINT_ON_RESIZE );
     m_canvas->SetName( "RecursiveDiagramCanvas" );
     m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT ); main->Add( m_canvas, 1, wxEXPAND ); diagram->SetSizer( main );
     auto* inspector = new wxPanel( splitter ); inspector->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
@@ -133,7 +133,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     splitter->SplitVertically( diagram, inspector, FromDIP( 1100 ) );
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
-    m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { m_rendered = false; ++m_viewRevision; updateImplementationLabel(); event.Skip(); } );
+    m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
+    { m_rendered = false; ++m_viewRevision; updateImplementationLabel(); m_canvas->Refresh(); event.Skip(); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::moveNote, this );

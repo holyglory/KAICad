@@ -14,7 +14,8 @@ public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid H
 public sealed record RecursiveBlockRevision(BlockSelection Selection, Guid? ParentRevisionId,
     string Name, Guid RequirementRevisionId, ImmutableArray<BlockSelection> Children,
     RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null, BlockLocalDiagram? Diagram = null,
-    BlockDefinition? Definition = null, BlockComponentBindings? ComponentBindings = null)
+    BlockDefinition? Definition = null, BlockComponentBindings? ComponentBindings = null,
+    BlockPhysicalAllocation? PhysicalAllocation = null)
 {
     public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
     public BlockDefinition EffectiveDefinition => Definition ?? BlockDefinition.Empty;
@@ -26,7 +27,8 @@ public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
 
 public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
     ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null,
-    BlockLocalDiagram? Diagram = null, BlockDefinition? Definition = null, BlockComponentBindings? ComponentBindings = null)
+    BlockLocalDiagram? Diagram = null, BlockDefinition? Definition = null, BlockComponentBindings? ComponentBindings = null,
+    BlockPhysicalAllocation? PhysicalAllocation = null)
 {
     public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
     public BlockDefinition EffectiveDefinition => Definition ?? BlockDefinition.Empty;
@@ -144,6 +146,7 @@ public sealed class RecursiveBlockGraph
             revision.LocalDiagram.Validate();
             revision.EffectiveDefinition.Validate();
             revision.EffectiveComponentBindings.Validate();
+            revision.PhysicalAllocation?.Validate();
             foreach (var boundary in revision.LocalDiagram.Interfaces)
             {
                 if (identities.Contains(boundary.Id) || (interfaceOwners.TryGetValue(boundary.Id, out var owner) && owner != revision.Selection.BlockId))
@@ -251,7 +254,8 @@ public sealed class RecursiveBlockGraph
         var requirements = Requirements(selection);
         return new(selection, revision.Name, revision.Children,
             new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty),
-            Diagram: revision.Diagram, Definition: revision.Definition, ComponentBindings: revision.ComponentBindings);
+            Diagram: revision.Diagram, Definition: revision.Definition, ComponentBindings: revision.ComponentBindings,
+            PhysicalAllocation: revision.PhysicalAllocation);
     }
 
     /// <summary>Restore old contents into a draft, not the selected hierarchy or saved heads.</summary>
@@ -263,6 +267,7 @@ public sealed class RecursiveBlockGraph
             || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             || !draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings)
+            || !SamePhysical(draft.PhysicalAllocation, baseline.PhysicalAllocation)
             || draft.Requirements.Requirements != Requirements(draft.Baseline).Requirements)
             throw new AutomationException("dirty_block_draft", "Save or explicitly decline the existing draft before restoring a whole diagram.");
         var previous = Inspect(source);
@@ -272,7 +277,8 @@ public sealed class RecursiveBlockGraph
         foreach (var field in Enum.GetValues<DiagramRequirementField>())
             fields = _requirements[source.StateId].RestoreField(fields, previous.RequirementRevisionId, field);
         return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields,
-            RestoredFrom = source, Diagram = previous.Diagram, Definition = previous.Definition, ComponentBindings = previous.ComponentBindings };
+            RestoredFrom = source, Diagram = previous.Diagram, Definition = previous.Definition, ComponentBindings = previous.ComponentBindings,
+            PhysicalAllocation = previous.PhysicalAllocation };
     }
 
     /// <summary>Atomically produces a new in-memory root and immutable history. A failed
@@ -307,11 +313,12 @@ public sealed class RecursiveBlockGraph
             && draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             && draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             && draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings)
+            && SamePhysical(draft.PhysicalAllocation, baseline.PhysicalAllocation)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return Select(expectedRoot, path, draft.Baseline, ancestorRevisionIds, origin);
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
             baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin,
-            draft.RestoredFrom, draft.Diagram, draft.Definition, draft.ComponentBindings);
+            draft.RestoredFrom, draft.Diagram, draft.Definition, draft.ComponentBindings, draft.PhysicalAllocation);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
         return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin);
     }
@@ -372,7 +379,7 @@ public sealed class RecursiveBlockGraph
                         Origin = n.Target.UnresolvedReason is null ? origin : n.Origin }).ToImmutableArray());
         var initial = new RecursiveBlockRevision(selection, null, original.Name, requirementRevisionId,
             emptyInterior ? [] : original.Children, origin, Diagram: diagram, Definition: original.Definition,
-            ComponentBindings: original.ComponentBindings);
+            ComponentBindings: original.ComponentBindings, PhysicalAllocation: original.PhysicalAllocation);
         return AddImplementation(state, initial, history);
     }
 
@@ -593,5 +600,7 @@ public sealed class RecursiveBlockGraph
         try { XmlConvert.VerifyXmlChars(text); }
         catch (XmlException) { throw Invalid("Block text cannot be preserved in XML."); }
     }
+    private static bool SamePhysical(BlockPhysicalAllocation? left, BlockPhysicalAllocation? right) => left is null
+        ? right is null : right is not null && left.SameContents(right);
     private static AutomationException Invalid(string message) => new("invalid_recursive_block_graph", message);
 }

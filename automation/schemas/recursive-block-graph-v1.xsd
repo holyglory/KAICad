@@ -21,6 +21,12 @@
   <xs:simpleType name="implementation-change-kind"><xs:restriction base="xs:string">
     <xs:enumeration value="Rename"/><xs:enumeration value="Archive"/><xs:enumeration value="Restore"/>
   </xs:restriction></xs:simpleType>
+  <xs:simpleType name="physical-allocation-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Component"/><xs:enumeration value="Board"/><xs:enumeration value="BoardStack"/><xs:enumeration value="Assembly"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="physical-allocation-state"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unknown"/><xs:enumeration value="Partial"/><xs:enumeration value="Resolved"/>
+  </xs:restriction></xs:simpleType>
   <xs:simpleType name="annotation-target"><xs:restriction base="xs:string">
     <xs:enumeration value="Canvas"/><xs:enumeration value="Block"/><xs:enumeration value="Connection"/>
   </xs:restriction></xs:simpleType>
@@ -104,6 +110,19 @@
             <xs:attribute name="id" type="h:identity" use="required"/>
           </xs:complexType></xs:element>
         </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="physical-allocation" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="target" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+            <xs:attribute name="id" type="h:identity" use="required"/>
+            <xs:attribute name="kind" type="physical-allocation-kind" use="required"/>
+            <xs:attribute name="name" type="xs:string" use="required"/>
+            <xs:attribute name="reference" type="xs:string"/>
+            <xs:attribute name="repository-path" type="xs:string"/>
+            <xs:attribute name="parent" type="h:identity"/>
+          </xs:complexType></xs:element>
+          <xs:element name="unknown-reason" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+          <xs:attribute name="state" type="physical-allocation-state" use="required"/>
+        </xs:complexType></xs:element>
       </xs:sequence>
         <xs:attribute name="id" type="h:identity" use="required"/>
         <xs:attribute name="block" type="h:identity" use="required"/>

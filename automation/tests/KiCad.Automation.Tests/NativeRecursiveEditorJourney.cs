@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using ModelContextProtocol.Client;
@@ -1045,6 +1046,42 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("Keep mapped components reachable.", nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.Routing);
             Assert.AreEqual(mappedGraph.Requirements(mappedGraph.SelectedRoot).Requirements.General,
                 nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.General);
+            var beforePhysical = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
+            Assert.IsFalse(beforePhysical.IsError == true);
+            var beforePhysicalData = JsonSerializer.SerializeToElement(beforePhysical).GetProperty("structuredContent");
+            var physical = new BlockPhysicalAllocation(PhysicalAllocationState.Partial,
+                [new PhysicalAllocationTarget(Guid.NewGuid(), PhysicalAllocationKind.Board, "Main controller PCB", "board:main", "boards/main.kicad_pcb")],
+                "Power and telemetry boards remain to be allocated.");
+            var physicalArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = beforePhysicalData.GetProperty("sourceToken").GetString(),
+                ["expectedRoot"] = nativeSavedComponents.SelectedRoot, ["blockPath"] = new[] { nativeSavedComponents.SelectedRoot },
+                ["allocation"] = JsonSerializer.SerializeToElement(physical, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+                { Converters = { new JsonStringEnumConverter() } }), ["operationId"] = Guid.NewGuid(), ["actor"] = "Compatible allocation agent fixture"
+            };
+            var physicalResult = await client.CallToolAsync("kicad_diagram_physical_allocation_set", physicalArguments, cancellationToken: token);
+            if (physicalResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-physical-allocation-error.json"), JsonSerializer.Serialize(physicalResult), token);
+            Assert.IsFalse(physicalResult.IsError == true);
+            var physicalData = JsonSerializer.SerializeToElement(physicalResult).GetProperty("structuredContent");
+            Assert.IsTrue(physicalData.GetProperty("changed").GetBoolean());
+            string physicalToken = physicalData.GetProperty("sourceToken").GetString()!;
+            var physicalSelection = physicalData.GetProperty("selection").Deserialize<BlockSelection>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var physicalReadArguments = new Dictionary<string, object?>(arguments)
+            { ["expectedSourceToken"] = physicalToken, ["selection"] = physicalSelection };
+            var physicalRead = await client.CallToolAsync("kicad_diagram_physical_allocation", physicalReadArguments, cancellationToken: token);
+            Assert.IsFalse(physicalRead.IsError == true);
+            var physicalReadData = JsonSerializer.SerializeToElement(physicalRead).GetProperty("structuredContent");
+            Assert.AreEqual("Partial", physicalReadData.GetProperty("allocation").GetProperty("state").GetString());
+            Assert.AreEqual("Main controller PCB", physicalReadData.GetProperty("allocation").GetProperty("targets")[0].GetProperty("name").GetString());
+            physicalArguments["expectedSourceToken"] = physicalToken; physicalArguments["expectedRoot"] = physicalSelection;
+            physicalArguments["blockPath"] = new[] { physicalSelection };
+            physicalArguments["operationId"] = Guid.NewGuid();
+            var physicalNoOp = await client.CallToolAsync("kicad_diagram_physical_allocation_set", physicalArguments, cancellationToken: token);
+            Assert.IsFalse(physicalNoOp.IsError == true);
+            Assert.IsFalse(JsonSerializer.SerializeToElement(physicalNoOp).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
+            var savedPhysical = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual("Main controller PCB", savedPhysical.Inspect(physicalSelection).PhysicalAllocation!.Targets[0].Name);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-physical-allocation.json"), JsonSerializer.Serialize(physicalRead), token);
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

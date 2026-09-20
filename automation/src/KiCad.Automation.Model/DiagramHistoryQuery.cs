@@ -12,7 +12,7 @@ public sealed record DiagramHistoryPage(Guid DocumentId, BlockSelection Context,
 }
 
 public enum DiagramHistoryChangeKind { Added, Removed, Changed, Reordered }
-public enum DiagramHistoryChangeCategory { Name, Requirement, Block, Connection, Interface, Comment, Definition }
+public enum DiagramHistoryChangeCategory { Name, Requirement, Block, Connection, Interface, Comment, Definition, PhysicalAllocation }
 public sealed record DiagramHistoryChange(DiagramHistoryChangeCategory Category, DiagramHistoryChangeKind Kind,
     Guid ObjectId, string Name, DiagramRequirementField? Field = null);
 public sealed record DiagramHistoryComparison(Guid DocumentId, BlockSelection Context, BlockSelection Inspected,
@@ -71,6 +71,8 @@ public static class DiagramHistoryQuery
             changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId, "Knowledge class"));
         if (!before.EffectiveComponentBindings.SameContents(after.EffectiveComponentBindings))
             changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId, "Components"));
+        if (!SamePhysical(before.PhysicalAllocation, after.PhysicalAllocation))
+            changes.Add(new(DiagramHistoryChangeCategory.PhysicalAllocation, DiagramHistoryChangeKind.Changed, context.BlockId, "Physical allocation"));
         CompareItems(before.Children, after.Children, DiagramHistoryChangeCategory.Block,
             c => c.BlockId, c => graph.Inspect(c).Name, (a, b) => a == b);
         CompareItems(before.LocalDiagram.Connections, after.LocalDiagram.Connections, DiagramHistoryChangeCategory.Connection,
@@ -97,4 +99,7 @@ public static class DiagramHistoryQuery
                 changes.Add(new(category, DiagramHistoryChangeKind.Reordered, context.BlockId, ""));
         }
     }
+
+    private static bool SamePhysical(BlockPhysicalAllocation? left, BlockPhysicalAllocation? right) => left is null
+        ? right is null : right is not null && left.SameContents(right);
 }

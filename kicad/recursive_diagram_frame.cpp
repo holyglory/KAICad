@@ -545,6 +545,7 @@ RECURSIVE_DIAGRAM_FRAME::DRAFT RECURSIVE_DIAGRAM_FRAME::draftFor( const REVISION
     if( item.has_local_diagram() ) *draft.mutable_local_diagram() = item.local_diagram();
     if( item.has_definition() ) *draft.mutable_definition() = item.definition();
     if( item.has_component_bindings() ) *draft.mutable_component_bindings() = item.component_bindings();
+    if( item.has_physical_allocation() ) *draft.mutable_physical_allocation() = item.physical_allocation();
     return draft;
 }
 void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
@@ -564,6 +565,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
         *m_draftView->mutable_local_diagram() = m_draft.local_diagram();
         if( m_draft.has_definition() ) *m_draftView->mutable_definition() = m_draft.definition(); else m_draftView->clear_definition();
         if( m_draft.has_component_bindings() ) *m_draftView->mutable_component_bindings() = m_draft.component_bindings(); else m_draftView->clear_component_bindings();
+        if( m_draft.has_physical_allocation() ) *m_draftView->mutable_physical_allocation() = m_draft.physical_allocation(); else m_draftView->clear_physical_allocation();
     }
     m_updating = true; bool available = m_ready && !m_process && !m_diagramHistoryOpen;
     bool link = !m_connectionId.empty();

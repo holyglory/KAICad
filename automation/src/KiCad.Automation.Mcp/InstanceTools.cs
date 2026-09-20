@@ -82,7 +82,9 @@ public sealed class InstanceTools(InstanceRegistry registry)
             new InstanceCapability("kicad_design_sync_apply", "schematic-design", "compiled-mcp", "registered", "instance epoch, recovery token, operation ID", false),
             new InstanceCapability("kicad_design_candidate_commit", "schematic-design", "compiled-mcp", "registered", "recovery revision token, candidate hash", false),
             new InstanceCapability("kicad_diagram_proposal_publish", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, proposal identity", false),
-            new InstanceCapability("kicad_diagram_proposal_select", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path", false)
+            new InstanceCapability("kicad_diagram_proposal_select", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path", false),
+            new InstanceCapability("kicad_diagram_physical_allocation", "structural-diagram", "compiled-mcp", "registered", "source token, exact block selection", false),
+            new InstanceCapability("kicad_diagram_physical_allocation_set", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path, operation ID", false)
             ,new InstanceCapability("kicad_pcb_drc_start", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document revision, operation ID", false)
             ,new InstanceCapability("kicad_pcb_drc_job", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)
             ,new InstanceCapability("kicad_pcb_drc_cancel", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)

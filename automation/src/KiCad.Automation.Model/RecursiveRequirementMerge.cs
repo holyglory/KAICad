@@ -45,7 +45,8 @@ public sealed class RecursiveRequirementMerge
         if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
             || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
-            || !draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings) || draft.RestoredFrom is not null)
+            || !draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings)
+            || !SamePhysical(draft.PhysicalAllocation, baseline.PhysicalAllocation) || draft.RestoredFrom is not null)
             throw Invalid("structural_draft_requires_comparison", "Keep this draft: its diagram structure or whole-version restoration needs a separate comparison.");
         var pending = new Stack<ImmutableArray<BlockSelection>>(); pending.Push([latest.SelectedRoot]);
         while (pending.TryPop(out var path))
@@ -67,6 +68,9 @@ public sealed class RecursiveRequirementMerge
         }
         throw Invalid("draft_block_no_longer_selected", "This block is no longer in the selected design; retain its draft rather than matching another block by name.");
     }
+
+    private static bool SamePhysical(BlockPhysicalAllocation? left, BlockPhysicalAllocation? right) => left is null
+        ? right is null : right is not null && left.SameContents(right);
 
     public RecursiveRequirementMergeResult Inspect(IEnumerable<DiagramRequirementResolution>? resolutions = null)
     {

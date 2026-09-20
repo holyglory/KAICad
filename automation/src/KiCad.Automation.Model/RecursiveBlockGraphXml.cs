@@ -48,7 +48,8 @@ public static class RecursiveBlockGraphXml
                     r.Diagram is { } diagram ? WriteLocal(diagram) : null,
                     r.Definition is { } definition ? EngineeringXmlText.Parse(BlockDefinitionXml.Write(definition)) : null,
                     r.ComponentBindings is { } bindings ? new XElement(Ns + "component-bindings", bindings.Targets.Select(t =>
-                        new XElement(Ns + "component", Attr("design", t.DesignId), Attr("circuit", t.CircuitId), Attr("id", t.ComponentId)))) : null))),
+                        new XElement(Ns + "component", Attr("design", t.DesignId), Attr("circuit", t.CircuitId), Attr("id", t.ComponentId)))) : null,
+                    r.PhysicalAllocation is { } allocation ? WritePhysicalAllocation(allocation) : null))),
             new XElement(Ns + "requirement-histories", graph.RequirementHistories.OrderBy(h => h.Scope.DesignStateId)
                 .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))),
             graph.ConnectionArchives.IsEmpty ? null : new XElement(Ns + "connection-archives", graph.ConnectionArchives.OrderBy(a => a.OwnerBlockId)
@@ -89,7 +90,8 @@ public static class RecursiveBlockGraphXml
                     r.Element(XName.Get("definition", BlockDefinitionXml.Namespace)) is { } definition
                         ? BlockDefinitionXml.Read(EngineeringXmlText.Render(definition)) : null,
                     r.Element(Ns + "component-bindings") is { } bindings ? new BlockComponentBindings(bindings.Elements(Ns + "component")
-                        .Select(t => new ComponentRealization(Id(t, "design"), Id(t, "circuit"), Id(t, "id"))).ToImmutableArray()) : null));
+                        .Select(t => new ComponentRealization(Id(t, "design"), Id(t, "circuit"), Id(t, "id"))).ToImmutableArray()) : null,
+                    r.Element(Ns + "physical-allocation") is { } allocation ? ReadPhysicalAllocation(allocation) : null));
             var histories = root.Element(Ns + "requirement-histories")!.Elements(XName.Get("requirement-history", DiagramRequirementHistoryXml.Namespace))
                 .Select(h => DiagramRequirementHistoryXml.Read(EngineeringXmlText.Render(h)));
             var archives = root.Element(Ns + "connection-archives")?.Elements(XName.Get("connection-archive", DiagramConnectionArchiveXml.Namespace))
@@ -143,6 +145,25 @@ public static class RecursiveBlockGraphXml
         diagram.Element(Ns + "connections")!.Elements(Ns + "connection").Select(c => new ConnectionSelection(
             Id(c, "connection"), Id(c, "state"), Id(c, "revision"))).ToImmutableArray(),
         diagram.Element(Ns + "annotations")?.Elements(Ns + "annotation").Select(ReadNote).ToImmutableArray() ?? []);
+    private static XElement WritePhysicalAllocation(BlockPhysicalAllocation allocation)
+    {
+        allocation.Validate();
+        return new XElement(Ns + "physical-allocation", new XAttribute("state", allocation.State),
+            allocation.Targets.Select(t => new XElement(Ns + "target", Attr("id", t.Id), new XAttribute("kind", t.Kind),
+                new XAttribute("name", t.Name), t.Reference is { } reference ? new XAttribute("reference", reference) : null,
+                t.RepositoryPath is { } path ? new XAttribute("repository-path", path) : null,
+                t.ParentId is { } parent ? Attr("parent", parent) : null)),
+            allocation.UnknownReason is { } reason ? new XElement(Ns + "unknown-reason", reason) : null);
+    }
+    private static BlockPhysicalAllocation ReadPhysicalAllocation(XElement allocation)
+    {
+        var result = new BlockPhysicalAllocation(Enum.Parse<PhysicalAllocationState>(Text(allocation, "state")),
+            allocation.Elements(Ns + "target").Select(t => new PhysicalAllocationTarget(Id(t, "id"),
+                Enum.Parse<PhysicalAllocationKind>(Text(t, "kind")), Text(t, "name"), (string?)t.Attribute("reference"),
+                (string?)t.Attribute("repository-path"), t.Attribute("parent") is { } parent ? Id(t, "parent") : null)).ToImmutableArray(),
+            allocation.Element(Ns + "unknown-reason")?.Value);
+        result.Validate(); return result;
+    }
     private static XElement WriteNote(DiagramAnnotation note) => new(Ns + "annotation", Attr("id", note.Id),
         new XAttribute("role", note.Role), new XAttribute("units", "diagram-unit"), DiagramRevisionOriginXml.Write(Ns, note.Origin),
         new XElement(Ns + "text", note.Text), new XElement(Ns + "target", new XAttribute("kind", note.Target.Kind),

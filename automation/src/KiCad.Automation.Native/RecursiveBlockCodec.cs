@@ -96,7 +96,8 @@ public static class RecursiveBlockCodec
                 Fields(Need(data.Fields)), restored.ToImmutable()), data.RestoredFrom is { } source ? Selection(source) : null,
             data.LocalDiagram is { } diagram ? Local(diagram) : null,
             data.Definition is { } definition ? Decode(definition) : null,
-            data.ComponentBindings is { } bindings ? Decode(bindings) : null);
+            data.ComponentBindings is { } bindings ? Decode(bindings) : null,
+            data.PhysicalAllocation is { } allocation ? Decode(allocation) : null);
     }
 
     public static P.BlockDraftData Encode(M.RecursiveBlockDraft draft)
@@ -111,6 +112,7 @@ public static class RecursiveBlockCodec
         if (draft.Diagram is { } diagram) result.LocalDiagram = Local(diagram);
         if (draft.Definition is { } definition) result.Definition = Encode(definition);
         if (draft.ComponentBindings is { } bindings) result.ComponentBindings = Encode(bindings);
+        if (draft.PhysicalAllocation is { } allocation) result.PhysicalAllocation = Encode(allocation);
         return result;
     }
 
@@ -128,6 +130,34 @@ public static class RecursiveBlockCodec
         var bindings = new M.BlockComponentBindings(data.Targets.Select(t => new M.ComponentRealization(
             GuidValue(t.DesignId), GuidValue(t.CircuitId), GuidValue(t.ComponentId))).ToImmutableArray());
         bindings.Validate(); return bindings;
+    }
+
+    public static P.BlockPhysicalAllocationData Encode(M.BlockPhysicalAllocation allocation)
+    {
+        allocation.Validate();
+        var data = new P.BlockPhysicalAllocationData { State = (P.PhysicalAllocationStateData) allocation.State };
+        foreach (var target in allocation.Targets)
+        {
+            var row = new P.PhysicalAllocationTargetData
+            { Id = Id(target.Id), Kind = (P.PhysicalAllocationKindData) ((int) target.Kind + 1), Name = target.Name };
+            if (target.Reference is { } reference) row.Reference = reference;
+            if (target.RepositoryPath is { } path) row.RepositoryPath = path;
+            if (target.ParentId is { } parent) row.ParentId = Id(parent);
+            data.Targets.Add(row);
+        }
+        if (allocation.UnknownReason is { } reason) data.UnknownReason = reason;
+        return data;
+    }
+
+    public static M.BlockPhysicalAllocation Decode(P.BlockPhysicalAllocationData data)
+    {
+        Known(data, P.BlockPhysicalAllocationData.Parser);
+        var allocation = new M.BlockPhysicalAllocation((M.PhysicalAllocationState) data.State,
+            data.Targets.Select(t => new M.PhysicalAllocationTarget(GuidValue(t.Id),
+                (M.PhysicalAllocationKind) ((int) t.Kind - 1), t.Name, t.HasReference ? t.Reference : null,
+                t.HasRepositoryPath ? t.RepositoryPath : null, t.HasParentId ? GuidValue(t.ParentId) : null)).ToImmutableArray(),
+            data.HasUnknownReason ? data.UnknownReason : null);
+        allocation.Validate(); return allocation;
     }
 
     internal static M.RequirementRevisionOrigin DecodeOrigin(P.DiagramRevisionOriginData origin) => Origin(Need(origin));
@@ -213,6 +243,7 @@ public static class RecursiveBlockCodec
             if (r.Diagram is { } diagram) row.LocalDiagram = Local(diagram);
             if (r.Definition is { } definition) row.Definition = Encode(definition);
             if (r.ComponentBindings is { } bindings) row.ComponentBindings = Encode(bindings);
+            if (r.PhysicalAllocation is { } allocation) row.PhysicalAllocation = Encode(allocation);
             row.Children.Add(r.Children.Select(Selection)); data.Revisions.Add(row);
         }
         data.RequirementHistories.Add(graph.RequirementHistories.Select(History));
@@ -236,7 +267,8 @@ public static class RecursiveBlockCodec
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
                 r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null,
                 r.Definition is { } definition ? Decode(definition) : null,
-                r.ComponentBindings is { } bindings ? Decode(bindings) : null)),
+                r.ComponentBindings is { } bindings ? Decode(bindings) : null,
+                r.PhysicalAllocation is { } allocation ? Decode(allocation) : null)),
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
                 (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))),

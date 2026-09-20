@@ -265,6 +265,57 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
+    [McpServerTool(Name = "kicad_diagram_physical_allocation", ReadOnly = true),
+     Description("Read the exact physical allocation attached to one saved block revision. Targets may be components, boards, board stacks or larger assemblies, and may remain unknown or partial with an explicit reason. This is a declared mapping, not inferred from names and not proof that a board or component exists on disk.")]
+    public Task<CallToolResult> PhysicalAllocation(string instanceId, string repositoryRoot, string sourcePath,
+        string documentId, string expectedSourceToken, BlockSelection selection, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        _ = HistorySelection(selection); Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the exact saved diagram before inspecting its physical allocation.");
+        var revision = loaded.Graph.Inspect(selection);
+        var checkedDiagram = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (checkedDiagram.ContentSha256 != loaded.ContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The diagram changed during physical allocation inspection; read a fresh observation.");
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            selection, allocation = revision.PhysicalAllocation });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_physical_allocation_set"),
+     Description("Save an explicit physical allocation for one exact block revision. Preserve Unknown when no target is known, or Partial with mapped targets and a reason for the unresolved remainder; never infer a board, stack or assembly from a block name. Requires the observed source token, exact root-to-block path and operation identity. Creates a new conceptual revision and does not create files, components, boards or native electrical objects.")]
+    public Task<CallToolResult> SetPhysicalAllocation(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
+        BlockPhysicalAllocation allocation, Guid operationId, string actor, CancellationToken cancellationToken,
+        Guid? refinementInputId = null) => Execute(async () =>
+    {
+        var requestedPath = blockPath?.ToArray() ?? [];
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; reattach and inspect it again.");
+        if (requestedPath.Length == 0 || requestedPath.Any(p => p is null) || expectedRoot is null || allocation is null
+            || operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_physical_allocation_operation", "Provide the exact root/path, allocation, observed source, operation identity and actor.");
+        allocation.Validate(); Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the allocation proposal and compare it with the latest revision.");
+        var draft = loaded.Graph.StartDraft(requestedPath[^1]) with { PhysicalAllocation = allocation };
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
+            "Update physical allocation", [], [operationId]);
+        origin = RefinementInputFiles.AttachOrigin(loaded.Graph, [.. requestedPath], refinementInputId, origin);
+        var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
+            [.. requestedPath], draft, operationId, Guid.NewGuid(), [.. requestedPath.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
+        var selection = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
+        var result = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
+            sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection,
+            allocation = saved.Graph.Inspect(selection).PhysicalAllocation,
+            changed = saved.ContentSha256 != loaded.ContentSha256 });
+        return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
+    });
+
     [McpServerTool(Name = "kicad_diagram_definition_guidance", ReadOnly = true),
      Description("Resolve the exact knowledge-class choices of a saved block against explicitly supplied repository-relative library paths. Returns inherited guidance and source hashes, with each candidate separate and missing libraries/revisions/classes explicit. A selected class is not a selected electrical part or proof of compatibility. Does not change XML, the editor or any native component.")]
     public Task<CallToolResult> DefinitionGuidance(string instanceId, string repositoryRoot, string sourcePath, string documentId,

@@ -79,7 +79,7 @@ message DiagramHistoryPageData {
   repeated DiagramHistoryEntryData entries = 6;
 }
 enum DiagramChangeKind { DHCK_UNKNOWN = 0; DHCK_ADDED = 1; DHCK_REMOVED = 2; DHCK_CHANGED = 3; DHCK_REORDERED = 4; }
-enum DiagramChangeCategory { DHCC_UNKNOWN = 0; DHCC_NAME = 1; DHCC_REQUIREMENT = 2; DHCC_BLOCK = 3; DHCC_CONNECTION = 4; DHCC_INTERFACE = 5; DHCC_COMMENT = 6; DHCC_DEFINITION = 7; }
+enum DiagramChangeCategory { DHCC_UNKNOWN = 0; DHCC_NAME = 1; DHCC_REQUIREMENT = 2; DHCC_BLOCK = 3; DHCC_CONNECTION = 4; DHCC_INTERFACE = 5; DHCC_COMMENT = 6; DHCC_DEFINITION = 7; DHCC_PHYSICAL_ALLOCATION = 8; }
 message DiagramHistoryChangeData {
   DiagramChangeCategory category = 1;
   DiagramChangeKind kind = 2;
@@ -152,10 +152,21 @@ message BlockRevisionData {
   BlockLocalDiagramData local_diagram = 8;
   BlockDefinitionData definition = 9;
   BlockComponentBindingsData component_bindings = 10;
+  BlockPhysicalAllocationData physical_allocation = 11;
 }
 // Exact electrical realizations are independent of chosen model/package text.
 message ComponentRealizationData { string design_id = 1; string circuit_id = 2; string component_id = 3; }
 message BlockComponentBindingsData { repeated ComponentRealizationData targets = 1; }
+enum PhysicalAllocationKindData { PAK_UNKNOWN = 0; PAK_COMPONENT = 1; PAK_BOARD = 2; PAK_BOARD_STACK = 3; PAK_ASSEMBLY = 4; }
+enum PhysicalAllocationStateData { PAS_UNKNOWN = 0; PAS_PARTIAL = 1; PAS_RESOLVED = 2; }
+message PhysicalAllocationTargetData {
+  string id = 1; PhysicalAllocationKindData kind = 2; string name = 3;
+  optional string reference = 4; optional string repository_path = 5; optional string parent_id = 6;
+}
+message BlockPhysicalAllocationData {
+  PhysicalAllocationStateData state = 1; repeated PhysicalAllocationTargetData targets = 2;
+  optional string unknown_reason = 3;
+}
 message DiagramRefinementAttachmentData {
   string id = 1; string original_name = 2; string asset_path = 3;
   string content_sha256 = 4; int64 byte_count = 5; string media_type = 6;
@@ -277,6 +288,7 @@ message BlockDraftData {
   BlockLocalDiagramData local_diagram = 9;
   BlockDefinitionData definition = 10;
   BlockComponentBindingsData component_bindings = 11;
+  BlockPhysicalAllocationData physical_allocation = 12;
 }
 message SaveBlockDraftData {
   BlockSelectionData expected_root = 1;

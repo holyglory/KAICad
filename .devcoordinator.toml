@@ -48,7 +48,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 timeout_seconds=300
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery|FullyQualifiedName~PhysicalAllocation)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history/contracts",max_bytes=67108864}]
 [[test.diagram-requirement-history.check]]
 name="native-protocol"

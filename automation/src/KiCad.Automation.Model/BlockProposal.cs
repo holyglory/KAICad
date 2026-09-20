@@ -7,7 +7,8 @@ namespace KiCad.Automation.Model;
 public sealed record ProposedBlock(BlockSelection Selection, BlockSelection? BasedOn, string ImplementationName,
     string Name, Guid RequirementRevisionId, DiagramRequirements Requirements, ImmutableArray<BlockSelection> Children,
     BlockLocalDiagram Diagram, BlockDefinition? Definition = null, BlockComponentBindings? ComponentBindings = null,
-    Guid? ForkRevisionId = null, Guid? ForkRequirementRevisionId = null);
+    Guid? ForkRevisionId = null, Guid? ForkRequirementRevisionId = null,
+    BlockPhysicalAllocation? PhysicalAllocation = null);
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ProposedConnection(Guid OwnerBlockId, ConnectionSelection Selection, ConnectionSelection? BasedOn,
     string ImplementationName, string Name, DiagramConnectionKind Kind, Guid RequirementRevisionId,
@@ -57,6 +58,7 @@ public static class BlockProposalCompiler
             if (block?.Selection is not { } selection || block.Requirements is null || block.Diagram is null || block.Children.IsDefault
                 || !declaredBlocks.Add(selection.BlockId)) throw Invalid("Declare each proposed block exactly once, with its complete local diagram and requirements.");
             Text(block.ImplementationName); Text(block.Name); block.Requirements.Validate(); block.Diagram.Validate();
+            block.PhysicalAllocation?.Validate();
             Fresh(selection.StateId); Fresh(selection.RevisionId); Fresh(block.RequirementRevisionId);
             if (names.Any(n => n.BlockId == selection.BlockId && string.Equals(n.Name, block.ImplementationName, StringComparison.OrdinalIgnoreCase)))
                 throw Invalid("Use a distinct implementation name for this block.");
@@ -86,7 +88,8 @@ public static class BlockProposalCompiler
             histories.Add(new(scope, requirementHistory));
             states.Add(new(selection.StateId, selection.BlockId, block.ImplementationName, selection.RevisionId, block.BasedOn));
             revisions.Add(new(selection, block.ForkRevisionId, block.Name, block.RequirementRevisionId, block.Children, origin,
-                Diagram: block.Diagram, Definition: block.Definition, ComponentBindings: block.ComponentBindings));
+                Diagram: block.Diagram, Definition: block.Definition, ComponentBindings: block.ComponentBindings,
+                PhysicalAllocation: block.PhysicalAllocation));
         }
         if (!proposal.Blocks.Any(b => b.Selection == proposal.Candidate && b.BasedOn == proposal.BasePath[^1]))
             throw Invalid("Include the new implementation of the original target in the proposed closure.");

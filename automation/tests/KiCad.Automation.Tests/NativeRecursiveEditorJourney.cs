@@ -178,6 +178,10 @@ public sealed partial class NativeSessionTests
                             Views = { new P.RecursiveDiagramViewRequest { ViewId = "cancelled", PixelWidth = 640, PixelHeight = 480 } } }, cancelledView.Token));
                 }
                 Assert.AreEqual(before, await Read());
+                viewArguments["views"] = new[] { new { viewId = "recovered", pixelWidth = 640, pixelHeight = 480 } };
+                var recoveredObservation = await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token);
+                Assert.IsFalse(recoveredObservation.IsError == true, "A valid native observation must work after rejected and cancelled requests.");
+                Assert.AreEqual(before, await Read());
             }
             await ObserveViews("saved-root", false);
             Key("Escape"); Key("Right");
@@ -710,6 +714,7 @@ public sealed partial class NativeSessionTests
             await Wait(s => s.Rendered);
             Key("p", alt: true);
             await Wait(s => !s.Busy && s.DiagramHistory?.Preview?.RevisionId == oldDiagram.RevisionId.ToString("D"));
+            await ObserveViews("historical-preview", false, oldDiagram);
             Assert.AreEqual(historyBeforeDraft, (await Read()).Draft);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-preview.png"), token);
             Key("c", alt: true); await Wait(s => s.DiagramHistory is { Preview: null });

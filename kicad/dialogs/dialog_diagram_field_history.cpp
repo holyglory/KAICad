@@ -157,8 +157,10 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::appendRows( const std::vector<DIAGRAM_FIELD_H
 {
     for( const auto& entry : entries )
     {
-        wxString label = entry.revisionLabel + wxS( " · " ) + entry.actor;
+        // The saved marker must remain visible when a long actor name scrolls.
+        wxString label = entry.revisionLabel;
         if( entry.saved ) label += wxS( " · " ) + _( "Saved" );
+        label += wxS( " · " ) + entry.actor;
         m_history->Append( label );
     }
 }

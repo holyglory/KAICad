@@ -89,6 +89,24 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("", connectionFile.Connections(connectionCpu.BlockId).Requirements(fixture.Links["CPU/Memory"]).Requirements.Routing);
             Key("3", control: true); Key("a", control: true); Type("Unsaved connection preference."); await Wait(s => s.Dirty);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && s.ConnectionDraft.Fields.Routing == "Keep memory away from noisy power.");
+            Key("3", control: true); Key("a", control: true); Type("A later memory routing preference."); await Wait(s => s.Dirty); await Save();
+            Key("3", control: true); Key("h", alt: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Requirement history")) await Task.Delay(50, modal.Token);
+            }
+            Key("Down", title: "Requirement history");
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true,
+                clickFromRight: 70, clickFromBottom: 30);
+            await Wait(s => s.Dirty && s.ConnectionDraft.Fields.Routing == "Keep memory away from noisy power.");
+            await Save();
+            var restoredConnection = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var restoredCpu = restoredConnection.Inspect(restoredConnection.SelectedRoot).Children[1];
+            var restoredLink = restoredConnection.Inspect(restoredCpu).LocalDiagram.Connections[2];
+            var linkHistory = restoredConnection.Connections(restoredCpu.BlockId).RequirementHistories.Single(h => h.Scope.DesignStateId == restoredLink.StateId);
+            Assert.AreEqual(DiagramRequirementField.Routing, linkHistory.Current.Restorations.Single().Field);
+            Assert.AreEqual("A later memory routing preference.", linkHistory.Revisions[^2].Requirements.Routing);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-connection.png"), token);
             // Select blank canvas space to return the inspector to the current
             // diagram, rather than accidentally editing a similarly named block.

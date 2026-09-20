@@ -372,6 +372,21 @@ public sealed class McpProcessTests
             Assert.IsFalse(syncData.GetProperty("baselineAdvanced").GetBoolean());
             Assert.AreEqual(SchematicDesignXml.Write(syncFixture.Baseline, syncFixture.KnowledgeLibraries),
                 syncData.GetProperty("candidateDesignXml").GetString());
+            string candidateXml = syncData.GetProperty("candidateDesignXml").GetString()!;
+            string candidateHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(candidateXml)));
+            var candidateCommit = await Request(4084, "tools/call", new { name = "kicad_design_candidate_commit",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken, candidateXml, expectedCandidateSha256 = candidateHash,
+                    operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(candidateCommit.GetProperty("result").GetProperty("isError").GetBoolean());
+            var candidateCommitState = candidateCommit.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(candidateCommitState.GetProperty("desiredCandidateStored").GetBoolean());
+            Assert.IsFalse(candidateCommitState.GetProperty("designFileWritten").GetBoolean());
+            Assert.IsFalse(candidateCommitState.GetProperty("nativeMutationCommitted").GetBoolean());
+            var committedRecoveryBytes = await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token);
+            CollectionAssert.AreNotEqual(syncOriginal, committedRecoveryBytes);
+            Assert.AreEqual(candidateCommitState.GetProperty("recoveryRevisionToken").GetString(), syncStore.Read()!.RevisionToken);
             var staleSync = await Request(4081, "tools/call", new { name = "kicad_design_sync_plan",
                 arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
                     expectedRevisionToken = "stale" } });
@@ -382,7 +397,7 @@ public sealed class McpProcessTests
             Assert.AreEqual("recovery_instance_mismatch", wrongSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
                 syncFixture.InstanceId.ToString("D"), syncRecoveryPath, syncSaved.RevisionToken, new CancellationToken(true)));
-            CollectionAssert.AreEqual(syncOriginal, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
+            CollectionAssert.AreEqual(committedRecoveryBytes, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
             string netRecoveryPath = Path.Combine(state, "designs", "net-recovery.json");
             var netFixture = SchematicNetReconciliationTests.Fixture();
             var netStore = new DesignRecoveryStore(netRecoveryPath);

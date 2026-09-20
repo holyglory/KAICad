@@ -1,4 +1,5 @@
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -6,6 +7,31 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class RecursiveBlockDefinitionGuidanceTests
 {
+    [TestMethod]
+    public async Task LibraryFilesReturnActualByteIdentityAndRejectWrongPathsWithoutWriting()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-definition-library-").FullName;
+        try
+        {
+            var library = new ComponentKnowledgeLibrary(Guid.NewGuid(), "r1", [new(Guid.NewGuid(), "Fixture class", null, [])]);
+            string xml = ComponentKnowledgeXml.WriteLibrary(library); string path = Path.Combine(root, "library.xml");
+            await File.WriteAllTextAsync(path, xml);
+            var read = await BlockDefinitionLibraries.ReadAsync(root, ["library.xml"]);
+            Assert.HasCount(1, read); Assert.AreEqual("library.xml", read[0].RelativePath);
+            Assert.AreEqual(library.Id, read[0].Library.Id); Assert.AreEqual("r1", read[0].Library.Revision);
+            Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path))), read[0].ContentSha256);
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            Assert.IsEmpty(await BlockDefinitionLibraries.ReadAsync(root, []));
+            await Assert.ThrowsExactlyAsync<AutomationException>(() => BlockDefinitionLibraries.ReadAsync(root, ["library.xml", "library.xml"]));
+            await Assert.ThrowsExactlyAsync<AutomationException>(() => BlockDefinitionLibraries.ReadAsync(root, ["../library.xml"]));
+            await File.WriteAllBytesAsync(path, [0xff, 0xfe, 0xfd]);
+            var invalid = await Assert.ThrowsExactlyAsync<AutomationException>(() => BlockDefinitionLibraries.ReadAsync(root, ["library.xml"]));
+            Assert.AreEqual("invalid_definition_library_encoding", invalid.Code);
+            CollectionAssert.AreEqual(new byte[] { 0xff, 0xfe, 0xfd }, await File.ReadAllBytesAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     [TestMethod]
     public void AClassResolvesInheritedGuidanceWithoutCreatingAComponentOrChoosingElectricalValues()
     {

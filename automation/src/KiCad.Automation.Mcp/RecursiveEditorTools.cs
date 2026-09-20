@@ -14,27 +14,48 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_definition_guidance", ReadOnly = true),
+     Description("Resolve the exact knowledge-class choices of a saved block against explicitly supplied repository-relative library paths. Returns inherited guidance and source hashes, with each candidate separate and missing libraries/revisions/classes explicit. A selected class is not a selected electrical part or proof of compatibility. Does not change XML, the editor or any native component.")]
+    public Task<CallToolResult> DefinitionGuidance(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, BlockSelection selection, string[] libraryPaths, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var paths = libraryPaths?.ToArray() ?? throw new AutomationException("missing_definition_libraries", "Provide explicit library paths, including an empty list when unavailable.");
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        _ = HistorySelection(selection);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the exact saved diagram before resolving its definition guidance.");
+        var libraries = await BlockDefinitionLibraries.ReadAsync(repositoryRoot, paths, cancellationToken);
+        var resolution = BlockDefinitionGuidance.Resolve(loaded.Graph.Inspect(selection).EffectiveDefinition, [.. libraries.Select(l => l.Library)]);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            selection, resolution, libraries = libraries.Select(l => new { l.RelativePath, l.ContentSha256, l.Library.Id, l.Library.Revision }) },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_definition_set"),
      Description("Save independent purpose/type/manufacturer/family/model/orderable-part/package/knowledge-class choices on one exact block revision. Choices retain unspecified, unknown, candidate or selected state, strength, conditions and sources. Requires the observed instance epoch, file token, selected root and root-to-block path. Creates one new revision without changing requirement text, siblings, connections or native electrical objects. This does not validate a part name against a library or materialize a schematic/footprint. Reload or reconcile an already-open native draft after this external save.")]
     public Task<CallToolResult> SetDefinition(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
         BlockDefinition definition, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
     {
+        var requestedPath = blockPath?.ToArray() ?? [];
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
-        if (blockPath is null || blockPath.Length == 0 || blockPath.Any(p => p is null) || expectedRoot is null
+        if (requestedPath.Length == 0 || requestedPath.Any(p => p is null) || expectedRoot is null
             || definition is null || operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || string.IsNullOrEmpty(expectedSourceToken))
             throw new AutomationException("invalid_definition_operation", "Provide the exact root/path, definition, observed source, operation identity and actor.");
         definition.Validate(); Guid id = Identity(documentId);
         var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
         if (loaded.ContentSha256 != expectedSourceToken)
             throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the proposed definition and compare it with the latest revision.");
-        var draft = loaded.Graph.StartDraft(blockPath[^1]) with { Definition = definition };
+        var draft = loaded.Graph.StartDraft(requestedPath[^1]) with { Definition = definition };
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
             "Refine block definition", [], [operationId]);
         var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
-            [.. blockPath], draft, operationId, Guid.NewGuid(), [.. blockPath.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
+            [.. requestedPath], draft, operationId, Guid.NewGuid(), [.. requestedPath.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
         var selected = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
         var definitionData = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(RecursiveBlockCodec.Encode(saved.Graph.Inspect(selected).EffectiveDefinition)));
         var result = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,

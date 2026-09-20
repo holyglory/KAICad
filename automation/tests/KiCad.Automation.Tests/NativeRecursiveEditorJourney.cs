@@ -844,6 +844,34 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(selectedDefinition.SameContents(definedGraph.Inspect(definedGraph.SelectedRoot).EffectiveDefinition));
             Assert.AreEqual(restoredChildGraph.Requirements(restoredChildGraph.SelectedRoot).Requirements, definedGraph.Requirements(definedGraph.SelectedRoot).Requirements);
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token)).IsError == true);
+            var currentDefinitionToken = JsonSerializer.SerializeToElement(definitionResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString();
+            definitionArguments["expectedSourceToken"] = currentDefinitionToken; definitionArguments["expectedRoot"] = definedGraph.SelectedRoot;
+            definitionArguments["blockPath"] = new[] { definedGraph.SelectedRoot }; definitionArguments["operationId"] = Guid.NewGuid();
+            var definitionNoOp = await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token);
+            Assert.IsFalse(definitionNoOp.IsError == true);
+            Assert.IsFalse(JsonSerializer.SerializeToElement(definitionNoOp).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(definedGraph), await File.ReadAllTextAsync(source, token));
+            var classReference = selectedDefinition.KnowledgeClass!.Values.Single();
+            var statement = new GuidanceStatement(Guid.NewGuid(), "routing", "routing", "Keep the sensing region accessible.", GuidanceStrength.Preference, "", []);
+            var knowledge = new ComponentKnowledgeLibrary(classReference.LibraryId, classReference.LibraryRevision,
+                [new(classReference.ClassId, "Fixture reusable class", null, [statement])]);
+            await File.WriteAllTextAsync(Path.Combine(project, "fixture-knowledge.xml"), ComponentKnowledgeXml.WriteLibrary(knowledge), token);
+            var guidanceArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedSourceToken"] = currentDefinitionToken, ["selection"] = definedGraph.SelectedRoot,
+                ["libraryPaths"] = new[] { "fixture-knowledge.xml" }
+            };
+            var guidanceResult = await client.CallToolAsync("kicad_diagram_definition_guidance", guidanceArguments, cancellationToken: token);
+            Assert.IsFalse(guidanceResult.IsError == true);
+            var guidanceData = JsonSerializer.SerializeToElement(guidanceResult).GetProperty("structuredContent");
+            Assert.AreEqual("Available", guidanceData.GetProperty("resolution").GetProperty("selected").GetProperty("availability").GetString());
+            Assert.AreEqual("Keep the sensing region accessible.", guidanceData.GetProperty("resolution").GetProperty("selected").GetProperty("guidance").GetProperty("effective")[0].GetProperty("statement").GetProperty("text").GetString());
+            Assert.AreEqual(64, guidanceData.GetProperty("libraries")[0].GetProperty("contentSha256").GetString()!.Length);
+            guidanceArguments["libraryPaths"] = Array.Empty<string>();
+            var missingClass = await client.CallToolAsync("kicad_diagram_definition_guidance", guidanceArguments, cancellationToken: token);
+            Assert.IsFalse(missingClass.IsError == true);
+            Assert.AreEqual("MissingLibrary", JsonSerializer.SerializeToElement(missingClass).GetProperty("structuredContent").GetProperty("resolution").GetProperty("selected").GetProperty("availability").GetString());
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(definedGraph), await File.ReadAllTextAsync(source, token));
             Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == JsonSerializer.SerializeToElement(definitionResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString());
             Key("w", control: true);
         }

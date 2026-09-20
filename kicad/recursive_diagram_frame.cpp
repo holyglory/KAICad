@@ -70,6 +70,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* inspector = new wxPanel( splitter ); inspector->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
     auto* side = new wxBoxSizer( wxVERTICAL );
     auto* scroll = new wxScrolledWindow( inspector ); scroll->SetScrollRate( 0, FromDIP( 12 ) );
+    m_inspectorScroll = scroll;
     auto* fields = new wxBoxSizer( wxVERTICAL );
     m_owner = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_owner->SetFont( GetFont().Bold().Larger() );
     fields->Add( m_owner, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
@@ -77,6 +78,12 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     fields->Add( m_savedVersion, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     m_openDiagram = new wxButton( scroll, wxID_ANY, _( "Open diagram" ) ); m_openDiagram->SetName( "RecursiveOpenDiagram" );
     fields->Add( m_openDiagram, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    m_endpointHeading = new wxStaticText( scroll, wxID_ANY, _( "Endpoints" ) );
+    fields->Add( m_endpointHeading, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    m_endpoints = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
+            FromDIP( wxSize( 320, 125 ) ), wxTE_MULTILINE | wxTE_READONLY );
+    m_endpoints->SetName( "RecursiveConnectionEndpoints" );
+    fields->Add( m_endpoints, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     const wxString labels[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
     for( int i = 0; i < 3; ++i )
     {
@@ -390,6 +397,29 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
             }
             m_savedVersion->SetLabel( wxString::Format( _( "Selected connection: v%d" ), number ) ); break;
         }
+    m_openDiagram->Show( !link ); m_endpointHeading->Show( link ); m_endpoints->Show( link );
+    wxString endpoints;
+    if( link && current() )
+        for( const auto& item : m_connectionDraft.endpoints() )
+        {
+            const REVISION* owner = item.block_id() == current()->selection().block_id() ? current() : nullptr;
+            for( const auto& child : current()->children() ) if( child.block_id() == item.block_id() ) owner = revision( child );
+            if( !endpoints.empty() ) endpoints += wxS( "\n\n" );
+            endpoints += owner ? text( owner->name() ) : _( "Unavailable endpoint" ); endpoints += wxS( "\n" );
+            switch( item.kind() )
+            {
+            case D::DEK_UNRESOLVED: endpoints += _( "Endpoint unresolved." ); break;
+            case D::DEK_COMPATIBLE: endpoints += _( "Compatible endpoint unresolved." ); break;
+            case D::DEK_CANDIDATES: endpoints += wxString::Format( _( "Pin not selected (%d candidates)." ), item.candidates_size() ); break;
+            case D::DEK_PIN: endpoints += wxString::Format( _( "Selected pin: %s" ), text( item.pin().pin() ) ); break;
+            case D::DEK_INTERFACE:
+                if( owner ) for( const auto& boundary : owner->local_diagram().interfaces() )
+                    if( boundary.id() == item.interface_id() ) endpoints += wxString::Format( _( "Interface: %s" ), text( boundary.name() ) );
+                break;
+            default: endpoints += _( "Endpoint type unavailable." ); break;
+            }
+        }
+    m_endpoints->ChangeValue( endpoints );
     for( int i = 0; i < 3; ++i ) { m_fields[i]->Enable( available ); m_history[i]->Enable( available ); m_fields[i]->ChangeValue( text( field( link ? m_connectionDraft.fields() : m_draft.fields(), i ) ) ); }
     m_openDiagram->Enable( available && !link && current() && m_selected != current()->selection().block_id() );
     m_save->Enable( available && m_dirty ); m_decline->Enable( available && m_dirty );
@@ -398,6 +428,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_toolbar->EnableTool( wxID_REDO, available && ( link ? !m_connectionRedo.empty() : !m_redo.empty() ) );
     m_toolbar->EnableTool( FIT, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 bool RECURSIVE_DIAGRAM_FRAME::confirmChange()

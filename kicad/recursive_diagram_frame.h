@@ -20,6 +20,7 @@ class wxPanel;
 class wxStaticText;
 class wxTextCtrl;
 class wxToolBar;
+class wxScrolledWindow;
 
 /** One native diagram level with revision-bound requirement drafts. XML validation
  * and publication remain in the compiled companion. No action invokes an agent. */
@@ -89,6 +90,9 @@ private:
     wxStaticText* m_breadcrumb;
     wxStaticText* m_owner;
     wxStaticText* m_savedVersion;
+    wxStaticText* m_endpointHeading;
+    wxTextCtrl* m_endpoints;
+    wxScrolledWindow* m_inspectorScroll;
     wxButton* m_openDiagram;
     wxButton* m_save;
     wxButton* m_decline;

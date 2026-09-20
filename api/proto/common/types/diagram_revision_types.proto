@@ -118,6 +118,9 @@ message RequirementMergeData {
   BlockDraftData saved_draft = 4;
   BlockDraftData candidate = 5;
   repeated RequirementConflictData conflicts = 6;
+  uint32 base_context_version = 7;
+  uint32 saved_context_version = 8;
+  DiagramRevisionOriginData saved_origin = 9;
 }
 message BlockDraftData {
   BlockSelectionData baseline = 1;

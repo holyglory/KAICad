@@ -40,6 +40,8 @@ public sealed class RecursiveRequirementMergeTests
         remote = remote with { Requirements = remote.Requirements.Edit(DiagramRequirementField.Routing, "Bottom edge") };
         var latest = Save(first, remote);
         var merge = RecursiveRequirementMerge.Prepare(latest, local);
+        Assert.AreEqual(1, merge.BaseContextVersion); Assert.AreEqual(2, merge.SavedContextVersion);
+        Assert.AreEqual(latest.Inspect(latest.SelectedRoot).Origin, merge.SavedOrigin);
         var blocked = merge.Inspect(); Assert.IsFalse(blocked.CanSave); Assert.IsNull(blocked.Candidate);
         Assert.AreEqual(new DiagramRequirementConflict(DiagramRequirementField.Routing, "", "Top edge", "Bottom edge"), blocked.Conflicts.Single());
         var choice = merge.Requirements.Choose(DiagramRequirementField.Routing, "Top edge beside the heat sink");

@@ -18,6 +18,9 @@ public sealed class RecursiveRequirementMerge
     public RecursiveBlockDraft OriginalDraft { get; }
     public RecursiveBlockDraft SavedDraft { get; }
     public DiagramRequirementMerge Requirements { get; }
+    public int BaseContextVersion { get; }
+    public int SavedContextVersion { get; }
+    public RequirementRevisionOrigin SavedOrigin { get; }
     private readonly DiagramRequirementHistory _history;
 
     private RecursiveRequirementMerge(RecursiveBlockGraph latest, RecursiveBlockDraft draft,
@@ -25,6 +28,10 @@ public sealed class RecursiveRequirementMerge
     {
         ExpectedRoot = latest.SelectedRoot; BlockPath = path; OriginalDraft = draft;
         SavedDraft = latest.StartDraft(path[^1]); _history = history;
+        var contexts = latest.History(draft.Baseline.StateId).Reverse().ToArray();
+        BaseContextVersion = Array.FindIndex(contexts, r => r.Selection == draft.Baseline) + 1;
+        SavedContextVersion = Array.FindIndex(contexts, r => r.Selection == path[^1]) + 1;
+        SavedOrigin = latest.Inspect(path[^1]).Origin;
         Requirements = history.PrepareMerge(draft.Requirements);
     }
 

@@ -234,6 +234,7 @@ BOOST_AUTO_TEST_CASE( RenderedConflictRequiresExplicitChoicesAndPreservesCancel 
     BOOST_REQUIRE( page.ParseFromIstream( &input ) );
     std::filesystem::path evidence( outputPath );
     D::RequirementMergeData merge;
+    merge.set_base_context_version( page.context_version() - 1 ); merge.set_saved_context_version( page.context_version() );
     auto* original = merge.mutable_original_draft(); original->mutable_baseline()->set_block_id( page.owner_id() );
     original->mutable_baseline()->set_state_id( page.state_id() ); original->mutable_baseline()->set_revision_id( page.context_revision_id() );
     original->set_baseline_requirement_revision_id( page.entries( 1 ).requirement_revision_id() );

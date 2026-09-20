@@ -33,28 +33,37 @@ DIALOG_DIAGRAM_CONFLICT::DIALOG_DIAGRAM_CONFLICT( wxWindow* parent, const wxStri
     int gap = FromDIP( 16 ); auto* outer = new wxBoxSizer( wxVERTICAL );
     auto* title = new wxStaticText( this, wxID_ANY, _( "Resolve changes before saving" ) ); title->SetFont( GetFont().Bold().Larger() );
     outer->Add( title, 0, wxEXPAND | wxALL, gap );
-    auto* ownerText = new wxStaticText( this, wxID_ANY, owner, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
-    ownerText->SetToolTip( owner ); outer->Add( ownerText, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
+    wxString scope = merge.conflicts_size() == 1 ? owner + wxS( " · " ) + fieldName( merge.conflicts( 0 ).field() ) : owner;
+    auto* ownerText = new wxStaticText( this, wxID_ANY, scope, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
+    ownerText->SetToolTip( scope ); outer->Add( ownerText, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
+    auto* context = new wxStaticText( this, wxID_ANY, wxString::Format(
+        _( "Your draft is based on v%u. The saved diagram is now v%u." ), merge.base_context_version(), merge.saved_context_version() ) );
+    outer->Add( context, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     m_field = new wxChoice( this, wxID_ANY ); m_field->SetName( "DiagramConflictField" ); OptOut( m_field );
     for( const auto& conflict : merge.conflicts() ) m_field->Append( fieldName( conflict.field() ) );
     if( merge.conflicts_size() ) m_field->SetSelection( 0 );
+    m_field->Show( merge.conflicts_size() > 1 );
     outer->Add( m_field, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto addText = [&]( wxSizer* sizer, const wxString& label, const char* name, bool editable )
     {
-        auto* heading = new wxStaticText( this, wxID_ANY, label ); heading->SetFont( GetFont().Bold() );
+        auto* heading = new wxStaticText( this, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
+        heading->SetToolTip( label ); heading->SetFont( GetFont().Bold() );
         sizer->Add( heading, 0, wxEXPAND | wxBOTTOM, gap / 2 );
         auto* value = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
                 FromDIP( wxSize( 220, 90 ) ), wxTE_MULTILINE | ( editable ? 0 : wxTE_READONLY ) );
         value->SetName( name ); OptOut( value ); value->SetMinSize( FromDIP( wxSize( 180, 65 ) ) );
         sizer->Add( value, 1, wxEXPAND ); return value;
     };
-    auto* base = new wxBoxSizer( wxVERTICAL ); m_base = addText( base, _( "Base" ), "DiagramConflictBase", false );
-    outer->Add( base, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
+    auto* base = new wxBoxSizer( wxVERTICAL );
+    m_base = addText( base, wxString::Format( _( "Base — v%u" ), merge.base_context_version() ), "DiagramConflictBase", false );
+    outer->Add( base, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto* comparison = new wxBoxSizer( wxHORIZONTAL ); auto* mine = new wxBoxSizer( wxVERTICAL ); auto* latest = new wxBoxSizer( wxVERTICAL );
     m_draft = addText( mine, _( "Your draft" ), "DiagramConflictDraft", false );
-    m_saved = addText( latest, _( "Latest saved" ), "DiagramConflictSaved", false );
+    wxString latestLabel = wxString::Format( _( "Latest saved — v%u" ), merge.saved_context_version() );
+    if( !merge.saved_origin().actor().empty() ) latestLabel += wxS( " · " ) + text( merge.saved_origin().actor() );
+    m_saved = addText( latest, latestLabel, "DiagramConflictSaved", false );
     comparison->Add( mine, 1, wxEXPAND | wxRIGHT, gap ); comparison->Add( latest, 1, wxEXPAND );
-    outer->Add( comparison, 2, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
+    outer->Add( comparison, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto* options = new wxBoxSizer( wxHORIZONTAL );
     m_mine = new wxRadioButton( this, wxID_ANY, _( "&Use my text" ), wxDefaultPosition, wxDefaultSize, wxRB_SINGLE );
     m_latest = new wxRadioButton( this, wxID_ANY, _( "Use &saved text" ), wxDefaultPosition, wxDefaultSize, wxRB_SINGLE );
@@ -63,7 +72,7 @@ DIALOG_DIAGRAM_CONFLICT::DIALOG_DIAGRAM_CONFLICT( wxWindow* parent, const wxStri
     for( auto* choice : { m_mine, m_latest, m_custom } ) { choice->SetValue( false ); OptOut( choice ); options->Add( choice, 1, wxRIGHT, gap / 2 ); }
     outer->Add( options, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto* resolved = new wxBoxSizer( wxVERTICAL ); m_resolved = addText( resolved, _( "Resolved text" ), "DiagramConflictResolved", true );
-    outer->Add( resolved, 2, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
+    outer->Add( resolved, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto* actions = new wxBoxSizer( wxHORIZONTAL );
     auto* cancel = new wxButton( this, wxID_CANCEL, _( "Back to editing" ) ); cancel->SetName( "DiagramConflictBack" );
     m_save = new wxButton( this, wxID_OK, _( "Save resolved &version" ) ); m_save->SetName( "DiagramConflictSave" );

@@ -16,7 +16,8 @@ public static class RecursiveBlockCodec
     {
         var resolved = merge.Inspect(choices);
         var result = new P.RequirementMergeData { ExpectedRoot = Selection(resolved.ExpectedRoot),
-            OriginalDraft = Encode(merge.OriginalDraft), SavedDraft = Encode(merge.SavedDraft) };
+            OriginalDraft = Encode(merge.OriginalDraft), SavedDraft = Encode(merge.SavedDraft),
+            BaseContextVersion = checked((uint)merge.BaseContextVersion), SavedContextVersion = checked((uint)merge.SavedContextVersion), SavedOrigin = Origin(merge.SavedOrigin) };
         result.BlockPath.Add(resolved.BlockPath.Select(Selection));
         if (resolved.Candidate is { } candidate) result.Candidate = Encode(candidate);
         result.Conflicts.Add(resolved.Conflicts.Select(c => new P.RequirementConflictData

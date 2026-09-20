@@ -378,6 +378,9 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1100, resizeHeight: 760,
                 observeGeometry: bounds => { Assert.AreEqual(1100, bounds.Width); Assert.AreEqual(760, bounds.Height); });
             await Wait(s => s.Rendered && s.ViewRevision > beforeResize.ViewRevision);
+            ulong compactView = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
+            await Wait(s => s.Rendered && s.ViewRevision > compactView);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-compact.png"), token);
             Key("3", control: true); Key("a", control: true); Type("A compact-window routing edit."); await Wait(s => s.Dirty);
             await Save();

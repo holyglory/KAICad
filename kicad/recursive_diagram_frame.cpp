@@ -418,6 +418,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         if( !present ) { m_errorCode = "implementation_target_mismatch"; m_error = "The management result belongs to another implementation."; refresh(); return; }
         if( m_activeRequest.implementation().action() != D::IAK_ARCHIVE ) m_pendingImplementation = result.implementation_id();
     }
+    std::string previousScope = current() ? current()->selection().block_id() : "";
     std::string scope = m_pendingScope.empty() ? current() ? current()->selection().block_id() : result.document().graph().selected_root().block_id() : m_pendingScope;
     std::string selected = m_pendingSelected.empty() ? m_selected : m_pendingSelected;
     std::string selectedConnection = m_pendingConnection.value_or( m_connectionId );
@@ -426,7 +427,8 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_selected.clear(); m_connectionId.clear();
     select( selected.empty() ? m_path.back().block_id() : selected );
     if( !selectedConnection.empty() ) selectConnection( selectedConnection );
-    fit(); m_canvas->SetFocus();
+    if( previousScope.empty() || previousScope != m_path.back().block_id() ) fit();
+    m_canvas->SetFocus();
     if( !m_pendingImplementation.empty() )
     { auto state = std::move( m_pendingImplementation ); m_pendingImplementation.clear(); previewImplementation( state ); }
     if( m_closeAfterSave ) { m_closeAfterSave = false; Close(); }
@@ -1029,9 +1031,26 @@ void RECURSIVE_DIAGRAM_FRAME::fit()
 {
     if( !current() ) return;
     int count = std::max( 1, current()->children_size() ), columns = static_cast<int>( std::ceil( std::sqrt( count ) ) ), rows = ( count + columns - 1 ) / columns;
-    double width = 140 + columns * 370, height = 110 + rows * 250;
-    auto area = m_canvas->GetClientSize(); m_scale = std::min( { 1.0, area.x / width, area.y / height } ); m_scale = std::max( 0.1, m_scale );
-    m_origin = { -( area.x / m_scale - width ) / 2, -( area.y / m_scale - height ) / 2 }; ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
+    double left = 0, top = 0, right = 140 + columns * 370, bottom = 110 + rows * 250;
+    const auto& notes = !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
+        : m_draft.baseline().block_id() == current()->selection().block_id() ? m_draft.local_diagram().annotations() : current()->local_diagram().annotations();
+    auto include = [&]( double x, double y ) { left = std::min( left, x - 20 ); top = std::min( top, y - 20 ); right = std::max( right, x + 20 ); bottom = std::max( bottom, y + 20 ); };
+    for( int i = 0; i < notes.size(); ++i )
+    {
+        const auto& note = notes.Get( i );
+        if( note.target_kind() == D::DAT_CANVAS || note.has_position() )
+        {
+            double x = 60 + i * 260, y = 420;
+            if( note.has_position() ) { text( note.position().x() ).ToDouble( &x ); text( note.position().y() ).ToDouble( &y ); }
+            include( x, y ); include( x + 240, y + 100 );
+        }
+        for( const auto& stroke : note.strokes() ) for( const auto& point : stroke.points() )
+        { double x = 0, y = 0; text( point.x() ).ToDouble( &x ); text( point.y() ).ToDouble( &y ); include( x, y ); }
+    }
+    double width = right - left, height = bottom - top;
+    auto area = m_canvas->GetClientSize(); m_scale = std::max( 0.000000001, std::min( { 1.0, area.x / width, area.y / height } ) );
+    m_origin = { left - ( area.x / m_scale - width ) / 2, top - ( area.y / m_scale - height ) / 2 };
+    ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
 }
 D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
 {

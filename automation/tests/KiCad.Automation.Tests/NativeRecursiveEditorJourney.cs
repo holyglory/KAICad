@@ -639,6 +639,12 @@ public sealed partial class NativeSessionTests
             await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h && h.Inspected.RevisionId == oldDiagram.RevisionId.ToString("D"));
             Assert.AreEqual(historyBeforeDraft, (await Read()).Draft); Assert.AreEqual(topologyXml, await File.ReadAllTextAsync(source, token));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-inspection.png"), token);
+            ulong historySizeRevision = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1100, resizeHeight: 760);
+            await Wait(s => s.ViewRevision > historySizeRevision && s.Rendered);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-compact.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1536, resizeHeight: 1024);
+            await Wait(s => s.Rendered);
             Key("p", alt: true);
             await Wait(s => !s.Busy && s.DiagramHistory?.Preview?.RevisionId == oldDiagram.RevisionId.ToString("D"));
             Assert.AreEqual(historyBeforeDraft, (await Read()).Draft);

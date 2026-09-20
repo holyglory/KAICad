@@ -63,7 +63,7 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     m_more = new wxButton( this, wxID_ANY, _( "Load &older" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_more->SetName( "DiagramHistoryOlder" ); paging->Add( m_more, 0 );
     layout->Add( paging, 0, wxEXPAND | wxALL, gap );
-    m_details = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 250, 180 ) ), wxTE_MULTILINE | wxTE_READONLY );
+    m_details = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 250, 180 ) ), wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2 );
     m_details->SetName( "DiagramHistoryComparison" ); m_details->SetMinSize( FromDIP( wxSize( 220, 100 ) ) );
     layout->Add( m_details, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
     m_failure = new wxStaticText( this, wxID_ANY, wxEmptyString ); m_failure->SetName( "DiagramHistoryError" );
@@ -150,7 +150,10 @@ bool PANEL_DIAGRAM_HISTORY::SetComparison( const COMPARISON& comparison )
         details += wxDateTime( static_cast<time_t>( comparison.inspected_origin().recorded_at().seconds() ) )
             .Format( "%Y-%m-%d %H:%M UTC", wxDateTime::UTC ) + wxS( "\n" );
     if( !comparison.inspected_origin().summary().empty() ) details += wxS( "\n" ) + text( comparison.inspected_origin().summary() ) + wxS( "\n" );
-    details += wxS( "\n" ) + wxString::Format( _( "Changes in saved v%u" ), comparison.context_version() ) + wxS( "\n" );
+    details += wxS( "\n" );
+    long changesStart = static_cast<long>( details.length() );
+    details += wxString::Format( _( "Changes in saved v%u" ), comparison.context_version() ) + wxS( "\n" );
+    long changesEnd = static_cast<long>( details.length() );
     if( comparison.changes_size() == 0 ) details += _( "No diagram content changes." );
     for( const auto& change : comparison.changes() )
     {
@@ -177,7 +180,11 @@ bool PANEL_DIAGRAM_HISTORY::SetComparison( const COMPARISON& comparison )
         }
         details += verb + wxS( ": " ) + name + wxS( "\n" );
     }
-    m_details->ChangeValue( details ); m_details->SetInsertionPoint( 0 );
+    m_details->ChangeValue( details );
+    wxTextAttr normal; normal.SetFont( GetFont() ); m_details->SetStyle( 0, m_details->GetLastPosition(), normal );
+    wxTextAttr heading; heading.SetFont( GetFont().Bold() );
+    m_details->SetStyle( 0, details.find( '\n' ), heading ); m_details->SetStyle( changesStart, changesEnd, heading );
+    m_details->SetInsertionPoint( 0 );
     m_comparisonReady = true; m_busy = false; m_error.clear(); updateActions(); m_rows->SetFocus(); return true;
 }
 

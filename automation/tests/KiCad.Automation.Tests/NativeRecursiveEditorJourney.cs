@@ -309,6 +309,17 @@ public sealed partial class NativeSessionTests
             var returned = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual(savedCpu, returned.Inspect(returned.SelectedRoot).Children[1]);
             Assert.AreEqual("Alternative implementation requirements.", returned.Requirements(choice).Requirements.General);
+            string selectionBytes = await File.ReadAllTextAsync(source, token);
+            await Preview(last: true); await Wait(s => s.ImplementationPreview);
+            await File.AppendAllTextAsync(source, "\n", token);
+            ulong selectionAttempts = (await Read()).CompletedSaveCount;
+            Key("s", control: true);
+            var staleSelection = await Wait(s => !s.Busy && s.CompletedSaveCount > selectionAttempts && s.ErrorCode == "recursive_block_file_changed");
+            Assert.IsTrue(staleSelection.Dirty); Assert.IsTrue(staleSelection.ImplementationPreview);
+            Assert.AreEqual(alternative.Id.ToString("D"), staleSelection.Draft.Baseline.StateId);
+            Assert.AreEqual(selectionBytes + "\n", await File.ReadAllTextAsync(source, token));
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.ImplementationPreview && !s.Dirty);
+            Assert.AreEqual(savedCpu, RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).Inspect(returned.SelectedRoot).Children[1]);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

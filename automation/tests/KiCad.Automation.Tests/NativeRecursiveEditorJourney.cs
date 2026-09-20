@@ -18,6 +18,7 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(graph), token);
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
         string stateRoot = Directory.CreateTempSubdirectory("kicad-recursive-mcp-").FullName;
+        var interactionFailures = new List<Exception>();
         try
         {
             await using var client = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
@@ -92,7 +93,23 @@ public sealed partial class NativeSessionTests
             var afterUp = await Wait(s => s.DiagramPath.Count == 1 && s.FocusedControl == "RecursiveDiagramCanvas"
                 && s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-after-toolbar-up.json"), SchematicJson.Formatter.Format(afterUp), token);
-            Key("Right"); await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
+            Key("Right");
+            try
+            {
+                var acknowledged = await Wait(s => s.NavigationInputRevision > afterUp.NavigationInputRevision);
+                Assert.AreEqual(afterUp.NavigationInputRevision + 1, acknowledged.NavigationInputRevision, "One arrow must be handled exactly once.");
+                Assert.AreEqual(fixture.Blocks["CPU"].BlockId.ToString("D"), acknowledged.Draft.Baseline.BlockId, "The next peer must be selected after the acknowledged arrow.");
+            }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                interactionFailures.Add(error);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-arrow-failure.json"), SchematicJson.Formatter.Format(await Read()), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-arrow-failure.png"), token);
+                // Explicit rendered recovery preserves the original failed assertion,
+                // then permits independent editing/save/recovery observations.
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 750, clickFromTop: 570);
+                await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
+            }
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 42, clickFromTop: 45);
             await Wait(s => s.DiagramPath.Count == 1 && s.FocusedControl == "RecursiveDiagramCanvas"); Key("Return");
@@ -345,6 +362,7 @@ public sealed partial class NativeSessionTests
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }
+        if (interactionFailures.Count != 0) throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)

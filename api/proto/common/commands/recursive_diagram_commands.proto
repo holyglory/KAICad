@@ -32,4 +32,5 @@ message RecursiveDiagramEditorState {
   bool implementation_preview = 16;
   BlockSelectionData preview_selection = 17;
   string focused_control = 18;
+  uint64 navigation_input_revision = 19;
 }

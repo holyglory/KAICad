@@ -192,9 +192,9 @@ bool RECURSIVE_DIAGRAM_FRAME::canvasKey( wxKeyEvent& event )
     int index = -1;
     for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
     if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )
-    { if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return true; }
+    { ++m_navigationInputRevision; if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return true; }
     if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
-    { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return true; }
+    { ++m_navigationInputRevision; if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return true; }
     if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return true; }
     if( event.GetKeyCode() == 'N' )
     { m_noteMode = true; m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); return true; }
@@ -948,6 +948,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( !m_connectionId.empty() ) *result.mutable_connection_draft() = m_connectionDraft;
     result.set_selected_annotation_id( m_commentId );
     result.set_implementation_preview( m_preview.has_value() );
+    result.set_navigation_input_revision( m_navigationInputRevision );
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( utf8( focused->GetName() ) );

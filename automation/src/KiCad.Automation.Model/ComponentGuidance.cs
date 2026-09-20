@@ -24,6 +24,14 @@ public sealed record GuidanceResolution(IReadOnlyList<ResolvedGuidance> Effectiv
 
 public static class ComponentGuidance
 {
+    /// <summary>Resolve reusable class guidance without inventing a component
+    /// instance. Native symbol inheritance and physical realization remain separate.</summary>
+    public static GuidanceResolution ResolveClass(ComponentKnowledgeLibrary library, Guid classId)
+    {
+        Validate(library);
+        return ResolveChain(Chain(library.Classes.ToDictionary(c => c.Id), classId), []);
+    }
+
     public static void Validate(ComponentKnowledgeLibrary library)
     {
         var ids = new HashSet<Guid>();

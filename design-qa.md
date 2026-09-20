@@ -28,8 +28,6 @@ Typography is readable in both themes; the two comparison fields and footer rema
 
 The focused regions reviewed are the revision list, selected/saved text and footer actions. Component success does not qualify the editor route, source opening, Save/Decline, conflicts or a full system-level diagram journey. The overall result remains blocked on those concrete integration and visual gaps.
 
-## Historical comparison — superseded option 1
-
 ## Recursive editor integration comparisons
 
 The first complete editor journey, `t20260920T000307Z-8fc24d`, exercised two native KiCad instances through MCP and real keyboard/mouse interaction. It navigated System → PSU → System → CPU, edited requirements, saved and declined drafts, restored field history, rejected a stale save while retaining the draft, and reopened the file. Its editor artifacts are materialized at `/mnt/build-storage/codex/kicad/evidence/recursive-editor-8fc24d/editor/`.
@@ -43,6 +41,8 @@ The implementation is a 1536 × 1024 native editor within a 1600 × 1150 virtual
 The inspector now keeps its three History controls visible, native text is readable, and the reviewed CPU boundary labels no longer overlap. Port-side choices route toward the peer without inventing electrical direction. Main region organization follows the approved canvas/right-inspector design. Existing native icons are reused; diagram blocks and links are data-driven drawing, not raster substitutes. Save/Decline remain editing actions and invoke no agent.
 
 Remaining P1/P2 scope: diagram implementation/history selection, connection selection/editing, comments/markup, saved layout manipulation, whole-diagram restore/preview, and the designed three-way conflict workflow are unfinished. The current native save safely rejects a stale file and retains the draft, but this is not the conflict-resolution dialog. Full-window compact/dark interaction and complete visible-control coverage are not yet qualified. Field-history pagination beyond 200 changes is tracked as `p8ebf18838a55934f`; the complete recursive editor and field-history outcomes remain open. The optional Agent console entry is not shown as a working integration. Final result remains blocked.
+
+## Historical comparison — superseded option 1
 
 The following records describe the earlier native editor and are retained as historical evidence. They are not the approved visual target for the recursive editor.
 

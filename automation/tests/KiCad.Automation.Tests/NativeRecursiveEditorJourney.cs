@@ -987,7 +987,8 @@ public sealed partial class NativeSessionTests
             var proposalArguments = new Dictionary<string, object?>(arguments)
             {
                 ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = componentToken,
-                ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                ["operationId"] = Guid.NewGuid()
             };
             var proposalResult = await client.CallToolAsync("kicad_diagram_proposal_publish", proposalArguments, cancellationToken: token);
             if (proposalResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-error.json"), JsonSerializer.Serialize(proposalResult), token);
@@ -995,6 +996,13 @@ public sealed partial class NativeSessionTests
             var proposalData = JsonSerializer.SerializeToElement(proposalResult).GetProperty("structuredContent");
             Assert.IsTrue(proposalData.GetProperty("added").GetBoolean());
             Assert.IsFalse(proposalData.GetProperty("contextStillSelected").GetBoolean(), "The proposal was based on the original input while later edits had advanced the active root.");
+            var proposalPublication = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = proposalArguments["operationId"]
+            }, cancellationToken: token);
+            Assert.IsFalse(proposalPublication.IsError == true);
+            Assert.AreEqual("Published", JsonSerializer.SerializeToElement(proposalPublication).GetProperty("structuredContent")
+                .GetProperty("receipt").GetProperty("stage").GetString());
             var proposalGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.IsTrue(proposalGraph.Proposal(proposal.Id).Issues.Any());
             var proposalReadArguments = new Dictionary<string, object?>(arguments)

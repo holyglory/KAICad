@@ -18,7 +18,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_diagram_proposal_publish"),
      Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. This does not generate or activate native electrical designs.")]
     public Task<CallToolResult> PublishProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
-        string sourcePath, string documentId, string expectedSourceToken, JsonElement proposalJson, CancellationToken cancellationToken) => Execute(async () =>
+        string sourcePath, string documentId, string expectedSourceToken, JsonElement proposalJson, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
         BlockProposal proposal;
         try
@@ -29,6 +29,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
         { throw new AutomationException("invalid_block_proposal", error.Message); }
+        if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "A proposal publication needs an explicit operation identity.");
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
@@ -36,7 +37,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         try
         {
             result = await BlockProposalFiles.PublishAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, proposal,
-                registry.StateDirectory, cancellationToken);
+                registry.StateDirectory, cancellationToken, operationId);
         }
         catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
         { throw new AutomationException("invalid_block_proposal", error.Message); }
@@ -61,6 +62,19 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
                 connections = b.LocalDiagram.Connections.IsEmpty ? [] : loaded.Graph.Connections(b.Selection.BlockId).Walk(b.LocalDiagram.Connections)
                     .Select(s => new { connection = loaded.Graph.Connections(b.Selection.BlockId).Inspect(s),
                         requirements = loaded.Graph.Connections(b.Selection.BlockId).Requirements(s).Requirements }).ToArray() }) });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_publication", ReadOnly = true),
+     Description("Read the durable publication phase for one proposal operation. The result distinguishes prepared, replacing and published XML evidence; it does not retry, select the candidate or claim native activation. A replacing receipt remains an explicit recovery requirement.")]
+    public Task<CallToolResult> ProposalPublication(string instanceId, string expectedInstanceEpoch, Guid operationId,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        var receipt = new BlockProposalReceipts(registry.StateDirectory).Read(operationId)
+            ?? throw new AutomationException("missing_block_proposal_receipt", "No durable proposal publication receipt has this operation identity.");
+        return Data(new { instanceId, instanceEpoch = session.Epoch, receipt });
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_retained", ReadOnly = true),

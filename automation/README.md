@@ -2873,6 +2873,14 @@ In the recursive window:
 - Select a block and use **Open diagram**, or double-click it. Back/Up return to
   containing diagrams. Arrow keys select peer blocks; Enter opens the selected
   block and Backspace goes up when the canvas has focus.
+- The compact implementation control in the diagram header previews another
+  existing implementation. Preview is visibly distinct and does not write the
+  file. **Save** selects it and publishes any edits as a new revision;
+  **Decline** returns to the latest saved choice. Other implementations and old
+  root snapshots remain available. Selection rejects incompatible boundary
+  interfaces or stale file versions instead of applying part of the change.
+  `Ctrl+I` opens the implementation menu. This selects the conceptual diagram;
+  it does not claim coherent native schematic/PCB activation yet.
 - Select a connection by clicking its line, or cycle the local connections with
   `L` on the canvas. Its endpoint summary describes the actual current binding,
   not a claimed native net or compatibility proof.
@@ -2913,6 +2921,6 @@ Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
 native Mac integration. The authoritative unfinished outcomes include recursive
 UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
 `pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and history pagination beyond
-the initial 200 entries `p8ebf18838a55934f`. Implementation switching, complete
+the initial 200 entries `p8ebf18838a55934f`. Implementation creation/removal, complete
 graph conflict handling, structural/native generation and reverse synchronization,
 schematic/PCB markup, and full platform qualification remain open.

@@ -446,6 +446,15 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(newGraph.Inspect(newSelection).Children);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-new-implementation.png"), token);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 118, clickFromTop: 45);
+            await Wait(s => s.DiagramPath.Count == 1 && !s.Busy);
+            await ImplementationMenu(); Key("d"); await Window("Duplicate implementation"); Name("Whole-system exploration", "Duplicate implementation");
+            var rootPreview = await Wait(s => !s.Busy && s.ImplementationPreview && s.Draft.Baseline.BlockId == newGraph.SelectedRoot.BlockId.ToString("D"));
+            var rootCopyGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(newGraph.SelectedRoot, rootCopyGraph.SelectedRoot);
+            Assert.AreEqual(newGraph.SelectedRoot, rootCopyGraph.States.Single(s => s.Id.ToString("D") == rootPreview.Draft.Baseline.StateId).ForkedFrom);
+            Assert.HasCount(2, rootPreview.Draft.Children);
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
             var managementRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
             Assert.IsFalse(managementRead.IsError == true);
             var managementData = JsonSerializer.SerializeToElement(managementRead).GetProperty("structuredContent");

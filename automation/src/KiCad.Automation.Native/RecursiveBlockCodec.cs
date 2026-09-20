@@ -95,7 +95,8 @@ public static class RecursiveBlockCodec
             new(new(scope, GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))),
                 Fields(Need(data.Fields)), restored.ToImmutable()), data.RestoredFrom is { } source ? Selection(source) : null,
             data.LocalDiagram is { } diagram ? Local(diagram) : null,
-            data.Definition is { } definition ? Decode(definition) : null);
+            data.Definition is { } definition ? Decode(definition) : null,
+            data.ComponentBindings is { } bindings ? Decode(bindings) : null);
     }
 
     public static P.BlockDraftData Encode(M.RecursiveBlockDraft draft)
@@ -109,7 +110,24 @@ public static class RecursiveBlockCodec
         if (draft.RestoredFrom is { } source) result.RestoredFrom = Selection(source);
         if (draft.Diagram is { } diagram) result.LocalDiagram = Local(diagram);
         if (draft.Definition is { } definition) result.Definition = Encode(definition);
+        if (draft.ComponentBindings is { } bindings) result.ComponentBindings = Encode(bindings);
         return result;
+    }
+
+    public static P.BlockComponentBindingsData Encode(M.BlockComponentBindings bindings)
+    {
+        bindings.Validate(); var data = new P.BlockComponentBindingsData();
+        data.Targets.Add(bindings.Targets.Select(t => new P.ComponentRealizationData
+            { DesignId = Id(t.DesignId), CircuitId = Id(t.CircuitId), ComponentId = Id(t.ComponentId) }));
+        return data;
+    }
+
+    public static M.BlockComponentBindings Decode(P.BlockComponentBindingsData data)
+    {
+        Known(data, P.BlockComponentBindingsData.Parser);
+        var bindings = new M.BlockComponentBindings(data.Targets.Select(t => new M.ComponentRealization(
+            GuidValue(t.DesignId), GuidValue(t.CircuitId), GuidValue(t.ComponentId))).ToImmutableArray());
+        bindings.Validate(); return bindings;
     }
 
     internal static M.RequirementRevisionOrigin DecodeOrigin(P.DiagramRevisionOriginData origin) => Origin(Need(origin));
@@ -194,6 +212,7 @@ public static class RecursiveBlockCodec
             if (r.RestoredFrom is { } restored) row.RestoredFrom = Selection(restored);
             if (r.Diagram is { } diagram) row.LocalDiagram = Local(diagram);
             if (r.Definition is { } definition) row.Definition = Encode(definition);
+            if (r.ComponentBindings is { } bindings) row.ComponentBindings = Encode(bindings);
             row.Children.Add(r.Children.Select(Selection)); data.Revisions.Add(row);
         }
         data.RequirementHistories.Add(graph.RequirementHistories.Select(History));
@@ -214,7 +233,8 @@ public static class RecursiveBlockCodec
             data.Revisions.Select(r => new M.RecursiveBlockRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
                 r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null,
-                r.Definition is { } definition ? Decode(definition) : null)),
+                r.Definition is { } definition ? Decode(definition) : null,
+                r.ComponentBindings is { } bindings ? Decode(bindings) : null)),
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
                 (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))));

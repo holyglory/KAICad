@@ -13,7 +13,8 @@ public sealed partial class NativeSessionTests
         string evidence, string instanceId, CancellationToken token)
     {
         var fixture = LinkedDiagramFixture.Create(); var graph = fixture.Graph;
-        var definitionDraft = graph.StartDraft(graph.SelectedRoot) with { Definition = RecursiveBlockDefinitionTests.Partial() };
+        var initialBindings = RecursiveBlockComponentTests.UnresolvedFixture();
+        var definitionDraft = graph.StartDraft(graph.SelectedRoot) with { Definition = RecursiveBlockDefinitionTests.Partial(), ComponentBindings = initialBindings };
         graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], definitionDraft, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
         string project = Path.GetDirectoryName((await native.HandshakeAsync(token)).ProjectPath)!;
         string source = Path.Combine(project, "system.design.xml");
@@ -42,6 +43,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(2, savedReadData.GetProperty("connections").GetArrayLength());
             Assert.AreEqual("DCSD_UNKNOWN", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("model").GetProperty("state").GetString());
             Assert.AreEqual("SGS_REQUIREMENT", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("package").GetProperty("strength").GetString());
+            Assert.AreEqual(initialBindings.Targets[0].ComponentId.ToString("D"), savedReadData.GetProperty("block")
+                .GetProperty("componentBindings").GetProperty("targets")[0].GetProperty("componentId").GetString());
             var wholeHistoryArguments = new Dictionary<string, object?>(arguments)
             {
                 ["context"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },
@@ -825,6 +828,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(oldPsu, restoredChildGraph.Inspect(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).Children[0]).RestoredFrom);
             Assert.IsTrue(RecursiveBlockDefinitionTests.Partial().SameContents(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).EffectiveDefinition),
                 "Native requirement edits, history restoration and child saves must retain independent definition choices.");
+            Assert.IsTrue(initialBindings.SameContents(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).EffectiveComponentBindings),
+                "Native editing, undo and restoration must preserve exact component identities, including unresolved targets.");
             var currentDefinitionState = await Read();
             var selectedDefinition = RecursiveBlockDefinitionTests.Partial().With(BlockDefinitionFacet.Model,
                 RecursiveBlockDefinitionTests.Choice(DefinitionChoiceState.Selected, ["Fixture selected model"]));
@@ -872,7 +877,78 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(missingClass.IsError == true);
             Assert.AreEqual("MissingLibrary", JsonSerializer.SerializeToElement(missingClass).GetProperty("structuredContent").GetProperty("resolution").GetProperty("selected").GetProperty("availability").GetString());
             Assert.AreEqual(RecursiveBlockGraphXml.Write(definedGraph), await File.ReadAllTextAsync(source, token));
-            Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == JsonSerializer.SerializeToElement(definitionResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString());
+            var electrical = await RecursiveBlockComponentTests.WriteRepository(project, token);
+            var componentArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = currentDefinitionToken,
+                ["expectedRoot"] = definedGraph.SelectedRoot, ["blockPath"] = new[] { definedGraph.SelectedRoot },
+                ["bindings"] = JsonSerializer.SerializeToElement(electrical.Bindings, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                ["operationId"] = Guid.NewGuid(), ["actor"] = "Compatible component agent fixture"
+            };
+            var componentResult = await client.CallToolAsync("kicad_diagram_components_set", componentArguments, cancellationToken: token);
+            if (componentResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-components-error.json"), JsonSerializer.Serialize(componentResult), token);
+            Assert.IsFalse(componentResult.IsError == true);
+            var componentData = JsonSerializer.SerializeToElement(componentResult).GetProperty("structuredContent");
+            string componentToken = componentData.GetProperty("sourceToken").GetString()!;
+            var mappedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(electrical.Bindings.SameContents(mappedGraph.Inspect(mappedGraph.SelectedRoot).EffectiveComponentBindings));
+            Assert.IsTrue(initialBindings.SameContents(mappedGraph.Inspect(definedGraph.SelectedRoot).EffectiveComponentBindings));
+            Assert.AreEqual(definedGraph.Requirements(definedGraph.SelectedRoot).Requirements, mappedGraph.Requirements(mappedGraph.SelectedRoot).Requirements);
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_components_set", componentArguments, cancellationToken: token)).IsError == true);
+            componentArguments["expectedSourceToken"] = componentToken; componentArguments["expectedRoot"] = mappedGraph.SelectedRoot;
+            componentArguments["blockPath"] = new[] { mappedGraph.SelectedRoot }; componentArguments["operationId"] = Guid.NewGuid();
+            var componentNoOp = await client.CallToolAsync("kicad_diagram_components_set", componentArguments, cancellationToken: token);
+            Assert.IsFalse(componentNoOp.IsError == true);
+            Assert.IsFalse(JsonSerializer.SerializeToElement(componentNoOp).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
+            componentArguments["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_components_set", componentArguments, cancellationToken: token)).IsError == true);
+            var inspectComponents = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedSourceToken"] = componentToken, ["selection"] = mappedGraph.SelectedRoot,
+                ["manifestPath"] = "hardware.xml", ["expectedManifestToken"] = electrical.ManifestHash
+            };
+            var componentObservation = await client.CallToolAsync("kicad_diagram_components", inspectComponents, cancellationToken: token);
+            if (componentObservation.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-component-observation-error.json"), JsonSerializer.Serialize(componentObservation), token);
+            Assert.IsFalse(componentObservation.IsError == true);
+            var inspected = JsonSerializer.SerializeToElement(componentObservation).GetProperty("structuredContent").GetProperty("inspection");
+            Assert.AreEqual(0, inspected.GetProperty("failures").GetArrayLength());
+            Assert.AreEqual(2, inspected.GetProperty("components").GetArrayLength());
+            foreach (var resolvedComponent in inspected.GetProperty("components").EnumerateArray())
+            {
+                Assert.AreEqual("ComponentResolved", resolvedComponent.GetProperty("status").GetString());
+                Assert.AreEqual(2, resolvedComponent.GetProperty("nativeLocations").GetArrayLength());
+            }
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-component-observation.json"), JsonSerializer.Serialize(componentObservation), token);
+            inspectComponents["expectedManifestToken"] = "stale";
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_components", inspectComponents, cancellationToken: token)).IsError == true);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(mappedGraph), await File.ReadAllTextAsync(source, token));
+            Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == componentToken);
+            // Reload preserves the PSU location used above; root mutations made
+            // through MCP must not silently change that native editing scope.
+            Assert.AreEqual(fixture.Blocks["PSU"].BlockId.ToString("D"), (await Read()).DiagramPath[^1].BlockId);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                clickFromLeft: 118, clickFromTop: 45);
+            await Wait(s => !s.Busy && s.DiagramPath.Count == 1);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                clickFromLeft: 20, clickFromTop: 250);
+            await Wait(s => !s.Busy && s.Draft.Baseline.RevisionId == mappedGraph.SelectedRoot.RevisionId.ToString("D"));
+            Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false });
+            Key("Down"); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h
+                && h.Inspected.RevisionId == definedGraph.SelectedRoot.RevisionId.ToString("D"));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-component-history.png"), token);
+            Key("d", alt: true);
+            var restoredComponents = await Wait(s => !s.Busy && s.DiagramHistory is null && s.Dirty);
+            Assert.IsTrue(initialBindings.SameContents(RecursiveBlockCodec.Decode(restoredComponents.Draft.ComponentBindings)));
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(mappedGraph), await File.ReadAllTextAsync(source, token));
+            Key("d", alt: true); var declinedComponents = await Wait(s => !s.Busy && !s.Dirty);
+            Assert.IsTrue(electrical.Bindings.SameContents(RecursiveBlockCodec.Decode(declinedComponents.Draft.ComponentBindings)));
+            Key("3", control: true); Key("a", control: true); Type("Keep mapped components reachable."); await Wait(s => s.Dirty);
+            await Save();
+            var nativeSavedComponents = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(electrical.Bindings.SameContents(nativeSavedComponents.Inspect(nativeSavedComponents.SelectedRoot).EffectiveComponentBindings));
+            Assert.AreEqual("Keep mapped components reachable.", nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.Routing);
+            Assert.AreEqual(mappedGraph.Requirements(mappedGraph.SelectedRoot).Requirements.General,
+                nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.General);
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

@@ -14,6 +14,58 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_components", ReadOnly = true),
+     Description("Inspect the exact electrical component realizations of a saved block using a repository-relative hardware manifest and its observed SHA256. Reads only its declared design and knowledge-library files. Returns source hashes, actual components/parts and all mapped native symbol units and sheet paths, or explicit missing/replaced identities and binding diagnostics. These are saved XML snapshots, not live editor state, electrical correctness or inferred part choices. Never changes a diagram or native design.")]
+    public Task<CallToolResult> Components(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, BlockSelection selection, string manifestPath, string expectedManifestToken,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        _ = HistorySelection(selection); Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the exact saved diagram before resolving its components.");
+        var inspection = await BlockComponentFiles.InspectAsync(repositoryRoot, manifestPath, expectedManifestToken,
+            loaded.Graph.Inspect(selection).EffectiveComponentBindings, cancellationToken);
+        var checkedDiagram = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (checkedDiagram.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The diagram changed during component inspection; read a fresh observation.");
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
+            sourceToken = loaded.ContentSha256, selection, inspection },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_diagram_components_set"),
+     Description("Save explicit design/circuit/component identity bindings on one exact block revision. A block may map to zero, one or multiple components across child designs. Requires the observed native instance epoch, source hash, selected root and complete root-to-block path. Saves a new revision and retains old bindings and requirements in history, without creating components, changing native circuits or claiming that targets resolve. Use kicad_diagram_components to inspect the saved targets. Reload or reconcile open native drafts after this external save.")]
+    public Task<CallToolResult> SetComponents(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
+        BlockComponentBindings bindings, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var path = blockPath?.ToArray() ?? [];
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (path.Length == 0 || path.Any(p => p is null) || expectedRoot is null || bindings is null
+            || operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_component_binding_operation", "Provide the exact root/path, bindings, observed source, operation identity and actor.");
+        bindings.Validate(); Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The saved diagram changed; retain the proposed bindings and compare with its latest revision.");
+        var draft = loaded.Graph.StartDraft(path[^1]) with { ComponentBindings = bindings };
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
+            "Update component bindings", [], [operationId]);
+        var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
+            [.. path], draft, operationId, Guid.NewGuid(), [.. path.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
+        var selection = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
+            sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection,
+            bindings = saved.Graph.Inspect(selection).EffectiveComponentBindings, changed = saved.ContentSha256 != loaded.ContentSha256 });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_definition_guidance", ReadOnly = true),
      Description("Resolve the exact knowledge-class choices of a saved block against explicitly supplied repository-relative library paths. Returns inherited guidance and source hashes, with each candidate separate and missing libraries/revisions/classes explicit. A selected class is not a selected electrical part or proof of compatibility. Does not change XML, the editor or any native component.")]
     public Task<CallToolResult> DefinitionGuidance(string instanceId, string repositoryRoot, string sourcePath, string documentId,

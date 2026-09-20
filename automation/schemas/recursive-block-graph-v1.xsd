@@ -95,6 +95,13 @@
           </xs:sequence></xs:complexType></xs:element>
         </xs:sequence></xs:complexType></xs:element>
         <xs:element ref="d:definition" minOccurs="0"/>
+        <xs:element name="component-bindings" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="component" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+            <xs:attribute name="design" type="h:identity" use="required"/>
+            <xs:attribute name="circuit" type="h:identity" use="required"/>
+            <xs:attribute name="id" type="h:identity" use="required"/>
+          </xs:complexType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
       </xs:sequence>
         <xs:attribute name="id" type="h:identity" use="required"/>
         <xs:attribute name="block" type="h:identity" use="required"/>

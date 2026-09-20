@@ -69,6 +69,8 @@ public static class DiagramHistoryQuery
         if (!(before.EffectiveDefinition.KnowledgeClass ?? DefinitionChoice<KnowledgeClassReference>.Unspecified)
             .SameContents(after.EffectiveDefinition.KnowledgeClass ?? DefinitionChoice<KnowledgeClassReference>.Unspecified))
             changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId, "Knowledge class"));
+        if (!before.EffectiveComponentBindings.SameContents(after.EffectiveComponentBindings))
+            changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId, "Components"));
         CompareItems(before.Children, after.Children, DiagramHistoryChangeCategory.Block,
             c => c.BlockId, c => graph.Inspect(c).Name, (a, b) => a == b);
         CompareItems(before.LocalDiagram.Connections, after.LocalDiagram.Connections, DiagramHistoryChangeCategory.Connection,

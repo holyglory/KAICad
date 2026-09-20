@@ -44,7 +44,8 @@ public sealed class RecursiveRequirementMerge
             throw Invalid("changed_draft_baseline", "The draft no longer identifies its exact saved requirement baseline.");
         if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
             || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
-            || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition) || draft.RestoredFrom is not null)
+            || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
+            || !draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings) || draft.RestoredFrom is not null)
             throw Invalid("structural_draft_requires_comparison", "Keep this draft: its diagram structure or whole-version restoration needs a separate comparison.");
         var pending = new Stack<ImmutableArray<BlockSelection>>(); pending.Push([latest.SelectedRoot]);
         while (pending.TryPop(out var path))

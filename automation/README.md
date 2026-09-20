@@ -2960,6 +2960,31 @@ returns a typed historical draft without writing the file or replacing an open
 window draft. The explicit context/source selections and observed file token
 remain distinct from choosing an implementation or saving a new revision.
 
+`kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
+Read `kicad_diagram_state` first, then supply that document's `sourceToken` and
+`viewRevision`. Each view names its pixel dimensions and may select an exact
+saved block/implementation/revision; omitting the selection uses the current
+canvas, including its visible draft or historical preview. An optional viewport
+uses `x`, `y`, `width`, and `height` in diagram units, with X right and Y down.
+The service can render another level and a detail region in the same request
+without moving the user's window, changing selection, discarding a draft or saving.
+
+The structured response identifies each view, actual viewport, source/view
+revision, diagram objects and whether it includes an unsaved draft. Known zero
+coordinates and false flags remain explicit. `imageReferences` maps view IDs to
+image content indices and SHA-256 values; PNG bytes are image content, not duplicated
+inside the structured metadata. Requests support one to eight views, 64–4096 pixels
+per dimension and 16 Mi-pixels total. An unrepresentable native zoom is rejected,
+not silently clamped into false geometry. Request another observation for more
+views. This is abstract-diagram rendering, not schematic/PCB realization or
+electrical validation.
+
+Scoped Linux observation proof is `t20260920T064819Z-ace160`: actual STDIO image
+content, current/saved/historical/detail views, empty implementations, unchanged
+editor state, stale/wrong targets, invalid viewport/duplicate requests, cancellation
+before capture and successful capture after errors in both themes. Actual Codex
+Desktop image delivery and native-platform qualification remain separate work.
+
 Focused Linux development verification uses:
 
 ```sh

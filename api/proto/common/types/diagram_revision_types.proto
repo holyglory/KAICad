@@ -78,8 +78,8 @@ message DiagramHistoryPageData {
   uint32 total = 5;
   repeated DiagramHistoryEntryData entries = 6;
 }
-enum DiagramChangeKind { DCK_UNKNOWN = 0; DCK_ADDED = 1; DCK_REMOVED = 2; DCK_CHANGED = 3; DCK_REORDERED = 4; }
-enum DiagramChangeCategory { DCC_UNKNOWN = 0; DCC_NAME = 1; DCC_REQUIREMENT = 2; DCC_BLOCK = 3; DCC_CONNECTION = 4; DCC_INTERFACE = 5; DCC_COMMENT = 6; }
+enum DiagramChangeKind { DHCK_UNKNOWN = 0; DHCK_ADDED = 1; DHCK_REMOVED = 2; DHCK_CHANGED = 3; DHCK_REORDERED = 4; }
+enum DiagramChangeCategory { DHCC_UNKNOWN = 0; DHCC_NAME = 1; DHCC_REQUIREMENT = 2; DHCC_BLOCK = 3; DHCC_CONNECTION = 4; DHCC_INTERFACE = 5; DHCC_COMMENT = 6; }
 message DiagramHistoryChangeData {
   DiagramChangeCategory category = 1;
   DiagramChangeKind kind = 2;

@@ -58,11 +58,13 @@ public sealed partial class NativeSessionTests
     public Task StructuralEditorUsesRealNativeControlsAndXmlFiles() => RunNativeSessions(NativeJourney.StructuralEditor);
 
     [TestMethod, TestCategory("NativeRecursiveEditor")]
-    public Task RecursiveEditorNavigatesLevelsAndSavesRequirementHistory() => RunNativeSessions(NativeJourney.RecursiveEditor);
+    [DataRow("light")]
+    [DataRow("dark")]
+    public Task RecursiveEditorNavigatesLevelsAndSavesRequirementHistory(string theme) => RunNativeSessions(NativeJourney.RecursiveEditor, theme);
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor }
 
-    private async Task RunNativeSessions(NativeJourney journey)
+    private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
         Assert.IsTrue(OperatingSystem.IsLinux(), "This virtual-display check is Linux-only, not native Mac evidence.");
         string root = FindRoot();
@@ -81,7 +83,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
                 NativeJourney.ComponentCreation => "native-xml-component-creation",
                 NativeJourney.StructuralEditor => "native-structural-editor",
-                NativeJourney.RecursiveEditor => "native-recursive-editor",
+                NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -157,6 +159,7 @@ public sealed partial class NativeSessionTests
                 start.Environment["WXTRACE"] = "KICAD_SETTINGS";
                 start.Environment["XDG_CONFIG_HOME"] = Path.Combine(projectDirectory, "config");
                 start.Environment["XDG_CACHE_HOME"] = Path.Combine(projectDirectory, "cache");
+                if (journey == NativeJourney.RecursiveEditor) start.Environment["GTK_THEME"] = theme == "dark" ? "Adwaita:dark" : "Adwaita";
                 foreach (string arg in new[] { "--new", "--automation", id, "--api-socket", socket,
                                                "--automation-log", Path.Combine(evidence, $"native-{index}.log"),
                                                "--software-rendering", project })

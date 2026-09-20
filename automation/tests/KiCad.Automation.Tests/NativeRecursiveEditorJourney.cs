@@ -435,6 +435,41 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(newGraph.Inspect(newSelection).Children);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-new-implementation.png"), token);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
+            var managementRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
+            Assert.IsFalse(managementRead.IsError == true);
+            var managementData = JsonSerializer.SerializeToElement(managementRead).GetProperty("structuredContent");
+            Guid agentStateId = Guid.NewGuid();
+            var agentArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = managementData.GetProperty("instanceEpoch").GetString(),
+                ["expectedSourceToken"] = managementData.GetProperty("sourceToken").GetString(),
+                ["expectedRoot"] = new { blockId = newGraph.SelectedRoot.BlockId, stateId = newGraph.SelectedRoot.StateId, revisionId = newGraph.SelectedRoot.RevisionId },
+                ["source"] = new { blockId = sourceCpu.BlockId, stateId = sourceCpu.StateId, revisionId = sourceCpu.RevisionId },
+                ["action"] = "duplicate", ["operationId"] = agentStateId, ["actor"] = "Compatible agent fixture", ["name"] = "Agent alternative"
+            };
+            var agentCreated = await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token);
+            Assert.IsFalse(agentCreated.IsError == true);
+            var agentCreatedData = JsonSerializer.SerializeToElement(agentCreated).GetProperty("structuredContent");
+            Assert.AreEqual(agentStateId.ToString("D"), agentCreatedData.GetProperty("implementation").GetProperty("id").GetString());
+            var agentGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(newGraph.SelectedRoot, agentGraph.SelectedRoot);
+            Assert.AreEqual(sourceCpu, agentGraph.States.Single(s => s.Id == agentStateId).ForkedFrom);
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token)).IsError == true);
+            var agentState = agentGraph.States.Single(s => s.Id == agentStateId);
+            agentArguments["source"] = new { blockId = agentState.BlockId, stateId = agentState.Id, revisionId = agentState.HeadRevisionId };
+            agentArguments["expectedSourceToken"] = agentCreatedData.GetProperty("sourceToken").GetString();
+            agentArguments["action"] = "remove"; agentArguments["operationId"] = Guid.NewGuid(); agentArguments.Remove("name");
+            var agentRemoved = await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token);
+            Assert.IsFalse(agentRemoved.IsError == true);
+            Assert.IsTrue(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).States.Single(s => s.Id == agentStateId).Archived);
+            agentArguments["expectedSourceToken"] = JsonSerializer.SerializeToElement(agentRemoved).GetProperty("structuredContent").GetProperty("sourceToken").GetString();
+            agentArguments["action"] = "restore"; agentArguments["operationId"] = Guid.NewGuid();
+            var agentRestored = await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token);
+            Assert.IsFalse(agentRestored.IsError == true);
+            Assert.IsFalse(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).States.Single(s => s.Id == agentStateId).Archived);
+            agentArguments["expectedInstanceEpoch"] = "wrong-epoch";
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token)).IsError == true);
+            Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == JsonSerializer.SerializeToElement(agentRestored).GetProperty("structuredContent").GetProperty("sourceToken").GetString());
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

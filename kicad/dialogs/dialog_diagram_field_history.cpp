@@ -107,6 +107,9 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_older->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& )
     {
         if( !m_loadOlder || m_loading || m_entries.size() >= m_total ) return;
+        // Keep keyboard navigation and Escape on a live control while the
+        // triggering button is disabled (and later hidden on the last page).
+        m_history->SetFocus();
         m_loading = true; m_pageError->SetLabel( wxEmptyString ); updatePaging();
         m_loadOlder( m_entries.size() );
     } );

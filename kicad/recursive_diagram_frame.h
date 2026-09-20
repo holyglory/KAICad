@@ -71,6 +71,8 @@ private:
     void save();
     void decline();
     void history( int aField );
+    void showHistory( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult,
+                      const REQUEST& aQuery );
     void undo( bool aRedo );
     void close( wxCloseEvent& aEvent );
     void paint( wxDC& aDC );

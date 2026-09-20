@@ -1,6 +1,7 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "recursive_diagram_frame.h"
 #include "dialogs/dialog_diagram_field_history.h"
+#include "dialogs/dialog_diagram_conflict.h"
 #include <bitmaps.h>
 #include <kiid.h>
 #include <google/protobuf/util/json_util.h>
@@ -220,7 +221,69 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
         m_error = parsed && !result.error_message().empty() ? result.error_message() : "The operation failed; the current draft remains open.";
+        if( m_activeRequest.action() == D::RFA_SAVE_BLOCK && m_errorCode == "recursive_block_file_changed" && m_rebaseAttempts++ < 2 )
+        {
+            REQUEST compare; compare.set_action( D::RFA_REBASE_REQUIREMENTS );
+            *compare.mutable_rebase()->mutable_draft() = m_draft;
+            execute( std::move( compare ) ); return;
+        }
         m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); refresh(); return;
+    }
+    if( m_activeRequest.action() == D::RFA_REBASE_REQUIREMENTS )
+    {
+        const auto& merge = result.merge();
+        if( !result.has_merge() || result.source_token().size() != 64 || !merge.has_original_draft()
+            || !result.has_document() || result.document().document_id() != DocumentId()
+            || result.document().source_path() != SourcePath() || result.document().source_token() != result.source_token()
+            || !same( merge.original_draft().baseline(), m_activeRequest.rebase().draft().baseline() )
+            || merge.original_draft().SerializeAsString() != m_activeRequest.rebase().draft().SerializeAsString() )
+        { m_errorCode = "requirement_comparison_mismatch"; m_error = "The comparison does not match the retained editing draft."; refresh(); return; }
+        if( merge.has_candidate() )
+        {
+            // Save the revalidated candidate against this exact new file token.
+            // The normal disk guard rejects another change between compare and save.
+            REQUEST save; save.set_action( D::RFA_SAVE_BLOCK ); save.set_expected_source_token( result.source_token() );
+            auto* candidate = save.mutable_save(); *candidate->mutable_draft() = merge.candidate();
+            *candidate->mutable_expected_root() = merge.expected_root(); *candidate->mutable_block_path() = merge.block_path();
+            candidate->set_new_revision_id( freshId() ); candidate->set_new_requirement_revision_id( freshId() );
+            for( int i = 1; i < merge.block_path_size(); ++i ) candidate->add_ancestor_revision_ids( freshId() );
+            auto* origin = candidate->mutable_origin(); origin->set_kind( D::DAK_EDITOR ); origin->set_actor( "Native editor" );
+            origin->set_summary( "Reconcile requirement edits" );
+            auto now = std::chrono::system_clock::now().time_since_epoch(); auto seconds = std::chrono::duration_cast<std::chrono::seconds>( now );
+            origin->mutable_recorded_at()->set_seconds( seconds.count() );
+            origin->mutable_recorded_at()->set_nanos( static_cast<int>( std::chrono::duration_cast<std::chrono::nanoseconds>( now - seconds ).count() / 100 * 100 ) );
+            std::string scope = current() ? current()->selection().block_id() : merge.expected_root().block_id();
+            m_document = result.document();
+            if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
+            m_savedDraft = merge.saved_draft(); m_draft = merge.candidate(); m_dirty = true;
+            execute( std::move( save ) ); return;
+        }
+        if( merge.conflicts_size() == 0 ) { m_error = "No savable comparison was returned; the draft remains open."; refresh(); return; }
+        DIALOG_DIAGRAM_CONFLICT dialog( this, m_owner->GetLabel(), merge );
+        if( dialog.ShowModal() != wxID_OK )
+        {
+            m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear();
+            m_errorCode = "requirement_conflict"; m_error = "The saved design changed. Your draft is still open."; refresh(); return;
+        }
+        REQUEST resolve; resolve.set_action( D::RFA_REBASE_REQUIREMENTS ); resolve.set_expected_source_token( result.source_token() );
+        *resolve.mutable_rebase()->mutable_draft() = merge.original_draft();
+        m_undo.push_back( m_draft ); m_redo.clear();
+        for( auto choice : dialog.Resolutions() )
+        {
+            choice.set_document_id( DocumentId() );
+            *resolve.mutable_rebase()->add_resolutions() = choice;
+            // Keep the user's chosen or composed text as draft work even if the
+            // saved file advances again before the companion can revalidate it.
+            int which = static_cast<int>( choice.field() ) - 1;
+            if( which >= 0 && which < 3 )
+            {
+                setField( m_draft.mutable_fields(), which, choice.text() );
+                auto* restored = m_draft.mutable_restored_fields();
+                for( int i = restored->size() - 1; i >= 0; --i )
+                    if( restored->Get( i ).field() == choice.field() ) restored->DeleteSubrange( i, 1 );
+            }
+        }
+        m_dirty = true; ++m_viewRevision; execute( std::move( resolve ) ); return;
     }
     if( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY )
     {
@@ -347,6 +410,7 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
 void RECURSIVE_DIAGRAM_FRAME::save()
 {
     if( !m_ready || m_process || !m_dirty ) return;
+    m_rebaseAttempts = 0;
     REQUEST request; request.set_action( D::RFA_SAVE_BLOCK ); request.set_expected_source_token( m_document.source_token() );
     auto* save = request.mutable_save(); *save->mutable_expected_root() = m_document.graph().selected_root(); *save->mutable_draft() = m_draft;
     std::vector<SELECTION> path; if( !findPath( m_draft.baseline().block_id(), path ) ) return;

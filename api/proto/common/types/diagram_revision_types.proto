@@ -93,7 +93,32 @@ message RecursiveEditorDocument {
   string source_token = 4;
   RecursiveBlockGraphData graph = 5;
 }
-enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; }
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; }
+message RequirementConflictData { RequirementFieldKind field = 1; string baseline = 2; string draft = 3; string saved = 4; }
+message RequirementResolutionData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  string baseline_revision_id = 4;
+  string saved_revision_id = 5;
+  RequirementFieldsData baseline = 6;
+  RequirementFieldsData draft = 7;
+  RequirementFieldsData saved = 8;
+  RequirementFieldKind field = 9;
+  string text = 10;
+}
+message RebaseRequirementsRequest {
+  BlockDraftData draft = 1;
+  repeated RequirementResolutionData resolutions = 2;
+}
+message RequirementMergeData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  BlockDraftData original_draft = 3;
+  BlockDraftData saved_draft = 4;
+  BlockDraftData candidate = 5;
+  repeated RequirementConflictData conflicts = 6;
+}
 message BlockDraftData {
   BlockSelectionData baseline = 1;
   string name = 2;
@@ -127,6 +152,7 @@ message RecursiveFileRequest {
   int32 offset = 10;
   int32 limit = 11;
   SaveBlockDraftData save = 12;
+  RebaseRequirementsRequest rebase = 13;
 }
 message RecursiveFileResult {
   bool success = 1;
@@ -135,6 +161,7 @@ message RecursiveFileResult {
   string source_token = 4;
   string error_code = 5;
   string error_message = 6;
+  RequirementMergeData merge = 7;
 }
 
 message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string intent = 3; }

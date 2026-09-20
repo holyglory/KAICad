@@ -105,13 +105,38 @@ public sealed partial class NativeSessionTests
             file = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             CollectionAssert.AreEqual(graph.Walk(oldRoot).ToArray(), file.Walk(oldRoot).ToArray());
             Key("1", control: true); Key("a", control: true); Type("Retain this draft on conflict."); await Wait(s => s.Dirty);
-            await File.AppendAllTextAsync(source, "\n", token);
+            var remoteCpu = file.Inspect(file.SelectedRoot).Children[1];
+            var remoteDraft = file.StartDraft(remoteCpu);
+            remoteDraft = remoteDraft with { Requirements = remoteDraft.Requirements.Edit(DiagramRequirementField.General, "A competing saved requirement.") };
+            var competing = file.SaveDraft(file.SelectedRoot, [file.SelectedRoot, remoteCpu], remoteDraft, Guid.NewGuid(), Guid.NewGuid(),
+                [Guid.NewGuid()], RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(competing), token);
             ulong beforeConflict = (await Read()).CompletedSaveCount; Key("s", control: true);
-            var conflict = await Wait(s => s.CompletedSaveCount > beforeConflict && !s.Busy);
-            Assert.IsTrue(conflict.Dirty); Assert.AreEqual("recursive_block_file_changed", conflict.ErrorCode);
-            Assert.AreEqual("Retain this draft on conflict.", conflict.Draft.Fields.General);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving")) await Task.Delay(50, modal.Token);
+            }
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-conflict.png"), token);
-            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
+            Key("Escape", title: "Resolve changes before saving");
+            var conflict = await Wait(s => s.CompletedSaveCount > beforeConflict && !s.Busy && s.ErrorCode == "requirement_conflict");
+            Assert.IsTrue(conflict.Dirty); Assert.AreEqual("requirement_conflict", conflict.ErrorCode);
+            Assert.AreEqual("Retain this draft on conflict.", conflict.Draft.Fields.General);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(competing), await File.ReadAllTextAsync(source, token));
+            Key("s", control: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving")) await Task.Delay(50, modal.Token);
+            }
+            Key("u", alt: true, title: "Resolve changes before saving");
+            Key("v", alt: true, title: "Resolve changes before saving");
+            var resolved = await Wait(s => !s.Busy && !s.Dirty && s.Draft.Fields.General == "Retain this draft on conflict.");
+            Assert.AreEqual("", resolved.ErrorCode);
+            var reconciled = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var chosenCpu = reconciled.Inspect(reconciled.SelectedRoot).Children[1];
+            Assert.AreEqual("Retain this draft on conflict.", reconciled.Requirements(chosenCpu).Requirements.General);
+            Assert.AreEqual("A competing saved requirement.", reconciled.Requirements(competing.Inspect(competing.SelectedRoot).Children[1]).Requirements.General);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

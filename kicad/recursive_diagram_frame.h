@@ -76,6 +76,7 @@ private:
     bool m_rememberNavigation = true, m_closeAfterSave = false;
     bool m_ready = false, m_dirty = false, m_rendered = false, m_updating = false, m_closing = false;
     uint64_t m_viewRevision = 0, m_saveCount = 0;
+    unsigned m_rebaseAttempts = 0;
     wxPanel* m_canvas;
     wxStaticText* m_breadcrumb;
     wxStaticText* m_owner;

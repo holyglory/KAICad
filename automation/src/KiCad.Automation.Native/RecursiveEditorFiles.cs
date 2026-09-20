@@ -18,7 +18,8 @@ public static class RecursiveEditorFiles
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
             || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
-            || request.Action != P.RecursiveFileAction.RfaSaveBlock && request.Save is not null)
+            || request.Action != P.RecursiveFileAction.RfaSaveBlock && request.Save is not null
+            || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
         if (request.Action == P.RecursiveFileAction.RfaSaveBlock)
@@ -35,6 +36,19 @@ public static class RecursiveEditorFiles
             return Describe(saved);
         }
         var loaded = await RecursiveBlockFiles.ReadAsync(request.RepositoryRoot, request.SourcePath, document, token);
+        if (request.Action == P.RecursiveFileAction.RfaRebaseRequirements)
+        {
+            if (request.Rebase?.Draft is null || request.Block is not null || request.Connection is not null
+                || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
+                throw Invalid("invalid_requirement_rebase_request", "Provide the retained requirement draft and any exact conflict resolutions.");
+            if (request.Rebase.Resolutions.Count != 0 && request.ExpectedSourceToken != loaded.ContentSha256)
+                throw Invalid("stale_requirement_resolution", "The saved design changed again; preserve the resolution and compare the latest version.");
+            var draft = RecursiveBlockCodec.Decode(request.Rebase.Draft, document);
+            var merge = RecursiveRequirementMerge.Prepare(loaded.Graph, draft);
+            var comparison = Describe(loaded);
+            comparison.Merge = RecursiveBlockCodec.Encode(merge, request.Rebase.Resolutions.Select(RecursiveBlockCodec.Decode));
+            return comparison;
+        }
         if (request.ExpectedSourceToken.Length != 0 && request.ExpectedSourceToken != loaded.ContentSha256)
             throw Invalid("recursive_block_file_changed", "The design file changed; retain the editing draft and reload its saved context.");
         var result = new P.RecursiveFileResult { Success = true, SourceToken = loaded.ContentSha256 };

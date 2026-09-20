@@ -11,6 +11,27 @@ namespace KiCad.Automation.Native;
 /// rejected, not simplified into a success. No I/O or agent execution occurs here.</summary>
 public static class RecursiveBlockCodec
 {
+    public static P.RequirementMergeData Encode(M.RecursiveRequirementMerge merge,
+        IEnumerable<M.DiagramRequirementResolution>? choices = null)
+    {
+        var resolved = merge.Inspect(choices);
+        var result = new P.RequirementMergeData { ExpectedRoot = Selection(resolved.ExpectedRoot),
+            OriginalDraft = Encode(merge.OriginalDraft), SavedDraft = Encode(merge.SavedDraft) };
+        result.BlockPath.Add(resolved.BlockPath.Select(Selection));
+        if (resolved.Candidate is { } candidate) result.Candidate = Encode(candidate);
+        result.Conflicts.Add(resolved.Conflicts.Select(c => new P.RequirementConflictData
+            { Field = (P.RequirementFieldKind)((int)c.Field + 1), Baseline = c.Base, Draft = c.Draft, Saved = c.Saved }));
+        return result;
+    }
+
+    public static M.DiagramRequirementResolution Decode(P.RequirementResolutionData resolution)
+    {
+        Known(resolution, P.RequirementResolutionData.Parser);
+        return new(new(GuidValue(resolution.DocumentId), GuidValue(resolution.OwnerId), GuidValue(resolution.StateId)),
+            GuidValue(resolution.BaselineRevisionId), GuidValue(resolution.SavedRevisionId), Fields(Need(resolution.Baseline)),
+            Fields(Need(resolution.Draft)), Fields(Need(resolution.Saved)), (M.DiagramRequirementField)((int)resolution.Field - 1), resolution.Text);
+    }
+
     public static M.RecursiveBlockDraft Decode(P.BlockDraftData data, Guid documentId)
     {
         Known(data, P.BlockDraftData.Parser);

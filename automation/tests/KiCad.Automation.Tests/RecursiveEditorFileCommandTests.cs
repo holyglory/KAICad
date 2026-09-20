@@ -95,6 +95,51 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     [TestMethod]
+    public async Task CompiledConflictComparisonPreservesVersionsAndBindsChoicesToExactSavedBytes()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-recursive-merge-command-").FullName;
+        try
+        {
+            var graph = RecursiveBlockFixture.Create().Graph; string path = Path.Combine(root, "design.xml");
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var readRequest = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var first = await Invoke(readRequest);
+            var local = graph.StartDraft(graph.SelectedRoot);
+            local = local with { Requirements = local.Requirements.Edit(DiagramRequirementField.Routing, "Top edge") };
+            var remote = graph.StartDraft(graph.SelectedRoot);
+            remote = remote with { Requirements = remote.Requirements.Edit(DiagramRequirementField.Routing, "Bottom edge") };
+            var latest = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], remote, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
+            string latestXml = RecursiveBlockGraphXml.Write(latest); await File.WriteAllTextAsync(path, latestXml);
+            var request = readRequest.Clone(); request.Action = P.RecursiveFileAction.RfaRebaseRequirements;
+            request.ExpectedSourceToken = first.SourceToken;
+            request.Rebase = new() { Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(local) };
+            var compared = await Invoke(request);
+            Assert.IsTrue(compared.Success); Assert.IsNull(compared.Merge.Candidate); Assert.HasCount(1, compared.Merge.Conflicts);
+            Assert.AreEqual("Top edge", compared.Merge.Conflicts[0].Draft); Assert.AreEqual("Bottom edge", compared.Merge.Conflicts[0].Saved);
+            Assert.AreEqual(latestXml, await File.ReadAllTextAsync(path));
+            request.ExpectedSourceToken = compared.SourceToken;
+            request.Rebase.Resolutions.Add(new P.RequirementResolutionData
+            {
+                DocumentId = graph.DocumentId.ToString("D"), OwnerId = graph.SelectedRoot.BlockId.ToString("D"), StateId = graph.SelectedRoot.StateId.ToString("D"),
+                BaselineRevisionId = compared.Merge.OriginalDraft.BaselineRequirementRevisionId,
+                SavedRevisionId = compared.Merge.SavedDraft.BaselineRequirementRevisionId,
+                Baseline = compared.Merge.OriginalDraft.BaselineFields.Clone(), Draft = compared.Merge.OriginalDraft.Fields.Clone(),
+                Saved = compared.Merge.SavedDraft.Fields.Clone(), Field = P.RequirementFieldKind.RfkRouting, Text = "Chosen combined text"
+            });
+            var resolved = await Invoke(request);
+            Assert.IsTrue(resolved.Success); Assert.IsNotNull(resolved.Merge.Candidate);
+            Assert.AreEqual("Chosen combined text", resolved.Merge.Candidate.Fields.Routing);
+            Assert.AreEqual(latestXml, await File.ReadAllTextAsync(path)); // Compare is not save.
+            await File.AppendAllTextAsync(path, "\n");
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("stale_requirement_resolution", stale.ErrorCode);
+            Assert.AreEqual("Chosen combined text", request.Rebase.Resolutions[0].Text);
+            Assert.AreEqual(latestXml + "\n", await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task MalformedAndCancelledCommandsReturnFailureWithoutWritingOrStartingAnMcpSession()
     {
         using var output = new StringWriter();

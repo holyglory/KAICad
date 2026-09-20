@@ -350,6 +350,11 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_design_nets_reconcile");
             CollectionAssert.Contains(names, "kicad_design_sync_plan");
             CollectionAssert.Contains(names, "kicad_design_sync_apply");
+            var invalidApply = await Request(4083, "tools/call", new { name = "kicad_design_sync_apply",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = Path.Combine(state, "missing-recovery.json"),
+                    designPath = Path.Combine(state, "design.xml"), expectedRevisionToken = "stale", operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(invalidApply.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("missing_design_recovery", invalidApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
             var syncFixture = SchematicSynchronizationPlanTests.Fixture();
             var syncStore = new DesignRecoveryStore(syncRecoveryPath);

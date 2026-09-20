@@ -63,10 +63,34 @@ public static class RecursiveBlockCodec
     }
 
     internal static M.RequirementRevisionOrigin DecodeOrigin(P.DiagramRevisionOriginData origin) => Origin(Need(origin));
+    internal static M.ConnectionSelection DecodeSelection(P.ConnectionSelectionData selection) => Selection(Need(selection));
     internal static M.BlockSelection DecodeSelection(P.BlockSelectionData selection) => Selection(Need(selection));
     internal static Guid DecodeIdentity(string value) => GuidValue(value);
     private static M.DiagramRequirements Fields(P.RequirementFieldsData data) => new(data.General, data.Schematic, data.Routing);
     private static P.RequirementFieldsData Fields(M.DiagramRequirements fields) => new() { General = fields.General, Schematic = fields.Schematic, Routing = fields.Routing };
+
+    public static M.DiagramConnectionDraft Decode(P.ConnectionDraftData data, Guid documentId)
+    {
+        Known(data, P.ConnectionDraftData.Parser); var baseline = Selection(Need(data.Baseline));
+        var restored = ImmutableDictionary.CreateBuilder<M.DiagramRequirementField, Guid>();
+        foreach (var field in data.RestoredFields)
+            if (!System.Enum.IsDefined((M.DiagramRequirementField)((int)field.Field - 1))
+                || !restored.TryAdd((M.DiagramRequirementField)((int)field.Field - 1), GuidValue(field.SourceRevisionId)))
+                throw Invalid("Connection field restorations require distinct supported categories and exact source revisions.");
+        return new(baseline, data.Name, (M.DiagramConnectionKind)((int)data.Kind - 1), data.Endpoints.Select(Decode).ToImmutableArray(),
+            data.Members.Select(Selection).ToImmutableArray(), new(new(new(documentId, baseline.ConnectionId, baseline.StateId),
+                GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))), Fields(Need(data.Fields)), restored.ToImmutable()));
+    }
+    public static P.ConnectionDraftData Encode(M.DiagramConnectionDraft draft)
+    {
+        var result = new P.ConnectionDraftData { Baseline = Selection(draft.Baseline), Name = draft.Name,
+            Kind = (P.DiagramConnectionKind)((int)draft.Kind + 1), BaselineRequirementRevisionId = Id(draft.Requirements.Baseline.RevisionId),
+            BaselineFields = Fields(draft.Requirements.Baseline.Requirements), Fields = Fields(draft.Requirements.Requirements) };
+        result.Endpoints.Add(draft.Endpoints.Select(Encode)); result.Members.Add(draft.Members.Select(Selection));
+        result.RestoredFields.Add(draft.Requirements.RestoredFields.Select(r => new P.FieldRestorationData
+            { Field = (P.RequirementFieldKind)((int)r.Key + 1), SourceRevisionId = Id(r.Value) }));
+        return result;
+    }
 
     public static P.FieldHistoryPageData Encode(M.DiagramFieldHistoryPage page)
     {

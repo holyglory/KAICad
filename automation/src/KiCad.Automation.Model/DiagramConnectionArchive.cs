@@ -11,6 +11,9 @@ public sealed record DiagramConnectionRevision(ConnectionSelection Selection, Gu
 
 public sealed record DiagramConnectionSelectionResult(DiagramConnectionArchive Archive,
     ImmutableArray<ConnectionSelection> Roots, ImmutableArray<ConnectionSelection> CreatedAncestors, bool Changed);
+public sealed record DiagramConnectionDraft(ConnectionSelection Baseline, string Name, DiagramConnectionKind Kind,
+    ImmutableArray<DiagramEndpointBinding> Endpoints, ImmutableArray<ConnectionSelection> Members, DiagramRequirementDraft Requirements);
+public sealed record DiagramConnectionCommit(DiagramConnectionArchive Archive, DiagramConnectionRevision Revision, bool Changed);
 
 /// <summary>Immutable connection implementations belonging to one block's local diagram.
 /// The containing block revision pins its connection roots. Publishing a new connection
@@ -106,6 +109,34 @@ public sealed class DiagramConnectionArchive
     {
         var revision = Inspect(selection);
         return _requirements[selection.StateId].Inspect(revision.RequirementRevisionId);
+    }
+
+    public DiagramConnectionDraft StartDraft(ConnectionSelection selection)
+    {
+        var revision = Inspect(selection); var requirements = Requirements(selection);
+        return new(selection, revision.Name, revision.Kind, revision.Endpoints, revision.Members,
+            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty));
+    }
+
+    public DiagramConnectionCommit SaveDraft(DiagramConnectionDraft draft, Guid revisionId, Guid requirementRevisionId,
+        RequirementRevisionOrigin origin, IEnumerable<DiagramRequirementResolution>? resolutions = null)
+    {
+        if (draft?.Requirements is null || draft.Endpoints.IsDefault || draft.Members.IsDefault)
+            throw Invalid("A connection draft needs its exact baseline, endpoint/member data and requirement fields.");
+        var baseline = Inspect(draft.Baseline);
+        if (draft.Requirements.Baseline != Requirements(draft.Baseline)) throw Invalid("The connection draft does not match its saved requirement baseline.");
+        if (_states[draft.Baseline.StateId].HeadRevisionId != draft.Baseline.RevisionId)
+            throw new AutomationException("stale_connection_revision", "This connection has a newer saved revision; retain the current draft for comparison.");
+        var history = _requirements[draft.Baseline.StateId];
+        var requirements = history.Commit(history.Current.Id, draft.Requirements, requirementRevisionId, origin, resolutions);
+        if (baseline.Name == draft.Name && baseline.Kind == draft.Kind && baseline.Members.SequenceEqual(draft.Members)
+            && baseline.Endpoints.Length == draft.Endpoints.Length && baseline.Endpoints.Zip(draft.Endpoints).All(p => p.First.SameDefinition(p.Second))
+            && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
+            return new(this, baseline, false);
+        var revision = new DiagramConnectionRevision(draft.Baseline with { RevisionId = revisionId }, baseline.Selection.RevisionId,
+            draft.Name, draft.Kind, draft.Endpoints, requirements.Revision.Id, draft.Members, origin);
+        var archive = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
+        return new(archive, revision, true);
     }
 
     public ImmutableArray<ConnectionSelection> Walk(ImmutableArray<ConnectionSelection> roots)

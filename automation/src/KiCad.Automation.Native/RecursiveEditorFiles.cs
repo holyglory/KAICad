@@ -19,9 +19,24 @@ public static class RecursiveEditorFiles
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
             || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
             || request.Action != P.RecursiveFileAction.RfaSaveBlock && request.Save is not null
-            || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null)
+            || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null
+            || request.Action != P.RecursiveFileAction.RfaSaveConnection && request.SaveConnection is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
+        if (request.Action == P.RecursiveFileAction.RfaSaveConnection)
+        {
+            if (request.SaveConnection is not { } save || save.Draft is null || save.Origin is null || save.ExpectedRoot is null
+                || request.ExpectedSourceToken.Length != 64 || request.Block is not null || request.Connection is not null
+                || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
+                throw Invalid("invalid_connection_save_request", "Save needs the exact source token, root, block/member paths, connection draft and change origin.");
+            var saved = await RecursiveBlockFiles.SaveConnectionAsync(request.RepositoryRoot, request.SourcePath, document, request.ExpectedSourceToken,
+                RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot), save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(),
+                save.ConnectionPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(), RecursiveBlockCodec.Decode(save.Draft, document),
+                Id(save.NewConnectionRevisionId), Id(save.NewRequirementRevisionId), save.ConnectionAncestorRevisionIds.Select(Id).ToImmutableArray(),
+                Id(save.NewBlockRevisionId), Id(save.NewBlockRequirementRevisionId), save.BlockAncestorRevisionIds.Select(Id).ToImmutableArray(),
+                RecursiveBlockCodec.DecodeOrigin(save.Origin), token);
+            return Describe(saved);
+        }
         if (request.Action == P.RecursiveFileAction.RfaSaveBlock)
         {
             if (request.Save is not { } save || save.Draft is null || save.Origin is null || save.ExpectedRoot is null

@@ -95,6 +95,40 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     [TestMethod]
+    public async Task CompiledConnectionSavePreservesTheOldInterfaceAndContainingDiagram()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-command-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"]; var link = f.Links["CPU/Memory"];
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var draft = graph.Connections(cpu.BlockId).StartDraft(link);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing, "Keep memory routes away from noisy power.") };
+            var data = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft);
+            var save = new P.SaveConnectionDraftData { ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = data,
+                NewConnectionRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                NewBlockRevisionId = Guid.NewGuid().ToString("D"), NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Edit connection requirements",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            save.BlockPath.Add(save.ExpectedRoot.Clone());
+            save.BlockPath.Add(new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") });
+            save.ConnectionPath.Add(data.Baseline.Clone()); save.BlockAncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            request.Action = P.RecursiveFileAction.RfaSaveConnection; request.SaveConnection = save; request.ExpectedSourceToken = read.SourceToken;
+            var saved = await Invoke(request); Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            var updated = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var newCpu = updated.Inspect(updated.SelectedRoot).Children[1]; var newLink = updated.Inspect(newCpu).LocalDiagram.Connections[2];
+            Assert.AreEqual("Keep memory routes away from noisy power.", updated.Connections(cpu.BlockId).Requirements(newLink).Requirements.Routing);
+            Assert.AreEqual("", updated.Connections(cpu.BlockId).Requirements(link).Requirements.Routing);
+            Assert.AreEqual(link, updated.Inspect(cpu).LocalDiagram.Connections[2]);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(updated), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task CompiledConflictComparisonPreservesVersionsAndBindsChoicesToExactSavedBytes()
     {
         string root = Directory.CreateTempSubdirectory("kicad-recursive-merge-command-").FullName;

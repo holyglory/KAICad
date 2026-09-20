@@ -152,6 +152,46 @@ public sealed class RecursiveBlockLocalDiagramTests
     }
 
     [TestMethod]
+    public void SavingConnectionRequirementsCreatesOneCoherentRootAndLeavesOtherRelationsUntouched()
+    {
+        var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+        var link = f.Links["CPU/Memory"]; var archive = graph.Connections(cpu.BlockId);
+        var draft = archive.StartDraft(link);
+        draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing, "Keep this interface clear of the heat sink.") };
+        var saved = graph.SaveConnectionDraft(graph.SelectedRoot, [graph.SelectedRoot, cpu], [link], draft,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var newCpu = saved.Inspect(saved.SelectedRoot).Children[1];
+        var newLink = saved.Inspect(newCpu).LocalDiagram.Connections[2];
+        Assert.AreEqual("Keep this interface clear of the heat sink.", saved.Connections(cpu.BlockId).Requirements(newLink).Requirements.Routing);
+        Assert.AreEqual("", saved.Connections(cpu.BlockId).Requirements(link).Requirements.Routing);
+        Assert.AreEqual(f.Links["CPU/Supply"], saved.Inspect(newCpu).LocalDiagram.Connections[0]);
+        Assert.AreEqual(cpu, saved.Inspect(graph.SelectedRoot).Children[1]);
+        Assert.AreEqual(f.Blocks["PSU"], saved.Inspect(saved.SelectedRoot).Children[0]);
+        Assert.AreEqual(graph.Revisions.Length + 2, saved.Revisions.Length);
+        Assert.AreEqual(archive.Revisions.Length + 1, saved.Connections(cpu.BlockId).Revisions.Length);
+        var noOp = saved.SaveConnectionDraft(saved.SelectedRoot, [saved.SelectedRoot, newCpu], [newLink],
+            saved.Connections(cpu.BlockId).StartDraft(newLink), Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(),
+            [Guid.NewGuid()], RecursiveBlockFixture.Origin());
+        Assert.IsFalse(noOp.Changed); Assert.AreSame(saved, noOp.Graph);
+        Assert.ThrowsExactly<AutomationException>(() => saved.SaveConnectionDraft(graph.SelectedRoot, [graph.SelectedRoot, cpu], [link], draft,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()));
+    }
+
+    [TestMethod]
+    public void ConnectionDraftCannotRedirectIntoAnotherDiagramOrUseForgedRequirementBaseline()
+    {
+        var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+        var link = f.Links["CPU/Memory"]; var draft = graph.Connections(cpu.BlockId).StartDraft(link);
+        Assert.ThrowsExactly<AutomationException>(() => graph.SaveConnectionDraft(graph.SelectedRoot, [graph.SelectedRoot, f.Blocks["PSU"]], [link], draft,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()));
+        var forged = draft with { Requirements = draft.Requirements with { Baseline = draft.Requirements.Baseline with
+            { Requirements = new("Forged previous requirements", "", "") } } };
+        Assert.ThrowsExactly<AutomationException>(() => graph.SaveConnectionDraft(graph.SelectedRoot, [graph.SelectedRoot, cpu], [link], forged,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()));
+        Assert.AreEqual(link, graph.Inspect(cpu).LocalDiagram.Connections[2]);
+    }
+
+    [TestMethod]
     public async Task FileSaveIncludesConnectionArchiveAndPinnedRootInOneGuardedWrite()
     {
         string root = Directory.CreateTempSubdirectory("kicad-linked-diagram-").FullName;

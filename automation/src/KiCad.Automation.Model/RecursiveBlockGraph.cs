@@ -343,6 +343,28 @@ public sealed class RecursiveBlockGraph
     public DiagramConnectionArchive Connections(Guid ownerBlockId) => _connections.TryGetValue(ownerBlockId, out var archive)
         ? archive : throw Invalid("This block has no saved connection archive.");
 
+    /// <summary>Save one relationship/member and its containing local diagram as one
+    /// immutable root update. No intermediate archive or partial ancestor update escapes.</summary>
+    public RecursiveBlockSelectionResult SaveConnectionDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
+        ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, Guid connectionRevisionId,
+        Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorRevisionIds, Guid blockRevisionId,
+        Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorRevisionIds, RequirementRevisionOrigin origin)
+    {
+        if (blockPath.IsDefaultOrEmpty || connectionPath.IsDefaultOrEmpty || draft is null || connectionPath[^1] != draft.Baseline)
+            throw Invalid("Connection edits need their exact containing block and member paths.");
+        _ = Select(expectedRoot, blockPath, blockPath[^1], blockAncestorRevisionIds, origin);
+        var block = Inspect(blockPath[^1]); var archive = Connections(block.Selection.BlockId);
+        _ = archive.Select(block.LocalDiagram.Connections, connectionPath, draft.Baseline, connectionAncestorRevisionIds, origin);
+        var committed = archive.SaveDraft(draft, connectionRevisionId, requirementRevisionId, origin);
+        if (!committed.Changed) return new(this, [], false);
+        var selected = committed.Archive.Select(block.LocalDiagram.Connections, connectionPath, committed.Revision.Selection,
+            connectionAncestorRevisionIds, origin);
+        var prepared = WithConnections(selected.Archive);
+        var blockDraft = prepared.StartDraft(block.Selection);
+        blockDraft = blockDraft with { Diagram = block.LocalDiagram with { Connections = selected.Roots } };
+        return prepared.SaveDraft(expectedRoot, blockPath, blockDraft, blockRevisionId, blockRequirementRevisionId, blockAncestorRevisionIds, origin);
+    }
+
     /// <summary>Publish an extended archive without changing any block's pinned local diagram.</summary>
     public RecursiveBlockGraph WithConnections(DiagramConnectionArchive archive)
     {

@@ -1083,35 +1083,35 @@ tier="development"
 requires=["sign"]
 command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260914T220222Z-02703fe62087", "--commit", "02703fe62087a2266360e65d8e79893ca9f6454a", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-31dd2-signed-000005", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-02703-signed-000018", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/02703fe620-preview18.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
 
-[test.preview-f120-linux-stage]
+[test.preview-2dc0-linux-stage]
 timeout_seconds=1800
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
-[[test.preview-f120-linux-stage.check]]
+[[test.preview-2dc0-linux-stage.check]]
 name="managed-build"
 tier="development"
 role="preflight"
 invalidates=["contracts", "sign", "stage"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.preview-f120-linux-stage.check]]
+[[test.preview-2dc0-linux-stage.check]]
 name="contracts"
 tier="development"
 role="preflight"
 invalidates=["sign", "stage"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx", "--results-directory", "automation/artifacts/preview-f120-stage-tests"]
-retained_artifacts=[{ name = "stage-tests", path = "automation/artifacts/preview-f120-stage-tests", max_bytes = 16777216 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx", "--results-directory", "automation/artifacts/preview-2dc0-stage-tests"]
+retained_artifacts=[{ name = "stage-tests", path = "automation/artifacts/preview-2dc0-stage-tests", max_bytes = 16777216 }]
 
-[[test.preview-f120-linux-stage.check]]
+[[test.preview-2dc0-linux-stage.check]]
 name="sign"
 tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/linux-f120a47cfb-sequence20.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/f120-preview20.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009/updates/preview.json"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/linux-2dc0fc1fa8-sequence21.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260920T070246Z-2dc0fc1fa8e5", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/2dc0-preview21.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-f120-signed-000010/updates/preview.json"]
 
-[[test.preview-f120-linux-stage.check]]
+[[test.preview-2dc0-linux-stage.check]]
 name="stage"
 tier="development"
 requires=["sign"]
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260918T212117Z-f120a47cfbd1", "--commit", "f120a47cfbd1832bc9133f6994b5e29aad082f3c", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-f120-signed-000020", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/f120-preview20.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260920T070246Z-2dc0fc1fa8e5", "--commit", "2dc0fc1fa8e52cd68025a7a9df5b22227f69ec52", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-f120-signed-000010", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-2dc0-signed-000021", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/2dc0-preview21.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
 
 [test.download-recovery]
 timeout_seconds=1800

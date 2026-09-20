@@ -13,6 +13,37 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_manage_implementation"),
+     Description("Create a new interior, duplicate, rename, remove from choices, or restore one implementation in the saved recursive model. Actions: new, duplicate, rename, remove, restore. Requires the observed instance epoch, exact file token/root/source and a non-empty operation ID. Creation stays unselected; removal retains historical revisions and rejects the active choice. Does not activate native schematics/PCBs or discard an open editor draft. After an external change, reload or reconcile that window explicitly.")]
+    public Task<CallToolResult> ManageImplementation(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection source,
+        string action, Guid operationId, string actor, CancellationToken cancellationToken, string? name = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; reattach and inspect it again.");
+        if (operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || expectedRoot is null || source is null)
+            throw new AutomationException("invalid_implementation_operation", "Provide a stable operation UUID, agent name and exact root/source selections.");
+        var kind = action switch { "new" => ImplementationActionKind.IakNew, "duplicate" => ImplementationActionKind.IakDuplicate,
+            "rename" => ImplementationActionKind.IakRename, "remove" => ImplementationActionKind.IakArchive,
+            "restore" => ImplementationActionKind.IakRestore, _ => throw new AutomationException("invalid_implementation_action", "Choose new, duplicate, rename, remove or restore.") };
+        BlockSelectionData Selection(BlockSelection value) => new() { BlockId = value.BlockId.ToString("D"), StateId = value.StateId.ToString("D"), RevisionId = value.RevisionId.ToString("D") };
+        var management = new ManageImplementationData { Action = kind, ExpectedRoot = Selection(expectedRoot), Source = Selection(source), Name = name ?? "",
+            Origin = new() { Kind = DiagramActorKind.DakAgent, Actor = actor, Summary = "Manage implementation: " + action,
+                RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+        management.Origin.InputIds.Add(operationId.ToString("D"));
+        if (kind is ImplementationActionKind.IakNew or ImplementationActionKind.IakDuplicate)
+        { management.NewStateId = operationId.ToString("D"); management.NewRevisionId = Guid.NewGuid().ToString("D"); management.NewRequirementRevisionId = Guid.NewGuid().ToString("D"); }
+        else management.ChangeId = operationId.ToString("D");
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaManageImplementation,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken, Implementation = management }, cancellationToken);
+        var implementation = result.Document.Graph.States.Single(s => s.Id == result.ImplementationId);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
+            sourceToken = result.SourceToken, implementation = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(implementation)),
+            selectedRoot = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.Document.Graph.SelectedRoot)) });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_read", ReadOnly = true),
      Description("Read one exact saved recursive diagram level as structured data: requirements, direct child selections, boundary interfaces, connection/member revisions, partial endpoints, comments and implementation metadata. Omitting block/state/revision reads the saved root; otherwise provide all three exact IDs. Returns the source token and native instance epoch. Does not return an unsaved window draft, activate an implementation, or claim schematic/PCB realization.")]
     public Task<CallToolResult> ReadSaved(string instanceId, string repositoryRoot, string sourcePath, string documentId,

@@ -58,6 +58,8 @@ private:
     void navigate( std::string aBlockId, bool aRemember = true );
     void chooseImplementation();
     void previewImplementation( const std::string& aStateId );
+    void manageImplementation( kiapi::automation::diagrams::v1::ImplementationActionKind aAction, std::string aStateId );
+    void reloadSaved();
     void updateImplementationLabel();
     bool hasChanges() const;
     bool confirmChange();
@@ -109,6 +111,7 @@ private:
     wxTextCtrl* m_endpoints;
     wxScrolledWindow* m_inspectorScroll;
     wxTextCtrl* m_comments;
+    wxStaticText* m_commentTargetStatus;
     wxChoice* m_commentChoice;
     std::vector<std::string> m_commentIds;
     std::string m_commentId;

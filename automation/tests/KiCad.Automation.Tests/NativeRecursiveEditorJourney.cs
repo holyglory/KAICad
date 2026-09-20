@@ -79,7 +79,7 @@ public sealed partial class NativeSessionTests
                 var saved = await Wait(s => s.CompletedSaveCount > previous && !s.Busy);
                 Assert.AreEqual("", saved.ErrorMessage); Assert.IsFalse(saved.Dirty); return saved;
             }
-            async Task Preview(bool last)
+            async Task ImplementationMenu()
             {
                 Key("i", control: true);
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(15));
@@ -89,8 +89,15 @@ public sealed partial class NativeSessionTests
                     NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, observePopupCount: value => count = value);
                     if (count == 0) await Task.Delay(50, timeout.Token);
                 } while (count == 0);
-                Key(last ? "End" : "Home"); Key("Return");
             }
+            async Task Preview(bool last) { await ImplementationMenu(); Key("Home"); if (last) Key("Down"); Key("Return"); }
+            async Task Window(string title, bool visible = true)
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                while (NativeKeyboard.HasWindow(display, processId, title) != visible) await Task.Delay(50, timeout.Token);
+            }
+            void Name(string value, string title)
+            { Key("a", control: true, title: title); foreach (char character in value) Key(character.ToString(), title: title); Key("Return", title: title); }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
             Assert.AreEqual(openingBytes, await File.ReadAllTextAsync(source, token));
@@ -383,6 +390,51 @@ public sealed partial class NativeSessionTests
             string expandedCapture = Path.Combine(evidence, instanceId + "-recursive-expanded.png");
             await CaptureRecursive(display, expandedCapture, token);
             await VerifyExpandedCanvasContent(expandedCapture, token);
+            string beforeManagement = await File.ReadAllTextAsync(source, token);
+            var beforeManagementGraph = RecursiveBlockGraphXml.Read(beforeManagement);
+            var sourceCpu = beforeManagementGraph.Inspect(beforeManagementGraph.SelectedRoot).Children[1];
+            await ImplementationMenu(); Key("d"); await Window("Duplicate implementation");
+            Key("Escape", title: "Duplicate implementation"); await Window("Duplicate implementation", false);
+            Assert.AreEqual(beforeManagement, await File.ReadAllTextAsync(source, token));
+            await ImplementationMenu(); Key("d"); await Window("Duplicate implementation");
+            Name("Serviceable copy", "Duplicate implementation");
+            var duplicated = await Wait(s => !s.Busy && s.ImplementationPreview && s.Draft.Baseline.StateId != sourceCpu.StateId.ToString("D"));
+            Guid copyState = Guid.Parse(duplicated.Draft.Baseline.StateId);
+            var copiedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(beforeManagementGraph.SelectedRoot, copiedGraph.SelectedRoot);
+            Assert.AreEqual(sourceCpu, copiedGraph.States.Single(s => s.Id == copyState).ForkedFrom);
+            Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements,
+                copiedGraph.Requirements(new(sourceCpu.BlockId, copyState, Guid.Parse(duplicated.Draft.Baseline.RevisionId))).Requirements);
+            await ImplementationMenu(); Key("r"); await Window("Rename implementation");
+            Name("Thermal copy", "Rename implementation");
+            await Wait(s => !s.Busy && s.ImplementationPreview && s.SourceToken != duplicated.SourceToken);
+            var renamedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual("Thermal copy", renamedGraph.States.Single(s => s.Id == copyState).Name);
+            Assert.AreEqual("Serviceable copy", renamedGraph.ImplementationChanges.Single(c => c.StateId == copyState).BeforeName);
+            await ImplementationMenu(); Key("v"); await Window("Remove implementation");
+            Key("Escape", title: "Remove implementation"); await Window("Remove implementation", false);
+            Assert.IsFalse(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).States.Single(s => s.Id == copyState).Archived);
+            await ImplementationMenu(); Key("v"); await Window("Remove implementation");
+            Key("r", alt: true, title: "Remove implementation");
+            await Wait(s => !s.Busy && !s.ImplementationPreview && !s.Dirty);
+            var removedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(removedGraph.States.Single(s => s.Id == copyState).Archived);
+            Assert.AreEqual(renamedGraph.Revisions.Length, removedGraph.Revisions.Length);
+            await ImplementationMenu(); Key("m"); Key("Right"); Key("Home"); Key("Return");
+            await Wait(s => !s.Busy && s.ImplementationPreview && s.Draft.Baseline.StateId == copyState.ToString("D"));
+            Assert.IsFalse(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).States.Single(s => s.Id == copyState).Archived);
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
+            await ImplementationMenu(); Key("n"); await Window("New implementation");
+            Name("New topology", "New implementation");
+            var created = await Wait(s => !s.Busy && s.ImplementationPreview && s.Draft.Children.Count == 0);
+            var newGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var newSelection = new BlockSelection(Guid.Parse(created.Draft.Baseline.BlockId), Guid.Parse(created.Draft.Baseline.StateId), Guid.Parse(created.Draft.Baseline.RevisionId));
+            Assert.AreEqual(sourceCpu, newGraph.States.Single(s => s.Id == newSelection.StateId).ForkedFrom);
+            Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements, newGraph.Requirements(newSelection).Requirements);
+            Assert.HasCount(2, newGraph.Inspect(newSelection).LocalDiagram.Interfaces);
+            Assert.IsEmpty(newGraph.Inspect(newSelection).Children);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-new-implementation.png"), token);
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

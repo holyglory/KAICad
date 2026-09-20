@@ -22,6 +22,7 @@
 #include <wx/splitter.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
+#include <wx/textdlg.h>
 #include <wx/toolbar.h>
 
 namespace D = kiapi::automation::diagrams::v1;
@@ -53,7 +54,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     SetName( "RecursiveDiagramEditor" ); SetMinSize( FromDIP( wxSize( 900, 650 ) ) );
     wxFont body = GetFont(); body.SetPointSize( std::max( 12, body.GetPointSize() ) ); SetFont( body );
     auto* menu = new wxMenuBar(); auto* file = new wxMenu();
-    file->Append( wxID_SAVE, _( "Save\tCtrl+S" ) ); file->AppendSeparator(); file->Append( wxID_CLOSE, _( "Close\tCtrl+W" ) );
+    file->Append( wxID_SAVE, _( "Save\tCtrl+S" ) ); file->Append( wxID_REFRESH, _( "Reload saved diagram\tCtrl+R" ) );
+    file->AppendSeparator(); file->Append( wxID_CLOSE, _( "Close\tCtrl+W" ) );
     menu->Append( file, _( "File" ) ); SetMenuBar( menu );
     m_toolbar = CreateToolBar( wxTB_HORIZONTAL | wxTB_FLAT | wxTB_TEXT );
     m_toolbar->SetName( "RecursiveToolbar" );
@@ -115,6 +117,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
     m_commentChoice->SetName( "RecursiveCommentSelection" ); commentsHeading->Add( m_commentChoice, 0 );
     fields->Add( commentsHeading, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
+    m_commentTargetStatus = new wxStaticText( scroll, wxID_ANY, wxEmptyString );
+    m_commentTargetStatus->SetName( "RecursiveCommentTargetStatus" );
+    fields->Add( m_commentTargetStatus, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 12 ) );
     m_comments = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 320, 110 ) ), wxTE_MULTILINE );
     m_comments->SetName( "RecursiveComments" ); fields->Add( m_comments, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
     m_comments->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) editComment(); } );
@@ -147,6 +152,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_save->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { save(); } );
     m_decline->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { decline(); } );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { save(); }, wxID_SAVE );
+    Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { reloadSaved(); }, wxID_REFRESH );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { Close(); }, wxID_CLOSE );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( !m_back.empty() ) { auto id = m_back.back(); navigate( id, false ); if( current() && current()->selection().block_id() == id ) m_back.pop_back(); refresh(); } }, BACK );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( m_path.size() > 1 ) navigate( m_path[m_path.size() - 2].block_id() ); }, UP );
@@ -161,6 +167,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
         if( event.ControlDown() && event.GetKeyCode() == 'I' ) { chooseImplementation(); return; }
+        if( event.ControlDown() && event.GetKeyCode() == 'R' ) { reloadSaved(); return; }
         if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '5' )
         { if( m_ready && !m_process ) { if( event.GetKeyCode() == '5' ) { if( m_commentChoice->IsShown() ) m_commentChoice->SetFocus(); }
             else if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
@@ -296,7 +303,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
     if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION
-        || m_activeRequest.action() == D::RFA_SAVE_IMPLEMENTATION ) ++m_saveCount;
+        || m_activeRequest.action() == D::RFA_SAVE_IMPLEMENTATION || m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION ) ++m_saveCount;
     if( event.GetExitCode() != 0 || !parsed || !result.success() )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
@@ -403,6 +410,14 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     if( !result.has_document() || result.document().schema_version() != 1 || result.document().document_id() != DocumentId()
         || result.document().source_path() != SourcePath() || result.document().source_token().size() != 64 )
     { m_errorCode = "diagram_target_mismatch"; m_error = "The loaded document does not match the requested diagram."; refresh(); return; }
+    if( m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION )
+    {
+        bool present = false;
+        for( const auto& state : result.document().graph().states() )
+            if( state.id() == result.implementation_id() && state.block_id() == m_activeRequest.implementation().source().block_id() ) present = true;
+        if( !present ) { m_errorCode = "implementation_target_mismatch"; m_error = "The management result belongs to another implementation."; refresh(); return; }
+        if( m_activeRequest.implementation().action() != D::IAK_ARCHIVE ) m_pendingImplementation = result.implementation_id();
+    }
     std::string scope = m_pendingScope.empty() ? current() ? current()->selection().block_id() : result.document().graph().selected_root().block_id() : m_pendingScope;
     std::string selected = m_pendingSelected.empty() ? m_selected : m_pendingSelected;
     std::string selectedConnection = m_pendingConnection.value_or( m_connectionId );
@@ -558,7 +573,7 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
 void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
 {
     if( !m_ready || m_process || !current() ) return;
-    wxMenu menu; const int reserved = m_document.graph().states_size();
+    wxMenu menu; const int reserved = m_document.graph().states_size() * 2 + 8;
     int firstId = wxWindow::NewControlId( reserved ); int index = 0;
     for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() && !state.archived() )
     {
@@ -566,9 +581,82 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
         item->Check( current()->selection().state_id() == state.id() );
         menu.Bind( wxEVT_MENU, [this, stateId = state.id()]( wxCommandEvent& ) { previewImplementation( stateId ); }, id );
     }
+    bool clean = m_connectionId.empty() ? m_draft.SerializeAsString() == m_savedDraft.SerializeAsString()
+        : m_connectionDraft.SerializeAsString() == m_savedConnectionDraft.SerializeAsString();
+    menu.AppendSeparator();
+    auto action = [&]( wxMenu& target, const wxString& label, D::ImplementationActionKind kind, const std::string& stateId, bool enabled )
+    {
+        int id = firstId + index++; auto* item = target.Append( id, label ); item->Enable( enabled );
+        target.Bind( wxEVT_MENU, [this, kind, stateId]( wxCommandEvent& ) { manageImplementation( kind, stateId ); }, id );
+    };
+    std::string selectedState = current()->selection().state_id();
+    action( menu, _( "&New implementation…" ), D::IAK_NEW, selectedState, clean );
+    action( menu, _( "&Duplicate implementation…" ), D::IAK_DUPLICATE, selectedState, clean );
+    action( menu, _( "&Rename implementation…" ), D::IAK_RENAME, selectedState, clean );
+    action( menu, _( "Remo&ve implementation…" ), D::IAK_ARCHIVE, selectedState, clean && selectedState != m_path.back().state_id() );
+    auto* removed = new wxMenu();
+    for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() && state.archived() )
+        action( *removed, text( state.name() ), D::IAK_RESTORE, state.id(), clean );
+    if( removed->GetMenuItemCount() ) menu.AppendSubMenu( removed, _( "Restore re&moved implementation" ) ); else delete removed;
     wxPoint position = ScreenToClient( m_implementation->ClientToScreen( wxPoint( 0, m_implementation->GetSize().y ) ) );
     PopupMenu( &menu, position );
     wxWindow::UnreserveControlId( firstId, reserved );
+}
+void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind action, std::string stateId )
+{
+    if( !m_ready || m_process || !current() ) return;
+    bool edited = m_connectionId.empty() ? m_draft.SerializeAsString() != m_savedDraft.SerializeAsString()
+        : m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString();
+    if( edited ) return;
+    const D::BlockDesignStateData* state = nullptr;
+    for( const auto& item : m_document.graph().states() ) if( item.id() == stateId && item.block_id() == current()->selection().block_id() ) state = &item;
+    if( !state ) return;
+    wxString name;
+    if( action == D::IAK_NEW || action == D::IAK_DUPLICATE || action == D::IAK_RENAME )
+    {
+        wxString title = action == D::IAK_NEW ? _( "New implementation" ) : action == D::IAK_DUPLICATE ? _( "Duplicate implementation" ) : _( "Rename implementation" );
+        wxString initial = action == D::IAK_NEW ? _( "New implementation" ) : action == D::IAK_DUPLICATE ? text( state->name() ) + _( " copy" ) : text( state->name() );
+        if( !m_errorCode.empty() && m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION
+            && m_activeRequest.implementation().action() == action && m_activeRequest.implementation().source().state_id() == stateId )
+            initial = text( m_activeRequest.implementation().name() );
+        wxTextEntryDialog dialog( this, _( "Implementation name:" ), title, initial );
+        dialog.SetName( "DiagramImplementationName" );
+        while( true )
+        {
+            if( dialog.ShowModal() != wxID_OK ) return;
+            name = dialog.GetValue().Strip( wxString::both );
+            if( name.empty() ) { wxMessageBox( _( "Enter an implementation name." ), title, wxOK | wxICON_ERROR, &dialog ); continue; }
+            bool duplicate = false;
+            for( const auto& other : m_document.graph().states() )
+                if( other.block_id() == state->block_id() && ( action != D::IAK_RENAME || other.id() != stateId ) && name.CmpNoCase( text( other.name() ) ) == 0 ) duplicate = true;
+            if( duplicate ) { wxMessageBox( _( "Choose a different name for this block's implementation." ), title, wxOK | wxICON_ERROR, &dialog ); continue; }
+            break;
+        }
+    }
+    else if( action == D::IAK_ARCHIVE )
+    {
+        wxMessageDialog dialog( this, wxString::Format( _( "Remove \"%s\" from implementation choices? Its saved history will be kept." ), text( state->name() ) ),
+                _( "Remove implementation" ), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION );
+        dialog.SetYesNoLabels( _( "&Remove" ), _( "&Cancel" ) ); if( dialog.ShowModal() != wxID_YES ) return;
+    }
+    REQUEST request; request.set_action( D::RFA_MANAGE_IMPLEMENTATION ); request.set_expected_source_token( m_document.source_token() );
+    auto* operation = request.mutable_implementation(); operation->set_action( action ); *operation->mutable_expected_root() = m_document.graph().selected_root();
+    operation->mutable_source()->set_block_id( state->block_id() ); operation->mutable_source()->set_state_id( stateId );
+    operation->mutable_source()->set_revision_id( state->head_revision_id() );
+    if( action == D::IAK_NEW || action == D::IAK_DUPLICATE )
+    { operation->set_new_state_id( freshId() ); operation->set_new_revision_id( freshId() ); operation->set_new_requirement_revision_id( freshId() ); }
+    else operation->set_change_id( freshId() );
+    operation->set_name( utf8( name ) ); editorOrigin( operation->mutable_origin(), "Manage implementation" );
+    m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_pendingScope; m_pendingConnection = "";
+    execute( std::move( request ) );
+}
+void RECURSIVE_DIAGRAM_FRAME::reloadSaved()
+{
+    if( m_process ) return;
+    if( !m_ready ) { load(); return; }
+    m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_selected; m_pendingConnection = m_connectionId;
+    if( !confirmChange() ) return;
+    load();
 }
 void RECURSIVE_DIAGRAM_FRAME::updateImplementationLabel()
 {
@@ -641,19 +729,23 @@ void RECURSIVE_DIAGRAM_FRAME::fillComments()
     D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
     m_commentIds.clear(); m_commentChoice->Clear();
     const D::DiagramAnnotationData* selected = nullptr;
-    for( const auto& note : notes ) if( ( ( note.target_kind() == kind && note.target_id() == target )
-        || ( !link && note.target_kind() == D::DAT_CANVAS ) ) && !note.has_unresolved_reason() )
+    for( const auto& note : notes ) if( ( note.target_kind() == kind && note.target_id() == target )
+        || ( !link && ( note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason() ) ) )
     {
         if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
         wxString title = text( note.text() ).BeforeFirst( '\n' );
         if( title.length() > 36 ) title = title.Left( 36 ) + wxS( "…" );
         if( title.empty() ) title = _( "Sketch comment" );
+        if( note.has_unresolved_reason() ) title = _( "Unresolved target: " ) + title;
         m_commentChoice->Append( title ); m_commentIds.push_back( note.id() );
         if( note.id() == m_commentId ) { selected = &note; m_commentChoice->SetSelection( m_commentIds.size() - 1 ); }
     }
     m_commentChoice->Append( _( "New comment" ) ); m_commentIds.emplace_back();
     if( !selected ) m_commentChoice->SetSelection( m_commentIds.size() - 1 );
     wxString value = selected ? text( selected->text() ) : wxString();
+    m_commentTargetStatus->Show( selected && selected->has_unresolved_reason() );
+    m_commentTargetStatus->SetLabel( selected && selected->has_unresolved_reason() ? text( selected->unresolved_reason() ) : wxString() );
+    m_commentTargetStatus->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
     if( m_comments->GetValue() != value ) m_comments->ChangeValue( value );
     m_comments->Enable( m_ready && !m_process ); m_commentChoice->Enable( m_ready && !m_process );
     m_commentChoice->Show( m_commentIds.size() > 1 );

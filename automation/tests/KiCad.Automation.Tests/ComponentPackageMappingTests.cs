@@ -1,3 +1,5 @@
+using System.Text.Json;
+using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Tests;
@@ -44,5 +46,20 @@ public sealed class ComponentPackageMappingTests
         // Package identity is textual evidence and is intentionally not checked
         // against a live package library here; a different pinned package needs
         // its own declared pad mapping rather than a guessed substitution.
+    }
+
+    [TestMethod]
+    public void CompiledMcpValidatorReturnsTruthfulMappingStatusWithoutNativeCreation()
+    {
+        var f = Fixture(); var tool = new KnowledgeTools();
+        var valid = tool.ValidatePackageMapping(CircuitXml.Write(f.Circuit),
+            JsonSerializer.SerializeToElement(f.Mapping, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
+        Assert.IsFalse(valid.IsError == true); Assert.IsTrue(valid.StructuredContent!.Value.GetProperty("valid").GetBoolean());
+        Assert.IsFalse(valid.StructuredContent.Value.GetProperty("nativeCreation").GetBoolean());
+        var invalidMapping = f.Mapping with { PinMappings = [f.Mapping.PinMappings[0]] };
+        var invalid = tool.ValidatePackageMapping(CircuitXml.Write(f.Circuit),
+            JsonSerializer.SerializeToElement(invalidMapping, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
+        Assert.IsTrue(invalid.IsError == true); Assert.AreEqual("invalid_component_package_mapping",
+            invalid.StructuredContent!.Value.GetProperty("errorCode").GetString());
     }
 }

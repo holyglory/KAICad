@@ -32,6 +32,34 @@ public sealed record DesignProjectionToolResult(string? CandidateEngineeringXml,
 [McpServerToolType]
 public sealed class KnowledgeTools
 {
+    [McpServerTool(Name = "kicad_component_package_mapping_validate", ReadOnly = true, UseStructuredContent = true),
+     Description("Validate an exact component-to-package pin/pad mapping against circuit:1 XML. Requires explicit part/component/package revision identities, every electrical pin mapped once, and every pad either mapped or explicitly unused. Reports validation only; it does not read libraries, infer pad numbers or create native footprints/boards.")]
+    public CallToolResult ValidatePackageMapping(string circuitXml, JsonElement mappingJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var circuit = CircuitXml.Read(circuitXml);
+            var mapping = JsonSerializer.Deserialize<ComponentPackageMapping>(mappingJson.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new AutomationException("invalid_component_package_mapping", "Supply a typed package mapping.");
+            mapping.Validate(circuit);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                valid = true, partId = mapping.PartId, componentId = mapping.ComponentId,
+                package = mapping.PackageId, revision = mapping.PackageRevision,
+                pinCount = mapping.PinMappings.Length, padCount = mapping.Pads.Length,
+                explicitlyUnusedPads = mapping.ExplicitlyUnusedPads, nativeCreation = false
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or JsonException)
+        {
+            var data = JsonSerializer.SerializeToElement(new { valid = false,
+                errorCode = error is AutomationException known ? known.Code : "invalid_mapping_json", errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
     [McpServerTool(Name = "kicad_component_guidance_propose", ReadOnly = true, UseStructuredContent = true),
      Description("Propose one source-backed reusable class-guidance statement and return a new knowledge-library XML revision. Numeric facts require an explicit classification, unit, exact source document/revision/page reference and preserve nominal/operating-limit/absolute-maximum/measurement semantics. Contradictory ranges are returned as issues, not repaired. The tool does not interpret prose, write files, create native symbols/footprints or change a design instance.")]
     public CallToolResult ProposeGuidance(string libraryXml, Guid classId, string newRevision,

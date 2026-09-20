@@ -35,6 +35,13 @@ std::string field( const D::RequirementFieldsData& fields, int which )
 { return which == 0 ? fields.general() : which == 1 ? fields.schematic() : fields.routing(); }
 void setField( D::RequirementFieldsData* fields, int which, const std::string& value )
 { if( which == 0 ) fields->set_general( value ); else if( which == 1 ) fields->set_schematic( value ); else fields->set_routing( value ); }
+void editorOrigin( D::DiagramRevisionOriginData* origin, const std::string& summary )
+{
+    origin->set_kind( D::DAK_EDITOR ); origin->set_actor( "Native editor" ); origin->set_summary( summary );
+    auto now = std::chrono::system_clock::now().time_since_epoch(); auto seconds = std::chrono::duration_cast<std::chrono::seconds>( now );
+    origin->mutable_recorded_at()->set_seconds( seconds.count() );
+    origin->mutable_recorded_at()->set_nanos( static_cast<int>( std::chrono::duration_cast<std::chrono::nanoseconds>( now - seconds ).count() / 100 * 100 ) );
+}
 }
 
 RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::OpenRecursiveDiagramEditor& request ) :
@@ -107,6 +114,13 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
         { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return; }
         if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return; }
+        if( event.GetKeyCode() == 'L' && current()->local_diagram().connections_size() )
+        {
+            int selected = -1;
+            for( int i = 0; i < current()->local_diagram().connections_size(); ++i )
+                if( current()->local_diagram().connections( i ).connection_id() == m_connectionId ) selected = i;
+            selectConnection( current()->local_diagram().connections( ( selected + 1 ) % current()->local_diagram().connections_size() ).connection_id() ); return;
+        }
         if( event.GetKeyCode() == WXK_BACK && m_path.size() > 1 ) { navigate( m_path[m_path.size() - 2].block_id() ); return; }
         event.Skip();
     } );
@@ -159,6 +173,15 @@ const D::RequirementRevisionData* RECURSIVE_DIAGRAM_FRAME::requirements( const R
 }
 const RECURSIVE_DIAGRAM_FRAME::REVISION* RECURSIVE_DIAGRAM_FRAME::current() const
 { return m_path.empty() ? nullptr : revision( m_path.back() ); }
+const D::ConnectionRevisionData* RECURSIVE_DIAGRAM_FRAME::connection( const std::string& id ) const
+{
+    if( !current() ) return nullptr;
+    for( const auto& selected : current()->local_diagram().connections() ) if( selected.connection_id() == id )
+        for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
+            for( const auto& item : archive.revisions() ) if( item.selection().revision_id() == selected.revision_id()
+                && item.selection().connection_id() == selected.connection_id() && item.selection().state_id() == selected.state_id() ) return &item;
+    return nullptr;
+}
 int RECURSIVE_DIAGRAM_FRAME::version( const REVISION& item ) const
 {
     int result = 1; const REVISION* found = &item;
@@ -216,7 +239,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     drain(); m_ioTimer.Stop(); m_process.reset();
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
-    if( m_activeRequest.action() == D::RFA_SAVE_BLOCK ) ++m_saveCount;
+    if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION ) ++m_saveCount;
     if( event.GetExitCode() != 0 || !parsed || !result.success() )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
@@ -227,7 +250,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             *compare.mutable_rebase()->mutable_draft() = m_draft;
             execute( std::move( compare ) ); return;
         }
-        m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); refresh(); return;
+        m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); refresh(); return;
     }
     if( m_activeRequest.action() == D::RFA_REBASE_REQUIREMENTS )
     {
@@ -285,13 +308,16 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         }
         m_dirty = true; ++m_viewRevision; execute( std::move( resolve ) ); return;
     }
-    if( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY )
+    if( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY || m_activeRequest.action() == D::RFA_CONNECTION_FIELD_HISTORY )
     {
+        bool link = m_activeRequest.action() == D::RFA_CONNECTION_FIELD_HISTORY;
+        std::string ownerId = link ? m_connectionDraft.baseline().connection_id() : m_draft.baseline().block_id();
+        std::string stateId = link ? m_connectionDraft.baseline().state_id() : m_draft.baseline().state_id();
+        std::string revisionId = link ? m_connectionDraft.baseline().revision_id() : m_draft.baseline().revision_id();
         if( !result.has_history() || result.source_token() != m_document.source_token()
             || result.history().document_id() != DocumentId()
-            || result.history().owner_id() != m_draft.baseline().block_id()
-            || result.history().state_id() != m_draft.baseline().state_id()
-            || result.history().context_revision_id() != m_draft.baseline().revision_id()
+            || result.history().owner_id() != ownerId || result.history().state_id() != stateId
+            || result.history().context_revision_id() != revisionId
             || result.history().field() != m_activeRequest.field() )
         { m_error = "The history response belongs to another saved context."; refresh(); return; }
         int which = static_cast<int>( result.history().field() ) - 1;
@@ -306,12 +332,15 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         if( dialog.ShowModal() == wxID_OK && dialog.RestoreRevision() )
             for( const auto& row : result.history().entries() ) if( row.requirement_revision_id() == *dialog.RestoreRevision() )
             {
-                if( field( m_draft.fields(), which ) == row.text() ) break;
-                m_undo.push_back( m_draft ); m_redo.clear(); setField( m_draft.mutable_fields(), which, row.text() );
-                auto* restores = m_draft.mutable_restored_fields();
+                if( field( link ? m_connectionDraft.fields() : m_draft.fields(), which ) == row.text() ) break;
+                if( link ) { m_connectionUndo.push_back( m_connectionDraft ); m_connectionRedo.clear(); }
+                else { m_undo.push_back( m_draft ); m_redo.clear(); }
+                setField( link ? m_connectionDraft.mutable_fields() : m_draft.mutable_fields(), which, row.text() );
+                auto* restores = link ? m_connectionDraft.mutable_restored_fields() : m_draft.mutable_restored_fields();
                 for( int i = restores->size() - 1; i >= 0; --i ) if( restores->Get( i ).field() == result.history().field() ) restores->DeleteSubrange( i, 1 );
                 auto* restored = restores->Add(); restored->set_field( result.history().field() ); restored->set_source_revision_id( row.requirement_revision_id() );
-                m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision; break;
+                m_dirty = link ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
+                    : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision; break;
             }
         refresh(); return;
     }
@@ -320,10 +349,13 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     { m_errorCode = "diagram_target_mismatch"; m_error = "The loaded document does not match the requested diagram."; refresh(); return; }
     std::string scope = m_pendingScope.empty() ? current() ? current()->selection().block_id() : result.document().graph().selected_root().block_id() : m_pendingScope;
     std::string selected = m_pendingSelected.empty() ? m_selected : m_pendingSelected;
+    std::string selectedConnection = m_pendingConnection.value_or( m_connectionId );
     m_document = result.document(); m_ready = true; m_dirty = false;
     if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
-    m_pendingScope.clear(); m_pendingSelected.clear(); m_selected.clear();
-    select( selected.empty() ? m_path.back().block_id() : selected ); fit(); m_canvas->SetFocus();
+    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_selected.clear(); m_connectionId.clear();
+    select( selected.empty() ? m_path.back().block_id() : selected );
+    if( !selectedConnection.empty() ) selectConnection( selectedConnection );
+    fit(); m_canvas->SetFocus();
     if( m_closeAfterSave ) { m_closeAfterSave = false; Close(); }
 }
 
@@ -339,17 +371,31 @@ void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
 void RECURSIVE_DIAGRAM_FRAME::refresh()
 {
     m_updating = true; bool available = m_ready && !m_process;
+    bool link = !m_connectionId.empty();
     wxString path;
     for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += text( item->name() ); }
     m_breadcrumb->SetLabel( path.empty() ? _( "Loading diagram…" ) : path );
-    m_owner->SetLabel( m_ready ? text( m_draft.name() ) : wxString() );
+    m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );
     auto* selected = m_ready ? revision( m_draft.baseline() ) : nullptr;
     m_savedVersion->SetLabel( selected ? wxString::Format( _( "Selected design: v%d" ), version( *selected ) ) : wxString() );
-    for( int i = 0; i < 3; ++i ) { m_fields[i]->Enable( available ); m_history[i]->Enable( available ); m_fields[i]->ChangeValue( text( field( m_draft.fields(), i ) ) ); }
-    m_openDiagram->Enable( available && current() && m_selected != current()->selection().block_id() );
+    if( link && current() )
+        for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
+        {
+            auto* item = connection( m_connectionId ); int number = 1;
+            while( item && item->has_parent_revision_id() && number <= archive.revisions_size() )
+            {
+                const D::ConnectionRevisionData* parent = nullptr;
+                for( const auto& row : archive.revisions() ) if( row.selection().revision_id() == item->parent_revision_id() ) { parent = &row; break; }
+                item = parent; ++number;
+            }
+            m_savedVersion->SetLabel( wxString::Format( _( "Selected connection: v%d" ), number ) ); break;
+        }
+    for( int i = 0; i < 3; ++i ) { m_fields[i]->Enable( available ); m_history[i]->Enable( available ); m_fields[i]->ChangeValue( text( field( link ? m_connectionDraft.fields() : m_draft.fields(), i ) ) ); }
+    m_openDiagram->Enable( available && !link && current() && m_selected != current()->selection().block_id() );
     m_save->Enable( available && m_dirty ); m_decline->Enable( available && m_dirty );
     m_toolbar->EnableTool( BACK, available && !m_back.empty() ); m_toolbar->EnableTool( UP, available && m_path.size() > 1 );
-    m_toolbar->EnableTool( wxID_UNDO, available && !m_undo.empty() ); m_toolbar->EnableTool( wxID_REDO, available && !m_redo.empty() );
+    m_toolbar->EnableTool( wxID_UNDO, available && ( link ? !m_connectionUndo.empty() : !m_undo.empty() ) );
+    m_toolbar->EnableTool( wxID_REDO, available && ( link ? !m_connectionRedo.empty() : !m_redo.empty() ) );
     m_toolbar->EnableTool( FIT, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
     m_updating = false; m_rendered = false; m_canvas->Refresh();
@@ -363,7 +409,7 @@ bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
     int answer = choice.ShowModal();
     if( answer == wxID_YES ) save();
     else if( answer == wxID_NO ) load();
-    else { m_pendingScope.clear(); m_pendingSelected.clear(); }
+    else { m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); }
     return false;
 }
 void RECURSIVE_DIAGRAM_FRAME::select( const std::string& id )
@@ -372,20 +418,42 @@ void RECURSIVE_DIAGRAM_FRAME::select( const std::string& id )
     const REVISION* target = current();
     for( const auto& child : current()->children() ) if( child.block_id() == id ) target = revision( child );
     if( !target ) return;
-    if( m_selected == target->selection().block_id() ) return;
+    if( m_selected == target->selection().block_id() && m_connectionId.empty() ) return;
     m_pendingScope = current()->selection().block_id(); m_pendingSelected = target->selection().block_id();
+    m_pendingConnection = "";
     if( !confirmChange() ) return;
-    m_pendingScope.clear(); m_pendingSelected.clear(); m_selected = target->selection().block_id(); makeDraft( *target ); ++m_viewRevision; refresh();
+    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_connectionId.clear();
+    m_selected = target->selection().block_id(); makeDraft( *target ); ++m_viewRevision; refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
+{
+    if( !m_ready || m_process || !current() || m_connectionId == id ) return;
+    auto* item = connection( id ); if( !item ) return;
+    m_pendingScope = current()->selection().block_id(); m_pendingSelected = current()->selection().block_id(); m_pendingConnection = id;
+    if( !confirmChange() ) return;
+    const D::RequirementRevisionData* requirement = nullptr;
+    for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
+        for( const auto& history : archive.requirement_histories() ) if( history.state_id() == item->selection().state_id() )
+            for( const auto& row : history.revisions() ) if( row.id() == item->requirement_revision_id() ) requirement = &row;
+    if( !requirement ) { m_error = "The connection requirement history is unavailable."; refresh(); return; }
+    makeDraft( *current() ); m_selected = current()->selection().block_id();
+    m_connectionDraft.Clear(); *m_connectionDraft.mutable_baseline() = item->selection(); m_connectionDraft.set_name( item->name() );
+    m_connectionDraft.set_kind( item->kind() ); *m_connectionDraft.mutable_endpoints() = item->endpoints(); *m_connectionDraft.mutable_members() = item->members();
+    m_connectionDraft.set_baseline_requirement_revision_id( requirement->id() ); *m_connectionDraft.mutable_baseline_fields() = requirement->fields();
+    *m_connectionDraft.mutable_fields() = requirement->fields(); m_savedConnectionDraft = m_connectionDraft;
+    m_connectionId = id; m_connectionUndo.clear(); m_connectionRedo.clear();
+    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
 {
     if( !m_ready || m_process || !current() || current()->selection().block_id() == id ) return;
     std::vector<SELECTION> path; if( !findPath( id, path ) ) return;
     m_pendingScope = id; m_pendingSelected = id;
+    m_pendingConnection = "";
     if( !confirmChange() ) return;
     if( remember ) m_back.push_back( current()->selection().block_id() );
     m_views[current()->selection().block_id()] = { m_scale, m_origin, m_selected };
-    m_path = std::move( path ); m_selected.clear(); m_pendingScope.clear(); m_pendingSelected.clear();
+    m_path = std::move( path ); m_selected.clear(); m_connectionId.clear(); m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset();
     select( id );
     if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; select( saved->second.selected ); }
     else fit();
@@ -394,6 +462,21 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
 void RECURSIVE_DIAGRAM_FRAME::edit()
 {
     if( !m_ready || m_process ) return;
+    if( !m_connectionId.empty() )
+    {
+        auto before = m_connectionDraft;
+        for( int i = 0; i < 3; ++i ) if( field( m_connectionDraft.fields(), i ) != utf8( m_fields[i]->GetValue() ) )
+        {
+            setField( m_connectionDraft.mutable_fields(), i, utf8( m_fields[i]->GetValue() ) );
+            auto* restores = m_connectionDraft.mutable_restored_fields();
+            for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == i + 1 ) restores->DeleteSubrange( n, 1 );
+        }
+        if( before.SerializeAsString() == m_connectionDraft.SerializeAsString() ) return;
+        m_connectionUndo.push_back( std::move( before ) ); m_connectionRedo.clear();
+        m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); ++m_viewRevision;
+        m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+        SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); return;
+    }
     DRAFT before = m_draft;
     for( int i = 0; i < 3; ++i ) if( field( m_draft.fields(), i ) != utf8( m_fields[i]->GetValue() ) )
     {
@@ -411,6 +494,17 @@ void RECURSIVE_DIAGRAM_FRAME::save()
 {
     if( !m_ready || m_process || !m_dirty ) return;
     m_rebaseAttempts = 0;
+    if( !m_connectionId.empty() )
+    {
+        REQUEST request; request.set_action( D::RFA_SAVE_CONNECTION ); request.set_expected_source_token( m_document.source_token() );
+        auto* save = request.mutable_save_connection(); *save->mutable_expected_root() = m_document.graph().selected_root();
+        for( const auto& step : m_path ) *save->add_block_path() = step;
+        *save->add_connection_path() = m_connectionDraft.baseline(); *save->mutable_draft() = m_connectionDraft;
+        save->set_new_connection_revision_id( freshId() ); save->set_new_requirement_revision_id( freshId() );
+        save->set_new_block_revision_id( freshId() ); save->set_new_block_requirement_revision_id( freshId() );
+        for( size_t i = 1; i < m_path.size(); ++i ) save->add_block_ancestor_revision_ids( freshId() );
+        editorOrigin( save->mutable_origin(), "Edit connection requirements" ); execute( std::move( request ) ); return;
+    }
     REQUEST request; request.set_action( D::RFA_SAVE_BLOCK ); request.set_expected_source_token( m_document.source_token() );
     auto* save = request.mutable_save(); *save->mutable_expected_root() = m_document.graph().selected_root(); *save->mutable_draft() = m_draft;
     std::vector<SELECTION> path; if( !findPath( m_draft.baseline().block_id(), path ) ) return;
@@ -428,12 +522,20 @@ void RECURSIVE_DIAGRAM_FRAME::decline()
 void RECURSIVE_DIAGRAM_FRAME::history( int which )
 {
     if( !m_ready || m_process ) return;
-    REQUEST request; request.set_action( D::RFA_BLOCK_FIELD_HISTORY ); request.set_expected_source_token( m_document.source_token() );
-    *request.mutable_block() = m_draft.baseline(); request.set_field( static_cast<D::RequirementFieldKind>( which + 1 ) ); request.set_limit( 200 ); execute( std::move( request ) );
+    REQUEST request; request.set_expected_source_token( m_document.source_token() );
+    if( m_connectionId.empty() ) { request.set_action( D::RFA_BLOCK_FIELD_HISTORY ); *request.mutable_block() = m_draft.baseline(); }
+    else { request.set_action( D::RFA_CONNECTION_FIELD_HISTORY ); *request.mutable_block() = m_path.back(); *request.mutable_connection() = m_connectionDraft.baseline(); }
+    request.set_field( static_cast<D::RequirementFieldKind>( which + 1 ) ); request.set_limit( 200 ); execute( std::move( request ) );
 }
 void RECURSIVE_DIAGRAM_FRAME::undo( bool redo )
 {
     if( m_process ) return;
+    if( !m_connectionId.empty() )
+    {
+        auto& from = redo ? m_connectionRedo : m_connectionUndo; auto& to = redo ? m_connectionUndo : m_connectionRedo;
+        if( from.empty() ) return; to.push_back( m_connectionDraft ); m_connectionDraft = std::move( from.back() ); from.pop_back();
+        m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); ++m_viewRevision; refresh(); return;
+    }
     auto& from = redo ? m_redo : m_undo; auto& to = redo ? m_undo : m_redo;
     if( from.empty() ) return; to.push_back( m_draft ); m_draft = std::move( from.back() ); from.pop_back();
     m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision; refresh();
@@ -469,6 +571,16 @@ wxPoint RECURSIVE_DIAGRAM_FRAME::endpoint( const D::DiagramEndpointBindingData& 
     }
     return {};
 }
+std::array<wxPoint, 4> RECURSIVE_DIAGRAM_FRAME::connectionPath( const D::ConnectionRevisionData& link, int index ) const
+{
+    auto center = [&]( const D::DiagramEndpointBindingData& e )
+    { auto left = endpoint( e, false ), right = endpoint( e, true ); return ( left.x + right.x ) / 2; };
+    const auto& first = link.endpoints( 0 ); const auto& second = link.endpoints( index );
+    wxPoint from = endpoint( first, center( first ) < center( second ) );
+    wxPoint to = endpoint( second, center( second ) < center( first ) );
+    int middle = ( from.x + to.x ) / 2;
+    return { from, wxPoint( middle, from.y ), wxPoint( middle, to.y ), to };
+}
 void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
 {
     wxColour background = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
@@ -480,18 +592,17 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         for( const auto& selected : scope->local_diagram().connections() )
             for( const auto& connection : archive.revisions() ) if( connection.selection().revision_id() == selected.revision_id() && connection.endpoints_size() >= 2 )
             {
+                bool highlighted = selected.connection_id() == m_connectionId;
+                dc.SetPen( wxPen( wxSystemSettings::GetColour( highlighted ? wxSYS_COLOUR_HIGHLIGHT : wxSYS_COLOUR_GRAYTEXT ), highlighted ? 2 : 1 ) );
                 for( int i = 1; i < connection.endpoints_size(); ++i )
                 {
                     // Port side is a presentation choice toward the peer, not an
                     // inferred electrical signal direction. Boundary links must
                     // not exit through the far side of a child and cross its body.
-                    auto center = [&]( const D::DiagramEndpointBindingData& e )
-                    { auto left = endpoint( e, false ), right = endpoint( e, true ); return ( left.x + right.x ) / 2; };
                     const auto& first = connection.endpoints( 0 ); const auto& second = connection.endpoints( i );
-                    wxPoint from = endpoint( first, center( first ) < center( second ) );
-                    wxPoint to = endpoint( second, center( second ) < center( first ) );
-                    int middle = ( from.x + to.x ) / 2;
-                    dc.DrawLine( from, { middle, from.y } ); dc.DrawLine( middle, from.y, middle, to.y ); dc.DrawLine( { middle, to.y }, to );
+                    auto route = connectionPath( connection, i );
+                    wxPoint from = route.front(), to = route.back();
+                    for( size_t segment = 1; segment < route.size(); ++segment ) dc.DrawLine( route[segment - 1], route[segment] );
                     // A boundary already names its interface. Avoid duplicating
                     // the relationship title on top of that boundary label.
                     if( first.block_id() != scope->selection().block_id() && second.block_id() != scope->selection().block_id() )
@@ -519,6 +630,17 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
     m_canvas->SetFocus();
     for( int i = 0; i < current()->children_size(); ++i ) if( nodeRect( i ).Contains( event.GetPosition() ) )
     { auto id = current()->children( i ).block_id(); if( event.LeftDClick() ) navigate( id ); else select( id ); return; }
+    for( const auto& selected : current()->local_diagram().connections() ) if( auto* link = connection( selected.connection_id() ) )
+        for( int i = 1; i < link->endpoints_size(); ++i )
+        {
+            auto route = connectionPath( *link, i ); wxPoint point = event.GetPosition();
+            for( size_t j = 1; j < route.size(); ++j )
+            {
+                int x = std::clamp( point.x, std::min( route[j - 1].x, route[j].x ), std::max( route[j - 1].x, route[j].x ) );
+                int y = std::clamp( point.y, std::min( route[j - 1].y, route[j].y ), std::max( route[j - 1].y, route[j].y ) );
+                if( std::abs( point.x - x ) + std::abs( point.y - y ) <= FromDIP( 6 ) ) { selectConnection( selected.connection_id() ); return; }
+            }
+        }
     select( current()->selection().block_id() );
 }
 void RECURSIVE_DIAGRAM_FRAME::fit()
@@ -536,5 +658,6 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_view_revision( m_viewRevision ); result.set_completed_save_count( m_saveCount ); result.set_error_code( m_errorCode ); result.set_error_message( m_error );
     for( const auto& step : m_path ) *result.add_diagram_path() = step;
     if( m_ready ) *result.mutable_draft() = m_draft;
+    if( !m_connectionId.empty() ) *result.mutable_connection_draft() = m_connectionDraft;
     return result;
 }

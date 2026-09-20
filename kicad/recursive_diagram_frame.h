@@ -10,6 +10,7 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,8 @@ private:
     void completed( wxProcessEvent& aEvent );
     void refresh();
     void select( const std::string& aBlockId );
+    void selectConnection( const std::string& aConnectionId );
+    const kiapi::automation::diagrams::v1::ConnectionRevisionData* connection( const std::string& aConnectionId ) const;
     void navigate( const std::string& aBlockId, bool aRemember = true );
     bool confirmChange();
     void makeDraft( const REVISION& aRevision );
@@ -64,11 +67,16 @@ private:
     void fit();
     wxRect nodeRect( int aIndex ) const;
     wxPoint endpoint( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint, bool aFirst ) const;
+    std::array<wxPoint, 4> connectionPath( const kiapi::automation::diagrams::v1::ConnectionRevisionData& aConnection, int aEndpoint ) const;
 
     kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor m_request;
     kiapi::automation::diagrams::v1::RecursiveEditorDocument m_document;
     REQUEST m_activeRequest;
     DRAFT m_draft, m_savedDraft;
+    kiapi::automation::diagrams::v1::ConnectionDraftData m_connectionDraft, m_savedConnectionDraft;
+    std::vector<kiapi::automation::diagrams::v1::ConnectionDraftData> m_connectionUndo, m_connectionRedo;
+    std::string m_connectionId;
+    std::optional<std::string> m_pendingConnection;
     std::vector<DRAFT> m_undo, m_redo;
     std::vector<SELECTION> m_path;
     std::vector<std::string> m_back;

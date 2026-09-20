@@ -76,6 +76,24 @@ public sealed partial class NativeSessionTests
             Key("Right"); await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-cpu.png"), token);
+            Key("Escape"); Key("l"); Key("l"); Key("l");
+            await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == fixture.Links["CPU/Memory"].ConnectionId.ToString("D"));
+            Key("3", control: true); Key("a", control: true); Type("Keep memory away from noisy power.");
+            await Wait(s => s.Dirty && s.ConnectionDraft.Fields.Routing == "Keep memory away from noisy power.");
+            var connectionSave = await Save();
+            Assert.AreEqual("Keep memory away from noisy power.", connectionSave.ConnectionDraft.Fields.Routing);
+            var connectionFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var connectionCpu = connectionFile.Inspect(connectionFile.SelectedRoot).Children[1];
+            var memoryLink = connectionFile.Inspect(connectionCpu).LocalDiagram.Connections[2];
+            Assert.AreEqual("Keep memory away from noisy power.", connectionFile.Connections(connectionCpu.BlockId).Requirements(memoryLink).Requirements.Routing);
+            Assert.AreEqual("", connectionFile.Connections(connectionCpu.BlockId).Requirements(fixture.Links["CPU/Memory"]).Requirements.Routing);
+            Key("3", control: true); Key("a", control: true); Type("Unsaved connection preference."); await Wait(s => s.Dirty);
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && s.ConnectionDraft.Fields.Routing == "Keep memory away from noisy power.");
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-connection.png"), token);
+            // Select blank canvas space to return the inspector to the current
+            // diagram, rather than accidentally editing a similarly named block.
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 60, clickFromTop: 220);
+            await Wait(s => s.ConnectionDraft is null && s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             string original = graph.Requirements(fixture.Blocks["CPU"]).Requirements.General;
             Key("1", control: true); Key("a", control: true); Type("Cool near the enclosure edge.");
             await Wait(s => s.Dirty && s.Draft.Fields.General == "Cool near the enclosure edge.");

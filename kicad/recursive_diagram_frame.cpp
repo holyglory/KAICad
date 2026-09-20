@@ -341,7 +341,8 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     // Closing history cancels delivery of this read. A late response must not
     // reopen a modal, replace a draft, or report an error in another scope.
     if( olderHistory && !m_historyDialog ) { refresh(); return; }
-    if( diagramHistory && !m_diagramHistoryOpen ) { refresh(); return; }
+    if( diagramHistory && !m_diagramHistoryOpen )
+    { refresh(); if( m_diagramHistory->IsEnabled() ) m_diagramHistory->SetFocus(); return; }
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
     if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION
@@ -967,7 +968,10 @@ void RECURSIVE_DIAGRAM_FRAME::closeDiagramHistory()
 {
     if( !m_diagramHistoryOpen ) return;
     returnFromHistoryPreview(); m_diagramHistoryOpen = false; m_pendingHistoryRestore.reset(); m_failedHistoryRequest.Clear();
-    m_inspectorBook->SetSelection( 0 ); ++m_viewRevision; refresh(); m_diagramHistory->SetFocus();
+    m_inspectorBook->SetSelection( 0 ); ++m_viewRevision; refresh();
+    // A cancelled read can still own the companion process. Its History button
+    // stays disabled until completion; never leave GTK focus on that control.
+    if( m_diagramHistory->IsEnabled() ) m_diagramHistory->SetFocus(); else m_canvas->SetFocus();
 }
 void RECURSIVE_DIAGRAM_FRAME::restoreDiagramHistory( SELECTION selected )
 {

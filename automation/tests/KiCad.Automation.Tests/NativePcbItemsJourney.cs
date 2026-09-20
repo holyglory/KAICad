@@ -1,5 +1,7 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using System.Security.Cryptography;
+using System.Text;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
@@ -76,11 +78,12 @@ public sealed partial class NativeSessionTests
             };
             var guideCreate = new CreateItems { Header = new() { Document = board } };
             guideCreate.Items.Add(Any.Pack(guideShape));
+            string guideId = Guid.NewGuid().ToString("D");
             var guideReply = await mcp.Tool("kicad_pcb_guide_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(guideCreate),
                 expectedStateJson = updatedReply.GetProperty("structuredContent").GetProperty("afterState").GetString(),
-                guideId = Guid.NewGuid().ToString("D"), sourceSha256 = new string('a', 64)
+                guideId, sourceSha256 = new string('a', 64)
             });
             Assert.IsFalse(guideReply.TryGetProperty("isError", out var guideError) && guideError.GetBoolean(), guideReply.GetRawText());
             var guideData = guideReply.GetProperty("structuredContent");
@@ -90,6 +93,27 @@ public sealed partial class NativeSessionTests
             var persistedGuide = guideRead.Items.Single().Unpack<BoardGraphicShape>();
             Assert.AreEqual(BoardLayer.BlDwgsUser, persistedGuide.Layer);
             Assert.IsTrue(persistedGuide.CustomProperties.Any(p => p.Key == "kicad.ai.guide.role" && p.Value == "visual-underlay"));
+            var candidateTrack = track.Clone(); candidateTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            var candidateRequest = new CreateItems { Header = new() { Document = board } }; candidateRequest.Items.Add(Any.Pack(candidateTrack));
+            var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new
+            {
+                instanceId, expectedInstanceEpoch = client.Epoch, requestJson = BoardJson.Formatter.Format(candidateRequest),
+                expectedStateJson = guideState, guideId,
+                sourceSha256 = new string('a', 64)
+            });
+            // The guide ID is provenance supplied by the caller; the validator must
+            // remain honest about not resolving it to a saved guide object yet.
+            Assert.IsFalse(candidateReply.TryGetProperty("isError", out var candidateError) && candidateError.GetBoolean(), candidateReply.GetRawText());
+            Assert.IsTrue(candidateReply.GetProperty("structuredContent").GetProperty("structuralValidation").GetBoolean());
+            Assert.IsFalse(candidateReply.GetProperty("structuredContent").GetProperty("nativeCommit").GetBoolean());
+            var invalidCandidate = candidateTrack.Clone(); invalidCandidate.Net = new();
+            var invalidCandidateRequest = new CreateItems { Header = new() { Document = board } }; invalidCandidateRequest.Items.Add(Any.Pack(invalidCandidate));
+            var rejectedCandidate = await mcp.Tool("kicad_pcb_route_candidate_validate", new
+            {
+                instanceId, expectedInstanceEpoch = client.Epoch, requestJson = BoardJson.Formatter.Format(invalidCandidateRequest),
+                expectedStateJson = guideState, guideId, sourceSha256 = new string('a', 64)
+            });
+            Assert.IsTrue(rejectedCandidate.GetProperty("isError").GetBoolean());
             var copperGuide = guideShape.Clone(); copperGuide.Layer = BoardLayer.BlFCu;
             var copperRequest = new CreateItems { Header = new() { Document = board } }; copperRequest.Items.Add(Any.Pack(copperGuide));
             var rejectedGuide = await mcp.Tool("kicad_pcb_guide_create", new
@@ -98,6 +122,21 @@ public sealed partial class NativeSessionTests
                 guideId = Guid.NewGuid().ToString("D"), sourceSha256 = new string('b', 64)
             });
             Assert.IsTrue(rejectedGuide.GetProperty("isError").GetBoolean());
+            const string svg = "<svg viewBox=\"0 0 10 10\"><polyline points=\"1,1 5,1 5,5\"/></svg>";
+            string svgHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(svg)));
+            string svgGuideId = Guid.NewGuid().ToString("D");
+            var svgReply = await mcp.Tool("kicad_pcb_guide_svg_create", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = guideState,
+                svg, repositoryRoot = board.Project.Path, sourceArchivePath = "guides/rf.svg", guideId = svgGuideId,
+                sourceSha256 = svgHash, layer = "Dwgs.User", originXNm = "30000000", originYNm = "30000000",
+                nanometersPerSvgUnit = "100000", strokeWidthNm = 100000
+            });
+            Assert.IsFalse(svgReply.TryGetProperty("isError", out var svgError) && svgError.GetBoolean(), svgReply.GetRawText());
+            Assert.AreEqual(svg, await File.ReadAllTextAsync(Path.Combine(board.Project.Path, "guides/rf.svg"), token));
+            var svgShapes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbShape } }, token);
+            Assert.IsTrue(svgShapes.Items.Any(item => item.Unpack<BoardGraphicShape>().CustomProperties.Any(p => p.Key == "kicad.ai.guide.source_format" && p.Value == "svg")));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

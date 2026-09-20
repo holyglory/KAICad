@@ -12,6 +12,23 @@ public sealed record RecursiveBlockFileSnapshot(string Path, string ContentSha25
 /// independently advertised MCP mutation; the owning operation supplies its journal.</summary>
 public static class RecursiveBlockFiles
 {
+    public static async Task<RecursiveBlockFileSnapshot> SaveImplementationAsync(string repositoryRoot, string path,
+        Guid documentId, string expectedContentSha256, BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
+        RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds,
+        RequirementRevisionOrigin origin, CancellationToken token = default)
+    {
+        var loaded = await Load(repositoryRoot, path, documentId, token);
+        if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the implementation draft for comparison.");
+        token.ThrowIfCancellationRequested();
+        var saved = loaded.Snapshot.Graph.SaveImplementationDraft(expectedRoot, blockPath, draft, revisionId,
+            requirementRevisionId, ancestorRevisionIds, origin);
+        if (!saved.Changed) return loaded.Snapshot;
+        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(saved.Graph));
+        string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
+        return new(loaded.Snapshot.Path, hash, saved.Graph);
+    }
+
     public static async Task<RecursiveBlockFileSnapshot> SaveConnectionAsync(string repositoryRoot, string path,
         Guid documentId, string expectedContentSha256, BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
         ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, Guid connectionRevisionId,

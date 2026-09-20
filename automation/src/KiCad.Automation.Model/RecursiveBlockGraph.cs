@@ -210,21 +210,34 @@ public sealed class RecursiveBlockGraph
     /// validation or conflict leaves this graph and the supplied draft untouched.</summary>
     public RecursiveBlockSelectionResult SaveDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> path,
         RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds,
-        RequirementRevisionOrigin origin, IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null)
+        RequirementRevisionOrigin origin, IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null) =>
+        SaveDraftCore(expectedRoot, path, draft, revisionId, requirementRevisionId, ancestorRevisionIds, origin, resolutions, false);
+
+    /// <summary>Commit an inspected implementation draft and select it only after all
+    /// containing interface checks succeed. Preview itself requires no mutation.</summary>
+    public RecursiveBlockSelectionResult SaveImplementationDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> path,
+        RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds,
+        RequirementRevisionOrigin origin) =>
+        SaveDraftCore(expectedRoot, path, draft, revisionId, requirementRevisionId, ancestorRevisionIds, origin, null, true);
+
+    private RecursiveBlockSelectionResult SaveDraftCore(BlockSelection expectedRoot, ImmutableArray<BlockSelection> path,
+        RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds,
+        RequirementRevisionOrigin origin, IReadOnlyCollection<DiagramRequirementResolution>? resolutions, bool chooseImplementation)
     {
         ValidateDraft(draft);
-        if (expectedRoot != SelectedRoot || path.IsDefaultOrEmpty || path[^1] != draft.Baseline
+        if (expectedRoot != SelectedRoot || path.IsDefaultOrEmpty || path[^1].BlockId != draft.Baseline.BlockId
+            || (!chooseImplementation && path[^1] != draft.Baseline)
             || _states[draft.Baseline.StateId].HeadRevisionId != draft.Baseline.RevisionId)
             throw new AutomationException("stale_block_revision", "The saved block or selected hierarchy changed; retain the draft and compare the newer design.");
         // Validate the complete path even for an unchanged save.
-        _ = Select(expectedRoot, path, draft.Baseline, ancestorRevisionIds, origin);
+        _ = Select(expectedRoot, path, path[^1], ancestorRevisionIds, origin);
         var history = _requirements[draft.Baseline.StateId];
         var requirements = history.Commit(history.Current.Id, draft.Requirements, requirementRevisionId, origin, resolutions);
         var baseline = Inspect(draft.Baseline);
         if (draft.Name == baseline.Name && draft.Children.SequenceEqual(baseline.Children)
             && draft.LocalDiagram.SameContents(baseline.LocalDiagram)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
-            return new(this, [], false);
+            return Select(expectedRoot, path, draft.Baseline, ancestorRevisionIds, origin);
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
             baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin, draft.RestoredFrom, draft.Diagram);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);

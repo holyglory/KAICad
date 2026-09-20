@@ -95,6 +95,39 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     [TestMethod]
+    public async Task CompiledImplementationSaveKeepsPreviewInactiveUntilGuardedPublication()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-implementation-command-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+            var state = graph.States.Single(s => s.BlockId == cpu.BlockId && s.Id != cpu.StateId);
+            var selection = new BlockSelection(cpu.BlockId, state.Id, state.HeadRevisionId);
+            string path = Path.Combine(root, "design.xml"); string original = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, original);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request); var draft = graph.StartDraft(selection);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "A different implementation choice") };
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            request.Action = P.RecursiveFileAction.RfaSaveImplementation; request.ExpectedSourceToken = read.SourceToken;
+            request.Save = new() { ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = new()
+                    { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Choose implementation", RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            request.Save.BlockPath.Add(request.Save.ExpectedRoot.Clone());
+            request.Save.BlockPath.Add(new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") });
+            request.Save.AncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            var saved = await Invoke(request); Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            var loaded = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var chosen = loaded.Inspect(loaded.SelectedRoot).Children[1]; Assert.AreEqual(state.Id, chosen.StateId);
+            Assert.AreEqual("A different implementation choice", loaded.Requirements(chosen).Requirements.General);
+            Assert.AreEqual(cpu, loaded.Inspect(graph.SelectedRoot).Children[1]);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(loaded), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task CompiledConnectionSavePreservesTheOldInterfaceAndContainingDiagram()
     {
         string root = Directory.CreateTempSubdirectory("kicad-connection-command-").FullName;

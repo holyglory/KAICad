@@ -93,7 +93,7 @@ message RecursiveEditorDocument {
   string source_token = 4;
   RecursiveBlockGraphData graph = 5;
 }
-enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; }
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; RFA_SAVE_IMPLEMENTATION = 6; }
 message ConnectionDraftData {
   ConnectionSelectionData baseline = 1;
   string name = 2;

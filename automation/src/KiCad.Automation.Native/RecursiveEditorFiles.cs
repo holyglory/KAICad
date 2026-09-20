@@ -18,7 +18,7 @@ public static class RecursiveEditorFiles
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
             || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
-            || request.Action != P.RecursiveFileAction.RfaSaveBlock && request.Save is not null
+            || request.Action is not (P.RecursiveFileAction.RfaSaveBlock or P.RecursiveFileAction.RfaSaveImplementation) && request.Save is not null
             || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null
             || request.Action != P.RecursiveFileAction.RfaSaveConnection && request.SaveConnection is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
@@ -37,12 +37,21 @@ public static class RecursiveEditorFiles
                 RecursiveBlockCodec.DecodeOrigin(save.Origin), token);
             return Describe(saved);
         }
-        if (request.Action == P.RecursiveFileAction.RfaSaveBlock)
+        if (request.Action is P.RecursiveFileAction.RfaSaveBlock or P.RecursiveFileAction.RfaSaveImplementation)
         {
             if (request.Save is not { } save || save.Draft is null || save.Origin is null || save.ExpectedRoot is null
                 || request.ExpectedSourceToken.Length != 64 || request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
                 throw Invalid("invalid_diagram_save_request", "Save needs its exact source token, root, block path, draft and change origin.");
+            if (request.Action == P.RecursiveFileAction.RfaSaveImplementation)
+            {
+                var selected = await RecursiveBlockFiles.SaveImplementationAsync(request.RepositoryRoot, request.SourcePath, document,
+                    request.ExpectedSourceToken, RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot),
+                    save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(), RecursiveBlockCodec.Decode(save.Draft, document),
+                    Id(save.NewRevisionId), Id(save.NewRequirementRevisionId), save.AncestorRevisionIds.Select(Id).ToImmutableArray(),
+                    RecursiveBlockCodec.DecodeOrigin(save.Origin), token);
+                return Describe(selected);
+            }
             var saved = await RecursiveBlockFiles.SaveDraftAsync(request.RepositoryRoot, request.SourcePath, document,
                 request.ExpectedSourceToken, RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot),
                 save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(), RecursiveBlockCodec.Decode(save.Draft, document),

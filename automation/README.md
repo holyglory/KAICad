@@ -2911,7 +2911,12 @@ In the recursive window:
   newer file. `Ctrl+1/2/3` focuses the corresponding field.
 - **History** beside a field compares its earlier values with the exact saved
   context. Restoring copies only that field into the draft; Save publishes it.
-  `Alt+H` opens history from a focused requirement field.
+  `Alt+H` opens history from a focused requirement field. For histories longer
+  than the first 200 changes, **Load older** (`Alt+O`) appends another bounded
+  page without changing the inspected revision. Close/Escape and restoring an
+  already-loaded value remain available during loading. A failed read preserves
+  the loaded rows and draft; a changed saved file requires closing history and
+  reloading its context. The saved marker stays before a long actor name.
 - For block requirement conflicts, compare Base, Your draft and Latest saved.
   Choose the draft, saved text, or explicitly write merged text. All overlapping
   fields require a choice. Independent fields can compose without a modal.
@@ -2951,8 +2956,12 @@ independent KiCad instances through navigation, editing, persistence and recover
 Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
 native Mac integration. The authoritative unfinished outcomes include recursive
 UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
-`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and history pagination beyond
-the initial 200 entries `p8ebf18838a55934f`. Implementation management is tracked
+`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and whole-diagram history,
+preview and restoration `pb0847a7ffd99250a`. Field-history pagination beyond 200
+changes passed the scoped Linux run `t20260920T042520Z-4974e9`, including actual
+editor restoration, stale-page recovery, cancellation and both themes. Its
+outcome is `p8ebf18838a55934f`; the wider history workflow is still incomplete.
+Implementation management is tracked
 by `p5848545e243151a7`; scoped Linux evidence is separate from cross-platform
 qualification. Complete
 graph conflict handling, structural/native generation and reverse synchronization,

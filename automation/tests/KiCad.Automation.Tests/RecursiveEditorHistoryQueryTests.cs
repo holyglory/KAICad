@@ -56,6 +56,38 @@ public sealed class RecursiveEditorHistoryQueryTests
     }
 
     [TestMethod]
+    public void HistoryOfAChildKeepsItsExactInterfacesNotesAndSiblingIndependent()
+    {
+        var fixture = LinkedDiagramFixture.Create(); var graph = fixture.Graph; var psu = fixture.Blocks["PSU"];
+        var sibling = fixture.Blocks["CPU"];
+        var origin = RecursiveBlockFixture.Origin("Independent agent") with { InputIds = [Guid.NewGuid()] };
+        var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Instruction, "Keep sensing separate from switching.",
+            new(DiagramAnnotationTargetKind.Canvas, null), new(10.125m, 22.75m),
+            [new([new(1.5m, 2.25m), new(6.75m, 8.125m)])], origin);
+        var draft = graph.StartDraft(psu);
+        draft = draft with { Diagram = draft.LocalDiagram with { Annotations = [note] } };
+        var annotated = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psu], draft, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], origin).Graph;
+        var annotatedPsu = annotated.Inspect(annotated.SelectedRoot).Children[0];
+        var next = annotated.StartDraft(annotatedPsu);
+        next = next with { Diagram = next.LocalDiagram with { Annotations = [note with { Text = "Review the sensing path again.", Position = new(40m, 60m) }] } };
+        var changed = annotated.SaveDraft(annotated.SelectedRoot, [annotated.SelectedRoot, annotatedPsu], next,
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], origin).Graph;
+        var current = changed.Inspect(changed.SelectedRoot).Children[0];
+        var comparison = DiagramHistoryQuery.Compare(changed, current, annotatedPsu);
+        Assert.HasCount(1, comparison.Changes); Assert.AreEqual(note.Id, comparison.Changes[0].ObjectId);
+        Assert.AreEqual(DiagramHistoryChangeCategory.Comment, comparison.Changes[0].Category);
+        var restored = changed.RestoreAsDraft(changed.StartDraft(current), annotatedPsu);
+        Assert.IsTrue(note.SameContents(restored.LocalDiagram.Notes.Single()));
+        var saved = changed.SaveDraft(changed.SelectedRoot, [changed.SelectedRoot, current], restored,
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], origin).Graph;
+        Assert.AreEqual(sibling, saved.Inspect(saved.SelectedRoot).Children[1]);
+        var roundtrip = RecursiveBlockGraphXml.Read(RecursiveBlockGraphXml.Write(saved));
+        var restoredPsu = roundtrip.Inspect(roundtrip.SelectedRoot).Children[0];
+        Assert.IsTrue(annotated.Inspect(annotatedPsu).LocalDiagram.SameContents(roundtrip.Inspect(restoredPsu).LocalDiagram));
+        Assert.AreEqual("Review the sensing path again.", roundtrip.Inspect(current).LocalDiagram.Notes.Single().Text);
+    }
+
+    [TestMethod]
     public void WholeHistoryIncludesUnrelatedFieldChangesButNeverLaterCandidates()
     {
         var f = LinkedDiagramFixture.Create(); var initial = f.Graph;

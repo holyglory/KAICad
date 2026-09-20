@@ -2868,6 +2868,17 @@ ready state without an error. These calls do not imply electrical realization
 or synchronized schematic/PCB generation. The earlier `kicad_structure_open`
 surface remains the legacy flat engineering-model editor, not this workflow.
 
+Agents can use `kicad_diagram_read` with the same instance/repository/path/document
+target to inspect one saved diagram level without opening a window. Omit all
+block/state/revision IDs to read the selected root, or supply all three to inspect
+an exact saved or historical block. The result contains direct child selections,
+requirements, boundary interfaces, selected connection/member details, partial
+endpoints, comments, implementation metadata, the source token and native instance
+epoch. It is saved model data, not an unsaved window draft or electrical proof.
+`kicad_diagram_field_history` reads a bounded page for an exact block, optionally
+one exact connection/member, and General/Schematic/Routing field. Its total and
+offset allow agents to reach older history without changing the selected design.
+
 In the recursive window:
 
 - Select a block and use **Open diagram**, or double-click it. Back/Up return to
@@ -2921,6 +2932,8 @@ Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
 native Mac integration. The authoritative unfinished outcomes include recursive
 UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
 `pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and history pagination beyond
-the initial 200 entries `p8ebf18838a55934f`. Implementation creation/removal, complete
+the initial 200 entries `p8ebf18838a55934f`. Implementation creation/removal is tracked
+by `p5848545e243151a7`; the model can preserve exact-source fork provenance, but
+editor management controls remain unfinished. Complete
 graph conflict handling, structural/native generation and reverse synchronization,
 schematic/PCB markup, and full platform qualification remain open.

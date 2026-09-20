@@ -30,6 +30,20 @@ The focused regions reviewed are the revision list, selected/saved text and foot
 
 ## Historical comparison — superseded option 1
 
+## Recursive editor integration comparisons
+
+The first complete editor journey, `t20260920T000307Z-8fc24d`, exercised two native KiCad instances through MCP and real keyboard/mouse interaction. It navigated System → PSU → System → CPU, edited requirements, saved and declined drafts, restored field history, rejected a stale save while retaining the draft, and reopened the file. Its editor artifacts are materialized at `/mnt/build-storage/codex/kicad/evidence/recursive-editor-8fc24d/editor/`.
+
+Source walkthrough and the root/PSU/CPU captures were opened in the same comparison input. P1: the right inspector clipped History buttons. P2: native body text was too small. P1: boundary interface labels overlapped connection titles, and some boundary links exited through the far side of a child. The behavior pass did not establish visual readiness.
+
+The repaired journey `t20260920T000928Z-c56124` passes the same interactions. Its source hash is `40565337d3654f6ff67b1bf6beb1a885c23589e3c1f6bf4f3bf78533b513f784`; hash-verified captures are in `/mnt/build-storage/codex/kicad/evidence/recursive-editor-c56124/editor/`. The approved System image and `be01ee80-a268-46a9-a908-4515faae0656-recursive-system.png` were opened together with the CPU capture. Both root views select PSU. Fixture text/revision numbers differ intentionally and are not product requirements.
+
+The implementation is a 1536 × 1024 native editor within a 1600 × 1150 virtual display; the screenshot includes the surrounding black display area. The reference is a 1536 × 1024 complete scene. No CSS/device scaling is involved. Compare the native editor region, not the extra desktop pixels.
+
+The inspector now keeps its three History controls visible, native text is readable, and the reviewed CPU boundary labels no longer overlap. Port-side choices route toward the peer without inventing electrical direction. Main region organization follows the approved canvas/right-inspector design. Existing native icons are reused; diagram blocks and links are data-driven drawing, not raster substitutes. Save/Decline remain editing actions and invoke no agent.
+
+Remaining P1/P2 scope: diagram implementation/history selection, connection selection/editing, comments/markup, saved layout manipulation, whole-diagram restore/preview, and the designed three-way conflict workflow are unfinished. The current native save safely rejects a stale file and retains the draft, but this is not the conflict-resolution dialog. Full-window compact/dark interaction and complete visible-control coverage are not yet qualified. Field-history pagination beyond 200 changes is tracked as `p8ebf18838a55934f`; the complete recursive editor and field-history outcomes remain open. The optional Agent console entry is not shown as a working integration. Final result remains blocked.
+
 The following records describe the earlier native editor and are retained as historical evidence. They are not the approved visual target for the recursive editor.
 
 ## Evidence and state

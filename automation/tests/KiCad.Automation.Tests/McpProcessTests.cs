@@ -377,13 +377,17 @@ public sealed class McpProcessTests
             Assert.AreEqual(SchematicDesignXml.Write(syncFixture.Baseline, syncFixture.KnowledgeLibraries),
                 syncData.GetProperty("candidateDesignXml").GetString());
             string candidateXml = syncData.GetProperty("candidateDesignXml").GetString()!;
+            var candidateDesign = SchematicDesignXml.Read(candidateXml, syncFixture.KnowledgeLibraries);
+            candidateDesign.Schematic.Instances[0].Metadata.TitleBlock.Title = "Stored production MCP candidate";
+            candidateXml = SchematicDesignXml.Write(candidateDesign, syncFixture.KnowledgeLibraries);
             string candidateHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(candidateXml)));
             var candidateCommit = await Request(4084, "tools/call", new { name = "kicad_design_candidate_commit",
                 arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
                     expectedRevisionToken = syncSaved.RevisionToken, candidateXml, expectedCandidateSha256 = candidateHash,
                     operationId = Guid.NewGuid().ToString("D") } });
-            Assert.IsFalse(candidateCommit.GetProperty("result").GetProperty("isError").GetBoolean());
+            var candidateCommitResult = candidateCommit.GetProperty("result");
+            Assert.IsFalse(candidateCommitResult.TryGetProperty("isError", out var candidateCommitError) && candidateCommitError.GetBoolean());
             var candidateCommitState = candidateCommit.GetProperty("result").GetProperty("structuredContent");
             Assert.IsTrue(candidateCommitState.GetProperty("desiredCandidateStored").GetBoolean());
             Assert.IsFalse(candidateCommitState.GetProperty("designFileWritten").GetBoolean());

@@ -45,6 +45,45 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("SGS_REQUIREMENT", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("package").GetProperty("strength").GetString());
             Assert.AreEqual(initialBindings.Targets[0].ComponentId.ToString("D"), savedReadData.GetProperty("block")
                 .GetProperty("componentBindings").GetProperty("targets")[0].GetProperty("componentId").GetString());
+            byte[] originalSource = System.Text.Encoding.UTF8.GetBytes("Original requirements and user drawing description.\n");
+            await File.WriteAllBytesAsync(Path.Combine(project, "original-requirements.txt"), originalSource, token);
+            var assetArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(),
+                ["attachmentPath"] = "original-requirements.txt", ["archiveDirectory"] = "assets/refinement",
+                ["attachmentId"] = Guid.NewGuid(), ["expectedSha256"] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(originalSource)),
+                ["expectedByteCount"] = originalSource.LongLength, ["mediaType"] = "text/plain"
+            };
+            var assetResult = await client.CallToolAsync("kicad_diagram_refinement_asset_capture", assetArguments, cancellationToken: token);
+            Assert.IsFalse(assetResult.IsError == true);
+            var capturedAsset = JsonSerializer.SerializeToElement(assetResult).GetProperty("structuredContent").GetProperty("attachment")
+                .Deserialize<DiagramRefinementAttachment>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var originalInput = RecursiveBlockRefinementInputTests.Input(graph) with { Attachments = [capturedAsset] };
+            var inputArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(),
+                ["input"] = JsonSerializer.SerializeToElement(originalInput, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
+            var inputResult = await client.CallToolAsync("kicad_diagram_refinement_input_record", inputArguments, cancellationToken: token);
+            if (inputResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-refinement-input-error.json"), JsonSerializer.Serialize(inputResult), token);
+            Assert.IsFalse(inputResult.IsError == true);
+            Assert.IsTrue(JsonSerializer.SerializeToElement(inputResult).GetProperty("structuredContent").GetProperty("added").GetBoolean());
+            var repeatedInput = await client.CallToolAsync("kicad_diagram_refinement_input_record", inputArguments, cancellationToken: token);
+            Assert.IsFalse(repeatedInput.IsError == true);
+            Assert.IsFalse(JsonSerializer.SerializeToElement(repeatedInput).GetProperty("structuredContent").GetProperty("added").GetBoolean());
+            graph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(originalInput.SameContents(graph.RefinementInput(originalInput.Id)));
+            savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
+            Assert.IsFalse(savedRead.IsError == true); savedReadData = JsonSerializer.SerializeToElement(savedRead).GetProperty("structuredContent");
+            await File.WriteAllTextAsync(Path.Combine(project, "original-requirements.txt"), "Later replacement, not the original.", token);
+            var readInputArguments = new Dictionary<string, object?>(arguments)
+            { ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(), ["inputId"] = originalInput.Id };
+            var readInput = await client.CallToolAsync("kicad_diagram_refinement_input_read", readInputArguments, cancellationToken: token);
+            Assert.IsFalse(readInput.IsError == true);
+            var readInputData = JsonSerializer.SerializeToElement(readInput).GetProperty("structuredContent");
+            Assert.AreEqual(originalInput.Prompt, readInputData.GetProperty("input").GetProperty("prompt").GetString());
+            Assert.AreEqual("Available", readInputData.GetProperty("assets")[0].GetProperty("status").GetString());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-refinement-input.json"), JsonSerializer.Serialize(readInput), token);
             var wholeHistoryArguments = new Dictionary<string, object?>(arguments)
             {
                 ["context"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },
@@ -830,6 +869,8 @@ public sealed partial class NativeSessionTests
                 "Native requirement edits, history restoration and child saves must retain independent definition choices.");
             Assert.IsTrue(initialBindings.SameContents(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).EffectiveComponentBindings),
                 "Native editing, undo and restoration must preserve exact component identities, including unresolved targets.");
+            Assert.IsTrue(originalInput.SameContents(restoredChildGraph.RefinementInput(originalInput.Id)),
+                "Native edits and history restoration must preserve original inputs without following later heads.");
             var currentDefinitionState = await Read();
             var selectedDefinition = RecursiveBlockDefinitionTests.Partial().With(BlockDefinitionFacet.Model,
                 RecursiveBlockDefinitionTests.Choice(DefinitionChoiceState.Selected, ["Fixture selected model"]));
@@ -840,6 +881,7 @@ public sealed partial class NativeSessionTests
                 ["expectedRoot"] = restoredChildGraph.SelectedRoot,
                 ["blockPath"] = new[] { restoredChildGraph.SelectedRoot },
                 ["definition"] = JsonSerializer.SerializeToElement(selectedDefinition, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                ["refinementInputId"] = originalInput.Id,
                 ["operationId"] = Guid.NewGuid(), ["actor"] = "Compatible agent fixture"
             };
             var definitionResult = await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token);
@@ -847,6 +889,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(definitionResult.IsError == true);
             var definedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.IsTrue(selectedDefinition.SameContents(definedGraph.Inspect(definedGraph.SelectedRoot).EffectiveDefinition));
+            Assert.IsTrue(definedGraph.Inspect(definedGraph.SelectedRoot).Origin.InputIds.Contains(originalInput.Id));
             Assert.AreEqual(restoredChildGraph.Requirements(restoredChildGraph.SelectedRoot).Requirements, definedGraph.Requirements(definedGraph.SelectedRoot).Requirements);
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token)).IsError == true);
             var currentDefinitionToken = JsonSerializer.SerializeToElement(definitionResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString();
@@ -883,6 +926,7 @@ public sealed partial class NativeSessionTests
                 ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = currentDefinitionToken,
                 ["expectedRoot"] = definedGraph.SelectedRoot, ["blockPath"] = new[] { definedGraph.SelectedRoot },
                 ["bindings"] = JsonSerializer.SerializeToElement(electrical.Bindings, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                ["refinementInputId"] = originalInput.Id,
                 ["operationId"] = Guid.NewGuid(), ["actor"] = "Compatible component agent fixture"
             };
             var componentResult = await client.CallToolAsync("kicad_diagram_components_set", componentArguments, cancellationToken: token);

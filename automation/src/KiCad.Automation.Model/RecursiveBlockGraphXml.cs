@@ -18,6 +18,7 @@ public static class RecursiveBlockGraphXml
     {
         var set = new XmlSchemaSet { XmlResolver = null };
         BlockDefinitionXml.AddSchema(set);
+        DiagramRefinementInputXml.AddSchema(set);
         var assembly = typeof(RecursiveBlockGraphXml).Assembly;
         foreach (string name in new[] { "requirement-history-v1.xsd", "connection-archive-v1.xsd", "recursive-block-graph-v1.xsd" })
         {
@@ -55,7 +56,9 @@ public static class RecursiveBlockGraphXml
             graph.ImplementationChanges.IsEmpty ? null : new XElement(Ns + "implementation-changes", graph.ImplementationChanges.Select(c =>
                 new XElement(Ns + "change", Attr("id", c.Id), Attr("state", c.StateId), new XAttribute("kind", c.Kind),
                     new XAttribute("before-name", c.BeforeName), new XAttribute("after-name", c.AfterName),
-                    new XAttribute("before-archived", c.BeforeArchived), new XAttribute("after-archived", c.AfterArchived), DiagramRevisionOriginXml.Write(Ns, c.Origin)))));
+                    new XAttribute("before-archived", c.BeforeArchived), new XAttribute("after-archived", c.AfterArchived), DiagramRevisionOriginXml.Write(Ns, c.Origin)))),
+            graph.RefinementInputs.IsEmpty ? null : new XElement(Ns + "refinement-inputs", graph.RefinementInputs.Select(i =>
+                EngineeringXmlText.Parse(DiagramRefinementInputXml.Write(i)))));
         new XDocument(root).Validate(Schema.Value, null);
         return EngineeringXmlText.Render(root);
     }
@@ -88,7 +91,9 @@ public static class RecursiveBlockGraphXml
             var changes = root.Element(Ns + "implementation-changes")?.Elements(Ns + "change").Select(c => new ImplementationChange(
                 Id(c, "id"), Id(c, "state"), Enum.Parse<ImplementationChangeKind>(Text(c, "kind")), Text(c, "before-name"), Text(c, "after-name"),
                 (bool)c.Attribute("before-archived")!, (bool)c.Attribute("after-archived")!, DiagramRevisionOriginXml.Read(c.Element(Ns + "origin")!))) ?? [];
-            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives, changes);
+            var inputs = root.Element(Ns + "refinement-inputs")?.Elements(XName.Get("refinement-input", DiagramRefinementInputXml.Namespace))
+                .Select(i => DiagramRefinementInputXml.Read(EngineeringXmlText.Render(i))) ?? [];
+            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives, changes, inputs);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)
         { throw Invalid("Invalid recursive block graph XML: " + error.Message); }

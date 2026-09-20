@@ -220,6 +220,7 @@ public static class RecursiveBlockCodec
         data.ImplementationChanges.Add(graph.ImplementationChanges.Select(c => new P.ImplementationChangeData { Id = Id(c.Id), StateId = Id(c.StateId),
             Kind = (P.ImplementationChangeKind)((int)c.Kind + 1), BeforeName = c.BeforeName, AfterName = c.AfterName,
             BeforeArchived = c.BeforeArchived, AfterArchived = c.AfterArchived, Origin = Origin(c.Origin) }));
+        data.RefinementInputs.Add(graph.RefinementInputs.Select(Encode));
         return data;
     }
 
@@ -237,7 +238,34 @@ public static class RecursiveBlockCodec
                 r.ComponentBindings is { } bindings ? Decode(bindings) : null)),
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
-                (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))));
+                (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))),
+            data.RefinementInputs.Select(Decode));
+    }
+
+    public static P.DiagramRefinementInputData Encode(M.DiagramRefinementInput input)
+    {
+        input.Validate();
+        var data = new P.DiagramRefinementInputData { Id = Id(input.Id), DocumentId = Id(input.DocumentId),
+            SourceSha256 = input.SourceSha256, Prompt = input.Prompt, Origin = Origin(input.Origin) };
+        data.BlockPath.Add(input.BlockPath.Select(Selection)); data.ConnectionPath.Add(input.ConnectionPath.Select(Selection));
+        data.Attachments.Add(input.Attachments.Select(a =>
+        {
+            var item = new P.DiagramRefinementAttachmentData { Id = Id(a.Id), OriginalName = a.OriginalName,
+                AssetPath = a.AssetPath, ContentSha256 = a.ContentSha256, ByteCount = a.ByteCount, MediaType = a.MediaType };
+            if (a.Source is { } source) item.Source = Source(source);
+            return item;
+        }));
+        return data;
+    }
+
+    public static M.DiagramRefinementInput Decode(P.DiagramRefinementInputData data)
+    {
+        Known(data, P.DiagramRefinementInputData.Parser);
+        var input = new M.DiagramRefinementInput(GuidValue(data.Id), GuidValue(data.DocumentId), data.SourceSha256,
+            data.BlockPath.Select(Selection).ToImmutableArray(), data.ConnectionPath.Select(Selection).ToImmutableArray(),
+            data.Prompt, Origin(Need(data.Origin)), data.Attachments.Select(a => new M.DiagramRefinementAttachment(GuidValue(a.Id),
+                a.OriginalName, a.AssetPath, a.ContentSha256, a.ByteCount, a.MediaType, a.Source is { } source ? Source(source) : null)).ToImmutableArray());
+        input.Validate(); return input;
     }
 
     public static P.ConnectionArchiveData Encode(M.DiagramConnectionArchive archive)

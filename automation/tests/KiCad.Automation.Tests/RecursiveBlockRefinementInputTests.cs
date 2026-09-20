@@ -1,17 +1,55 @@
 using System.Security.Cryptography;
 using System.Text;
+using Google.Protobuf;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using P = KiCad.Automation.Protocol.Diagrams;
 
 namespace KiCad.Automation.Tests;
 
 [TestClass]
 public sealed class RecursiveBlockRefinementInputTests
 {
-    private static DiagramRefinementInput Input(RecursiveBlockGraph graph) => new(Guid.NewGuid(), graph.DocumentId,
+    internal static DiagramRefinementInput Input(RecursiveBlockGraph graph) => new(Guid.NewGuid(), graph.DocumentId,
         Hash(RecursiveBlockGraphXml.Write(graph)), [graph.SelectedRoot], [], "  Original prompt\r\nΩ & <vision>\n ",
         RecursiveBlockFixture.Origin(), [new(Guid.NewGuid(), "Original drawing Ω.png", "assets/original.png", Hash("fixture bytes"),
             Encoding.UTF8.GetByteCount("fixture bytes"), "image/png", new("source-document", "r3", 7, "Table 2", "Variant B"))]);
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+
+    [TestMethod]
+    public void OriginalInputsRemainImmutableAcrossGraphEditsAndSharedMessages()
+    {
+        var original = LinkedDiagramFixture.Create().Graph; string old = RecursiveBlockGraphXml.Write(original);
+        var input = Input(original); var graph = original.WithRefinementInput(input);
+        Assert.AreEqual(original.SelectedRoot, graph.SelectedRoot);
+        Assert.AreSame(graph, graph.WithRefinementInput(DiagramRefinementInputXml.Read(DiagramRefinementInputXml.Write(input))));
+        Assert.ThrowsExactly<AutomationException>(() => graph.WithRefinementInput(input with { Prompt = "Replace the original." }));
+        Assert.ThrowsExactly<AutomationException>(() => original.WithRefinementInput(input with { Id = original.SelectedRoot.BlockId }));
+        string xml = RecursiveBlockGraphXml.Write(graph);
+        Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(xml)));
+        Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(graph))));
+        var wire = RecursiveBlockCodec.Encode(input);
+        Assert.IsTrue(input.SameContents(RecursiveBlockCodec.Decode(P.DiagramRefinementInputData.Parser.ParseFrom(wire.ToByteArray()))));
+        wire.Attachments[0].MergeFrom(new byte[] { 0x98, 0x06, 1 });
+        Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(wire));
+        var draft = graph.StartDraft(graph.SelectedRoot);
+        var origin = RecursiveBlockFixture.Origin() with { InputIds = [input.Id] };
+        graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], draft with
+            { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "A refined current requirement.") },
+            Guid.NewGuid(), Guid.NewGuid(), [], origin).Graph;
+        Assert.IsTrue(input.SameContents(graph.RefinementInput(input.Id)));
+        Assert.AreEqual(input.Id, graph.Inspect(graph.SelectedRoot).Origin.InputIds.Single());
+        Guid state = Guid.NewGuid(); graph = graph.ForkImplementation(graph.SelectedRoot, state, Guid.NewGuid(), Guid.NewGuid(), "Alternative", origin);
+        graph = graph.RenameImplementation(state, "Another implementation", Guid.NewGuid(), origin);
+        graph = graph.SetImplementationArchived(state, true, Guid.NewGuid(), origin);
+        graph = graph.SetImplementationArchived(state, false, Guid.NewGuid(), origin);
+        Assert.IsTrue(input.SameContents(graph.RefinementInput(input.Id)));
+        var restored = graph.RestoreAsDraft(graph.StartDraft(graph.SelectedRoot), original.SelectedRoot);
+        graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], restored, Guid.NewGuid(), Guid.NewGuid(), [], origin).Graph;
+        Assert.IsTrue(input.SameContents(graph.RefinementInput(input.Id)));
+        Assert.AreEqual(original.Requirements(original.SelectedRoot).Requirements, graph.Requirements(graph.SelectedRoot).Requirements);
+        Assert.AreEqual(old, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(old)));
+    }
 
     [TestMethod]
     public void OriginalPromptAttachmentAndSourceMetadataSurviveStrictXml()

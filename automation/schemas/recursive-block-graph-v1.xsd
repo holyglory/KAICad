@@ -4,10 +4,12 @@
            xmlns="urn:kicad:automation:recursive-block-graph:1"
            xmlns:h="urn:kicad:automation:requirement-history:1"
            xmlns:c="urn:kicad:automation:connection-archive:1"
-           xmlns:d="urn:kicad:automation:block-definition:1" elementFormDefault="qualified">
+           xmlns:d="urn:kicad:automation:block-definition:1"
+           xmlns:r="urn:kicad:automation:refinement-input:1" elementFormDefault="qualified">
   <xs:import namespace="urn:kicad:automation:requirement-history:1"/>
   <xs:import namespace="urn:kicad:automation:connection-archive:1"/>
   <xs:import namespace="urn:kicad:automation:block-definition:1"/>
+  <xs:import namespace="urn:kicad:automation:refinement-input:1"/>
   <xs:complexType name="selection">
     <xs:attribute name="block" type="h:identity" use="required"/>
     <xs:attribute name="state" type="h:identity" use="required"/>
@@ -126,6 +128,9 @@
         <xs:attribute name="before-name" type="xs:string" use="required"/><xs:attribute name="after-name" type="xs:string" use="required"/>
         <xs:attribute name="before-archived" type="xs:boolean" use="required"/><xs:attribute name="after-archived" type="xs:boolean" use="required"/>
       </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="refinement-inputs" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element ref="r:refinement-input" minOccurs="1" maxOccurs="unbounded"/>
     </xs:sequence></xs:complexType></xs:element>
   </xs:sequence>
     <xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>

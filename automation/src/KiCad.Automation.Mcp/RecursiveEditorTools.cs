@@ -14,6 +14,69 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_refinement_asset_capture"),
+     Description("Preserve original prompt/file/graphic bytes inside a repository-relative archive directory, keyed by their observed SHA256. Requires an exact diagram checkpoint and native instance epoch, explicit source path/hash/byte count and attachment identity. Returns actual verified attachment metadata; does not execute the file, extract invented text, change the diagram or start an agent. Reuses identical preserved bytes, never overwrites a corrupt archive. Record the returned attachment in an original refinement input separately.")]
+    public Task<CallToolResult> CaptureRefinementAsset(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, string attachmentPath, string archiveDirectory,
+        Guid attachmentId, string expectedSha256, long expectedByteCount, string mediaType, CancellationToken cancellationToken,
+        SourceReference? source = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("refinement_context_changed", "Read the exact diagram checkpoint before capturing its input assets.");
+        var attachment = await RefinementAssetFiles.CaptureAsync(repositoryRoot, attachmentPath, archiveDirectory, attachmentId,
+            expectedSha256, expectedByteCount, mediaType, source, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
+            sourceToken = loaded.ContentSha256, attachment }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_diagram_refinement_input_record"),
+     Description("Record an immutable original prompt, exact block/connection revision context and verified preserved attachments in the diagram's input archive. Requires the observed process epoch and file hash. Does not select a design, edit native objects, replace an open draft or start AI. Repeating identical input content observes the existing record without another insertion; changing content under the same ID is rejected. An existing record is not a receipt resolving a previous ambiguous publication: retain and reconcile any displaced XML reported by the publisher.")]
+    public Task<CallToolResult> RecordRefinementInput(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, DiagramRefinementInput input,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        var recorded = await RefinementInputFiles.RecordAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, input, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
+            inputId = recorded.Input.Id, sourceToken = recorded.Snapshot.ContentSha256, selectedRoot = recorded.Snapshot.Graph.SelectedRoot,
+            added = recorded.Added, observation = recorded.Added ? "Recorded" : "AlreadyPresent" }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_diagram_refinement_input_read", ReadOnly = true),
+     Description("Read an exact retained original input, its historical block/connection context and requirements, plus the current integrity of preserved attachment files. Historical references never follow newer implementation heads. Missing or changed assets remain explicit. This reads saved XML and original source data; it does not launch an agent, activate a revision or discard any editor draft.")]
+    public Task<CallToolResult> ReadRefinementInput(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, Guid inputId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the current file token before inspecting an archived input.");
+        var input = loaded.Graph.RefinementInput(inputId);
+        var assets = new List<RefinementAssetObservation>();
+        foreach (var attachment in input.Attachments)
+            assets.Add(await RefinementAssetFiles.InspectAsync(repositoryRoot, attachment, cancellationToken));
+        var verified = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (verified.ContentSha256 != loaded.ContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The diagram changed during input inspection; read a fresh observation.");
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
+            sourceToken = loaded.ContentSha256, input, assets,
+            blocks = input.BlockPath.Select(p => new { selection = p, block = loaded.Graph.Inspect(p), requirements = loaded.Graph.Requirements(p).Requirements }),
+            connections = input.ConnectionPath.Select(p => new { selection = p, connection = loaded.Graph.Connections(input.BlockPath[^1].BlockId).Inspect(p),
+                requirements = loaded.Graph.Connections(input.BlockPath[^1].BlockId).Requirements(p).Requirements }) },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_components", ReadOnly = true),
      Description("Inspect the exact electrical component realizations of a saved block using a repository-relative hardware manifest and its observed SHA256. Reads only its declared design and knowledge-library files. Returns source hashes, actual components/parts and all mapped native symbol units and sheet paths, or explicit missing/replaced identities and binding diagnostics. These are saved XML snapshots, not live editor state, electrical correctness or inferred part choices. Never changes a diagram or native design.")]
     public Task<CallToolResult> Components(string instanceId, string repositoryRoot, string sourcePath, string documentId,
@@ -41,7 +104,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
      Description("Save explicit design/circuit/component identity bindings on one exact block revision. A block may map to zero, one or multiple components across child designs. Requires the observed native instance epoch, source hash, selected root and complete root-to-block path. Saves a new revision and retains old bindings and requirements in history, without creating components, changing native circuits or claiming that targets resolve. Use kicad_diagram_components to inspect the saved targets. Reload or reconcile open native drafts after this external save.")]
     public Task<CallToolResult> SetComponents(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
-        BlockComponentBindings bindings, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
+        BlockComponentBindings bindings, Guid operationId, string actor, CancellationToken cancellationToken, Guid? refinementInputId = null) => Execute(async () =>
     {
         var path = blockPath?.ToArray() ?? [];
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
@@ -57,6 +120,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var draft = loaded.Graph.StartDraft(path[^1]) with { ComponentBindings = bindings };
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
             "Update component bindings", [], [operationId]);
+        origin = RefinementInputFiles.AttachOrigin(loaded.Graph, [.. path], refinementInputId, origin);
         var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
             [.. path], draft, operationId, Guid.NewGuid(), [.. path.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
         var selection = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
@@ -90,7 +154,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
      Description("Save independent purpose/type/manufacturer/family/model/orderable-part/package/knowledge-class choices on one exact block revision. Choices retain unspecified, unknown, candidate or selected state, strength, conditions and sources. Requires the observed instance epoch, file token, selected root and root-to-block path. Creates one new revision without changing requirement text, siblings, connections or native electrical objects. This does not validate a part name against a library or materialize a schematic/footprint. Reload or reconcile an already-open native draft after this external save.")]
     public Task<CallToolResult> SetDefinition(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
-        BlockDefinition definition, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
+        BlockDefinition definition, Guid operationId, string actor, CancellationToken cancellationToken, Guid? refinementInputId = null) => Execute(async () =>
     {
         var requestedPath = blockPath?.ToArray() ?? [];
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
@@ -106,6 +170,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var draft = loaded.Graph.StartDraft(requestedPath[^1]) with { Definition = definition };
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
             "Refine block definition", [], [operationId]);
+        origin = RefinementInputFiles.AttachOrigin(loaded.Graph, [.. requestedPath], refinementInputId, origin);
         var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
             [.. requestedPath], draft, operationId, Guid.NewGuid(), [.. requestedPath.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
         var selected = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);

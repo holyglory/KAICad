@@ -156,6 +156,18 @@ message BlockRevisionData {
 // Exact electrical realizations are independent of chosen model/package text.
 message ComponentRealizationData { string design_id = 1; string circuit_id = 2; string component_id = 3; }
 message BlockComponentBindingsData { repeated ComponentRealizationData targets = 1; }
+message DiagramRefinementAttachmentData {
+  string id = 1; string original_name = 2; string asset_path = 3;
+  string content_sha256 = 4; int64 byte_count = 5; string media_type = 6;
+  kiapi.automation.structure.v1.StructuralSourceReference source = 7;
+}
+message DiagramRefinementInputData {
+  string id = 1; string document_id = 2; string source_sha256 = 3;
+  repeated BlockSelectionData block_path = 4;
+  repeated ConnectionSelectionData connection_path = 5;
+  string prompt = 6; DiagramRevisionOriginData origin = 7;
+  repeated DiagramRefinementAttachmentData attachments = 8;
+}
 message RecursiveBlockGraphData {
   uint32 schema_version = 1;
   string document_id = 2;
@@ -165,6 +177,7 @@ message RecursiveBlockGraphData {
   repeated RequirementHistoryData requirement_histories = 6;
   repeated ConnectionArchiveData connection_archives = 7;
   repeated ImplementationChangeData implementation_changes = 8;
+  repeated DiagramRefinementInputData refinement_inputs = 9;
 }
 
 message RecursiveEditorDocument {

@@ -186,6 +186,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
+        if( event.GetKeyCode() == WXK_ESCAPE && m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'H' ) { openDiagramHistory(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'I' ) { chooseImplementation(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'R' ) { reloadSaved(); return; }
@@ -316,6 +317,8 @@ void RECURSIVE_DIAGRAM_FRAME::execute( REQUEST request )
     {
         m_process.reset(); m_errorCode = "companion_start_failed"; m_error = "The compiled companion could not start.";
         if( m_historyDialog ) m_historyDialog->PageFailed( _( "Could not load older changes. Try again." ) );
+        if( m_diagramHistoryOpen )
+        { m_failedHistoryRequest = m_activeRequest; m_diagramHistoryPanel->Fail( _( "The diagram companion could not start. Retry or return to properties." ) ); }
         refresh(); return;
     }
     m_process->GetOutputStream()->Write( json.data(), json.size() ); m_process->CloseOutput(); m_ioTimer.Start( 50 ); refresh();
@@ -926,6 +929,7 @@ void RECURSIVE_DIAGRAM_FRAME::decline()
 void RECURSIVE_DIAGRAM_FRAME::openDiagramHistory()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen || !current() ) return;
+    finishNoteDrag(); m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) );
     SELECTION context = current()->selection(); const auto* saved = revision( context ); if( !saved ) return;
     m_diagramHistoryOpen = true; m_failedHistoryRequest.Clear();
     m_diagramHistoryPanel->Begin( context, text( saved->name() ), version( *saved ) );
@@ -975,7 +979,7 @@ void RECURSIVE_DIAGRAM_FRAME::restoreDiagramHistory( SELECTION selected )
     {
         wxMessageDialog choice( this, _( "Save your existing edits before preparing the earlier diagram?" ),
             _( "Unsaved changes" ), wxYES_NO | wxCANCEL | wxICON_QUESTION );
-        choice.SetYesNoLabels( _( "Save" ), _( "Decline" ) );
+        choice.SetYesNoLabels( _( "&Save" ), _( "&Decline" ) );
         int answer = choice.ShowModal();
         if( answer == wxID_YES ) { returnFromHistoryPreview(); save(); return; }
         if( answer == wxID_NO ) { returnFromHistoryPreview(); load(); return; }

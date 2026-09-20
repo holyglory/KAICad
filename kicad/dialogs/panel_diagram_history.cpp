@@ -60,7 +60,7 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     m_rows = new DIAGRAM_HISTORY_ROWS( this ); layout->Add( m_rows, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
     auto* paging = new wxBoxSizer( wxHORIZONTAL ); m_count = new wxStaticText( this, wxID_ANY, wxEmptyString );
     paging->Add( m_count, 1, wxALIGN_CENTER_VERTICAL );
-    m_more = new wxButton( this, wxID_ANY, _( "Load older" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
+    m_more = new wxButton( this, wxID_ANY, _( "Load &older" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_more->SetName( "DiagramHistoryOlder" ); paging->Add( m_more, 0 );
     layout->Add( paging, 0, wxEXPAND | wxALL, gap );
     m_details = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 250, 180 ) ), wxTE_MULTILINE | wxTE_READONLY );
@@ -68,7 +68,7 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     layout->Add( m_details, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
     m_failure = new wxStaticText( this, wxID_ANY, wxEmptyString ); m_failure->SetName( "DiagramHistoryError" );
     layout->Add( m_failure, 0, wxEXPAND | wxALL, gap );
-    m_retry = new wxButton( this, wxID_ANY, _( "Retry" ) ); m_retry->SetName( "DiagramHistoryRetry" );
+    m_retry = new wxButton( this, wxID_ANY, _( "&Retry" ) ); m_retry->SetName( "DiagramHistoryRetry" );
     layout->Add( m_retry, 0, wxLEFT | wxRIGHT | wxBOTTOM, gap );
     auto* actionsRow = new wxBoxSizer( wxHORIZONTAL );
     m_preview = new wxButton( this, wxID_ANY, _( "&Preview" ) ); m_preview->SetName( "DiagramHistoryPreview" );
@@ -116,9 +116,14 @@ bool PANEL_DIAGRAM_HISTORY::SetPage( const PAGE& page )
         && ( LoadedCount() == 0 || page.total() == m_total );
     std::set<std::string> ids;
     for( const auto& entry : m_rows->entries ) ids.insert( entry.selection().revision_id() );
+    unsigned nextVersion = page.total() - std::min( page.total(), page.offset() );
     for( const auto& entry : page.entries() )
+    {
         valid = entry.selection().block_id() == m_context.block_id() && entry.selection().state_id() == m_context.state_id()
-            && !entry.selection().revision_id().empty() && ids.insert( entry.selection().revision_id() ).second && valid;
+            && !entry.selection().revision_id().empty() && ids.insert( entry.selection().revision_id() ).second
+            && entry.version() == nextVersion && entry.is_context() == same( entry.selection(), m_context ) && valid;
+        if( nextVersion > 0 ) --nextVersion;
+    }
     if( !valid ) { Fail( _( "This page does not match the open history." ) ); return false; }
     bool initial = m_rows->entries.empty(); m_total = page.total();
     m_rows->entries.insert( m_rows->entries.end(), page.entries().begin(), page.entries().end() );

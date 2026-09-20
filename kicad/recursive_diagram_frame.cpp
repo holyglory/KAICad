@@ -1298,6 +1298,12 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_canvas_origin_x( m_origin.m_x ); result.set_canvas_origin_y( m_origin.m_y ); result.set_canvas_scale( m_scale );
     result.set_canvas_pixel_width( std::max( 0, m_canvas->GetClientSize().x ) );
     result.set_canvas_pixel_height( std::max( 0, m_canvas->GetClientSize().y ) );
+    if( auto* canvas = current() )
+    {
+        *result.mutable_canvas_diagram() = *canvas; unsigned resolved = 0;
+        for( const auto& child : canvas->children() ) if( revision( child ) ) ++resolved;
+        result.set_resolved_canvas_children( resolved );
+    }
     if( m_diagramHistoryOpen )
     {
         auto* history = result.mutable_diagram_history(); *history->mutable_context() = m_diagramHistoryPanel->Context();

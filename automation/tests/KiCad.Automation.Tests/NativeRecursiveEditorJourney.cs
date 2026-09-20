@@ -670,7 +670,9 @@ public sealed partial class NativeSessionTests
             Assert.HasCount(2, wholeSaved.Inspect(wholeSaved.SelectedRoot).Children);
             Key("h", control: true);
             var cancellingHistory = await Wait(s => s.DiagramHistory is not null);
-            Key("Escape"); await Wait(s => !s.Busy && s.DiagramHistory is null && s.ViewRevision > cancellingHistory.ViewRevision);
+            Key("Escape");
+            var afterHistoryCancel = await Wait(s => !s.Busy && s.DiagramHistory is null && s.ViewRevision > cancellingHistory.ViewRevision);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-history-cancelled-state.json"), SchematicJson.Formatter.Format(afterHistoryCancel), token);
             Assert.IsFalse((await Read()).Dirty, "Closing while history loads cannot create a draft.");
             Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
             var inspectedBeforeMore = (await Read()).DiagramHistory.Inspected;

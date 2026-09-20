@@ -60,4 +60,6 @@ message RecursiveDiagramEditorState {
   double canvas_scale = 24;
   uint32 canvas_pixel_width = 25;
   uint32 canvas_pixel_height = 26;
+  BlockRevisionData canvas_diagram = 27;
+  uint32 resolved_canvas_children = 28;
 }

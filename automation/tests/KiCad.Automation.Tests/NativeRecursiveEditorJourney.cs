@@ -148,6 +148,15 @@ public sealed partial class NativeSessionTests
             var savedNote = noteFile.Inspect(noteCpu).LocalDiagram.Notes.Single(n => n.Id.ToString("D") == canvasNote.Id);
             Assert.AreEqual("Keep this region accessible.", savedNote.Text);
             Assert.AreEqual(decimal.Parse(movedX, System.Globalization.CultureInfo.InvariantCulture), savedNote.Position!.X);
+            Key("5", control: true); Key("End"); await Wait(s => s.SelectedAnnotationId == "");
+            Key("4", control: true); Type("Second independent block comment."); await Wait(s => s.Dirty); await Save();
+            var multiple = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var multipleCpu = multiple.Inspect(multiple.SelectedRoot).Children[1];
+            Assert.AreEqual(4, multiple.Inspect(multipleCpu).LocalDiagram.Notes.Length);
+            Assert.IsTrue(multiple.Inspect(multipleCpu).LocalDiagram.Notes.Any(n => n.Id == savedNote.Id && n.Text == savedNote.Text));
+            Key("5", control: true); Key("Home"); Key("4", control: true); Key("a", control: true); Type("Unsaved first-comment edit.");
+            await Wait(s => s.Dirty); Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(multiple), await File.ReadAllTextAsync(source, token));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-canvas-note.png"), token);
             string original = graph.Requirements(fixture.Blocks["CPU"]).Requirements.General;
             Key("1", control: true); Key("a", control: true); Type("Cool near the enclosure edge.");

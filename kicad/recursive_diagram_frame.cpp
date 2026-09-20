@@ -169,8 +169,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
-        if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '4' )
-        { if( m_ready && !m_process ) { if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
+        if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '5' )
+        { if( m_ready && !m_process ) { if( event.GetKeyCode() == '5' ) { if( m_commentChoice->IsShown() ) m_commentChoice->SetFocus(); }
+            else if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
         if( event.AltDown() && event.GetKeyCode() == 'H' )
         { for( int i = 0; i < 3; ++i ) if( wxWindow::FindFocus() == m_fields[i] ) { history( i ); return; } }
         if( event.GetKeyCode() == WXK_ESCAPE && !m_process )
@@ -855,5 +856,6 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     for( const auto& step : m_path ) *result.add_diagram_path() = step;
     if( m_ready ) *result.mutable_draft() = m_draft;
     if( !m_connectionId.empty() ) *result.mutable_connection_draft() = m_connectionDraft;
+    result.set_selected_annotation_id( m_commentId );
     return result;
 }

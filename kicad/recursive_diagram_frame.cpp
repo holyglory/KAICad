@@ -751,6 +751,17 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     for( int i = 0; i < notes.size(); ++i )
     {
         const auto& note = notes.Get( i );
+        dc.SetPen( wxPen( wxSystemSettings::GetColour( note.id() == m_commentId ? wxSYS_COLOUR_HIGHLIGHT : wxSYS_COLOUR_WINDOWTEXT ), 2 ) );
+        for( const auto& stroke : note.strokes() )
+        {
+            std::optional<wxPoint> previous;
+            for( const auto& point : stroke.points() )
+            {
+                double x = 0, y = 0; text( point.x() ).ToDouble( &x ); text( point.y() ).ToDouble( &y );
+                wxPoint now( static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ) );
+                if( previous ) dc.DrawLine( *previous, now ); previous = now;
+            }
+        }
         if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
         wxRect box = noteRect( note, i );
         dc.SetPen( wxPen( note.id() == m_commentId ? wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ) : wxColour( 176, 142, 52 ), 1 ) );

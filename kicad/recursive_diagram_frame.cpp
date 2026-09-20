@@ -41,6 +41,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_request( request ), m_ioTimer( this )
 {
     SetName( "RecursiveDiagramEditor" ); SetMinSize( FromDIP( wxSize( 900, 650 ) ) );
+    wxFont body = GetFont(); body.SetPointSize( std::max( 12, body.GetPointSize() ) ); SetFont( body );
     auto* menu = new wxMenuBar(); auto* file = new wxMenu();
     file->Append( wxID_SAVE, _( "Save\tCtrl+S" ) ); file->AppendSeparator(); file->Append( wxID_CLOSE, _( "Close\tCtrl+W" ) );
     menu->Append( file, _( "File" ) ); SetMenuBar( menu );
@@ -58,7 +59,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     main->Add( m_breadcrumb, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
     m_canvas = new wxPanel( diagram ); m_canvas->SetName( "RecursiveDiagramCanvas" );
     m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT ); main->Add( m_canvas, 1, wxEXPAND ); diagram->SetSizer( main );
-    auto* inspector = new wxPanel( splitter ); auto* side = new wxBoxSizer( wxVERTICAL );
+    auto* inspector = new wxPanel( splitter ); inspector->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
+    auto* side = new wxBoxSizer( wxVERTICAL );
     auto* scroll = new wxScrolledWindow( inspector ); scroll->SetScrollRate( 0, FromDIP( 12 ) );
     auto* fields = new wxBoxSizer( wxVERTICAL );
     m_owner = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_owner->SetFont( GetFont().Bold().Larger() );
@@ -91,6 +93,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     splitter->SplitVertically( diagram, inspector, FromDIP( 1100 ) );
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
+    m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { m_rendered = false; ++m_viewRevision; event.Skip(); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
@@ -132,7 +135,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         if( event.ControlDown() && event.GetKeyCode() == 'Y' ) { undo( true ); return; }
         event.StopPropagation(); event.Skip();
     } );
-    refresh(); CallAfter( [this] { load( m_request.expected_source_token() ); } );
+    refresh(); CallAfter( [this, splitter]
+    { splitter->SetSashPosition( splitter->GetClientSize().x - FromDIP( 400 ) ); load( m_request.expected_source_token() ); } );
 }
 
 RECURSIVE_DIAGRAM_FRAME::~RECURSIVE_DIAGRAM_FRAME()
@@ -221,7 +225,11 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     if( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY )
     {
         if( !result.has_history() || result.source_token() != m_document.source_token()
-            || result.history().owner_id() != m_draft.baseline().block_id() )
+            || result.history().document_id() != DocumentId()
+            || result.history().owner_id() != m_draft.baseline().block_id()
+            || result.history().state_id() != m_draft.baseline().state_id()
+            || result.history().context_revision_id() != m_draft.baseline().revision_id()
+            || result.history().field() != m_activeRequest.field() )
         { m_error = "The history response belongs to another saved context."; refresh(); return; }
         int which = static_cast<int>( result.history().field() ) - 1;
         std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
@@ -281,7 +289,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_toolbar->EnableTool( wxID_UNDO, available && !m_undo.empty() ); m_toolbar->EnableTool( wxID_REDO, available && !m_redo.empty() );
     m_toolbar->EnableTool( FIT, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
-    m_updating = false; m_canvas->Refresh();
+    m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
 {
@@ -408,10 +416,23 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         for( const auto& selected : scope->local_diagram().connections() )
             for( const auto& connection : archive.revisions() ) if( connection.selection().revision_id() == selected.revision_id() && connection.endpoints_size() >= 2 )
             {
-                wxPoint from = endpoint( connection.endpoints( 0 ), true );
                 for( int i = 1; i < connection.endpoints_size(); ++i )
-                { wxPoint to = endpoint( connection.endpoints( i ), false ); int middle = ( from.x + to.x ) / 2; dc.DrawLine( from, { middle, from.y } ); dc.DrawLine( middle, from.y, middle, to.y ); dc.DrawLine( { middle, to.y }, to ); }
-                dc.DrawText( text( connection.name() ), from.x + 8, from.y - 24 );
+                {
+                    // Port side is a presentation choice toward the peer, not an
+                    // inferred electrical signal direction. Boundary links must
+                    // not exit through the far side of a child and cross its body.
+                    auto center = [&]( const D::DiagramEndpointBindingData& e )
+                    { auto left = endpoint( e, false ), right = endpoint( e, true ); return ( left.x + right.x ) / 2; };
+                    const auto& first = connection.endpoints( 0 ); const auto& second = connection.endpoints( i );
+                    wxPoint from = endpoint( first, center( first ) < center( second ) );
+                    wxPoint to = endpoint( second, center( second ) < center( first ) );
+                    int middle = ( from.x + to.x ) / 2;
+                    dc.DrawLine( from, { middle, from.y } ); dc.DrawLine( middle, from.y, middle, to.y ); dc.DrawLine( { middle, to.y }, to );
+                    // A boundary already names its interface. Avoid duplicating
+                    // the relationship title on top of that boundary label.
+                    if( first.block_id() != scope->selection().block_id() && second.block_id() != scope->selection().block_id() )
+                        dc.DrawText( text( connection.name() ), std::min( from.x, to.x ) + 8, from.y - 24 );
+                }
             }
     bool dark = background.Red() + background.Green() + background.Blue() < 384;
     for( int i = 0; i < scope->children_size(); ++i ) if( auto* child = revision( scope->children( i ) ) )
@@ -442,7 +463,7 @@ void RECURSIVE_DIAGRAM_FRAME::fit()
     int count = std::max( 1, current()->children_size() ), columns = static_cast<int>( std::ceil( std::sqrt( count ) ) ), rows = ( count + columns - 1 ) / columns;
     double width = 140 + columns * 370, height = 110 + rows * 250;
     auto area = m_canvas->GetClientSize(); m_scale = std::min( { 1.0, area.x / width, area.y / height } ); m_scale = std::max( 0.1, m_scale );
-    m_origin = { -( area.x / m_scale - width ) / 2, -( area.y / m_scale - height ) / 2 }; ++m_viewRevision; m_canvas->Refresh();
+    m_origin = { -( area.x / m_scale - width ) / 2, -( area.y / m_scale - height ) / 2 }; ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
 }
 D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
 {

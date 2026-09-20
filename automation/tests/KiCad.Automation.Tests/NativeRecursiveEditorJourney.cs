@@ -66,9 +66,9 @@ public sealed partial class NativeSessionTests
             }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
-            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-system.png"), token);
             Key("Escape"); Key("Right");
             await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-system.png"), token);
             Key("Return");
             await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-psu.png"), token);

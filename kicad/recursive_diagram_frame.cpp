@@ -11,6 +11,7 @@
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
+#include <wx/dcclient.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
@@ -64,7 +65,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE );
     splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 );
     auto* diagram = new wxPanel( splitter ); auto* main = new wxBoxSizer( wxVERTICAL );
-    m_breadcrumb = new wxStaticText( diagram, wxID_ANY, _( "Loading diagram…" ) );
+    m_breadcrumb = new wxStaticText( diagram, wxID_ANY, _( "Loading diagram…" ), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
+    m_breadcrumb->SetMinSize( FromDIP( wxSize( 80, -1 ) ) );
     m_breadcrumb->SetName( "RecursiveDiagramPath" );
     auto* pathRow = new wxBoxSizer( wxHORIZONTAL ); pathRow->Add( m_breadcrumb, 1, wxALIGN_CENTER_VERTICAL );
     m_implementation = new wxButton( diagram, wxID_ANY, _( "Implementation" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
@@ -421,6 +423,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     wxString path;
     for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += text( item->name() ); }
     m_breadcrumb->SetLabel( path.empty() ? _( "Loading diagram…" ) : path );
+    m_breadcrumb->SetToolTip( path );
     updateImplementationLabel();
     m_implementation->Enable( available );
     m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );

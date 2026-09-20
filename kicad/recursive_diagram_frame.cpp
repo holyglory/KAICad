@@ -81,12 +81,14 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* scroll = new wxScrolledWindow( inspector ); scroll->SetScrollRate( 0, FromDIP( 12 ) );
     m_inspectorScroll = scroll;
     auto* fields = new wxBoxSizer( wxVERTICAL );
-    m_owner = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_owner->SetFont( GetFont().Bold().Larger() );
-    fields->Add( m_owner, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
-    m_savedVersion = new wxStaticText( scroll, wxID_ANY, wxEmptyString );
-    fields->Add( m_savedVersion, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
-    m_openDiagram = new wxButton( scroll, wxID_ANY, _( "Open diagram" ) ); m_openDiagram->SetName( "RecursiveOpenDiagram" );
-    fields->Add( m_openDiagram, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    auto* header = new wxPanel( inspector ); auto* heading = new wxBoxSizer( wxVERTICAL );
+    m_owner = new wxStaticText( header, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
+    m_owner->SetFont( GetFont().Bold().Larger() ); heading->Add( m_owner, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+    m_savedVersion = new wxStaticText( header, wxID_ANY, wxEmptyString );
+    heading->Add( m_savedVersion, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    m_openDiagram = new wxButton( header, wxID_ANY, _( "Open diagram" ) ); m_openDiagram->SetName( "RecursiveOpenDiagram" );
+    heading->Add( m_openDiagram, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    header->SetSizer( heading ); side->Add( header, 0, wxEXPAND );
     m_endpointHeading = new wxStaticText( scroll, wxID_ANY, _( "Endpoints" ) );
     fields->Add( m_endpointHeading, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     m_endpoints = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
@@ -430,6 +432,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     updateImplementationLabel();
     m_implementation->Enable( available );
     m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );
+    m_owner->SetToolTip( m_owner->GetLabel() );
     auto* selected = m_ready ? revision( m_draft.baseline() ) : nullptr;
     m_savedVersion->SetLabel( selected ? wxString::Format( m_preview ? _( "Preview design: v%d" ) : _( "Selected design: v%d" ), version( *selected ) ) : wxString() );
     if( link && current() )
@@ -476,7 +479,8 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_toolbar->EnableTool( FIT, available );
     m_toolbar->EnableTool( NOTE, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
-    fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
+    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 bool RECURSIVE_DIAGRAM_FRAME::confirmChange()

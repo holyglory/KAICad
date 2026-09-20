@@ -51,9 +51,12 @@ internal static class NativeKeyboard
         int? clickFromLeft = null, int? clickFromTop = null, bool altKey = false,
         Action<nuint>? observeWindow = null, Action<(int X, int Y, int Width, int Height)>? observeGeometry = null,
         nuint? excludeWindow = null, Action<int>? observePopupCount = null,
-        int? dragToLeft = null, int? dragToTop = null)
+        int? dragToLeft = null, int? dragToTop = null, int? resizeWidth = null, int? resizeHeight = null)
     {
         ValidateDragArguments(key, dragToLeft, dragToTop);
+        if (resizeWidth.HasValue != resizeHeight.HasValue || resizeWidth is <= 0 || resizeHeight is <= 0
+            || resizeWidth.HasValue && key.Length != 0)
+            throw new ArgumentException("Window resizing requires a separate exact-target operation and two positive dimensions.");
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         using var errors = new WindowErrorScope();
         nint display = XOpenDisplay(fixtureDisplay);
@@ -123,6 +126,12 @@ internal static class NativeKeyboard
                     + string.Join("; ", observed));
 
             observeWindow?.Invoke(targets.Single());
+            if (resizeWidth is int requestedWidth && resizeHeight is int requestedHeight)
+            {
+                if (XResizeWindow(display, targets[0], (uint)requestedWidth, (uint)requestedHeight) == 0)
+                    throw new InvalidOperationException("The fixture window could not be resized.");
+                XSync(display, 0);
+            }
             if (observeGeometry is not null)
             {
                 if (XGetWindowAttributes(display, targets[0], out var geometry) == 0)
@@ -301,6 +310,7 @@ internal static class NativeKeyboard
     [DllImport("libX11.so.6")] private static extern int XFetchName(nint display, nuint window, out nint name);
     [DllImport("libX11.so.6")] private static extern int XFree(nint memory);
     [DllImport("libX11.so.6")] private static extern int XRaiseWindow(nint display, nuint window);
+    [DllImport("libX11.so.6")] private static extern int XResizeWindow(nint display, nuint window, uint width, uint height);
     [DllImport("libX11.so.6")] private static extern int XGetGeometry(nint display, nuint window,
         out nuint root, out int x, out int y, out uint width, out uint height, out uint border, out uint depth);
     [DllImport("libX11.so.6")] private static extern int XTranslateCoordinates(nint display, nuint source, nuint destination,

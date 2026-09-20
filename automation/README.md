@@ -3011,10 +3011,51 @@ and net/pin refinement remain separate unfinished outcomes.
 The original refinement-input model and strict XML contract are also defined:
 prompt text, historical block/connection paths, source hashes, attachment names/
 media types/byte counts and document revision/page/table/variant provenance.
-`t20260920T091402Z-3602f2` verifies model/XML behavior only. These records are not yet
-integrated with graph publication, preserved asset files or agent result tools;
-that remains `p465efce87f8f22fc`, with actual client qualification under
-`pa48933d0fe0a5c2f`. See [the contract](qualification/agent-refinement-contract.md).
+`t20260920T091402Z-3602f2` verifies the initial model/XML contract.
+
+Original inputs now live in the diagram's immutable input archive. An agent can
+use `kicad_diagram_refinement_asset_capture` to preserve an explicitly observed
+repository file by hash and byte count, then `kicad_diagram_refinement_input_record`
+to record the prompt, exact context and returned attachments. Recording does not
+select a new design, edit a native object, replace a draft or start an agent.
+Files are streamed into a content-addressed archive; a later source replacement
+or deletion does not change the preserved original. Corrupt existing assets are
+reported, never silently overwritten or treated as valid evidence.
+
+`kicad_diagram_refinement_input_read` returns the original prompt, pinned historical
+block/connection context and current asset integrity. Later implementation heads
+do not replace that context. `kicad_diagram_definition_set` and
+`kicad_diagram_components_set` accept an optional `refinementInputId`, keeping
+the original input and source provenance linked to their new revisions. The
+reference must belong to the targeted block's captured scope, not an unrelated unit.
+
+The Linux native/MCP journey `t20260920T094814Z-d0b60d` passes original capture,
+record/read, repeated insertion, source replacement, native Save/Decline/history
+preservation and agent-origin linkage in both themes. It is real SDK-client and
+native-editor evidence, not qualification of the currently registered Codex Desktop
+server or another agent application. No new raw-XML or chat interface is introduced.
+
+`AlreadyPresent` is only an observation of an identical input in the current XML;
+it is not a receipt clearing an earlier ambiguous publication. The service retains
+durable Prepared/Replacing/Published receipts in its existing local state directory.
+`kicad_diagram_refinement_publication` inspects those receipts, or explicitly resumes
+with `resume=true`. A pending exchange requires the exact before/after file hashes
+and original staged/retained paths. If another writer's contents were displaced,
+recovery leaves both versions for review. `CompletedPreviously` describes historical
+publication, not a promise that today's file still has those bytes.
+
+The focused `t20260920T110127Z-5ea985` run includes real helper-process termination
+after intent persistence, before exchange, after exchange and after receipt
+confirmation, followed by recovery from the same state directory. It also tests
+concurrent-save preservation and cancellation. The final
+`t20260920T110322Z-57aa11` run passes the combined contracts and real native/MCP
+journeys in both themes, including publication inspection/resume and wrong-ID/epoch
+rejection. This qualifies original-input preservation and its file recovery on Linux,
+not the complete prompt-to-design workflow. Whole block/decomposition proposals
+remain `p1231ce557d949a70`, with actual agent client qualification under
+`pa48933d0fe0a5c2f`.
+Linux proof does not lift the Mac/Windows hold or establish native-Mac execution.
+See [the contract](qualification/agent-refinement-contract.md).
 
 `kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
 Read `kicad_diagram_state` first, then supply that document's `sourceToken` and

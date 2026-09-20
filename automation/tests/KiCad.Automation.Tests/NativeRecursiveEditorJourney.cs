@@ -58,9 +58,13 @@ public sealed partial class NativeSessionTests
             void Key(string key, bool control = false, bool alt = false, string title = "Structural diagram") =>
                 NativeKeyboard.SchematicShortcut(display, processId, key, title, control, false, altKey: alt);
             void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+            int saveRequests = 0;
             async Task<P.RecursiveDiagramEditorState> Save()
             {
-                ulong previous = (await Read()).CompletedSaveCount; Key("s", control: true);
+                ulong previous = (await Read()).CompletedSaveCount;
+                if (++saveRequests % 2 == 0)
+                    NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromRight: 55, clickFromBottom: 52);
+                else Key("s", control: true);
                 var saved = await Wait(s => s.CompletedSaveCount > previous && !s.Busy);
                 Assert.AreEqual("", saved.ErrorMessage); Assert.IsFalse(saved.Dirty); return saved;
             }
@@ -81,12 +85,19 @@ public sealed partial class NativeSessionTests
             Key("Escape"); Key("Right");
             await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-system.png"), token);
-            Key("Return");
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromRight: 300, clickFromTop: 185);
             await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-psu.png"), token);
-            Key("Escape"); Key("BackSpace"); await Wait(s => s.DiagramPath.Count == 1);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 118, clickFromTop: 45);
+            await Wait(s => s.DiagramPath.Count == 1); Key("Escape");
             Key("Right"); await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 42, clickFromTop: 45);
+            await Wait(s => s.DiagramPath.Count == 1); Key("Escape"); Key("Return");
+            await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
+            ulong beforeFit = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
+            await Wait(s => s.ViewRevision > beforeFit && s.Rendered);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-cpu.png"), token);
             Key("Escape"); Key("l"); Key("l"); Key("l");
             await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == fixture.Links["CPU/Memory"].ConnectionId.ToString("D"));
@@ -154,6 +165,10 @@ public sealed partial class NativeSessionTests
             var moved = await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X != originalX);
             string movedX = moved.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X;
             Key("z", control: true); await Wait(s => !s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == originalX);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 285, clickFromTop: 45);
+            await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == movedX);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 210, clickFromTop: 45);
+            await Wait(s => !s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == originalX);
             Key("y", control: true); await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == movedX);
             await Save();
             var noteFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));

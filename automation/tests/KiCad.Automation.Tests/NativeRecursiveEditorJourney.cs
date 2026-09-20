@@ -673,6 +673,18 @@ public sealed partial class NativeSessionTests
             Key("Escape");
             var afterHistoryCancel = await Wait(s => !s.Busy && s.DiagramHistory is null && s.ViewRevision > cancellingHistory.ViewRevision);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-history-cancelled-state.json"), SchematicJson.Formatter.Format(afterHistoryCancel), token);
+            string cancelledCanvas = Path.Combine(evidence, instanceId + "-history-cancelled-canvas.png");
+            await CaptureRecursive(display, cancelledCanvas, token);
+            try { await VerifyExpandedCanvasContent(cancelledCanvas, token); }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                interactionFailures.Add(error);
+                ulong cancelledCanvasBeforeFit = (await Read()).ViewRevision;
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                    clickFromLeft: 378, clickFromTop: 45);
+                await Wait(s => s.Rendered && s.ViewRevision > cancelledCanvasBeforeFit);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-history-canvas-fit-recovery.png"), token);
+            }
             Assert.IsFalse((await Read()).Dirty, "Closing while history loads cannot create a draft.");
             // Continue safe observations after a failed shortcut without erasing
             // that failure. The real History button distinguishes input dispatch

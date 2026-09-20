@@ -47,10 +47,12 @@ private:
     SELECTION m_context;
     unsigned m_total = 0;
     bool m_busy = false, m_comparisonReady = false, m_previewing = false;
+    bool m_resumeRows = false;
     std::string m_error;
     wxStaticText *m_title, *m_saved, *m_count, *m_failure;
     DIAGRAM_HISTORY_ROWS* m_rows;
     wxTextCtrl* m_details;
     wxButton *m_more, *m_retry, *m_preview, *m_restore, *m_return;
+    wxButton* m_back;
 };
 #endif

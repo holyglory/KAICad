@@ -50,6 +50,7 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     SetName( "DiagramHistoryPanel" ); const int gap = FromDIP( 12 );
     auto* layout = new wxBoxSizer( wxVERTICAL ); auto* heading = new wxBoxSizer( wxHORIZONTAL );
     auto* close = new wxButton( this, wxID_ANY, _( "Back" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
+    m_back = close;
     close->SetName( "DiagramHistoryClose" ); close->SetToolTip( _( "Back to properties" ) );
     heading->Add( close, 0, wxRIGHT, gap );
     m_title = new wxStaticText( this, wxID_ANY, _( "History" ), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
@@ -104,7 +105,18 @@ std::optional<PANEL_DIAGRAM_HISTORY::SELECTION> PANEL_DIAGRAM_HISTORY::Inspected
         : std::optional<SELECTION>( m_rows->entries[selected].selection() );
 }
 unsigned PANEL_DIAGRAM_HISTORY::LoadedCount() const { return static_cast<unsigned>( m_rows->entries.size() ); }
-void PANEL_DIAGRAM_HISTORY::SetBusy( bool busy ) { m_busy = busy; if( busy ) m_error.clear(); updateActions(); }
+void PANEL_DIAGRAM_HISTORY::SetBusy( bool busy )
+{
+    if( busy )
+    {
+        auto* focused = wxWindow::FindFocus();
+        m_resumeRows = focused == m_rows || focused == m_more;
+        if( focused == m_rows || focused == m_more || focused == m_retry || focused == m_preview || focused == m_restore || focused == m_return )
+            m_back->SetFocus();
+        m_error.clear();
+    }
+    m_busy = busy; updateActions();
+}
 void PANEL_DIAGRAM_HISTORY::Fail( const wxString& message ) { m_busy = false; m_error = message.ToStdString( wxConvUTF8 ); updateActions(); }
 void PANEL_DIAGRAM_HISTORY::SetPreviewing( bool preview ) { m_previewing = preview; updateActions(); }
 
@@ -128,7 +140,13 @@ bool PANEL_DIAGRAM_HISTORY::SetPage( const PAGE& page )
     bool initial = m_rows->entries.empty(); m_total = page.total();
     m_rows->entries.insert( m_rows->entries.end(), page.entries().begin(), page.entries().end() );
     m_rows->SetItemCount( m_rows->entries.size() ); m_rows->Refresh(); m_busy = false; m_error.clear();
-    if( initial ) { m_rows->SetSelection( 0 ); select(); } else updateActions();
+    if( initial ) { m_rows->SetSelection( 0 ); select(); }
+    else
+    {
+        updateActions();
+        if( m_resumeRows && wxWindow::FindFocus() == m_back ) m_rows->SetFocus();
+        m_resumeRows = false;
+    }
     return true;
 }
 

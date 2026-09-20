@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <wx/accel.h>
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
@@ -31,7 +32,7 @@
 namespace D = kiapi::automation::diagrams::v1;
 namespace
 {
-enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE };
+enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE, DIAGRAM_HISTORY };
 wxString text( const std::string& value ) { return wxString::FromUTF8( value ); }
 std::string utf8( const wxString& value ) { return value.ToStdString( wxConvUTF8 ); }
 std::string freshId() { return utf8( KIID().AsString() ); }
@@ -169,6 +170,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_openDiagram->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { navigate( m_selected ); } );
     m_implementation->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseImplementation(); } );
     m_diagramHistory->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { openDiagramHistory(); } );
+    Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { openDiagramHistory(); }, DIAGRAM_HISTORY );
+    wxAcceleratorEntry historyKey( wxACCEL_CTRL, 'H', DIAGRAM_HISTORY );
+    SetAcceleratorTable( wxAcceleratorTable( 1, &historyKey ) );
     m_save->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { save(); } );
     m_decline->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { decline(); } );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { save(); }, wxID_SAVE );

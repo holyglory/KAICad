@@ -66,7 +66,10 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* diagram = new wxPanel( splitter ); auto* main = new wxBoxSizer( wxVERTICAL );
     m_breadcrumb = new wxStaticText( diagram, wxID_ANY, _( "Loading diagram…" ) );
     m_breadcrumb->SetName( "RecursiveDiagramPath" );
-    main->Add( m_breadcrumb, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+    auto* pathRow = new wxBoxSizer( wxHORIZONTAL ); pathRow->Add( m_breadcrumb, 1, wxALIGN_CENTER_VERTICAL );
+    m_implementation = new wxButton( diagram, wxID_ANY, _( "Implementation" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
+    m_implementation->SetName( "RecursiveImplementation" ); pathRow->Add( m_implementation, 0, wxLEFT, FromDIP( 12 ) );
+    main->Add( pathRow, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
     m_canvas = new wxPanel( diagram ); m_canvas->SetName( "RecursiveDiagramCanvas" );
     m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT ); main->Add( m_canvas, 1, wxEXPAND ); diagram->SetSizer( main );
     auto* inspector = new wxPanel( splitter ); inspector->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
@@ -153,6 +156,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         event.Skip();
     } );
     m_openDiagram->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { navigate( m_selected ); } );
+    m_implementation->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseImplementation(); } );
     m_save->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { save(); } );
     m_decline->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { decline(); } );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { save(); }, wxID_SAVE );
@@ -169,6 +173,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
+        if( event.ControlDown() && event.GetKeyCode() == 'I' ) { chooseImplementation(); return; }
         if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '5' )
         { if( m_ready && !m_process ) { if( event.GetKeyCode() == '5' ) { if( m_commentChoice->IsShown() ) m_commentChoice->SetFocus(); }
             else if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
@@ -204,7 +209,13 @@ const D::RequirementRevisionData* RECURSIVE_DIAGRAM_FRAME::requirements( const R
     return nullptr;
 }
 const RECURSIVE_DIAGRAM_FRAME::REVISION* RECURSIVE_DIAGRAM_FRAME::current() const
-{ return m_path.empty() ? nullptr : revision( m_path.back() ); }
+{ return m_preview ? revision( *m_preview ) : m_path.empty() ? nullptr : revision( m_path.back() ); }
+bool RECURSIVE_DIAGRAM_FRAME::hasChanges() const
+{
+    return m_preview.has_value() || ( !m_connectionId.empty()
+        ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
+        : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString() );
+}
 const D::ConnectionRevisionData* RECURSIVE_DIAGRAM_FRAME::connection( const std::string& id ) const
 {
     if( !current() ) return nullptr;
@@ -271,7 +282,8 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     drain(); m_ioTimer.Stop(); m_process.reset();
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
-    if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION ) ++m_saveCount;
+    if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION
+        || m_activeRequest.action() == D::RFA_SAVE_IMPLEMENTATION ) ++m_saveCount;
     if( event.GetExitCode() != 0 || !parsed || !result.success() )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
@@ -282,7 +294,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             *compare.mutable_rebase()->mutable_draft() = m_draft;
             execute( std::move( compare ) ); return;
         }
-        m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); refresh(); return;
+        m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_pendingImplementation.clear(); refresh(); return;
     }
     if( m_activeRequest.action() == D::RFA_REBASE_REQUIREMENTS )
     {
@@ -371,8 +383,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
                 auto* restores = link ? m_connectionDraft.mutable_restored_fields() : m_draft.mutable_restored_fields();
                 for( int i = restores->size() - 1; i >= 0; --i ) if( restores->Get( i ).field() == result.history().field() ) restores->DeleteSubrange( i, 1 );
                 auto* restored = restores->Add(); restored->set_field( result.history().field() ); restored->set_source_revision_id( row.requirement_revision_id() );
-                m_dirty = link ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
-                    : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision; break;
+                m_dirty = hasChanges(); ++m_viewRevision; break;
             }
         refresh(); return;
     }
@@ -382,12 +393,14 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     std::string scope = m_pendingScope.empty() ? current() ? current()->selection().block_id() : result.document().graph().selected_root().block_id() : m_pendingScope;
     std::string selected = m_pendingSelected.empty() ? m_selected : m_pendingSelected;
     std::string selectedConnection = m_pendingConnection.value_or( m_connectionId );
-    m_document = result.document(); m_ready = true; m_dirty = false;
+    m_document = result.document(); m_preview.reset(); m_ready = true; m_dirty = false;
     if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_selected.clear(); m_connectionId.clear();
     select( selected.empty() ? m_path.back().block_id() : selected );
     if( !selectedConnection.empty() ) selectConnection( selectedConnection );
     fit(); m_canvas->SetFocus();
+    if( !m_pendingImplementation.empty() )
+    { auto state = std::move( m_pendingImplementation ); m_pendingImplementation.clear(); previewImplementation( state ); }
     if( m_closeAfterSave ) { m_closeAfterSave = false; Close(); }
 }
 
@@ -398,7 +411,7 @@ void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
     *m_draft.mutable_children() = item.children(); m_draft.set_baseline_requirement_revision_id( saved->id() );
     *m_draft.mutable_baseline_fields() = saved->fields(); *m_draft.mutable_fields() = saved->fields();
     if( item.has_local_diagram() ) *m_draft.mutable_local_diagram() = item.local_diagram();
-    m_savedDraft = m_draft; m_undo.clear(); m_redo.clear(); m_dirty = false;
+    m_savedDraft = m_draft; m_undo.clear(); m_redo.clear(); m_dirty = m_preview.has_value();
     m_commentId.clear(); m_newComment = false;
 }
 void RECURSIVE_DIAGRAM_FRAME::refresh()
@@ -408,9 +421,14 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     wxString path;
     for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += text( item->name() ); }
     m_breadcrumb->SetLabel( path.empty() ? _( "Loading diagram…" ) : path );
+    wxString implementation;
+    if( current() ) for( const auto& state : m_document.graph().states() ) if( state.id() == current()->selection().state_id() )
+    { implementation = text( state.name() ) + wxString::Format( " · v%d", version( *current() ) ); break; }
+    m_implementation->SetLabel( m_preview ? _( "Preview: " ) + implementation : implementation.empty() ? _( "Implementation" ) : implementation );
+    m_implementation->Enable( available );
     m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );
     auto* selected = m_ready ? revision( m_draft.baseline() ) : nullptr;
-    m_savedVersion->SetLabel( selected ? wxString::Format( _( "Selected design: v%d" ), version( *selected ) ) : wxString() );
+    m_savedVersion->SetLabel( selected ? wxString::Format( m_preview ? _( "Preview design: v%d" ) : _( "Selected design: v%d" ), version( *selected ) ) : wxString() );
     if( link && current() )
         for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
         {
@@ -467,7 +485,7 @@ bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
     int answer = choice.ShowModal();
     if( answer == wxID_YES ) save();
     else if( answer == wxID_NO ) load();
-    else { m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); }
+    else { m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_pendingImplementation.clear(); }
     return false;
 }
 void RECURSIVE_DIAGRAM_FRAME::select( const std::string& id )
@@ -507,6 +525,8 @@ void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
 void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
 {
     if( !m_ready || m_process || !current() || current()->selection().block_id() == id ) return;
+    if( m_preview )
+    { m_pendingScope = id; m_pendingSelected = id; m_pendingConnection = ""; confirmChange(); return; }
     std::vector<SELECTION> path; if( !findPath( id, path ) ) return;
     m_pendingScope = id; m_pendingSelected = id;
     m_pendingConnection = "";
@@ -518,6 +538,37 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
     if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; select( saved->second.selected ); }
     else fit();
     ++m_viewRevision; refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
+{
+    if( !m_ready || m_process || !current() ) return;
+    wxMenu menu; const int reserved = m_document.graph().states_size();
+    int firstId = wxWindow::NewControlId( reserved ); int index = 0;
+    for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() )
+    {
+        int id = firstId + index++; auto* item = menu.AppendCheckItem( id, wxString::Format( _( "Preview %s" ), text( state.name() ) ) );
+        item->Check( current()->selection().state_id() == state.id() );
+        menu.Bind( wxEVT_MENU, [this, stateId = state.id()]( wxCommandEvent& ) { previewImplementation( stateId ); }, id );
+    }
+    wxPoint position = ScreenToClient( m_implementation->ClientToScreen( wxPoint( 0, m_implementation->GetSize().y ) ) );
+    PopupMenu( &menu, position );
+    wxWindow::UnreserveControlId( firstId, reserved );
+}
+void RECURSIVE_DIAGRAM_FRAME::previewImplementation( const std::string& stateId )
+{
+    if( !m_ready || m_process || !current() || current()->selection().state_id() == stateId ) return;
+    const D::BlockDesignStateData* alternative = nullptr;
+    for( const auto& state : m_document.graph().states() ) if( state.id() == stateId && state.block_id() == current()->selection().block_id() ) alternative = &state;
+    if( !alternative ) return;
+    bool edited = !m_connectionId.empty() ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
+        : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString();
+    if( edited )
+    { m_pendingImplementation = stateId; m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_pendingScope; m_pendingConnection = ""; confirmChange(); return; }
+    SELECTION selection; selection.set_block_id( alternative->block_id() ); selection.set_state_id( stateId ); selection.set_revision_id( alternative->head_revision_id() );
+    auto* target = revision( selection ); if( !target ) return;
+    if( same( selection, m_path.back() ) ) m_preview.reset(); else m_preview = selection;
+    m_connectionId.clear(); m_selected = selection.block_id(); makeDraft( *target );
+    m_dirty = hasChanges(); ++m_viewRevision; refresh(); fit(); m_canvas->SetFocus();
 }
 void RECURSIVE_DIAGRAM_FRAME::edit()
 {
@@ -533,7 +584,7 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
         }
         if( before.SerializeAsString() == m_connectionDraft.SerializeAsString() ) return;
         m_connectionUndo.push_back( std::move( before ) ); m_connectionRedo.clear();
-        m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); ++m_viewRevision;
+        m_dirty = hasChanges(); ++m_viewRevision;
         m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
         SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); return;
     }
@@ -545,7 +596,7 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
         for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == i + 1 ) restores->DeleteSubrange( n, 1 );
     }
     if( before.SerializeAsString() == m_draft.SerializeAsString() ) return;
-    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision;
+    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
     // Do not refill text controls while typing: it would move the caret.
     m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
@@ -601,9 +652,9 @@ void RECURSIVE_DIAGRAM_FRAME::editComment()
         selected->set_text( value ); editorOrigin( selected->mutable_origin(), "Edit diagram comment" );
     }
     if( link )
-    { m_connectionUndo.push_back( std::move( connectionBefore ) ); m_connectionRedo.clear(); m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); }
+    { m_connectionUndo.push_back( std::move( connectionBefore ) ); m_connectionRedo.clear(); m_dirty = hasChanges(); }
     else
-    { m_undo.push_back( std::move( blockBefore ) ); m_redo.clear(); m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); }
+    { m_undo.push_back( std::move( blockBefore ) ); m_redo.clear(); m_dirty = hasChanges(); }
     ++m_viewRevision; m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
 }
@@ -622,7 +673,7 @@ void RECURSIVE_DIAGRAM_FRAME::save()
         for( size_t i = 1; i < m_path.size(); ++i ) save->add_block_ancestor_revision_ids( freshId() );
         editorOrigin( save->mutable_origin(), "Edit connection requirements" ); execute( std::move( request ) ); return;
     }
-    REQUEST request; request.set_action( D::RFA_SAVE_BLOCK ); request.set_expected_source_token( m_document.source_token() );
+    REQUEST request; request.set_action( m_preview ? D::RFA_SAVE_IMPLEMENTATION : D::RFA_SAVE_BLOCK ); request.set_expected_source_token( m_document.source_token() );
     auto* save = request.mutable_save(); *save->mutable_expected_root() = m_document.graph().selected_root(); *save->mutable_draft() = m_draft;
     std::vector<SELECTION> path; if( !findPath( m_draft.baseline().block_id(), path ) ) return;
     for( const auto& step : path ) *save->add_block_path() = step;
@@ -651,11 +702,11 @@ void RECURSIVE_DIAGRAM_FRAME::undo( bool redo )
     {
         auto& from = redo ? m_connectionRedo : m_connectionUndo; auto& to = redo ? m_connectionUndo : m_connectionRedo;
         if( from.empty() ) return; to.push_back( m_connectionDraft ); m_connectionDraft = std::move( from.back() ); from.pop_back();
-        m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); ++m_viewRevision; refresh(); return;
+        m_dirty = hasChanges(); ++m_viewRevision; refresh(); return;
     }
     auto& from = redo ? m_redo : m_undo; auto& to = redo ? m_undo : m_redo;
     if( from.empty() ) return; to.push_back( m_draft ); m_draft = std::move( from.back() ); from.pop_back();
-    m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); ++m_viewRevision; refresh();
+    m_dirty = hasChanges(); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::close( wxCloseEvent& event )
 {
@@ -868,5 +919,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( m_ready ) *result.mutable_draft() = m_draft;
     if( !m_connectionId.empty() ) *result.mutable_connection_draft() = m_connectionDraft;
     result.set_selected_annotation_id( m_commentId );
+    result.set_implementation_preview( m_preview.has_value() );
+    if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     return result;
 }

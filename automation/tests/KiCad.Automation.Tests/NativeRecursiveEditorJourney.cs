@@ -64,6 +64,18 @@ public sealed partial class NativeSessionTests
                 var saved = await Wait(s => s.CompletedSaveCount > previous && !s.Busy);
                 Assert.AreEqual("", saved.ErrorMessage); Assert.IsFalse(saved.Dirty); return saved;
             }
+            async Task Preview(bool last)
+            {
+                Key("i", control: true);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                int count = 0;
+                do
+                {
+                    NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, observePopupCount: value => count = value);
+                    if (count == 0) await Task.Delay(50, timeout.Token);
+                } while (count == 0);
+                Key(last ? "End" : "Home"); Key("Return");
+            }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
             Key("Escape"); Key("Right");
@@ -258,6 +270,30 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("My independent general requirement.", composed.Draft.Fields.General);
             Assert.AreEqual("Show the telemetry path clearly.", composed.Draft.Fields.Schematic);
             Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving"));
+            string beforeSwitch = await File.ReadAllTextAsync(source, token);
+            var beforeSwitchGraph = RecursiveBlockGraphXml.Read(beforeSwitch);
+            var savedCpu = beforeSwitchGraph.Inspect(beforeSwitchGraph.SelectedRoot).Children[1];
+            var alternative = beforeSwitchGraph.States.Single(s => s.BlockId == savedCpu.BlockId && s.Id != savedCpu.StateId);
+            await Preview(last: true);
+            var preview = await Wait(s => s.ImplementationPreview && s.Draft.Baseline.StateId == alternative.Id.ToString("D"));
+            Assert.IsTrue(preview.Dirty); Assert.AreEqual(beforeSwitch, await File.ReadAllTextAsync(source, token));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-implementation-preview.png"), token);
+            Key("d", alt: true);
+            await Wait(s => !s.Busy && !s.Dirty && !s.ImplementationPreview && s.Draft.Baseline.StateId == savedCpu.StateId.ToString("D"));
+            Assert.AreEqual(beforeSwitch, await File.ReadAllTextAsync(source, token));
+            await Preview(last: true); await Wait(s => s.ImplementationPreview);
+            Key("1", control: true); Key("a", control: true); Type("Alternative implementation requirements."); await Wait(s => s.Dirty);
+            var chosen = await Save(); Assert.IsFalse(chosen.ImplementationPreview);
+            var chosenGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var choice = chosenGraph.Inspect(chosenGraph.SelectedRoot).Children[1];
+            Assert.AreEqual(alternative.Id, choice.StateId);
+            Assert.AreEqual("Alternative implementation requirements.", chosenGraph.Requirements(choice).Requirements.General);
+            Assert.AreEqual(savedCpu, chosenGraph.Inspect(beforeSwitchGraph.SelectedRoot).Children[1]);
+            Assert.AreEqual(beforeSwitchGraph.Requirements(savedCpu).Requirements, chosenGraph.Requirements(savedCpu).Requirements);
+            await Preview(last: false); await Wait(s => s.ImplementationPreview); await Save();
+            var returned = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(savedCpu, returned.Inspect(returned.SelectedRoot).Children[1]);
+            Assert.AreEqual("Alternative implementation requirements.", returned.Requirements(choice).Requirements.General);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

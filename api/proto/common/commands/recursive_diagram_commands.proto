@@ -29,4 +29,6 @@ message RecursiveDiagramEditorState {
   BlockDraftData draft = 13;
   ConnectionDraftData connection_draft = 14;
   string selected_annotation_id = 15;
+  bool implementation_preview = 16;
+  BlockSelectionData preview_selection = 17;
 }

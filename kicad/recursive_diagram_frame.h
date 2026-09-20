@@ -56,6 +56,9 @@ private:
     void selectConnection( const std::string& aConnectionId );
     const kiapi::automation::diagrams::v1::ConnectionRevisionData* connection( const std::string& aConnectionId ) const;
     void navigate( const std::string& aBlockId, bool aRemember = true );
+    void chooseImplementation();
+    void previewImplementation( const std::string& aStateId );
+    bool hasChanges() const;
     bool confirmChange();
     void makeDraft( const REVISION& aRevision );
     void edit();
@@ -86,6 +89,8 @@ private:
     std::optional<std::string> m_pendingConnection;
     std::vector<DRAFT> m_undo, m_redo;
     std::vector<SELECTION> m_path;
+    std::optional<SELECTION> m_preview;
+    std::string m_pendingImplementation;
     std::vector<std::string> m_back;
     std::string m_selected, m_pendingScope, m_pendingSelected, m_errorCode, m_error;
     bool m_rememberNavigation = true, m_closeAfterSave = false;
@@ -94,6 +99,7 @@ private:
     unsigned m_rebaseAttempts = 0;
     wxPanel* m_canvas;
     wxStaticText* m_breadcrumb;
+    wxButton* m_implementation;
     wxStaticText* m_owner;
     wxStaticText* m_savedVersion;
     wxStaticText* m_endpointHeading;

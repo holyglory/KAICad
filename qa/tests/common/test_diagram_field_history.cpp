@@ -4,6 +4,7 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <dialogs/dialog_diagram_field_history.h>
 #include <dialogs/dialog_diagram_conflict.h>
+#include <dialogs/panel_diagram_history.h>
 #include <api/common/types/diagram_revision_types.pb.h>
 #include <nlohmann/json.hpp>
 #include <wx/app.h>
@@ -17,6 +18,8 @@
 #include <wx/listbox.h>
 #include <wx/stopwatch.h>
 #include <wx/stattext.h>
+#include <wx/sizer.h>
+#include <wx/vlbox.h>
 #include <wx/textctrl.h>
 #include <wx/timer.h>
 #include <wx/uiaction.h>
@@ -128,6 +131,63 @@ int show( DIALOG_SHIM* aDialog, const std::function<void()>& aScenario )
 }
 
 BOOST_AUTO_TEST_SUITE( DiagramFieldHistory )
+
+BOOST_AUTO_TEST_CASE( RenderedWholeDiagramPanelKeepsInspectionPreviewAndRestoreSeparate )
+{
+    const char* inputPath = std::getenv( "KICAD_FIELD_HISTORY_PAGES" );
+    const char* outputPath = std::getenv( "KICAD_FIELD_HISTORY_EVIDENCE" );
+    if( !inputPath || !outputPath ) return;
+    BOOST_REQUIRE( KI_TEST::CanDoDisplayTests() );
+    D::DiagramHistoryPageData first, second; D::DiagramHistoryComparisonData comparison;
+    std::ifstream firstInput( std::filesystem::path( inputPath ) / "diagram-page-0.pb", std::ios::binary );
+    std::ifstream secondInput( std::filesystem::path( inputPath ) / "diagram-page-1.pb", std::ios::binary );
+    std::ifstream comparedInput( std::filesystem::path( inputPath ) / "diagram-comparison.pb", std::ios::binary );
+    BOOST_REQUIRE( first.ParseFromIstream( &firstInput ) ); BOOST_REQUIRE( second.ParseFromIstream( &secondInput ) );
+    BOOST_REQUIRE( comparison.ParseFromIstream( &comparedInput ) );
+    auto* dialog = new DIALOG_SHIM( nullptr, wxID_ANY, "Whole diagram history component" );
+    auto* layout = new wxBoxSizer( wxVERTICAL ); PANEL_DIAGRAM_HISTORY* panel = nullptr;
+    D::BlockSelectionData inspected, previewed, restored; bool returned = false, closed = false; unsigned requested = 0;
+    PANEL_DIAGRAM_HISTORY::ACTIONS actions;
+    actions.inspect = [&]( auto selected ) { inspected = selected; };
+    actions.preview = [&]( auto selected ) { previewed = selected; panel->SetPreviewing( true ); };
+    actions.restore = [&]( auto selected ) { restored = selected; };
+    actions.load = [&]( unsigned offset ) { requested = offset; };
+    actions.retry = [] {};
+    actions.returnToCurrent = [&] { returned = true; panel->SetPreviewing( false ); };
+    actions.close = [&] { closed = true; dialog->EndModal( wxID_CANCEL ); };
+    panel = new PANEL_DIAGRAM_HISTORY( dialog, std::move( actions ) ); layout->Add( panel, 1, wxEXPAND ); dialog->SetSizer( layout );
+    dialog->SetClientSize( 400, 640 ); panel->Begin( first.context(), "System", first.context_version() );
+    BOOST_REQUIRE( panel->SetPage( first ) );
+    bool readOnly = false, wrongRejected = false;
+    BOOST_CHECK_EQUAL( show( dialog, [&]
+    {
+        click( control<wxButton>( panel, "DiagramHistoryOlder" ) ); BOOST_CHECK_EQUAL( requested, 1 );
+        BOOST_CHECK( panel->SetPage( second ) );
+        auto* rows = control<wxVListBox>( panel, "DiagramHistoryRevisions" ); rows->SetFocus(); key( WXK_DOWN );
+        waitFor( [&] { return inspected.revision_id() == comparison.inspected().revision_id(); } );
+        readOnly = previewed.revision_id().empty() && restored.revision_id().empty(); BOOST_CHECK( readOnly );
+        auto wrong = comparison; wrong.mutable_inspected()->set_revision_id( first.context().revision_id() );
+        wrongRejected = !panel->SetComparison( wrong ); BOOST_CHECK( wrongRejected );
+        BOOST_CHECK( !control<wxButton>( panel, "DiagramHistoryRestore" )->IsEnabled() );
+        BOOST_CHECK( panel->SetComparison( comparison ) );
+        wxRect client( dialog->ClientToScreen( wxPoint( 0, 0 ) ), dialog->GetClientSize() );
+        BOOST_CHECK( client.Contains( control<wxButton>( panel, "DiagramHistoryRestore" )->GetScreenRect() ) );
+        BOOST_CHECK( client.Contains( control<wxTextCtrl>( panel, "DiagramHistoryComparison" )->GetScreenRect() ) );
+        capture( dialog, outputPath, "09-diagram-history-panel.png" );
+        click( control<wxButton>( panel, "DiagramHistoryPreview" ) );
+        BOOST_CHECK_EQUAL( previewed.revision_id(), comparison.inspected().revision_id() );
+        BOOST_CHECK( restored.revision_id().empty() );
+        click( control<wxButton>( panel, "DiagramHistoryReturn" ) ); BOOST_CHECK( returned );
+        click( control<wxButton>( panel, "DiagramHistoryRestore" ) );
+        BOOST_CHECK_EQUAL( restored.revision_id(), comparison.inspected().revision_id() );
+        click( control<wxButton>( panel, "DiagramHistoryClose" ) );
+    } ), wxID_CANCEL );
+    std::ofstream receipt( std::filesystem::path( outputPath ) / "diagram-panel-interaction.json" );
+    receipt << nlohmann::json( { { "inspection_read_only", readOnly }, { "comparison_target_rejected", wrongRejected },
+        { "preview_explicit", previewed.revision_id() == comparison.inspected().revision_id() }, { "return_explicit", returned },
+        { "restore_explicit", restored.revision_id() == comparison.inspected().revision_id() }, { "cancelled", closed } } ).dump( 2 );
+    dialog->Destroy(); wxTheApp->ProcessPendingEvents();
+}
 
 BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
 {

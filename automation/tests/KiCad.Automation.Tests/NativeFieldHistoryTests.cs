@@ -40,6 +40,12 @@ public sealed class NativeFieldHistoryTests
             for (int offset = 0; offset < 206; offset += 200)
                 await File.WriteAllBytesAsync(Path.Combine(temporary, $"history-page-{offset}.pb"), RecursiveBlockCodec.Encode(
                     DiagramFieldHistoryQuery.Block(longGraph, longGraph.SelectedRoot, DiagramRequirementField.General, offset, 200)).ToByteArray());
+            for (int offset = 0; offset < 2; ++offset)
+                await File.WriteAllBytesAsync(Path.Combine(temporary, $"diagram-page-{offset}.pb"), RecursiveBlockCodec.Encode(
+                    DiagramHistoryQuery.Read(longGraph, longGraph.SelectedRoot, offset, 1)).ToByteArray());
+            var preceding = longGraph.History(longGraph.SelectedRoot.StateId)[1].Selection;
+            await File.WriteAllBytesAsync(Path.Combine(temporary, "diagram-comparison.pb"), RecursiveBlockCodec.Encode(
+                DiagramHistoryQuery.Compare(longGraph, longGraph.SelectedRoot, preceding)).ToByteArray());
             var start = new ProcessStartInfo("xvfb-run")
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = temporary };
             foreach (string arg in new[] { "-a", "-s", "-screen 0 1280x1024x24 -nolisten tcp", executable,
@@ -102,6 +108,9 @@ public sealed class NativeFieldHistoryTests
                 paging.RootElement.GetProperty("oldest_revision_id").GetString());
             foreach (string capture in new[] { "06-history-loading.png", "07-history-load-error.png", "08-history-oldest.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, capture);
+            using var wholePanel = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "diagram-panel-interaction.json")));
+            foreach (string check in new[] { "inspection_read_only", "comparison_target_rejected", "preview_explicit", "return_explicit", "restore_explicit", "cancelled" })
+                Assert.IsTrue(wholePanel.RootElement.GetProperty(check).GetBoolean(), check);
         }
         finally { Directory.Delete(temporary, recursive: true); }
     }

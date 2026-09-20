@@ -31,7 +31,7 @@ public static class RecursiveEditorFiles
                 throw Invalid("invalid_implementation_request", "Provide the exact implementation management request without unrelated targets.");
             var managed = await ImplementationFiles.ApplyAsync(request.RepositoryRoot, request.SourcePath, document,
                 request.ExpectedSourceToken, request.Implementation, token);
-            var result = Describe(managed.Snapshot); result.ImplementationId = managed.StateId.ToString("D"); return result;
+            var managedResult = Describe(managed.Snapshot); managedResult.ImplementationId = managed.StateId.ToString("D"); return managedResult;
         }
         if (request.Action == P.RecursiveFileAction.RfaSaveConnection)
         {

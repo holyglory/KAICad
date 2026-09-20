@@ -321,15 +321,18 @@ public sealed partial class NativeSessionTests
             Key("d", alt: true); await Wait(s => !s.Busy && !s.ImplementationPreview && !s.Dirty);
             Assert.AreEqual(savedCpu, RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).Inspect(returned.SelectedRoot).Children[1]);
             var beforeResize = await Read();
-            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1100, resizeHeight: 760);
+            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1100, resizeHeight: 760,
+                observeGeometry: bounds => { Assert.AreEqual(1100, bounds.Width); Assert.AreEqual(760, bounds.Height); });
             await Wait(s => s.Rendered && s.ViewRevision > beforeResize.ViewRevision);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-compact.png"), token);
             Key("3", control: true); Key("a", control: true); Type("A compact-window routing edit."); await Wait(s => s.Dirty);
             await Save();
             Key("4", control: true);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-compact-comments.png"), token);
-            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1536, resizeHeight: 1024);
-            await Wait(s => s.Rendered && !s.Busy);
+            ulong narrowView = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "", "Structural diagram", false, false, resizeWidth: 1536, resizeHeight: 1024,
+                observeGeometry: bounds => { Assert.AreEqual(1536, bounds.Width); Assert.AreEqual(1024, bounds.Height); });
+            await Wait(s => s.Rendered && !s.Busy && s.ViewRevision > narrowView);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-expanded.png"), token);
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));

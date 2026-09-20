@@ -93,6 +93,9 @@ public sealed class McpProcessTests
                 .Select(t => t.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.Contains(names, "kicad_instances_list");
             CollectionAssert.Contains(names, "kicad_instance_capabilities");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_start");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
             var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());
@@ -121,9 +124,9 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
             CollectionAssert.Contains(names, "kicad_document_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_state");
-            CollectionAssert.DoesNotContain(names, "kicad_pcb_drc_start");
-            CollectionAssert.DoesNotContain(names, "kicad_pcb_drc_job");
-            CollectionAssert.DoesNotContain(names, "kicad_pcb_drc_cancel");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_start");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
             CollectionAssert.Contains(names, "kicad_document_close");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");

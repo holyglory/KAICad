@@ -83,6 +83,9 @@ public sealed class InstanceTools(InstanceRegistry registry)
             new InstanceCapability("kicad_design_candidate_commit", "schematic-design", "compiled-mcp", "registered", "recovery revision token, candidate hash", false),
             new InstanceCapability("kicad_diagram_proposal_publish", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, proposal identity", false),
             new InstanceCapability("kicad_diagram_proposal_select", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path", false)
+            ,new InstanceCapability("kicad_pcb_drc_start", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document revision, operation ID", false)
+            ,new InstanceCapability("kicad_pcb_drc_job", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)
+            ,new InstanceCapability("kicad_pcb_drc_cancel", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)
         };
         var data = JsonSerializer.SerializeToElement(new
         {

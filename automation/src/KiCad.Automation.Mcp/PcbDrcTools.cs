@@ -13,8 +13,8 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbDrcTools(InstanceRegistry registry)
 {
-    // Deliberately not in tools/list until complete snapshot/isolation and real
-    // cancellation journeys qualify this family (p23deb822a36256a6).
+    [McpServerTool(Name = "kicad_pcb_drc_start"),
+     Description("Start a revision-guarded native PCB DRC job for an explicit PCB document. Requires process epoch, document revision and operation identity; optional schematic parity checks require the exact observed schematic state. Returns a job snapshot and does not claim completion until kicad_pcb_drc_job reports a terminal fresh result.")]
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
         bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
         string processEpoch, CancellationToken cancellationToken, string? expectedSchematicStateJson = null,
@@ -64,6 +64,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         return WithStructuredState(response, state);
     }
 
+    [McpServerTool(Name = "kicad_pcb_drc_job", ReadOnly = true),
+     Description("Read one exact native PCB DRC job by instance epoch, document and job ID. Running jobs expose no findings; terminal results identify freshness and snapshot completeness. Does not rerun or mutate the board.")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {
@@ -86,6 +88,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         return WithStructuredState(response, state);
     }
 
+    [McpServerTool(Name = "kicad_pcb_drc_cancel"),
+     Description("Cancel one exact native PCB DRC job by process epoch, document and job ID. Returns the terminal cancellation state and never treats cancellation as a successful DRC result.")]
     public async Task<CallToolResult> Cancel(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {

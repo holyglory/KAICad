@@ -2892,6 +2892,16 @@ In the recursive window:
   interfaces or stale file versions instead of applying part of the change.
   `Ctrl+I` opens the implementation menu. This selects the conceptual diagram;
   it does not claim coherent native schematic/PCB activation yet.
+- That menu also provides **New**, **Duplicate**, **Rename**, **Remove** and
+  **Restore removed implementation**. New retains the source requirements,
+  boundary interfaces and notes but starts with no internal blocks/connections;
+  displaced note targets remain explicitly unresolved. Duplicate retains the
+  exact source graph. Both record their source and start unselected. Naming
+  cancellation writes nothing; names must be nonempty and distinct within the
+  block. Removal hides an inactive implementation without deleting its history;
+  choose and save a replacement before removing an active implementation.
+  Unsaved content must first be saved or declined before management actions.
+  `Ctrl+R` reloads saved data with the existing draft-preservation choices.
 - Select a connection by clicking its line, or cycle the local connections with
   `L` on the canvas. Its endpoint summary describes the actual current binding,
   not a claimed native net or compatibility proof.
@@ -2919,6 +2929,16 @@ In the recursive window:
 None of these actions invokes an AI agent. The optional global agent-console
 integration is still separate unfinished work.
 
+An agent can use `kicad_diagram_manage_implementation` for the equivalent saved-model
+operations. Supply the observed instance epoch, exact source file token, expected
+root and source selections, action, operation UUID and actor name. The operation
+UUID becomes the new state identity for creation, or the retained management
+event identity for rename/remove/restore. Stale file tokens or epochs fail without
+applying a second edit. An already-open native draft is not silently replaced by
+an agent's file update; reload or reconcile it explicitly. Management history
+retains old names and removal/restoration state, in addition to immutable design
+revisions. This is conceptual model management, not native schematic/PCB activation.
+
 Focused Linux development verification uses:
 
 ```sh
@@ -2932,8 +2952,8 @@ Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
 native Mac integration. The authoritative unfinished outcomes include recursive
 UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
 `pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and history pagination beyond
-the initial 200 entries `p8ebf18838a55934f`. Implementation creation/removal is tracked
-by `p5848545e243151a7`; the model can preserve exact-source fork provenance, but
-editor management controls remain unfinished. Complete
+the initial 200 entries `p8ebf18838a55934f`. Implementation management is tracked
+by `p5848545e243151a7`; scoped Linux evidence is separate from cross-platform
+qualification. Complete
 graph conflict handling, structural/native generation and reverse synchronization,
 schematic/PCB markup, and full platform qualification remain open.

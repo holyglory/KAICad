@@ -12,7 +12,8 @@ public sealed record RefinementInputFileResult(RecursiveBlockFileSnapshot Snapsh
 public static class RefinementInputFiles
 {
     public static async Task<RefinementInputFileResult> RecordAsync(string repositoryRoot, string path,
-        Guid documentId, string expectedSourceToken, DiagramRefinementInput input, CancellationToken token = default)
+        Guid documentId, string expectedSourceToken, DiagramRefinementInput input, CancellationToken token = default,
+        string? stateDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(input); input.Validate(); token.ThrowIfCancellationRequested();
         if (string.IsNullOrEmpty(expectedSourceToken))
@@ -24,6 +25,9 @@ public static class RefinementInputFiles
         {
             if (!existing.SameContents(input)) throw new AutomationException("refinement_input_conflict",
                 "This identity already records different original input; neither version was replaced.");
+            if (stateDirectory is not null && new RefinementInputReceipts(stateDirectory).Read(input.Id) is { Stage: not RefinementPublicationStage.Published } pending)
+                throw new AutomationException("refinement_publication_recovery_required",
+                    $"The current XML contains this input, but its publication receipt is {pending.Stage}; inspect the retained preimage/postimage before retrying.");
             // This is a current-state observation, not a success receipt for any
             // previously ambiguous publication or later native design operation.
             return new(loaded.Snapshot, existing, false);
@@ -35,7 +39,25 @@ public static class RefinementInputFiles
             await RefinementAssetFiles.RequireAvailable(repositoryRoot, attachment, token);
         var updated = graph.WithRefinementInput(input);
         byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(updated));
-        string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
+        var receipts = stateDirectory is null ? null : new RefinementInputReceipts(stateDirectory);
+        receipts?.Write(new(1, input.Id, loaded.Snapshot.Path, DiagramRefinementInputXml.Write(input),
+            loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
+            RefinementPublicationStage.Prepared, null, null));
+        string staged = loaded.Snapshot.Path + ".sync-" + Guid.NewGuid().ToString("N");
+        string? retained = null;
+        string hash = await DesignFilePublisher.WriteCoreAsync(loaded.Snapshot.Path, loaded.Bytes, bytes,
+            beforeReplace: null,
+            replace: (target, temporary) =>
+            {
+                staged = temporary; retained = PreservingFileReplacement.PreviousPath(temporary);
+                receipts?.Write(new(1, input.Id, target, DiagramRefinementInputXml.Write(input),
+                    loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
+                    RefinementPublicationStage.Replacing, staged, retained));
+                PreservingFileReplacement.Replace(target, temporary);
+            }, token);
+        receipts?.Write(new(1, input.Id, loaded.Snapshot.Path, DiagramRefinementInputXml.Write(input),
+            loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
+            RefinementPublicationStage.Published, staged, retained, DateTimeOffset.UtcNow));
         return new(new(loaded.Snapshot.Path, hash, updated), input, true);
     }
 

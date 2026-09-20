@@ -21,6 +21,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
     private readonly SemaphoreSlim changes = new(1, 1);
     private readonly string directory = Path.GetFullPath(stateDirectory);
 
+    public string StateDirectory => directory;
+
     public IReadOnlyList<InstanceRecord> List() => connections.Values.Select(value => value.Record).OrderBy(r => r.InstanceId).ToArray();
 
     public InstanceRecord Get(string instanceId) => Find(instanceId).Record;

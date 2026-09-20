@@ -43,7 +43,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
-        var recorded = await RefinementInputFiles.RecordAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, input, cancellationToken);
+        var recorded = await RefinementInputFiles.RecordAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, input,
+            cancellationToken, registry.StateDirectory);
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
             inputId = recorded.Input.Id, sourceToken = recorded.Snapshot.ContentSha256, selectedRoot = recorded.Snapshot.Graph.SelectedRoot,
             added = recorded.Added, observation = recorded.Added ? "Recorded" : "AlreadyPresent" }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -62,6 +63,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
             throw new AutomationException("recursive_block_file_changed", "Read the current file token before inspecting an archived input.");
         var input = loaded.Graph.RefinementInput(inputId);
+        var publication = new RefinementInputReceipts(registry.StateDirectory).Read(inputId);
         var assets = new List<RefinementAssetObservation>();
         foreach (var attachment in input.Attachments)
             assets.Add(await RefinementAssetFiles.InspectAsync(repositoryRoot, attachment, cancellationToken));
@@ -70,6 +72,9 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             throw new AutomationException("recursive_block_file_changed", "The diagram changed during input inspection; read a fresh observation.");
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
             sourceToken = loaded.ContentSha256, input, assets,
+            publication = publication is null ? null : new { publication.Version, publication.InputId, publication.DesignPath,
+                publication.BeforeSha256, publication.AfterSha256, publication.Stage, publication.StagedPath,
+                publication.RetainedPath, publication.ConfirmedAt },
             blocks = input.BlockPath.Select(p => new { selection = p, block = loaded.Graph.Inspect(p), requirements = loaded.Graph.Requirements(p).Requirements }),
             connections = input.ConnectionPath.Select(p => new { selection = p, connection = loaded.Graph.Connections(input.BlockPath[^1].BlockId).Inspect(p),
                 requirements = loaded.Graph.Connections(input.BlockPath[^1].BlockId).Requirements(p).Requirements }) },

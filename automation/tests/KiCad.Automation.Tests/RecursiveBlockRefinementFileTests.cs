@@ -67,4 +67,41 @@ public sealed class RecursiveBlockRefinementFileTests
         Assert.ThrowsExactly<AutomationException>(() => RefinementInputFiles.AttachOrigin(graph, [root, child], Guid.NewGuid(), origin));
         Assert.AreSame(origin, RefinementInputFiles.AttachOrigin(graph, [root, child], null, origin));
     }
+
+    [TestMethod]
+    public async Task PublishedReceiptAllowsIdempotentRetryButPendingReceiptRequiresRecovery()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-refinement-receipt-").FullName;
+        string state = Directory.CreateTempSubdirectory("kicad-refinement-state-").FullName;
+        try
+        {
+            var graph = LinkedDiagramFixture.Create().Graph; string path = Path.Combine(root, "diagram.xml");
+            string xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            var input = RecursiveBlockRefinementInputTests.Input(graph) with { Attachments = [] };
+            var stored = await RefinementInputFiles.RecordAsync(root, path, graph.DocumentId, input.SourceSha256, input, stateDirectory: state);
+            var receiptStore = new RefinementInputReceipts(state);
+            var receipt = receiptStore.Read(input.Id);
+            Assert.IsNotNull(receipt); Assert.AreEqual(RefinementPublicationStage.Published, receipt.Stage);
+            Assert.AreEqual(input.Id, receipt.InputId); Assert.AreEqual(input.SourceSha256, receipt.BeforeSha256);
+            Assert.IsTrue(RefinementPublicationIntent.Digest(receipt.AfterSha256));
+            var retry = await RefinementInputFiles.RecordAsync(root, path, graph.DocumentId, stored.Snapshot.ContentSha256, input, stateDirectory: state);
+            Assert.IsFalse(retry.Added);
+            string pendingPath = Path.Combine(root, "pending.xml");
+            var pendingInput = RecursiveBlockRefinementInputTests.Input(graph) with { Attachments = [] };
+            var pendingGraph = graph.WithRefinementInput(pendingInput);
+            string pendingXml = RecursiveBlockGraphXml.Write(pendingGraph);
+            await File.WriteAllTextAsync(pendingPath, pendingXml);
+            string stage = pendingPath + ".sync-recovery";
+            var pendingReceipt = new RefinementInputPublicationReceipt(1, pendingInput.Id, pendingPath,
+                DiagramRefinementInputXml.Write(pendingInput), pendingInput.SourceSha256,
+                Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(pendingXml))),
+                RefinementPublicationStage.Replacing, stage, stage);
+            receiptStore.Write(pendingReceipt);
+            await Assert.ThrowsExactlyAsync<AutomationException>(() => RefinementInputFiles.RecordAsync(root, pendingPath,
+                graph.DocumentId, pendingInput.SourceSha256, pendingInput, stateDirectory: state));
+            Assert.AreEqual(RefinementPublicationStage.Replacing, receiptStore.Read(pendingInput.Id)!.Stage);
+            Assert.AreEqual(pendingXml, await File.ReadAllTextAsync(pendingPath));
+        }
+        finally { Directory.Delete(root, true); Directory.Delete(state, true); }
+    }
 }

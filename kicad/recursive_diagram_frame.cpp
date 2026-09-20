@@ -627,11 +627,12 @@ void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind 
         {
             if( dialog.ShowModal() != wxID_OK ) return;
             name = dialog.GetValue().Strip( wxString::both );
-            if( name.empty() ) { wxMessageBox( _( "Enter an implementation name." ), title, wxOK | wxICON_ERROR, &dialog ); continue; }
+            if( name.empty() ) { wxMessageBox( _( "Enter an implementation name." ), _( "Invalid implementation name" ), wxOK | wxICON_ERROR, this ); continue; }
             bool duplicate = false;
             for( const auto& other : m_document.graph().states() )
                 if( other.block_id() == state->block_id() && ( action != D::IAK_RENAME || other.id() != stateId ) && name.CmpNoCase( text( other.name() ) ) == 0 ) duplicate = true;
-            if( duplicate ) { wxMessageBox( _( "Choose a different name for this block's implementation." ), title, wxOK | wxICON_ERROR, &dialog ); continue; }
+            if( duplicate ) { wxMessageBox( wxString::Format( _( "An implementation named \"%s\" already exists for this block. Choose another name." ), name ),
+                    _( "Invalid implementation name" ), wxOK | wxICON_ERROR, this ); continue; }
             break;
         }
     }

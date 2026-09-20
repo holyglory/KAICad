@@ -409,6 +409,14 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements,
                 copiedGraph.Requirements(new(sourceCpu.BlockId, copyState, Guid.Parse(duplicated.Draft.Baseline.RevisionId))).Requirements);
             await ImplementationMenu(); Key("r"); await Window("Rename implementation");
+            Name("Initial approach", "Rename implementation"); await Window("Invalid implementation name");
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(copiedGraph), await File.ReadAllTextAsync(source, token));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-implementation-name-error.png"), token);
+            Key("Return", title: "Invalid implementation name"); await Window("Invalid implementation name", false); await Window("Rename implementation");
+            Key("a", control: true, title: "Rename implementation"); Key("BackSpace", title: "Rename implementation"); Key("Return", title: "Rename implementation");
+            await Window("Invalid implementation name");
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(copiedGraph), await File.ReadAllTextAsync(source, token));
+            Key("Return", title: "Invalid implementation name"); await Window("Invalid implementation name", false); await Window("Rename implementation");
             Name("Thermal copy", "Rename implementation");
             await Wait(s => !s.Busy && s.ImplementationPreview && s.SourceToken != duplicated.SourceToken);
             var renamedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));

@@ -3,6 +3,7 @@
 #define KICAD_RECURSIVE_DIAGRAM_FRAME_H
 
 #include <api/common/commands/recursive_diagram_commands.pb.h>
+#include <api/api_handler.h>
 #include <wx/frame.h>
 #include <wx/geometry.h>
 #include <wx/process.h>
@@ -38,6 +39,8 @@ public:
     const std::string& SourcePath() const { return m_request.source_path(); }
     bool IsClosing() const { return m_closing; }
     kiapi::automation::diagrams::v1::RecursiveDiagramEditorState State() const;
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramObservation> Observe(
+        const kiapi::automation::diagrams::v1::ObserveRecursiveDiagramEditor& aRequest );
 
 private:
     using SELECTION = kiapi::automation::diagrams::v1::BlockSelectionData;
@@ -93,6 +96,7 @@ private:
     void finishNoteDrag();
     wxRect noteRect( const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote, int aIndex ) const;
     void fit();
+    wxRect2DDouble diagramBounds() const;
     wxRect nodeRect( int aIndex ) const;
     wxPoint endpoint( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint, bool aFirst ) const;
     std::array<wxPoint, 4> connectionPath( const kiapi::automation::diagrams::v1::ConnectionRevisionData& aConnection, int aEndpoint ) const;

@@ -32,6 +32,7 @@ STRUCTURAL_EDITOR_CONTROL::STRUCTURAL_EDITOR_CONTROL( KICAD_MANAGER_FRAME* manag
     registerHandler<S::ReadStructuralEditor, S::StructuralEditorState>( &STRUCTURAL_EDITOR_CONTROL::read );
     registerHandler<D::OpenRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &STRUCTURAL_EDITOR_CONTROL::openRecursive );
     registerHandler<D::ReadRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &STRUCTURAL_EDITOR_CONTROL::readRecursive );
+    registerHandler<D::ObserveRecursiveDiagramEditor, D::RecursiveDiagramObservation>( &STRUCTURAL_EDITOR_CONTROL::observeRecursive );
     Pgm().GetApiServer().RegisterHandler( this );
 }
 STRUCTURAL_EDITOR_CONTROL::~STRUCTURAL_EDITOR_CONTROL()
@@ -96,5 +97,12 @@ HANDLER_RESULT<D::RecursiveDiagramEditorState> STRUCTURAL_EDITOR_CONTROL::openRe
 HANDLER_RESULT<D::RecursiveDiagramEditorState> STRUCTURAL_EDITOR_CONTROL::readRecursive( const HANDLER_CONTEXT<D::ReadRecursiveDiagramEditor>& ctx )
 {
     for( auto& editor : m_recursiveEditors ) if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == ctx.Request.document_id() ) return editor->State();
+    return failure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
+}
+HANDLER_RESULT<D::RecursiveDiagramObservation> STRUCTURAL_EDITOR_CONTROL::observeRecursive( const HANDLER_CONTEXT<D::ObserveRecursiveDiagramEditor>& ctx )
+{
+    for( auto& editor : m_recursiveEditors )
+        if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == ctx.Request.document_id() )
+            return editor->Observe( ctx.Request );
     return failure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
 }

@@ -119,6 +119,53 @@ public sealed partial class NativeSessionTests
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
             Assert.AreEqual(openingBytes, await File.ReadAllTextAsync(source, token));
+            async Task ObserveViews(string label, bool dirty, BlockSelection? history = null)
+            {
+                var before = await Read();
+                var psuView = fixture.Blocks["PSU"];
+                object Selection(BlockSelection selected) => new { blockId = selected.BlockId, stateId = selected.StateId, revisionId = selected.RevisionId };
+                var viewArguments = new Dictionary<string, object?>
+                {
+                    ["instanceId"] = instanceId, ["documentId"] = graph.DocumentId.ToString("D"),
+                    ["expectedSourceToken"] = before.SourceToken, ["expectedViewRevision"] = before.ViewRevision,
+                    ["views"] = new object[] {
+                        new { viewId = "current", pixelWidth = 1024, pixelHeight = 768 },
+                        new { viewId = "saved-psu", pixelWidth = 800, pixelHeight = 600, selection = Selection(history ?? psuView) },
+                        new { viewId = "detail", pixelWidth = 640, pixelHeight = 480, viewport = new { x = 100.0, y = 80.0, width = 400.0, height = 300.0 } }
+                    }
+                };
+                var observation = await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token);
+                Assert.IsFalse(observation.IsError == true, JsonSerializer.Serialize(observation));
+                var payload = JsonSerializer.SerializeToElement(observation);
+                var state = payload.GetProperty("structuredContent").GetProperty("observation");
+                Assert.AreEqual(before.ViewRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), state.GetProperty("viewRevision").GetString());
+                Assert.AreEqual(before.SourceToken, state.GetProperty("sourceToken").GetString());
+                Assert.AreEqual(3, state.GetProperty("views").GetArrayLength());
+                var images = payload.GetProperty("content").EnumerateArray().Where(c => c.GetProperty("type").GetString() == "image").ToArray();
+                Assert.AreEqual(3, images.Length);
+                for (int i = 0; i < images.Length; ++i)
+                {
+                    byte[] png = Convert.FromBase64String(images[i].GetProperty("data").GetString()!);
+                    Assert.IsTrue(png.Length > 1000); Assert.AreEqual("image/png", images[i].GetProperty("mimeType").GetString());
+                    await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-" + label + "-view-" + i + ".png"), png, token);
+                    Assert.AreEqual("diagram-unit", state.GetProperty("views")[i].GetProperty("units").GetString());
+                    Assert.AreEqual("x-right/y-down", state.GetProperty("views")[i].GetProperty("coordinateSystem").GetString());
+                }
+                var currentView = state.GetProperty("views")[0];
+                Assert.AreEqual(dirty, currentView.TryGetProperty("containsUnsavedDraft", out var draftFlag) && draftFlag.GetBoolean());
+                Assert.AreEqual((history ?? psuView).RevisionId.ToString("D"), state.GetProperty("views")[1].GetProperty("diagram").GetProperty("selection").GetProperty("revisionId").GetString());
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + label + "-observation.json"), state.GetRawText(), token);
+                Assert.AreEqual(before, await Read(), "Offscreen views must not alter draft, selection, source, view revision or viewport.");
+                viewArguments["expectedViewRevision"] = before.ViewRevision + 1;
+                Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                viewArguments["expectedViewRevision"] = before.ViewRevision; viewArguments["documentId"] = Guid.NewGuid().ToString("D");
+                Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                viewArguments["documentId"] = graph.DocumentId.ToString("D");
+                viewArguments["views"] = new[] { new { viewId = "invalid", pixelWidth = 1, pixelHeight = 600 } };
+                Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
+                Assert.AreEqual(before, await Read());
+            }
+            await ObserveViews("saved-root", false);
             Key("Escape"); Key("Right");
             await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-system.png"), token);
@@ -632,6 +679,7 @@ public sealed partial class NativeSessionTests
             await Wait(s => !s.Busy && !s.Dirty && s.Draft.Baseline.RevisionId == topologyGraph.SelectedRoot.RevisionId.ToString("D"));
             Key("3", control: true); Key("a", control: true); Type("Keep this uncommitted routing text."); await Wait(s => s.Dirty);
             var historyBeforeDraft = (await Read()).Draft.Clone();
+            await ObserveViews("current-draft", true, oldDiagram);
             Key("h", control: true);
             var wholeOpened = await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
             Assert.AreEqual(historyBeforeDraft, wholeOpened.Draft); Assert.IsNull(wholeOpened.DiagramHistory.Preview);

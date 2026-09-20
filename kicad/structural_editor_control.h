@@ -26,6 +26,8 @@ private:
         const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor>& aCtx );
     HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramEditorState> readRecursive(
         const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ReadRecursiveDiagramEditor>& aCtx );
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramObservation> observeRecursive(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ObserveRecursiveDiagramEditor>& aCtx );
     KICAD_MANAGER_FRAME* m_manager;
     std::vector<wxWeakRef<STRUCTURAL_EDITOR_FRAME>> m_editors;
     std::vector<wxWeakRef<RECURSIVE_DIAGRAM_FRAME>> m_recursiveEditors;

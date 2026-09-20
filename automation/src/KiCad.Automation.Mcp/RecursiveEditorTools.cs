@@ -13,6 +13,47 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_observe", ReadOnly = true),
+     Description("Render one or more native structural-diagram views with matching structured objects at the exact observed source token and editor view revision. Omit a view selection for the current canvas including its draft/preview; specify an exact selection for another saved level or revision. Optional diagram-unit viewport chooses a detail region. Rendering never navigates the user window or saves a draft. Each view returns PNG, actual viewport, coordinate system and object identities; this is not native schematic/PCB realization or electrical verification.")]
+    public Task<CallToolResult> Observe(string instanceId, string documentId, string expectedSourceToken,
+        ulong expectedViewRevision, DiagramObservationView[] views, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        if (views is null || views.Length is < 1 or > 8 || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_diagram_observation", "Specify the observed source/view revision and one to eight view requests.");
+        var request = new ObserveRecursiveDiagramEditor { DocumentId = Identity(documentId).ToString("D"),
+            ExpectedSourceToken = expectedSourceToken, ExpectedViewRevision = expectedViewRevision };
+        foreach (var view in views)
+        {
+            if (view is null) throw new AutomationException("invalid_diagram_observation", "Every view needs an explicit identifier and pixel dimensions.");
+            var item = new RecursiveDiagramViewRequest { ViewId = view.ViewId ?? "", PixelWidth = view.PixelWidth, PixelHeight = view.PixelHeight };
+            if (view.Selection is not null) item.Selection = HistorySelection(view.Selection);
+            if (view.Viewport is { } box) item.Viewport = new() { X = box.X, Y = box.Y, Width = box.Width, Height = box.Height };
+            request.Views.Add(item);
+        }
+        var native = registry.Client(instanceId);
+        var observation = await native.InvokeAsync<ObserveRecursiveDiagramEditor, RecursiveDiagramObservation>(request, cancellationToken);
+        if (observation.DocumentId != documentId || observation.SourceToken != expectedSourceToken || observation.ViewRevision != expectedViewRevision
+            || observation.Views.Count != views.Length || observation.Editor is null || observation.Editor.DocumentId != documentId || observation.Editor.ViewRevision != expectedViewRevision)
+            throw new AutomationException("diagram_observation_mismatch", "The image response does not match the requested document checkpoint.");
+        var metadata = observation.Clone(); var content = new List<ContentBlock>();
+        for (int i = 0; i < observation.Views.Count; ++i)
+        {
+            var view = observation.Views[i];
+            byte[] png = view.Png.ToByteArray();
+            if (view.ViewId != views[i].ViewId || png.Length < 24 || !png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 })
+                || view.PixelWidth != views[i].PixelWidth || view.PixelHeight != views[i].PixelHeight
+                || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)) != view.PixelWidth
+                || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)) != view.PixelHeight)
+                throw new AutomationException("diagram_observation_image", "The native view did not return the exact requested PNG dimensions and identity.");
+            metadata.Views[i].Png = ByteString.Empty;
+            content.Add(new TextContentBlock { Text = "View: " + view.ViewId }); content.Add(ImageContentBlock.FromBytes(png, "image/png"));
+        }
+        var structured = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = native.Epoch,
+            observation = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(metadata)) });
+        content.Insert(0, new TextContentBlock { Text = structured.GetRawText() });
+        return new() { Content = content, StructuredContent = structured };
+    });
+
     [McpServerTool(Name = "kicad_diagram_history", ReadOnly = true),
      Description("Read a bounded whole-diagram revision list at an exact block/implementation/revision context. Includes actual origin, version and local contents counts. Later implementation heads do not enter an older context. Reading or selecting a history row does not activate a design or change an open draft.")]
     public Task<CallToolResult> History(string instanceId, string repositoryRoot, string sourcePath, string documentId,
@@ -221,3 +262,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         }
     }
 }
+
+public sealed record DiagramObservationViewport(double X, double Y, double Width, double Height);
+public sealed record DiagramObservationView(string ViewId, uint PixelWidth, uint PixelHeight,
+    BlockSelection? Selection = null, DiagramObservationViewport? Viewport = null);

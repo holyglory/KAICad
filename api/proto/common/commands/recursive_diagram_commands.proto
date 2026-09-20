@@ -33,6 +33,46 @@ message DiagramHistoryViewState {
   bool busy = 6;
   string error_message = 7;
 }
+// Offscreen views use the native diagram painter and never navigate the editor.
+// Omit selection to capture the current canvas, including its visible draft or
+// historical preview. An explicit selection reads that exact saved diagram.
+message DiagramViewport {
+  double x = 1; double y = 2; double width = 3; double height = 4;
+}
+message RecursiveDiagramViewRequest {
+  string view_id = 1;
+  BlockSelectionData selection = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+  DiagramViewport viewport = 5;
+}
+message ObserveRecursiveDiagramEditor {
+  string document_id = 1;
+  string expected_source_token = 2;
+  uint64 expected_view_revision = 3;
+  repeated RecursiveDiagramViewRequest views = 4;
+}
+message RecursiveDiagramView {
+  string view_id = 1;
+  string units = 2;
+  DiagramViewport viewport = 3;
+  uint32 pixel_width = 4;
+  uint32 pixel_height = 5;
+  bytes png = 6;
+  BlockRevisionData diagram = 7;
+  repeated BlockRevisionData children = 8;
+  repeated ConnectionRevisionData connections = 9;
+  RequirementFieldsData requirements = 10;
+  bool contains_unsaved_draft = 11;
+  string coordinate_system = 12;
+}
+message RecursiveDiagramObservation {
+  string document_id = 1;
+  string source_token = 2;
+  uint64 view_revision = 3;
+  RecursiveDiagramEditorState editor = 4;
+  repeated RecursiveDiagramView views = 5;
+}
 message RecursiveDiagramEditorState {
   string document_id = 1;
   string source_path = 2;

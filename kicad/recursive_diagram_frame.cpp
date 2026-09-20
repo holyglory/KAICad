@@ -14,6 +14,10 @@
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
 #include <wx/dcclient.h>
+#include <wx/dcmemory.h>
+#include <wx/image.h>
+#include <wx/mstream.h>
+#include <set>
 #include <wx/filename.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
@@ -1267,9 +1271,9 @@ void RECURSIVE_DIAGRAM_FRAME::finishNoteDrag()
     }
     refresh();
 }
-void RECURSIVE_DIAGRAM_FRAME::fit()
+wxRect2DDouble RECURSIVE_DIAGRAM_FRAME::diagramBounds() const
 {
-    if( !current() ) return;
+    if( !current() ) return { 0, 0, 1, 1 };
     int count = std::max( 1, current()->children_size() ), columns = static_cast<int>( std::ceil( std::sqrt( count ) ) ), rows = ( count + columns - 1 ) / columns;
     double left = 0, top = 0, right = 140 + columns * 370, bottom = 110 + rows * 250;
     const auto& notes = m_historyPreview ? current()->local_diagram().annotations() : !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
@@ -1287,10 +1291,125 @@ void RECURSIVE_DIAGRAM_FRAME::fit()
         for( const auto& stroke : note.strokes() ) for( const auto& point : stroke.points() )
         { double x = 0, y = 0; text( point.x() ).ToDouble( &x ); text( point.y() ).ToDouble( &y ); include( x, y ); }
     }
-    double width = right - left, height = bottom - top;
+    return { left, top, right - left, bottom - top };
+}
+void RECURSIVE_DIAGRAM_FRAME::fit()
+{
+    if( !current() ) return;
+    auto bounds = diagramBounds(); double width = bounds.m_width, height = bounds.m_height;
     auto area = m_canvas->GetClientSize(); m_scale = std::max( 0.000000001, std::min( { 1.0, area.x / width, area.y / height } ) );
-    m_origin = { left - ( area.x / m_scale - width ) / 2, top - ( area.y / m_scale - height ) / 2 };
+    m_origin = { bounds.m_x - ( area.x / m_scale - width ) / 2, bounds.m_y - ( area.y / m_scale - height ) / 2 };
     ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
+}
+
+HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe( const D::ObserveRecursiveDiagramEditor& request )
+{
+    wxASSERT( wxIsMainThread() );
+    auto failure = []( kiapi::common::ApiStatusCode code, const std::string& message )
+    {
+        kiapi::common::ApiResponseStatus error; error.set_status( code ); error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    auto known = request; known.DiscardUnknownFields();
+    if( known.SerializeAsString() != request.SerializeAsString() || request.document_id() != DocumentId()
+        || request.expected_source_token().size() != 64 || request.views_size() < 1 || request.views_size() > 8 )
+        return failure( kiapi::common::AS_BAD_REQUEST, "Provide this exact diagram, observed source/view revision and one to eight supported view requests" );
+    if( !m_ready || m_process || m_draggingNote || m_closing || !current() )
+        return failure( kiapi::common::AS_BUSY, "The diagram is not at an idle rendering checkpoint" );
+    if( request.expected_source_token() != m_document.source_token() || request.expected_view_revision() != m_viewRevision )
+        return failure( kiapi::common::AS_BAD_REQUEST, "The diagram view changed; inspect its current source token and view revision before observing it" );
+    std::set<std::string> ids; uint64_t pixels = 0;
+    for( const auto& view : request.views() )
+    {
+        if( view.view_id().empty() || view.view_id().size() > 128 || !ids.insert( view.view_id() ).second
+            || view.pixel_width() < 64 || view.pixel_width() > 4096 || view.pixel_height() < 64 || view.pixel_height() > 4096
+            || ( view.has_selection() && !revision( view.selection() ) ) )
+            return failure( kiapi::common::AS_BAD_REQUEST, "View IDs must be distinct, image dimensions 64 through 4096 pixels, and selected diagram revisions exact" );
+        pixels += static_cast<uint64_t>( view.pixel_width() ) * view.pixel_height();
+        if( pixels > 16 * 1024 * 1024 )
+            return failure( kiapi::common::AS_BAD_REQUEST, "Request at most sixteen million pixels per observation; use additional observations for more views" );
+        if( view.has_viewport() )
+        {
+            const auto& box = view.viewport();
+            if( !std::isfinite( box.x() ) || !std::isfinite( box.y() ) || !std::isfinite( box.width() ) || !std::isfinite( box.height() )
+                || std::abs( box.x() ) > 1000000000 || std::abs( box.y() ) > 1000000000
+                || box.width() <= 0 || box.height() <= 0 || box.width() > 2100000000 || box.height() > 2100000000 )
+                return failure( kiapi::common::AS_BAD_REQUEST, "Use finite positive viewport dimensions within the supported diagram-unit range" );
+        }
+    }
+    // No yield, input processing or asynchronous paint occurs inside this scope.
+    // Restore every temporary rendering parameter even when PNG encoding fails.
+    struct RESTORE_VIEW
+    {
+        RECURSIVE_DIAGRAM_FRAME& frame;
+        double scale;
+        wxPoint2DDouble origin;
+        std::optional<SELECTION> historical;
+        std::string selected, connection, comment;
+        bool rendered;
+        ~RESTORE_VIEW()
+        {
+            frame.m_scale = scale; frame.m_origin = origin; frame.m_historyPreview = historical;
+            frame.m_selected = selected; frame.m_connectionId = connection; frame.m_commentId = comment; frame.m_rendered = rendered;
+        }
+    } restore{ *this, m_scale, m_origin, m_historyPreview, m_selected, m_connectionId, m_commentId, m_rendered };
+    D::RecursiveDiagramObservation result;
+    result.set_document_id( DocumentId() ); result.set_source_token( m_document.source_token() ); result.set_view_revision( m_viewRevision );
+    *result.mutable_editor() = State();
+    for( const auto& view : request.views() )
+    {
+        m_historyPreview = view.has_selection() ? std::optional<SELECTION>( view.selection() ) : restore.historical;
+        m_selected = view.has_selection() ? "" : restore.selected;
+        m_connectionId = view.has_selection() ? "" : restore.connection;
+        m_commentId = view.has_selection() ? "" : restore.comment;
+        auto* scope = current(); if( !scope ) return failure( kiapi::common::AS_BAD_REQUEST, "The requested diagram revision is unavailable" );
+        auto bounds = view.has_viewport() ? wxRect2DDouble( view.viewport().x(), view.viewport().y(), view.viewport().width(), view.viewport().height() ) : diagramBounds();
+        m_scale = std::min( view.pixel_width() / bounds.m_width, view.pixel_height() / bounds.m_height );
+        m_origin = { bounds.m_x - ( view.pixel_width() / m_scale - bounds.m_width ) / 2,
+                     bounds.m_y - ( view.pixel_height() / m_scale - bounds.m_height ) / 2 };
+        // The wxDC backend accepts integer device coordinates. Reject an
+        // unrepresentable zoom instead of overflowing and drawing false geometry.
+        auto extent = diagramBounds();
+        auto representable = [&]( double x, double y )
+        { return std::isfinite( ( x - m_origin.m_x ) * m_scale ) && std::isfinite( ( y - m_origin.m_y ) * m_scale )
+            && std::abs( ( x - m_origin.m_x ) * m_scale ) < 10000000 && std::abs( ( y - m_origin.m_y ) * m_scale ) < 10000000; };
+        if( !std::isfinite( m_scale ) || m_scale <= 0 || !representable( extent.m_x, extent.m_y )
+            || !representable( extent.m_x + extent.m_width, extent.m_y + extent.m_height ) )
+            return failure( kiapi::common::AS_BAD_REQUEST, "This zoom exceeds the native drawing range; request a wider viewport" );
+        wxBitmap bitmap( static_cast<int>( view.pixel_width() ), static_cast<int>( view.pixel_height() ), 32 );
+        if( !bitmap.IsOk() ) return failure( kiapi::common::AS_BAD_REQUEST, "The native image buffer could not be created" );
+        { wxMemoryDC dc( bitmap ); dc.SetFont( GetFont() ); paint( dc ); dc.SelectObject( wxNullBitmap ); }
+        wxMemoryOutputStream output;
+        if( !bitmap.ConvertToImage().SaveFile( output, wxBITMAP_TYPE_PNG ) || output.GetSize() > 64 * 1024 * 1024 )
+            return failure( kiapi::common::AS_BAD_REQUEST, "The native diagram image could not be encoded within the supported output size" );
+        std::string png( output.GetSize(), '\0' ); output.CopyTo( png.data(), png.size() );
+        auto* rendered = result.add_views(); rendered->set_view_id( view.view_id() ); rendered->set_units( "diagram-unit" );
+        rendered->set_coordinate_system( "x-right/y-down" );
+        rendered->mutable_viewport()->set_x( m_origin.m_x ); rendered->mutable_viewport()->set_y( m_origin.m_y );
+        rendered->mutable_viewport()->set_width( view.pixel_width() / m_scale ); rendered->mutable_viewport()->set_height( view.pixel_height() / m_scale );
+        rendered->set_pixel_width( view.pixel_width() ); rendered->set_pixel_height( view.pixel_height() ); rendered->set_png( std::move( png ) );
+        *rendered->mutable_diagram() = *scope;
+        const auto& notes = m_historyPreview ? scope->local_diagram().annotations() : !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
+            : m_draft.baseline().block_id() == scope->selection().block_id() ? m_draft.local_diagram().annotations() : scope->local_diagram().annotations();
+        *rendered->mutable_diagram()->mutable_local_diagram()->mutable_annotations() = notes;
+        if( auto* fields = requirements( *scope ) ) *rendered->mutable_requirements() = fields->fields();
+        if( !view.has_selection() && !m_historyPreview && same( m_draft.baseline(), scope->selection() ) )
+            *rendered->mutable_requirements() = m_draft.fields();
+        rendered->set_contains_unsaved_draft( !view.has_selection() && !m_historyPreview && m_dirty );
+        for( const auto& child : scope->children() ) if( auto* item = revision( child ) ) *rendered->add_children() = *item;
+        for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
+        {
+            std::vector<D::ConnectionSelectionData> pending( scope->local_diagram().connections().begin(), scope->local_diagram().connections().end() );
+            std::set<std::string> seen;
+            while( !pending.empty() )
+            {
+                auto selected = pending.back(); pending.pop_back(); if( !seen.insert( selected.revision_id() ).second ) continue;
+                for( const auto& item : archive.revisions() ) if( item.selection().SerializeAsString() == selected.SerializeAsString() )
+                { *rendered->add_connections() = item; pending.insert( pending.end(), item.members().begin(), item.members().end() ); break; }
+            }
+        }
+    }
+    return result;
 }
 D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
 {

@@ -64,6 +64,7 @@
 #include <api/api_sch_net_settings.h>
 #include <api/api_sch_erc_settings.h>
 #include <api/api_sch_field_text_modes.h>
+#include <sim/spice_circuit_model.h>
 #include <sch_symbol_cache_state.h>
 #include <sch_root_instance.h>
 #include <richio.h>
@@ -2849,14 +2850,27 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    if( aCtx.Request.operation_id().empty() || aCtx.Request.netlist().empty() )
-        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation requires operation identity and a non-empty netlist" );
+    if( aCtx.Request.operation_id().empty() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation requires an operation identity" );
+
+    std::string netlist = aCtx.Request.netlist();
+    if( netlist.empty() )
+    {
+        SPICE_CIRCUIT_MODEL model( schematic() );
+        STRING_FORMATTER formatter;
+        WX_STRING_REPORTER reporter;
+        if( !model.GetNetlist( wxS( ".op" ), 0, &formatter, reporter ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "KiCad could not generate an ngspice netlist from the current schematic: "
+                                            + reporter.GetMessages().ToStdString() );
+        netlist = formatter.GetString();
+    }
 
     std::lock_guard<std::mutex> lock( m_simulationMutex );
     bool start = false;
     if( m_simulationJob && m_simulationJob->operationId == aCtx.Request.operation_id() )
     {
-        if( m_simulationJob->netlist != aCtx.Request.netlist()
+        if( m_simulationJob->netlist != netlist
                 || !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
                                                                          aCtx.Request.document() ) )
             return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation operation identity was reused with different netlist bytes" );
@@ -2871,7 +2885,7 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
         m_simulationJob->operationId = aCtx.Request.operation_id();
         m_simulationJob->processEpoch = aCtx.Request.process_epoch();
         m_simulationJob->document = aCtx.Request.document();
-        m_simulationJob->netlist = aCtx.Request.netlist();
+        m_simulationJob->netlist = netlist;
         m_simulationJob->status = SIMJS_RUNNING;
         m_simulationJob->sequence++;
     }
@@ -2901,7 +2915,13 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
             m_simulationJob->errorMessage = "KiCad's native ngspice wrapper rejected the netlist or run command";
             m_simulationJob->workerFinished = true;
             m_simulationJob->sequence++;
-            return SimulationError( ApiStatusCode::AS_BAD_REQUEST, m_simulationJob->errorMessage );
+            SimulationJobState failed;
+            failed.mutable_document()->CopyFrom( aCtx.Request.document() );
+            failed.set_job_id( m_simulationJob->jobId ); failed.set_operation_id( m_simulationJob->operationId );
+            failed.set_process_epoch( m_simulationJob->processEpoch ); failed.set_status( m_simulationJob->status );
+            failed.set_sequence( m_simulationJob->sequence ); failed.set_worker_finished( true );
+            failed.set_error_code( m_simulationJob->errorCode ); failed.set_error_message( m_simulationJob->errorMessage );
+            return failed;
         }
     }
 

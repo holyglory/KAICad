@@ -9,7 +9,7 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyNativeSimulation(NativeClient client, DocumentSpecifier document,
         string evidence, string instanceId, CancellationToken token)
     {
-        const string netlist = "Automation divider\nV1 in 0 5\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n";
+        const string netlist = ""; // Let eeschema generate the .op deck from the current schematic.
         string operation = Guid.NewGuid().ToString("D");
         var started = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
         { Document = document, OperationId = operation, ProcessEpoch = client.Epoch, Netlist = netlist }, token);
@@ -43,6 +43,14 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(SimulationJobStatus.SimjsCancelled, cancelled.Status);
         Assert.IsTrue(cancelled.CancellationRequested);
         Assert.IsFalse(cancelled.Vectors.Count > 0);
+        var invalid = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
+        { Document = document, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch,
+            Netlist = ".not-a-real-ngspice-command\n.end\n" }, token);
+        Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalid.Status);
+        Assert.IsTrue(invalid.WorkerFinished);
+        var invalidRead = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+        { Document = document, JobId = invalid.JobId, ProcessEpoch = client.Epoch }, token);
+        Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalidRead.Status);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation.json"),
             System.Text.Json.JsonSerializer.Serialize(current), token);
     }

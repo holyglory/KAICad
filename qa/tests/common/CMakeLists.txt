@@ -335,7 +335,8 @@ if( UNIX AND NOT APPLE )
         ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
         test_module.cpp
         test_diagram_field_history.cpp
-        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp )
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_conflict.cpp )
     target_compile_definitions( qa_diagram_field_history PRIVATE KICAD_QA_GUI )
     target_link_libraries( qa_diagram_field_history PRIVATE
         common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework

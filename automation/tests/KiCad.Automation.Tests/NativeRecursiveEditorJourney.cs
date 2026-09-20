@@ -137,6 +137,18 @@ public sealed partial class NativeSessionTests
             var chosenCpu = reconciled.Inspect(reconciled.SelectedRoot).Children[1];
             Assert.AreEqual("Retain this draft on conflict.", reconciled.Requirements(chosenCpu).Requirements.General);
             Assert.AreEqual("A competing saved requirement.", reconciled.Requirements(competing.Inspect(competing.SelectedRoot).Children[1]).Requirements.General);
+            // Independent field edits should compose without asking the user to
+            // choose a winner or losing the remote schematic requirement.
+            Key("1", control: true); Key("a", control: true); Type("My independent general requirement."); await Wait(s => s.Dirty);
+            var independentRemote = reconciled.StartDraft(chosenCpu);
+            independentRemote = independentRemote with { Requirements = independentRemote.Requirements.Edit(DiagramRequirementField.Schematic, "Show the telemetry path clearly.") };
+            var independentGraph = reconciled.SaveDraft(reconciled.SelectedRoot, [reconciled.SelectedRoot, chosenCpu], independentRemote,
+                Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(independentGraph), token);
+            var composed = await Save();
+            Assert.AreEqual("My independent general requirement.", composed.Draft.Fields.General);
+            Assert.AreEqual("Show the telemetry path clearly.", composed.Draft.Fields.Schematic);
+            Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving"));
             Key("w", control: true);
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);

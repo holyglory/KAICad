@@ -72,7 +72,7 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual(page.Entries[1].RequirementRevisionId, restored);
             foreach (string check in new[] { "cancelled_without_restore", "reopen_cleared_restore", "scope_isolation", "compact_controls_visible" })
                 Assert.IsTrue(result.GetProperty(check).GetBoolean(), check);
-            foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png" })
+            foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png", "04-conflict-unresolved.png", "05-conflict-resolved.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, "A rendered capture is required: " + capture);
             byte[] currentCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "01-current.png"));
             byte[] earlierCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "02-earlier-text.png"));
@@ -84,6 +84,11 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual("Independent unsaved text.", restoredDraft.Requirements.General);
             Assert.AreEqual("Keep power paths short.", restoredDraft.Requirements.Routing);
             Assert.AreEqual("Keep high-current paths away from sensing.", graph.Requirements(psu).Requirements.Routing);
+            using var conflict = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "conflict-interaction.json")));
+            Assert.IsTrue(conflict.RootElement.GetProperty("no_default_choice").GetBoolean());
+            Assert.IsTrue(conflict.RootElement.GetProperty("partial_resolution_blocked").GetBoolean());
+            Assert.AreEqual("Keep both edges accessible.", conflict.RootElement.GetProperty("routing_text").GetString());
+            Assert.AreEqual("Prefer fixed mounting.", conflict.RootElement.GetProperty("general_text").GetString());
         }
         finally { Directory.Delete(temporary, recursive: true); }
     }

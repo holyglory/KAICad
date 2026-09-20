@@ -3,10 +3,13 @@
 #include <boost/test/unit_test.hpp>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <dialogs/dialog_diagram_field_history.h>
+#include <dialogs/dialog_diagram_conflict.h>
 #include <api/common/types/diagram_revision_types.pb.h>
 #include <nlohmann/json.hpp>
 #include <wx/app.h>
 #include <wx/button.h>
+#include <wx/choice.h>
+#include <wx/radiobut.h>
 #include <wx/dcmemory.h>
 #include <wx/dcscreen.h>
 #include <wx/evtloop.h>
@@ -102,7 +105,7 @@ void capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const 
     BOOST_REQUIRE_MESSAGE( written, message );
 }
 
-int show( DIALOG_DIAGRAM_FIELD_HISTORY* aDialog, const std::function<void()>& aScenario )
+int show( DIALOG_SHIM* aDialog, const std::function<void()>& aScenario )
 {
     std::exception_ptr failure;
     bool expired = false;
@@ -219,6 +222,80 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
         { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
+}
+
+BOOST_AUTO_TEST_CASE( RenderedConflictRequiresExplicitChoicesAndPreservesCancel )
+{
+    const char* inputPath = std::getenv( "KICAD_FIELD_HISTORY_INPUT" );
+    const char* outputPath = std::getenv( "KICAD_FIELD_HISTORY_EVIDENCE" );
+    if( !inputPath || !outputPath ) return;
+    BOOST_REQUIRE( KI_TEST::CanDoDisplayTests() );
+    D::FieldHistoryPageData page; std::ifstream input( inputPath, std::ios::binary );
+    BOOST_REQUIRE( page.ParseFromIstream( &input ) );
+    std::filesystem::path evidence( outputPath );
+    D::RequirementMergeData merge;
+    auto* original = merge.mutable_original_draft(); original->mutable_baseline()->set_block_id( page.owner_id() );
+    original->mutable_baseline()->set_state_id( page.state_id() ); original->mutable_baseline()->set_revision_id( page.context_revision_id() );
+    original->set_baseline_requirement_revision_id( page.entries( 1 ).requirement_revision_id() );
+    original->mutable_baseline_fields()->set_routing( "Keep sensing quiet." );
+    original->mutable_fields()->set_routing( "Place converters at the top edge." );
+    original->mutable_fields()->set_general( "Prefer a removable unit." );
+    auto* latest = merge.mutable_saved_draft(); *latest->mutable_baseline() = original->baseline();
+    latest->set_baseline_requirement_revision_id( page.requirement_revision_id() );
+    latest->mutable_fields()->set_routing( "Place converters at the bottom edge." );
+    latest->mutable_fields()->set_general( "Prefer fixed mounting." );
+    auto* routing = merge.add_conflicts(); routing->set_field( D::RFK_ROUTING ); routing->set_baseline( "Keep sensing quiet." );
+    routing->set_draft( original->fields().routing() ); routing->set_saved( latest->fields().routing() );
+    auto* general = merge.add_conflicts(); general->set_field( D::RFK_GENERAL ); general->set_baseline( "" );
+    general->set_draft( original->fields().general() ); general->set_saved( latest->fields().general() );
+    auto* cancelled = new DIALOG_DIAGRAM_CONFLICT( nullptr, "PSU", merge );
+    BOOST_CHECK_EQUAL( show( cancelled, [&]
+    {
+        BOOST_CHECK( !control<wxButton>( cancelled, "DiagramConflictSave" )->IsEnabled() );
+        BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictUseMine" )->GetValue() );
+        BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictUseSaved" )->GetValue() );
+        BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictWriteMerged" )->GetValue() );
+        capture( cancelled, evidence, "04-conflict-unresolved.png" );
+        key( WXK_ESCAPE );
+    } ), wxID_CANCEL );
+    BOOST_CHECK( cancelled->Resolutions().empty() ); cancelled->Destroy(); wxTheApp->ProcessPendingEvents();
+    auto* dialog = new DIALOG_DIAGRAM_CONFLICT( nullptr, "PSU", merge );
+    bool noDefault = false, partialBlocked = false;
+    BOOST_CHECK_EQUAL( show( dialog, [&]
+    {
+        auto* save = control<wxButton>( dialog, "DiagramConflictSave" );
+        auto* resolved = control<wxTextCtrl>( dialog, "DiagramConflictResolved" );
+        noDefault = !save->IsEnabled();
+        click( control<wxRadioButton>( dialog, "DiagramConflictUseMine" ) );
+        waitFor( [&] { return resolved->GetValue() == wxString::FromUTF8( routing->draft() ); } );
+        partialBlocked = !save->IsEnabled(); BOOST_CHECK( partialBlocked );
+        click( control<wxRadioButton>( dialog, "DiagramConflictWriteMerged" ) );
+        resolved->SetFocus(); wxUIActionSimulator keys;
+        BOOST_REQUIRE( keys.KeyDown( WXK_CONTROL ) ); BOOST_REQUIRE( keys.KeyDown( 'A' ) );
+        BOOST_REQUIRE( keys.KeyUp( 'A' ) ); BOOST_REQUIRE( keys.KeyUp( WXK_CONTROL ) );
+        BOOST_REQUIRE( keys.Text( "Keep both edges accessible." ) );
+        waitFor( [&] { return resolved->GetValue() == "Keep both edges accessible."; } );
+        auto* fields = control<wxChoice>( dialog, "DiagramConflictField" ); fields->SetFocus(); key( WXK_DOWN );
+        waitFor( [&] { return fields->GetSelection() == 1; } );
+        BOOST_CHECK( !control<wxRadioButton>( dialog, "DiagramConflictUseMine" )->GetValue() );
+        click( control<wxRadioButton>( dialog, "DiagramConflictUseSaved" ) );
+        waitFor( [&] { return save->IsEnabled() && resolved->GetValue() == "Prefer fixed mounting."; } );
+        fields->SetFocus(); key( WXK_UP ); waitFor( [&] { return fields->GetSelection() == 0; } );
+        BOOST_CHECK_EQUAL( resolved->GetValue(), "Keep both edges accessible." );
+        capture( dialog, evidence, "05-conflict-resolved.png" ); click( save );
+    } ), wxID_OK );
+    auto choices = dialog->Resolutions(); BOOST_REQUIRE_EQUAL( choices.size(), 2 );
+    BOOST_CHECK_EQUAL( choices[0].text(), "Keep both edges accessible." );
+    BOOST_CHECK_EQUAL( choices[1].text(), "Prefer fixed mounting." );
+    BOOST_CHECK_EQUAL( choices[0].baseline_revision_id(), original->baseline_requirement_revision_id() );
+    BOOST_CHECK_EQUAL( choices[0].saved_revision_id(), latest->baseline_requirement_revision_id() );
+    BOOST_CHECK_EQUAL( choices[0].draft().routing(), "Place converters at the top edge." );
+    BOOST_CHECK_EQUAL( choices[0].saved().routing(), "Place converters at the bottom edge." );
+    std::ofstream receipt( evidence / "conflict-interaction.json" );
+    receipt << nlohmann::json( { { "no_default_choice", noDefault }, { "partial_resolution_blocked", partialBlocked },
+        { "routing_text", choices[0].text() }, { "general_text", choices[1].text() },
+        { "base_revision", choices[0].baseline_revision_id() }, { "saved_revision", choices[0].saved_revision_id() } } ).dump( 2 );
+    BOOST_REQUIRE( receipt.good() ); dialog->Destroy(); wxTheApp->ProcessPendingEvents();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

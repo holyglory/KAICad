@@ -65,6 +65,39 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = board }, Items = { createdTrack.Id } }, token);
             var actualTrack = actual.Items.Single().Unpack<Track>();
             Assert.AreEqual(moved.End, actualTrack.End);
+            var guideShape = new BoardGraphicShape
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Layer = BoardLayer.BlDwgsUser,
+                Shape = new GraphicShape
+                {
+                    Attributes = new() { Stroke = new() { Width = new() { ValueNm = 100_000 } } },
+                    Segment = new() { Start = new() { XNm = 10_000_000, YNm = 12_000_000 }, End = new() { XNm = 20_000_000, YNm = 12_000_000 } }
+                }
+            };
+            var guideCreate = new CreateItems { Header = new() { Document = board } };
+            guideCreate.Items.Add(Any.Pack(guideShape));
+            var guideReply = await mcp.Tool("kicad_pcb_guide_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(guideCreate),
+                expectedStateJson = updatedReply.GetProperty("structuredContent").GetProperty("afterState").GetString(),
+                guideId = Guid.NewGuid().ToString("D"), sourceSha256 = new string('a', 64)
+            });
+            Assert.IsFalse(guideReply.TryGetProperty("isError", out var guideError) && guideError.GetBoolean(), guideReply.GetRawText());
+            var guideData = guideReply.GetProperty("structuredContent");
+            string guideState = guideData.GetProperty("afterState").GetString()!;
+            var guideRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { guideShape.Id } }, token);
+            var persistedGuide = guideRead.Items.Single().Unpack<BoardGraphicShape>();
+            Assert.AreEqual(BoardLayer.BlDwgsUser, persistedGuide.Layer);
+            Assert.IsTrue(persistedGuide.CustomProperties.Any(p => p.Key == "kicad.ai.guide.role" && p.Value == "visual-underlay"));
+            var copperGuide = guideShape.Clone(); copperGuide.Layer = BoardLayer.BlFCu;
+            var copperRequest = new CreateItems { Header = new() { Document = board } }; copperRequest.Items.Add(Any.Pack(copperGuide));
+            var rejectedGuide = await mcp.Tool("kicad_pcb_guide_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(copperRequest), expectedStateJson = guideState,
+                guideId = Guid.NewGuid().ToString("D"), sourceSha256 = new string('b', 64)
+            });
+            Assert.IsTrue(rejectedGuide.GetProperty("isError").GetBoolean());
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

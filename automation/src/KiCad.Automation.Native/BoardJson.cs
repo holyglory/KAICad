@@ -12,7 +12,8 @@ public static class BoardJson
 {
     private static readonly TypeRegistry Types = TypeRegistry.FromFiles(
         CreateItems.Descriptor.File, Track.Descriptor.File, Arc.Descriptor.File, Via.Descriptor.File,
-        Footprint.Descriptor.File, Pad.Descriptor.File, BoardGraphicShape.Descriptor.File, BoardText.Descriptor.File);
+        Footprint.Descriptor.File, Pad.Descriptor.File, ReferenceImage.Descriptor.File,
+        BoardGraphicShape.Descriptor.File, BoardText.Descriptor.File);
     public static JsonFormatter Formatter { get; } = new(JsonFormatter.Settings.Default.WithTypeRegistry(Types));
     public static JsonParser Parser { get; } = new(JsonParser.Settings.Default.WithTypeRegistry(Types));
 }

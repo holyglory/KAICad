@@ -1,9 +1,11 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using ModelContextProtocol.Protocol;
@@ -33,6 +35,41 @@ public sealed class PcbItemTools(InstanceRegistry registry)
      Description("Update typed native PCB items with an exact lifecycle checkpoint. requestJson is UpdateItems protobuf JSON; expectedStateJson must identify the same open board and native content digest. Stale boards are rejected and no unchecked fallback is used. This is a primitive edit, not automatic routing.")]
     public Task<CallToolResult> Update(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Mutate<UpdateItems, UpdateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_guide_create"),
+     Description("Create a visual PCB routing guide as native non-copper board objects. The request may contain only BoardGraphicShape vector geometry or ReferenceImage objects, and every item must use a non-copper layer. The source SHA-256 and guide ID are attached as custom provenance properties. This never creates Track, Arc or Via copper and does not validate RF, impedance, clearance or length constraints; convert a guide to explicitly net-bound copper candidates separately.")]
+    public Task<CallToolResult> CreateGuide(string instanceId, string requestJson, string expectedStateJson,
+        string guideId, string sourceSha256, CancellationToken cancellationToken)
+    {
+        var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
+        ValidateHeader(request.Header, requireItems: true);
+        if (!Guid.TryParseExact(guideId, "D", out var id) || id == Guid.Empty
+            || sourceSha256.Length != 64 || sourceSha256.Any(c => !Uri.IsHexDigit(c)))
+            throw new AutomationException("invalid_pcb_guide_identity", "Provide a canonical guide ID and exact source SHA-256.");
+        if (request.Items.Count == 0) throw new AutomationException("invalid_pcb_guide", "A guide must contain at least one vector or reference-image object.");
+        for (int index = 0; index < request.Items.Count; ++index)
+        {
+            var packed = request.Items[index];
+            if (packed.Is(BoardGraphicShape.Descriptor))
+            {
+                var shape = packed.Unpack<BoardGraphicShape>(); ValidateGuideLayer(shape.Layer);
+                shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.id", Value = guideId });
+                shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.source_sha256", Value = sourceSha256 });
+                shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.role", Value = "visual-underlay" });
+                request.Items[index] = Any.Pack(shape);
+            }
+            else if (packed.Is(ReferenceImage.Descriptor))
+            {
+                var image = packed.Unpack<ReferenceImage>(); ValidateGuideLayer(image.Layer);
+                image.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.id", Value = guideId });
+                image.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.source_sha256", Value = sourceSha256 });
+                image.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.role", Value = "visual-underlay" });
+                request.Items[index] = Any.Pack(image);
+            }
+            else throw new AutomationException("invalid_pcb_guide", "Guide creation accepts only BoardGraphicShape or ReferenceImage objects.");
+        }
+        return Mutate<CreateItems, CreateItemsResponse>(instanceId, BoardJson.Formatter.Format(request), expectedStateJson, cancellationToken);
+    }
 
     private async Task<CallToolResult> Mutate<TRequest, TResponse>(string instanceId, string requestJson,
         string expectedStateJson, CancellationToken cancellationToken)
@@ -84,6 +121,14 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             // keep this branch here so read requests can intentionally have no type filter.
             _ = hasItems;
         }
+    }
+
+    private static void ValidateGuideLayer(BoardLayer layer)
+    {
+        // BL_F_Cu through BL_B_Cu are the contiguous copper range in the
+        // shared board protocol. Guides belong on documentation/user layers.
+        if ((int)layer >= 3 && (int)layer <= 34)
+            throw new AutomationException("invalid_pcb_guide_layer", "Visual guides must use a non-copper board layer.");
     }
 
     private static CallToolResult Data(object value, bool error = false)

@@ -2982,8 +2982,39 @@ Save/Decline and history restoration. The first native preservation run is
 no-op/stale requests and missing-library behavior passed in both native themes
 with `t20260920T082202Z-413cbd`.
 There are no new raw-XML forms or component-choice controls in this increment.
-Exact native realization, physical allocation and component-selection UI remain
+Native generation, physical allocation and component-selection UI remain
 separate unfinished work; these fields alone do not generate a schematic.
+
+Component realizations are explicit, separate bindings: a block can refer to zero,
+one or several exact electrical components across declared child designs. Each
+target retains the design, circuit and component identities in the block's own
+revision. Choosing a model/package string never creates one of these bindings.
+`kicad_diagram_components_set` saves this list with the normal exact root/path,
+source hash, operation ID and process-epoch guards. Earlier bindings remain in
+history; changed bindings are not silently merged into a requirement-only draft.
+
+`kicad_diagram_components` inspects the chosen saved revision against an explicitly
+supplied `hardware.xml` path and hash. It reads the manifest's declared model and
+knowledge-library files, returns their hashes and resolves all symbol units through
+their existing sheet-instance mappings. A renamed component keeps its identity;
+missing designs/components, replaced circuits and broken native mappings do not
+fall back to similar names or coordinates. Native locations are withheld when the
+design's identity mappings are unresolved, with the diagnostics returned instead.
+These observations describe saved XML snapshots, not a live editor revision or
+electrical correctness. Native preservation, MCP mutation/inspection and rendered
+history/restore/Decline/Save passed in both themes with
+`t20260920T090734Z-89bbe9`. The earlier `520f92` failure is retained: the test had
+opened PSU history while expecting a root revision; the corrected test explicitly
+navigates and asserts its scope. Native navigation controls, physical allocation
+and net/pin refinement remain separate unfinished outcomes.
+
+The original refinement-input model and strict XML contract are also defined:
+prompt text, historical block/connection paths, source hashes, attachment names/
+media types/byte counts and document revision/page/table/variant provenance.
+`t20260920T091402Z-3602f2` verifies model/XML behavior only. These records are not yet
+integrated with graph publication, preserved asset files or agent result tools;
+that remains `p465efce87f8f22fc`, with actual client qualification under
+`pa48933d0fe0a5c2f`. See [the contract](qualification/agent-refinement-contract.md).
 
 `kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
 Read `kicad_diagram_state` first, then supply that document's `sourceToken` and

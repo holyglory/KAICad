@@ -6,7 +6,7 @@ namespace KiCad.Automation.Model;
 /// <summary>An exact occurrence, implementation and revision; never a mutable head lookup.</summary>
 public sealed record BlockSelection(Guid BlockId, Guid StateId, Guid RevisionId);
 
-public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid HeadRevisionId);
+public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid HeadRevisionId, BlockSelection? ForkedFrom = null);
 
 /// <summary>The revisioned containment portion of a block's local diagram. The root uses
 /// the same contract as every child. Physical allocation is deliberately independent.</summary>
@@ -118,6 +118,17 @@ public sealed class RecursiveBlockGraph
             }
         }
         foreach (var state in States) ValidateHistory(state);
+        foreach (var state in States)
+        {
+            var seen = new HashSet<Guid> { state.Id }; var current = state;
+            while (current.ForkedFrom is { } source)
+            {
+                _ = Inspect(source);
+                if (source.BlockId != current.BlockId || !seen.Add(source.StateId))
+                    throw Invalid("An implementation source must be an exact revision of the same block without circular derivation.");
+                current = _states[source.StateId];
+            }
+        }
         foreach (var revision in Revisions)
         {
             ValidateRestoration(revision.Selection, revision.ParentRevisionId, revision.RestoredFrom);
@@ -277,6 +288,24 @@ public sealed class RecursiveBlockGraph
             || initial.Selection != new BlockSelection(state.BlockId, state.Id, state.HeadRevisionId))
             throw Invalid("An alternative needs a fresh implementation of an existing occurrence and its initial revision.");
         return new(DocumentId, SelectedRoot, States.Add(state), Revisions.Add(initial), RequirementHistories.Add(requirements), ConnectionArchives);
+    }
+
+    /// <summary>Create an independent implementation from one exact saved revision.
+    /// The source stays discoverable and immutable; the new state is not selected.</summary>
+    public RecursiveBlockGraph ForkImplementation(BlockSelection source, Guid stateId, Guid revisionId,
+        Guid requirementRevisionId, string name, RequirementRevisionOrigin origin)
+    {
+        var original = Inspect(source); Text(name, "A new implementation needs a name.");
+        if (States.Any(s => s.BlockId == source.BlockId && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)))
+            throw new AutomationException("implementation_name_exists", "Choose a distinct implementation name for this block.");
+        var originalRequirements = Requirements(source);
+        var state = new BlockDesignState(stateId, source.BlockId, name, revisionId, source);
+        var selection = new BlockSelection(source.BlockId, stateId, revisionId);
+        var history = new DiagramRequirementHistory(new(DocumentId, source.BlockId, stateId),
+            [new(requirementRevisionId, null, originalRequirements.Requirements, origin, [])]);
+        var initial = new RecursiveBlockRevision(selection, null, original.Name, requirementRevisionId,
+            original.Children, origin, Diagram: original.Diagram);
+        return AddImplementation(state, initial, history);
     }
 
     /// <summary>Select a revision of an existing occurrence at an exact root-to-block path.

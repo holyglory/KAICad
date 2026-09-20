@@ -110,8 +110,12 @@ public static class RecursiveBlockCodec
     public static P.RecursiveBlockGraphData Encode(M.RecursiveBlockGraph graph)
     {
         var data = new P.RecursiveBlockGraphData { SchemaVersion = 1, DocumentId = Id(graph.DocumentId), SelectedRoot = Selection(graph.SelectedRoot) };
-        data.States.Add(graph.States.Select(s => new P.BlockDesignStateData
-            { Id = Id(s.Id), BlockId = Id(s.BlockId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId) }));
+        data.States.Add(graph.States.Select(s =>
+        {
+            var state = new P.BlockDesignStateData { Id = Id(s.Id), BlockId = Id(s.BlockId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId) };
+            if (s.ForkedFrom is { } source) state.ForkedFrom = Selection(source);
+            return state;
+        }));
         foreach (var r in graph.Revisions)
         {
             var row = new P.BlockRevisionData { Selection = Selection(r.Selection), Name = r.Name,
@@ -131,7 +135,8 @@ public static class RecursiveBlockCodec
         Known(data, P.RecursiveBlockGraphData.Parser);
         if (data.SchemaVersion != 1) throw Invalid("Use the supported recursive diagram message version.");
         return new(GuidValue(data.DocumentId), Selection(Need(data.SelectedRoot)),
-            data.States.Select(s => new M.BlockDesignState(GuidValue(s.Id), GuidValue(s.BlockId), s.Name, GuidValue(s.HeadRevisionId))),
+            data.States.Select(s => new M.BlockDesignState(GuidValue(s.Id), GuidValue(s.BlockId), s.Name, GuidValue(s.HeadRevisionId),
+                s.ForkedFrom is { } source ? Selection(source) : null)),
             data.Revisions.Select(r => new M.RecursiveBlockRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
                 r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null)),

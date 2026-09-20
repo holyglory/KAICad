@@ -7,6 +7,52 @@ namespace KiCad.Automation.Tests;
 public sealed class RecursiveImplementationTests
 {
     [TestMethod]
+    public void ANewImplementationPinsItsExactSourceAndStartsIndependentHistoryWithoutSelection()
+    {
+        var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var source = f.Blocks["CPU"];
+        Guid stateId = Guid.NewGuid(), revisionId = Guid.NewGuid(), requirementId = Guid.NewGuid();
+        var forked = graph.ForkImplementation(source, stateId, revisionId, requirementId, "Low-power exploration", RecursiveBlockFixture.Origin());
+        Assert.AreEqual(graph.SelectedRoot, forked.SelectedRoot);
+        var state = forked.States.Single(s => s.Id == stateId); Assert.AreEqual(source, state.ForkedFrom);
+        var choice = new BlockSelection(source.BlockId, stateId, revisionId);
+        Assert.AreEqual(graph.Requirements(source).Requirements, forked.Requirements(choice).Requirements);
+        Assert.IsTrue(graph.Inspect(source).LocalDiagram.SameContents(forked.Inspect(choice).LocalDiagram));
+        CollectionAssert.AreEqual(graph.Inspect(source).Children.ToArray(), forked.Inspect(choice).Children.ToArray());
+        var draft = forked.StartDraft(choice);
+        draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "Use less power.") };
+        var edited = forked.SaveImplementationDraft(forked.SelectedRoot, [forked.SelectedRoot, source], draft,
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        Assert.AreEqual(graph.Requirements(source).Requirements, edited.Requirements(source).Requirements);
+        Assert.AreEqual(source, edited.States.Single(s => s.Id == stateId).ForkedFrom);
+        var loaded = RecursiveBlockGraphXml.Read(RecursiveBlockGraphXml.Write(edited));
+        Assert.AreEqual(source, loaded.States.Single(s => s.Id == stateId).ForkedFrom);
+        var fromMessage = KiCad.Automation.Native.RecursiveBlockCodec.Decode(KiCad.Automation.Native.RecursiveBlockCodec.Encode(edited));
+        Assert.AreEqual(RecursiveBlockGraphXml.Write(loaded), RecursiveBlockGraphXml.Write(fromMessage));
+        Assert.HasCount(2, loaded.History(stateId));
+        Assert.HasCount(1, loaded.History(source.StateId));
+    }
+
+    [TestMethod]
+    public void DuplicateNamesWrongSourceAndCircularImplementationDerivationAreRejected()
+    {
+        var f = RecursiveBlockFixture.Create(); var graph = f.Graph; var source = f.Selected["CPU"];
+        Assert.ThrowsExactly<AutomationException>(() => graph.ForkImplementation(source, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            "INITIAL APPROACH", RecursiveBlockFixture.Origin()));
+        Assert.ThrowsExactly<AutomationException>(() => graph.ForkImplementation(source, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            " ", RecursiveBlockFixture.Origin()));
+        Assert.ThrowsExactly<AutomationException>(() => graph.ForkImplementation(source with { BlockId = Guid.NewGuid() }, Guid.NewGuid(),
+            Guid.NewGuid(), Guid.NewGuid(), "New", RecursiveBlockFixture.Origin()));
+        var self = graph.States.Select(s => s.Id == source.StateId ? s with { ForkedFrom = source } : s);
+        Assert.ThrowsExactly<AutomationException>(() => new RecursiveBlockGraph(graph.DocumentId, graph.SelectedRoot, self, graph.Revisions, graph.RequirementHistories));
+        var alternative = f.Alternatives["CPU"];
+        var cyclic = graph.States.Select(s => s.Id == source.StateId ? s with { ForkedFrom = alternative }
+            : s.Id == alternative.StateId ? s with { ForkedFrom = source } : s);
+        Assert.ThrowsExactly<AutomationException>(() => new RecursiveBlockGraph(graph.DocumentId, graph.SelectedRoot, cyclic, graph.Revisions, graph.RequirementHistories));
+        var wrongOwner = graph.States.Select(s => s.Id == source.StateId ? s with { ForkedFrom = f.Selected["PSU"] } : s);
+        Assert.ThrowsExactly<AutomationException>(() => new RecursiveBlockGraph(graph.DocumentId, graph.SelectedRoot, wrongOwner, graph.Revisions, graph.RequirementHistories));
+    }
+
+    [TestMethod]
     public void PreviewDraftDoesNotSelectAndSavePublishesItsEditsOnlyInThatImplementation()
     {
         var f = RecursiveBlockFixture.Create(); var graph = f.Graph; var original = f.Selected["CPU"]; var alternative = f.Alternatives["CPU"];

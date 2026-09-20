@@ -40,7 +40,9 @@
   <xs:element name="recursive-block-graph"><xs:complexType><xs:sequence>
     <xs:element name="selected-root" type="selection"/>
     <xs:element name="states"><xs:complexType><xs:sequence>
-      <xs:element name="state" minOccurs="1" maxOccurs="unbounded"><xs:complexType>
+      <xs:element name="state" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="forked-from" type="selection" minOccurs="0"/>
+      </xs:sequence>
         <xs:attribute name="id" type="h:identity" use="required"/>
         <xs:attribute name="block" type="h:identity" use="required"/>
         <xs:attribute name="name" type="xs:string" use="required"/>

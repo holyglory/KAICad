@@ -34,7 +34,8 @@ public static class RecursiveBlockGraphXml
         var root = new XElement(Ns + "recursive-block-graph", new XAttribute("version", 1), Attr("document", graph.DocumentId),
             Selection("selected-root", graph.SelectedRoot),
             new XElement(Ns + "states", graph.States.OrderBy(s => s.Id).Select(s => new XElement(Ns + "state",
-                Attr("id", s.Id), Attr("block", s.BlockId), new XAttribute("name", s.Name), Attr("head", s.HeadRevisionId)))),
+                Attr("id", s.Id), Attr("block", s.BlockId), new XAttribute("name", s.Name), Attr("head", s.HeadRevisionId),
+                s.ForkedFrom is { } source ? Selection("forked-from", source) : null))),
             new XElement(Ns + "revisions", graph.Revisions.OrderBy(r => r.Selection.RevisionId).Select(r =>
                 new XElement(Ns + "revision", Attr("id", r.Selection.RevisionId), Attr("block", r.Selection.BlockId), Attr("state", r.Selection.StateId),
                     r.ParentRevisionId is { } parent ? Attr("parent", parent) : null, new XAttribute("name", r.Name),
@@ -59,7 +60,8 @@ public static class RecursiveBlockGraphXml
             if (root.Name != Ns + "recursive-block-graph") throw Invalid("Use the supported recursive block graph root and namespace.");
             new XDocument(root).Validate(Schema.Value, null);
             var states = root.Element(Ns + "states")!.Elements(Ns + "state").Select(s =>
-                new BlockDesignState(Id(s, "id"), Id(s, "block"), Text(s, "name"), Id(s, "head")));
+                new BlockDesignState(Id(s, "id"), Id(s, "block"), Text(s, "name"), Id(s, "head"),
+                    s.Element(Ns + "forked-from") is { } source ? ReadSelection(source) : null));
             var revisions = root.Element(Ns + "revisions")!.Elements(Ns + "revision").Select(r =>
                 new RecursiveBlockRevision(new(Id(r, "block"), Id(r, "state"), Id(r, "id")),
                     r.Attribute("parent") is null ? null : Id(r, "parent"), Text(r, "name"), Id(r, "requirements"),

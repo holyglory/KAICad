@@ -65,6 +65,7 @@ message BlockDesignStateData {
   string block_id = 2;
   string name = 3;
   string head_revision_id = 4;
+  BlockSelectionData forked_from = 5;
 }
 message BlockRevisionData {
   BlockSelectionData selection = 1;

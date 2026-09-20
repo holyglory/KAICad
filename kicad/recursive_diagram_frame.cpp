@@ -1295,6 +1295,9 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_selected_annotation_id( m_commentId );
     result.set_implementation_preview( m_preview.has_value() );
     result.set_navigation_input_revision( m_navigationInputRevision );
+    result.set_canvas_origin_x( m_origin.m_x ); result.set_canvas_origin_y( m_origin.m_y ); result.set_canvas_scale( m_scale );
+    result.set_canvas_pixel_width( std::max( 0, m_canvas->GetClientSize().x ) );
+    result.set_canvas_pixel_height( std::max( 0, m_canvas->GetClientSize().y ) );
     if( m_diagramHistoryOpen )
     {
         auto* history = result.mutable_diagram_history(); *history->mutable_context() = m_diagramHistoryPanel->Context();

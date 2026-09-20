@@ -55,4 +55,9 @@ message RecursiveDiagramEditorState {
   uint64 navigation_input_revision = 19;
   FieldHistoryViewState field_history = 20;
   DiagramHistoryViewState diagram_history = 21;
+  double canvas_origin_x = 22;
+  double canvas_origin_y = 23;
+  double canvas_scale = 24;
+  uint32 canvas_pixel_width = 25;
+  uint32 canvas_pixel_height = 26;
 }

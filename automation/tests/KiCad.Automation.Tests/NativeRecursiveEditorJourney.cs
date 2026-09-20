@@ -668,7 +668,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(oldDiagram, wholeSaved.Inspect(wholeSaved.SelectedRoot).RestoredFrom);
             Assert.HasCount(1, wholeSaved.Inspect(topologyGraph.SelectedRoot).Children);
             Assert.HasCount(2, wholeSaved.Inspect(wholeSaved.SelectedRoot).Children);
-            Key("h", control: true); Key("Escape"); await Wait(s => !s.Busy && s.DiagramHistory is null);
+            Key("h", control: true);
+            var cancellingHistory = await Wait(s => s.DiagramHistory is not null);
+            Key("Escape"); await Wait(s => !s.Busy && s.DiagramHistory is null && s.ViewRevision > cancellingHistory.ViewRevision);
             Assert.IsFalse((await Read()).Dirty, "Closing while history loads cannot create a draft.");
             Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
             var inspectedBeforeMore = (await Read()).DiagramHistory.Inspected;

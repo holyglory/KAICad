@@ -674,7 +674,22 @@ public sealed partial class NativeSessionTests
             var afterHistoryCancel = await Wait(s => !s.Busy && s.DiagramHistory is null && s.ViewRevision > cancellingHistory.ViewRevision);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-history-cancelled-state.json"), SchematicJson.Formatter.Format(afterHistoryCancel), token);
             Assert.IsFalse((await Read()).Dirty, "Closing while history loads cannot create a draft.");
-            Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
+            // Continue safe observations after a failed shortcut without erasing
+            // that failure. The real History button distinguishes input dispatch
+            // from a broken model or an unavailable history source.
+            try
+            {
+                Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
+            }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                interactionFailures.Add(error);
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                    clickFromRight: 440, clickFromTop: 115);
+                var recoveredHistory = await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-history-pointer-recovery.json"), SchematicJson.Formatter.Format(recoveredHistory), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-history-pointer-recovery.png"), token);
+            }
             var inspectedBeforeMore = (await Read()).DiagramHistory.Inspected;
             Key("o", alt: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 100 });
             Assert.AreEqual(inspectedBeforeMore, (await Read()).DiagramHistory.Inspected);

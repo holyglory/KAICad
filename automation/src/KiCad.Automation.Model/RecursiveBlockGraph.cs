@@ -364,12 +364,13 @@ public sealed class RecursiveBlockGraph
         var block = Inspect(blockPath[^1]); var archive = Connections(block.Selection.BlockId);
         _ = archive.Select(block.LocalDiagram.Connections, connectionPath, draft.Baseline, connectionAncestorRevisionIds, origin);
         var committed = archive.SaveDraft(draft, connectionRevisionId, requirementRevisionId, origin);
-        if (!committed.Changed) return new(this, [], false);
+        if (!committed.Changed && draft.DiagramAnnotations.IsDefault) return new(this, [], false);
         var selected = committed.Archive.Select(block.LocalDiagram.Connections, connectionPath, committed.Revision.Selection,
             connectionAncestorRevisionIds, origin);
         var prepared = WithConnections(selected.Archive);
         var blockDraft = prepared.StartDraft(block.Selection);
-        blockDraft = blockDraft with { Diagram = block.LocalDiagram with { Connections = selected.Roots } };
+        blockDraft = blockDraft with { Diagram = block.LocalDiagram with { Connections = selected.Roots,
+            Annotations = draft.DiagramAnnotations.IsDefault ? block.LocalDiagram.Annotations : draft.DiagramAnnotations } };
         return prepared.SaveDraft(expectedRoot, blockPath, blockDraft, blockRevisionId, blockRequirementRevisionId, blockAncestorRevisionIds, origin);
     }
 

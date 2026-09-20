@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <wx/button.h>
+#include <wx/choice.h>
 #include <wx/dcbuffer.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
@@ -93,12 +94,26 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_history[i]->SetName( wxString::Format( "RecursiveFieldHistory%d", i ) );
         heading->Add( m_history[i], 0 ); fields->Add( heading, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
         m_fields[i] = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
-                FromDIP( wxSize( 320, 115 ) ), wxTE_MULTILINE );
+                FromDIP( wxSize( 320, 90 ) ), wxTE_MULTILINE );
         m_fields[i]->SetName( wxString::Format( "RecursiveRequirements%d", i ) );
         fields->Add( m_fields[i], 0, wxEXPAND | wxALL, FromDIP( 12 ) );
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
         m_history[i]->Bind( wxEVT_BUTTON, [this, i]( wxCommandEvent& ) { history( i ); } );
     }
+    auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
+    commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
+    m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
+    m_commentChoice->SetName( "RecursiveCommentSelection" ); commentsHeading->Add( m_commentChoice, 0 );
+    fields->Add( commentsHeading, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
+    m_comments = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 320, 110 ) ), wxTE_MULTILINE );
+    m_comments->SetName( "RecursiveComments" ); fields->Add( m_comments, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+    m_comments->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) editComment(); } );
+    m_commentChoice->Bind( wxEVT_CHOICE, [this]( wxCommandEvent& )
+    {
+        int chosen = m_commentChoice->GetSelection();
+        if( chosen >= 0 && chosen < static_cast<int>( m_commentIds.size() ) )
+        { m_commentId = m_commentIds[chosen]; m_newComment = m_commentId.empty(); fillComments(); m_comments->SetFocus(); }
+    } );
     scroll->SetSizer( fields ); side->Add( scroll, 1, wxEXPAND );
     auto* actions = new wxBoxSizer( wxHORIZONTAL ); actions->AddStretchSpacer();
     m_decline = new wxButton( inspector, wxID_ANY, _( "&Decline" ) ); m_decline->SetName( "RecursiveDecline" );
@@ -146,8 +161,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
-        if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '3' )
-        { if( m_ready && !m_process ) m_fields[event.GetKeyCode() - '1']->SetFocus(); return; }
+        if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '4' )
+        { if( m_ready && !m_process ) { if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
         if( event.AltDown() && event.GetKeyCode() == 'H' )
         { for( int i = 0; i < 3; ++i ) if( wxWindow::FindFocus() == m_fields[i] ) { history( i ); return; } }
         if( event.GetKeyCode() == WXK_ESCAPE && !m_process ) { m_canvas->SetFocus(); return; }
@@ -374,6 +389,7 @@ void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
     *m_draft.mutable_baseline_fields() = saved->fields(); *m_draft.mutable_fields() = saved->fields();
     if( item.has_local_diagram() ) *m_draft.mutable_local_diagram() = item.local_diagram();
     m_savedDraft = m_draft; m_undo.clear(); m_redo.clear(); m_dirty = false;
+    m_commentId.clear(); m_newComment = false;
 }
 void RECURSIVE_DIAGRAM_FRAME::refresh()
 {
@@ -428,7 +444,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_toolbar->EnableTool( wxID_REDO, available && ( link ? !m_connectionRedo.empty() : !m_redo.empty() ) );
     m_toolbar->EnableTool( FIT, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
-    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
@@ -472,6 +488,8 @@ void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
     m_connectionDraft.set_kind( item->kind() ); *m_connectionDraft.mutable_endpoints() = item->endpoints(); *m_connectionDraft.mutable_members() = item->members();
     m_connectionDraft.set_baseline_requirement_revision_id( requirement->id() ); *m_connectionDraft.mutable_baseline_fields() = requirement->fields();
     *m_connectionDraft.mutable_fields() = requirement->fields(); m_savedConnectionDraft = m_connectionDraft;
+    *m_connectionDraft.mutable_diagram_annotations()->mutable_annotations() = current()->local_diagram().annotations();
+    m_savedConnectionDraft = m_connectionDraft;
     m_connectionId = id; m_connectionUndo.clear(); m_connectionRedo.clear();
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); ++m_viewRevision; refresh();
 }
@@ -520,6 +538,62 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
     // Do not refill text controls while typing: it would move the caret.
     m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+}
+void RECURSIVE_DIAGRAM_FRAME::fillComments()
+{
+    bool wasUpdating = m_updating; m_updating = true;
+    bool link = !m_connectionId.empty();
+    const auto& notes = link ? m_connectionDraft.diagram_annotations().annotations() : m_draft.local_diagram().annotations();
+    const std::string target = link ? m_connectionId : m_draft.baseline().block_id();
+    D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
+    m_commentIds.clear(); m_commentChoice->Clear();
+    const D::DiagramAnnotationData* selected = nullptr;
+    for( const auto& note : notes ) if( note.target_kind() == kind && note.target_id() == target && !note.has_unresolved_reason() )
+    {
+        if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
+        wxString title = text( note.text() ).BeforeFirst( '\n' );
+        if( title.length() > 36 ) title = title.Left( 36 ) + wxS( "…" );
+        if( title.empty() ) title = _( "Sketch comment" );
+        m_commentChoice->Append( title ); m_commentIds.push_back( note.id() );
+        if( note.id() == m_commentId ) { selected = &note; m_commentChoice->SetSelection( m_commentIds.size() - 1 ); }
+    }
+    m_commentChoice->Append( _( "New comment" ) ); m_commentIds.emplace_back();
+    if( !selected ) m_commentChoice->SetSelection( m_commentIds.size() - 1 );
+    wxString value = selected ? text( selected->text() ) : wxString();
+    if( m_comments->GetValue() != value ) m_comments->ChangeValue( value );
+    m_comments->Enable( m_ready && !m_process ); m_commentChoice->Enable( m_ready && !m_process );
+    m_commentChoice->Show( m_commentIds.size() > 1 );
+    m_updating = wasUpdating;
+}
+void RECURSIVE_DIAGRAM_FRAME::editComment()
+{
+    if( !m_ready || m_process ) return;
+    bool link = !m_connectionId.empty();
+    DRAFT blockBefore = m_draft; auto connectionBefore = m_connectionDraft;
+    auto* notes = link ? m_connectionDraft.mutable_diagram_annotations()->mutable_annotations()
+                      : m_draft.mutable_local_diagram()->mutable_annotations();
+    D::DiagramAnnotationData* selected = nullptr; int index = -1;
+    for( int i = 0; i < notes->size(); ++i ) if( notes->Get( i ).id() == m_commentId ) { selected = notes->Mutable( i ); index = i; break; }
+    std::string value = utf8( m_comments->GetValue() );
+    if( ( selected && selected->text() == value ) || ( !selected && value.empty() ) ) return;
+    if( selected && value.empty() && selected->strokes_size() == 0 )
+    { notes->DeleteSubrange( index, 1 ); m_commentId.clear(); m_newComment = true; }
+    else
+    {
+        if( !selected )
+        {
+            selected = notes->Add(); selected->set_id( freshId() ); selected->set_role( D::DAR_COMMENT ); selected->set_units( "diagram-unit" );
+            selected->set_target_kind( link ? D::DAT_CONNECTION : D::DAT_BLOCK );
+            selected->set_target_id( link ? m_connectionId : m_draft.baseline().block_id() ); m_commentId = selected->id(); m_newComment = false;
+        }
+        selected->set_text( value ); editorOrigin( selected->mutable_origin(), "Edit diagram comment" );
+    }
+    if( link )
+    { m_connectionUndo.push_back( std::move( connectionBefore ) ); m_connectionRedo.clear(); m_dirty = m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString(); }
+    else
+    { m_undo.push_back( std::move( blockBefore ) ); m_redo.clear(); m_dirty = m_draft.SerializeAsString() != m_savedDraft.SerializeAsString(); }
+    ++m_viewRevision; m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
 }
 void RECURSIVE_DIAGRAM_FRAME::save()
 {

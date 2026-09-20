@@ -80,7 +80,8 @@ public static class RecursiveBlockCodec
                 throw Invalid("Connection field restorations require distinct supported categories and exact source revisions.");
         return new(baseline, data.Name, (M.DiagramConnectionKind)((int)data.Kind - 1), data.Endpoints.Select(Decode).ToImmutableArray(),
             data.Members.Select(Selection).ToImmutableArray(), new(new(new(documentId, baseline.ConnectionId, baseline.StateId),
-                GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))), Fields(Need(data.Fields)), restored.ToImmutable()));
+                GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))), Fields(Need(data.Fields)), restored.ToImmutable()),
+            data.DiagramAnnotations is { } notes ? notes.Annotations.Select(Note).ToImmutableArray() : default);
     }
     public static P.ConnectionDraftData Encode(M.DiagramConnectionDraft draft)
     {
@@ -90,6 +91,8 @@ public static class RecursiveBlockCodec
         result.Endpoints.Add(draft.Endpoints.Select(Encode)); result.Members.Add(draft.Members.Select(Selection));
         result.RestoredFields.Add(draft.Requirements.RestoredFields.Select(r => new P.FieldRestorationData
             { Field = (P.RequirementFieldKind)((int)r.Key + 1), SourceRevisionId = Id(r.Value) }));
+        if (!draft.DiagramAnnotations.IsDefault)
+        { result.DiagramAnnotations = new(); result.DiagramAnnotations.Annotations.Add(draft.DiagramAnnotations.Select(Note)); }
         return result;
     }
 

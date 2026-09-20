@@ -12,7 +12,8 @@ public sealed record DiagramConnectionRevision(ConnectionSelection Selection, Gu
 public sealed record DiagramConnectionSelectionResult(DiagramConnectionArchive Archive,
     ImmutableArray<ConnectionSelection> Roots, ImmutableArray<ConnectionSelection> CreatedAncestors, bool Changed);
 public sealed record DiagramConnectionDraft(ConnectionSelection Baseline, string Name, DiagramConnectionKind Kind,
-    ImmutableArray<DiagramEndpointBinding> Endpoints, ImmutableArray<ConnectionSelection> Members, DiagramRequirementDraft Requirements);
+    ImmutableArray<DiagramEndpointBinding> Endpoints, ImmutableArray<ConnectionSelection> Members, DiagramRequirementDraft Requirements,
+    ImmutableArray<DiagramAnnotation> DiagramAnnotations = default);
 public sealed record DiagramConnectionCommit(DiagramConnectionArchive Archive, DiagramConnectionRevision Revision, bool Changed);
 
 /// <summary>Immutable connection implementations belonging to one block's local diagram.

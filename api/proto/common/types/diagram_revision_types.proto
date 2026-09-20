@@ -104,7 +104,9 @@ message ConnectionDraftData {
   RequirementFieldsData baseline_fields = 7;
   RequirementFieldsData fields = 8;
   repeated FieldRestorationData restored_fields = 9;
+  DiagramAnnotationListData diagram_annotations = 10;
 }
+message DiagramAnnotationListData { repeated DiagramAnnotationData annotations = 1; }
 message SaveConnectionDraftData {
   BlockSelectionData expected_root = 1;
   repeated BlockSelectionData block_path = 2;

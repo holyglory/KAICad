@@ -21,6 +21,7 @@ class wxStaticText;
 class wxTextCtrl;
 class wxToolBar;
 class wxScrolledWindow;
+class wxChoice;
 
 /** One native diagram level with revision-bound requirement drafts. XML validation
  * and publication remain in the compiled companion. No action invokes an agent. */
@@ -58,6 +59,8 @@ private:
     bool confirmChange();
     void makeDraft( const REVISION& aRevision );
     void edit();
+    void editComment();
+    void fillComments();
     void save();
     void decline();
     void history( int aField );
@@ -93,6 +96,11 @@ private:
     wxStaticText* m_endpointHeading;
     wxTextCtrl* m_endpoints;
     wxScrolledWindow* m_inspectorScroll;
+    wxTextCtrl* m_comments;
+    wxChoice* m_commentChoice;
+    std::vector<std::string> m_commentIds;
+    std::string m_commentId;
+    bool m_newComment = false;
     wxButton* m_openDiagram;
     wxButton* m_save;
     wxButton* m_decline;

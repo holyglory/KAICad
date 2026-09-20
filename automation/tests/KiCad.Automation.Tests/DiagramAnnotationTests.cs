@@ -81,6 +81,27 @@ public sealed class DiagramAnnotationTests
     }
 
     [TestMethod]
+    public void ConnectionCommentsUpdateOnlyTheDiagramSnapshotWithoutInventingAnElectricalRevision()
+    {
+        var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"]; var link = f.Links["CPU/Memory"];
+        var comment = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Leave pin choices open until placement.",
+            new(DiagramAnnotationTargetKind.Connection, link.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+        var draft = graph.Connections(cpu.BlockId).StartDraft(link) with { DiagramAnnotations = [comment] };
+        var decoded = RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(draft), graph.DocumentId);
+        Assert.IsTrue(comment.SameContents(decoded.DiagramAnnotations.Single()));
+        var saved = graph.SaveConnectionDraft(graph.SelectedRoot, [graph.SelectedRoot, cpu], [link], decoded,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var changedCpu = saved.Inspect(saved.SelectedRoot).Children[1];
+        Assert.AreEqual(link, saved.Inspect(changedCpu).LocalDiagram.Connections[2]);
+        Assert.IsTrue(comment.SameContents(saved.Inspect(changedCpu).LocalDiagram.Notes.Single()));
+        Assert.IsEmpty(saved.Inspect(cpu).LocalDiagram.Notes);
+        Assert.AreEqual(graph.Connections(cpu.BlockId).Revisions.Length, saved.Connections(cpu.BlockId).Revisions.Length);
+        var unchanged = saved.Connections(cpu.BlockId).StartDraft(link) with { DiagramAnnotations = [comment] };
+        Assert.IsFalse(saved.SaveConnectionDraft(saved.SelectedRoot, [saved.SelectedRoot, changedCpu], [link], unchanged,
+            Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Changed);
+    }
+
+    [TestMethod]
     public void InvalidAliasesCrossDiagramReuseAndImpreciseSketchCoordinatesAreRejected()
     {
         var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var note = Comment(f.Blocks["PSU"].BlockId);

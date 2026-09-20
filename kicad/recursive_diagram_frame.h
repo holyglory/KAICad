@@ -23,6 +23,8 @@ class wxToolBar;
 class wxScrolledWindow;
 class wxChoice;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
+class PANEL_DIAGRAM_HISTORY;
+class wxSimplebook;
 
 /** One native diagram level with revision-bound requirement drafts. XML validation
  * and publication remain in the compiled companion. No action invokes an agent. */
@@ -65,6 +67,7 @@ private:
     bool hasChanges() const;
     bool confirmChange();
     void makeDraft( const REVISION& aRevision );
+    DRAFT draftFor( const REVISION& aRevision ) const;
     void edit();
     void editComment();
     void fillComments();
@@ -73,6 +76,14 @@ private:
     void history( int aField );
     void showHistory( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult,
                       const REQUEST& aQuery );
+    void openDiagramHistory();
+    void loadDiagramHistory( unsigned aOffset );
+    void inspectDiagramHistory( SELECTION aSelection );
+    void previewDiagramHistory( SELECTION aSelection );
+    void restoreDiagramHistory( SELECTION aSelection );
+    void prepareDiagramRestoration();
+    void returnFromHistoryPreview();
+    void closeDiagramHistory();
     void undo( bool aRedo );
     void close( wxCloseEvent& aEvent );
     void paint( wxDC& aDC );
@@ -93,6 +104,7 @@ private:
     wxEvtHandler m_historyEvents;
     kiapi::automation::diagrams::v1::FieldHistoryPageData m_historyContext;
     DRAFT m_draft, m_savedDraft;
+    std::optional<REVISION> m_draftView;
     kiapi::automation::diagrams::v1::ConnectionDraftData m_connectionDraft, m_savedConnectionDraft;
     std::vector<kiapi::automation::diagrams::v1::ConnectionDraftData> m_connectionUndo, m_connectionRedo;
     std::string m_connectionId;
@@ -100,6 +112,9 @@ private:
     std::vector<DRAFT> m_undo, m_redo;
     std::vector<SELECTION> m_path;
     std::optional<SELECTION> m_preview;
+    bool m_diagramHistoryOpen = false;
+    std::optional<SELECTION> m_historyPreview, m_pendingHistoryRestore;
+    REQUEST m_failedHistoryRequest;
     std::string m_pendingImplementation;
     std::vector<std::string> m_back;
     std::string m_selected, m_pendingScope, m_pendingSelected, m_errorCode, m_error;
@@ -111,6 +126,9 @@ private:
     wxPanel* m_canvas;
     wxStaticText* m_breadcrumb;
     wxButton* m_implementation;
+    wxButton* m_diagramHistory;
+    PANEL_DIAGRAM_HISTORY* m_diagramHistoryPanel;
+    wxSimplebook* m_inspectorBook;
     wxStaticText* m_owner;
     wxStaticText* m_savedVersion;
     wxStaticText* m_endpointHeading;
@@ -135,6 +153,7 @@ private:
     double m_scale = 1.0;
     wxPoint2DDouble m_origin{ 0, 0 };
     struct VIEW { double scale; wxPoint2DDouble origin; std::string selected; };
+    std::optional<VIEW> m_historyView;
     std::map<std::string, VIEW> m_views;
     std::unique_ptr<wxProcess> m_process;
     wxTimer m_ioTimer;

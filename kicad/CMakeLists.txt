@@ -23,6 +23,7 @@ set( KICAD_SRCS
     structural_editor_frame.cpp
     recursive_diagram_frame.cpp
     dialogs/dialog_diagram_field_history.cpp
+    dialogs/panel_diagram_history.cpp
     dialogs/dialog_diagram_conflict.cpp
     dialogs/dialog_destination.cpp
     dialogs/dialog_destination_base.cpp

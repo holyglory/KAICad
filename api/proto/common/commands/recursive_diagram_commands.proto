@@ -24,6 +24,15 @@ message FieldHistoryViewState {
   bool loading = 8;
   string error_message = 9;
 }
+message DiagramHistoryViewState {
+  BlockSelectionData context = 1;
+  BlockSelectionData inspected = 2;
+  BlockSelectionData preview = 3;
+  uint32 loaded_count = 4;
+  uint32 total_count = 5;
+  bool busy = 6;
+  string error_message = 7;
+}
 message RecursiveDiagramEditorState {
   string document_id = 1;
   string source_path = 2;
@@ -45,4 +54,5 @@ message RecursiveDiagramEditorState {
   string focused_control = 18;
   uint64 navigation_input_revision = 19;
   FieldHistoryViewState field_history = 20;
+  DiagramHistoryViewState diagram_history = 21;
 }

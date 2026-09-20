@@ -7,9 +7,10 @@ public sealed record DiagramBoundaryInterface(Guid Id, string Name, string Inten
 /// <summary>Interfaces and selected relationships at one diagram level. Child interiors
 /// are not duplicated here. Geometry and physical allocation are separate concerns.</summary>
 public sealed record BlockLocalDiagram(ImmutableArray<DiagramBoundaryInterface> Interfaces,
-    ImmutableArray<ConnectionSelection> Connections)
+    ImmutableArray<ConnectionSelection> Connections, ImmutableArray<DiagramAnnotation> Annotations = default)
 {
     public static BlockLocalDiagram Empty { get; } = new([], []);
+    public ImmutableArray<DiagramAnnotation> Notes => Annotations.IsDefault ? [] : Annotations;
 
     public void Validate()
     {
@@ -24,7 +25,13 @@ public sealed record BlockLocalDiagram(ImmutableArray<DiagramBoundaryInterface> 
         }
         if (Connections.Any(c => c is null) || Connections.Select(c => c.ConnectionId).Distinct().Count() != Connections.Length)
             throw new AutomationException("invalid_block_local_diagram", "A local diagram must pin each connection occurrence exactly once.");
+        foreach (var note in Notes)
+        {
+            if (note is null || !ids.Add(note.Id)) throw new AutomationException("invalid_block_local_diagram", "Annotation identities must be distinct from each other and boundary interfaces.");
+            note.Validate();
+        }
     }
 
-    public bool SameContents(BlockLocalDiagram other) => Interfaces.SequenceEqual(other.Interfaces) && Connections.SequenceEqual(other.Connections);
+    public bool SameContents(BlockLocalDiagram other) => Interfaces.SequenceEqual(other.Interfaces) && Connections.SequenceEqual(other.Connections)
+        && Notes.Length == other.Notes.Length && Notes.Zip(other.Notes).All(n => n.First.SameContents(n.Second));
 }

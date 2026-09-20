@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using M = KiCad.Automation.Model;
@@ -181,11 +182,32 @@ public static class RecursiveBlockCodec
     {
         var result = new P.BlockLocalDiagramData();
         result.Interfaces.Add(diagram.Interfaces.Select(i => new P.DiagramBoundaryInterfaceData { Id = Id(i.Id), Name = i.Name, Intent = i.Intent }));
-        result.Connections.Add(diagram.Connections.Select(Selection)); return result;
+        result.Connections.Add(diagram.Connections.Select(Selection)); result.Annotations.Add(diagram.Notes.Select(Note)); return result;
     }
     private static M.BlockLocalDiagram Local(P.BlockLocalDiagramData diagram) => new(
         diagram.Interfaces.Select(i => new M.DiagramBoundaryInterface(GuidValue(i.Id), i.Name, i.Intent)).ToImmutableArray(),
-        diagram.Connections.Select(Selection).ToImmutableArray());
+        diagram.Connections.Select(Selection).ToImmutableArray(), diagram.Annotations.Select(Note).ToImmutableArray());
+    private static P.DiagramAnnotationData Note(M.DiagramAnnotation note)
+    {
+        var result = new P.DiagramAnnotationData { Id = Id(note.Id), Role = (P.DiagramAnnotationRole)((int)note.Role + 1), Text = note.Text,
+            TargetKind = (P.DiagramAnnotationTargetKind)((int)note.Target.Kind + 1), Origin = Origin(note.Origin), Units = "diagram-unit" };
+        if (note.Target.TargetId is { } target) result.TargetId = Id(target);
+        if (note.Target.UnresolvedReason is { } reason) result.UnresolvedReason = reason;
+        if (note.Position is { } position) result.Position = Point(position);
+        foreach (var stroke in note.Strokes) { var row = new P.DiagramAnnotationStrokeData(); row.Points.Add(stroke.Points.Select(Point)); result.Strokes.Add(row); }
+        return result;
+    }
+    private static M.DiagramAnnotation Note(P.DiagramAnnotationData note)
+    {
+        if (note.Units != "diagram-unit") throw Invalid("Annotation positions and sketches must use diagram-unit presentation coordinates.");
+        return new(GuidValue(note.Id), (M.DiagramAnnotationRole)((int)note.Role - 1), note.Text,
+            new((M.DiagramAnnotationTargetKind)((int)note.TargetKind - 1), note.HasTargetId ? GuidValue(note.TargetId) : null,
+                note.HasUnresolvedReason ? note.UnresolvedReason : null), note.Position is { } position ? Point(position) : null,
+            note.Strokes.Select(s => new M.DiagramAnnotationStroke(s.Points.Select(Point).ToImmutableArray())).ToImmutableArray(), Origin(Need(note.Origin)));
+    }
+    private static P.DiagramAnnotationPointData Point(M.DiagramAnnotationPoint point) => new()
+        { X = point.X.ToString(CultureInfo.InvariantCulture), Y = point.Y.ToString(CultureInfo.InvariantCulture) };
+    private static M.DiagramAnnotationPoint Point(P.DiagramAnnotationPointData point) => M.DiagramAnnotationPoint.Parse(point.X, point.Y);
     private static P.ConnectionSelectionData Selection(M.ConnectionSelection s) => new() { ConnectionId = Id(s.ConnectionId), StateId = Id(s.StateId), RevisionId = Id(s.RevisionId) };
     private static M.ConnectionSelection Selection(P.ConnectionSelectionData s) => new(GuidValue(s.ConnectionId), GuidValue(s.StateId), GuidValue(s.RevisionId));
 

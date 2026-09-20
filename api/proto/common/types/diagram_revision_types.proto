@@ -196,6 +196,23 @@ message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string in
 message BlockLocalDiagramData {
   repeated DiagramBoundaryInterfaceData interfaces = 1;
   repeated ConnectionSelectionData connections = 2;
+  repeated DiagramAnnotationData annotations = 3;
+}
+enum DiagramAnnotationRole { DAR_UNKNOWN = 0; DAR_COMMENT = 1; DAR_INSTRUCTION = 2; }
+enum DiagramAnnotationTargetKind { DAT_UNKNOWN = 0; DAT_CANVAS = 1; DAT_BLOCK = 2; DAT_CONNECTION = 3; }
+message DiagramAnnotationPointData { string x = 1; string y = 2; }
+message DiagramAnnotationStrokeData { repeated DiagramAnnotationPointData points = 1; }
+message DiagramAnnotationData {
+  string id = 1;
+  DiagramAnnotationRole role = 2;
+  string text = 3;
+  DiagramAnnotationTargetKind target_kind = 4;
+  optional string target_id = 5;
+  optional string unresolved_reason = 6;
+  DiagramAnnotationPointData position = 7;
+  repeated DiagramAnnotationStrokeData strokes = 8;
+  DiagramRevisionOriginData origin = 9;
+  string units = 10;
 }
 message ConnectionSelectionData { string connection_id = 1; string state_id = 2; string revision_id = 3; }
 message ConnectionDesignStateData { string id = 1; string connection_id = 2; string name = 3; string head_revision_id = 4; }

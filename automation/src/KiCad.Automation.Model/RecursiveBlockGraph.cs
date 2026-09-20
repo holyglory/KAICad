@@ -100,6 +100,7 @@ public sealed class RecursiveBlockGraph
                 || archive.States.Any(s => !identities.Add(s.Id)) || archive.Revisions.Any(r => !identities.Add(r.Selection.RevisionId)))
                 throw Invalid("Connection identities cannot alias block or other connection identities.");
         var interfaceOwners = new Dictionary<Guid, Guid>();
+        var annotationOwners = new Dictionary<Guid, Guid>();
         foreach (var revision in Revisions)
         {
             revision.LocalDiagram.Validate();
@@ -108,6 +109,12 @@ public sealed class RecursiveBlockGraph
                 if (identities.Contains(boundary.Id) || (interfaceOwners.TryGetValue(boundary.Id, out var owner) && owner != revision.Selection.BlockId))
                     throw Invalid("An interface identity must remain owned by one exact block occurrence.");
                 interfaceOwners[boundary.Id] = revision.Selection.BlockId;
+            }
+            foreach (var note in revision.LocalDiagram.Notes)
+            {
+                if (annotationOwners.TryGetValue(note.Id, out var owner) && owner != revision.Selection.BlockId)
+                    throw Invalid("An annotation identity must remain owned by its original local diagram.");
+                annotationOwners[note.Id] = revision.Selection.BlockId;
             }
         }
         foreach (var state in States) ValidateHistory(state);
@@ -122,6 +129,7 @@ public sealed class RecursiveBlockGraph
                     throw Invalid("A local diagram cannot contain itself or the same block occurrence twice.");
             }
             ValidateConnections(revision);
+            ValidateAnnotations(revision, identities, interfaceOwners);
         }
         _ = Inspect(SelectedRoot);
         // Validate inactive and historical states too. A later selection must not expose
@@ -390,6 +398,29 @@ public sealed class RecursiveBlockGraph
                 if (!available.TryGetValue(endpoint.BlockId, out var target)
                     || (endpoint.InterfaceId is { } id && !target.LocalDiagram.Interfaces.Any(i => i.Id == id)))
                     throw Invalid("A connection endpoint must target this diagram's boundary or an exact direct child and its pinned interface; do not guess a replacement.");
+    }
+
+    private void ValidateAnnotations(RecursiveBlockRevision revision, HashSet<Guid> identities, Dictionary<Guid, Guid> interfaces)
+    {
+        var blocks = revision.Children.Select(c => c.BlockId).Append(revision.Selection.BlockId).ToHashSet();
+        HashSet<Guid> connections = revision.LocalDiagram.Connections.IsEmpty ? [] : Connections(revision.Selection.BlockId)
+            .Walk(revision.LocalDiagram.Connections).Select(c => c.ConnectionId).ToHashSet();
+        foreach (var note in revision.LocalDiagram.Notes)
+        {
+            if (identities.Contains(note.Id) || interfaces.ContainsKey(note.Id))
+                throw Invalid("Annotation identities must remain separate from engineering objects and interfaces.");
+            bool present = note.Target.Kind switch
+            {
+                DiagramAnnotationTargetKind.Canvas => true,
+                DiagramAnnotationTargetKind.Block => blocks.Contains(note.Target.TargetId!.Value),
+                DiagramAnnotationTargetKind.Connection => connections.Contains(note.Target.TargetId!.Value),
+                _ => false
+            };
+            if (!present && note.Target.UnresolvedReason is null)
+                throw Invalid("A removed annotation target needs its exact former identity and an explicit unresolved reason; do not silently retarget or drop the note.");
+            if (present && note.Target.UnresolvedReason is not null)
+                throw Invalid("A present annotation target cannot simultaneously be reported as unresolved.");
+        }
     }
 
     private static void Text(string? text, string message)

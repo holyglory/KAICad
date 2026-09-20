@@ -11,6 +11,15 @@
     <xs:attribute name="state" type="h:identity" use="required"/>
     <xs:attribute name="revision" type="h:identity" use="required"/>
   </xs:complexType>
+  <xs:simpleType name="annotation-role"><xs:restriction base="xs:string">
+    <xs:enumeration value="Comment"/><xs:enumeration value="Instruction"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="annotation-target"><xs:restriction base="xs:string">
+    <xs:enumeration value="Canvas"/><xs:enumeration value="Block"/><xs:enumeration value="Connection"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="annotation-point">
+    <xs:attribute name="x" type="xs:decimal" use="required"/><xs:attribute name="y" type="xs:decimal" use="required"/>
+  </xs:complexType>
   <xs:complexType name="origin"><xs:sequence>
     <xs:element name="summary" type="xs:string"/>
     <xs:element name="source" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
@@ -55,6 +64,26 @@
           </xs:sequence></xs:complexType></xs:element>
           <xs:element name="connections"><xs:complexType><xs:sequence>
             <xs:element name="connection" type="c:selection" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence></xs:complexType></xs:element>
+          <xs:element name="annotations" minOccurs="0"><xs:complexType><xs:sequence>
+            <xs:element name="annotation" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="origin" type="origin"/>
+              <xs:element name="text" type="xs:string"/>
+              <xs:element name="target"><xs:complexType><xs:sequence>
+                <xs:element name="unresolved-reason" type="xs:string" minOccurs="0"/>
+              </xs:sequence><xs:attribute name="kind" type="annotation-target" use="required"/>
+                <xs:attribute name="ref" type="h:identity"/>
+              </xs:complexType></xs:element>
+              <xs:element name="position" type="annotation-point" minOccurs="0"/>
+              <xs:element name="strokes"><xs:complexType><xs:sequence>
+                <xs:element name="stroke" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+                  <xs:element name="point" type="annotation-point" minOccurs="2" maxOccurs="unbounded"/>
+                </xs:sequence></xs:complexType></xs:element>
+              </xs:sequence></xs:complexType></xs:element>
+            </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/>
+              <xs:attribute name="role" type="annotation-role" use="required"/>
+              <xs:attribute name="units" type="xs:string" use="required" fixed="diagram-unit"/>
+            </xs:complexType></xs:element>
           </xs:sequence></xs:complexType></xs:element>
         </xs:sequence></xs:complexType></xs:element>
       </xs:sequence>

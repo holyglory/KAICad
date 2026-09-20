@@ -99,12 +99,33 @@ public static class RecursiveBlockGraphXml
         new XElement(Ns + "interfaces", diagram.Interfaces.Select(i => new XElement(Ns + "interface", Attr("id", i.Id),
             new XAttribute("name", i.Name), new XElement(Ns + "intent", i.Intent)))),
         new XElement(Ns + "connections", diagram.Connections.Select(c => new XElement(Ns + "connection",
-            Attr("connection", c.ConnectionId), Attr("state", c.StateId), Attr("revision", c.RevisionId)))));
+            Attr("connection", c.ConnectionId), Attr("state", c.StateId), Attr("revision", c.RevisionId)))),
+        diagram.Notes.IsEmpty ? null : new XElement(Ns + "annotations", diagram.Notes.Select(WriteNote)));
     private static BlockLocalDiagram ReadLocal(XElement diagram) => new(
         diagram.Element(Ns + "interfaces")!.Elements(Ns + "interface").Select(i => new DiagramBoundaryInterface(
             Id(i, "id"), Text(i, "name"), i.Element(Ns + "intent")!.Value)).ToImmutableArray(),
         diagram.Element(Ns + "connections")!.Elements(Ns + "connection").Select(c => new ConnectionSelection(
-            Id(c, "connection"), Id(c, "state"), Id(c, "revision"))).ToImmutableArray());
+            Id(c, "connection"), Id(c, "state"), Id(c, "revision"))).ToImmutableArray(),
+        diagram.Element(Ns + "annotations")?.Elements(Ns + "annotation").Select(ReadNote).ToImmutableArray() ?? []);
+    private static XElement WriteNote(DiagramAnnotation note) => new(Ns + "annotation", Attr("id", note.Id),
+        new XAttribute("role", note.Role), new XAttribute("units", "diagram-unit"), DiagramRevisionOriginXml.Write(Ns, note.Origin),
+        new XElement(Ns + "text", note.Text), new XElement(Ns + "target", new XAttribute("kind", note.Target.Kind),
+            note.Target.TargetId is { } id ? Attr("ref", id) : null,
+            note.Target.UnresolvedReason is { } reason ? new XElement(Ns + "unresolved-reason", reason) : null),
+        note.Position is { } position ? WritePoint("position", position) : null,
+        new XElement(Ns + "strokes", note.Strokes.Select(s => new XElement(Ns + "stroke", s.Points.Select(p => WritePoint("point", p))))));
+    private static XElement WritePoint(string name, DiagramAnnotationPoint point) => new(Ns + name,
+        new XAttribute("x", point.X), new XAttribute("y", point.Y));
+    private static DiagramAnnotation ReadNote(XElement note)
+    {
+        var target = note.Element(Ns + "target")!;
+        return new(Id(note, "id"), Enum.Parse<DiagramAnnotationRole>(Text(note, "role")), note.Element(Ns + "text")!.Value,
+            new(Enum.Parse<DiagramAnnotationTargetKind>(Text(target, "kind")), target.Attribute("ref") is null ? null : Id(target, "ref"),
+                target.Element(Ns + "unresolved-reason")?.Value), note.Element(Ns + "position") is { } position ? ReadPoint(position) : null,
+            note.Element(Ns + "strokes")!.Elements(Ns + "stroke").Select(s => new DiagramAnnotationStroke(
+                s.Elements(Ns + "point").Select(ReadPoint).ToImmutableArray())).ToImmutableArray(), DiagramRevisionOriginXml.Read(note.Element(Ns + "origin")!));
+    }
+    private static DiagramAnnotationPoint ReadPoint(XElement point) => DiagramAnnotationPoint.Parse(Text(point, "x"), Text(point, "y"));
     private static string Text(XElement element, string name) => element.Attribute(name)!.Value;
     private static Guid Id(XElement element, string name) => Guid.ParseExact(Text(element, name), "D");
     private static XAttribute Attr(string name, Guid value) => new(name, value.ToString("D"));

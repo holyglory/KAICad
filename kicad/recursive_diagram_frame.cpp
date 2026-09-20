@@ -535,8 +535,10 @@ void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
     m_connectionId = id; m_connectionUndo.clear(); m_connectionRedo.clear();
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); ++m_viewRevision; refresh();
 }
-void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
+void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
 {
+    // Callers commonly pass m_selected or a selection inside m_path. This
+    // operation replaces both, so the destination must be owned, not borrowed.
     if( !m_ready || m_process || !current() || current()->selection().block_id() == id ) return;
     if( m_preview )
     { m_pendingScope = id; m_pendingSelected = id; m_pendingConnection = ""; confirmChange(); return; }

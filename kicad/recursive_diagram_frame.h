@@ -55,7 +55,7 @@ private:
     void select( const std::string& aBlockId );
     void selectConnection( const std::string& aConnectionId );
     const kiapi::automation::diagrams::v1::ConnectionRevisionData* connection( const std::string& aConnectionId ) const;
-    void navigate( const std::string& aBlockId, bool aRemember = true );
+    void navigate( std::string aBlockId, bool aRemember = true );
     void chooseImplementation();
     void previewImplementation( const std::string& aStateId );
     void updateImplementationLabel();

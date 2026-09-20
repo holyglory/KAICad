@@ -77,6 +77,19 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         return Data(new { instanceId, instanceEpoch = session.Epoch, receipt });
     });
 
+    [McpServerTool(Name = "kicad_diagram_proposal_publication_resume"),
+     Description("Inspect and explicitly resume an interrupted proposal publication or selection from its durable receipt. Requires the exact diagram/document, operation and native epoch. It completes only when the receipt preimage/postimage proves safety; competing XML or missing candidate files return NeedsReview without overwriting either version. It does not activate native schematic/PCB objects.")]
+    public Task<CallToolResult> ResumeProposalPublication(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        var result = await BlockProposalRecovery.ResumeAsync(repositoryRoot, sourcePath, Identity(documentId), operationId,
+            registry.StateDirectory, cancellationToken);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recovery = result });
+    });
+
     [McpServerTool(Name = "kicad_diagram_proposal_retained", ReadOnly = true),
      Description("Retrieve the exact locally retained typed proposal request after a failed or stale publication. Requires its original diagram path/document and proposal ID. This does not publish, select, mutate or launch an agent, and request retention is not evidence of completed publication.")]
     public Task<CallToolResult> RetainedProposal(string instanceId, string sourcePath, string documentId, Guid proposalId,

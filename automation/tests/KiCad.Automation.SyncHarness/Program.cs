@@ -28,6 +28,17 @@ if (args is ["--refinement-input-file", var inputFile])
     Console.WriteLine(JsonSerializer.Serialize(new { result.Added, result.Snapshot.ContentSha256 }));
     return;
 }
+if (args is ["--block-proposal-file", var proposalFile])
+{
+    using var proposalJson = JsonDocument.Parse(await File.ReadAllBytesAsync(proposalFile)); var request = proposalJson.RootElement;
+    var proposal = BlockProposalFiles.Normalize(request.GetProperty("proposal").Deserialize<BlockProposal>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
+    var result = await BlockProposalFiles.PublishAsync(request.GetProperty("repositoryRoot").GetString()!,
+        request.GetProperty("designPath").GetString()!, request.GetProperty("documentId").GetGuid(),
+        request.GetProperty("sourceToken").GetString()!, proposal, state, CancellationToken.None,
+        request.GetProperty("operationId").GetGuid(), pause.WaitAsync);
+    Console.WriteLine(JsonSerializer.Serialize(new { result.Added, result.Snapshot.ContentSha256 }));
+    return;
+}
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -65,7 +76,8 @@ public sealed class PauseGate
     {
         if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
             or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"
-            or "layout-prepared" or "layout-resolved" or "input-prepared" or "input-replacing" or "input-replaced" or "input-published"))
+            or "layout-prepared" or "layout-resolved" or "input-prepared" or "input-replacing" or "input-replaced" or "input-published"
+            or "proposal-prepared" or "proposal-replacing" or "proposal-replaced" or "proposal-published"))
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));

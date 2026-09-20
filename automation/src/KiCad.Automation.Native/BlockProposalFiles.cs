@@ -55,7 +55,7 @@ public static class BlockProposalFiles
 
     public static async Task<BlockProposalFileResult> PublishAsync(string root, string path, Guid documentId,
         string expectedSourceToken, BlockProposal proposal, string stateDirectory, CancellationToken token = default,
-        Guid? operationId = null)
+        Guid? operationId = null, Func<string, CancellationToken, Task>? checkpoint = null)
     {
         token.ThrowIfCancellationRequested();
         if (proposal?.Id is not { } id || id == Guid.Empty || documentId == Guid.Empty)
@@ -86,6 +86,7 @@ public static class BlockProposalFiles
                 loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(SHA256.HashData(replacement)), BlockProposalOperationStage.Prepared, null, null,
                 DocumentId: documentId, CandidateXml: Encoding.UTF8.GetString(replacement));
             receipts!.Write(preparedReceipt);
+            if (checkpoint is not null) await checkpoint("proposal-prepared", token);
         }
         string? staged = null; string? retained = null;
         string hash = await DesignFilePublisher.WriteCoreAsync(path, loaded.Bytes, replacement, null, (target, temporary) =>
@@ -93,11 +94,14 @@ public static class BlockProposalFiles
             staged = temporary; retained = PreservingFileReplacement.PreviousPath(temporary);
             if (preparedReceipt is not null)
                 receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Replacing, StagedPath = staged, RetainedPath = retained });
+            checkpoint?.Invoke("proposal-replacing", token).GetAwaiter().GetResult();
             PreservingFileReplacement.Replace(target, temporary);
+            checkpoint?.Invoke("proposal-replaced", token).GetAwaiter().GetResult();
         }, token);
         if (preparedReceipt is not null)
             receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Published, StagedPath = staged,
                 RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
+        if (checkpoint is not null) await checkpoint("proposal-published", token);
         return new(new(path, hash, updated), record, true, prepared.ContextStillSelected);
     }
 

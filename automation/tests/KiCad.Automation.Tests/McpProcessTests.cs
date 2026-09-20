@@ -98,6 +98,10 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
+            CollectionAssert.Contains(names, "kicad_simulation_start");
+            CollectionAssert.Contains(names, "kicad_simulation_job");
+            CollectionAssert.Contains(names, "kicad_simulation_wait");
+            CollectionAssert.Contains(names, "kicad_simulation_cancel");
             var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());

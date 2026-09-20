@@ -97,5 +97,6 @@ builder.Services.AddMcpServer(options =>
     .WithTools<RecoveryTools>()
     .WithTools<FileIntakeTools>()
     .WithTools<NativeIntakeTools>()
-    .WithTools<AutomaticDesignTools>();
+    .WithTools<AutomaticDesignTools>()
+    .WithTools<SimulationTools>();
 await builder.Build().RunAsync();

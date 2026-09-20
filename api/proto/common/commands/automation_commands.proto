@@ -78,6 +78,52 @@ message CancelPcbDrcJob {
   string process_epoch = 3;
 }
 
+// Native KiCad simulator jobs. The eeschema owner uses its existing
+// SPICE_SIMULATOR/ngspice integration; MCP only addresses the job.
+message StartSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  string netlist = 4;
+}
+message ReadSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+message CancelSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+enum SimulationJobStatus {
+  SIMJS_UNKNOWN = 0;
+  SIMJS_RUNNING = 1;
+  SIMJS_COMPLETED = 2;
+  SIMJS_CANCELLED = 3;
+  SIMJS_FAILED = 4;
+}
+message SimulationVector {
+  string name = 1;
+  repeated double values = 2;
+  bool complex = 3;
+}
+message SimulationJobState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string operation_id = 3;
+  string process_epoch = 4;
+  SimulationJobStatus status = 5;
+  uint64 sequence = 6;
+  double progress = 7;
+  string error_code = 8;
+  string error_message = 9;
+  bool cancellation_requested = 10;
+  bool worker_finished = 11;
+  repeated string messages = 12;
+  repeated SimulationVector vectors = 13;
+}
+
 enum PcbDrcJobStatus {
   PDRCJS_UNKNOWN = 0;
   PDRCJS_QUEUED = 1;

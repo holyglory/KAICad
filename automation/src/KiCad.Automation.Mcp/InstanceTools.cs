@@ -84,7 +84,11 @@ public sealed class InstanceTools(InstanceRegistry registry)
             new InstanceCapability("kicad_diagram_proposal_publish", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, proposal identity", false),
             new InstanceCapability("kicad_diagram_proposal_select", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path", false),
             new InstanceCapability("kicad_diagram_physical_allocation", "structural-diagram", "compiled-mcp", "registered", "source token, exact block selection", false),
-            new InstanceCapability("kicad_diagram_physical_allocation_set", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path, operation ID", false)
+            new InstanceCapability("kicad_diagram_physical_allocation_set", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path, operation ID", false),
+            new InstanceCapability("kicad_simulation_start", "simulation", "native-ngspice", "registered", "instance epoch, document, operation ID", false),
+            new InstanceCapability("kicad_simulation_job", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID", false),
+            new InstanceCapability("kicad_simulation_wait", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID, sequence", false),
+            new InstanceCapability("kicad_simulation_cancel", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID", false)
             ,new InstanceCapability("kicad_pcb_drc_start", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document revision, operation ID", false)
             ,new InstanceCapability("kicad_pcb_drc_job", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)
             ,new InstanceCapability("kicad_pcb_drc_cancel", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)

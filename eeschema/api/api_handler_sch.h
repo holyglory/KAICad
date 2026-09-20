@@ -31,6 +31,10 @@
 #include <api/schematic/schematic_commands.pb.h>
 #include <api/schematic/schematic_jobs.pb.h>
 #include <kiid.h>
+#include <sim/spice_simulator.h>
+
+#include <mutex>
+#include <optional>
 
 using namespace kiapi;
 using namespace kiapi::common;
@@ -158,6 +162,13 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::CaptureSchematicPreview>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicViewSet> handleRenderViews(
             const HANDLER_CONTEXT<kiapi::automation::v1::RenderSchematicViews>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleStartSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleReadSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleCancelSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx );
     HANDLER_RESULT<types::DocumentSpecifier> handleActivateSheet(
             const HANDLER_CONTEXT<kiapi::automation::v1::ActivateSchematicSheet>& aCtx );
 
@@ -168,7 +179,28 @@ private:
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
 
     HANDLER_RESULT<google::protobuf::Empty>
-    handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+            handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+
+    struct SIMULATION_JOB
+    {
+        std::string jobId;
+        std::string operationId;
+        std::string processEpoch;
+        kiapi::common::types::DocumentSpecifier document;
+        std::string netlist;
+        uint64_t sequence = 1;
+        bool cancellationRequested = false;
+        bool workerFinished = false;
+        kiapi::automation::v1::SimulationJobStatus status = kiapi::automation::v1::SIMJS_UNKNOWN;
+        std::string errorCode;
+        std::string errorMessage;
+        std::vector<std::string> messages;
+        std::vector<kiapi::automation::v1::SimulationVector> vectors;
+    };
+
+    std::mutex m_simulationMutex;
+    std::shared_ptr<SPICE_SIMULATOR> m_automationSimulator;
+    std::optional<SIMULATION_JOB> m_simulationJob;
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );

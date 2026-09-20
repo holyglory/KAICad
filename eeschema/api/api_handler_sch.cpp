@@ -191,6 +191,12 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleCapturePreview );
     registerHandler<kiapi::automation::v1::RenderSchematicViews, kiapi::automation::v1::SchematicViewSet>(
             &API_HANDLER_SCH::handleRenderViews );
+    registerHandler<kiapi::automation::v1::StartSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleStartSimulation );
+    registerHandler<kiapi::automation::v1::ReadSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleReadSimulation );
+    registerHandler<kiapi::automation::v1::CancelSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleCancelSimulation );
     registerHandler<kiapi::automation::v1::ActivateSchematicSheet, types::DocumentSpecifier>(
             &API_HANDLER_SCH::handleActivateSheet );
     registerHandler<kiapi::automation::v1::ReadSchematicChangeJournal, kiapi::automation::v1::SchematicChangeJournal>(
@@ -2822,6 +2828,155 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPreview> API_HANDLER_SCH::handleC
     result.mutable_png()->resize( stream.GetSize() );
     stream.CopyTo( result.mutable_png()->data(), result.png().size() );
     return result;
+}
+
+namespace
+{
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> SimulationError(
+        kiapi::common::ApiStatusCode aCode, const std::string& aMessage )
+{
+    kiapi::common::ApiResponseStatus error;
+    error.set_status( aCode );
+    error.set_error_message( aMessage );
+    return tl::unexpected( error );
+}
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleStartSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    if( aCtx.Request.operation_id().empty() || aCtx.Request.netlist().empty() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation requires operation identity and a non-empty netlist" );
+
+    std::lock_guard<std::mutex> lock( m_simulationMutex );
+    bool start = false;
+    if( m_simulationJob && m_simulationJob->operationId == aCtx.Request.operation_id() )
+    {
+        if( m_simulationJob->netlist != aCtx.Request.netlist()
+                || !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                                         aCtx.Request.document() ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation operation identity was reused with different netlist bytes" );
+    }
+    else if( m_simulationJob && m_simulationJob->status == SIMJS_RUNNING )
+        return SimulationError( ApiStatusCode::AS_BUSY, "Another simulation is running for this schematic instance" );
+    else
+    {
+        start = true;
+        m_simulationJob.emplace();
+        m_simulationJob->jobId = KIID().AsString();
+        m_simulationJob->operationId = aCtx.Request.operation_id();
+        m_simulationJob->processEpoch = aCtx.Request.process_epoch();
+        m_simulationJob->document = aCtx.Request.document();
+        m_simulationJob->netlist = aCtx.Request.netlist();
+        m_simulationJob->status = SIMJS_RUNNING;
+        m_simulationJob->sequence++;
+    }
+
+        if( !m_automationSimulator )
+        {
+            m_automationSimulator = SIMULATOR::CreateInstance( "ngspice" );
+        if( !m_automationSimulator )
+        {
+            m_simulationJob->status = SIMJS_FAILED;
+            m_simulationJob->errorCode = "simulation_unavailable";
+            m_simulationJob->errorMessage = "KiCad could not create its native ngspice simulator";
+                return SimulationError( ApiStatusCode::AS_NOT_READY, m_simulationJob->errorMessage );
+            }
+            m_automationSimulator->Settings() = m_context->Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+            m_automationSimulator->Init();
+        }
+
+    if( start )
+    {
+        std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
+        if( !simulatorLock.owns_lock() ) return SimulationError( ApiStatusCode::AS_BUSY, "The KiCad simulator is in use by another owner" );
+        if( !m_automationSimulator->LoadNetlist( m_simulationJob->netlist ) || !m_automationSimulator->Run() )
+        {
+            m_simulationJob->status = SIMJS_FAILED;
+            m_simulationJob->errorCode = "simulation_start_failed";
+            m_simulationJob->errorMessage = "KiCad's native ngspice wrapper rejected the netlist or run command";
+            m_simulationJob->workerFinished = true;
+            m_simulationJob->sequence++;
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST, m_simulationJob->errorMessage );
+        }
+    }
+
+    SimulationJobState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    result.set_job_id( m_simulationJob->jobId ); result.set_operation_id( m_simulationJob->operationId );
+    result.set_process_epoch( m_simulationJob->processEpoch ); result.set_status( m_simulationJob->status );
+    result.set_sequence( m_simulationJob->sequence ); result.set_progress( m_simulationJob->status == SIMJS_COMPLETED ? 100 : 0 );
+    return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleReadSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
+    std::lock_guard<std::mutex> lock( m_simulationMutex );
+    if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "No simulation job matches this schematic document" );
+    if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                              aCtx.Request.document() ) )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation job belongs to another schematic document" );
+    if( !aCtx.Request.process_epoch().empty() && aCtx.Request.process_epoch() != m_simulationJob->processEpoch )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation process epoch is stale" );
+    if( m_simulationJob->status == SIMJS_RUNNING && m_automationSimulator )
+    {
+        std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
+        if( simulatorLock.owns_lock() && !m_automationSimulator->IsRunning() )
+        {
+            m_simulationJob->workerFinished = true; m_simulationJob->status = SIMJS_COMPLETED;
+            m_simulationJob->sequence++;
+            for( const std::string& name : m_automationSimulator->AllVectors() )
+            {
+                m_simulationJob->vectors.emplace_back();
+                auto& vector = m_simulationJob->vectors.back();
+                vector.set_name( name ); vector.set_complex( false );
+                for( double value : m_automationSimulator->GetRealVector( name ) ) vector.add_values( value );
+            }
+        }
+    }
+    SimulationJobState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() ); result.set_job_id( m_simulationJob->jobId );
+    result.set_operation_id( m_simulationJob->operationId ); result.set_process_epoch( m_simulationJob->processEpoch );
+    result.set_status( m_simulationJob->status ); result.set_sequence( m_simulationJob->sequence );
+    result.set_progress( m_simulationJob->status == SIMJS_COMPLETED ? 100 : 0 );
+    result.set_cancellation_requested( m_simulationJob->cancellationRequested ); result.set_worker_finished( m_simulationJob->workerFinished );
+    result.set_error_code( m_simulationJob->errorCode ); result.set_error_message( m_simulationJob->errorMessage );
+    result.mutable_messages()->Add( m_simulationJob->messages.begin(), m_simulationJob->messages.end() );
+    for( const auto& vector : m_simulationJob->vectors ) result.add_vectors()->CopyFrom( vector );
+    return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleCancelSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
+    std::unique_lock<std::mutex> lock( m_simulationMutex );
+    if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "No simulation job matches this schematic document" );
+    if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                              aCtx.Request.document() ) )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation job belongs to another schematic document" );
+    if( m_simulationJob->status == SIMJS_RUNNING && m_automationSimulator )
+    {
+        if( !m_automationSimulator->Stop() )
+            return SimulationError( ApiStatusCode::AS_NOT_READY, "KiCad's native ngspice wrapper did not accept cancellation" );
+        m_simulationJob->cancellationRequested = true; m_simulationJob->workerFinished = true;
+        m_simulationJob->status = SIMJS_CANCELLED; m_simulationJob->sequence++;
+    }
+    lock.unlock();
+    HANDLER_CONTEXT<ReadSimulationJob> read;
+    read.ClientName = aCtx.ClientName; read.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+    read.Request.set_job_id( aCtx.Request.job_id() ); read.Request.set_process_epoch( aCtx.Request.process_epoch() );
+    return handleReadSimulation( read );
 }
 
 

@@ -62,7 +62,10 @@ public sealed partial class NativeSessionTests
     [DataRow("dark")]
     public Task RecursiveEditorNavigatesLevelsAndSavesRequirementHistory(string theme) => RunNativeSessions(NativeJourney.RecursiveEditor, theme);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor }
+    [TestMethod, TestCategory("NativeSimulation")]
+    public Task NativeSimulationUsesKiCadNgspiceAndReturnsVectors() => RunNativeSessions(NativeJourney.Simulation);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor, Simulation }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -84,6 +87,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.ComponentCreation => "native-xml-component-creation",
                 NativeJourney.StructuralEditor => "native-structural-editor",
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
+                NativeJourney.Simulation => "native-simulation",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -410,6 +414,8 @@ public sealed partial class NativeSessionTests
                             await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-creation-failure.txt"), error.ToString(), deadline.Token);
                         }
                     }
+                    else if (journey == NativeJourney.Simulation)
+                        await VerifyNativeSimulation(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SymbolSheets)
                     {
                         try

@@ -130,6 +130,20 @@ public sealed partial class NativeSessionTests
                 while (!NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving")) await Task.Delay(50, modal.Token);
             }
             Key("u", alt: true, title: "Resolve changes before saving");
+            // A resolution is tied to the exact comparison bytes. Even a further
+            // saved-file change while the dialog is open must not reuse its token.
+            await File.AppendAllTextAsync(source, "\n", token);
+            Key("v", alt: true, title: "Resolve changes before saving");
+            var changedAgain = await Wait(s => !s.Busy && s.Dirty && s.ErrorCode == "stale_requirement_resolution");
+            Assert.AreEqual("Retain this draft on conflict.", changedAgain.Draft.Fields.General);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(competing) + "\n", await File.ReadAllTextAsync(source, token));
+            Key("s", control: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving")) await Task.Delay(50, modal.Token);
+            }
+            Key("u", alt: true, title: "Resolve changes before saving");
             Key("v", alt: true, title: "Resolve changes before saving");
             var resolved = await Wait(s => !s.Busy && !s.Dirty && s.Draft.Fields.General == "Retain this draft on conflict.");
             Assert.AreEqual("", resolved.ErrorCode);

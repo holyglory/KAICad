@@ -112,7 +112,11 @@ public static class RecursiveEditorFiles
                 throw Invalid("invalid_diagram_history_request", "Use the exact diagram context and only the page or comparison fields belonging to this operation.");
             if (request.Action == P.RecursiveFileAction.RfaDiagramHistory)
                 result.DiagramHistory = RecursiveBlockCodec.Encode(DiagramHistoryQuery.Read(loaded.Graph, block, request.Offset, request.Limit));
-            else result.DiagramComparison = RecursiveBlockCodec.Encode(DiagramHistoryQuery.Compare(loaded.Graph, block, RecursiveBlockCodec.DecodeSelection(request.InspectedBlock)));
+            else
+            {
+                var inspected = request.InspectedBlock ?? throw Invalid("missing_diagram_history_revision", "Select the exact historical revision to compare.");
+                result.DiagramComparison = RecursiveBlockCodec.Encode(DiagramHistoryQuery.Compare(loaded.Graph, block, RecursiveBlockCodec.DecodeSelection(inspected)));
+            }
             return result;
         }
         var field = (DiagramRequirementField)((int)request.Field - 1);

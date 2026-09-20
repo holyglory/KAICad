@@ -91,6 +91,14 @@ public sealed partial class NativeSessionTests
                 } while (count == 0);
             }
             async Task Preview(bool last) { await ImplementationMenu(); Key("Home"); if (last) Key("Down"); Key("Return"); }
+            async Task PreviewState(Guid id)
+            {
+                var saved = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+                Guid owner = saved.States.Single(s => s.Id == id).BlockId;
+                var states = saved.States.Where(s => s.BlockId == owner && !s.Archived).ToArray();
+                int index = Array.FindIndex(states, s => s.Id == id); Assert.IsTrue(index >= 0);
+                await ImplementationMenu(); Key("Home"); for (int i = 0; i < index; ++i) Key("Down"); Key("Return");
+            }
             async Task Window(string title, bool visible = true)
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(15));
@@ -422,6 +430,16 @@ public sealed partial class NativeSessionTests
             var renamedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual("Thermal copy", renamedGraph.States.Single(s => s.Id == copyState).Name);
             Assert.AreEqual("Serviceable copy", renamedGraph.ImplementationChanges.Single(c => c.StateId == copyState).BeforeName);
+            await Save();
+            var selectedCopyGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(copyState, selectedCopyGraph.Inspect(selectedCopyGraph.SelectedRoot).Children[1].StateId);
+            string selectedCopyBytes = await File.ReadAllTextAsync(source, token);
+            await ImplementationMenu(); Key("v");
+            Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Remove implementation")); Key("Escape");
+            Assert.AreEqual(selectedCopyBytes, await File.ReadAllTextAsync(source, token));
+            await PreviewState(sourceCpu.StateId); await Wait(s => s.ImplementationPreview); await Save();
+            await PreviewState(copyState); await Wait(s => s.ImplementationPreview);
+            renamedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             await ImplementationMenu(); Key("v"); await Window("Remove implementation");
             Key("Escape", title: "Remove implementation"); await Window("Remove implementation", false);
             Assert.IsFalse(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)).States.Single(s => s.Id == copyState).Archived);

@@ -2917,6 +2917,16 @@ In the recursive window:
   already-loaded value remain available during loading. A failed read preserves
   the loaded rows and draft; a changed saved file requires closing history and
   reloading its context. The saved marker stays before a long actor name.
+- **History** in the diagram header (`Ctrl+H`) opens whole-diagram history at
+  the current level. Selecting a row shows the actual author, time and content
+  changes while leaving the canvas and any editing draft untouched. **Preview**
+  explicitly shows that historical diagram read-only; **Return to current**
+  restores the prior view. **Restore as draft** retains exact children,
+  connections, interfaces and notes, then normal Save creates a new successor.
+  An existing dirty draft first offers Save, Decline or Cancel. Older pages,
+  changed-file errors, retry and closing during loading preserve saved history.
+  Source-instruction opening is still separate unfinished work; no missing
+  source is presented as an enabled link.
 - For block requirement conflicts, compare Base, Your draft and Latest saved.
   Choose the draft, saved text, or explicitly write merged text. All overlapping
   fields require a choice. Independent fields can compose without a modal.
@@ -2944,6 +2954,12 @@ an agent's file update; reload or reconcile it explicitly. Management history
 retains old names and removal/restoration state, in addition to immutable design
 revisions. This is conceptual model management, not native schematic/PCB activation.
 
+`kicad_diagram_history` and `kicad_diagram_history_compare` expose bounded exact-
+context revision lists and content differences. `kicad_diagram_prepare_restoration`
+returns a typed historical draft without writing the file or replacing an open
+window draft. The explicit context/source selections and observed file token
+remain distinct from choosing an implementation or saving a new revision.
+
 Focused Linux development verification uses:
 
 ```sh
@@ -2956,8 +2972,12 @@ independent KiCad instances through navigation, editing, persistence and recover
 Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
 native Mac integration. The authoritative unfinished outcomes include recursive
 UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
-`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and whole-diagram history,
-preview and restoration `pb0847a7ffd99250a`. Field-history pagination beyond 200
+`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and opening retained source
+instructions from history `pb09aa30cf44e609b`. Whole-diagram history, preview and
+restoration `pb0847a7ffd99250a` passed the expanded Linux native and STDIO journeys
+in `t20260920T061636Z-21b360`, including root/child restoration, dirty choices,
+stale-page recovery, compact controls, native keyboard focus and visible canvas.
+Field-history pagination beyond 200
 changes passed the scoped Linux run `t20260920T042520Z-4974e9`, including actual
 editor restoration, stale-page recovery, cancellation and both themes. Its
 outcome is `p8ebf18838a55934f`; the wider history workflow is still incomplete.

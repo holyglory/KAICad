@@ -527,6 +527,66 @@ public sealed partial class NativeSessionTests
             var reopened = await client.CallToolAsync("kicad_diagram_open", arguments, cancellationToken: token);
             Assert.IsFalse(reopened.IsError == true);
             await Wait(s => s.Ready && !s.Busy && s.Draft.Baseline.BlockId == file.SelectedRoot.BlockId.ToString("D"));
+            // A real native dialog must reach history older than the first bounded
+            // page, while retaining an unrelated draft and exact saved context.
+            var longGraph = RecursiveBlockFixture.RefineRoot(RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)),
+                DiagramRequirementField.General, 205);
+            await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(longGraph), token);
+            Key("r", control: true);
+            await Wait(s => !s.Busy && !s.Dirty && s.Draft.Baseline.RevisionId == longGraph.SelectedRoot.RevisionId.ToString("D"));
+            Key("3", control: true); Key("a", control: true); Type("Independent routing draft.");
+            await Wait(s => s.Dirty && s.Draft.Fields.Routing == "Independent routing draft.");
+            Key("1", control: true); Key("h", alt: true);
+            var firstHistory = await Wait(s => s.FieldHistory is { LoadedCount: 200, Loading: false });
+            Key("Down", title: "Requirement history");
+            var inspectedHistory = await Wait(s => s.FieldHistory is not null
+                && s.FieldHistory.InspectedRevisionId != firstHistory.FieldHistory.InspectedRevisionId);
+            var externalHistory = RecursiveBlockFixture.RefineRoot(longGraph, DiagramRequirementField.Schematic, 1);
+            string externalHistoryXml = RecursiveBlockGraphXml.Write(externalHistory);
+            await File.WriteAllTextAsync(source, externalHistoryXml, token);
+            Key("o", alt: true, title: "Requirement history");
+            var pageFailure = await Wait(s => !s.Busy && s.ErrorCode == "recursive_block_file_changed" && s.FieldHistory is { Loading: false });
+            Assert.AreEqual(200U, pageFailure.FieldHistory.LoadedCount);
+            Assert.AreEqual(inspectedHistory.FieldHistory.InspectedRevisionId, pageFailure.FieldHistory.InspectedRevisionId);
+            Assert.AreEqual(longGraph.SelectedRoot.RevisionId.ToString("D"), pageFailure.FieldHistory.ContextRevisionId);
+            Assert.AreEqual("Independent routing draft.", pageFailure.Draft.Fields.Routing);
+            Assert.IsFalse(string.IsNullOrEmpty(pageFailure.FieldHistory.ErrorMessage));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-history-page-stale.png"), token);
+            Key("Escape", title: "Requirement history"); await Wait(s => s.FieldHistory is null && !s.Busy);
+            Assert.AreEqual(externalHistoryXml, await File.ReadAllTextAsync(source, token));
+            Key("d", alt: true);
+            await Wait(s => !s.Busy && !s.Dirty && s.Draft.Baseline.RevisionId == externalHistory.SelectedRoot.RevisionId.ToString("D"));
+            Key("1", control: true); Key("h", alt: true); await Wait(s => s.FieldHistory is { LoadedCount: 200, Loading: false });
+            Key("o", alt: true, title: "Requirement history"); Key("Escape", title: "Requirement history");
+            await Wait(s => !s.Busy && s.FieldHistory is null);
+            Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Requirement history"), "A cancelled page read must not reopen history.");
+            Assert.AreEqual(externalHistoryXml, await File.ReadAllTextAsync(source, token));
+            Key("3", control: true); Key("a", control: true); Type("Independent routing draft."); await Wait(s => s.Dirty);
+            Key("1", control: true); Key("h", alt: true);
+            var beforeOlder = await Wait(s => s.FieldHistory is { LoadedCount: 200, Loading: false });
+            Key("o", alt: true, title: "Requirement history");
+            var allHistory = await Wait(s => s.FieldHistory is { Loading: false } h && h.LoadedCount == h.TotalCount);
+            Assert.AreEqual(beforeOlder.FieldHistory.InspectedRevisionId, allHistory.FieldHistory.InspectedRevisionId);
+            var lastHistory = DiagramFieldHistoryQuery.Block(externalHistory, externalHistory.SelectedRoot,
+                DiagramRequirementField.General, 200, 200).Entries[^1];
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true,
+                clickFromLeft: 70, clickFromTop: 150);
+            Key("End", title: "Requirement history");
+            await Wait(s => s.FieldHistory?.InspectedRevisionId == lastHistory.RequirementRevisionId.ToString("D"));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-history-oldest.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true,
+                clickFromRight: 70, clickFromBottom: 30);
+            var oldestDraft = await Wait(s => s.FieldHistory is null && s.Dirty && s.Draft.Fields.General == lastHistory.Text);
+            Assert.AreEqual("Independent routing draft.", oldestDraft.Draft.Fields.Routing);
+            Assert.AreEqual(externalHistoryXml, await File.ReadAllTextAsync(source, token));
+            await Save();
+            var historySaved = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(lastHistory.Text, historySaved.Requirements(historySaved.SelectedRoot).Requirements.General);
+            Assert.AreEqual("Independent routing draft.", historySaved.Requirements(historySaved.SelectedRoot).Requirements.Routing);
+            Assert.AreEqual(externalHistory.Requirements(externalHistory.SelectedRoot).Requirements.Schematic,
+                historySaved.Requirements(historySaved.SelectedRoot).Requirements.Schematic);
+            var restoredHistory = historySaved.RequirementHistories.Single(h => h.Scope.DesignStateId == historySaved.SelectedRoot.StateId);
+            Assert.AreEqual(lastHistory.RequirementRevisionId, restoredHistory.Current.Restorations.Single().SourceRevisionId);
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

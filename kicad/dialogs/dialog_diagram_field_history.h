@@ -34,14 +34,35 @@ public:
             std::function<void( const std::string& )> aOpenSource = {} );
 
     const std::optional<std::string>& RestoreRevision() const { return m_restoreRevision; }
+    const DIAGRAM_FIELD_HISTORY_ENTRY* RestoredEntry() const;
+
+    // Pages append to the exact comparison opened by the caller. A failed or
+    // cancelled read must never clear inspected rows or select another revision.
+    void ConfigurePaging( size_t aTotal, std::function<void( size_t )> aLoadOlder );
+    bool AppendPage( size_t aOffset, size_t aTotal,
+                     std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> aEntries );
+    void PageFailed( const wxString& aMessage );
+    size_t LoadedCount() const { return m_entries.size(); }
+    size_t TotalCount() const { return m_total; }
+    bool IsLoading() const { return m_loading; }
+    std::string InspectedRevision() const;
+    wxString PageError() const;
 
 private:
     void updateSelection();
+    void updatePaging();
+    void appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& aEntries );
 
-    const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> m_entries;
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> m_entries;
     const std::function<void( const std::string& )> m_openSource;
+    std::function<void( size_t )> m_loadOlder;
+    size_t m_total = 0;
+    bool m_loading = false;
     std::optional<std::string> m_restoreRevision;
     wxListBox* m_history;
+    wxStaticText* m_pageStatus;
+    wxStaticText* m_pageError;
+    wxButton* m_older;
     wxStaticText* m_selectedHeading;
     wxTextCtrl* m_selectedText;
     wxButton* m_source;

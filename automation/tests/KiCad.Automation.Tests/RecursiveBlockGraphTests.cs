@@ -13,6 +13,17 @@ internal sealed record RecursiveBlockFixture(RecursiveBlockGraph Graph,
         actor == "Fixture user" ? RequirementRevisionActor.User : RequirementRevisionActor.Agent,
         actor, new(2026, 9, 19, 12, 0, 0, TimeSpan.Zero), "Test-only system refinement", [], []);
 
+    public static RecursiveBlockGraph RefineRoot(RecursiveBlockGraph graph, DiagramRequirementField field, int changes)
+    {
+        for (int i = 0; i < changes; ++i)
+        {
+            var draft = graph.StartDraft(graph.SelectedRoot);
+            draft = draft with { Requirements = draft.Requirements.Edit(field, $"History refinement {i + 1}.") };
+            graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], draft, Guid.NewGuid(), Guid.NewGuid(), [], Origin()).Graph;
+        }
+        return graph;
+    }
+
     public static RecursiveBlockFixture Create()
     {
         int next = 1;

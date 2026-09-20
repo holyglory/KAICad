@@ -36,11 +36,16 @@ public sealed class NativeFieldHistoryTests
             var page = DiagramFieldHistoryQuery.Block(graph, psu, DiagramRequirementField.Routing);
             string input = Path.Combine(temporary, "field-history.pb");
             await File.WriteAllBytesAsync(input, RecursiveBlockCodec.Encode(page).ToByteArray());
+            var longGraph = RecursiveBlockFixture.RefineRoot(fixture.Graph, DiagramRequirementField.General, 205);
+            for (int offset = 0; offset < 206; offset += 200)
+                await File.WriteAllBytesAsync(Path.Combine(temporary, $"history-page-{offset}.pb"), RecursiveBlockCodec.Encode(
+                    DiagramFieldHistoryQuery.Block(longGraph, longGraph.SelectedRoot, DiagramRequirementField.General, offset, 200)).ToByteArray());
             var start = new ProcessStartInfo("xvfb-run")
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = temporary };
             foreach (string arg in new[] { "-a", "-s", "-screen 0 1280x1024x24 -nolisten tcp", executable,
                 "--run_test=DiagramFieldHistory", "--log_level=test_suite" }) start.ArgumentList.Add(arg);
             start.Environment["KICAD_FIELD_HISTORY_INPUT"] = input;
+            start.Environment["KICAD_FIELD_HISTORY_PAGES"] = temporary;
             start.Environment["KICAD_FIELD_HISTORY_EVIDENCE"] = evidence;
             start.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "config");
             start.Environment["KICAD_CONFIG_HOME"] = Path.Combine(temporary, "config", "kicad");
@@ -89,6 +94,14 @@ public sealed class NativeFieldHistoryTests
             Assert.IsTrue(conflict.RootElement.GetProperty("partial_resolution_blocked").GetBoolean());
             Assert.AreEqual("Keep both edges accessible.", conflict.RootElement.GetProperty("routing_text").GetString());
             Assert.AreEqual("Prefer fixed mounting.", conflict.RootElement.GetProperty("general_text").GetString());
+            using var paging = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "paging-interaction.json")));
+            foreach (string check in new[] { "selection_preserved", "failure_preserved_rows", "malformed_page_rejected", "cancelled_load_without_restore" })
+                Assert.IsTrue(paging.RootElement.GetProperty(check).GetBoolean(), check);
+            Assert.AreEqual(206, paging.RootElement.GetProperty("loaded_count").GetInt32());
+            Assert.AreEqual(fixture.Graph.Requirements(fixture.Graph.SelectedRoot).RevisionId.ToString("D"),
+                paging.RootElement.GetProperty("oldest_revision_id").GetString());
+            foreach (string capture in new[] { "06-history-loading.png", "07-history-load-error.png", "08-history-oldest.png" })
+                Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, capture);
         }
         finally { Directory.Delete(temporary, recursive: true); }
     }

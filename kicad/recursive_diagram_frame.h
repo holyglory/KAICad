@@ -22,6 +22,7 @@ class wxTextCtrl;
 class wxToolBar;
 class wxScrolledWindow;
 class wxChoice;
+class DIALOG_DIAGRAM_FIELD_HISTORY;
 
 /** One native diagram level with revision-bound requirement drafts. XML validation
  * and publication remain in the compiled companion. No action invokes an agent. */
@@ -86,6 +87,8 @@ private:
     kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor m_request;
     kiapi::automation::diagrams::v1::RecursiveEditorDocument m_document;
     REQUEST m_activeRequest;
+    DIALOG_DIAGRAM_FIELD_HISTORY* m_historyDialog = nullptr;
+    kiapi::automation::diagrams::v1::FieldHistoryPageData m_historyContext;
     DRAFT m_draft, m_savedDraft;
     kiapi::automation::diagrams::v1::ConnectionDraftData m_connectionDraft, m_savedConnectionDraft;
     std::vector<kiapi::automation::diagrams::v1::ConnectionDraftData> m_connectionUndo, m_connectionRedo;

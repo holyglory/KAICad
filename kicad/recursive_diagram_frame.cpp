@@ -286,7 +286,12 @@ void RECURSIVE_DIAGRAM_FRAME::execute( REQUEST request )
     const wxChar* binary[] = { helper.c_str(), mode.c_str(), nullptr };
     const wxChar* managed[] = { dotnet.c_str(), helper.c_str(), mode.c_str(), nullptr };
     m_pid = wxExecute( helper.EndsWith( ".dll" ) ? managed : binary, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, m_process.get() );
-    if( m_pid <= 0 ) { m_process.reset(); m_errorCode = "companion_start_failed"; m_error = "The compiled companion could not start."; refresh(); return; }
+    if( m_pid <= 0 )
+    {
+        m_process.reset(); m_errorCode = "companion_start_failed"; m_error = "The compiled companion could not start.";
+        if( m_historyDialog ) m_historyDialog->PageFailed( _( "Could not load older changes. Try again." ) );
+        refresh(); return;
+    }
     m_process->GetOutputStream()->Write( json.data(), json.size() ); m_process->CloseOutput(); m_ioTimer.Start( 50 ); refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::drain()
@@ -300,6 +305,11 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
 {
     if( !m_process || event.GetPid() != m_pid ) return;
     drain(); m_ioTimer.Stop(); m_process.reset();
+    bool olderHistory = ( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY
+                          || m_activeRequest.action() == D::RFA_CONNECTION_FIELD_HISTORY ) && m_activeRequest.offset() > 0;
+    // Closing history cancels delivery of this read. A late response must not
+    // reopen a modal, replace a draft, or report an error in another scope.
+    if( olderHistory && !m_historyDialog ) { refresh(); return; }
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
     if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION
@@ -308,6 +318,13 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
         m_error = parsed && !result.error_message().empty() ? result.error_message() : "The operation failed; the current draft remains open.";
+        if( olderHistory )
+        {
+            m_historyDialog->PageFailed( m_errorCode == "recursive_block_file_changed"
+                ? _( "Saved design changed. Close history and reload." )
+                : _( "Could not load older changes. Try again." ) );
+            refresh(); return;
+        }
         if( m_activeRequest.action() == D::RFA_SAVE_BLOCK && m_errorCode == "recursive_block_file_changed" && m_rebaseAttempts++ < 2 )
         {
             REQUEST compare; compare.set_action( D::RFA_REBASE_REQUIREMENTS );
@@ -382,30 +399,55 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             || result.history().document_id() != DocumentId()
             || result.history().owner_id() != ownerId || result.history().state_id() != stateId
             || result.history().context_revision_id() != revisionId
-            || result.history().field() != m_activeRequest.field() )
-        { m_error = "The history response belongs to another saved context."; refresh(); return; }
+            || result.history().field() != m_activeRequest.field()
+            || result.history().offset() != static_cast<unsigned>( m_activeRequest.offset() )
+            || ( olderHistory && ( result.history().context_version() != m_historyContext.context_version()
+                || result.history().requirement_revision_id() != m_historyContext.requirement_revision_id()
+                || result.history().saved_text() != m_historyContext.saved_text() ) ) )
+        {
+            m_errorCode = "field_history_context_mismatch"; m_error = "The history response belongs to another saved context.";
+            if( m_historyDialog ) m_historyDialog->PageFailed( _( "Older changes did not match this history. Try again." ) );
+            refresh(); return;
+        }
         int which = static_cast<int>( result.history().field() ) - 1;
         std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
         for( const auto& row : result.history().entries() )
             rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
                 text( row.origin().actor() ), text( row.text() ), wxEmptyString, row.is_saved_text() } );
+        if( olderHistory )
+        {
+            if( !m_historyDialog->AppendPage( result.history().offset(), result.history().total(), std::move( rows ) ) )
+            { m_errorCode = "field_history_page_mismatch"; m_error = "The older page does not continue this exact history."; }
+            refresh(); return;
+        }
         const wxString labels[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
         if( which < 0 || which > 2 ) { m_error = "The history field is unsupported."; refresh(); return; }
         DIALOG_DIAGRAM_FIELD_HISTORY dialog( this, labels[which], m_owner->GetLabel(),
                 wxString::Format( "v%u", result.history().context_version() ), text( result.history().saved_text() ), std::move( rows ) );
-        if( dialog.ShowModal() == wxID_OK && dialog.RestoreRevision() )
-            for( const auto& row : result.history().entries() ) if( row.requirement_revision_id() == *dialog.RestoreRevision() )
+        m_historyContext = result.history();
+        REQUEST query = m_activeRequest;
+        dialog.ConfigurePaging( result.history().total(), [this, query]( size_t offset ) mutable
+        { query.set_offset( static_cast<int>( offset ) ); execute( query ); } );
+        m_historyDialog = &dialog;
+        int action = dialog.ShowModal();
+        m_historyDialog = nullptr; m_historyContext.Clear();
+        if( action == wxID_OK && dialog.RestoredEntry() )
+        {
+            const auto& row = *dialog.RestoredEntry();
+            if( field( link ? m_connectionDraft.fields() : m_draft.fields(), which ) != utf8( row.text ) )
             {
-                if( field( link ? m_connectionDraft.fields() : m_draft.fields(), which ) == row.text() ) break;
                 if( link ) { m_connectionUndo.push_back( m_connectionDraft ); m_connectionRedo.clear(); }
                 else { m_undo.push_back( m_draft ); m_redo.clear(); }
-                setField( link ? m_connectionDraft.mutable_fields() : m_draft.mutable_fields(), which, row.text() );
+                setField( link ? m_connectionDraft.mutable_fields() : m_draft.mutable_fields(), which, utf8( row.text ) );
                 auto* restores = link ? m_connectionDraft.mutable_restored_fields() : m_draft.mutable_restored_fields();
                 for( int i = restores->size() - 1; i >= 0; --i ) if( restores->Get( i ).field() == result.history().field() ) restores->DeleteSubrange( i, 1 );
-                auto* restored = restores->Add(); restored->set_field( result.history().field() ); restored->set_source_revision_id( row.requirement_revision_id() );
-                m_dirty = hasChanges(); ++m_viewRevision; break;
+                auto* restored = restores->Add(); restored->set_field( result.history().field() ); restored->set_source_revision_id( row.revisionId );
+                m_dirty = hasChanges(); ++m_viewRevision;
             }
-        refresh(); return;
+        }
+        refresh();
+        if( action == wxID_OK ) m_fields[which]->SetFocus(); else m_history[which]->SetFocus();
+        return;
     }
     if( !result.has_document() || result.document().schema_version() != 1 || result.document().document_id() != DocumentId()
         || result.document().source_path() != SourcePath() || result.document().source_token().size() != 64 )
@@ -1064,6 +1106,16 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_selected_annotation_id( m_commentId );
     result.set_implementation_preview( m_preview.has_value() );
     result.set_navigation_input_revision( m_navigationInputRevision );
+    if( m_historyDialog )
+    {
+        auto* history = result.mutable_field_history();
+        history->set_owner_id( m_historyContext.owner_id() ); history->set_state_id( m_historyContext.state_id() );
+        history->set_context_revision_id( m_historyContext.context_revision_id() ); history->set_field( m_historyContext.field() );
+        history->set_loaded_count( static_cast<unsigned>( m_historyDialog->LoadedCount() ) );
+        history->set_total_count( static_cast<unsigned>( m_historyDialog->TotalCount() ) );
+        history->set_inspected_revision_id( m_historyDialog->InspectedRevision() );
+        history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( utf8( m_historyDialog->PageError() ) );
+    }
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( utf8( focused->GetName() ) );

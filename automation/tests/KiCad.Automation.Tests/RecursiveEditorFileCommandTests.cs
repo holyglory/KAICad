@@ -12,6 +12,42 @@ namespace KiCad.Automation.Tests;
 public sealed class RecursiveEditorFileCommandTests
 {
     [TestMethod]
+    public async Task OlderHistoryPagesKeepTheirExactContextAndRejectChangedFiles()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-history-pages-").FullName;
+        try
+        {
+            var initial = RecursiveBlockFixture.Create().Graph;
+            var graph = RecursiveBlockFixture.RefineRoot(initial, DiagramRequirementField.General, 205);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root,
+                SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request); Assert.IsTrue(read.Success);
+            request.ExpectedSourceToken = read.SourceToken; request.Action = P.RecursiveFileAction.RfaBlockFieldHistory;
+            request.Block = new() { BlockId = graph.SelectedRoot.BlockId.ToString("D"), StateId = graph.SelectedRoot.StateId.ToString("D"), RevisionId = graph.SelectedRoot.RevisionId.ToString("D") };
+            request.Field = P.RequirementFieldKind.RfkGeneral; request.Limit = 200;
+            var first = await Invoke(request); Assert.IsTrue(first.Success); Assert.HasCount(200, first.History.Entries);
+            request.Offset = 200;
+            var older = await Invoke(request); Assert.IsTrue(older.Success); Assert.HasCount(6, older.History.Entries);
+            Assert.AreEqual(first.History.ContextRevisionId, older.History.ContextRevisionId);
+            Assert.AreEqual(first.History.SavedText, older.History.SavedText);
+            Assert.AreEqual(initial.Requirements(initial.SelectedRoot).RevisionId.ToString("D"), older.History.Entries[^1].RequirementRevisionId);
+            var changed = RecursiveBlockFixture.RefineRoot(graph, DiagramRequirementField.Routing, 1);
+            string changedXml = RecursiveBlockGraphXml.Write(changed); await File.WriteAllTextAsync(path, changedXml);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.IsNull(stale.History); Assert.AreEqual(changedXml, await File.ReadAllTextAsync(path));
+            var currentRead = request.Clone(); currentRead.Action = P.RecursiveFileAction.RfaRead;
+            currentRead.Block = null; currentRead.Field = P.RequirementFieldKind.RfkUnknown; currentRead.Offset = currentRead.Limit = 0; currentRead.ExpectedSourceToken = "";
+            request.ExpectedSourceToken = (await Invoke(currentRead)).SourceToken;
+            var recovered = await Invoke(request); Assert.IsTrue(recovered.Success);
+            Assert.AreEqual(older.History, recovered.History, "A refreshed file still permits inspecting the exact old context, not today's head.");
+            Assert.AreEqual(changedXml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task CompiledReadAndScopedHistoryCommandsPreserveTheSavedDesign()
     {
         string root = Directory.CreateTempSubdirectory("kicad-recursive-command-").FullName;

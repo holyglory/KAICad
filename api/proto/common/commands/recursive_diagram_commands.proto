@@ -13,6 +13,17 @@ message OpenRecursiveDiagramEditor {
   string helper_path = 6;
 }
 message ReadRecursiveDiagramEditor { string document_id = 1; }
+message FieldHistoryViewState {
+  string owner_id = 1;
+  string state_id = 2;
+  string context_revision_id = 3;
+  RequirementFieldKind field = 4;
+  uint32 loaded_count = 5;
+  uint32 total_count = 6;
+  string inspected_revision_id = 7;
+  bool loading = 8;
+  string error_message = 9;
+}
 message RecursiveDiagramEditorState {
   string document_id = 1;
   string source_path = 2;
@@ -33,4 +44,5 @@ message RecursiveDiagramEditorState {
   BlockSelectionData preview_selection = 17;
   string focused_control = 18;
   uint64 navigation_input_revision = 19;
+  FieldHistoryViewState field_history = 20;
 }

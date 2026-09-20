@@ -2,6 +2,7 @@
 #include "dialog_diagram_field_history.h"
 
 #include <algorithm>
+#include <set>
 #include <utility>
 #include <wx/button.h>
 #include <wx/listbox.h>
@@ -45,13 +46,20 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_history->SetName( "DiagramFieldHistoryRevisions" );
     OptOut( m_history );
     m_history->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
-    for( const auto& entry : m_entries )
-    {
-        wxString label = entry.revisionLabel + wxS( " · " ) + entry.actor;
-        if( entry.saved ) label += wxS( " · " ) + _( "Saved" );
-        m_history->Append( label );
-    }
-    comparison->Add( m_history, 0, wxEXPAND | wxRIGHT, gap );
+    appendRows( m_entries );
+    auto* revisionColumn = new wxBoxSizer( wxVERTICAL );
+    revisionColumn->Add( m_history, 1, wxEXPAND );
+    m_pageStatus = new wxStaticText( this, wxID_ANY, wxEmptyString );
+    m_pageStatus->SetName( "DiagramFieldHistoryPageStatus" );
+    revisionColumn->Add( m_pageStatus, 0, wxTOP, gap / 2 );
+    m_pageError = new wxStaticText( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                  FromDIP( wxSize( 200, -1 ) ), wxST_NO_AUTORESIZE );
+    m_pageError->SetName( "DiagramFieldHistoryPageError" );
+    revisionColumn->Add( m_pageError, 0, wxEXPAND | wxTOP, gap / 2 );
+    m_older = new wxButton( this, wxID_ANY, _( "Load &older" ) );
+    m_older->SetName( "DiagramFieldHistoryOlder" );
+    revisionColumn->Add( m_older, 0, wxEXPAND | wxTOP, gap / 2 );
+    comparison->Add( revisionColumn, 0, wxEXPAND | wxRIGHT, gap );
 
     auto* texts = new wxBoxSizer( wxVERTICAL );
     m_selectedHeading = new wxStaticText( this, wxID_ANY, wxEmptyString );
@@ -96,6 +104,12 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_history->Bind( wxEVT_LISTBOX, [this]( wxCommandEvent& ) { updateSelection(); } );
     // A double-click is inspection, not permission to replace a draft field.
     m_history->Bind( wxEVT_LISTBOX_DCLICK, [this]( wxCommandEvent& ) { updateSelection(); } );
+    m_older->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& )
+    {
+        if( !m_loadOlder || m_loading || m_entries.size() >= m_total ) return;
+        m_loading = true; m_pageError->SetLabel( wxEmptyString ); updatePaging();
+        m_loadOlder( m_entries.size() );
+    } );
     m_source->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& )
     {
         int selected = m_history->GetSelection();
@@ -123,6 +137,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     } );
 
     if( !m_entries.empty() ) m_history->SetSelection( 0 );
+    m_total = m_entries.size(); updatePaging();
     updateSelection();
     finishDialogSettings();
     wxSize minimum = GetSizer()->CalcMin();
@@ -132,6 +147,79 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     preferred.IncTo( minimum );
     SetClientSize( preferred );
     m_history->SetFocus();
+}
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& entries )
+{
+    for( const auto& entry : entries )
+    {
+        wxString label = entry.revisionLabel + wxS( " · " ) + entry.actor;
+        if( entry.saved ) label += wxS( " · " ) + _( "Saved" );
+        m_history->Append( label );
+    }
+}
+
+
+const DIAGRAM_FIELD_HISTORY_ENTRY* DIALOG_DIAGRAM_FIELD_HISTORY::RestoredEntry() const
+{
+    if( m_restoreRevision )
+        for( const auto& entry : m_entries )
+            if( entry.revisionId == *m_restoreRevision ) return &entry;
+    return nullptr;
+}
+
+
+std::string DIALOG_DIAGRAM_FIELD_HISTORY::InspectedRevision() const
+{
+    int selected = m_history->GetSelection();
+    return selected == wxNOT_FOUND ? "" : m_entries[selected].revisionId;
+}
+
+
+wxString DIALOG_DIAGRAM_FIELD_HISTORY::PageError() const { return m_pageError->GetLabel(); }
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::ConfigurePaging( size_t total, std::function<void( size_t )> loadOlder )
+{
+    m_total = std::max( total, m_entries.size() ); m_loadOlder = std::move( loadOlder ); updatePaging();
+}
+
+
+bool DIALOG_DIAGRAM_FIELD_HISTORY::AppendPage( size_t offset, size_t total,
+                                              std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> entries )
+{
+    bool valid = m_loading && offset == m_entries.size() && total == m_total
+                 && !entries.empty() && entries.size() <= 200 && entries.size() <= total - offset;
+    std::set<std::string> ids;
+    for( const auto& row : m_entries ) ids.insert( row.revisionId );
+    for( const auto& row : entries ) valid = !row.revisionId.empty() && ids.insert( row.revisionId ).second && valid;
+    if( !valid ) { PageFailed( _( "Older changes did not match this history. Try again." ) ); return false; }
+    int selected = m_history->GetSelection();
+    m_history->Freeze(); appendRows( entries );
+    m_entries.insert( m_entries.end(), entries.begin(), entries.end() );
+    m_history->SetSelection( selected ); m_history->Thaw();
+    m_loading = false; m_pageError->SetLabel( wxEmptyString ); updatePaging();
+    return true;
+}
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::PageFailed( const wxString& message )
+{
+    m_loading = false; m_pageError->SetLabel( message );
+    m_pageError->Wrap( FromDIP( 200 ) ); updatePaging();
+}
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::updatePaging()
+{
+    bool more = m_entries.size() < m_total;
+    m_pageStatus->SetLabel( wxString::Format( _( "%zu of %zu changes" ), m_entries.size(), m_total ) );
+    m_pageStatus->Show( static_cast<bool>( m_loadOlder ) );
+    m_pageError->Show( !m_pageError->GetLabel().IsEmpty() );
+    m_older->Show( more ); m_older->Enable( more && m_loadOlder && !m_loading );
+    m_older->SetLabel( m_loading ? _( "Loading…" ) : _( "Load &older" ) );
+    Layout();
 }
 
 

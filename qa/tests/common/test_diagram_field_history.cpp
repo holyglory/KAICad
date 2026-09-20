@@ -16,6 +16,7 @@
 #include <wx/image.h>
 #include <wx/listbox.h>
 #include <wx/stopwatch.h>
+#include <wx/stattext.h>
 #include <wx/textctrl.h>
 #include <wx/timer.h>
 #include <wx/uiaction.h>
@@ -127,6 +128,89 @@ int show( DIALOG_SHIM* aDialog, const std::function<void()>& aScenario )
 }
 
 BOOST_AUTO_TEST_SUITE( DiagramFieldHistory )
+
+BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
+{
+    const char* inputPath = std::getenv( "KICAD_FIELD_HISTORY_PAGES" );
+    const char* outputPath = std::getenv( "KICAD_FIELD_HISTORY_EVIDENCE" );
+    if( !inputPath || !outputPath ) return;
+    BOOST_REQUIRE( KI_TEST::CanDoDisplayTests() ); wxInitAllImageHandlers();
+    D::FieldHistoryPageData first, older;
+    std::ifstream firstInput( std::filesystem::path( inputPath ) / "history-page-0.pb", std::ios::binary );
+    std::ifstream olderInput( std::filesystem::path( inputPath ) / "history-page-200.pb", std::ios::binary );
+    BOOST_REQUIRE( first.ParseFromIstream( &firstInput ) ); BOOST_REQUIRE( older.ParseFromIstream( &olderInput ) );
+    BOOST_REQUIRE_EQUAL( first.entries_size(), 200 ); BOOST_REQUIRE_EQUAL( first.total(), 206 );
+    auto rows = []( const D::FieldHistoryPageData& page )
+    {
+        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> result;
+        for( const auto& entry : page.entries() )
+            result.push_back( { entry.requirement_revision_id(), wxString::Format( "v%u", entry.context_version() ),
+                wxString::FromUTF8( entry.origin().actor() ), wxString::FromUTF8( entry.text() ), wxEmptyString, entry.is_saved_text() } );
+        return result;
+    };
+    auto makeDialog = [&]()
+    {
+        return new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "General requirements", "System", "v206",
+                wxString::FromUTF8( first.saved_text() ), rows( first ) );
+    };
+    auto* dialog = makeDialog(); size_t requested = 0; bool preserved = false, failurePreserved = false, rejected = false;
+    dialog->ConfigurePaging( first.total(), [&]( size_t offset ) { requested = offset; } );
+    auto* list = control<wxListBox>( dialog, "DiagramFieldHistoryRevisions" );
+    auto* more = control<wxButton>( dialog, "DiagramFieldHistoryOlder" );
+    auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
+    auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
+    std::filesystem::path evidence( outputPath ); std::filesystem::create_directories( evidence );
+    BOOST_CHECK_EQUAL( show( dialog, [&]
+    {
+        list->SetFocus(); key( WXK_DOWN );
+        waitFor( [&] { return list->GetSelection() == 1; } );
+        auto inspected = dialog->InspectedRevision();
+        click( more ); BOOST_CHECK_EQUAL( requested, 200 );
+        BOOST_CHECK( dialog->IsLoading() ); BOOST_CHECK( !more->IsEnabled() );
+        BOOST_CHECK( restore->IsEnabled() ); BOOST_CHECK( close->IsEnabled() );
+        capture( dialog, evidence, "06-history-loading.png" );
+        dialog->PageFailed( "Could not load older changes. Try again." );
+        failurePreserved = dialog->LoadedCount() == 200 && dialog->InspectedRevision() == inspected && more->IsEnabled();
+        BOOST_CHECK( failurePreserved );
+        dialog->SetClientSize( dialog->FromDIP( wxSize( 590, 440 ) ) ); dialog->Layout();
+        wxRect client( dialog->ClientToScreen( wxPoint( 0, 0 ) ), dialog->GetClientSize() );
+        BOOST_CHECK( client.Contains( more->GetScreenRect() ) ); BOOST_CHECK( client.Contains( restore->GetScreenRect() ) );
+        BOOST_CHECK( client.Contains( control<wxStaticText>( dialog, "DiagramFieldHistoryPageError" )->GetScreenRect() ) );
+        capture( dialog, evidence, "07-history-load-error.png" );
+        click( more );
+        rejected = !dialog->AppendPage( 199, first.total(), rows( older ) );
+        BOOST_CHECK( rejected ); BOOST_CHECK_EQUAL( dialog->LoadedCount(), 200 );
+        click( more ); auto duplicate = rows( older ); duplicate[0] = rows( first )[0];
+        BOOST_CHECK( !dialog->AppendPage( 200, first.total(), duplicate ) );
+        BOOST_CHECK_EQUAL( dialog->LoadedCount(), 200 );
+        click( more ); BOOST_CHECK( dialog->AppendPage( 200, first.total(), rows( older ) ) );
+        preserved = dialog->InspectedRevision() == inspected && list->GetSelection() == 1;
+        BOOST_CHECK( preserved ); BOOST_CHECK_EQUAL( dialog->LoadedCount(), 206 ); BOOST_CHECK( !more->IsShown() );
+        BOOST_CHECK( dialog->PageError().IsEmpty() );
+        list->SetFocus(); key( WXK_END );
+        waitFor( [&] { return dialog->InspectedRevision() == older.entries( older.entries_size() - 1 ).requirement_revision_id(); } );
+        BOOST_CHECK_EQUAL( control<wxTextCtrl>( dialog, "DiagramFieldHistorySavedText" )->GetValue(), wxString::FromUTF8( first.saved_text() ) );
+        dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
+        capture( dialog, evidence, "08-history-oldest.png" ); click( restore );
+    } ), wxID_OK );
+    BOOST_REQUIRE( dialog->RestoredEntry() );
+    std::string restored = dialog->RestoredEntry()->revisionId;
+    BOOST_CHECK_EQUAL( restored, older.entries( older.entries_size() - 1 ).requirement_revision_id() );
+    size_t loaded = dialog->LoadedCount(); dialog->Destroy(); wxTheApp->ProcessPendingEvents();
+    auto* cancelled = makeDialog(); bool requestedThenCancelled = false;
+    cancelled->ConfigurePaging( first.total(), [&]( size_t offset ) { requestedThenCancelled = offset == 200; } );
+    BOOST_CHECK_EQUAL( show( cancelled, [&]
+    {
+        click( control<wxButton>( cancelled, "DiagramFieldHistoryOlder" ) );
+        BOOST_CHECK( cancelled->IsLoading() ); key( WXK_ESCAPE );
+    } ), wxID_CANCEL );
+    bool noRestore = requestedThenCancelled && !cancelled->RestoreRevision().has_value(); BOOST_CHECK( noRestore );
+    cancelled->Destroy(); wxTheApp->ProcessPendingEvents();
+    std::ofstream receipt( evidence / "paging-interaction.json" );
+    receipt << nlohmann::json( { { "selection_preserved", preserved }, { "failure_preserved_rows", failurePreserved },
+        { "malformed_page_rejected", rejected }, { "cancelled_load_without_restore", noRestore },
+        { "loaded_count", loaded }, { "oldest_revision_id", restored } } ).dump( 2 );
+}
 
 BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
 {

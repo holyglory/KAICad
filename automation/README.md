@@ -2978,7 +2978,9 @@ Resolving a class does not fabricate a physical component or claim compatibility
 
 Definition fields round-trip through XML and shared messages and survive native
 Save/Decline and history restoration. The first native preservation run is
-`t20260920T081144Z-d90a1f`; combined live guidance qualification is still in progress.
+`t20260920T081144Z-d90a1f`; combined live guidance, actual MCP definition edits,
+no-op/stale requests and missing-library behavior passed in both native themes
+with `t20260920T082202Z-413cbd`.
 There are no new raw-XML forms or component-choice controls in this increment.
 Exact native realization, physical allocation and component-selection UI remain
 separate unfinished work; these fields alone do not generate a schematic.

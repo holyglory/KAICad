@@ -998,8 +998,9 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(proposalData.GetProperty("contextStillSelected").GetBoolean(), "The proposal was based on the original input while later edits had advanced the active root.");
             var proposalPublication = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
             {
-                ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = proposalArguments["operationId"]
+                ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = proposalArguments["operationId"]
             }, cancellationToken: token);
+            if (proposalPublication.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-publication-error.json"), JsonSerializer.Serialize(proposalPublication), token);
             Assert.IsFalse(proposalPublication.IsError == true);
             Assert.AreEqual("Published", JsonSerializer.SerializeToElement(proposalPublication).GetProperty("structuredContent")
                 .GetProperty("receipt").GetProperty("stage").GetString());

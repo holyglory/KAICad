@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Security.Cryptography;
+using System.Text;
 using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
@@ -19,22 +21,36 @@ public sealed record BlockProposalPublicationReceipt(
     [property: JsonRequired] BlockProposalOperationStage Stage,
     [property: JsonRequired] string? StagedPath,
     [property: JsonRequired] string? RetainedPath,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? ConfirmedAt = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? ConfirmedAt = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? DocumentId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CandidateXml = null)
 {
     internal void Validate()
     {
-        if (Version != 1 || ProposalId == Guid.Empty || OperationId == Guid.Empty || !Enum.IsDefined(Kind)
+        if (Version is not (1 or 2) || ProposalId == Guid.Empty || OperationId == Guid.Empty || !Enum.IsDefined(Kind)
             || !Enum.IsDefined(Stage) || !Canonical(DesignPath) || !Digest(RequestSha256)
             || !Digest(BeforeSha256) || !Digest(AfterSha256) || BeforeSha256 == AfterSha256)
             throw Invalid("Proposal receipt identity or hashes are incomplete.");
+        if (Version == 1 ? DocumentId is not null || CandidateXml is not null
+            : DocumentId is null || DocumentId == Guid.Empty || CandidateXml is null)
+            throw Invalid("Version 2 retains the exact candidate and diagram identity for recovery.");
+        if (Version == 2)
+        {
+            if (Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(CandidateXml!))) != AfterSha256)
+                throw Invalid("The retained candidate bytes do not match the operation postimage.");
+            var graph = RecursiveBlockGraphXml.Read(CandidateXml!);
+            if (graph.DocumentId != DocumentId) throw Invalid("The retained candidate belongs to another diagram.");
+            _ = graph.Proposal(ProposalId);
+        }
         if (Stage == BlockProposalOperationStage.Prepared)
         {
             if (StagedPath is not null || RetainedPath is not null || ConfirmedAt is not null) throw Invalid("Prepared proposal receipts cannot claim replacement paths or confirmation.");
         }
-        else if (!Canonical(StagedPath) || !Canonical(RetainedPath) || Path.GetDirectoryName(StagedPath) != Path.GetDirectoryName(DesignPath)
+        else if (!Canonical(StagedPath) || !Canonical(RetainedPath) || !StagedPath!.StartsWith(DesignPath + ".sync-", StringComparison.Ordinal)
+            || Path.GetDirectoryName(StagedPath) != Path.GetDirectoryName(DesignPath)
             || (RetainedPath != StagedPath && RetainedPath != StagedPath + ".previous")
             || (Stage == BlockProposalOperationStage.Published
-                ? ConfirmedAt is null || ConfirmedAt.Value.Offset != TimeSpan.Zero
+                ? ConfirmedAt is null || ConfirmedAt == DateTimeOffset.MinValue || ConfirmedAt.Value.Offset != TimeSpan.Zero
                 : ConfirmedAt is not null)) throw Invalid("Proposal receipt paths and phase confirmation do not match.");
     }
     private static bool Digest(string? value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
@@ -59,10 +75,16 @@ public sealed class BlockProposalReceipts(string stateDirectory)
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "A proposal operation needs a nonempty operation identity.");
         try
         {
+            RequireDirectory(false);
             string path = Path.Combine(directory, operationId.ToString("N") + ".json");
             if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
                 throw new AutomationException("invalid_block_proposal_receipt", "Proposal receipts must be ordinary files.");
-            var result = JsonSerializer.Deserialize<BlockProposalPublicationReceipt>(File.ReadAllBytes(path), Json)
+            byte[] bytes = File.ReadAllBytes(path);
+            using var parsed = JsonDocument.Parse(bytes);
+            if (parsed.RootElement.ValueKind != JsonValueKind.Object || parsed.RootElement.EnumerateObject().Select(p => p.Name)
+                .Distinct(StringComparer.Ordinal).Count() != parsed.RootElement.EnumerateObject().Count())
+                throw BlockProposalPublicationReceipt.Invalid("Duplicate or invalid receipt properties.");
+            var result = JsonSerializer.Deserialize<BlockProposalPublicationReceipt>(bytes, Json)
                 ?? throw new AutomationException("invalid_block_proposal_receipt", "The proposal receipt is empty.");
             result.Validate(); if (result.OperationId != operationId) throw new AutomationException("invalid_block_proposal_receipt", "Receipt filename and operation differ.");
             return result;
@@ -74,13 +96,14 @@ public sealed class BlockProposalReceipts(string stateDirectory)
 
     public void Write(BlockProposalPublicationReceipt receipt)
     {
-        receipt.Validate(); Directory.CreateDirectory(directory);
-        using var lease = Acquire(receipt.OperationId);
+        receipt.Validate(); RequireDirectory(true);
+        using var lease = Lock(receipt.OperationId, ".receipt.lock");
         string path = Path.Combine(directory, receipt.OperationId.ToString("N") + ".json");
         var previous = Read(receipt.OperationId);
         if (previous is not null)
         {
-            if (previous.ProposalId != receipt.ProposalId || previous.Kind != receipt.Kind || previous.DesignPath != receipt.DesignPath
+            if (previous.Version != receipt.Version || previous.DocumentId != receipt.DocumentId || previous.CandidateXml != receipt.CandidateXml
+                || previous.ProposalId != receipt.ProposalId || previous.Kind != receipt.Kind || previous.DesignPath != receipt.DesignPath
                 || previous.RequestSha256 != receipt.RequestSha256 || previous.BeforeSha256 != receipt.BeforeSha256 || previous.AfterSha256 != receipt.AfterSha256
                 || (int)receipt.Stage < (int)previous.Stage
                 || (int)receipt.Stage != (int)previous.Stage + 1 && receipt.Stage != previous.Stage)
@@ -89,6 +112,8 @@ public sealed class BlockProposalReceipts(string stateDirectory)
                 && (receipt.StagedPath != previous.StagedPath || receipt.RetainedPath != previous.RetainedPath))
                 throw new AutomationException("block_proposal_receipt_conflict", "Proposal replacement paths cannot change during recovery.");
             if (receipt.Stage == previous.Stage && JsonSerializer.SerializeToUtf8Bytes(receipt, Json).AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(previous, Json))) return;
+            if (receipt.Stage == previous.Stage)
+                throw new AutomationException("block_proposal_receipt_conflict", "A recorded phase cannot change its paths or acknowledgement.");
         }
         else if (receipt.Stage != BlockProposalOperationStage.Prepared)
             throw new AutomationException("block_proposal_receipt_conflict", "Record the prepared proposal operation before replacement.");
@@ -102,10 +127,23 @@ public sealed class BlockProposalReceipts(string stateDirectory)
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    private FileStream Acquire(Guid operationId)
+    public IDisposable AcquireOperation(Guid operationId) => Lock(operationId, ".operation.lock");
+
+    private FileStream Lock(Guid operationId, string suffix)
     {
-        string path = Path.Combine(directory, operationId.ToString("N") + ".lock");
+        if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "Identify the exact proposal operation.");
+        RequireDirectory(true);
+        string path = Path.Combine(directory, operationId.ToString("N") + suffix);
+        if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw BlockProposalPublicationReceipt.Invalid("Receipt locks require ordinary paths.");
         try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
         catch (IOException error) { throw new AutomationException("block_proposal_receipt_busy", error.Message); }
+    }
+
+    private void RequireDirectory(bool create)
+    {
+        if (create) Directory.CreateDirectory(directory);
+        if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            throw BlockProposalPublicationReceipt.Invalid("Use the owned ordinary receipt directory.");
     }
 }

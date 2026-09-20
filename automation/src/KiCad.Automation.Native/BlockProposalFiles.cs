@@ -82,8 +82,9 @@ public static class BlockProposalFiles
         BlockProposalPublicationReceipt? preparedReceipt = null;
         if (operationId is { } operation)
         {
-            preparedReceipt = new(1, proposal.Id, operation, BlockProposalOperationKind.Publish, path, fingerprint,
-                loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(SHA256.HashData(replacement)), BlockProposalOperationStage.Prepared, null, null);
+            preparedReceipt = new(2, proposal.Id, operation, BlockProposalOperationKind.Publish, path, fingerprint,
+                loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(SHA256.HashData(replacement)), BlockProposalOperationStage.Prepared, null, null,
+                DocumentId: documentId, CandidateXml: Encoding.UTF8.GetString(replacement));
             receipts!.Write(preparedReceipt);
         }
         string? staged = null; string? retained = null;
@@ -102,7 +103,8 @@ public static class BlockProposalFiles
 
     public static async Task<RecursiveBlockFileSnapshot> SelectAsync(string root, string path, Guid documentId, Guid proposalId,
         string expectedSourceToken, BlockSelection expectedRoot, ImmutableArray<BlockSelection> currentPath,
-        ImmutableArray<Guid> ancestorIds, RequirementRevisionOrigin origin, CancellationToken token = default)
+        ImmutableArray<Guid> ancestorIds, RequirementRevisionOrigin origin, CancellationToken token = default,
+        string? stateDirectory = null, Guid? operationId = null)
     {
         var loaded = await RecursiveBlockFiles.Load(root, path, documentId, token);
         if (string.IsNullOrEmpty(expectedSourceToken) || loaded.Snapshot.ContentSha256 != expectedSourceToken)
@@ -110,8 +112,27 @@ public static class BlockProposalFiles
         var selected = BlockProposalCompiler.Select(loaded.Snapshot.Graph, proposalId, expectedRoot, currentPath, ancestorIds, origin);
         token.ThrowIfCancellationRequested();
         if (!selected.Changed) return loaded.Snapshot;
-        string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes,
-            Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(selected.Graph)), token);
+        byte[] replacement = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(selected.Graph));
+        BlockProposalPublicationReceipt? preparedReceipt = null;
+        BlockProposalReceipts? receipts = null;
+        if (stateDirectory is not null && operationId is { } operation)
+        {
+            receipts = new BlockProposalReceipts(stateDirectory);
+            preparedReceipt = new(2, proposalId, operation, BlockProposalOperationKind.Select, loaded.Snapshot.Path,
+                loaded.Snapshot.Graph.Proposal(proposalId).RequestSha256, loaded.Snapshot.ContentSha256,
+                Convert.ToHexStringLower(SHA256.HashData(replacement)), BlockProposalOperationStage.Prepared, null, null,
+                DocumentId: documentId, CandidateXml: Encoding.UTF8.GetString(replacement));
+            receipts.Write(preparedReceipt);
+        }
+        string? staged = null; string? retained = null;
+        string hash = await DesignFilePublisher.WriteCoreAsync(loaded.Snapshot.Path, loaded.Bytes, replacement, null, (target, temporary) =>
+        {
+            staged = temporary; retained = PreservingFileReplacement.PreviousPath(temporary);
+            if (preparedReceipt is not null) receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Replacing, StagedPath = staged, RetainedPath = retained });
+            PreservingFileReplacement.Replace(target, temporary);
+        }, token);
+        if (preparedReceipt is not null) receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Published,
+            StagedPath = staged, RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
         return new(loaded.Snapshot.Path, hash, selected.Graph);
     }
 

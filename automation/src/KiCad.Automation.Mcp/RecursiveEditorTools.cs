@@ -103,7 +103,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "Identify this conceptual selection operation.");
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow, "Choose proposed implementation", [], [operationId]);
         var result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
-            expectedRoot, path, ancestors, origin, cancellationToken);
+            expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, sourceToken = result.ContentSha256,
             selectedRoot = result.Graph.SelectedRoot, proposalId });
     });

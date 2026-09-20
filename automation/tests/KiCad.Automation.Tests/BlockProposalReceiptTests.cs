@@ -4,7 +4,7 @@ using KiCad.Automation.Model;
 namespace KiCad.Automation.Tests;
 
 [TestClass]
-public sealed class BlockProposalReceiptTests
+public sealed class RecursiveBlockProposalReceiptTests
 {
     [TestMethod]
     public void PublicationReceiptKeepsExactProposalOperationAndOrderedPhases()

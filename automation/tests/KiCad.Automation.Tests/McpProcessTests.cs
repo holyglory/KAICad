@@ -349,8 +349,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve");
             CollectionAssert.Contains(names, "kicad_design_nets_reconcile");
             CollectionAssert.Contains(names, "kicad_design_sync_plan");
-            CollectionAssert.DoesNotContain(names, "kicad_design_sync_apply",
-                "An unqualified high-level synchronization executor must not be advertised.");
+            CollectionAssert.Contains(names, "kicad_design_sync_apply");
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
             var syncFixture = SchematicSynchronizationPlanTests.Fixture();
             var syncStore = new DesignRecoveryStore(syncRecoveryPath);

@@ -8,12 +8,30 @@ using ModelContextProtocol.Server;
 
 namespace KiCad.Automation.Mcp;
 
+public interface IExecutionCheckpoint
+{
+    Task WaitAsync(string reached, CancellationToken token);
+}
+
 [McpServerToolType]
 public sealed class RecoveryTools
 {
     private readonly InstanceRegistry? registry;
+    private readonly IExecutionCheckpoint? checkpoint;
     public RecoveryTools() { }
-    public RecoveryTools(InstanceRegistry registry) => this.registry = registry;
+    public RecoveryTools(InstanceRegistry registry, IExecutionCheckpoint? checkpoint = null)
+    { this.registry = registry; this.checkpoint = checkpoint; }
+
+    [McpServerTool(Name = "kicad_design_sync_apply", ReadOnly = false),
+     Description("Apply a prepared XML synchronization candidate to one explicit native KiCad instance, then publish the native files and XML through the revision-safe journal. Requires the exact recovery token, absolute XML destination and caller-stable operation ID. Replays an identical completed operation from its receipt; stale instances, changed files, conflicts and interrupted phases remain explicit recovery results. Native connectivity validation, dirty-session preservation and retained prior XML are returned separately. This is not an automatic AI request and does not run from Save/Decline.")]
+    public async Task<CallToolResult> ApplySynchronizationTool(string instanceId, string recoveryPath, string designPath,
+        string expectedRevisionToken, string operationId, CancellationToken cancellationToken)
+    {
+        var result = await ApplySynchronization(instanceId, recoveryPath, designPath, expectedRevisionToken, operationId,
+            cancellationToken, checkpoint is null ? null : checkpoint.WaitAsync);
+        if (!(result.IsError ?? false) && checkpoint is not null) await checkpoint.WaitAsync("completed", cancellationToken);
+        return result;
+    }
 
     [McpServerTool(Name = "kicad_design_candidate_commit", ReadOnly = false),
      Description("Store a complete validated schematic design XML as the desired recovery candidate for one explicit attached instance. Requires the exact recovery token and candidate SHA256. The candidate must retain the native hierarchy root identity and declared library dependencies. This only advances the local recovery desired bytes; it does not write the native schematic, mutate KiCad, advance the baseline, or certify connectivity. Inspect with kicad_design_sync_plan before any separately authorized native application.")]

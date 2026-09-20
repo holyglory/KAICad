@@ -57,31 +57,17 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 builder.Services.AddSingleton(pause);
+builder.Services.AddSingleton<IExecutionCheckpoint>(pause);
 builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause));
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), state));
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddMcpServer().WithStdioServerTransport()
     .WithTools<InstanceTools>().WithTools<RecoveryTools>().WithTools<SchematicViewTools>()
-    .WithTools<CheckedSchematicTools>().WithTools<QualificationSynchronizationTools>()
+    .WithTools<CheckedSchematicTools>()
     .WithTools<AutomaticDesignTools>();
 await builder.Build().RunAsync();
 
-[McpServerToolType]
-public sealed class QualificationSynchronizationTools(InstanceRegistry registry, PauseGate pause)
-{
-    [McpServerTool(Name = "kicad_design_sync_apply", ReadOnly = false),
-     Description("Test-only registration of the production synchronization handler.")]
-    public async Task<CallToolResult> Apply(string instanceId, string recoveryPath, string designPath,
-        string expectedRevisionToken, string operationId, CancellationToken cancellationToken)
-    {
-        var result = await new RecoveryTools(registry).ApplySynchronization(instanceId, recoveryPath, designPath,
-            expectedRevisionToken, operationId, cancellationToken, pause.WaitAsync);
-        if (!(result.IsError ?? false)) await pause.WaitAsync("completed", cancellationToken);
-        return result;
-    }
-}
-
-public sealed class PauseGate
+public sealed class PauseGate : IExecutionCheckpoint
 {
     private readonly string stage;
     private readonly string? marker;

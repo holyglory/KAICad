@@ -11,6 +11,14 @@ public sealed record DiagramHistoryPage(Guid DocumentId, BlockSelection Context,
     public bool HasMore => Offset + Entries.Length < Total;
 }
 
+public enum DiagramHistoryChangeKind { Added, Removed, Changed, Reordered }
+public enum DiagramHistoryChangeCategory { Name, Requirement, Block, Connection, Interface, Comment }
+public sealed record DiagramHistoryChange(DiagramHistoryChangeCategory Category, DiagramHistoryChangeKind Kind,
+    Guid ObjectId, string Name, DiagramRequirementField? Field = null);
+public sealed record DiagramHistoryComparison(Guid DocumentId, BlockSelection Context, BlockSelection Inspected,
+    int ContextVersion, int InspectedVersion, RequirementRevisionOrigin InspectedOrigin,
+    ImmutableArray<DiagramHistoryChange> Changes);
+
 /// <summary>Read-only whole-diagram history pinned to an exact persisted context.
 /// A later implementation head is not part of this context and cannot silently
 /// enter an older page. Preview and restore remain separate caller actions.</summary>
@@ -40,5 +48,44 @@ public static class DiagramHistoryQuery
             || !graph.History(context.StateId).SkipWhile(r => r.Selection != context).Any(r => r.Selection == inspected))
             throw new AutomationException("wrong_diagram_history_scope", "Inspect a revision belonging to this exact diagram implementation and saved context.");
         return revision;
+    }
+
+    /// <summary>Content changes from the inspected earlier diagram to the saved
+    /// context. Stable identities, not similar names or positions, match objects.</summary>
+    public static DiagramHistoryComparison Compare(RecursiveBlockGraph graph, BlockSelection context, BlockSelection inspected)
+    {
+        var before = Inspect(graph, context, inspected); var after = graph.Inspect(context);
+        var changes = ImmutableArray.CreateBuilder<DiagramHistoryChange>();
+        if (before.Name != after.Name)
+            changes.Add(new(DiagramHistoryChangeCategory.Name, DiagramHistoryChangeKind.Changed, context.BlockId, after.Name));
+        var oldFields = graph.Requirements(inspected).Requirements; var newFields = graph.Requirements(context).Requirements;
+        foreach (var field in Enum.GetValues<DiagramRequirementField>())
+            if (oldFields.Get(field) != newFields.Get(field))
+                changes.Add(new(DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, context.BlockId, "", field));
+        CompareItems(before.Children, after.Children, DiagramHistoryChangeCategory.Block,
+            c => c.BlockId, c => graph.Inspect(c).Name, (a, b) => a == b);
+        CompareItems(before.LocalDiagram.Connections, after.LocalDiagram.Connections, DiagramHistoryChangeCategory.Connection,
+            c => c.ConnectionId, c => graph.Connections(context.BlockId).Inspect(c).Name, (a, b) => a == b);
+        CompareItems(before.LocalDiagram.Interfaces, after.LocalDiagram.Interfaces, DiagramHistoryChangeCategory.Interface,
+            i => i.Id, i => i.Name, (a, b) => a == b);
+        CompareItems(before.LocalDiagram.Notes, after.LocalDiagram.Notes, DiagramHistoryChangeCategory.Comment,
+            n => n.Id, n => n.Text, (a, b) => a.SameContents(b));
+        int version = Read(graph, context, 0, 1).ContextVersion;
+        int inspectedVersion = Read(graph, inspected, 0, 1).ContextVersion;
+        return new(graph.DocumentId, context, inspected, version, inspectedVersion, before.Origin, changes.ToImmutable());
+
+        void CompareItems<T>(ImmutableArray<T> oldItems, ImmutableArray<T> newItems, DiagramHistoryChangeCategory category,
+            Func<T, Guid> id, Func<T, string> name, Func<T, T, bool> same)
+        {
+            var oldById = oldItems.ToDictionary(id); var newById = newItems.ToDictionary(id);
+            foreach (var item in newItems)
+                if (!oldById.TryGetValue(id(item), out var old)) changes.Add(new(category, DiagramHistoryChangeKind.Added, id(item), name(item)));
+                else if (!same(old, item)) changes.Add(new(category, DiagramHistoryChangeKind.Changed, id(item), name(item)));
+            foreach (var item in oldItems)
+                if (!newById.ContainsKey(id(item))) changes.Add(new(category, DiagramHistoryChangeKind.Removed, id(item), name(item)));
+            if (oldById.Count == newById.Count && oldById.Keys.All(newById.ContainsKey)
+                && !oldItems.Select(id).SequenceEqual(newItems.Select(id)))
+                changes.Add(new(category, DiagramHistoryChangeKind.Reordered, context.BlockId, ""));
+        }
     }
 }

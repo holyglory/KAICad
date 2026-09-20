@@ -21,7 +21,9 @@ public static class RecursiveEditorFiles
             || request.Action is not (P.RecursiveFileAction.RfaSaveBlock or P.RecursiveFileAction.RfaSaveImplementation) && request.Save is not null
             || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null
             || request.Action != P.RecursiveFileAction.RfaSaveConnection && request.SaveConnection is not null
-            || request.Action != P.RecursiveFileAction.RfaManageImplementation && request.Implementation is not null)
+            || request.Action != P.RecursiveFileAction.RfaManageImplementation && request.Implementation is not null
+            || request.Action != P.RecursiveFileAction.RfaCompareDiagramHistory && request.InspectedBlock is not null
+            || request.Action != P.RecursiveFileAction.RfaPrepareDiagramRestoration && request.Restoration is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
         if (request.Action == P.RecursiveFileAction.RfaManageImplementation)
@@ -88,9 +90,31 @@ public static class RecursiveEditorFiles
         var result = new P.RecursiveFileResult { Success = true, SourceToken = loaded.ContentSha256 };
         if (request.Action == P.RecursiveFileAction.RfaRead)
             return Describe(loaded);
+        if (request.Action == P.RecursiveFileAction.RfaPrepareDiagramRestoration)
+        {
+            if (request.Restoration?.Draft is null || request.Restoration.Source is null || request.ExpectedSourceToken.Length != 64
+                || request.Block is not null || request.Connection is not null || request.Field != P.RequirementFieldKind.RfkUnknown
+                || request.Offset != 0 || request.Limit != 0)
+                throw Invalid("invalid_diagram_restoration_request", "Provide the retained clean draft, exact history source and observed file token; restoration only prepares a new draft.");
+            var draft = RecursiveBlockCodec.Decode(request.Restoration.Draft, document);
+            var source = RecursiveBlockCodec.DecodeSelection(request.Restoration.Source);
+            _ = DiagramHistoryQuery.Inspect(loaded.Graph, draft.Baseline, source);
+            result.PreparedDraft = RecursiveBlockCodec.Encode(loaded.Graph.RestoreAsDraft(draft, source));
+            return result;
+        }
         if (request.Block is null) throw Invalid("missing_diagram_target", "Select the exact block context for this history query.");
         var block = new BlockSelection(Id(request.Block.BlockId), Id(request.Block.StateId), Id(request.Block.RevisionId));
         var revision = loaded.Graph.Inspect(block);
+        if (request.Action is P.RecursiveFileAction.RfaDiagramHistory or P.RecursiveFileAction.RfaCompareDiagramHistory)
+        {
+            if (request.Connection is not null || request.Field != P.RequirementFieldKind.RfkUnknown
+                || request.Action == P.RecursiveFileAction.RfaCompareDiagramHistory && (request.InspectedBlock is null || request.Offset != 0 || request.Limit != 0))
+                throw Invalid("invalid_diagram_history_request", "Use the exact diagram context and only the page or comparison fields belonging to this operation.");
+            if (request.Action == P.RecursiveFileAction.RfaDiagramHistory)
+                result.DiagramHistory = RecursiveBlockCodec.Encode(DiagramHistoryQuery.Read(loaded.Graph, block, request.Offset, request.Limit));
+            else result.DiagramComparison = RecursiveBlockCodec.Encode(DiagramHistoryQuery.Compare(loaded.Graph, block, RecursiveBlockCodec.DecodeSelection(request.InspectedBlock)));
+            return result;
+        }
         var field = (DiagramRequirementField)((int)request.Field - 1);
         if (request.Action == P.RecursiveFileAction.RfaBlockFieldHistory)
             result.History = RecursiveBlockCodec.Encode(DiagramFieldHistoryQuery.Block(loaded.Graph, block, field, request.Offset, request.Limit));

@@ -13,6 +13,60 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_history", ReadOnly = true),
+     Description("Read a bounded whole-diagram revision list at an exact block/implementation/revision context. Includes actual origin, version and local contents counts. Later implementation heads do not enter an older context. Reading or selecting a history row does not activate a design or change an open draft.")]
+    public Task<CallToolResult> History(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        BlockSelection context, CancellationToken cancellationToken, int offset = 0, int limit = 50, string? expectedSourceToken = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaDiagramHistory,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "",
+            Block = HistorySelection(context), Offset = offset, Limit = limit }, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
+            history = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.DiagramHistory)) });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_diagram_history_compare", ReadOnly = true),
+     Description("Compare an earlier whole diagram with the exact saved context in the same implementation. Reports content additions, removals, changes and ordering by stable object identity, not name similarity. The difference describes changes from inspected history to the context; no preview, activation or edit occurs.")]
+    public Task<CallToolResult> CompareHistory(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        BlockSelection context, BlockSelection inspected, CancellationToken cancellationToken, string? expectedSourceToken = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaCompareDiagramHistory,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "",
+            Block = HistorySelection(context), InspectedBlock = HistorySelection(inspected) }, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
+            comparison = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.DiagramComparison)) });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_diagram_prepare_restoration", ReadOnly = true),
+     Description("Prepare earlier whole-diagram contents as a new draft based on the exact saved context and file token. Returns the typed draft with original child/connection/comment references and restoration provenance. Does not write XML, replace an open editor draft, activate native designs or save; existing unsaved work remains the caller's responsibility to preserve.")]
+    public Task<CallToolResult> PrepareRestoration(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, BlockSelection context, BlockSelection source, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        if (string.IsNullOrEmpty(expectedSourceToken)) throw new AutomationException("missing_diagram_source_token", "Supply the exact observed file token before preparing a restoration.");
+        var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = repositoryRoot,
+            SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken }, cancellationToken);
+        var graph = RecursiveBlockCodec.Decode(loaded.Document.Graph);
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaPrepareDiagramRestoration,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken,
+            Restoration = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(context)), Source = HistorySelection(source) } }, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
+            draft = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.PreparedDraft)) });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    private static BlockSelectionData HistorySelection(BlockSelection selection) => selection is not null
+        && selection.BlockId != Guid.Empty && selection.StateId != Guid.Empty && selection.RevisionId != Guid.Empty
+        ? new() { BlockId = selection.BlockId.ToString("D"), StateId = selection.StateId.ToString("D"), RevisionId = selection.RevisionId.ToString("D") }
+        : throw new AutomationException("invalid_diagram_identity", "Provide the exact non-empty block, implementation and revision selection.");
+
     [McpServerTool(Name = "kicad_diagram_manage_implementation"),
      Description("Create a new interior, duplicate, rename, remove from choices, or restore one implementation in the saved recursive model. Actions: new, duplicate, rename, remove, restore. Requires the observed instance epoch, exact file token/root/source and a non-empty operation ID. Creation stays unselected; removal retains historical revisions and rejects the active choice. Does not activate native schematics/PCBs or discard an open editor draft. After an external change, reload or reconcile that window explicitly.")]
     public Task<CallToolResult> ManageImplementation(string instanceId, string expectedInstanceEpoch, string repositoryRoot,

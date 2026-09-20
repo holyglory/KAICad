@@ -60,6 +60,43 @@ message FieldHistoryPageData {
   uint32 total = 10;
   repeated FieldHistoryEntryData entries = 11;
 }
+message DiagramHistoryEntryData {
+  BlockSelectionData selection = 1;
+  uint32 version = 2;
+  string name = 3;
+  DiagramRevisionOriginData origin = 4;
+  uint32 child_count = 5;
+  uint32 connection_count = 6;
+  uint32 annotation_count = 7;
+  bool is_context = 8;
+}
+message DiagramHistoryPageData {
+  string document_id = 1;
+  BlockSelectionData context = 2;
+  uint32 context_version = 3;
+  uint32 offset = 4;
+  uint32 total = 5;
+  repeated DiagramHistoryEntryData entries = 6;
+}
+enum DiagramChangeKind { DCK_UNKNOWN = 0; DCK_ADDED = 1; DCK_REMOVED = 2; DCK_CHANGED = 3; DCK_REORDERED = 4; }
+enum DiagramChangeCategory { DCC_UNKNOWN = 0; DCC_NAME = 1; DCC_REQUIREMENT = 2; DCC_BLOCK = 3; DCC_CONNECTION = 4; DCC_INTERFACE = 5; DCC_COMMENT = 6; }
+message DiagramHistoryChangeData {
+  DiagramChangeCategory category = 1;
+  DiagramChangeKind kind = 2;
+  string object_id = 3;
+  string name = 4;
+  RequirementFieldKind field = 5;
+}
+message DiagramHistoryComparisonData {
+  string document_id = 1;
+  BlockSelectionData context = 2;
+  BlockSelectionData inspected = 3;
+  uint32 context_version = 4;
+  uint32 inspected_version = 5;
+  DiagramRevisionOriginData inspected_origin = 6;
+  repeated DiagramHistoryChangeData changes = 7;
+}
+message PrepareDiagramRestorationData { BlockDraftData draft = 1; BlockSelectionData source = 2; }
 message BlockDesignStateData {
   string id = 1;
   string block_id = 2;
@@ -102,7 +139,7 @@ message RecursiveEditorDocument {
   string source_token = 4;
   RecursiveBlockGraphData graph = 5;
 }
-enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; RFA_SAVE_IMPLEMENTATION = 6; RFA_MANAGE_IMPLEMENTATION = 7; }
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; RFA_SAVE_IMPLEMENTATION = 6; RFA_MANAGE_IMPLEMENTATION = 7; RFA_DIAGRAM_HISTORY = 8; RFA_COMPARE_DIAGRAM_HISTORY = 9; RFA_PREPARE_DIAGRAM_RESTORATION = 10; }
 enum ImplementationActionKind { IAK_UNKNOWN = 0; IAK_NEW = 1; IAK_DUPLICATE = 2; IAK_RENAME = 3; IAK_ARCHIVE = 4; IAK_RESTORE = 5; }
 message ManageImplementationData {
   ImplementationActionKind action = 1;
@@ -205,6 +242,8 @@ message RecursiveFileRequest {
   RebaseRequirementsRequest rebase = 13;
   SaveConnectionDraftData save_connection = 14;
   ManageImplementationData implementation = 15;
+  BlockSelectionData inspected_block = 16;
+  PrepareDiagramRestorationData restoration = 17;
 }
 message RecursiveFileResult {
   bool success = 1;
@@ -215,6 +254,9 @@ message RecursiveFileResult {
   string error_message = 6;
   RequirementMergeData merge = 7;
   string implementation_id = 8;
+  DiagramHistoryPageData diagram_history = 9;
+  DiagramHistoryComparisonData diagram_comparison = 10;
+  BlockDraftData prepared_draft = 11;
 }
 
 message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string intent = 3; }

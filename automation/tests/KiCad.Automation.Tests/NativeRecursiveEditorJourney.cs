@@ -38,6 +38,16 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(graph.DocumentId.ToString("D"), savedReadData.GetProperty("documentId").GetString());
             Assert.AreEqual(2, savedReadData.GetProperty("children").GetArrayLength());
             Assert.AreEqual(2, savedReadData.GetProperty("connections").GetArrayLength());
+            var wholeHistoryArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["context"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },
+                ["limit"] = 1, ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString()
+            };
+            var wholeHistory = await client.CallToolAsync("kicad_diagram_history", wholeHistoryArguments, cancellationToken: token);
+            Assert.IsFalse(wholeHistory.IsError == true);
+            var firstWholeHistory = JsonSerializer.SerializeToElement(wholeHistory).GetProperty("structuredContent").GetProperty("history");
+            Assert.AreEqual(1, firstWholeHistory.GetProperty("entries").GetArrayLength());
+            Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), firstWholeHistory.GetProperty("context").GetProperty("revisionId").GetString());
             var invalidTargetArguments = new Dictionary<string, object?>(arguments) { ["blockId"] = graph.SelectedRoot.BlockId.ToString("D") };
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_read", invalidTargetArguments, cancellationToken: token)).IsError == true);
             string openingBytes = await File.ReadAllTextAsync(source, token);
@@ -587,6 +597,28 @@ public sealed partial class NativeSessionTests
                 historySaved.Requirements(historySaved.SelectedRoot).Requirements.Schematic);
             var restoredHistory = historySaved.RequirementHistories.Single(h => h.Scope.DesignStateId == historySaved.SelectedRoot.StateId);
             Assert.AreEqual(lastHistory.RequirementRevisionId, restoredHistory.Current.Restorations.Single().SourceRevisionId);
+            string beforeWholeRestore = await File.ReadAllTextAsync(source, token);
+            var unchangedWindow = await Read();
+            var comparisonArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["context"] = new { blockId = historySaved.SelectedRoot.BlockId, stateId = historySaved.SelectedRoot.StateId, revisionId = historySaved.SelectedRoot.RevisionId },
+                ["inspected"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },
+                ["expectedSourceToken"] = unchangedWindow.SourceToken
+            };
+            var wholeComparison = await client.CallToolAsync("kicad_diagram_history_compare", comparisonArguments, cancellationToken: token);
+            Assert.IsFalse(wholeComparison.IsError == true);
+            Assert.IsTrue(JsonSerializer.SerializeToElement(wholeComparison).GetProperty("structuredContent").GetProperty("comparison").GetProperty("changes").GetArrayLength() > 0);
+            comparisonArguments["source"] = comparisonArguments["inspected"]; comparisonArguments.Remove("inspected");
+            var preparedWhole = await client.CallToolAsync("kicad_diagram_prepare_restoration", comparisonArguments, cancellationToken: token);
+            Assert.IsFalse(preparedWhole.IsError == true);
+            var preparedWholeDraft = JsonSerializer.SerializeToElement(preparedWhole).GetProperty("structuredContent").GetProperty("draft");
+            Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), preparedWholeDraft.GetProperty("restoredFrom").GetProperty("revisionId").GetString());
+            Assert.AreEqual(historySaved.SelectedRoot.RevisionId.ToString("D"), preparedWholeDraft.GetProperty("baseline").GetProperty("revisionId").GetString());
+            Assert.AreEqual(beforeWholeRestore, await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(unchangedWindow.Draft, (await Read()).Draft);
+            comparisonArguments["expectedSourceToken"] = new string('0', 64);
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_prepare_restoration", comparisonArguments, cancellationToken: token)).IsError == true);
+            Assert.AreEqual(beforeWholeRestore, await File.ReadAllTextAsync(source, token));
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

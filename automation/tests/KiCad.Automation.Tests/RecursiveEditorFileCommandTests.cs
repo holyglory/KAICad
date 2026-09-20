@@ -12,6 +12,46 @@ namespace KiCad.Automation.Tests;
 public sealed class RecursiveEditorFileCommandTests
 {
     [TestMethod]
+    public async Task WholeHistoryComparisonAndRestorationPreparationAreReadOnlyAndRevisionBound()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-whole-history-").FullName;
+        try
+        {
+            var original = LinkedDiagramFixture.Create().Graph;
+            var graph = RecursiveBlockFixture.RefineRoot(original, DiagramRequirementField.General, 2);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root,
+                SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            request.ExpectedSourceToken = (await Invoke(request)).SourceToken;
+            request.Action = P.RecursiveFileAction.RfaDiagramHistory; request.Block = Selection(graph.SelectedRoot); request.Limit = 2;
+            var history = await Invoke(request); Assert.IsTrue(history.Success); Assert.HasCount(2, history.DiagramHistory.Entries);
+            Assert.AreEqual(3U, history.DiagramHistory.Total); Assert.IsNull(history.Document);
+            request.Offset = 2; var older = await Invoke(request); Assert.IsTrue(older.Success);
+            Assert.AreEqual(original.SelectedRoot.RevisionId.ToString("D"), older.DiagramHistory.Entries.Single().Selection.RevisionId);
+            request.Action = P.RecursiveFileAction.RfaCompareDiagramHistory; request.Offset = request.Limit = 0; request.InspectedBlock = Selection(original.SelectedRoot);
+            var compared = await Invoke(request); Assert.IsTrue(compared.Success); Assert.HasCount(1, compared.DiagramComparison.Changes);
+            Assert.AreEqual(P.RequirementFieldKind.RfkGeneral, compared.DiagramComparison.Changes[0].Field);
+            request.Action = P.RecursiveFileAction.RfaPrepareDiagramRestoration; request.Block = request.InspectedBlock = null;
+            request.Restoration = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)), Source = Selection(original.SelectedRoot) };
+            var prepared = await Invoke(request); Assert.IsTrue(prepared.Success);
+            Assert.AreEqual(original.SelectedRoot.RevisionId.ToString("D"), prepared.PreparedDraft.RestoredFrom.RevisionId);
+            Assert.AreEqual(original.Requirements(original.SelectedRoot).Requirements.General, prepared.PreparedDraft.Fields.General);
+            Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), prepared.PreparedDraft.Baseline.RevisionId);
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            var dirty = request.Clone(); dirty.Restoration.Draft.Fields.Routing = "Retain my separate draft.";
+            var rejected = await Invoke(dirty); Assert.IsFalse(rejected.Success); Assert.AreEqual("dirty_block_draft", rejected.ErrorCode);
+            Assert.AreEqual("Retain my separate draft.", dirty.Restoration.Draft.Fields.Routing);
+            await File.AppendAllTextAsync(path, "\n");
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.IsNull(stale.PreparedDraft);
+            Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode); Assert.AreEqual(xml + "\n", await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+
+        static P.BlockSelectionData Selection(BlockSelection s) => new() { BlockId = s.BlockId.ToString("D"), StateId = s.StateId.ToString("D"), RevisionId = s.RevisionId.ToString("D") };
+    }
+
+    [TestMethod]
     public async Task OlderHistoryPagesKeepTheirExactContextAndRejectChangedFiles()
     {
         string root = Directory.CreateTempSubdirectory("kicad-history-pages-").FullName;

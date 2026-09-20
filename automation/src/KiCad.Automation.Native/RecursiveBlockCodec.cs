@@ -96,6 +96,27 @@ public static class RecursiveBlockCodec
         return result;
     }
 
+    public static P.DiagramHistoryPageData Encode(M.DiagramHistoryPage page)
+    {
+        var result = new P.DiagramHistoryPageData { DocumentId = Id(page.DocumentId), Context = Selection(page.Context),
+            ContextVersion = checked((uint)page.ContextVersion), Offset = checked((uint)page.Offset), Total = checked((uint)page.Total) };
+        result.Entries.Add(page.Entries.Select(e => new P.DiagramHistoryEntryData { Selection = Selection(e.Selection), Version = checked((uint)e.Version),
+            Name = e.Name, Origin = Origin(e.Origin), ChildCount = checked((uint)e.ChildCount), ConnectionCount = checked((uint)e.ConnectionCount),
+            AnnotationCount = checked((uint)e.AnnotationCount), IsContext = e.IsContext }));
+        return result;
+    }
+
+    public static P.DiagramHistoryComparisonData Encode(M.DiagramHistoryComparison comparison)
+    {
+        var result = new P.DiagramHistoryComparisonData { DocumentId = Id(comparison.DocumentId), Context = Selection(comparison.Context),
+            Inspected = Selection(comparison.Inspected), ContextVersion = checked((uint)comparison.ContextVersion),
+            InspectedVersion = checked((uint)comparison.InspectedVersion), InspectedOrigin = Origin(comparison.InspectedOrigin) };
+        result.Changes.Add(comparison.Changes.Select(c => new P.DiagramHistoryChangeData { Category = (P.DiagramChangeCategory)((int)c.Category + 1),
+            Kind = (P.DiagramChangeKind)((int)c.Kind + 1), ObjectId = Id(c.ObjectId), Name = c.Name,
+            Field = c.Field is { } field ? (P.RequirementFieldKind)((int)field + 1) : P.RequirementFieldKind.RfkUnknown }));
+        return result;
+    }
+
     public static P.FieldHistoryPageData Encode(M.DiagramFieldHistoryPage page)
     {
         var result = new P.FieldHistoryPageData { DocumentId = Id(page.Scope.DocumentId), OwnerId = Id(page.Scope.OwnerId), StateId = Id(page.Scope.DesignStateId),

@@ -102,7 +102,19 @@ message RecursiveEditorDocument {
   string source_token = 4;
   RecursiveBlockGraphData graph = 5;
 }
-enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; RFA_SAVE_IMPLEMENTATION = 6; }
+enum RecursiveFileAction { RFA_READ = 0; RFA_BLOCK_FIELD_HISTORY = 1; RFA_CONNECTION_FIELD_HISTORY = 2; RFA_SAVE_BLOCK = 3; RFA_REBASE_REQUIREMENTS = 4; RFA_SAVE_CONNECTION = 5; RFA_SAVE_IMPLEMENTATION = 6; RFA_MANAGE_IMPLEMENTATION = 7; }
+enum ImplementationActionKind { IAK_UNKNOWN = 0; IAK_NEW = 1; IAK_DUPLICATE = 2; IAK_RENAME = 3; IAK_ARCHIVE = 4; IAK_RESTORE = 5; }
+message ManageImplementationData {
+  ImplementationActionKind action = 1;
+  BlockSelectionData expected_root = 2;
+  BlockSelectionData source = 3;
+  string name = 4;
+  string new_state_id = 5;
+  string new_revision_id = 6;
+  string new_requirement_revision_id = 7;
+  string change_id = 8;
+  DiagramRevisionOriginData origin = 9;
+}
 message ConnectionDraftData {
   ConnectionSelectionData baseline = 1;
   string name = 2;
@@ -192,6 +204,7 @@ message RecursiveFileRequest {
   SaveBlockDraftData save = 12;
   RebaseRequirementsRequest rebase = 13;
   SaveConnectionDraftData save_connection = 14;
+  ManageImplementationData implementation = 15;
 }
 message RecursiveFileResult {
   bool success = 1;
@@ -201,6 +214,7 @@ message RecursiveFileResult {
   string error_code = 5;
   string error_message = 6;
   RequirementMergeData merge = 7;
+  string implementation_id = 8;
 }
 
 message DiagramBoundaryInterfaceData { string id = 1; string name = 2; string intent = 3; }

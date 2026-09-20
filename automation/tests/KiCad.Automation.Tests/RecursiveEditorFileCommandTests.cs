@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Google.Protobuf;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using P = KiCad.Automation.Protocol.Diagrams;
 
@@ -90,6 +91,51 @@ public sealed class RecursiveEditorFileCommandTests
             request.Save.AncestorRevisionIds[0] = Guid.NewGuid().ToString("D");
             var noOp = await Invoke(request);
             Assert.IsTrue(noOp.Success); Assert.AreEqual(saved.SourceToken, noOp.SourceToken);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledImplementationManagementCreatesRenamesRemovesAndRestoresWithoutDeletingHistory()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-implementation-management-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var source = new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") };
+            var management = new P.ManageImplementationData { Action = P.ImplementationActionKind.IakDuplicate,
+                ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Source = source, Name = "Serviceable alternative",
+                NewStateId = Guid.NewGuid().ToString("D"), NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Implementation management fixture",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            request.Action = P.RecursiveFileAction.RfaManageImplementation; request.Implementation = management; request.ExpectedSourceToken = read.SourceToken;
+            var created = await Invoke(request); Assert.IsTrue(created.Success, created.ErrorMessage);
+            Assert.AreEqual(management.NewStateId, created.ImplementationId);
+            var loaded = RecursiveBlockCodec.Decode(created.Document.Graph);
+            Assert.AreEqual(graph.SelectedRoot, loaded.SelectedRoot); Assert.AreEqual(graph.States.Length + 1, loaded.States.Length);
+            Assert.AreEqual(cpu, loaded.States.Single(s => s.Id.ToString("D") == created.ImplementationId).ForkedFrom);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            management.Source = new() { BlockId = cpu.BlockId.ToString("D"), StateId = created.ImplementationId, RevisionId = management.NewRevisionId };
+            management.NewStateId = ""; management.NewRevisionId = ""; management.NewRequirementRevisionId = "";
+            management.Action = P.ImplementationActionKind.IakRename; management.Name = "Thermal alternative"; management.ChangeId = Guid.NewGuid().ToString("D");
+            request.ExpectedSourceToken = created.SourceToken;
+            var renamed = await Invoke(request); Assert.IsTrue(renamed.Success, renamed.ErrorMessage);
+            Assert.AreEqual("Thermal alternative", renamed.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Name);
+            management.Action = P.ImplementationActionKind.IakArchive; management.Name = ""; management.ChangeId = Guid.NewGuid().ToString("D"); request.ExpectedSourceToken = renamed.SourceToken;
+            var removed = await Invoke(request); Assert.IsTrue(removed.Success, removed.ErrorMessage);
+            Assert.IsTrue(removed.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Archived);
+            Assert.AreEqual(renamed.Document.Graph.Revisions.Count, removed.Document.Graph.Revisions.Count);
+            management.Action = P.ImplementationActionKind.IakRestore; management.ChangeId = Guid.NewGuid().ToString("D"); request.ExpectedSourceToken = removed.SourceToken;
+            var restored = await Invoke(request); Assert.IsTrue(restored.Success, restored.ErrorMessage);
+            Assert.IsFalse(restored.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Archived);
+            Assert.AreEqual(3, restored.Document.Graph.ImplementationChanges.Count);
+            request.ExpectedSourceToken = restored.SourceToken; management.Action = P.ImplementationActionKind.IakArchive;
+            management.Source = source; management.ChangeId = Guid.NewGuid().ToString("D");
+            var activeRemoval = await Invoke(request); Assert.IsFalse(activeRemoval.Success); Assert.AreEqual("implementation_is_selected", activeRemoval.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(restored.Document.Graph)), await File.ReadAllTextAsync(path));
         }
         finally { Directory.Delete(root, true); }
     }

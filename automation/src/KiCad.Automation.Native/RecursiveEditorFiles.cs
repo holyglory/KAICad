@@ -20,9 +20,19 @@ public static class RecursiveEditorFiles
             || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
             || request.Action is not (P.RecursiveFileAction.RfaSaveBlock or P.RecursiveFileAction.RfaSaveImplementation) && request.Save is not null
             || request.Action != P.RecursiveFileAction.RfaRebaseRequirements && request.Rebase is not null
-            || request.Action != P.RecursiveFileAction.RfaSaveConnection && request.SaveConnection is not null)
+            || request.Action != P.RecursiveFileAction.RfaSaveConnection && request.SaveConnection is not null
+            || request.Action != P.RecursiveFileAction.RfaManageImplementation && request.Implementation is not null)
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
+        if (request.Action == P.RecursiveFileAction.RfaManageImplementation)
+        {
+            if (request.Implementation is null || request.Block is not null || request.Connection is not null
+                || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
+                throw Invalid("invalid_implementation_request", "Provide the exact implementation management request without unrelated targets.");
+            var managed = await ImplementationFiles.ApplyAsync(request.RepositoryRoot, request.SourcePath, document,
+                request.ExpectedSourceToken, request.Implementation, token);
+            var result = Describe(managed.Snapshot); result.ImplementationId = managed.StateId.ToString("D"); return result;
+        }
         if (request.Action == P.RecursiveFileAction.RfaSaveConnection)
         {
             if (request.SaveConnection is not { } save || save.Draft is null || save.Origin is null || save.ExpectedRoot is null

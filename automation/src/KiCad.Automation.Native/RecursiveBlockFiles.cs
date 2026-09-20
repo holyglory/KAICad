@@ -90,7 +90,7 @@ public static class RecursiveBlockFiles
         return new(loaded.Snapshot.Path, hash, saved.Graph);
     }
 
-    private static async Task<(RecursiveBlockFileSnapshot Snapshot, byte[] Bytes)> Load(string root, string path,
+    internal static async Task<(RecursiveBlockFileSnapshot Snapshot, byte[] Bytes)> Load(string root, string path,
         Guid documentId, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();

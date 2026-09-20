@@ -108,7 +108,7 @@ public static class BlockProposalFiles
     public static async Task<RecursiveBlockFileSnapshot> SelectAsync(string root, string path, Guid documentId, Guid proposalId,
         string expectedSourceToken, BlockSelection expectedRoot, ImmutableArray<BlockSelection> currentPath,
         ImmutableArray<Guid> ancestorIds, RequirementRevisionOrigin origin, CancellationToken token = default,
-        string? stateDirectory = null, Guid? operationId = null)
+        string? stateDirectory = null, Guid? operationId = null, Func<string, CancellationToken, Task>? checkpoint = null)
     {
         var loaded = await RecursiveBlockFiles.Load(root, path, documentId, token);
         if (string.IsNullOrEmpty(expectedSourceToken) || loaded.Snapshot.ContentSha256 != expectedSourceToken)
@@ -127,16 +127,20 @@ public static class BlockProposalFiles
                 Convert.ToHexStringLower(SHA256.HashData(replacement)), BlockProposalOperationStage.Prepared, null, null,
                 DocumentId: documentId, CandidateXml: Encoding.UTF8.GetString(replacement));
             receipts.Write(preparedReceipt);
+            if (checkpoint is not null) await checkpoint("proposal-selection-prepared", token);
         }
         string? staged = null; string? retained = null;
         string hash = await DesignFilePublisher.WriteCoreAsync(loaded.Snapshot.Path, loaded.Bytes, replacement, null, (target, temporary) =>
         {
             staged = temporary; retained = PreservingFileReplacement.PreviousPath(temporary);
             if (preparedReceipt is not null) receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Replacing, StagedPath = staged, RetainedPath = retained });
+            checkpoint?.Invoke("proposal-selection-replacing", token).GetAwaiter().GetResult();
             PreservingFileReplacement.Replace(target, temporary);
+            checkpoint?.Invoke("proposal-selection-replaced", token).GetAwaiter().GetResult();
         }, token);
         if (preparedReceipt is not null) receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Published,
             StagedPath = staged, RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
+        if (checkpoint is not null) await checkpoint("proposal-selection-published", token);
         return new(loaded.Snapshot.Path, hash, selected.Graph);
     }
 

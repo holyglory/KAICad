@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Immutable;
 using System.Text.Json;
 using Kiapi.Common;
 using KiCad.Automation.Model;
@@ -39,6 +40,19 @@ if (args is ["--block-proposal-file", var proposalFile])
     Console.WriteLine(JsonSerializer.Serialize(new { result.Added, result.Snapshot.ContentSha256 }));
     return;
 }
+if (args is ["--block-proposal-select-file", var selectionFile])
+{
+    using var selectionJson = JsonDocument.Parse(await File.ReadAllBytesAsync(selectionFile)); var request = selectionJson.RootElement;
+    var result = await BlockProposalFiles.SelectAsync(request.GetProperty("repositoryRoot").GetString()!,
+        request.GetProperty("designPath").GetString()!, request.GetProperty("documentId").GetGuid(), request.GetProperty("proposalId").GetGuid(),
+        request.GetProperty("sourceToken").GetString()!, request.GetProperty("expectedRoot").Deserialize<BlockSelection>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!,
+        request.GetProperty("currentPath").Deserialize<ImmutableArray<BlockSelection>>(new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+        request.GetProperty("ancestorIds").Deserialize<ImmutableArray<Guid>>(),
+        request.GetProperty("origin").Deserialize<RequirementRevisionOrigin>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!,
+        CancellationToken.None, state, request.GetProperty("operationId").GetGuid(), pause.WaitAsync);
+    Console.WriteLine(JsonSerializer.Serialize(new { result.ContentSha256 }));
+    return;
+}
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -77,7 +91,8 @@ public sealed class PauseGate
         if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
             or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"
             or "layout-prepared" or "layout-resolved" or "input-prepared" or "input-replacing" or "input-replaced" or "input-published"
-            or "proposal-prepared" or "proposal-replacing" or "proposal-replaced" or "proposal-published"))
+            or "proposal-prepared" or "proposal-replacing" or "proposal-replaced" or "proposal-published"
+            or "proposal-selection-prepared" or "proposal-selection-replacing" or "proposal-selection-replaced" or "proposal-selection-published"))
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));

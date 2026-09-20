@@ -127,7 +127,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     splitter->SplitVertically( diagram, inspector, FromDIP( 1100 ) );
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
-    m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { m_rendered = false; ++m_viewRevision; event.Skip(); } );
+    m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { m_rendered = false; ++m_viewRevision; updateImplementationLabel(); event.Skip(); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::moveNote, this );
@@ -421,10 +421,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     wxString path;
     for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += text( item->name() ); }
     m_breadcrumb->SetLabel( path.empty() ? _( "Loading diagram…" ) : path );
-    wxString implementation;
-    if( current() ) for( const auto& state : m_document.graph().states() ) if( state.id() == current()->selection().state_id() )
-    { implementation = text( state.name() ) + wxString::Format( " · v%d", version( *current() ) ); break; }
-    m_implementation->SetLabel( m_preview ? _( "Preview: " ) + implementation : implementation.empty() ? _( "Implementation" ) : implementation );
+    updateImplementationLabel();
     m_implementation->Enable( available );
     m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );
     auto* selected = m_ready ? revision( m_draft.baseline() ) : nullptr;
@@ -553,6 +550,21 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
     wxPoint position = ScreenToClient( m_implementation->ClientToScreen( wxPoint( 0, m_implementation->GetSize().y ) ) );
     PopupMenu( &menu, position );
     wxWindow::UnreserveControlId( firstId, reserved );
+}
+void RECURSIVE_DIAGRAM_FRAME::updateImplementationLabel()
+{
+    if( !m_implementation ) return;
+    wxString implementation;
+    if( current() ) for( const auto& state : m_document.graph().states() ) if( state.id() == current()->selection().state_id() )
+    { implementation = text( state.name() ) + wxString::Format( " · v%d", version( *current() ) ); break; }
+    wxString full = m_preview ? _( "Preview: " ) + implementation : implementation.empty() ? _( "Implementation" ) : implementation;
+    wxClientDC dc( m_implementation ); dc.SetFont( m_implementation->GetFont() );
+    int maximum = std::max( FromDIP( 150 ), std::min( FromDIP( 450 ), m_implementation->GetParent()->GetClientSize().x / 2 ) );
+    wxString label = wxControl::Ellipsize( full, dc, wxELLIPSIZE_MIDDLE, maximum - FromDIP( 24 ) );
+    wxSize minimum( std::min( maximum, dc.GetTextExtent( label ).x + FromDIP( 24 ) ), -1 );
+    m_implementation->SetLabel( label ); m_implementation->SetToolTip( full );
+    if( m_implementation->GetMinSize() != minimum )
+    { m_implementation->SetMinSize( minimum ); m_implementation->GetParent()->Layout(); }
 }
 void RECURSIVE_DIAGRAM_FRAME::previewImplementation( const std::string& stateId )
 {

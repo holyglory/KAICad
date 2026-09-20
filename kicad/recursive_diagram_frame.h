@@ -58,6 +58,7 @@ private:
     void navigate( const std::string& aBlockId, bool aRemember = true );
     void chooseImplementation();
     void previewImplementation( const std::string& aStateId );
+    void updateImplementationLabel();
     bool hasChanges() const;
     bool confirmChange();
     void makeDraft( const REVISION& aRevision );

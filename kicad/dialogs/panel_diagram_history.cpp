@@ -75,7 +75,7 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     m_restore = new wxButton( this, wxID_ANY, _( "Restore as &draft" ) ); m_restore->SetName( "DiagramHistoryRestore" );
     actionsRow->Add( m_preview, 0, wxRIGHT, gap ); actionsRow->Add( m_restore, 1 );
     layout->Add( actionsRow, 0, wxEXPAND | wxALL, gap );
-    m_return = new wxButton( this, wxID_ANY, _( "Return to current" ) ); m_return->SetName( "DiagramHistoryReturn" );
+    m_return = new wxButton( this, wxID_ANY, _( "Return to &current" ) ); m_return->SetName( "DiagramHistoryReturn" );
     layout->Add( m_return, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, gap );
     SetSizer( layout );
     close->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { m_actions.close(); } );
@@ -173,7 +173,7 @@ bool PANEL_DIAGRAM_HISTORY::SetComparison( const COMPARISON& comparison )
         details += verb + wxS( ": " ) + name + wxS( "\n" );
     }
     m_details->ChangeValue( details ); m_details->SetInsertionPoint( 0 );
-    m_comparisonReady = true; m_busy = false; m_error.clear(); updateActions(); return true;
+    m_comparisonReady = true; m_busy = false; m_error.clear(); updateActions(); m_rows->SetFocus(); return true;
 }
 
 void PANEL_DIAGRAM_HISTORY::updateActions()

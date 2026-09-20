@@ -619,6 +619,49 @@ public sealed partial class NativeSessionTests
             comparisonArguments["expectedSourceToken"] = new string('0', 64);
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_prepare_restoration", comparisonArguments, cancellationToken: token)).IsError == true);
             Assert.AreEqual(beforeWholeRestore, await File.ReadAllTextAsync(source, token));
+            // Whole-diagram history has its own read-only inspector and explicit
+            // preview; browsing never replaces the user's current editing draft.
+            var oldDiagram = historySaved.SelectedRoot;
+            var topologyDraft = historySaved.StartDraft(oldDiagram);
+            topologyDraft = topologyDraft with { Children = [topologyDraft.Children[0]],
+                Diagram = topologyDraft.LocalDiagram with { Connections = [] } };
+            var topologyGraph = historySaved.SaveDraft(oldDiagram, [oldDiagram], topologyDraft,
+                Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin("Another agent")).Graph;
+            string topologyXml = RecursiveBlockGraphXml.Write(topologyGraph);
+            await File.WriteAllTextAsync(source, topologyXml, token); Key("r", control: true);
+            await Wait(s => !s.Busy && !s.Dirty && s.Draft.Baseline.RevisionId == topologyGraph.SelectedRoot.RevisionId.ToString("D"));
+            Key("3", control: true); Key("a", control: true); Type("Keep this uncommitted routing text."); await Wait(s => s.Dirty);
+            var historyBeforeDraft = (await Read()).Draft.Clone();
+            Key("h", control: true);
+            var wholeOpened = await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
+            Assert.AreEqual(historyBeforeDraft, wholeOpened.Draft); Assert.IsNull(wholeOpened.DiagramHistory.Preview);
+            Key("Down");
+            await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h && h.Inspected.RevisionId == oldDiagram.RevisionId.ToString("D"));
+            Assert.AreEqual(historyBeforeDraft, (await Read()).Draft); Assert.AreEqual(topologyXml, await File.ReadAllTextAsync(source, token));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-inspection.png"), token);
+            Key("p", alt: true);
+            await Wait(s => !s.Busy && s.DiagramHistory?.Preview?.RevisionId == oldDiagram.RevisionId.ToString("D"));
+            Assert.AreEqual(historyBeforeDraft, (await Read()).Draft);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-preview.png"), token);
+            Key("c", alt: true); await Wait(s => s.DiagramHistory is { Preview: null });
+            Key("d", alt: true); await Window("Unsaved changes"); Key("Escape", title: "Unsaved changes");
+            await Wait(s => !s.Busy && s.DiagramHistory is not null && s.Dirty);
+            Assert.AreEqual(historyBeforeDraft, (await Read()).Draft); Assert.AreEqual(topologyXml, await File.ReadAllTextAsync(source, token));
+            Key("Escape"); await Wait(s => s.DiagramHistory is null); Assert.AreEqual(historyBeforeDraft, (await Read()).Draft);
+            Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
+            Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false, LoadedCount: 50 });
+            Key("Down"); await Wait(s => !s.Busy && s.DiagramHistory?.Inspected?.RevisionId == oldDiagram.RevisionId.ToString("D"));
+            Key("d", alt: true);
+            var restoredDiagram = await Wait(s => !s.Busy && s.DiagramHistory is null && s.Dirty && s.Draft.RestoredFrom?.RevisionId == oldDiagram.RevisionId.ToString("D"));
+            Assert.HasCount(2, restoredDiagram.Draft.Children); Assert.HasCount(2, restoredDiagram.Draft.LocalDiagram.Connections);
+            Assert.AreEqual(topologyXml, await File.ReadAllTextAsync(source, token));
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-restored-draft.png"), token);
+            await Save();
+            var wholeSaved = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(topologyGraph.SelectedRoot.RevisionId, wholeSaved.Inspect(wholeSaved.SelectedRoot).ParentRevisionId);
+            Assert.AreEqual(oldDiagram, wholeSaved.Inspect(wholeSaved.SelectedRoot).RestoredFrom);
+            Assert.HasCount(1, wholeSaved.Inspect(topologyGraph.SelectedRoot).Children);
+            Assert.HasCount(2, wholeSaved.Inspect(wholeSaved.SelectedRoot).Children);
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

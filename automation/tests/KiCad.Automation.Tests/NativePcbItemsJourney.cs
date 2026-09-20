@@ -1,0 +1,73 @@
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Commands;
+using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
+using KiCad.Automation.Native;
+
+namespace KiCad.Automation.Tests;
+
+public sealed partial class NativeSessionTests
+{
+    private static async Task VerifyNativePcbItems(NativeClient client, DocumentSpecifier schematic,
+        string evidence, string instanceId, CancellationToken token)
+    {
+        string boardPath = Path.Combine(schematic.Project.Path, schematic.Project.Name + ".kicad_pcb");
+        var boardOpen = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token, toolName: "kicad_pcb_create");
+        var board = boardOpen.Document;
+        await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+        var before = await ObserveLifecycleState(client, board, token);
+        var track = new Track
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Start = new() { XNm = 10_000_000, YNm = 10_000_000 },
+            End = new() { XNm = 20_000_000, YNm = 10_000_000 },
+            Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
+            Net = new() { Name = "POWER_RAIL" }
+        };
+        var create = new CreateItems { Header = new() { Document = board } };
+        create.Items.Add(Any.Pack(track));
+        string stateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-items-mcp-").FullName;
+        try
+        {
+            await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                stateDirectory, Path.Combine(evidence, instanceId + "-pcb-items-mcp.stderr.log"), token);
+            var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+            Assert.IsFalse(attached.TryGetProperty("isError", out var attachError) && attachError.GetBoolean());
+            var createdReply = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(create),
+                expectedStateJson = SchematicJson.Formatter.Format(before)
+            });
+            Assert.IsFalse(createdReply.TryGetProperty("isError", out var createError) && createError.GetBoolean(), createdReply.GetRawText());
+            var createdData = createdReply.GetProperty("structuredContent");
+            var createdResponse = BoardJson.Parser.Parse<CreateItemsResponse>(createdData.GetProperty("response").GetRawText());
+            Assert.AreEqual(ItemRequestStatus.IrsOk, createdResponse.Status);
+            var createdTrack = createdResponse.CreatedItems.Single().Item.Unpack<Track>();
+            Assert.AreEqual(track.Id, createdTrack.Id);
+            string afterCreate = createdData.GetProperty("afterState").GetString()!;
+            var stale = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(create),
+                expectedStateJson = SchematicJson.Formatter.Format(before)
+            });
+            Assert.IsTrue(stale.GetProperty("isError").GetBoolean());
+            var moved = createdTrack.Clone(); moved.End.XNm += 5_000_000;
+            var update = new UpdateItems { Header = new() { Document = board } };
+            update.Items.Add(Any.Pack(moved));
+            var updatedReply = await mcp.Tool("kicad_pcb_items_update", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(update), expectedStateJson = afterCreate
+            });
+            Assert.IsFalse(updatedReply.TryGetProperty("isError", out var updateError) && updateError.GetBoolean(), updatedReply.GetRawText());
+            var actual = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { createdTrack.Id } }, token);
+            var actualTrack = actual.Items.Single().Unpack<Track>();
+            Assert.AreEqual(moved.End, actualTrack.End);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
+        }
+        finally { Directory.Delete(stateDirectory, true); }
+        await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+    }
+}

@@ -60,7 +60,7 @@ name="native-ui"
 tier="development"
 requires=["contracts","native-protocol"]
 timeout_seconds=600
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation","--logger","trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216},{name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216},{name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216},{name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864},{name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864}]
 
 [test.structural-editor-build]

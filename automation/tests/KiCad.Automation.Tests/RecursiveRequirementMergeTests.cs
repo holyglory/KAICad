@@ -23,7 +23,7 @@ public sealed class RecursiveRequirementMergeTests
         Assert.AreEqual("New system name", result.Candidate.Name);
         Assert.AreEqual("Top edge", result.Candidate.Requirements.Requirements.Routing);
         Assert.AreEqual("Group telemetry", result.Candidate.Requirements.Requirements.Schematic);
-        Assert.AreEqual(latest.SelectedRoot, result.ExpectedRoot); Assert.AreEqual(latest.SelectedRoot, result.Candidate.Baseline);
+        Assert.IsTrue(result.ExpectedRoot == latest.SelectedRoot); Assert.AreEqual(latest.SelectedRoot, result.Candidate.Baseline);
         var saved = Save(latest, result.Candidate);
         Assert.AreEqual("Top edge", saved.Requirements(saved.SelectedRoot).Requirements.Routing);
         Assert.AreEqual("", saved.Requirements(first.SelectedRoot).Requirements.Routing);

@@ -58,6 +58,7 @@ private:
     std::function<void( size_t )> m_loadOlder;
     size_t m_total = 0;
     bool m_loading = false;
+    bool m_showPageCount = false;
     std::optional<std::string> m_restoreRevision;
     wxListBox* m_history;
     wxStaticText* m_pageStatus;

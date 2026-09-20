@@ -164,6 +164,7 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
     {
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1; } );
+        BOOST_CHECK( list->GetString( 0 ).StartsWith( "v206 · Saved · " ) );
         auto inspected = dialog->InspectedRevision();
         click( more ); BOOST_CHECK_EQUAL( requested, 200 );
         BOOST_CHECK( dialog->IsLoading() ); BOOST_CHECK( !more->IsEnabled() );
@@ -243,8 +244,11 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     auto* saved = control<wxTextCtrl>( dialog, "DiagramFieldHistorySavedText" );
     auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
     auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
+    dialog->ConfigurePaging( rows.size(), []( size_t ) { BOOST_FAIL( "A complete short history needs no further request." ); } );
     int cancelled = show( dialog, [&]
     {
+        BOOST_CHECK( !control<wxStaticText>( dialog, "DiagramFieldHistoryPageStatus" )->IsShown() );
+        BOOST_CHECK( !control<wxButton>( dialog, "DiagramFieldHistoryOlder" )->IsShown() );
         capture( dialog, evidence, "01-current.png" );
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );

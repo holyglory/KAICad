@@ -187,6 +187,7 @@ wxString DIALOG_DIAGRAM_FIELD_HISTORY::PageError() const { return m_pageError->G
 
 void DIALOG_DIAGRAM_FIELD_HISTORY::ConfigurePaging( size_t total, std::function<void( size_t )> loadOlder )
 {
+    m_showPageCount = total > m_entries.size();
     m_total = std::max( total, m_entries.size() ); m_loadOlder = std::move( loadOlder ); updatePaging();
 }
 
@@ -220,7 +221,7 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updatePaging()
 {
     bool more = m_entries.size() < m_total;
     m_pageStatus->SetLabel( wxString::Format( _( "%zu of %zu changes" ), m_entries.size(), m_total ) );
-    m_pageStatus->Show( static_cast<bool>( m_loadOlder ) );
+    m_pageStatus->Show( m_showPageCount );
     m_pageError->Show( !m_pageError->GetLabel().IsEmpty() );
     m_older->Show( more ); m_older->Enable( more && m_loadOlder && !m_loading );
     m_older->SetLabel( m_loading ? _( "Loading…" ) : _( "Load &older" ) );

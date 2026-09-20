@@ -49,7 +49,7 @@ name="contracts"
 tier="development"
 timeout_seconds=300
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~DiagramRequirement|FullyQualifiedName~DiagramEndpointBinding|FullyQualifiedName~DiagramConnection|FullyQualifiedName~DiagramFieldHistoryQuery|FullyQualifiedName~DiagramAnnotation|FullyQualifiedName~RecursiveBlock|FullyQualifiedName~RecursiveEditor|FullyQualifiedName~RecursiveRequirement|FullyQualifiedName~RecursiveImplementation|FullyQualifiedName~StructuralEditorFileTests|FullyQualifiedName~StructuralDiagramTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~BlockProposalReceipt|FullyQualifiedName~BlockProposalRecovery|FullyQualifiedName~BlockProposalInterruption|FullyQualifiedName~BlockProposalSelectionInterruption|FullyQualifiedName~CandidateRecoveryCommit)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history"]
-retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history",max_bytes=16777216}]
+retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history/contracts",max_bytes=67108864}]
 [[test.diagram-requirement-history.check]]
 name="native-protocol"
 tier="development"

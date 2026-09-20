@@ -53,6 +53,7 @@ internal static class NativeKeyboard
         nuint? excludeWindow = null, Action<int>? observePopupCount = null,
         int? dragToLeft = null, int? dragToTop = null)
     {
+        ValidateDragArguments(key, dragToLeft, dragToTop);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         using var errors = new WindowErrorScope();
         nint display = XOpenDisplay(fixtureDisplay);
@@ -196,6 +197,12 @@ internal static class NativeKeyboard
             }
         }
         finally { XCloseDisplay(display); }
+    }
+
+    internal static void ValidateDragArguments(string key, int? x, int? y)
+    {
+        if (key == "drag" ? x is null || y is null : x is not null || y is not null)
+            throw new ArgumentException("Only a drag command accepts endpoint coordinates, and both coordinates are required.");
     }
 
     // Printable Latin-1 keysyms equal their character values. Xlib names such

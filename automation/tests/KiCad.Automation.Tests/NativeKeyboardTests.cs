@@ -6,6 +6,18 @@ namespace KiCad.Automation.Tests;
 public sealed class NativeKeyboardTests
 {
     [TestMethod]
+    public void DragCoordinatesCannotBeSilentlyIgnoredByAClickCommand()
+    {
+        NativeKeyboard.ValidateDragArguments("drag", 10, 20);
+        NativeKeyboard.ValidateDragArguments("click", null, null);
+        NativeKeyboard.ValidateDragArguments("Return", null, null);
+        Assert.ThrowsExactly<ArgumentException>(() => NativeKeyboard.ValidateDragArguments("click", 10, 20));
+        Assert.ThrowsExactly<ArgumentException>(() => NativeKeyboard.ValidateDragArguments("motion", 10, 20));
+        Assert.ThrowsExactly<ArgumentException>(() => NativeKeyboard.ValidateDragArguments("drag", null, 20));
+        Assert.ThrowsExactly<ArgumentException>(() => NativeKeyboard.ValidateDragArguments("drag", 10, null));
+    }
+
+    [TestMethod]
     public void ExplicitPointerCommandsDoNotDependOnTheKeyboardFocusPreclick()
     {
         foreach (string key in new[] { "click", "right-click", "motion", "drag" })

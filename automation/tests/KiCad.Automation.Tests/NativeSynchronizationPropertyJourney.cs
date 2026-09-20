@@ -26,7 +26,7 @@ public sealed partial class NativeSessionTests
         } } };
         await SaveDesired(desired);
         Console.WriteLine($"Native synchronization {instanceId}: engineering reference/value through STDIO MCP");
-        await using (var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
+        await using (var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
             Path.Combine(evidence, instanceId + "-property-host-state"),
             Path.Combine(evidence, instanceId + "-property-host.log"), token))
         {
@@ -117,7 +117,7 @@ public sealed partial class NativeSessionTests
             instanceId, forwardReferenceAndValueThroughStdio = true, nativeKeyboardUndoAndRedo = true,
             conflictingXmlPreserved = true, pinsAndGeometryPreservedByPropertyEdits = true,
             nativeConnectedMoveCaptured = true, nativeWireGeometryCaptured = true, pinConnectivityEquivalent = true,
-            unchangedReapplication = true, testOnlyHost = true, productionToolAdvertised = false,
+            unchangedReapplication = true, testOnlyHost = false, productionToolAdvertised = true,
             forwardConnectedPlacementQualified = false, crossPlatformReady = false
         }), token);
 

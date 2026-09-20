@@ -34,6 +34,53 @@ public static class RecursiveBlockCodec
             Fields(Need(resolution.Draft)), Fields(Need(resolution.Saved)), (M.DiagramRequirementField)((int)resolution.Field - 1), resolution.Text);
     }
 
+    public static P.BlockDefinitionData Encode(M.BlockDefinition definition)
+    {
+        definition.Validate();
+        var result = new P.BlockDefinitionData
+        {
+            Purpose = EncodeChoice(definition.Purpose), Type = EncodeChoice(definition.Type),
+            Manufacturer = EncodeChoice(definition.Manufacturer), Family = EncodeChoice(definition.Family),
+            Model = EncodeChoice(definition.Model), OrderablePart = EncodeChoice(definition.OrderablePart), Package = EncodeChoice(definition.Package)
+        };
+        if (definition.KnowledgeClass is { } choice)
+        {
+            result.KnowledgeClass = new() { State = (P.DefinitionChoiceStateData)choice.State, Strength = (S.StructuralGuidanceStrength)choice.Strength,
+                Applicability = choice.Applicability, Verification = (S.StructuralVerification)choice.Verification };
+            result.KnowledgeClass.Values.Add(choice.Values.Select(v => new P.KnowledgeClassReferenceData
+                { LibraryId = Id(v.LibraryId), LibraryRevision = v.LibraryRevision, ClassId = Id(v.ClassId) }));
+            result.KnowledgeClass.Sources.Add(choice.Sources.Select(Source));
+            if (choice.UnknownReason is { } reason) result.KnowledgeClass.UnknownReason = reason;
+        }
+        return result;
+    }
+
+    public static M.BlockDefinition Decode(P.BlockDefinitionData data)
+    {
+        Known(data, P.BlockDefinitionData.Parser);
+        M.DefinitionChoice<M.KnowledgeClassReference>? knowledge = data.KnowledgeClass is { } choice
+            ? new((M.DefinitionChoiceState)choice.State, choice.Values.Select(v => new M.KnowledgeClassReference(
+                GuidValue(v.LibraryId), v.LibraryRevision, GuidValue(v.ClassId))).ToImmutableArray(),
+                (M.GuidanceStrength)choice.Strength, choice.Applicability, choice.Sources.Select(Source).ToImmutableArray(),
+                (M.VerificationState)choice.Verification, choice.HasUnknownReason ? choice.UnknownReason : null) : null;
+        var definition = new M.BlockDefinition(DecodeChoice(data.Purpose), DecodeChoice(data.Type), DecodeChoice(data.Manufacturer),
+            DecodeChoice(data.Family), DecodeChoice(data.Model), DecodeChoice(data.OrderablePart), DecodeChoice(data.Package), knowledge);
+        definition.Validate(); return definition;
+    }
+
+    private static P.DefinitionTextChoiceData? EncodeChoice(M.DefinitionChoice<string>? choice)
+    {
+        if (choice is null) return null;
+        var result = new P.DefinitionTextChoiceData { State = (P.DefinitionChoiceStateData)choice.State, Strength = (S.StructuralGuidanceStrength)choice.Strength,
+            Applicability = choice.Applicability, Verification = (S.StructuralVerification)choice.Verification };
+        result.Values.Add(choice.Values); result.Sources.Add(choice.Sources.Select(Source));
+        if (choice.UnknownReason is { } reason) result.UnknownReason = reason;
+        return result;
+    }
+    private static M.DefinitionChoice<string>? DecodeChoice(P.DefinitionTextChoiceData? data) => data is null ? null : new(
+        (M.DefinitionChoiceState)data.State, data.Values.ToImmutableArray(), (M.GuidanceStrength)data.Strength, data.Applicability,
+        data.Sources.Select(Source).ToImmutableArray(), (M.VerificationState)data.Verification, data.HasUnknownReason ? data.UnknownReason : null);
+
     public static M.RecursiveBlockDraft Decode(P.BlockDraftData data, Guid documentId)
     {
         Known(data, P.BlockDraftData.Parser);
@@ -47,7 +94,8 @@ public static class RecursiveBlockCodec
         return new(baseline, data.Name, data.Children.Select(Selection).ToImmutableArray(),
             new(new(scope, GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))),
                 Fields(Need(data.Fields)), restored.ToImmutable()), data.RestoredFrom is { } source ? Selection(source) : null,
-            data.LocalDiagram is { } diagram ? Local(diagram) : null);
+            data.LocalDiagram is { } diagram ? Local(diagram) : null,
+            data.Definition is { } definition ? Decode(definition) : null);
     }
 
     public static P.BlockDraftData Encode(M.RecursiveBlockDraft draft)
@@ -60,6 +108,7 @@ public static class RecursiveBlockCodec
             { Field = (P.RequirementFieldKind)((int)r.Key + 1), SourceRevisionId = Id(r.Value) }));
         if (draft.RestoredFrom is { } source) result.RestoredFrom = Selection(source);
         if (draft.Diagram is { } diagram) result.LocalDiagram = Local(diagram);
+        if (draft.Definition is { } definition) result.Definition = Encode(definition);
         return result;
     }
 
@@ -144,6 +193,7 @@ public static class RecursiveBlockCodec
             if (r.ParentRevisionId is { } parent) row.ParentRevisionId = Id(parent);
             if (r.RestoredFrom is { } restored) row.RestoredFrom = Selection(restored);
             if (r.Diagram is { } diagram) row.LocalDiagram = Local(diagram);
+            if (r.Definition is { } definition) row.Definition = Encode(definition);
             row.Children.Add(r.Children.Select(Selection)); data.Revisions.Add(row);
         }
         data.RequirementHistories.Add(graph.RequirementHistories.Select(History));
@@ -163,7 +213,8 @@ public static class RecursiveBlockCodec
                 s.ForkedFrom is { } source ? Selection(source) : null, s.Archived)),
             data.Revisions.Select(r => new M.RecursiveBlockRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
-                r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null)),
+                r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null,
+                r.Definition is { } definition ? Decode(definition) : null)),
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
                 (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))));

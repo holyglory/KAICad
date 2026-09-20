@@ -12,7 +12,7 @@ public sealed record DiagramHistoryPage(Guid DocumentId, BlockSelection Context,
 }
 
 public enum DiagramHistoryChangeKind { Added, Removed, Changed, Reordered }
-public enum DiagramHistoryChangeCategory { Name, Requirement, Block, Connection, Interface, Comment }
+public enum DiagramHistoryChangeCategory { Name, Requirement, Block, Connection, Interface, Comment, Definition }
 public sealed record DiagramHistoryChange(DiagramHistoryChangeCategory Category, DiagramHistoryChangeKind Kind,
     Guid ObjectId, string Name, DiagramRequirementField? Field = null);
 public sealed record DiagramHistoryComparison(Guid DocumentId, BlockSelection Context, BlockSelection Inspected,
@@ -62,6 +62,13 @@ public static class DiagramHistoryQuery
         foreach (var field in Enum.GetValues<DiagramRequirementField>())
             if (oldFields.Get(field) != newFields.Get(field))
                 changes.Add(new(DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, context.BlockId, "", field));
+        foreach (var facet in Enum.GetValues<BlockDefinitionFacet>())
+            if (!before.EffectiveDefinition.Get(facet).SameContents(after.EffectiveDefinition.Get(facet)))
+                changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId,
+                    facet == BlockDefinitionFacet.OrderablePart ? "Orderable part" : facet.ToString()));
+        if (!(before.EffectiveDefinition.KnowledgeClass ?? DefinitionChoice<KnowledgeClassReference>.Unspecified)
+            .SameContents(after.EffectiveDefinition.KnowledgeClass ?? DefinitionChoice<KnowledgeClassReference>.Unspecified))
+            changes.Add(new(DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, context.BlockId, "Knowledge class"));
         CompareItems(before.Children, after.Children, DiagramHistoryChangeCategory.Block,
             c => c.BlockId, c => graph.Inspect(c).Name, (a, b) => a == b);
         CompareItems(before.LocalDiagram.Connections, after.LocalDiagram.Connections, DiagramHistoryChangeCategory.Connection,

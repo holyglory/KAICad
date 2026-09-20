@@ -543,6 +543,7 @@ RECURSIVE_DIAGRAM_FRAME::DRAFT RECURSIVE_DIAGRAM_FRAME::draftFor( const REVISION
     *draft.mutable_children() = item.children(); draft.set_baseline_requirement_revision_id( saved->id() );
     *draft.mutable_baseline_fields() = saved->fields(); *draft.mutable_fields() = saved->fields();
     if( item.has_local_diagram() ) *draft.mutable_local_diagram() = item.local_diagram();
+    if( item.has_definition() ) *draft.mutable_definition() = item.definition();
     return draft;
 }
 void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
@@ -560,6 +561,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
         m_draftView = *visible; m_draftView->set_name( m_draft.name() );
         *m_draftView->mutable_children() = m_draft.children();
         *m_draftView->mutable_local_diagram() = m_draft.local_diagram();
+        if( m_draft.has_definition() ) *m_draftView->mutable_definition() = m_draft.definition(); else m_draftView->clear_definition();
     }
     m_updating = true; bool available = m_ready && !m_process && !m_diagramHistoryOpen;
     bool link = !m_connectionId.empty();

@@ -13,6 +13,8 @@ public sealed partial class NativeSessionTests
         string evidence, string instanceId, CancellationToken token)
     {
         var fixture = LinkedDiagramFixture.Create(); var graph = fixture.Graph;
+        var definitionDraft = graph.StartDraft(graph.SelectedRoot) with { Definition = RecursiveBlockDefinitionTests.Partial() };
+        graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], definitionDraft, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
         string project = Path.GetDirectoryName((await native.HandshakeAsync(token)).ProjectPath)!;
         string source = Path.Combine(project, "system.design.xml");
         await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(graph), token);
@@ -38,6 +40,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(graph.DocumentId.ToString("D"), savedReadData.GetProperty("documentId").GetString());
             Assert.AreEqual(2, savedReadData.GetProperty("children").GetArrayLength());
             Assert.AreEqual(2, savedReadData.GetProperty("connections").GetArrayLength());
+            Assert.AreEqual("DCSD_UNKNOWN", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("model").GetProperty("state").GetString());
+            Assert.AreEqual("SGS_REQUIREMENT", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("package").GetProperty("strength").GetString());
             var wholeHistoryArguments = new Dictionary<string, object?>(arguments)
             {
                 ["context"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },
@@ -819,6 +823,28 @@ public sealed partial class NativeSessionTests
             var restoredChildGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual(unchangedSibling, restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).Children[1]);
             Assert.AreEqual(oldPsu, restoredChildGraph.Inspect(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).Children[0]).RestoredFrom);
+            Assert.IsTrue(RecursiveBlockDefinitionTests.Partial().SameContents(restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).EffectiveDefinition),
+                "Native requirement edits, history restoration and child saves must retain independent definition choices.");
+            var currentDefinitionState = await Read();
+            var selectedDefinition = RecursiveBlockDefinitionTests.Partial().With(BlockDefinitionFacet.Model,
+                RecursiveBlockDefinitionTests.Choice(DefinitionChoiceState.Selected, ["Fixture selected model"]));
+            var definitionArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = (await native.HandshakeAsync(token)).Epoch,
+                ["expectedSourceToken"] = currentDefinitionState.SourceToken,
+                ["expectedRoot"] = restoredChildGraph.SelectedRoot,
+                ["blockPath"] = new[] { restoredChildGraph.SelectedRoot },
+                ["definition"] = JsonSerializer.SerializeToElement(selectedDefinition, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                ["operationId"] = Guid.NewGuid(), ["actor"] = "Compatible agent fixture"
+            };
+            var definitionResult = await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token);
+            if (definitionResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-definition-error.json"), JsonSerializer.Serialize(definitionResult), token);
+            Assert.IsFalse(definitionResult.IsError == true);
+            var definedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(selectedDefinition.SameContents(definedGraph.Inspect(definedGraph.SelectedRoot).EffectiveDefinition));
+            Assert.AreEqual(restoredChildGraph.Requirements(restoredChildGraph.SelectedRoot).Requirements, definedGraph.Requirements(definedGraph.SelectedRoot).Requirements);
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token)).IsError == true);
+            Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == JsonSerializer.SerializeToElement(definitionResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString());
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

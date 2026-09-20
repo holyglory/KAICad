@@ -14,6 +14,35 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_definition_set"),
+     Description("Save independent purpose/type/manufacturer/family/model/orderable-part/package/knowledge-class choices on one exact block revision. Choices retain unspecified, unknown, candidate or selected state, strength, conditions and sources. Requires the observed instance epoch, file token, selected root and root-to-block path. Creates one new revision without changing requirement text, siblings, connections or native electrical objects. This does not validate a part name against a library or materialize a schematic/footprint. Reload or reconcile an already-open native draft after this external save.")]
+    public Task<CallToolResult> SetDefinition(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
+        BlockDefinition definition, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (blockPath is null || blockPath.Length == 0 || blockPath.Any(p => p is null) || expectedRoot is null
+            || definition is null || operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_definition_operation", "Provide the exact root/path, definition, observed source, operation identity and actor.");
+        definition.Validate(); Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the proposed definition and compare it with the latest revision.");
+        var draft = loaded.Graph.StartDraft(blockPath[^1]) with { Definition = definition };
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
+            "Refine block definition", [], [operationId]);
+        var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
+            [.. blockPath], draft, operationId, Guid.NewGuid(), [.. blockPath.Skip(1).Select(_ => Guid.NewGuid())], origin, token: cancellationToken);
+        var selected = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
+        var definitionData = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(RecursiveBlockCodec.Encode(saved.Graph.Inspect(selected).EffectiveDefinition)));
+        var result = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
+            sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection = selected, definition = definitionData,
+            changed = saved.ContentSha256 != loaded.ContentSha256 });
+        return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
+    });
+
     [McpServerTool(Name = "kicad_diagram_observe", ReadOnly = true),
      Description("Render one or more native structural-diagram views with matching structured objects at the exact observed source token and editor view revision. Omit a view selection for the current canvas including its draft/preview; specify an exact selection for another saved level or revision. Optional diagram-unit viewport chooses a detail region. Rendering never navigates the user window or saves a draft. Each view returns PNG, actual viewport, coordinate system and object identities; this is not native schematic/PCB realization or electrical verification.")]
     public Task<CallToolResult> Observe(string instanceId, string documentId, string expectedSourceToken,

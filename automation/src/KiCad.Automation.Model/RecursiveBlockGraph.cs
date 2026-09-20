@@ -13,9 +13,11 @@ public sealed record BlockDesignState(Guid Id, Guid BlockId, string Name, Guid H
 /// the same contract as every child. Physical allocation is deliberately independent.</summary>
 public sealed record RecursiveBlockRevision(BlockSelection Selection, Guid? ParentRevisionId,
     string Name, Guid RequirementRevisionId, ImmutableArray<BlockSelection> Children,
-    RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null, BlockLocalDiagram? Diagram = null)
+    RequirementRevisionOrigin Origin, BlockSelection? RestoredFrom = null, BlockLocalDiagram? Diagram = null,
+    BlockDefinition? Definition = null)
 {
     public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
+    public BlockDefinition EffectiveDefinition => Definition ?? BlockDefinition.Empty;
 }
 
 public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
@@ -23,9 +25,10 @@ public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
 
 public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
     ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null,
-    BlockLocalDiagram? Diagram = null)
+    BlockLocalDiagram? Diagram = null, BlockDefinition? Definition = null)
 {
     public BlockLocalDiagram LocalDiagram => Diagram ?? BlockLocalDiagram.Empty;
+    public BlockDefinition EffectiveDefinition => Definition ?? BlockDefinition.Empty;
 }
 
 /// <summary>Immutable block occurrence/revision graph. Publishing an unselected revision
@@ -132,6 +135,7 @@ public sealed class RecursiveBlockGraph
         foreach (var revision in Revisions)
         {
             revision.LocalDiagram.Validate();
+            revision.EffectiveDefinition.Validate();
             foreach (var boundary in revision.LocalDiagram.Interfaces)
             {
                 if (identities.Contains(boundary.Id) || (interfaceOwners.TryGetValue(boundary.Id, out var owner) && owner != revision.Selection.BlockId))
@@ -226,7 +230,8 @@ public sealed class RecursiveBlockGraph
         var revision = Inspect(selection);
         var requirements = Requirements(selection);
         return new(selection, revision.Name, revision.Children,
-            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty), Diagram: revision.Diagram);
+            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty),
+            Diagram: revision.Diagram, Definition: revision.Definition);
     }
 
     /// <summary>Restore old contents into a draft, not the selected hierarchy or saved heads.</summary>
@@ -236,6 +241,7 @@ public sealed class RecursiveBlockGraph
         var baseline = Inspect(draft.Baseline);
         if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
             || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
+            || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             || draft.Requirements.Requirements != Requirements(draft.Baseline).Requirements)
             throw new AutomationException("dirty_block_draft", "Save or explicitly decline the existing draft before restoring a whole diagram.");
         var previous = Inspect(source);
@@ -244,7 +250,8 @@ public sealed class RecursiveBlockGraph
         var fields = draft.Requirements;
         foreach (var field in Enum.GetValues<DiagramRequirementField>())
             fields = _requirements[source.StateId].RestoreField(fields, previous.RequirementRevisionId, field);
-        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields, RestoredFrom = source, Diagram = previous.Diagram };
+        return draft with { Name = previous.Name, Children = previous.Children, Requirements = fields,
+            RestoredFrom = source, Diagram = previous.Diagram, Definition = previous.Definition };
     }
 
     /// <summary>Atomically produces a new in-memory root and immutable history. A failed
@@ -277,10 +284,12 @@ public sealed class RecursiveBlockGraph
         var baseline = Inspect(draft.Baseline);
         if (draft.Name == baseline.Name && draft.Children.SequenceEqual(baseline.Children)
             && draft.LocalDiagram.SameContents(baseline.LocalDiagram)
+            && draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return Select(expectedRoot, path, draft.Baseline, ancestorRevisionIds, origin);
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
-            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin, draft.RestoredFrom, draft.Diagram);
+            baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin,
+            draft.RestoredFrom, draft.Diagram, draft.Definition);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
         return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin);
     }
@@ -340,7 +349,7 @@ public sealed class RecursiveBlockGraph
                     ? n : n with { Target = n.Target with { UnresolvedReason = n.Target.UnresolvedReason ?? "The source target is not present in this new implementation." },
                         Origin = n.Target.UnresolvedReason is null ? origin : n.Origin }).ToImmutableArray());
         var initial = new RecursiveBlockRevision(selection, null, original.Name, requirementRevisionId,
-            emptyInterior ? [] : original.Children, origin, Diagram: diagram);
+            emptyInterior ? [] : original.Children, origin, Diagram: diagram, Definition: original.Definition);
         return AddImplementation(state, initial, history);
     }
 
@@ -435,6 +444,7 @@ public sealed class RecursiveBlockGraph
             throw Invalid("Provide the saved baseline, current fields and diagram children for this draft.");
         _ = Inspect(draft.Baseline); Text(draft.Name, "A block draft needs a name.");
         draft.LocalDiagram.Validate();
+        draft.EffectiveDefinition.Validate();
         if (draft.Requirements.Baseline != Requirements(draft.Baseline))
             throw Invalid("The draft's requirement baseline must match its exact saved block revision.");
         _ = _requirements[draft.Baseline.StateId].PrepareMerge(draft.Requirements);

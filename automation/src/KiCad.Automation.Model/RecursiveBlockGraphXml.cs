@@ -17,6 +17,7 @@ public static class RecursiveBlockGraphXml
     public static XmlSchemaSet CreateSchemaSet()
     {
         var set = new XmlSchemaSet { XmlResolver = null };
+        BlockDefinitionXml.AddSchema(set);
         var assembly = typeof(RecursiveBlockGraphXml).Assembly;
         foreach (string name in new[] { "requirement-history-v1.xsd", "connection-archive-v1.xsd", "recursive-block-graph-v1.xsd" })
         {
@@ -43,7 +44,8 @@ public static class RecursiveBlockGraphXml
                     Attr("requirements", r.RequirementRevisionId), WriteOrigin(r.Origin),
                     new XElement(Ns + "children", r.Children.Select(c => Selection("child", c))),
                     r.RestoredFrom is { } source ? Selection("restored-from", source) : null,
-                    r.Diagram is { } diagram ? WriteLocal(diagram) : null))),
+                    r.Diagram is { } diagram ? WriteLocal(diagram) : null,
+                    r.Definition is { } definition ? EngineeringXmlText.Parse(BlockDefinitionXml.Write(definition)) : null))),
             new XElement(Ns + "requirement-histories", graph.RequirementHistories.OrderBy(h => h.Scope.DesignStateId)
                 .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))),
             graph.ConnectionArchives.IsEmpty ? null : new XElement(Ns + "connection-archives", graph.ConnectionArchives.OrderBy(a => a.OwnerBlockId)
@@ -72,7 +74,9 @@ public static class RecursiveBlockGraphXml
                     r.Attribute("parent") is null ? null : Id(r, "parent"), Text(r, "name"), Id(r, "requirements"),
                     r.Element(Ns + "children")!.Elements(Ns + "child").Select(ReadSelection).ToImmutableArray(),
                     ReadOrigin(r.Element(Ns + "origin")!), r.Element(Ns + "restored-from") is { } source ? ReadSelection(source) : null,
-                    r.Element(Ns + "local-diagram") is { } diagram ? ReadLocal(diagram) : null));
+                    r.Element(Ns + "local-diagram") is { } diagram ? ReadLocal(diagram) : null,
+                    r.Element(XName.Get("definition", BlockDefinitionXml.Namespace)) is { } definition
+                        ? BlockDefinitionXml.Read(EngineeringXmlText.Render(definition)) : null));
             var histories = root.Element(Ns + "requirement-histories")!.Elements(XName.Get("requirement-history", DiagramRequirementHistoryXml.Namespace))
                 .Select(h => DiagramRequirementHistoryXml.Read(EngineeringXmlText.Render(h)));
             var archives = root.Element(Ns + "connection-archives")?.Elements(XName.Get("connection-archive", DiagramConnectionArchiveXml.Namespace))

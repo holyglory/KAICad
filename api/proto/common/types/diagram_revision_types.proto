@@ -79,7 +79,7 @@ message DiagramHistoryPageData {
   repeated DiagramHistoryEntryData entries = 6;
 }
 enum DiagramChangeKind { DHCK_UNKNOWN = 0; DHCK_ADDED = 1; DHCK_REMOVED = 2; DHCK_CHANGED = 3; DHCK_REORDERED = 4; }
-enum DiagramChangeCategory { DHCC_UNKNOWN = 0; DHCC_NAME = 1; DHCC_REQUIREMENT = 2; DHCC_BLOCK = 3; DHCC_CONNECTION = 4; DHCC_INTERFACE = 5; DHCC_COMMENT = 6; }
+enum DiagramChangeCategory { DHCC_UNKNOWN = 0; DHCC_NAME = 1; DHCC_REQUIREMENT = 2; DHCC_BLOCK = 3; DHCC_CONNECTION = 4; DHCC_INTERFACE = 5; DHCC_COMMENT = 6; DHCC_DEFINITION = 7; }
 message DiagramHistoryChangeData {
   DiagramChangeCategory category = 1;
   DiagramChangeKind kind = 2;
@@ -111,6 +111,36 @@ message ImplementationChangeData {
   string before_name = 4; string after_name = 5; bool before_archived = 6; bool after_archived = 7;
   DiagramRevisionOriginData origin = 8;
 }
+enum DefinitionChoiceStateData { DCSD_UNSPECIFIED = 0; DCSD_UNKNOWN = 1; DCSD_CANDIDATES = 2; DCSD_SELECTED = 3; }
+message DefinitionTextChoiceData {
+  DefinitionChoiceStateData state = 1;
+  repeated string values = 2;
+  kiapi.automation.structure.v1.StructuralGuidanceStrength strength = 3;
+  string applicability = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  kiapi.automation.structure.v1.StructuralVerification verification = 6;
+  optional string unknown_reason = 7;
+}
+message KnowledgeClassReferenceData { string library_id = 1; string library_revision = 2; string class_id = 3; }
+message DefinitionClassChoiceData {
+  DefinitionChoiceStateData state = 1;
+  repeated KnowledgeClassReferenceData values = 2;
+  kiapi.automation.structure.v1.StructuralGuidanceStrength strength = 3;
+  string applicability = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  kiapi.automation.structure.v1.StructuralVerification verification = 6;
+  optional string unknown_reason = 7;
+}
+message BlockDefinitionData {
+  DefinitionTextChoiceData purpose = 1;
+  DefinitionTextChoiceData type = 2;
+  DefinitionTextChoiceData manufacturer = 3;
+  DefinitionTextChoiceData family = 4;
+  DefinitionTextChoiceData model = 5;
+  DefinitionTextChoiceData orderable_part = 6;
+  DefinitionTextChoiceData package = 7;
+  DefinitionClassChoiceData knowledge_class = 8;
+}
 message BlockRevisionData {
   BlockSelectionData selection = 1;
   optional string parent_revision_id = 2;
@@ -120,6 +150,7 @@ message BlockRevisionData {
   DiagramRevisionOriginData origin = 6;
   BlockSelectionData restored_from = 7;
   BlockLocalDiagramData local_diagram = 8;
+  BlockDefinitionData definition = 9;
 }
 message RecursiveBlockGraphData {
   uint32 schema_version = 1;
@@ -216,6 +247,7 @@ message BlockDraftData {
   repeated FieldRestorationData restored_fields = 7;
   BlockSelectionData restored_from = 8;
   BlockLocalDiagramData local_diagram = 9;
+  BlockDefinitionData definition = 10;
 }
 message SaveBlockDraftData {
   BlockSelectionData expected_root = 1;

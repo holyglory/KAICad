@@ -35,6 +35,7 @@ public static class RecursiveBlockGraphXml
             Selection("selected-root", graph.SelectedRoot),
             new XElement(Ns + "states", graph.States.OrderBy(s => s.Id).Select(s => new XElement(Ns + "state",
                 Attr("id", s.Id), Attr("block", s.BlockId), new XAttribute("name", s.Name), Attr("head", s.HeadRevisionId),
+                s.Archived ? new XAttribute("archived", true) : null,
                 s.ForkedFrom is { } source ? Selection("forked-from", source) : null))),
             new XElement(Ns + "revisions", graph.Revisions.OrderBy(r => r.Selection.RevisionId).Select(r =>
                 new XElement(Ns + "revision", Attr("id", r.Selection.RevisionId), Attr("block", r.Selection.BlockId), Attr("state", r.Selection.StateId),
@@ -46,7 +47,11 @@ public static class RecursiveBlockGraphXml
             new XElement(Ns + "requirement-histories", graph.RequirementHistories.OrderBy(h => h.Scope.DesignStateId)
                 .Select(h => EngineeringXmlText.Parse(DiagramRequirementHistoryXml.Write(h)))),
             graph.ConnectionArchives.IsEmpty ? null : new XElement(Ns + "connection-archives", graph.ConnectionArchives.OrderBy(a => a.OwnerBlockId)
-                .Select(a => EngineeringXmlText.Parse(DiagramConnectionArchiveXml.Write(a)))));
+                .Select(a => EngineeringXmlText.Parse(DiagramConnectionArchiveXml.Write(a)))),
+            graph.ImplementationChanges.IsEmpty ? null : new XElement(Ns + "implementation-changes", graph.ImplementationChanges.Select(c =>
+                new XElement(Ns + "change", Attr("id", c.Id), Attr("state", c.StateId), new XAttribute("kind", c.Kind),
+                    new XAttribute("before-name", c.BeforeName), new XAttribute("after-name", c.AfterName),
+                    new XAttribute("before-archived", c.BeforeArchived), new XAttribute("after-archived", c.AfterArchived), DiagramRevisionOriginXml.Write(Ns, c.Origin)))));
         new XDocument(root).Validate(Schema.Value, null);
         return EngineeringXmlText.Render(root);
     }
@@ -61,7 +66,7 @@ public static class RecursiveBlockGraphXml
             new XDocument(root).Validate(Schema.Value, null);
             var states = root.Element(Ns + "states")!.Elements(Ns + "state").Select(s =>
                 new BlockDesignState(Id(s, "id"), Id(s, "block"), Text(s, "name"), Id(s, "head"),
-                    s.Element(Ns + "forked-from") is { } source ? ReadSelection(source) : null));
+                    s.Element(Ns + "forked-from") is { } source ? ReadSelection(source) : null, (bool?)s.Attribute("archived") ?? false));
             var revisions = root.Element(Ns + "revisions")!.Elements(Ns + "revision").Select(r =>
                 new RecursiveBlockRevision(new(Id(r, "block"), Id(r, "state"), Id(r, "id")),
                     r.Attribute("parent") is null ? null : Id(r, "parent"), Text(r, "name"), Id(r, "requirements"),
@@ -72,7 +77,10 @@ public static class RecursiveBlockGraphXml
                 .Select(h => DiagramRequirementHistoryXml.Read(EngineeringXmlText.Render(h)));
             var archives = root.Element(Ns + "connection-archives")?.Elements(XName.Get("connection-archive", DiagramConnectionArchiveXml.Namespace))
                 .Select(a => DiagramConnectionArchiveXml.Read(EngineeringXmlText.Render(a))) ?? [];
-            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives);
+            var changes = root.Element(Ns + "implementation-changes")?.Elements(Ns + "change").Select(c => new ImplementationChange(
+                Id(c, "id"), Id(c, "state"), Enum.Parse<ImplementationChangeKind>(Text(c, "kind")), Text(c, "before-name"), Text(c, "after-name"),
+                (bool)c.Attribute("before-archived")!, (bool)c.Attribute("after-archived")!, DiagramRevisionOriginXml.Read(c.Element(Ns + "origin")!))) ?? [];
+            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives, changes);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)
         { throw Invalid("Invalid recursive block graph XML: " + error.Message); }

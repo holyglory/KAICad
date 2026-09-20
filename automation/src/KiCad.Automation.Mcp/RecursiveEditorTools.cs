@@ -54,7 +54,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             isSelected = graph.Walk(graph.SelectedRoot).Contains(selection), block = Wire(block), requirements = Wire(fields),
             children = selected.Children.Select(c => protocol.Revisions.Single(r => r.Selection.RevisionId == c.RevisionId.ToString("D")))
                 .Select(r => new { selection = Wire(r.Selection), name = r.Name, requirementRevisionId = r.RequirementRevisionId, childCount = r.Children.Count }),
-            implementations = protocol.States.Where(s => s.BlockId == selection.BlockId.ToString("D")).Select(Wire), connections
+            implementations = protocol.States.Where(s => s.BlockId == selection.BlockId.ToString("D")).Select(Wire),
+            implementationChanges = protocol.ImplementationChanges.Where(c => graph.States.Any(s => s.Id.ToString("D") == c.StateId && s.BlockId == selection.BlockId)).Select(Wire), connections
         });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });

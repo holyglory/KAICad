@@ -14,6 +14,9 @@
   <xs:simpleType name="annotation-role"><xs:restriction base="xs:string">
     <xs:enumeration value="Comment"/><xs:enumeration value="Instruction"/>
   </xs:restriction></xs:simpleType>
+  <xs:simpleType name="implementation-change-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Rename"/><xs:enumeration value="Archive"/><xs:enumeration value="Restore"/>
+  </xs:restriction></xs:simpleType>
   <xs:simpleType name="annotation-target"><xs:restriction base="xs:string">
     <xs:enumeration value="Canvas"/><xs:enumeration value="Block"/><xs:enumeration value="Connection"/>
   </xs:restriction></xs:simpleType>
@@ -47,6 +50,7 @@
         <xs:attribute name="block" type="h:identity" use="required"/>
         <xs:attribute name="name" type="xs:string" use="required"/>
         <xs:attribute name="head" type="h:identity" use="required"/>
+        <xs:attribute name="archived" type="xs:boolean"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
     <xs:element name="revisions"><xs:complexType><xs:sequence>
@@ -102,6 +106,16 @@
     </xs:sequence></xs:complexType></xs:element>
     <xs:element name="connection-archives" minOccurs="0"><xs:complexType><xs:sequence>
       <xs:element ref="c:connection-archive" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="implementation-changes" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="change" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="origin" type="origin"/>
+      </xs:sequence>
+        <xs:attribute name="id" type="h:identity" use="required"/><xs:attribute name="state" type="h:identity" use="required"/>
+        <xs:attribute name="kind" type="implementation-change-kind" use="required"/>
+        <xs:attribute name="before-name" type="xs:string" use="required"/><xs:attribute name="after-name" type="xs:string" use="required"/>
+        <xs:attribute name="before-archived" type="xs:boolean" use="required"/><xs:attribute name="after-archived" type="xs:boolean" use="required"/>
+      </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
   </xs:sequence>
     <xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/>

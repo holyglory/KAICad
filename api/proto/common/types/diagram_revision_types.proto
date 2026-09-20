@@ -66,6 +66,13 @@ message BlockDesignStateData {
   string name = 3;
   string head_revision_id = 4;
   BlockSelectionData forked_from = 5;
+  bool archived = 6;
+}
+enum ImplementationChangeKind { ICK_UNKNOWN = 0; ICK_RENAME = 1; ICK_ARCHIVE = 2; ICK_RESTORE = 3; }
+message ImplementationChangeData {
+  string id = 1; string state_id = 2; ImplementationChangeKind kind = 3;
+  string before_name = 4; string after_name = 5; bool before_archived = 6; bool after_archived = 7;
+  DiagramRevisionOriginData origin = 8;
 }
 message BlockRevisionData {
   BlockSelectionData selection = 1;
@@ -85,6 +92,7 @@ message RecursiveBlockGraphData {
   repeated BlockRevisionData revisions = 5;
   repeated RequirementHistoryData requirement_histories = 6;
   repeated ConnectionArchiveData connection_archives = 7;
+  repeated ImplementationChangeData implementation_changes = 8;
 }
 
 message RecursiveEditorDocument {

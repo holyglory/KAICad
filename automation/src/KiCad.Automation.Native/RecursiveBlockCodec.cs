@@ -112,7 +112,7 @@ public static class RecursiveBlockCodec
         var data = new P.RecursiveBlockGraphData { SchemaVersion = 1, DocumentId = Id(graph.DocumentId), SelectedRoot = Selection(graph.SelectedRoot) };
         data.States.Add(graph.States.Select(s =>
         {
-            var state = new P.BlockDesignStateData { Id = Id(s.Id), BlockId = Id(s.BlockId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId) };
+            var state = new P.BlockDesignStateData { Id = Id(s.Id), BlockId = Id(s.BlockId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId), Archived = s.Archived };
             if (s.ForkedFrom is { } source) state.ForkedFrom = Selection(source);
             return state;
         }));
@@ -127,6 +127,9 @@ public static class RecursiveBlockCodec
         }
         data.RequirementHistories.Add(graph.RequirementHistories.Select(History));
         data.ConnectionArchives.Add(graph.ConnectionArchives.Select(Encode));
+        data.ImplementationChanges.Add(graph.ImplementationChanges.Select(c => new P.ImplementationChangeData { Id = Id(c.Id), StateId = Id(c.StateId),
+            Kind = (P.ImplementationChangeKind)((int)c.Kind + 1), BeforeName = c.BeforeName, AfterName = c.AfterName,
+            BeforeArchived = c.BeforeArchived, AfterArchived = c.AfterArchived, Origin = Origin(c.Origin) }));
         return data;
     }
 
@@ -136,11 +139,13 @@ public static class RecursiveBlockCodec
         if (data.SchemaVersion != 1) throw Invalid("Use the supported recursive diagram message version.");
         return new(GuidValue(data.DocumentId), Selection(Need(data.SelectedRoot)),
             data.States.Select(s => new M.BlockDesignState(GuidValue(s.Id), GuidValue(s.BlockId), s.Name, GuidValue(s.HeadRevisionId),
-                s.ForkedFrom is { } source ? Selection(source) : null)),
+                s.ForkedFrom is { } source ? Selection(source) : null, s.Archived)),
             data.Revisions.Select(r => new M.RecursiveBlockRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, GuidValue(r.RequirementRevisionId), r.Children.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)),
                 r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null)),
-            data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode));
+            data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
+            data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
+                (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))));
     }
 
     public static P.ConnectionArchiveData Encode(M.DiagramConnectionArchive archive)

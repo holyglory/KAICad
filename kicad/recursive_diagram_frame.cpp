@@ -560,7 +560,7 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
     if( !m_ready || m_process || !current() ) return;
     wxMenu menu; const int reserved = m_document.graph().states_size();
     int firstId = wxWindow::NewControlId( reserved ); int index = 0;
-    for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() )
+    for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() && !state.archived() )
     {
         int id = firstId + index++; auto* item = menu.AppendCheckItem( id, wxString::Format( _( "Preview %s" ), text( state.name() ) ) );
         item->Check( current()->selection().state_id() == state.id() );
@@ -589,7 +589,7 @@ void RECURSIVE_DIAGRAM_FRAME::previewImplementation( const std::string& stateId 
 {
     if( !m_ready || m_process || !current() || current()->selection().state_id() == stateId ) return;
     const D::BlockDesignStateData* alternative = nullptr;
-    for( const auto& state : m_document.graph().states() ) if( state.id() == stateId && state.block_id() == current()->selection().block_id() ) alternative = &state;
+    for( const auto& state : m_document.graph().states() ) if( state.id() == stateId && state.block_id() == current()->selection().block_id() && !state.archived() ) alternative = &state;
     if( !alternative ) return;
     bool edited = !m_connectionId.empty() ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
         : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString();

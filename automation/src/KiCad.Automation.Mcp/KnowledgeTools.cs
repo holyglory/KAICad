@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Text.Json;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace KiCad.Automation.Mcp;
@@ -30,6 +32,35 @@ public sealed record DesignProjectionToolResult(string? CandidateEngineeringXml,
 [McpServerToolType]
 public sealed class KnowledgeTools
 {
+    [McpServerTool(Name = "kicad_component_guidance_propose", ReadOnly = true, UseStructuredContent = true),
+     Description("Propose one source-backed reusable class-guidance statement and return a new knowledge-library XML revision. Numeric facts require an explicit classification, unit, exact source document/revision/page reference and preserve nominal/operating-limit/absolute-maximum/measurement semantics. Contradictory ranges are returned as issues, not repaired. The tool does not interpret prose, write files, create native symbols/footprints or change a design instance.")]
+    public CallToolResult ProposeGuidance(string libraryXml, Guid classId, string newRevision,
+        JsonElement statementJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var library = ComponentKnowledgeXml.ReadLibrary(libraryXml);
+            var statement = JsonSerializer.Deserialize<GuidanceStatement>(statementJson.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new AutomationException("invalid_guidance_authoring", "Supply a typed guidance statement.");
+            var result = ComponentKnowledgeAuthoring.AddClassGuidance(library, classId, newRevision, statement);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                libraryId = result.Library.Id, previousRevision = library.Revision, revision = result.Library.Revision,
+                statement = result.Added, quantityIssues = result.QuantityIssues,
+                libraryXml = ComponentKnowledgeXml.WriteLibrary(result.Library), nativeCreation = false,
+                sourceTextInterpreted = false
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or JsonException)
+        {
+            string code = error is AutomationException known ? known.Code : "invalid_guidance_json";
+            var data = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
     [McpServerTool(Name = "kicad_design_connectivity_compare", ReadOnly = true, UseStructuredContent = true),
      Description("Compare the supplied design:1 engineering model with one native SchematicElectricalState protobuf-JSON snapshot using exact sheet/symbol/placed-pin bindings. Returns missing or ambiguous pin bindings and split/joined pin partitions. Net names are not identity matches, and snapshot net indexes are not persistent IDs. Requires exact declared knowledge-library XML. Does not read a live editor, assign successor nets, transfer requirements, change either design, or establish complete native coverage or mutation admission.")]
     public SchematicElectricalComparisonResult CompareConnectivity(string designXml, string electricalStateJson,

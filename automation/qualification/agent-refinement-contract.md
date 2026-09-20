@@ -83,3 +83,34 @@ does not qualify a particular agent, its image handling, or native Desktop integ
 The Mac/Windows build hold remains in force until the complete agreed XML editing
 workflow is implemented. This contract does not enable a global console control or
 claim automatic structural-to-schematic generation or electrical verification.
+
+## Next implementation boundary: complete proposals
+
+The original-input archive and definition/component setters are not a substitute
+for complete diagram proposals. The remaining concrete outcome is
+`p1231ce557d949a70`. Its shared contract must carry the original input identity,
+captured source token and target path, the proposed block selection, and the typed
+new block/connection revisions with their requirement histories and unresolved issues.
+All existing histories and input records remain immutable. A proposal can add an
+internal decomposition while its parent still presents the unit's boundary interfaces.
+
+Prepare and validate the whole proposed closure before publishing any part of it:
+every newly referenced child/member exists; exact endpoint and ownership constraints
+hold; original statements and attachments remain reachable; and previously selected
+siblings and unrelated implementations remain unchanged. A head lookup is not a
+historical reference. An invalid final connection cannot leave only the new blocks
+published. Native electrical generation remains a separately verified operation.
+
+Publishing an unselected candidate may append its history, but must not activate
+it in the containing root or replace a user's native editing draft. Choosing it
+uses explicit root/path guards and updates the necessary ancestors together.
+Reuse the same input and operation identity on retries; do not manufacture a second
+candidate to work around an uncertain response. Retain a stale proposal for comparison
+with newer changes rather than rewriting its original context or guessing a merge.
+
+Acceptance must include an abstract power unit evolving from one regulator into
+multiple converters plus telemetry, and an abstract data connection evolving into
+a signal bundle with partly resolved endpoints. These are test-only synthetic designs,
+not claimed engineering recommendations. Verify rewritten current General/Schematic/
+Routing text with original history, exact unrelated-sibling preservation, preview
+without activation, cancellation, invalid member rejection and stale-result recovery.

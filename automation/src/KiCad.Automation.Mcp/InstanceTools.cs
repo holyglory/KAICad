@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -13,6 +14,8 @@ namespace KiCad.Automation.Mcp;
 public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt);
 public sealed record InspectedInstance(string InstanceId, string ProjectPath, string NativeVersion,
                                       IReadOnlyList<string> NativeCapabilities);
+public sealed record InstanceCapability(string Name, string Scope, string Source, string Availability,
+                                        string RevisionContract, bool NativeAdvertised);
 
 [McpServerToolType]
 public sealed class InstanceTools(InstanceRegistry registry)
@@ -57,6 +60,37 @@ public sealed class InstanceTools(InstanceRegistry registry)
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         GetVersionResponse version = await client.GetVersionAsync(cancellationToken);
         return new(session.InstanceId, session.ProjectPath, version.Version.FullVersion, session.Capabilities.ToArray());
+    });
+
+    [McpServerTool(Name = "kicad_instance_capabilities", ReadOnly = true),
+     Description("Return a versioned capability catalogue for one verified native instance and this compiled MCP service. Native capabilities come only from the matching handshake; service entries are explicitly labeled as registered or unavailable and include their target/revision contract. This is not a promise that an unfinished or unregistered operation works, and it does not change documents.")]
+    public Task<CallToolResult> Capabilities(string instanceId, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var client = registry.Client(instanceId);
+        var session = await client.HandshakeAsync(cancellationToken);
+        var version = await client.GetVersionAsync(cancellationToken);
+        var native = session.Capabilities.Order(StringComparer.Ordinal).Select(name => new InstanceCapability(
+            name, "native-instance", "native-handshake", "advertised", "native epoch plus document revision", true)).ToArray();
+        // Keep this list intentionally limited to operations with real handlers
+        // and focused evidence. Planned PCB routing, simulation, OCR and external
+        // agent-client features are not represented as working capabilities.
+        var service = new[]
+        {
+            new InstanceCapability("kicad_instances_list", "service", "compiled-mcp", "registered", "explicit instance ID", false),
+            new InstanceCapability("kicad_instance_inspect", "service", "compiled-mcp", "registered", "verified instance epoch", false),
+            new InstanceCapability("kicad_design_sync_plan", "schematic-design", "compiled-mcp", "registered", "recovery revision token", false),
+            new InstanceCapability("kicad_design_sync_apply", "schematic-design", "compiled-mcp", "registered", "instance epoch, recovery token, operation ID", false),
+            new InstanceCapability("kicad_design_candidate_commit", "schematic-design", "compiled-mcp", "registered", "recovery revision token, candidate hash", false),
+            new InstanceCapability("kicad_diagram_proposal_publish", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, proposal identity", false),
+            new InstanceCapability("kicad_diagram_proposal_select", "structural-diagram", "compiled-mcp", "registered", "instance epoch, source token, exact root/path", false)
+        };
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            schemaVersion = 1, session.InstanceId, session.ProjectPath, session.Epoch,
+            nativeVersion = version.Version.FullVersion, nativeCapabilities = native,
+            serviceCapabilities = service, unfinished = new[] { "pcb-routing", "simulation", "external-agent-qualification", "mac-desktop-qualification" }
+        });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
     [McpServerTool(Name = "kicad_documents_list", ReadOnly = true),

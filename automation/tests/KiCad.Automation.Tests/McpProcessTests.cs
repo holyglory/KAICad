@@ -92,6 +92,10 @@ public sealed class McpProcessTests
             string[] names = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Select(t => t.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.Contains(names, "kicad_instances_list");
+            CollectionAssert.Contains(names, "kicad_instance_capabilities");
+            var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());
             foreach (string suffix in new[] { "start", "list", "wait", "resume", "stop" })
                 CollectionAssert.Contains(names, "kicad_design_native_intake_" + suffix);
             var nativeIntakes = await Request(9060, "tools/call", new { name = "kicad_design_native_intake_list",

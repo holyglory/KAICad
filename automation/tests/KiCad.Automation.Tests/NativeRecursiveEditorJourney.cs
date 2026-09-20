@@ -140,6 +140,7 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(observation.IsError == true, "Native multi-view observation failed; its exact response is retained.");
                 var payload = JsonSerializer.SerializeToElement(observation);
                 var state = payload.GetProperty("structuredContent").GetProperty("observation");
+                var imageReferences = payload.GetProperty("structuredContent").GetProperty("imageReferences");
                 Assert.AreEqual(before.ViewRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), state.GetProperty("viewRevision").GetString());
                 Assert.AreEqual(before.SourceToken, state.GetProperty("sourceToken").GetString());
                 Assert.AreEqual(3, state.GetProperty("views").GetArrayLength());
@@ -149,12 +150,17 @@ public sealed partial class NativeSessionTests
                 {
                     byte[] png = Convert.FromBase64String(images[i].GetProperty("data").GetString()!);
                     Assert.IsTrue(png.Length > 1000); Assert.AreEqual("image/png", images[i].GetProperty("mimeType").GetString());
+                    Assert.AreEqual(2 + i * 2, imageReferences[i].GetProperty("contentIndex").GetInt32());
+                    Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(png)), imageReferences[i].GetProperty("sha256").GetString());
+                    Assert.AreEqual(state.GetProperty("views")[i].GetProperty("viewId").GetString(), imageReferences[i].GetProperty("viewId").GetString());
+                    Assert.IsTrue(state.GetProperty("views")[i].GetProperty("viewport").TryGetProperty("x", out _));
+                    Assert.IsTrue(state.GetProperty("views")[i].GetProperty("viewport").TryGetProperty("y", out _));
                     await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-" + label + "-view-" + i + ".png"), png, token);
                     Assert.AreEqual("diagram-unit", state.GetProperty("views")[i].GetProperty("units").GetString());
                     Assert.AreEqual("x-right/y-down", state.GetProperty("views")[i].GetProperty("coordinateSystem").GetString());
                 }
                 var currentView = state.GetProperty("views")[0];
-                Assert.AreEqual(dirty, currentView.TryGetProperty("containsUnsavedDraft", out var draftFlag) && draftFlag.GetBoolean());
+                Assert.AreEqual(dirty, currentView.GetProperty("containsUnsavedDraft").GetBoolean());
                 Assert.AreEqual((history ?? psuView).RevisionId.ToString("D"), state.GetProperty("views")[1].GetProperty("diagram").GetProperty("selection").GetProperty("revisionId").GetString());
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + label + "-observation.json"), state.GetRawText(), token);
                 Assert.AreEqual(before, await Read(), "Offscreen views must not alter draft, selection, source, view revision or viewport.");

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Google.Protobuf;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
@@ -35,7 +36,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (observation.DocumentId != documentId || observation.SourceToken != expectedSourceToken || observation.ViewRevision != expectedViewRevision
             || observation.Views.Count != views.Length || observation.Editor is null || observation.Editor.DocumentId != documentId || observation.Editor.ViewRevision != expectedViewRevision)
             throw new AutomationException("diagram_observation_mismatch", "The image response does not match the requested document checkpoint.");
-        var metadata = observation.Clone(); var content = new List<ContentBlock>();
+        var metadata = observation.Clone(); var content = new List<ContentBlock>(); var imageReferences = new List<object>();
         for (int i = 0; i < observation.Views.Count; ++i)
         {
             var view = observation.Views[i];
@@ -46,10 +47,17 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
                 || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)) != view.PixelHeight)
                 throw new AutomationException("diagram_observation_image", "The native view did not return the exact requested PNG dimensions and identity.");
             metadata.Views[i].Png = ByteString.Empty;
+            imageReferences.Add(new { viewId = view.ViewId, contentIndex = 2 + i * 2, mimeType = "image/png",
+                sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(png)) });
             content.Add(new TextContentBlock { Text = "View: " + view.ViewId }); content.Add(ImageContentBlock.FromBytes(png, "image/png"));
         }
+        // A measured zero origin or false draft flag is known information, not
+        // an unspecified engineering fact. Keep these computed defaults explicit.
+        var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
+        var wire = JsonNode.Parse(formatter.Format(metadata))!.AsObject();
+        foreach (var view in wire["views"]!.AsArray()) view!.AsObject().Remove("png");
         var structured = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = native.Epoch,
-            observation = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(metadata)) });
+            observation = wire, imageReferences });
         content.Insert(0, new TextContentBlock { Text = structured.GetRawText() });
         return new() { Content = content, StructuredContent = structured };
     });

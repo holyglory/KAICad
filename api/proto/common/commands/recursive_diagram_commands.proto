@@ -31,4 +31,5 @@ message RecursiveDiagramEditorState {
   string selected_annotation_id = 15;
   bool implementation_preview = 16;
   BlockSelectionData preview_selection = 17;
+  string focused_control = 18;
 }

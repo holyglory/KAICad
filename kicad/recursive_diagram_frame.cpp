@@ -56,6 +56,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     file->Append( wxID_SAVE, _( "Save\tCtrl+S" ) ); file->AppendSeparator(); file->Append( wxID_CLOSE, _( "Close\tCtrl+W" ) );
     menu->Append( file, _( "File" ) ); SetMenuBar( menu );
     m_toolbar = CreateToolBar( wxTB_HORIZONTAL | wxTB_FLAT | wxTB_TEXT );
+    m_toolbar->SetName( "RecursiveToolbar" );
     m_toolbar->AddTool( BACK, _( "Back" ), KiBitmap( BITMAPS::left ) );
     m_toolbar->AddTool( UP, _( "Up" ), KiBitmap( BITMAPS::up ) ); m_toolbar->AddSeparator();
     m_toolbar->AddTool( wxID_UNDO, _( "Undo" ), KiBitmap( BITMAPS::undo ) );
@@ -538,6 +539,7 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( const std::string& id, bool remember )
     if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; select( saved->second.selected ); }
     else fit();
     ++m_viewRevision; refresh();
+    CallAfter( [this] { if( !m_closing ) m_canvas->SetFocus(); } );
 }
 void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
 {
@@ -936,5 +938,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_selected_annotation_id( m_commentId );
     result.set_implementation_preview( m_preview.has_value() );
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
+    if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
+        result.set_focused_control( utf8( focused->GetName() ) );
     return result;
 }

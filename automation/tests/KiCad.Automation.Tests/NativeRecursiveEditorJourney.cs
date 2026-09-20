@@ -31,6 +31,16 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(attach.IsError == true);
             var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project,
                 ["sourcePath"] = source, ["documentId"] = graph.DocumentId.ToString("D") };
+            var savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
+            Assert.IsFalse(savedRead.IsError == true);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-saved-diagram.json"), JsonSerializer.Serialize(savedRead), token);
+            var savedReadData = JsonSerializer.SerializeToElement(savedRead).GetProperty("structuredContent");
+            Assert.AreEqual(graph.DocumentId.ToString("D"), savedReadData.GetProperty("documentId").GetString());
+            Assert.AreEqual(2, savedReadData.GetProperty("children").GetArrayLength());
+            Assert.AreEqual(2, savedReadData.GetProperty("connections").GetArrayLength());
+            var invalidTargetArguments = new Dictionary<string, object?>(arguments) { ["blockId"] = graph.SelectedRoot.BlockId.ToString("D") };
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_read", invalidTargetArguments, cancellationToken: token)).IsError == true);
+            string openingBytes = await File.ReadAllTextAsync(source, token);
             var opened = await client.CallToolAsync("kicad_diagram_open", arguments, cancellationToken: token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-open.json"), JsonSerializer.Serialize(opened), token);
             Assert.IsFalse(opened.IsError == true);
@@ -83,6 +93,7 @@ public sealed partial class NativeSessionTests
             }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
+            Assert.AreEqual(openingBytes, await File.ReadAllTextAsync(source, token));
             Key("Escape"); Key("Right");
             await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-system.png"), token);
@@ -149,6 +160,23 @@ public sealed partial class NativeSessionTests
             var linkHistory = restoredConnection.Connections(restoredCpu.BlockId).RequirementHistories.Single(h => h.Scope.DesignStateId == restoredLink.StateId);
             Assert.AreEqual(DiagramRequirementField.Routing, linkHistory.Current.Restorations.Single().Field);
             Assert.AreEqual("A later memory routing preference.", linkHistory.Revisions[^2].Requirements.Routing);
+            var fieldArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["blockId"] = restoredCpu.BlockId.ToString("D"), ["stateId"] = restoredCpu.StateId.ToString("D"), ["revisionId"] = restoredCpu.RevisionId.ToString("D"),
+                ["field"] = "Routing", ["connectionId"] = restoredLink.ConnectionId.ToString("D"), ["connectionStateId"] = restoredLink.StateId.ToString("D"),
+                ["connectionRevisionId"] = restoredLink.RevisionId.ToString("D"), ["offset"] = 0, ["limit"] = 1
+            };
+            var fieldRead = await client.CallToolAsync("kicad_diagram_field_history", fieldArguments, cancellationToken: token);
+            Assert.IsFalse(fieldRead.IsError == true);
+            var fieldData = JsonSerializer.SerializeToElement(fieldRead).GetProperty("structuredContent").GetProperty("history");
+            Assert.AreEqual(restoredLink.ConnectionId.ToString("D"), fieldData.GetProperty("ownerId").GetString());
+            Assert.AreEqual("Keep memory away from noisy power.", fieldData.GetProperty("savedText").GetString());
+            Assert.AreEqual(1, fieldData.GetProperty("entries").GetArrayLength()); Assert.IsTrue(fieldData.GetProperty("total").GetUInt32() > 1);
+            fieldArguments["offset"] = 1;
+            var olderField = await client.CallToolAsync("kicad_diagram_field_history", fieldArguments, cancellationToken: token);
+            Assert.IsFalse(olderField.IsError == true);
+            Assert.AreEqual("A later memory routing preference.", JsonSerializer.SerializeToElement(olderField).GetProperty("structuredContent").GetProperty("history")
+                .GetProperty("entries")[0].GetProperty("text").GetString());
             Key("4", control: true); Type("Leave pin choices open until placement."); await Wait(s => s.Dirty); await Save();
             var annotatedConnection = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             var annotatedCpu = annotatedConnection.Inspect(annotatedConnection.SelectedRoot).Children[1];

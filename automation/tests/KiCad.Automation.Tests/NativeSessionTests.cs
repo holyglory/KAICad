@@ -57,7 +57,10 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeStructuralEditor")]
     public Task StructuralEditorUsesRealNativeControlsAndXmlFiles() => RunNativeSessions(NativeJourney.StructuralEditor);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor }
+    [TestMethod, TestCategory("NativeRecursiveEditor")]
+    public Task RecursiveEditorNavigatesLevelsAndSavesRequirementHistory() => RunNativeSessions(NativeJourney.RecursiveEditor);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor }
 
     private async Task RunNativeSessions(NativeJourney journey)
     {
@@ -78,6 +81,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
                 NativeJourney.ComponentCreation => "native-xml-component-creation",
                 NativeJourney.StructuralEditor => "native-structural-editor",
+                NativeJourney.RecursiveEditor => "native-recursive-editor",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -103,7 +107,7 @@ public sealed partial class NativeSessionTests
         try
         {
             var displayStart = new ProcessStartInfo("Xvfb") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", journey == NativeJourney.StructuralEditor ? "1600x1150x24" : "1280x900x24", "-nolisten", "tcp" })
+            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", journey is NativeJourney.StructuralEditor or NativeJourney.RecursiveEditor ? "1600x1150x24" : "1280x900x24", "-nolisten", "tcp" })
                 displayStart.ArgumentList.Add(arg);
             Process display = Process.Start(displayStart)!;
             processes.Add(display);
@@ -383,6 +387,12 @@ public sealed partial class NativeSessionTests
                         }
                         catch (Exception error) when (!deadline.IsCancellationRequested)
                         { synchronizationFailures.Add(error); await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-structural-failure.txt"), error.ToString(), deadline.Token); }
+                    }
+                    else if (journey == NativeJourney.RecursiveEditor)
+                    {
+                        try { await VerifyRecursiveEditor(client, focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token); }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        { synchronizationFailures.Add(error); await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-recursive-failure.txt"), error.ToString(), deadline.Token); }
                     }
                     else if (journey == NativeJourney.ComponentCreation)
                     {

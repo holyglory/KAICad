@@ -84,7 +84,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     }
     scroll->SetSizer( fields ); side->Add( scroll, 1, wxEXPAND );
     auto* actions = new wxBoxSizer( wxHORIZONTAL ); actions->AddStretchSpacer();
-    m_decline = new wxButton( inspector, wxID_ANY, _( "Decline" ) ); m_decline->SetName( "RecursiveDecline" );
+    m_decline = new wxButton( inspector, wxID_ANY, _( "&Decline" ) ); m_decline->SetName( "RecursiveDecline" );
     m_save = new wxButton( inspector, wxID_SAVE, _( "Save" ) ); m_save->SetName( "RecursiveSave" );
     actions->Add( m_decline, 0, wxRIGHT, FromDIP( 12 ) ); actions->Add( m_save, 0 );
     side->Add( actions, 0, wxEXPAND | wxALL, FromDIP( 12 ) ); inspector->SetSizer( side );
@@ -93,6 +93,19 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
+    m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
+    {
+        if( !m_ready || m_process || !current() ) { event.Skip(); return; }
+        int index = -1;
+        for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
+        if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )
+        { if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return; }
+        if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
+        { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return; }
+        if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return; }
+        if( event.GetKeyCode() == WXK_BACK && m_path.size() > 1 ) { navigate( m_path[m_path.size() - 2].block_id() ); return; }
+        event.Skip();
+    } );
     m_openDiagram->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { navigate( m_selected ); } );
     m_save->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { save(); } );
     m_decline->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { decline(); } );
@@ -108,6 +121,11 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
+        if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '3' )
+        { if( m_ready && !m_process ) m_fields[event.GetKeyCode() - '1']->SetFocus(); return; }
+        if( event.AltDown() && event.GetKeyCode() == 'H' )
+        { for( int i = 0; i < 3; ++i ) if( wxWindow::FindFocus() == m_fields[i] ) { history( i ); return; } }
+        if( event.GetKeyCode() == WXK_ESCAPE && !m_process ) { m_canvas->SetFocus(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'S' ) { save(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'W' ) { Close(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'Z' ) { undo( false ); return; }
@@ -234,7 +252,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     m_document = result.document(); m_ready = true; m_dirty = false;
     if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
     m_pendingScope.clear(); m_pendingSelected.clear(); m_selected.clear();
-    select( selected.empty() ? m_path.back().block_id() : selected ); fit();
+    select( selected.empty() ? m_path.back().block_id() : selected ); fit(); m_canvas->SetFocus();
     if( m_closeAfterSave ) { m_closeAfterSave = false; Close(); }
 }
 
@@ -413,6 +431,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
 void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 {
     if( !m_ready || m_process || !current() ) return;
+    m_canvas->SetFocus();
     for( int i = 0; i < current()->children_size(); ++i ) if( nodeRect( i ).Contains( event.GetPosition() ) )
     { auto id = current()->children( i ).block_id(); if( event.LeftDClick() ) navigate( id ); else select( id ); return; }
     select( current()->selection().block_id() );

@@ -26,7 +26,7 @@
 namespace D = kiapi::automation::diagrams::v1;
 namespace
 {
-enum { BACK = wxID_HIGHEST + 3900, UP, FIT };
+enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE };
 wxString text( const std::string& value ) { return wxString::FromUTF8( value ); }
 std::string utf8( const wxString& value ) { return value.ToStdString( wxConvUTF8 ); }
 std::string freshId() { return utf8( KIID().AsString() ); }
@@ -59,7 +59,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_toolbar->AddTool( UP, _( "Up" ), KiBitmap( BITMAPS::up ) ); m_toolbar->AddSeparator();
     m_toolbar->AddTool( wxID_UNDO, _( "Undo" ), KiBitmap( BITMAPS::undo ) );
     m_toolbar->AddTool( wxID_REDO, _( "Redo" ), KiBitmap( BITMAPS::redo ) ); m_toolbar->AddSeparator();
-    m_toolbar->AddTool( FIT, _( "Fit" ), KiBitmap( BITMAPS::zoom_fit_in_page ) ); m_toolbar->Realize();
+    m_toolbar->AddTool( FIT, _( "Fit" ), KiBitmap( BITMAPS::zoom_fit_in_page ) );
+    m_toolbar->AddTool( NOTE, _( "Note" ), KiBitmap( BITMAPS::add_textbox ) ); m_toolbar->Realize();
     auto* splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE );
     splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 );
     auto* diagram = new wxPanel( splitter ); auto* main = new wxBoxSizer( wxVERTICAL );
@@ -126,6 +127,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { m_rendered = false; ++m_viewRevision; event.Skip(); } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
+    m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::moveNote, this );
+    m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& ) { finishNoteDrag(); } );
+    m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { finishNoteDrag(); } );
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
     {
         if( !m_ready || m_process || !current() ) { event.Skip(); return; }
@@ -136,6 +140,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
         { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return; }
         if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return; }
+        if( event.GetKeyCode() == 'N' )
+        { m_noteMode = true; m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); return; }
         if( event.GetKeyCode() == 'L' && current()->local_diagram().connections_size() )
         {
             int selected = -1;
@@ -154,6 +160,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( !m_back.empty() ) { auto id = m_back.back(); navigate( id, false ); if( current() && current()->selection().block_id() == id ) m_back.pop_back(); refresh(); } }, BACK );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( m_path.size() > 1 ) navigate( m_path[m_path.size() - 2].block_id() ); }, UP );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { fit(); }, FIT );
+    Bind( wxEVT_TOOL, [this]( wxCommandEvent& )
+    { m_noteMode = true; m_canvas->SetFocus(); m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); }, NOTE );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { undo( false ); }, wxID_UNDO );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { undo( true ); }, wxID_REDO );
     Bind( wxEVT_TIMER, [this]( wxTimerEvent& ) { drain(); }, m_ioTimer.GetId() );
@@ -165,7 +173,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         { if( m_ready && !m_process ) { if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
         if( event.AltDown() && event.GetKeyCode() == 'H' )
         { for( int i = 0; i < 3; ++i ) if( wxWindow::FindFocus() == m_fields[i] ) { history( i ); return; } }
-        if( event.GetKeyCode() == WXK_ESCAPE && !m_process ) { m_canvas->SetFocus(); return; }
+        if( event.GetKeyCode() == WXK_ESCAPE && !m_process )
+        { m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); finishNoteDrag(); m_canvas->SetFocus(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'S' ) { save(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'W' ) { Close(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'Z' ) { undo( false ); return; }
@@ -443,6 +452,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_toolbar->EnableTool( wxID_UNDO, available && ( link ? !m_connectionUndo.empty() : !m_undo.empty() ) );
     m_toolbar->EnableTool( wxID_REDO, available && ( link ? !m_connectionRedo.empty() : !m_redo.empty() ) );
     m_toolbar->EnableTool( FIT, available );
+    m_toolbar->EnableTool( NOTE, available );
     SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
     fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
@@ -548,7 +558,8 @@ void RECURSIVE_DIAGRAM_FRAME::fillComments()
     D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
     m_commentIds.clear(); m_commentChoice->Clear();
     const D::DiagramAnnotationData* selected = nullptr;
-    for( const auto& note : notes ) if( note.target_kind() == kind && note.target_id() == target && !note.has_unresolved_reason() )
+    for( const auto& note : notes ) if( ( ( note.target_kind() == kind && note.target_id() == target )
+        || ( !link && note.target_kind() == D::DAT_CANVAS ) ) && !note.has_unresolved_reason() )
     {
         if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
         wxString title = text( note.text() ).BeforeFirst( '\n' );
@@ -686,6 +697,13 @@ std::array<wxPoint, 4> RECURSIVE_DIAGRAM_FRAME::connectionPath( const D::Connect
     int middle = ( from.x + to.x ) / 2;
     return { from, wxPoint( middle, from.y ), wxPoint( middle, to.y ), to };
 }
+wxRect RECURSIVE_DIAGRAM_FRAME::noteRect( const D::DiagramAnnotationData& note, int index ) const
+{
+    double x = 60 + index * 260, y = 420;
+    if( note.has_position() ) { text( note.position().x() ).ToDouble( &x ); text( note.position().y() ).ToDouble( &y ); }
+    return { static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ),
+             static_cast<int>( 240 * m_scale ), static_cast<int>( 100 * m_scale ) };
+}
 void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
 {
     wxColour background = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
@@ -727,12 +745,64 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     }
     for( const auto& port : scope->local_diagram().interfaces() )
     { D::DiagramEndpointBindingData value; value.set_block_id( scope->selection().block_id() ); value.set_interface_id( port.id() ); auto point = endpoint( value, true ); dc.DrawRectangle( point.x - 4, point.y - 4, 8, 8 ); dc.DrawText( text( port.name() ), point.x + 12, point.y - 24 ); }
+    const auto& notes = !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
+        : m_draft.baseline().block_id() == scope->selection().block_id() ? m_draft.local_diagram().annotations() : scope->local_diagram().annotations();
+    for( int i = 0; i < notes.size(); ++i )
+    {
+        const auto& note = notes.Get( i );
+        if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+        wxRect box = noteRect( note, i );
+        dc.SetPen( wxPen( note.id() == m_commentId ? wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ) : wxColour( 176, 142, 52 ), 1 ) );
+        dc.SetBrush( wxBrush( dark ? wxColour( 76, 66, 34 ) : wxColour( 255, 247, 213 ) ) ); dc.DrawRectangle( box );
+        box.Deflate( 8 ); dc.SetClippingRegion( box );
+        wxString value = text( note.text() ); int y = box.y;
+        while( !value.empty() && y + dc.GetCharHeight() <= box.GetBottom() )
+        {
+            size_t count = value.find( '\n' ); if( count == wxString::npos ) count = value.length();
+            while( count > 0 && dc.GetTextExtent( value.Left( count ) ).x > box.width ) --count;
+            if( count == 0 && value[0] != '\n' ) count = 1;
+            wxString line = value.Left( count ); value = value.Mid( count ); if( value.StartsWith( "\n" ) ) value = value.Mid( 1 );
+            if( !value.empty() && y + dc.GetCharHeight() * 2 > box.GetBottom() )
+            { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > box.width ) line.RemoveLast(); line += wxS( "…" ); }
+            dc.DrawText( line, box.x, y ); y += dc.GetCharHeight();
+        }
+        dc.DestroyClippingRegion();
+    }
     m_rendered = true;
 }
 void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 {
     if( !m_ready || m_process || !current() ) return;
     m_canvas->SetFocus();
+    if( m_noteMode )
+    {
+        select( current()->selection().block_id() );
+        if( m_process || !m_connectionId.empty() || m_draft.baseline().block_id() != current()->selection().block_id() ) return;
+        m_undo.push_back( m_draft ); m_redo.clear(); auto* note = m_draft.mutable_local_diagram()->add_annotations();
+        note->set_id( freshId() ); note->set_role( D::DAR_COMMENT ); note->set_target_kind( D::DAT_CANVAS ); note->set_units( "diagram-unit" );
+        note->mutable_position()->set_x( std::to_string( event.GetX() / m_scale + m_origin.m_x ) );
+        note->mutable_position()->set_y( std::to_string( event.GetY() / m_scale + m_origin.m_y ) );
+        editorOrigin( note->mutable_origin(), "Place diagram comment" ); m_commentId = note->id(); m_newComment = false;
+        m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); m_dirty = true; ++m_viewRevision; refresh(); m_comments->SetFocus(); return;
+    }
+    const auto& visibleNotes = m_draft.baseline().block_id() == current()->selection().block_id() && m_connectionId.empty()
+        ? m_draft.local_diagram().annotations() : current()->local_diagram().annotations();
+    for( int i = visibleNotes.size() - 1; i >= 0; --i )
+    {
+        const auto& note = visibleNotes.Get( i );
+        if( note.target_kind() != D::DAT_CANVAS || !noteRect( note, i ).Contains( event.GetPosition() ) ) continue;
+        std::string id = note.id();
+        select( current()->selection().block_id() );
+        if( m_process || !m_connectionId.empty() || m_draft.baseline().block_id() != current()->selection().block_id() ) return;
+        m_commentId = id; m_newComment = false; refresh();
+        if( event.LeftDClick() ) { m_comments->SetFocus(); return; }
+        for( const auto& item : m_draft.local_diagram().annotations() ) if( item.id() == id )
+        {
+            wxRect box = noteRect( item, i ); m_noteStartX = box.x / m_scale + m_origin.m_x; m_noteStartY = box.y / m_scale + m_origin.m_y;
+            m_noteDragStart = event.GetPosition(); m_noteDragBefore = m_draft; m_draggingNote = true;
+            if( !m_canvas->HasCapture() ) m_canvas->CaptureMouse(); return;
+        }
+    }
     for( int i = 0; i < current()->children_size(); ++i ) if( nodeRect( i ).Contains( event.GetPosition() ) )
     { auto id = current()->children( i ).block_id(); if( event.LeftDClick() ) navigate( id ); else select( id ); return; }
     for( const auto& selected : current()->local_diagram().connections() ) if( auto* link = connection( selected.connection_id() ) )
@@ -747,6 +817,27 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
             }
         }
     select( current()->selection().block_id() );
+}
+void RECURSIVE_DIAGRAM_FRAME::moveNote( wxMouseEvent& event )
+{
+    if( !m_draggingNote || !event.Dragging() || m_process ) return;
+    for( auto& note : *m_draft.mutable_local_diagram()->mutable_annotations() ) if( note.id() == m_commentId )
+    {
+        note.mutable_position()->set_x( std::to_string( m_noteStartX + ( event.GetX() - m_noteDragStart.x ) / m_scale ) );
+        note.mutable_position()->set_y( std::to_string( m_noteStartY + ( event.GetY() - m_noteDragStart.y ) / m_scale ) );
+        m_rendered = false; m_canvas->Refresh(); return;
+    }
+}
+void RECURSIVE_DIAGRAM_FRAME::finishNoteDrag()
+{
+    if( !m_draggingNote ) return; m_draggingNote = false;
+    if( m_canvas->HasCapture() ) m_canvas->ReleaseMouse();
+    if( m_draft.SerializeAsString() != m_noteDragBefore.SerializeAsString() )
+    {
+        for( auto& note : *m_draft.mutable_local_diagram()->mutable_annotations() ) if( note.id() == m_commentId ) editorOrigin( note.mutable_origin(), "Move diagram comment" );
+        m_undo.push_back( m_noteDragBefore ); m_redo.clear(); m_dirty = true; ++m_viewRevision;
+    }
+    refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::fit()
 {

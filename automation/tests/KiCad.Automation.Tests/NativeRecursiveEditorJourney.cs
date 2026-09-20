@@ -129,6 +129,26 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(annotatedBlock.Inspect(latestCpu).LocalDiagram.Notes.Any(n => n.Target.Kind == DiagramAnnotationTargetKind.Block
                 && n.Target.TargetId == fixture.Blocks["CPU"].BlockId && n.Text == "Prefer the cooler enclosure side."));
             Assert.IsTrue(annotatedBlock.Inspect(latestCpu).LocalDiagram.Notes.Any(n => n.Id == connectionComment.Id && n.Text == connectionComment.Text));
+            Key("Escape"); Key("n");
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 260, clickFromTop: 740);
+            Key("4", control: true); Type("Keep this region accessible.");
+            await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Any(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatCanvas && n.Text == "Keep this region accessible."));
+            var placed = await Save();
+            var canvasNote = placed.Draft.LocalDiagram.Annotations.Single(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatCanvas);
+            string originalX = canvasNote.Position.X;
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                clickFromLeft: 280, clickFromTop: 760, dragToLeft: 360, dragToTop: 820);
+            var moved = await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X != originalX);
+            string movedX = moved.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X;
+            Key("z", control: true); await Wait(s => !s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == originalX);
+            Key("y", control: true); await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X == movedX);
+            await Save();
+            var noteFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var noteCpu = noteFile.Inspect(noteFile.SelectedRoot).Children[1];
+            var savedNote = noteFile.Inspect(noteCpu).LocalDiagram.Notes.Single(n => n.Id.ToString("D") == canvasNote.Id);
+            Assert.AreEqual("Keep this region accessible.", savedNote.Text);
+            Assert.AreEqual(decimal.Parse(movedX, System.Globalization.CultureInfo.InvariantCulture), savedNote.Position!.X);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-canvas-note.png"), token);
             string original = graph.Requirements(fixture.Blocks["CPU"]).Requirements.General;
             Key("1", control: true); Key("a", control: true); Type("Cool near the enclosure edge.");
             await Wait(s => s.Dirty && s.Draft.Fields.General == "Cool near the enclosure edge.");

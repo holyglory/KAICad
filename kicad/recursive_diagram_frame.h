@@ -68,6 +68,9 @@ private:
     void close( wxCloseEvent& aEvent );
     void paint( wxDC& aDC );
     void click( wxMouseEvent& aEvent );
+    void moveNote( wxMouseEvent& aEvent );
+    void finishNoteDrag();
+    wxRect noteRect( const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote, int aIndex ) const;
     void fit();
     wxRect nodeRect( int aIndex ) const;
     wxPoint endpoint( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint, bool aFirst ) const;
@@ -101,6 +104,10 @@ private:
     std::vector<std::string> m_commentIds;
     std::string m_commentId;
     bool m_newComment = false;
+    bool m_noteMode = false, m_draggingNote = false;
+    DRAFT m_noteDragBefore;
+    wxPoint m_noteDragStart;
+    double m_noteStartX = 0, m_noteStartY = 0;
     wxButton* m_openDiagram;
     wxButton* m_save;
     wxButton* m_decline;

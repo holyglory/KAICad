@@ -58,7 +58,13 @@ public static class RecursiveBlockGraphXml
                     new XAttribute("before-name", c.BeforeName), new XAttribute("after-name", c.AfterName),
                     new XAttribute("before-archived", c.BeforeArchived), new XAttribute("after-archived", c.AfterArchived), DiagramRevisionOriginXml.Write(Ns, c.Origin)))),
             graph.RefinementInputs.IsEmpty ? null : new XElement(Ns + "refinement-inputs", graph.RefinementInputs.Select(i =>
-                EngineeringXmlText.Parse(DiagramRefinementInputXml.Write(i)))));
+                EngineeringXmlText.Parse(DiagramRefinementInputXml.Write(i)))),
+            graph.Proposals.IsEmpty ? null : new XElement(Ns + "proposals", graph.Proposals.Select(p =>
+                new XElement(Ns + "proposal", Attr("id", p.Id), Attr("input", p.InputId), new XAttribute("request-sha256", p.RequestSha256),
+                    new XElement(Ns + "base-path", p.BasePath.Select(s => Selection("block", s))), Selection("candidate", p.Candidate),
+                    WriteOrigin(p.Origin), new XElement(Ns + "issues", p.Issues.Select(i => new XElement(Ns + "issue", Attr("id", i.Id),
+                        new XAttribute("kind", i.Kind), i.TargetId is { } target ? Attr("target", target) : null,
+                        new XElement(Ns + "message", i.Message), i.Sources.Select(s => DiagramRevisionOriginXml.Source(Ns, s)))))))));
         new XDocument(root).Validate(Schema.Value, null);
         return EngineeringXmlText.Render(root);
     }
@@ -93,7 +99,14 @@ public static class RecursiveBlockGraphXml
                 (bool)c.Attribute("before-archived")!, (bool)c.Attribute("after-archived")!, DiagramRevisionOriginXml.Read(c.Element(Ns + "origin")!))) ?? [];
             var inputs = root.Element(Ns + "refinement-inputs")?.Elements(XName.Get("refinement-input", DiagramRefinementInputXml.Namespace))
                 .Select(i => DiagramRefinementInputXml.Read(EngineeringXmlText.Render(i))) ?? [];
-            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives, changes, inputs);
+            var proposals = root.Element(Ns + "proposals")?.Elements(Ns + "proposal").Select(p => new BlockProposalRecord(
+                Id(p, "id"), Id(p, "input"), Text(p, "request-sha256"),
+                p.Element(Ns + "base-path")!.Elements(Ns + "block").Select(ReadSelection).ToImmutableArray(),
+                ReadSelection(p.Element(Ns + "candidate")!), p.Element(Ns + "issues")!.Elements(Ns + "issue").Select(i => new BlockProposalIssue(
+                    Id(i, "id"), Enum.Parse<BlockProposalIssueKind>(Text(i, "kind")), i.Element(Ns + "message")!.Value,
+                    i.Attribute("target") is null ? null : Id(i, "target"), i.Elements(Ns + "source").Select(DiagramRevisionOriginXml.ReadSource).ToImmutableArray())).ToImmutableArray(),
+                ReadOrigin(p.Element(Ns + "origin")!))) ?? [];
+            return new(Id(root, "document"), ReadSelection(root.Element(Ns + "selected-root")!), states, revisions, histories, archives, changes, inputs, proposals);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)
         { throw Invalid("Invalid recursive block graph XML: " + error.Message); }

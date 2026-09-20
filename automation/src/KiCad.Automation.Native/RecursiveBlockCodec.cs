@@ -221,6 +221,7 @@ public static class RecursiveBlockCodec
             Kind = (P.ImplementationChangeKind)((int)c.Kind + 1), BeforeName = c.BeforeName, AfterName = c.AfterName,
             BeforeArchived = c.BeforeArchived, AfterArchived = c.AfterArchived, Origin = Origin(c.Origin) }));
         data.RefinementInputs.Add(graph.RefinementInputs.Select(Encode));
+        data.Proposals.Add(graph.Proposals.Select(Encode));
         return data;
     }
 
@@ -239,7 +240,29 @@ public static class RecursiveBlockCodec
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
                 (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))),
-            data.RefinementInputs.Select(Decode));
+            data.RefinementInputs.Select(Decode), data.Proposals.Select(Decode));
+    }
+
+    public static P.BlockProposalRecordData Encode(M.BlockProposalRecord proposal)
+    {
+        var data = new P.BlockProposalRecordData { Id = Id(proposal.Id), InputId = Id(proposal.InputId), RequestSha256 = proposal.RequestSha256,
+            Candidate = Selection(proposal.Candidate), Origin = Origin(proposal.Origin) };
+        data.BasePath.Add(proposal.BasePath.Select(Selection));
+        foreach (var issue in proposal.Issues)
+        {
+            var item = new P.BlockProposalIssueData { Id = Id(issue.Id), Kind = (P.BlockProposalIssueKindData)issue.Kind, Message = issue.Message };
+            if (issue.TargetId is { } target) item.TargetId = Id(target);
+            item.Sources.Add(issue.Sources.Select(Source)); data.Issues.Add(item);
+        }
+        return data;
+    }
+
+    public static M.BlockProposalRecord Decode(P.BlockProposalRecordData data)
+    {
+        Known(data, P.BlockProposalRecordData.Parser);
+        return new(GuidValue(data.Id), GuidValue(data.InputId), data.RequestSha256, data.BasePath.Select(Selection).ToImmutableArray(),
+            Selection(Need(data.Candidate)), data.Issues.Select(i => new M.BlockProposalIssue(GuidValue(i.Id), (M.BlockProposalIssueKind)i.Kind,
+                i.Message, i.HasTargetId ? GuidValue(i.TargetId) : null, i.Sources.Select(Source).ToImmutableArray())).ToImmutableArray(), Origin(Need(data.Origin)));
     }
 
     public static P.DiagramRefinementInputData Encode(M.DiagramRefinementInput input)

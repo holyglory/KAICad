@@ -983,6 +983,32 @@ public sealed partial class NativeSessionTests
             inspectComponents["expectedManifestToken"] = "stale";
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_components", inspectComponents, cancellationToken: token)).IsError == true);
             Assert.AreEqual(RecursiveBlockGraphXml.Write(mappedGraph), await File.ReadAllTextAsync(source, token));
+            var proposal = RecursiveBlockProposalTests.CreateFor(mappedGraph, originalInput);
+            var proposalArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = componentToken,
+                ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
+            var proposalResult = await client.CallToolAsync("kicad_diagram_proposal_publish", proposalArguments, cancellationToken: token);
+            if (proposalResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-error.json"), JsonSerializer.Serialize(proposalResult), token);
+            Assert.IsFalse(proposalResult.IsError == true);
+            var proposalData = JsonSerializer.SerializeToElement(proposalResult).GetProperty("structuredContent");
+            Assert.IsTrue(proposalData.GetProperty("added").GetBoolean());
+            Assert.IsFalse(proposalData.GetProperty("contextStillSelected").GetBoolean(), "The proposal was based on the original input while later edits had advanced the active root.");
+            var proposalGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.IsTrue(proposalGraph.Proposal(proposal.Id).Issues.Any());
+            var proposalReadArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedSourceToken"] = proposalData.GetProperty("sourceToken").GetString(), ["proposalId"] = proposal.Id
+            };
+            var proposalRead = await client.CallToolAsync("kicad_diagram_proposal_read", proposalReadArguments, cancellationToken: token);
+            Assert.IsFalse(proposalRead.IsError == true);
+            Assert.AreEqual(proposal.Id.ToString("D"), JsonSerializer.SerializeToElement(proposalRead).GetProperty("structuredContent")
+                .GetProperty("proposal").GetProperty("id").GetString());
+            proposalReadArguments["proposalId"] = Guid.NewGuid();
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_proposal_read", proposalReadArguments, cancellationToken: token)).IsError == true);
+            componentToken = proposalData.GetProperty("sourceToken").GetString()!;
+            mappedGraph = proposalGraph;
             Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == componentToken);
             // Reload preserves the PSU location used above; root mutations made
             // through MCP must not silently change that native editing scope.

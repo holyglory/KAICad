@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,6 +15,92 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_proposal_publish"),
+     Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. This does not generate or activate native electrical designs.")]
+    public Task<CallToolResult> PublishProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, JsonElement proposalJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        BlockProposal proposal;
+        try
+        {
+            proposal = JsonSerializer.Deserialize<BlockProposal>(proposalJson.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new AutomationException("invalid_block_proposal", "The proposal JSON is empty.");
+            proposal = BlockProposalFiles.Normalize(proposal);
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
+        { throw new AutomationException("invalid_block_proposal", error.Message); }
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        BlockProposalFileResult result;
+        try
+        {
+            result = await BlockProposalFiles.PublishAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, proposal,
+                registry.StateDirectory, cancellationToken);
+        }
+        catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
+        { throw new AutomationException("invalid_block_proposal", error.Message); }
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.Snapshot.ContentSha256,
+            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_read", ReadOnly = true),
+     Description("Read a published proposal's exact candidate revision, original input context, unresolved issues and complete selected block/connection closure. Reading does not activate a candidate or move the native editor. Native views may be requested for the candidate after the editor has reloaded the saved file. Use the retained-request tool if publication failed before this candidate was saved.")]
+    public Task<CallToolResult> ReadProposal(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, Guid proposalId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed.");
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken) throw new AutomationException("block_proposal_source_changed", "Read the current source token before inspecting a proposal.");
+        var proposal = loaded.Graph.Proposal(proposalId);
+        var blocks = loaded.Graph.Walk(proposal.Candidate).Select(loaded.Graph.Inspect).ToArray();
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            selectedRoot = loaded.Graph.SelectedRoot, proposal,
+            blocks = blocks.Select(b => new { block = b, requirements = loaded.Graph.Requirements(b.Selection).Requirements,
+                connections = b.LocalDiagram.Connections.IsEmpty ? [] : loaded.Graph.Connections(b.Selection.BlockId).Walk(b.LocalDiagram.Connections)
+                    .Select(s => new { connection = loaded.Graph.Connections(b.Selection.BlockId).Inspect(s),
+                        requirements = loaded.Graph.Connections(b.Selection.BlockId).Requirements(s).Requirements }).ToArray() }) });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_retained", ReadOnly = true),
+     Description("Retrieve the exact locally retained typed proposal request after a failed or stale publication. Requires its original diagram path/document and proposal ID. This does not publish, select, mutate or launch an agent, and request retention is not evidence of completed publication.")]
+    public Task<CallToolResult> RetainedProposal(string instanceId, string sourcePath, string documentId, Guid proposalId,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed.");
+        var request = BlockProposalFiles.ReadRetained(registry.StateDirectory, proposalId);
+        if (request.DesignPath != sourcePath || request.DocumentId != Identity(documentId))
+            throw new AutomationException("block_proposal_conflict", "The retained request belongs to a different target.");
+        return Data(new { instanceId, instanceEpoch = session.Epoch, request });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_select"),
+     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path; a changed target is rejected for comparison. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID; a completed selection retry must be inspected before another mutation.")]
+    public Task<CallToolResult> SelectProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, Guid proposalId, BlockSelection expectedRoot,
+        BlockSelection[] currentPath, Guid[] ancestorRevisionIds, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var path = currentPath?.ToImmutableArray() ?? []; var ancestors = ancestorRevisionIds?.ToImmutableArray() ?? [];
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "Identify this conceptual selection operation.");
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow, "Choose proposed implementation", [], [operationId]);
+        var result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
+            expectedRoot, path, ancestors, origin, cancellationToken);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, sourceToken = result.ContentSha256,
+            selectedRoot = result.Graph.SelectedRoot, proposalId });
+    });
+
+    private static CallToolResult Data(object value)
+    {
+        var data = JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
+
     [McpServerTool(Name = "kicad_diagram_refinement_publication"),
      Description("Inspect or explicitly resume an original-input publication using its durable receipt. Supply the exact native process epoch, diagram path/document and input ID. Inspection never writes. Resume completes only a verified preimage/postimage transition, preserves the original staged/retained files, and otherwise returns NeedsReview without replacing newer XML. CompletedPreviously reports historical success, not current XML equivalence. Does not start an agent or mutate native electrical designs.")]
     public Task<CallToolResult> RefinementPublication(string instanceId, string expectedInstanceEpoch, string repositoryRoot,

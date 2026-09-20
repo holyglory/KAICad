@@ -3057,6 +3057,24 @@ remain `p1231ce557d949a70`, with actual agent client qualification under
 Linux proof does not lift the Mac/Windows hold or establish native-Mac execution.
 See [the contract](qualification/agent-refinement-contract.md).
 
+Whole agent proposals are now retained and publishable as independent candidates.
+`kicad_diagram_proposal_publish` accepts the complete typed proposal payload after
+strict normalization: nested block revisions, connection/member revisions, partial
+endpoints, General/Schematic/Routing text, definitions and unresolved issues. It
+retains the request locally before guarded XML publication. Existing heads and the
+selected root do not move. `kicad_diagram_proposal_read` returns the candidate's
+exact closure and issues; `kicad_diagram_proposal_select` is a separate guarded
+choice that updates containing snapshots only when the current root/path still
+matches. `kicad_diagram_proposal_retained` recovers the request after a stale or
+failed publication. Unknown proposal IDs, changed targets and reused IDs with
+different content are rejected.
+
+The complete proposal model has contract coverage for a power unit decomposed into
+converters plus telemetry and a partly resolved signal bundle. The native journey
+also publishes and reads a proposal through MCP in both themes. These tools do not
+generate native schematics/PCBs, start agents, or trigger from Save/Decline; native
+activation and actual Codex/second-agent qualification remain open.
+
 `kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
 Read `kicad_diagram_state` first, then supply that document's `sourceToken` and
 `viewRevision`. Each view names its pixel dimensions and may select an exact

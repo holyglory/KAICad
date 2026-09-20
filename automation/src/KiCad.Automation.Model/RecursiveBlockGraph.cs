@@ -46,6 +46,7 @@ public sealed class RecursiveBlockGraph
     public ImmutableArray<DiagramConnectionArchive> ConnectionArchives { get; }
     public ImmutableArray<ImplementationChange> ImplementationChanges { get; }
     public ImmutableArray<DiagramRefinementInput> RefinementInputs { get; }
+    public ImmutableArray<BlockProposalRecord> Proposals { get; }
     private readonly ImmutableDictionary<Guid, BlockDesignState> _states;
     private readonly ImmutableDictionary<Guid, RecursiveBlockRevision> _revisions;
     private readonly ImmutableDictionary<Guid, DiagramRequirementHistory> _requirements;
@@ -56,7 +57,7 @@ public sealed class RecursiveBlockGraph
         IEnumerable<DiagramRequirementHistory> requirementHistories,
         IEnumerable<DiagramConnectionArchive>? connectionArchives = null,
         IEnumerable<ImplementationChange>? implementationChanges = null,
-        IEnumerable<DiagramRefinementInput>? refinementInputs = null)
+        IEnumerable<DiagramRefinementInput>? refinementInputs = null, IEnumerable<BlockProposalRecord>? proposals = null)
     {
         if (documentId == Guid.Empty || selectedRoot is null || states is null || revisions is null
             || requirementHistories is null) throw Invalid("Supply a document, selected root and immutable block histories.");
@@ -66,6 +67,7 @@ public sealed class RecursiveBlockGraph
         ConnectionArchives = connectionArchives?.ToImmutableArray() ?? [];
         ImplementationChanges = implementationChanges?.ToImmutableArray() ?? [];
         RefinementInputs = refinementInputs?.ToImmutableArray() ?? [];
+        Proposals = proposals?.ToImmutableArray() ?? [];
         var stateIndex = ImmutableDictionary.CreateBuilder<Guid, BlockDesignState>();
         foreach (var state in States)
         {
@@ -162,6 +164,12 @@ public sealed class RecursiveBlockGraph
             input.ValidateAgainst(this);
         }
         foreach (var state in States) ValidateHistory(state);
+        foreach (var proposal in Proposals)
+        {
+            if (proposal is null || !identities.Add(proposal.Id) || interfaceOwners.ContainsKey(proposal.Id) || annotationOwners.ContainsKey(proposal.Id))
+                throw Invalid("Proposal identities must be distinct from all retained diagram objects.");
+            proposal.ValidateAgainst(this);
+        }
         foreach (var state in States)
         {
             var seen = new HashSet<Guid> { state.Id }; var current = state;
@@ -328,7 +336,7 @@ public sealed class RecursiveBlockGraph
         }
         return new(DocumentId, SelectedRoot,
             States.Select(s => s.Id == state.Id ? s with { HeadRevisionId = selection.RevisionId } : s),
-            Revisions.Add(revision), histories, ConnectionArchives, ImplementationChanges, RefinementInputs);
+            Revisions.Add(revision), histories, ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals);
     }
 
     /// <summary>Create an alternative for an existing occurrence; it remains unselected.
@@ -340,7 +348,7 @@ public sealed class RecursiveBlockGraph
             || !States.Any(s => s.BlockId == state.BlockId) || initial.ParentRevisionId is not null
             || initial.Selection != new BlockSelection(state.BlockId, state.Id, state.HeadRevisionId))
             throw Invalid("An alternative needs a fresh implementation of an existing occurrence and its initial revision.");
-        return new(DocumentId, SelectedRoot, States.Add(state), Revisions.Add(initial), RequirementHistories.Add(requirements), ConnectionArchives, ImplementationChanges, RefinementInputs);
+        return new(DocumentId, SelectedRoot, States.Add(state), Revisions.Add(initial), RequirementHistories.Add(requirements), ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals);
     }
 
     /// <summary>Create an independent implementation from one exact saved revision.
@@ -377,7 +385,7 @@ public sealed class RecursiveBlockGraph
             throw new AutomationException("implementation_name_exists", "Choose a distinct implementation name for this block.");
         var change = new ImplementationChange(changeId, stateId, ImplementationChangeKind.Rename, state.Name, name, state.Archived, state.Archived, origin);
         return new(DocumentId, SelectedRoot, States.Select(s => s.Id == stateId ? s with { Name = name } : s),
-            Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges.Add(change), RefinementInputs);
+            Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges.Add(change), RefinementInputs, Proposals);
     }
 
     public RecursiveBlockGraph SetImplementationArchived(Guid stateId, bool archived, Guid changeId, RequirementRevisionOrigin origin)
@@ -389,7 +397,7 @@ public sealed class RecursiveBlockGraph
         var change = new ImplementationChange(changeId, stateId, archived ? ImplementationChangeKind.Archive : ImplementationChangeKind.Restore,
             state.Name, state.Name, state.Archived, archived, origin);
         return new(DocumentId, SelectedRoot, States.Select(s => s.Id == stateId ? s with { Archived = archived } : s),
-            Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges.Add(change), RefinementInputs);
+            Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges.Add(change), RefinementInputs, Proposals);
     }
 
     /// <summary>Select a revision of an existing occurrence at an exact root-to-block path.
@@ -436,7 +444,7 @@ public sealed class RecursiveBlockGraph
             states[states.IndexOf(state)] = state with { HeadRevisionId = next.RevisionId };
             created[i] = next; child = next;
         }
-        return new(new(DocumentId, child, states, revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs), [.. created], true);
+        return new(new(DocumentId, child, states, revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals), [.. created], true);
     }
 
     private void ValidateHistory(BlockDesignState state)
@@ -516,7 +524,7 @@ public sealed class RecursiveBlockGraph
             archives = archives.SetItem(archives.IndexOf(saved), archive);
         }
         else archives = archives.Add(archive);
-        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, archives, ImplementationChanges, RefinementInputs);
+        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, archives, ImplementationChanges, RefinementInputs, Proposals);
     }
 
     public DiagramRefinementInput RefinementInput(Guid id) => RefinementInputs.SingleOrDefault(i => i.Id == id)
@@ -530,7 +538,18 @@ public sealed class RecursiveBlockGraph
         if (RefinementInputs.SingleOrDefault(i => i.Id == input.Id) is { } existing)
             return existing.SameContents(input) ? this : throw new AutomationException("refinement_input_conflict",
                 "This input identity already records different content; neither version was replaced.");
-        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs.Add(input));
+        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs.Add(input), Proposals);
+    }
+
+    public BlockProposalRecord Proposal(Guid id) => Proposals.SingleOrDefault(p => p.Id == id)
+        ?? throw new AutomationException("unknown_block_proposal", "No candidate with this exact proposal identity exists in the diagram.");
+
+    public RecursiveBlockGraph WithProposal(BlockProposalRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record); record.ValidateAgainst(this);
+        if (Proposals.SingleOrDefault(p => p.Id == record.Id) is { } previous)
+            return previous.SameContents(record) ? this : throw new AutomationException("block_proposal_conflict", "A different proposal already owns this identity.");
+        return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals.Add(record));
     }
 
     private void ValidateConnections(RecursiveBlockRevision revision)

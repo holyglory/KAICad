@@ -9,7 +9,9 @@ public sealed record DiagramBoundaryInterface(Guid Id, string Name, string Inten
 public sealed record BlockLocalDiagram(ImmutableArray<DiagramBoundaryInterface> Interfaces,
     ImmutableArray<ConnectionSelection> Connections, ImmutableArray<DiagramAnnotation> Annotations = default)
 {
-    public static BlockLocalDiagram Empty { get; } = new([], []);
+    // Keep optional presentation collections materialized so MCP's JSON-schema
+    // exporter can describe the record without enumerating a default ImmutableArray.
+    public static BlockLocalDiagram Empty { get; } = new([], [], []);
     public ImmutableArray<DiagramAnnotation> Notes => Annotations.IsDefault ? [] : Annotations;
 
     public void Validate()

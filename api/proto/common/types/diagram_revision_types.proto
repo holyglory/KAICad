@@ -178,6 +178,17 @@ message RecursiveBlockGraphData {
   repeated ConnectionArchiveData connection_archives = 7;
   repeated ImplementationChangeData implementation_changes = 8;
   repeated DiagramRefinementInputData refinement_inputs = 9;
+  repeated BlockProposalRecordData proposals = 10;
+}
+enum BlockProposalIssueKindData { BPIK_UNRESOLVED = 0; BPIK_CONFLICTING = 1; BPIK_UNSUPPORTED = 2; }
+message BlockProposalIssueData {
+  string id = 1; BlockProposalIssueKindData kind = 2; string message = 3;
+  optional string target_id = 4; repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+}
+message BlockProposalRecordData {
+  string id = 1; string input_id = 2; string request_sha256 = 3;
+  repeated BlockSelectionData base_path = 4; BlockSelectionData candidate = 5;
+  repeated BlockProposalIssueData issues = 6; DiagramRevisionOriginData origin = 7;
 }
 
 message RecursiveEditorDocument {

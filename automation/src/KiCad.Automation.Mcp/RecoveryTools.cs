@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text;
 using System.Text.Json;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
@@ -13,6 +14,40 @@ public sealed class RecoveryTools
     private readonly InstanceRegistry? registry;
     public RecoveryTools() { }
     public RecoveryTools(InstanceRegistry registry) => this.registry = registry;
+
+    [McpServerTool(Name = "kicad_design_candidate_commit", ReadOnly = false),
+     Description("Store a complete validated schematic design XML as the desired recovery candidate for one explicit attached instance. Requires the exact recovery token and candidate SHA256. The candidate must retain the native hierarchy root identity and declared library dependencies. This only advances the local recovery desired bytes; it does not write the native schematic, mutate KiCad, advance the baseline, or certify connectivity. Inspect with kicad_design_sync_plan before any separately authorized native application.")]
+    public CallToolResult CommitCandidate(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string candidateXml, string expectedCandidateSha256, string operationId, CancellationToken cancellationToken) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var (store, saved) = Read(instanceId, recoveryPath);
+        if (saved.RevisionToken != expectedRevisionToken)
+            throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the latest desired and native snapshots before committing a candidate.");
+        if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty || operation.ToString("D") != operationId)
+            throw new AutomationException("invalid_operation_id", "Provide a canonical operation UUID for this candidate commit.");
+        if (candidateXml is null) throw new AutomationException("invalid_candidate_xml", "Supply the complete typed schematic design XML.");
+        byte[] bytes;
+        try { bytes = new System.Text.UTF8Encoding(false, true).GetBytes(candidateXml); }
+        catch (Exception error) when (error is EncoderFallbackException or ArgumentException)
+        { throw new AutomationException("invalid_candidate_encoding", error.Message); }
+        string actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        if (actual != expectedCandidateSha256)
+            throw new AutomationException("candidate_hash_mismatch", "The candidate bytes do not match the observed candidate hash.");
+        var candidate = SchematicDesignXml.Read(candidateXml, saved.State.KnowledgeLibraries);
+        if (!candidate.Schematic.Document.Equals(saved.State.Baseline.Schematic.Document))
+            throw new AutomationException("candidate_root_mismatch", "A candidate cannot change the native schematic hierarchy root through recovery state.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var next = saved.State with { DesiredFileBytes = bytes };
+        var committed = store.Save(next, expectedRevisionToken);
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, operationId = operation, recoveryRevisionToken = committed.RevisionToken,
+            candidateSha256 = actual, desiredCandidateStored = true, designFileWritten = false,
+            nativeMutationCommitted = false, baselineAdvanced = false, liveMutationAuthorized = false
+        });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
     // Qualification pending (p7e712f1bb764e327): do not advertise a mutation tool
     // before competing-file writes and interrupted commits have native evidence.
     internal async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,

@@ -72,6 +72,7 @@ private:
     void close( wxCloseEvent& aEvent );
     void paint( wxDC& aDC );
     void click( wxMouseEvent& aEvent );
+    bool canvasKey( wxKeyEvent& aEvent );
     void moveNote( wxMouseEvent& aEvent );
     void finishNoteDrag();
     wxRect noteRect( const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote, int aIndex ) const;

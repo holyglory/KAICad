@@ -140,28 +140,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& ) { finishNoteDrag(); } );
     m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { finishNoteDrag(); } );
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
-    {
-        if( !m_ready || m_process || !current() ) { event.Skip(); return; }
-        if( event.GetKeyCode() == WXK_TAB ) { m_canvas->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
-        int index = -1;
-        for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
-        if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )
-        { if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return; }
-        if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
-        { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return; }
-        if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return; }
-        if( event.GetKeyCode() == 'N' )
-        { m_noteMode = true; m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); return; }
-        if( event.GetKeyCode() == 'L' && current()->local_diagram().connections_size() )
-        {
-            int selected = -1;
-            for( int i = 0; i < current()->local_diagram().connections_size(); ++i )
-                if( current()->local_diagram().connections( i ).connection_id() == m_connectionId ) selected = i;
-            selectConnection( current()->local_diagram().connections( ( selected + 1 ) % current()->local_diagram().connections_size() ).connection_id() ); return;
-        }
-        if( event.GetKeyCode() == WXK_BACK && m_path.size() > 1 ) { navigate( m_path[m_path.size() - 2].block_id() ); return; }
-        event.Skip();
-    } );
+    { if( !canvasKey( event ) ) event.Skip(); } );
     m_openDiagram->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { navigate( m_selected ); } );
     m_implementation->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseImplementation(); } );
     m_save->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { save(); } );
@@ -192,6 +171,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         if( event.ControlDown() && event.GetKeyCode() == 'W' ) { Close(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'Z' ) { undo( false ); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'Y' ) { undo( true ); return; }
+        if( wxWindow::FindFocus() == m_canvas && !event.ControlDown() && !event.AltDown() && canvasKey( event ) ) return;
         event.StopPropagation(); event.Skip();
     } );
     refresh(); CallAfter( [this, splitter]
@@ -202,6 +182,31 @@ RECURSIVE_DIAGRAM_FRAME::~RECURSIVE_DIAGRAM_FRAME()
 {
     m_ioTimer.Stop();
     if( m_process ) { m_process->Detach(); wxProcess::Kill( m_pid, wxSIGTERM, wxKILL_CHILDREN ); }
+}
+
+bool RECURSIVE_DIAGRAM_FRAME::canvasKey( wxKeyEvent& event )
+{
+    if( !m_ready || m_process || !current() ) return false;
+    if( event.GetKeyCode() == WXK_TAB )
+    { m_canvas->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return true; }
+    int index = -1;
+    for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
+    if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )
+    { if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return true; }
+    if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
+    { if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return true; }
+    if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return true; }
+    if( event.GetKeyCode() == 'N' )
+    { m_noteMode = true; m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); return true; }
+    if( event.GetKeyCode() == 'L' && current()->local_diagram().connections_size() )
+    {
+        int selected = -1;
+        for( int i = 0; i < current()->local_diagram().connections_size(); ++i )
+            if( current()->local_diagram().connections( i ).connection_id() == m_connectionId ) selected = i;
+        selectConnection( current()->local_diagram().connections( ( selected + 1 ) % current()->local_diagram().connections_size() ).connection_id() ); return true;
+    }
+    if( event.GetKeyCode() == WXK_BACK && m_path.size() > 1 ) { navigate( m_path[m_path.size() - 2].block_id() ); return true; }
+    return false;
 }
 
 const RECURSIVE_DIAGRAM_FRAME::REVISION* RECURSIVE_DIAGRAM_FRAME::revision( const SELECTION& selection ) const

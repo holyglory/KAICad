@@ -2951,10 +2951,17 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
         std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
         if( simulatorLock.owns_lock() && !m_automationSimulator->IsRunning() )
         {
-            m_simulationJob->workerFinished = true; m_simulationJob->status = SIMJS_COMPLETED;
+            m_simulationJob->workerFinished = true;
+            m_simulationJob->status = m_automationSimulator->HasError() ? SIMJS_FAILED : SIMJS_COMPLETED;
+            if( m_simulationJob->status == SIMJS_FAILED )
+            {
+                m_simulationJob->errorCode = "simulation_failed";
+                m_simulationJob->errorMessage = "KiCad's native ngspice engine reported a terminal failure";
+            }
             m_simulationJob->sequence++;
             for( const std::string& name : m_automationSimulator->AllVectors() )
             {
+                if( m_simulationJob->status != SIMJS_COMPLETED ) break;
                 m_simulationJob->vectors.emplace_back();
                 auto& vector = m_simulationJob->vectors.back();
                 vector.set_name( name ); vector.set_complex( false );

@@ -9,7 +9,7 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyNativeSimulation(NativeClient client, DocumentSpecifier document,
         string evidence, string instanceId, CancellationToken token)
     {
-        const string netlist = ""; // Let eeschema generate the .op deck from the current schematic.
+        const string netlist = "Automation divider\nV1 in 0 5\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n";
         string operation = Guid.NewGuid().ToString("D");
         var started = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
         { Document = document, OperationId = operation, ProcessEpoch = client.Epoch, Netlist = netlist }, token);
@@ -31,6 +31,16 @@ public sealed partial class NativeSessionTests
         var replay = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
         { Document = document, OperationId = operation, ProcessEpoch = client.Epoch, Netlist = netlist }, token);
         Assert.AreEqual(started.JobId, replay.JobId);
+        var generated = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
+        { Document = document, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch, Netlist = "" }, token);
+        var generatedTerminal = generated;
+        while( generatedTerminal.Status == SimulationJobStatus.SimjsRunning )
+        {
+            await Task.Delay(100, deadline.Token);
+            generatedTerminal = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = document, JobId = generated.JobId, ProcessEpoch = client.Epoch }, deadline.Token);
+        }
+        Assert.IsTrue(generatedTerminal.Status is SimulationJobStatus.SimjsCompleted or SimulationJobStatus.SimjsFailed);
         var wrongDocument = document.Clone(); wrongDocument.SheetPath.Path[0].Value = Guid.NewGuid().ToString("D");
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
         { Document = wrongDocument, JobId = started.JobId, ProcessEpoch = client.Epoch }, token));
@@ -45,11 +55,18 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(cancelled.Vectors.Count > 0);
         var invalid = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(new()
         { Document = document, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch,
-            Netlist = ".not-a-real-ngspice-command\n.end\n" }, token);
-        Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalid.Status);
-        Assert.IsTrue(invalid.WorkerFinished);
+            Netlist = ".include \"/definitely/missing/kicad-automation-model.lib\"\n.op\n.end\n" }, token);
+        var invalidTerminal = invalid;
+        while( invalidTerminal.Status == SimulationJobStatus.SimjsRunning )
+        {
+            await Task.Delay(100, deadline.Token);
+            invalidTerminal = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = document, JobId = invalid.JobId, ProcessEpoch = client.Epoch }, deadline.Token);
+        }
+        Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalidTerminal.Status);
+        Assert.IsTrue(invalidTerminal.WorkerFinished);
         var invalidRead = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
-        { Document = document, JobId = invalid.JobId, ProcessEpoch = client.Epoch }, token);
+        { Document = document, JobId = invalidTerminal.JobId, ProcessEpoch = client.Epoch }, token);
         Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalidRead.Status);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation.json"),
             System.Text.Json.JsonSerializer.Serialize(current), token);

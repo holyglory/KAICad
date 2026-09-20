@@ -89,6 +89,9 @@ public sealed class InstanceTools(InstanceRegistry registry)
             new InstanceCapability("kicad_simulation_job", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID", false),
             new InstanceCapability("kicad_simulation_wait", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID, sequence", false),
             new InstanceCapability("kicad_simulation_cancel", "simulation", "native-ngspice", "registered", "instance epoch, document, job ID", false)
+            ,new InstanceCapability("kicad_pcb_items_read", "pcb", "native-board-api", "registered", "explicit board document", false)
+            ,new InstanceCapability("kicad_pcb_items_create", "pcb", "native-board-api", "registered", "board lifecycle state, typed Any items", false)
+            ,new InstanceCapability("kicad_pcb_items_update", "pcb", "native-board-api", "registered", "board lifecycle state, typed Any items", false)
             ,new InstanceCapability("kicad_pcb_drc_start", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document revision, operation ID", false)
             ,new InstanceCapability("kicad_pcb_drc_job", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)
             ,new InstanceCapability("kicad_pcb_drc_cancel", "pcb", "compiled-mcp plus native-api", "registered", "process epoch, document and job ID", false)

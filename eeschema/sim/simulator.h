@@ -87,6 +87,9 @@ public:
      */
     virtual bool IsRunning() = 0;
 
+    /** Whether the simulator has recorded a native engine failure. */
+    virtual bool HasError() const { return false; }
+
     /**
      * Cleans simulation data (i.e. all vectors)
      *
@@ -101,4 +104,3 @@ private:
     ///< For interprocess synchronisation.
     std::mutex m_mutex;
 };
-

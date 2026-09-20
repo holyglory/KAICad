@@ -44,6 +44,7 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(createdReply.TryGetProperty("isError", out var createError) && createError.GetBoolean(), createdReply.GetRawText());
             var createdData = createdReply.GetProperty("structuredContent");
+            Assert.IsTrue(createdData.GetProperty("atomicTransaction").GetBoolean());
             var createdResponse = BoardJson.Parser.Parse<CreateItemsResponse>(createdData.GetProperty("response").GetRawText());
             Assert.AreEqual(ItemRequestStatus.IrsOk, createdResponse.Status);
             var createdTrack = createdResponse.CreatedItems.Single().Item.Unpack<Track>();
@@ -63,6 +64,7 @@ public sealed partial class NativeSessionTests
                 instanceId, requestJson = BoardJson.Formatter.Format(update), expectedStateJson = afterCreate
             });
             Assert.IsFalse(updatedReply.TryGetProperty("isError", out var updateError) && updateError.GetBoolean(), updatedReply.GetRawText());
+            Assert.IsTrue(updatedReply.GetProperty("structuredContent").GetProperty("atomicTransaction").GetBoolean());
             var actual = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { createdTrack.Id } }, token);
             var actualTrack = actual.Items.Single().Unpack<Track>();

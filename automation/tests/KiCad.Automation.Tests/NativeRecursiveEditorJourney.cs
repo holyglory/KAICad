@@ -83,7 +83,24 @@ public sealed partial class NativeSessionTests
             var readInputData = JsonSerializer.SerializeToElement(readInput).GetProperty("structuredContent");
             Assert.AreEqual(originalInput.Prompt, readInputData.GetProperty("input").GetProperty("prompt").GetString());
             Assert.AreEqual("Available", readInputData.GetProperty("assets")[0].GetProperty("status").GetString());
+            Assert.AreEqual("Published", readInputData.GetProperty("publication").GetProperty("stage").GetString());
+            var publicationArguments = new Dictionary<string, object?>(arguments)
+            { ["expectedInstanceEpoch"] = native.Epoch, ["inputId"] = originalInput.Id };
+            var publicationState = await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token);
+            Assert.IsFalse(publicationState.IsError == true);
+            Assert.AreEqual("CompletedPreviously", JsonSerializer.SerializeToElement(publicationState).GetProperty("structuredContent")
+                .GetProperty("inspection").GetProperty("disposition").GetString());
+            publicationArguments["resume"] = true;
+            var resumedPublication = await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token);
+            Assert.IsFalse(resumedPublication.IsError == true);
+            Assert.AreEqual("CompletedPreviously", JsonSerializer.SerializeToElement(resumedPublication).GetProperty("structuredContent")
+                .GetProperty("inspection").GetProperty("disposition").GetString());
+            publicationArguments["inputId"] = Guid.NewGuid();
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token)).IsError == true);
+            publicationArguments["inputId"] = originalInput.Id; publicationArguments["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
+            Assert.IsTrue((await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token)).IsError == true);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-refinement-input.json"), JsonSerializer.Serialize(readInput), token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-refinement-publication.json"), JsonSerializer.Serialize(resumedPublication), token);
             var wholeHistoryArguments = new Dictionary<string, object?>(arguments)
             {
                 ["context"] = new { blockId = graph.SelectedRoot.BlockId, stateId = graph.SelectedRoot.StateId, revisionId = graph.SelectedRoot.RevisionId },

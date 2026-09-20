@@ -4,6 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="KiCad.Automation.Tests" />
+    <InternalsVisibleTo Include="KiCad.Automation.SyncHarness" />
     <InternalsVisibleTo Include="kicad-mcp" />
     <EmbeddedResource Include="Schemas/*.xsd" />
     <ProjectReference Include="../KiCad.Automation.Model/KiCad.Automation.Model.csproj" />

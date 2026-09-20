@@ -14,6 +14,22 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_diagram_refinement_publication"),
+     Description("Inspect or explicitly resume an original-input publication using its durable receipt. Supply the exact native process epoch, diagram path/document and input ID. Inspection never writes. Resume completes only a verified preimage/postimage transition, preserves the original staged/retained files, and otherwise returns NeedsReview without replacing newer XML. CompletedPreviously reports historical success, not current XML equivalence. Does not start an agent or mutate native electrical designs.")]
+    public Task<CallToolResult> RefinementPublication(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, Guid inputId, CancellationToken cancellationToken, bool resume = false) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        var inspection = resume ? await RefinementInputRecovery.ResumeAsync(repositoryRoot, sourcePath, Identity(documentId), inputId,
+            registry.StateDirectory, cancellationToken) : await RefinementInputRecovery.InspectAsync(repositoryRoot, sourcePath, Identity(documentId), inputId,
+            registry.StateDirectory, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, inputId, inspection },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_refinement_asset_capture"),
      Description("Preserve original prompt/file/graphic bytes inside a repository-relative archive directory, keyed by their observed SHA256. Requires an exact diagram checkpoint and native instance epoch, explicit source path/hash/byte count and attachment identity. Returns actual verified attachment metadata; does not execute the file, extract invented text, change the diagram or start an agent. Reuses identical preserved bytes, never overwrites a corrupt archive. Record the returned attachment in an original refinement input separately.")]
     public Task<CallToolResult> CaptureRefinementAsset(string instanceId, string expectedInstanceEpoch, string repositoryRoot,

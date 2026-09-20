@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Kiapi.Common;
+using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -17,6 +18,16 @@ string state = Environment.GetEnvironmentVariable("KICAD_AUTOMATION_STATE_DIRECT
 if (!Path.IsPathFullyQualified(state)) throw new InvalidOperationException("The state directory must be absolute.");
 var pause = new PauseGate(Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_STAGE") ?? "none",
     Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_MARKER"));
+if (args is ["--refinement-input-file", var inputFile])
+{
+    using var inputJson = JsonDocument.Parse(await File.ReadAllBytesAsync(inputFile)); var request = inputJson.RootElement;
+    var input = request.GetProperty("input").Deserialize<DiagramRefinementInput>()!;
+    var result = await RefinementInputFiles.RecordCoreAsync(request.GetProperty("repositoryRoot").GetString()!,
+        request.GetProperty("designPath").GetString()!, request.GetProperty("documentId").GetGuid(),
+        request.GetProperty("sourceToken").GetString()!, input, CancellationToken.None, state, pause.WaitAsync);
+    Console.WriteLine(JsonSerializer.Serialize(new { result.Added, result.Snapshot.ContentSha256 }));
+    return;
+}
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -54,7 +65,7 @@ public sealed class PauseGate
     {
         if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
             or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"
-            or "layout-prepared" or "layout-resolved"))
+            or "layout-prepared" or "layout-resolved" or "input-prepared" or "input-replacing" or "input-replaced" or "input-published"))
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));

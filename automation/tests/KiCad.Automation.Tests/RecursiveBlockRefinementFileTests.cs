@@ -96,6 +96,7 @@ public sealed class RecursiveBlockRefinementFileTests
                 DiagramRefinementInputXml.Write(pendingInput), pendingInput.SourceSha256,
                 Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(pendingXml))),
                 RefinementPublicationStage.Replacing, stage, stage);
+            receiptStore.Write(pendingReceipt with { Stage = RefinementPublicationStage.Prepared, StagedPath = null, RetainedPath = null });
             receiptStore.Write(pendingReceipt);
             await Assert.ThrowsExactlyAsync<AutomationException>(() => RefinementInputFiles.RecordAsync(root, pendingPath,
                 graph.DocumentId, pendingInput.SourceSha256, pendingInput, stateDirectory: state));

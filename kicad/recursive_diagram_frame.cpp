@@ -73,7 +73,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_implementation = new wxButton( diagram, wxID_ANY, _( "Implementation" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_implementation->SetName( "RecursiveImplementation" ); pathRow->Add( m_implementation, 0, wxLEFT, FromDIP( 12 ) );
     main->Add( pathRow, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
-    m_canvas = new wxPanel( diagram ); m_canvas->SetName( "RecursiveDiagramCanvas" );
+    m_canvas = new wxPanel( diagram, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS | wxBORDER_NONE );
+    m_canvas->SetName( "RecursiveDiagramCanvas" );
     m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT ); main->Add( m_canvas, 1, wxEXPAND ); diagram->SetSizer( main );
     auto* inspector = new wxPanel( splitter ); inspector->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
     auto* side = new wxBoxSizer( wxVERTICAL );
@@ -139,6 +140,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
     {
         if( !m_ready || m_process || !current() ) { event.Skip(); return; }
+        if( event.GetKeyCode() == WXK_TAB ) { m_canvas->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
         int index = -1;
         for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
         if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )

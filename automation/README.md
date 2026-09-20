@@ -2844,3 +2844,75 @@ closing the viewer. This is close-safety evidence, not qualification of MCP 3D
 rendering. The receipt covers its frozen Linux candidate, not public packages,
 later source changes or Mac/Desktop execution. Cancellable DRC jobs and result
 freshness remain open in completion-ledger outcome `p9966151ec04cd9cf`.
+
+### Recursive structural diagrams (Linux source increment)
+
+The native recursive editor opens one connected diagram level at a time.
+System, PSU, CPU and their children use the same block/revision model. Every
+saved parent pins exact child revisions; inspecting old data does not follow
+today's mutable implementation heads. Connections have independent endpoint
+states, member histories and General/Schematic/Routing requirements. Unknown
+pins, protocols and values remain unknown.
+
+This increment is on `codex/recursive-diagram-history`; it is not yet a claim
+about the packages currently on the public download site. Mac and Windows
+builds remain held until the complete agreed XML editing workflow is implemented.
+
+With a matching compiled companion and native manager, an attached MCP client can
+call `kicad_diagram_open(instanceId, repositoryRoot, sourcePath, documentId)`.
+The file must be a supported typed `recursive-block-graph` document inside the
+explicit repository. `kicad_diagram_state(instanceId, documentId)` reports the
+current diagram path, file token, block/connection draft, dirty/busy/rendered
+state, selected annotation and errors. Opening is asynchronous: wait for a
+ready state without an error. These calls do not imply electrical realization
+or synchronized schematic/PCB generation. The earlier `kicad_structure_open`
+surface remains the legacy flat engineering-model editor, not this workflow.
+
+In the recursive window:
+
+- Select a block and use **Open diagram**, or double-click it. Back/Up return to
+  containing diagrams. Arrow keys select peer blocks; Enter opens the selected
+  block and Backspace goes up when the canvas has focus.
+- Select a connection by clicking its line, or cycle the local connections with
+  `L` on the canvas. Its endpoint summary describes the actual current binding,
+  not a claimed native net or compatibility proof.
+- Edit the three requirement fields and use **Save** or **Decline**. Save creates
+  new immutable revisions where content changed; unchanged saves do not churn
+  files. Decline reloads saved content and never writes an old baseline over a
+  newer file. `Ctrl+1/2/3` focuses the corresponding field.
+- **History** beside a field compares its earlier values with the exact saved
+  context. Restoring copies only that field into the draft; Save publishes it.
+  `Alt+H` opens history from a focused requirement field.
+- For block requirement conflicts, compare Base, Your draft and Latest saved.
+  Choose the draft, saved text, or explicitly write merged text. All overlapping
+  fields require a choice. Independent fields can compose without a modal.
+  Another file change invalidates old resolution choices while retaining their
+  text. Structural changes and connection conflicts are not silently guessed.
+- Edit **Comments** on blocks and connections. The comment selector preserves
+  separate notes; **New comment** adds another. `Ctrl+4` focuses comment text and
+  `Ctrl+5` focuses its selector when present. Clearing a text-only comment removes
+  it from the draft; old revisions retain it.
+- **Note** places a free-space comment. Edit it in Comments, drag it on the
+  canvas, then Save. Undo/redo includes note movement. XML stores exact target
+  identities, note coordinates and provenance. Stored sketch paths are retained;
+  a native sketch-creation tool is not yet qualified.
+
+None of these actions invokes an AI agent. The optional global agent-console
+integration is still separate unfinished work.
+
+Focused Linux development verification uses:
+
+```sh
+devcoordinator2 test start . --test diagram-requirement-history --tier development --client codex
+```
+
+The graph checks managed contracts, builds matching C++ messages and the native
+editor, exercises the history/conflict dialogs in both themes, and drives two
+independent KiCad instances through navigation, editing, persistence and recovery.
+Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
+native Mac integration. The authoritative unfinished outcomes include recursive
+UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
+`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and history pagination beyond
+the initial 200 entries `p8ebf18838a55934f`. Implementation switching, complete
+graph conflict handling, structural/native generation and reverse synchronization,
+schematic/PCB markup, and full platform qualification remain open.

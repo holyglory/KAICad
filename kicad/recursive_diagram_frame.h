@@ -90,6 +90,7 @@ private:
     kiapi::automation::diagrams::v1::RecursiveEditorDocument m_document;
     REQUEST m_activeRequest;
     DIALOG_DIAGRAM_FIELD_HISTORY* m_historyDialog = nullptr;
+    wxEvtHandler m_historyEvents;
     kiapi::automation::diagrams::v1::FieldHistoryPageData m_historyContext;
     DRAFT m_draft, m_savedDraft;
     kiapi::automation::diagrams::v1::ConnectionDraftData m_connectionDraft, m_savedConnectionDraft;

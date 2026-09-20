@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <wx/app.h>
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
@@ -426,7 +425,8 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         // keeping it on the stack would hold every later page's completion.
         wxWeakRef<RECURSIVE_DIAGRAM_FRAME> frame( this );
         REQUEST query = m_activeRequest;
-        wxTheApp->CallAfter( [frame, result, query]
+        // Use a dedicated dispatcher, not the application-wide pending queue.
+        m_historyEvents.CallAfter( [frame, result, query]
         { if( frame && !frame->IsClosing() ) frame->showHistory( result, query ); } );
         return;
     }

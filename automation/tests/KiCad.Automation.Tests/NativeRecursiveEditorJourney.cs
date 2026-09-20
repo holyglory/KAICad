@@ -136,7 +136,7 @@ public sealed partial class NativeSessionTests
             var placed = await Save();
             var canvasNote = placed.Draft.LocalDiagram.Annotations.Single(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatCanvas);
             string originalX = canvasNote.Position.X;
-            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+            NativeKeyboard.SchematicShortcut(display, processId, "drag", "Structural diagram", false, true,
                 clickFromLeft: 280, clickFromTop: 760, dragToLeft: 360, dragToTop: 820);
             var moved = await Wait(s => s.Dirty && s.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X != originalX);
             string movedX = moved.Draft.LocalDiagram.Annotations.Single(n => n.Id == canvasNote.Id).Position.X;

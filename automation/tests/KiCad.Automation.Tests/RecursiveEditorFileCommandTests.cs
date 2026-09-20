@@ -39,6 +39,12 @@ public sealed class RecursiveEditorFileCommandTests
             Assert.AreEqual(original.Requirements(original.SelectedRoot).Requirements.General, prepared.PreparedDraft.Fields.General);
             Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), prepared.PreparedDraft.Baseline.RevisionId);
             Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            var ambiguous = request.Clone(); ambiguous.Block = Selection(graph.SelectedRoot);
+            Assert.IsFalse((await Invoke(ambiguous)).Success, "Restoration must not accept unrelated history paging targets.");
+            ambiguous = request.Clone(); ambiguous.Offset = 1;
+            Assert.IsFalse((await Invoke(ambiguous)).Success);
+            ambiguous = request.Clone(); ambiguous.Action = P.RecursiveFileAction.RfaRead;
+            Assert.IsFalse((await Invoke(ambiguous)).Success, "A read request cannot smuggle restoration data.");
             var dirty = request.Clone(); dirty.Restoration.Draft.Fields.Routing = "Retain my separate draft.";
             var rejected = await Invoke(dirty); Assert.IsFalse(rejected.Success); Assert.AreEqual("dirty_block_draft", rejected.ErrorCode);
             Assert.AreEqual("Retain my separate draft.", dirty.Restoration.Draft.Fields.Routing);

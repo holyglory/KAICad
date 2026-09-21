@@ -8,6 +8,7 @@ using Google.Protobuf.WellKnownTypes;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -51,7 +52,7 @@ public sealed class PcbItemTools(InstanceRegistry registry)
         var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
         ValidateHeader(request.Header, requireItems: true);
         if (!Guid.TryParseExact(guideId, "D", out var id) || id == Guid.Empty
-            || sourceSha256.Length != 64 || sourceSha256.Any(c => !Uri.IsHexDigit(c)))
+            || string.IsNullOrWhiteSpace(sourceSha256) || sourceSha256.Length != 64 || sourceSha256.Any(c => !Uri.IsHexDigit(c)))
             throw new AutomationException("invalid_pcb_guide_identity", "Provide a canonical guide ID and exact source SHA-256.");
         if (request.Items.Count == 0) throw new AutomationException("invalid_pcb_guide", "A guide must contain at least one vector or reference-image object.");
         for (int index = 0; index < request.Items.Count; ++index)
@@ -117,6 +118,7 @@ public sealed class PcbItemTools(InstanceRegistry registry)
                 shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.role", Value = "visual-underlay" });
                 shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.source_format", Value = "svg" });
                 shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.source_archive", Value = archive });
+                shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.guide.segment_index", Value = index.ToString(CultureInfo.InvariantCulture) });
                 request.Items.Add(Any.Pack(shape));
             }
             return await Mutate<CreateItems, CreateItemsResponse>(instanceId, BoardJson.Formatter.Format(request), expectedStateJson, cancellationToken);
@@ -125,6 +127,89 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException or InvalidJsonException)
         { return Data(new { errorCode = error is AutomationException known ? known.Code : "pcb_svg_guide_failed", errorMessage = error.Message }, true); }
     }
+
+    [McpServerTool(Name = "kicad_pcb_route_candidate_from_guide", ReadOnly = true),
+     Description("Convert the exact vector segments of a saved, provenance-matched visual guide into a deterministic, read-only CreateItems request containing explicit net-bound Track candidates. The requested net must already exist on the board. This is a handoff from visual intent to a candidate for native validation; it does not commit copper and does not claim DRC, impedance, RF or high-speed correctness. Reference images and non-segment guide geometry are intentionally not converted.")]
+    public Task<CallToolResult> RouteCandidateFromGuide(string instanceId, string expectedInstanceEpoch,
+        string documentJson, string expectedStateJson, string guideId, string sourceSha256,
+        string netName, string layer, long widthNm, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var document = SchematicJson.Parser.Parse<DocumentSpecifier>(documentJson);
+        ValidateHeader(new ItemHeader { Document = document }, requireItems: true);
+        ValidateGuideIdentity(guideId, sourceSha256, "invalid_pcb_route_candidate");
+        if (string.IsNullOrWhiteSpace(netName))
+            throw new AutomationException("invalid_pcb_route_candidate", "Supply the explicit board net to which the guide candidate belongs.");
+        if (widthNm <= 0) throw new AutomationException("invalid_pcb_route_candidate", "Candidate track width must be positive.");
+        var boardLayer = ParseCopperLayer(layer);
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb || expected.ProcessEpoch != expectedInstanceEpoch
+            || !expected.Document.Equals(document))
+            throw new AutomationException("pcb_state_changed", "The guide checkpoint does not match the exact PCB document and native epoch.");
+        var client = registry.Client(instanceId);
+        var session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("pcb_instance_changed", "The native process epoch changed.");
+        var current = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = document }, cancellationToken);
+        if (!current.Equals(expected))
+            throw new AutomationException("pcb_state_changed", "The PCB changed after the guide checkpoint.");
+
+        var nets = await client.InvokeAsync<GetNets, NetsResponse>(new() { Board = document }, cancellationToken);
+        if (!nets.Nets.Any(net => string.Equals(net.Name, netName, StringComparison.Ordinal)))
+            throw new AutomationException("pcb_net_not_found", $"The requested board net '{netName}' does not exist; no electrically unbound candidate was generated.");
+
+        var guideItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+        {
+            Header = new() { Document = document },
+            Types_ = { KiCadObjectType.KotPcbShape, KiCadObjectType.KotPcbReferenceImage }
+        }, cancellationToken);
+        var segments = new List<(int Order, string Id, GraphicSegmentAttributes Segment)>();
+        foreach (var packed in guideItems.Items)
+        {
+            if (!packed.Is(BoardGraphicShape.Descriptor)) continue;
+            var shape = packed.Unpack<BoardGraphicShape>();
+            if (!HasGuideProvenance(packed, guideId, sourceSha256)) continue;
+            if (shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Segment)
+            {
+                int order = shape.CustomProperties
+                    .FirstOrDefault(property => property.Key == "kicad.ai.guide.segment_index")?.Value is string value
+                    && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                    ? parsed : int.MaxValue;
+                segments.Add((order, shape.Id.Value, shape.Shape.Segment.Clone()));
+            }
+        }
+        if (segments.Count == 0)
+            throw new AutomationException("pcb_guide_has_no_vector_segments", "The provenance-matched guide has no convertible line segments; reference images remain visual-only.");
+        segments.Sort((left, right) => left.Order != right.Order
+            ? left.Order.CompareTo(right.Order)
+            : StringComparer.Ordinal.Compare(left.Id, right.Id));
+
+        var candidate = new CreateItems { Header = new() { Document = document } };
+        for (int index = 0; index < segments.Count; ++index)
+        {
+            var segment = segments[index].Segment;
+            var track = new Track
+            {
+                Id = new() { Value = DeterministicCandidateId(guideId, sourceSha256, netName, boardLayer, widthNm, index) },
+                Start = segment.Start.Clone(), End = segment.End.Clone(),
+                Width = new() { ValueNm = widthNm }, Layer = boardLayer,
+                Net = new() { Name = netName }
+            };
+            track.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.route_candidate.guide_id", Value = guideId });
+            track.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.route_candidate.source_sha256", Value = sourceSha256 });
+            track.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.route_candidate.origin", Value = "visual-guide" });
+            candidate.Items.Add(Any.Pack(track));
+        }
+        string candidateJson = BoardJson.Formatter.Format(candidate);
+        return Data(new
+        {
+            instanceId, processEpoch = session.Epoch, document, guideId, guideSourceSha256 = sourceSha256,
+            requestedNet = netName, requestedLayer = boardLayer.ToString(), widthNm,
+            sourceVectorSegments = segments.Count, candidateItems = candidate.Items.Count,
+            candidateRequestJson = candidateJson, structuralValidation = true,
+            electricalNetResolved = true, drcValidated = false, nativeCommit = false
+        });
+    });
 
     [McpServerTool(Name = "kicad_pcb_route_candidate_validate", ReadOnly = true),
      Description("Validate a guide-derived PCB copper candidate before native mutation. The candidate must contain only exact Track, Arc or Via objects with canonical identities, copper layers and explicit net names. Requires a guide ID/source hash and an unchanged PCB lifecycle checkpoint. This validates structure and provenance supplied by the caller; it does not claim DRC, impedance, length, RF or high-speed correctness and does not mutate the board.")]
@@ -184,6 +269,13 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             guideId = guideId, guideSourceSha256 = sourceSha256, candidateItems = ids.Count, nets = nets.Order(StringComparer.Ordinal).ToArray(),
             structuralValidation = true, guideResolutionChecked = true, drcValidated = false, nativeCommit = false });
     });
+
+    private static void ValidateGuideIdentity(string guideId, string sourceSha256, string errorCode)
+    {
+        if (!Guid.TryParseExact(guideId, "D", out var id) || id == Guid.Empty
+            || sourceSha256.Length != 64 || sourceSha256.Any(c => !Uri.IsHexDigit(c)))
+            throw new AutomationException(errorCode, "Provide a canonical guide ID and exact guide SHA-256.");
+    }
 
     private static bool HasGuideProvenance(Any packed, string guideId, string sourceSha256)
     {
@@ -301,6 +393,20 @@ public sealed class PcbItemTools(InstanceRegistry registry)
         _ => throw new AutomationException("invalid_pcb_svg_guide_layer", "Use a named non-copper board layer such as Dwgs.User or Cmts.User.")
     };
 
+    private static BoardLayer ParseCopperLayer(string value)
+    {
+        BoardLayer layer = value switch
+        {
+            "F.Cu" or "F_Cu" or "BL_F_Cu" => BoardLayer.BlFCu,
+            "B.Cu" or "B_Cu" or "BL_B_Cu" => BoardLayer.BlBCu,
+            _ when System.Enum.TryParse<BoardLayer>(value, true, out var parsed) => parsed,
+            _ => throw new AutomationException("invalid_pcb_route_candidate", "Use a named copper layer such as F.Cu, B.Cu or BL_In1_Cu.")
+        };
+        if ((int)layer < 3 || (int)layer > 34)
+            throw new AutomationException("invalid_pcb_route_candidate", "Route candidates must use a copper layer.");
+        return layer;
+    }
+
     private static decimal Decimal(string value, string name) => decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
         ? parsed : throw new AutomationException("invalid_pcb_svg_guide", $"{name} must be a finite decimal.");
 
@@ -335,6 +441,14 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     private static string DeterministicId(string guideId, int index)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes($"kicad-svg-guide-v1\n{guideId}\n{index}"));
+        return new Guid(hash.AsSpan(0, 16), bigEndian: true).ToString("D");
+    }
+
+    private static string DeterministicCandidateId(string guideId, string sourceSha256, string netName,
+        BoardLayer layer, long widthNm, int index)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"kicad-route-candidate-v1\n{guideId}\n{sourceSha256}\n{netName}\n{layer}\n{widthNm}\n{index}"));
         return new Guid(hash.AsSpan(0, 16), bigEndian: true).ToString("D");
     }
 

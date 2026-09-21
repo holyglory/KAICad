@@ -56,9 +56,11 @@ public sealed class PcbDrcToolTests
                 Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
                 Net = new() { Name = "POWER_RAIL" }
             }));
+            string candidateOperationId = Guid.NewGuid().ToString("D");
+            transport.State.OperationId = candidateOperationId;
             transport.State.CandidateDryRun = true;
             transport.State.CandidateItemIds.Add(candidateRequest.Items[0].Unpack<Track>().Id.Value);
-            var candidateStarted = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            var candidateStarted = await tool.Start(transport.Session.InstanceId, json, candidateOperationId,
                 false, false, false, revisionJson, transport.Session.Epoch, default,
                 candidateRequestJson: BoardJson.Formatter.Format(candidateRequest));
             Assert.IsFalse(candidateStarted.IsError ?? false, candidateStarted.ToString());

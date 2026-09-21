@@ -194,6 +194,31 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(generatedValidation.TryGetProperty("isError", out var generatedValidationError) && generatedValidationError.GetBoolean(), generatedValidation.GetRawText());
             Assert.IsTrue(generatedValidation.GetProperty("structuredContent").GetProperty("structuralValidation").GetBoolean());
+            var dryRunState = SchematicJson.Parser.Parse<DocumentLifecycleState>(svgState);
+            var dryRunReply = await mcp.Tool("kicad_pcb_drc_start", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board),
+                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                reportAllTrackErrors = true, testFootprints = false,
+                expectedRevisionJson = SchematicJson.Formatter.Format(dryRunState.Revision),
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(generatedRequest)
+            });
+            Assert.IsFalse(dryRunReply.TryGetProperty("isError", out var dryRunError) && dryRunError.GetBoolean(), dryRunReply.GetRawText());
+            var dryRun = SchematicJson.Parser.Parse<PcbDrcJobState>(
+                dryRunReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            Assert.IsTrue(dryRun.CandidateDryRun);
+            Assert.AreEqual(2, dryRun.CandidateItemIds.Count);
+            for (int attempt = 0; attempt < 60 && !dryRun.WorkerFinished; ++attempt)
+            {
+                await Task.Delay(100, token);
+                var drcUpdate = await mcp.Tool("kicad_pcb_drc_job", new
+                { instanceId, documentJson = SchematicJson.Formatter.Format(board), jobId = dryRun.JobId, processEpoch = client.Epoch });
+                Assert.IsFalse(drcUpdate.TryGetProperty("isError", out var drcUpdateError) && drcUpdateError.GetBoolean(), drcUpdate.GetRawText());
+                dryRun = SchematicJson.Parser.Parse<PcbDrcJobState>(drcUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
+            }
+            Assert.IsTrue(dryRun.WorkerFinished, "Detached candidate DRC did not reach a terminal state.");
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, dryRun.Status, dryRun.ErrorMessage);
+            Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

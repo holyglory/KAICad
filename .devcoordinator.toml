@@ -54,7 +54,7 @@ retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-require
 name="native-protocol"
 tier="development"
 timeout_seconds=600
-command=["cmake","--build","automation/artifacts/native","--target","kiapi","kicad","eeschema","qa_diagram_field_history"]
+command=["cmake","--build","automation/artifacts/native","--target","kiapi","kicad","pcbnew","eeschema","qa_diagram_field_history"]
 [[test.diagram-requirement-history.check]]
 name="native-ui"
 tier="development"

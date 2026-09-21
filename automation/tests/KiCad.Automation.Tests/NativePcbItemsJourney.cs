@@ -159,6 +159,16 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(renderData.GetProperty("image").GetProperty("bytes").GetInt32() > 0);
             var renderAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(renderData.GetProperty("afterState").GetString()!);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(renderAfter));
+            var routeGeometry = await mcp.Tool("kicad_pcb_route_geometry", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                netName = "POWER_RAIL"
+            });
+            Assert.IsFalse(routeGeometry.TryGetProperty("isError", out var routeGeometryError) && routeGeometryError.GetBoolean(), routeGeometry.GetRawText());
+            var routeGeometryData = routeGeometry.GetProperty("structuredContent");
+            Assert.IsTrue(routeGeometryData.GetProperty("measuredGeometry").GetBoolean());
+            Assert.IsFalse(routeGeometryData.GetProperty("drcValidated").GetBoolean());
+            Assert.AreEqual(15_000_000, routeGeometryData.GetProperty("nets").EnumerateArray().Single().GetProperty("trackLengthNm").GetInt64());
             var generatedCandidate = await mcp.Tool("kicad_pcb_route_candidate_from_guide", new
             {
                 instanceId, expectedInstanceEpoch = client.Epoch, documentJson = SchematicJson.Formatter.Format(board),

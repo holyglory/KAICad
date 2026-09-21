@@ -110,6 +110,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
+            CollectionAssert.Contains(names, "kicad_pcb_route_geometry");
             var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());

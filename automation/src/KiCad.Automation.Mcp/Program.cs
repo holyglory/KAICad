@@ -100,5 +100,6 @@ builder.Services.AddMcpServer(options =>
     .WithTools<AutomaticDesignTools>()
     .WithTools<SimulationTools>()
     .WithTools<PcbItemTools>()
-    .WithTools<PcbRenderTools>();
+    .WithTools<PcbRenderTools>()
+    .WithTools<PcbRoutingTools>();
 await builder.Build().RunAsync();

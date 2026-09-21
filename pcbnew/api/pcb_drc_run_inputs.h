@@ -3,6 +3,8 @@
 #define KICAD_PCB_DRC_RUN_INPUTS_H
 
 #include <file_content_baseline.h>
+#include <google/protobuf/any.pb.h>
+#include <google/protobuf/repeated_field.h>
 #include <kiid.h>
 #include <json_common.h>
 #include <memory>
@@ -82,6 +84,11 @@ public:
     const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
     std::string LibraryFingerprint() const;
     bool HasLibraryDependencies() const;
+
+    // Add explicitly net-bound Track/Arc/Via candidates only to this detached
+    // DRC snapshot. The live editor board is never changed.
+    tl::expected<std::vector<KIID>, std::string> AddCandidateItems(
+            const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems );
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.

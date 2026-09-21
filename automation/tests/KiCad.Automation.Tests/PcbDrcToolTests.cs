@@ -1,6 +1,8 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Types;
 using Kiapi.Common;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
@@ -45,21 +47,39 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue(started.StructuredContent.HasValue);
             Assert.AreEqual(transport.State,
                 SchematicJson.Parser.Parse<PcbDrcJobState>(((TextContentBlock)started.Content.Single()).Text));
+            var candidateRequest = new CreateItems { Header = new() { Document = document } };
+            candidateRequest.Items.Add(Any.Pack(new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = new() { XNm = 1_000_000, YNm = 1_000_000 },
+                End = new() { XNm = 2_000_000, YNm = 1_000_000 },
+                Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
+                Net = new() { Name = "POWER_RAIL" }
+            }));
+            transport.State.CandidateDryRun = true;
+            transport.State.CandidateItemIds.Add(candidateRequest.Items[0].Unpack<Track>().Id.Value);
+            var candidateStarted = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, false, revisionJson, transport.Session.Epoch, default,
+                candidateRequestJson: BoardJson.Formatter.Format(candidateRequest));
+            Assert.IsFalse(candidateStarted.IsError ?? false, candidateStarted.ToString());
+            Assert.AreEqual(1, transport.LastStart!.CandidateItems.Count);
+            transport.State.CandidateDryRun = false;
+            transport.State.CandidateItemIds.Clear();
             var read = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
                 transport.Session.Epoch, default);
             Assert.IsFalse(read.IsError ?? false, read.ToString());
             var cancelled = await tool.Cancel(transport.Session.InstanceId, json, transport.State.JobId,
                 transport.Session.Epoch, default);
             Assert.IsFalse(cancelled.IsError ?? false, cancelled.ToString());
-            Assert.AreEqual(3, transport.Calls);
+            Assert.AreEqual(4, transport.Calls);
             var stale = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
                 Guid.NewGuid().ToString("D"), default);
             Assert.IsTrue(stale.IsError ?? false);
-            Assert.AreEqual(3, transport.Calls);
+            Assert.AreEqual(4, transport.Calls);
             var badOperation = await tool.Start(transport.Session.InstanceId, json,
                 Guid.Empty.ToString("D"), false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsTrue(badOperation.IsError ?? false);
-            Assert.AreEqual(3, transport.Calls);
+            Assert.AreEqual(4, transport.Calls);
             var valid = transport.State.Clone();
             for (int variant = 0; variant < 7; ++variant)
             {

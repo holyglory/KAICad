@@ -64,6 +64,9 @@ message StartPcbDrcJob {
   // state; clients do not supply their own substitute netlist.
   DocumentLifecycleState expected_schematic_state = 8;
   bool allow_duplicate_sheet_names = 9;
+  // Optional guide-derived copper candidates. Native DRC applies these only to
+  // its detached snapshot; the live board is never mutated by a dry run.
+  repeated google.protobuf.Any candidate_items = 10;
 }
 
 message ReadPcbDrcJob {
@@ -155,6 +158,8 @@ message PcbDrcJobState {
   bool snapshot_complete = 15;
   DocumentLifecycleState checked_schematic_state = 16;
   repeated string input_warnings = 17;
+  bool candidate_dry_run = 18;
+  repeated string candidate_item_ids = 19;
 }
 
 message ReadSchematicMetadata {

@@ -96,6 +96,8 @@ struct PCB_DRC_JOB_MANAGER::JOB
     std::string libraryFingerprint;
     std::string auxiliaryFingerprint;
     bool hasLibraryDependencies = false;
+    bool candidateDryRun = false;
+    std::vector<KIID> candidateItemIds;
     std::vector<std::string> inputWarnings;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
     double progress = 0.0;
@@ -229,6 +231,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_worker_finished( aJob->workerFinished );
     // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
     result.set_snapshot_complete( false );
+    result.set_candidate_dry_run( aJob->candidateDryRun );
+    for( const KIID& identity : aJob->candidateItemIds )
+        result.add_candidate_item_ids( identity.AsStdString() );
     if( aJob->testFootprints ) result.mutable_checked_schematic_state()->CopyFrom( aJob->schematicState );
     for( const auto& warning : aJob->inputWarnings ) result.add_input_warnings( warning );
     if( aJob->workerFinished && aJob->status == PDRCJS_COMPLETED )
@@ -319,10 +324,17 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     }
 
     std::unique_ptr<PCB_DRC_RUN_INPUTS> inputs;
+    std::vector<KIID> candidateItemIds;
     try
     {
         inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
         if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
+        if( aRequest.candidate_items_size() > 0 )
+        {
+            auto added = inputs->AddCandidateItems( aRequest.candidate_items() );
+            if( !added ) return tl::unexpected( added.error() );
+            candidateItemIds = std::move( *added );
+        }
         if( aRequest.test_footprints() )
             inputs->SetSchematicInput( PCB_DRC_SCHEMATIC_INPUT::Capture( *aCaptureContext.schematic,
                     aRequest.expected_schematic_state(), aRequest.document(), aProcessEpoch ) );
@@ -348,6 +360,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->libraryFingerprint = inputs->LibraryFingerprint();
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
+    job->candidateDryRun = !candidateItemIds.empty();
+    job->candidateItemIds = std::move( candidateItemIds );
     if( job->testFootprints )
     {
         job->schematicState = aCaptureContext.schematic->source_state();

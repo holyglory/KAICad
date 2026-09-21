@@ -2,7 +2,10 @@
 #include "pcb_drc_run_inputs.h"
 #include "pcb_drc_document_snapshot.h"
 #include "pcb_drc_schematic_input.h"
+#include <api/api_pcb_utils.h>
+#include <api/api_utils.h>
 #include <board.h>
+#include <board_connected_item.h>
 #include <api/native_state_digest.h>
 #include <board_design_settings.h>
 #include <drc/drc_engine.h>
@@ -16,7 +19,36 @@
 #include <pcb_project_editor_state.h>
 #include <json_common.h>
 #include <router/pns_routing_settings.h>
+#include <algorithm>
 #include <stdexcept>
+
+namespace
+{
+std::optional<std::string> CandidateNetName( KICAD_T aType,
+        const google::protobuf::Any& aItem )
+{
+    using namespace kiapi::board::types;
+    if( aType == PCB_TRACE_T )
+    {
+        Track value;
+        if( !aItem.UnpackTo( &value ) ) return std::nullopt;
+        return value.net().name();
+    }
+    if( aType == PCB_ARC_T )
+    {
+        Arc value;
+        if( !aItem.UnpackTo( &value ) ) return std::nullopt;
+        return value.net().name();
+    }
+    if( aType == PCB_VIA_T )
+    {
+        Via value;
+        if( !aItem.UnpackTo( &value ) ) return std::nullopt;
+        return value.net().name();
+    }
+    return std::nullopt;
+}
+}
 
 PCB_DRC_RUN_INPUTS::~PCB_DRC_RUN_INPUTS() = default;
 BOARD& PCB_DRC_RUN_INPUTS::GetBoard() const { return m_document->GetBoard(); }
@@ -152,6 +184,38 @@ const KIID& PCB_DRC_RUN_INPUTS::CapturedDrawingIdentity() const { return m_proxy
 std::string PCB_DRC_RUN_INPUTS::LibraryFingerprint() const
 {
     return m_libraries->ContentFingerprint();
+}
+
+tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateItems(
+        const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems )
+{
+    if( aItems.empty() ) return std::vector<KIID>();
+    BOARD& source = GetBoard();
+    std::vector<KIID> identities;
+    identities.reserve( aItems.size() );
+    for( const google::protobuf::Any& encoded : aItems )
+    {
+        const std::optional<KICAD_T> type = kiapi::common::TypeNameFromAny( encoded );
+        if( !type || ( *type != PCB_TRACE_T && *type != PCB_ARC_T && *type != PCB_VIA_T ) )
+            return tl::unexpected( "Candidate DRC accepts only Track, Arc and Via items" );
+        const std::optional<std::string> netName = CandidateNetName( *type, encoded );
+        if( !netName || netName->empty() )
+            return tl::unexpected( "Candidate DRC requires an explicit net name" );
+        if( !source.FindNet( wxString::FromUTF8( *netName ) ) )
+            return tl::unexpected( "Candidate DRC requires an existing board net" );
+        std::unique_ptr<BOARD_ITEM> item = CreateItemForType( *type, &source );
+        if( !item || !item->Deserialize( encoded ) )
+            return tl::unexpected( "Candidate DRC could not deserialize a native route item" );
+        if( item->m_Uuid == niluuid || source.ResolveItem( item->m_Uuid, true )
+            || std::find( identities.begin(), identities.end(), item->m_Uuid ) != identities.end() )
+            return tl::unexpected( "Candidate DRC requires distinct nonempty item identities" );
+        auto* connected = dynamic_cast<BOARD_CONNECTED_ITEM*>( item.get() );
+        if( !connected || connected->GetNetCode() <= 0 )
+            return tl::unexpected( "Candidate DRC requires a connected existing net" );
+        identities.push_back( item->m_Uuid );
+        source.Add( item.release() );
+    }
+    return identities;
 }
 
 bool PCB_DRC_RUN_INPUTS::HasLibraryDependencies() const

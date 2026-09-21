@@ -92,6 +92,15 @@
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <tools/zone_filler_tool.h>
+#include <tools/generator_tool.h>
+#include <router/router_tool.h>
+#include <router/pns_kicad_iface.h>
+#include <router/pns_segment.h>
+#include <router/pns_arc.h>
+#include <router/pns_via.h>
+#include <router/pns_line.h>
+#include <router/pns_routing_settings.h>
+#include <pcbnew_settings.h>
 #include <zone.h>
 #include <zone_filler.h>
 
@@ -138,6 +147,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleReadDrcJob );
     registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
             &API_HANDLER_PCB::handleCancelDrcJob );
+    registerHandler<kiapi::automation::v1::StartPcbRoutePreview, kiapi::automation::v1::PcbRoutePreviewState>(
+            &API_HANDLER_PCB::handleRoutePreview );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -523,6 +534,190 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCan
         return tl::unexpected( error );
     }
     return *cancelled;
+}
+
+namespace
+{
+ApiResponseStatus RoutePreviewError( const std::string& aMessage,
+                                     ApiStatusCode aStatus = ApiStatusCode::AS_BAD_REQUEST )
+{
+    ApiResponseStatus error;
+    error.set_status( aStatus );
+    error.set_error_message( aMessage );
+    return error;
+}
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::handleRoutePreview(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbRoutePreview>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using kiapi::board::types::BoardLayer;
+
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    const auto& request = aCtx.Request;
+    BOARD* target = board();
+    if( request.operation_id().empty() || request.operation_id() == niluuid.AsStdString() )
+        return tl::unexpected( RoutePreviewError( "A route preview requires a nonempty operation ID" ) );
+    if( request.process_epoch() != Pgm().GetApiServer().Token() )
+        return tl::unexpected( RoutePreviewError( "The route preview process epoch is stale" ) );
+    if( !request.has_expected_revision()
+        || request.expected_revision().epoch() != target->m_Uuid.AsStdString()
+        || request.expected_revision().sequence() != static_cast<uint64_t>( target->GetTimeStamp() ) )
+        return tl::unexpected( RoutePreviewError( "The PCB changed since the requested route preview revision" ) );
+    if( request.waypoints_size() == 0 || request.waypoints_size() > 256 )
+        return tl::unexpected( RoutePreviewError( "A route preview requires one to 256 waypoints" ) );
+    if( !request.has_start() )
+        return tl::unexpected( RoutePreviewError( "A route preview requires an explicit start point" ) );
+
+    PCB_LAYER_ID boardLayer = FromProtoEnum<PCB_LAYER_ID>( request.layer() );
+    if( !IsCopperLayer( boardLayer ) )
+        return tl::unexpected( RoutePreviewError( "A route preview must use a copper layer" ) );
+    BOARD_ITEM* startBoardItem = target->ResolveItem( KIID( request.start_item_id() ), true );
+    if( !startBoardItem || !startBoardItem->IsConnected() )
+        return tl::unexpected( RoutePreviewError( "The route preview start item is not a connected board object" ) );
+
+    PCBNEW_SETTINGS* pcbSettings = frame() ? frame()->GetPcbNewSettings() : nullptr;
+    if( !pcbSettings || !pcbSettings->m_PnsSettings )
+        return tl::unexpected( RoutePreviewError( "Native routing settings are unavailable", ApiStatusCode::AS_UNIMPLEMENTED ) );
+    auto snapshotSettings = std::make_unique<PNS::ROUTING_SETTINGS>( nullptr,
+                                                                       pcbSettings->m_PnsSettings->GetPath() );
+    pcbSettings->m_PnsSettings->CopyCurrentStateTo( *snapshotSettings );
+    TOOL_MANAGER previewManager;
+    previewManager.SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
+    auto* generatorTool = new GENERATOR_TOOL( false );
+    previewManager.RegisterTool( generatorTool );
+    try { generatorTool->InitializeSnapshot( std::move( snapshotSettings ) ); }
+    catch( const std::exception& error )
+    { return tl::unexpected( RoutePreviewError( error.what() ) ); }
+    PNS::ROUTER* router = generatorTool->Router();
+    PNS_KICAD_IFACE* iface = generatorTool->GetInterface();
+    PNS::ITEM* startItem = router->GetWorld()->FindItemByParent( startBoardItem );
+    if( !startItem )
+        return tl::unexpected( RoutePreviewError( "The start item is not available in the native router world" ) );
+    const VECTOR2I start( request.start().x_nm(), request.start().y_nm() );
+    const int pnsLayer = iface->GetPNSLayerFromBoardLayer( boardLayer );
+    PNS::SIZES_SETTINGS sizes( router->Sizes() );
+    if( !iface->ImportSizes( sizes, startItem, nullptr, start ) )
+        return tl::unexpected( RoutePreviewError( "The native router could not resolve track and via sizes" ) );
+    router->UpdateSizes( sizes );
+    router->SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+    if( !router->StartRouting( start, startItem, pnsLayer ) )
+        return tl::unexpected( RoutePreviewError( router->FailureReason().ToStdString() ) );
+
+    std::string failure;
+    for( int index = 0; index < request.waypoints_size(); ++index )
+    {
+        const VECTOR2I point( request.waypoints( index ).x_nm(), request.waypoints( index ).y_nm() );
+        if( !router->Move( point, nullptr ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        const bool last = index == request.waypoints_size() - 1;
+        if( last && !router->FixRoute( point, nullptr, request.force_finish(), false ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        if( !last ) router->FixRoute( point, nullptr, false, false );
+    }
+
+    std::vector<PNS::ITEM*> removed, added, heads;
+    if( failure.empty() ) router->GetUpdatedItems( removed, added, heads );
+    router->StopRouting();
+    if( !failure.empty() ) return tl::unexpected( RoutePreviewError( failure ) );
+    if( heads.empty() ) return tl::unexpected( RoutePreviewError( "The native router produced no preview geometry" ) );
+
+    PcbRoutePreviewState response;
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_operation_id( request.operation_id() );
+    response.mutable_checked_revision()->CopyFrom( request.expected_revision() );
+    response.set_process_epoch( request.process_epoch() );
+    response.set_completed( true );
+    response.set_preview_only( true );
+    response.set_native_commit( false );
+    int index = 0;
+    for( PNS::ITEM* item : heads )
+    {
+        const std::string netName = iface->GetNetName( item->Net() ).ToStdString();
+        auto addSegment = [&]( const VECTOR2I& start, const VECTOR2I& end, int width, int pnsLayer )
+        {
+            kiapi::board::types::Track track;
+            track.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            track.mutable_start()->set_x_nm( start.x ); track.mutable_start()->set_y_nm( start.y );
+            track.mutable_end()->set_x_nm( end.x ); track.mutable_end()->set_y_nm( end.y );
+            track.mutable_width()->set_value_nm( width );
+            track.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
+            track.mutable_net()->set_name( netName );
+            response.add_route_items()->PackFrom( track );
+        };
+        auto addArc = [&]( const SHAPE_ARC& arc, int width, int pnsLayer )
+        {
+            kiapi::board::types::Arc value;
+            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            value.mutable_start()->set_x_nm( arc.GetP0().x ); value.mutable_start()->set_y_nm( arc.GetP0().y );
+            value.mutable_mid()->set_x_nm( arc.GetArcMid().x ); value.mutable_mid()->set_y_nm( arc.GetArcMid().y );
+            value.mutable_end()->set_x_nm( arc.GetP1().x ); value.mutable_end()->set_y_nm( arc.GetP1().y );
+            value.mutable_width()->set_value_nm( width );
+            value.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
+            value.mutable_net()->set_name( netName );
+            response.add_route_items()->PackFrom( value );
+        };
+        auto addVia = [&]( const PNS::VIA& via )
+        {
+            kiapi::board::types::Via value;
+            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            value.mutable_position()->set_x_nm( via.Pos().x ); value.mutable_position()->set_y_nm( via.Pos().y );
+            value.mutable_net()->set_name( netName );
+            value.set_type( ToProtoEnum<VIATYPE, kiapi::board::types::ViaType>( via.ViaType() ) );
+            auto* padStack = value.mutable_pad_stack();
+            padStack->set_type( kiapi::board::types::PST_NORMAL );
+            for( int layer = via.Layers().Start(); layer <= via.Layers().End(); ++layer )
+                padStack->add_layers( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( layer ) ) );
+            padStack->mutable_drill()->mutable_diameter()->set_x_nm( via.Drill() );
+            padStack->mutable_drill()->mutable_diameter()->set_y_nm( via.Drill() );
+            response.add_route_items()->PackFrom( value );
+        };
+        if( PNS::LINE::ClassOf( item ) )
+        {
+            auto* line = static_cast<PNS::LINE*>( item );
+            const SHAPE_LINE_CHAIN& chain = line->CLine();
+            std::set<size_t> emittedArcs;
+            for( size_t segment = 0; segment < chain.SegmentCount(); ++segment )
+            {
+                if( chain.IsArcSegment( segment ) )
+                {
+                    const size_t arcIndex = static_cast<size_t>( chain.ArcIndex( segment ) );
+                    if( emittedArcs.insert( arcIndex ).second ) addArc( chain.Arc( arcIndex ), line->Width(), line->Layers().Start() );
+                }
+                else
+                    addSegment( chain.CSegment( segment ).A, chain.CSegment( segment ).B, line->Width(), line->Layers().Start() );
+            }
+            if( line->EndsWithVia() ) addVia( line->Via() );
+        }
+        else if( PNS::SEGMENT::ClassOf( item ) )
+        {
+            auto* segment = static_cast<PNS::SEGMENT*>( item );
+            addSegment( segment->Seg().A, segment->Seg().B, segment->Width(), segment->Layer() );
+        }
+        else if( PNS::ARC::ClassOf( item ) )
+        {
+            auto* arc = static_cast<PNS::ARC*>( item );
+            addArc( arc->CArc(), arc->Width(), arc->Layer() );
+        }
+        else if( PNS::VIA::ClassOf( item ) )
+        {
+            addVia( *static_cast<PNS::VIA*>( item ) );
+        }
+    }
+    if( response.route_items_size() == 0 )
+        return tl::unexpected( RoutePreviewError( "The native router returned unsupported preview geometry" ) );
+    return response;
 }
 
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(

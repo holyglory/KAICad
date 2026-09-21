@@ -16,6 +16,40 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbRoutingTools(InstanceRegistry registry)
 {
+    [McpServerTool(Name = "kicad_pcb_route_preview", ReadOnly = true),
+     Description("Run KiCad's native push-and-shove single-track router on an explicit start item and waypoint sequence, then return typed Track/Arc/Via candidates without committing copper. The preview is revision-bound and read-only; use candidate validation and detached DRC before any separate mutation. Active native routing sessions are rejected rather than hijacked.")]
+    public Task<CallToolResult> Preview(string instanceId, string requestJson, string expectedStateJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var request = SchematicJson.Parser.Parse<StartPcbRoutePreview>(requestJson);
+        if (request.Document is null || request.Document.Type != DocumentType.DoctypePcb
+            || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ProcessEpoch))
+            throw new AutomationException("invalid_route_preview", "Supply an explicit PCB, process epoch and expected revision.");
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        if (!expected.Document.Equals(request.Document) || expected.Scope != DocumentLifecycleScope.DlsPcb
+            || expected.ProcessEpoch != request.ProcessEpoch)
+            throw new AutomationException("invalid_route_preview", "The preview request and lifecycle checkpoint target different native state.");
+        var result = await registry.Client(instanceId).InvokeAsync<StartPcbRoutePreview, PcbRoutePreviewState>(request, cancellationToken);
+        if (!result.Completed || result.NativeCommit || !result.PreviewOnly)
+            throw new AutomationException(string.IsNullOrWhiteSpace(result.ErrorCode) ? "route_preview_failed" : result.ErrorCode,
+                string.IsNullOrWhiteSpace(result.ErrorMessage) ? "Native routing preview did not complete." : result.ErrorMessage);
+        var candidate = new CreateItems { Header = new() { Document = request.Document } };
+        candidate.Items.Add(result.RouteItems);
+        var after = await registry.Client(instanceId).InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = request.Document }, cancellationToken);
+        if (!after.Equals(expected))
+            throw new AutomationException("route_preview_changed", "The board changed during native routing preview; discard the candidates.");
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, processEpoch = result.ProcessEpoch,
+            preview = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)),
+            candidateRequestJson = BoardJson.Formatter.Format(candidate),
+            beforeState = SchematicJson.Formatter.Format(expected), afterState = SchematicJson.Formatter.Format(after),
+            nativeRouter = true, nativeCommit = false, drcValidated = false
+        });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_pcb_route_geometry", ReadOnly = true),
      Description("Measure exact native PCB trace, arc and via geometry at one revision checkpoint. Returns net-grouped track length, arc length, layer usage, via transitions and object identities. An optional netName restricts the result. This is numerical routing feedback for placement, high-speed tuning and candidate comparison; it does not certify DRC, impedance, RF or electromagnetic performance and does not mutate the board.")]
     public Task<CallToolResult> Measure(string instanceId, string documentJson, string expectedStateJson,

@@ -219,6 +219,26 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(dryRun.WorkerFinished, "Detached candidate DRC did not reach a terminal state.");
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, dryRun.Status, dryRun.ErrorMessage);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+            var previewRequest = new StartPcbRoutePreview
+            {
+                Document = board, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch,
+                ExpectedRevision = dryRunState.Revision.Clone(), StartItemId = createdTrack.Id.Value,
+                Start = new() { XNm = 25_000_000, YNm = 10_000_000 }, Layer = BoardLayer.BlFCu,
+                ForceFinish = true
+            };
+            previewRequest.Waypoints.Add(new Vector2 { XNm = 28_000_000, YNm = 10_000_000 });
+            var routePreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(previewRequest), expectedStateJson = svgState
+            });
+            Assert.IsFalse(routePreview.TryGetProperty("isError", out var routePreviewError) && routePreviewError.GetBoolean(), routePreview.GetRawText());
+            var routePreviewData = routePreview.GetProperty("structuredContent");
+            Assert.IsTrue(routePreviewData.GetProperty("nativeRouter").GetBoolean());
+            Assert.IsFalse(routePreviewData.GetProperty("nativeCommit").GetBoolean());
+            Assert.IsFalse(routePreviewData.GetProperty("drcValidated").GetBoolean());
+            var previewCandidate = BoardJson.Parser.Parse<CreateItems>(routePreviewData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.IsTrue(previewCandidate.Items.Count > 0);
+            Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

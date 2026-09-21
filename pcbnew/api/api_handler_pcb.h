@@ -65,6 +65,8 @@ private:
     tl::expected<std::string, std::string> observeDrcAuxiliary( BOARD& aBoard );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleCancelDrcJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleRoutePreview(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbRoutePreview>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );

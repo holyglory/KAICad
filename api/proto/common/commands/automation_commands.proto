@@ -10,6 +10,7 @@ import "common/types/embedded_files.proto";
 import "google/protobuf/any.proto";
 import "schematic/schematic_types.proto";
 import "board/board_rules.proto";
+import "board/board_types.proto";
 
 message ReadPcbDrcState {
   kiapi.common.types.DocumentSpecifier document = 1;
@@ -160,6 +161,33 @@ message PcbDrcJobState {
   repeated string input_warnings = 17;
   bool candidate_dry_run = 18;
   repeated string candidate_item_ids = 19;
+}
+
+// Read-only native PNS route preview. The router operates on its in-memory
+// branch and returns typed candidates; no live board commit is performed.
+message StartPcbRoutePreview {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  DocumentRevision expected_revision = 4;
+  string start_item_id = 5;
+  kiapi.common.types.Vector2 start = 6;
+  repeated kiapi.common.types.Vector2 waypoints = 7;
+  kiapi.board.types.BoardLayer layer = 8;
+  bool force_finish = 9;
+}
+
+message PcbRoutePreviewState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentRevision checked_revision = 3;
+  string process_epoch = 4;
+  bool completed = 5;
+  string error_code = 6;
+  string error_message = 7;
+  repeated google.protobuf.Any route_items = 8;
+  bool preview_only = 9;
+  bool native_commit = 10;
 }
 
 message ReadSchematicMetadata {

@@ -550,9 +550,9 @@ public sealed class PsuCpuFixtureTests
     {
         Guid root = Guid.NewGuid();
         string At(params int[] symbols) => string.Join('/', symbols.Select(n => PsuCpuIds.Id(0x20, n).ToString("D")).Prepend(root.ToString("D")));
-        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root));
-        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root));
-        PsuCpuFixture.RequireSeedHierarchy(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root);
+        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root));
+        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root));
+        PsuCpuFixture.RequireSeedHierarchy(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root);
 
         void Mismatch(SchematicHierarchyData data, PsuCpuSeed seed, params string[] expected)
         {
@@ -562,16 +562,16 @@ public sealed class PsuCpuFixtureTests
         }
         Mismatch(new(), PsuCpuSeed.Sheets, "0 screens instead of 4", $"ROOT is not loaded at {At()}", $"CPU_POWER is not loaded at {At(3, 4)}");
         Mismatch(new(), PsuCpuSeed.RootOnly, "0 screens instead of 1", $"ROOT is not loaded at {At()}");
-        var paper = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        var paper = PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets);
         paper.Instances.Single(s => s.Metadata.ScreenId.Value == PsuCpuIds.Id(0x20, 6).ToString("D")).Metadata.Page.PageSize = PageSize.PsA4;
         Mismatch(paper, PsuCpuSeed.Sheets, "CPU paper differs");
-        Mismatch(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, "4 screens instead of 1");
-        Mismatch(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, "1 screens instead of 4", $"PSU is not loaded at {At(2)}");
-        Mismatch(SeedHierarchy(Guid.NewGuid(), PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, $"ROOT is not loaded at {At()}");
-        var screen = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        Mismatch(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, "4 screens instead of 1");
+        Mismatch(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, "1 screens instead of 4", $"PSU is not loaded at {At(2)}");
+        Mismatch(PsuCpuFixture.SeedHierarchy(Guid.NewGuid(), PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, $"ROOT is not loaded at {At()}");
+        var screen = PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets);
         screen.Instances.Single(s => s.Metadata.ScreenId.Value == PsuCpuIds.Id(0x20, 7).ToString("D")).Metadata.ScreenId.Value = Guid.NewGuid().ToString("D");
         Mismatch(screen, PsuCpuSeed.Sheets, "CPU_POWER screen identity differs");
-        var pinned = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        var pinned = PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets);
         var psu = pinned.Instances[0].Items[0].Unpack<SheetSymbol>();
         psu.Pins.Add(new SheetPin { Id = new() { Value = Guid.NewGuid().ToString("D") } });
         pinned.Instances[0].Items[0] = Any.Pack(psu);
@@ -583,12 +583,12 @@ public sealed class PsuCpuFixtureTests
     {
         Guid root = Guid.NewGuid();
         var token = CancellationToken.None;
-        var sheets = PsuCpuFixture.Baseline(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root, token);
+        var sheets = PsuCpuFixture.Baseline(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root, token);
         Assert.AreEqual(EngineeringDesignXml.Write(PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly), []), EngineeringDesignXml.Write(sheets.Engineering, []));
         CollectionAssert.AreEqual(Enumerable.Range(1, 4).Select(n => (PsuCpuIds.Id(0x05, n), string.Join('/', PsuCpuFixture.NativePath(n, root)))).ToArray(),
             sheets.SheetBindings.Select(b => (b.SheetInstanceId, string.Join('/', b.NativePath))).ToArray());
         Assert.IsTrue(sheets.SymbolBindings.Count == 0 && sheets.PartSymbols is null);
-        var rootOnly = PsuCpuFixture.Baseline(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root, token);
+        var rootOnly = PsuCpuFixture.Baseline(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root, token);
         Assert.AreEqual((PsuCpuIds.Id(0x05, 1), root), (rootOnly.SheetBindings.Single().SheetInstanceId, rootOnly.SheetBindings.Single().NativePath.Single()));
 
         void Unresolved(SchematicHierarchyData native, PsuCpuSeed seed, Guid instance, string expected)
@@ -597,11 +597,11 @@ public sealed class PsuCpuFixtureTests
             Code(error, "psu_cpu_baseline_unresolved");
             Assert.IsTrue(error.Message.Contains(expected, StringComparison.Ordinal), error.Message);
         }
-        Unresolved(new() { Document = SeedHierarchy(root, PsuCpuSeed.Sheets).Document }, PsuCpuSeed.Sheets, root, "native_missing_root");
-        Unresolved(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, root, "missing_native_sheet");
-        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, root, "unmapped_native_sheet");
-        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, Guid.NewGuid(), "missing_native_sheet");
-        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.None, root, "Seed None has no native baseline");
+        Unresolved(new() { Document = PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets).Document }, PsuCpuSeed.Sheets, root, "native_missing_root");
+        Unresolved(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, root, "missing_native_sheet");
+        Unresolved(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, root, "unmapped_native_sheet");
+        Unresolved(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, Guid.NewGuid(), "missing_native_sheet");
+        Unresolved(PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.None, root, "Seed None has no native baseline");
 
         // Seed None prepares no baseline, so neither a desired design nor recovery state can be made from it.
         var none = new PsuCpuNativeContext("unused", new(), root, PsuCpuSeed.None, [], null,
@@ -638,37 +638,6 @@ public sealed class PsuCpuFixtureTests
         }
         var data = new SchematicHierarchyData();
         data.Instances.Add(screen);
-        return data;
-    }
-
-    /// <summary>The loaded S1 "Sheets" (or S2 "RootOnly") hierarchy exactly as contract section 1.6.2
-    /// declares it, below the native-created root instance.</summary>
-    private static SchematicHierarchyData SeedHierarchy(Guid root, PsuCpuSeed seed)
-    {
-        KIID Id(Guid id) => new() { Value = id.ToString("D") };
-        KIID Native(int n) => Id(PsuCpuIds.Id(0x20, n));
-        var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new(), Project = new() { Name = "fixture", Path = "/fixture" } };
-        document.SheetPath.Path.Add(Id(root));
-        var data = new SchematicHierarchyData { Document = document.Clone() };
-        SchematicScreenData Screen(KIID[] path, int screen, PageSize paper)
-        {
-            var target = document.Clone(); target.SheetPath.Path.Clear(); target.SheetPath.Path.Add(path);
-            var result = new SchematicScreenData { Metadata = new() { Document = target, ScreenId = Native(screen), Page = new() { PageSize = paper } } };
-            data.Instances.Add(result);
-            return result;
-        }
-        SchematicField Field(string text) => new() { Text = new() { Text_ = text, Attributes = new() { Multiline = true } } };
-        void Sheet(SchematicScreenData parent, int symbol, int child, string name, string file, string page) =>
-            parent.Items.Add(Any.Pack(new SheetSymbol { Id = Native(symbol), ChildScreenId = Native(child), Path = parent.Metadata.Document.SheetPath.Clone(),
-                NameField = Field(name), FilenameField = Field(file), PageNumber = page }));
-        var top = Screen([Id(root)], 1, PageSize.PsA4);
-        if (seed == PsuCpuSeed.RootOnly) return data;
-        Sheet(top, 2, 5, "PSU", "psu.kicad_sch", "2");
-        Sheet(top, 3, 6, "CPU", "cpu.kicad_sch", "3");
-        Screen([Id(root), Native(2)], 5, PageSize.PsA4);
-        var cpu = Screen([Id(root), Native(3)], 6, PageSize.PsA3);
-        Sheet(cpu, 4, 7, "CPU_POWER", "cpu_power.kicad_sch", "4");
-        Screen([Id(root), Native(3), Native(4)], 7, PageSize.PsA4);
         return data;
     }
 

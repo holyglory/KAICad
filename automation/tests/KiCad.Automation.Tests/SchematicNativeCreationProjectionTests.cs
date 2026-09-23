@@ -337,8 +337,6 @@ public sealed class SchematicNativeCreationProjectionTests
     internal static (SchematicDesign Baseline, SchematicDesign Desired) PsuCpuComponents()
     {
         Guid root = Guid.NewGuid();
-        // The copied S1 builder must stay exactly the contract seed (§1.6.2), not only bind to the model.
-        PsuCpuFixture.RequireSeedHierarchy(PsuCpuSheets(root), PsuCpuSeed.Sheets, root);
         var baseline = PsuCpuFixture.Baseline(PsuCpuSheets(root), PsuCpuSeed.Sheets, root, CancellationToken.None);
         var engineering = PsuCpuFixture.Engineering(PsuCpuStage.Components);
         // Explicit grid placements: the rendered journeys measure real layout; this checks identity.
@@ -379,35 +377,8 @@ public sealed class SchematicNativeCreationProjectionTests
         })];
     }
 
-    /// <summary>The loaded S1 "Sheets" seed of contract §1.6.2 below a native-created root instance:
-    /// ROOT holds the PSU and CPU sheet symbols and CPU holds CPU_POWER.</summary>
-    private static SchematicHierarchyData PsuCpuSheets(Guid root)
-    {
-        KIID Id(Guid id) => new() { Value = id.ToString("D") };
-        KIID Native(int n) => Id(PsuCpuIds.Id(0x20, n));
-        var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new(), Project = new() { Name = "fixture", Path = "/fixture" } };
-        document.SheetPath.Path.Add(Id(root));
-        var data = new SchematicHierarchyData { Document = document.Clone() };
-        SchematicScreenData Screen(KIID[] path, int screen, PageSize paper)
-        {
-            var target = document.Clone(); target.SheetPath.Path.Clear(); target.SheetPath.Path.Add(path);
-            var result = new SchematicScreenData { Metadata = new() { Document = target, ScreenId = Native(screen), Page = new() { PageSize = paper } } };
-            data.Instances.Add(result);
-            return result;
-        }
-        SchematicField Text(string text) => new() { Text = new() { Text_ = text, Attributes = new() { Multiline = true } } };
-        void Sheet(SchematicScreenData parent, int symbol, int child, string name, string file, string page) =>
-            parent.Items.Add(Any.Pack(new SheetSymbol { Id = Native(symbol), ChildScreenId = Native(child), Path = parent.Metadata.Document.SheetPath.Clone(),
-                NameField = Text(name), FilenameField = Text(file), PageNumber = page }));
-        var top = Screen([Id(root)], 1, PageSize.PsA4);
-        Sheet(top, 2, 5, "PSU", "psu.kicad_sch", "2");
-        Sheet(top, 3, 6, "CPU", "cpu.kicad_sch", "3");
-        Screen([Id(root), Native(2)], 5, PageSize.PsA4);
-        var cpu = Screen([Id(root), Native(3)], 6, PageSize.PsA3);
-        Sheet(cpu, 4, 7, "CPU_POWER", "cpu_power.kicad_sch", "4");
-        Screen([Id(root), Native(3), Native(4)], 7, PageSize.PsA4);
-        return data;
-    }
+    /// <summary>The loaded S1 "Sheets" seed of contract §1.6.2 below a native-created root instance.</summary>
+    private static SchematicHierarchyData PsuCpuSheets(Guid root) => PsuCpuFixture.SeedHierarchy(root, PsuCpuSeed.Sheets);
 
     internal static EngineeringDesign AddComponent(SchematicDesign baseline, bool coordinateFree = false)
     {

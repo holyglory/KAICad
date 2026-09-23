@@ -19,6 +19,13 @@ public sealed partial class NativeSessionTests
         string display, string evidence, string instanceId, CancellationToken token)
         => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
 
+    // Creation-only PSU/CPU journey on the S1 seed: the fixture's Components stage,
+    // including U5 unit 4 on CPU_POWER, created from XML without nets.
+    // Lane 2A replaces this body when it delivers the journey.
+    private static Task VerifyPsuCpuComponentCreation(NativeClient client, PsuCpuNativeContext context, int processId,
+        string display, string evidence, string instanceId, CancellationToken token)
+        => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
+
     private static async Task VerifyXmlComponentCreation(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, bool interruptAfterNativeEdit, CancellationToken token)
     {

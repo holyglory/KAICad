@@ -81,6 +81,7 @@ public static class SchematicConnectionErrors
     public const string SymbolRebindingRequiresResolution = "symbol_rebinding_requires_resolution";
     public const string SymbolOwnerRequiresResolution = "symbol_owner_requires_resolution";
     public const string ComponentUnitsIncomplete = "component_units_incomplete";
+    public const string CreatedUnitSheetCoverageMismatch = "created_unit_sheet_coverage_mismatch";
     public const string SharedSymbolPlacementConflict = "shared_symbol_placement_conflict";
     public const string CreatedNativeIdentityCollision = "created_native_identity_collision";
     public const string MissingNativeSheet = "missing_native_sheet";

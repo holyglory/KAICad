@@ -67,6 +67,9 @@ public sealed partial class NativeSessionTests
         Key("Tab", add); // Unknown reason remains absent for these supplied fixture values.
         Key("Tab", add); Key("Down", add); // Percent tolerance.
         Key("Tab", add); Type("5", add); Key("Tab", add); Type("5", add);
+        NativeKeyboard.SchematicShortcut(display, processId, "", add, false, false, observeGeometry: bounds =>
+            Assert.IsTrue(bounds.X >= 0 && bounds.Y >= 0 && bounds.X + bounds.Width <= 1600 && bounds.Y + bounds.Height <= 1150,
+                "The complete property form and its buttons must remain within the fixture display."));
         await CaptureStructural(display, Path.Combine(evidence, instanceId + "-quantity-dialog.png"), token);
         Ok(add); await Window(add, false);
         var created = await Wait(s => s.Document.Diagram.Properties.Any(p => p.OwnerId == owner && p.Key == "Supply"));

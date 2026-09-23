@@ -11,6 +11,7 @@
 #include <wx/dcbuffer.h>
 #include <wx/dataview.h>
 #include <wx/dialog.h>
+#include <wx/display.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
@@ -472,22 +473,25 @@ void STRUCTURAL_EDITOR_FRAME::addProperty( const std::string& propertyId )
             if( property.id() == propertyId && property.owner_id() == m_selected ) draft = property;
         if( draft.id().empty() ) return;
     }
-    wxDialog dialog( this, wxID_ANY, editing ? _( "Edit custom property" ) : _( "Add custom property" ) );
+    wxDialog dialog( this, wxID_ANY, editing ? _( "Edit custom property" ) : _( "Add custom property" ),
+                     wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER );
+    auto* form = new wxScrolledWindow( &dialog, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL | wxTAB_TRAVERSAL );
+    form->SetScrollRate( 0, 10 );
     auto* sizer = new wxBoxSizer( wxVERTICAL );
-    auto* name = new wxTextCtrl( &dialog, wxID_ANY ); auto* value = new wxTextCtrl( &dialog, wxID_ANY, {}, wxDefaultPosition, wxSize( 330, 90 ), wxTE_MULTILINE );
+    auto* name = new wxTextCtrl( form, wxID_ANY ); auto* value = new wxTextCtrl( form, wxID_ANY, {}, wxDefaultPosition, wxSize( 330, 90 ), wxTE_MULTILINE );
     name->ChangeValue( text( draft.key() ) ); value->ChangeValue( text( draft.text() ) );
-    sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Name" ) ), 0, wxALL, 8 ); sizer->Add( name, 0, wxEXPAND | wxALL, 8 );
-    sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Value or instruction" ) ), 0, wxALL, 8 ); sizer->Add( value, 1, wxEXPAND | wxALL, 8 );
-    auto* strength = new wxChoice( &dialog, wxID_ANY );
+    sizer->Add( new wxStaticText( form, wxID_ANY, _( "Name" ) ), 0, wxALL, 8 ); sizer->Add( name, 0, wxEXPAND | wxALL, 8 );
+    sizer->Add( new wxStaticText( form, wxID_ANY, _( "Value or instruction" ) ), 0, wxALL, 8 ); sizer->Add( value, 0, wxEXPAND | wxALL, 8 );
+    auto* strength = new wxChoice( form, wxID_ANY );
     strength->Append( _( "Information" ) ); strength->Append( _( "Preference" ) ); strength->Append( _( "Requirement" ) );
     strength->SetSelection( editing ? draft.strength() : 0 );
     sizer->Add( strength, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8 );
-    sizer->Add( new wxStaticText( &dialog, wxID_ANY, _( "Applies when" ) ), 0, wxLEFT | wxRIGHT, 8 );
-    auto* applicability = new wxTextCtrl( &dialog, wxID_ANY, text( draft.applicability() ) );
+    sizer->Add( new wxStaticText( form, wxID_ANY, _( "Applies when" ) ), 0, wxLEFT | wxRIGHT, 8 );
+    auto* applicability = new wxTextCtrl( form, wxID_ANY, text( draft.applicability() ) );
     sizer->Add( applicability, 0, wxEXPAND | wxALL, 8 );
-    auto* numeric = new wxCheckBox( &dialog, wxID_ANY, _( "Numeric value" ) ); numeric->SetValue( draft.has_quantity() );
+    auto* numeric = new wxCheckBox( form, wxID_ANY, _( "Numeric value" ) ); numeric->SetValue( draft.has_quantity() );
     sizer->Add( numeric, 0, wxLEFT | wxRIGHT | wxTOP, 8 );
-    auto* numbers = new wxPanel( &dialog ); auto* grid = new wxFlexGridSizer( 2, 6, 8 ); grid->AddGrowableCol( 1 );
+    auto* numbers = new wxPanel( form ); auto* grid = new wxFlexGridSizer( 2, 6, 8 ); grid->AddGrowableCol( 1 );
     auto quantityField = [&]( const wxString& label, const std::string& initial )
     {
         grid->Add( new wxStaticText( numbers, wxID_ANY, label ), 0, wxALIGN_CENTER_VERTICAL );
@@ -509,8 +513,25 @@ void STRUCTURAL_EDITOR_FRAME::addProperty( const std::string& propertyId )
     auto* minus = quantityField( _( "Minus tolerance" ), q.has_tolerance() ? q.tolerance().minus() : "" );
     auto* plus = quantityField( _( "Plus tolerance" ), q.has_tolerance() ? q.tolerance().plus() : "" );
     numbers->SetSizer( grid ); sizer->Add( numbers, 0, wxEXPAND | wxALL, 8 ); numbers->Show( numeric->GetValue() );
-    numeric->Bind( wxEVT_CHECKBOX, [&]( wxCommandEvent& ) { numbers->Show( numeric->GetValue() ); dialog.GetSizer()->Fit( &dialog ); dialog.Layout(); } );
-    sizer->Add( dialog.CreateStdDialogButtonSizer( wxOK | wxCANCEL ), 0, wxEXPAND | wxALL, 8 ); dialog.SetSizerAndFit( sizer ); name->SetFocus();
+    form->SetSizer( sizer );
+    auto* root = new wxBoxSizer( wxVERTICAL ); root->Add( form, 1, wxEXPAND );
+    auto* buttons = dialog.CreateStdDialogButtonSizer( wxOK | wxCANCEL ); root->Add( buttons, 0, wxEXPAND | wxALL, 8 );
+    dialog.SetSizer( root );
+    auto fitDialog = [&]
+    {
+        form->FitInside();
+        wxDisplay display( this );
+        wxRect available = display.IsOk() ? display.GetClientArea() : wxGetClientDisplayRect();
+        wxSize best = sizer->GetMinSize();
+        dialog.SetSize( std::min( best.x + 24, available.width - 24 ),
+                        std::min( best.y + buttons->GetMinSize().y + 40, available.height - 24 ) );
+        dialog.Layout(); form->FitInside(); dialog.CentreOnParent();
+        wxPoint position = dialog.GetPosition(); wxSize size = dialog.GetSize();
+        dialog.Move( std::clamp( position.x, available.x, available.GetRight() - size.x + 1 ),
+                     std::clamp( position.y, available.y, available.GetBottom() - size.y + 1 ) );
+    };
+    numeric->Bind( wxEVT_CHECKBOX, [&]( wxCommandEvent& ) { numbers->Show( numeric->GetValue() ); fitDialog(); } );
+    fitDialog(); name->SetFocus();
     dialog.Bind( wxEVT_BUTTON, [&]( wxCommandEvent& )
     {
         if( name->GetValue().Strip( wxString::both ).empty() || value->GetValue().Strip( wxString::both ).empty() )

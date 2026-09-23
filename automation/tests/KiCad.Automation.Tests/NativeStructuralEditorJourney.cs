@@ -65,6 +65,11 @@ public sealed partial class NativeSessionTests
                 d => d.Connections[0].Direction = (P.StructuralLinkDirection)999,
                 d => d.Presentation.Blocks[0].WidthNm = -100,
                 d => d.Presentation.Blocks[0].Position.XNm = long.MaxValue,
+                d => d.Properties.Add(new P.StructuralPropertyData { Id = Guid.NewGuid().ToString("D"), OwnerId = d.Blocks[0].Id,
+                    Key = "Invalid", Text = "Invalid enum fixture", Strength = (P.StructuralGuidanceStrength)999 }),
+                d => d.Properties.Add(new P.StructuralPropertyData { Id = Guid.NewGuid().ToString("D"), OwnerId = d.Blocks[0].Id,
+                    Key = "Invalid", Text = "Invalid quantity fixture", Strength = P.StructuralGuidanceStrength.SgsInformation,
+                    Quantity = new() { Kind = (P.StructuralParameterKind)999, Unit = "V", Nominal = "3.3" } }),
             })
             {
                 var malformed = admitted.Document.Clone(); corrupt(malformed.Diagram);
@@ -105,12 +110,8 @@ public sealed partial class NativeSessionTests
             }
             void AddProperty()
             {
-                // Use the native focus order: Name -> Purpose -> strength ->
-                // instruction text -> Add custom property. The optional
-                // instruction chooser has just been hidden by Undo.
-                Key("click", x: 180, y: 160);
-                for (int tab = 0; tab < 4; tab++) Key("Tab");
-                Key("Return");
+                // Native mnemonic stays usable as the property list grows.
+                NativeKeyboard.SchematicShortcut(display, processId, "a", "Structure", false, false, altKey: true);
             }
             async Task Save()
             {

@@ -83,6 +83,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<InstanceUpdateTools>()
     .WithTools<EventTools>()
     .WithTools<SchematicViewTools>()
+    .WithTools<RecoveryObservationTools>()
     .WithTools<StructuralEditorTools>()
     .WithTools<RecursiveEditorTools>()
     .WithTools<SchematicMutationTools>()

@@ -390,10 +390,14 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
             session.set_instance_id( m_automationInstanceId );
             session.set_project_path( m_automationProjectPath );
             session.set_epoch( m_token );
-            session.set_capability_format( kiapi::automation::v1::NCP_REGISTERED_REQUEST_TYPES );
 
+            // Named feature contracts, each listed only when the whole feature works in this build.
+            session.add_capabilities( "session.info" );
+            session.add_capabilities( "version.read" );
+
+            // The individual requests this process dispatches right now.
             for( const std::string& type : AdvertisedRequestTypes() )
-                session.add_capabilities( type );
+                session.add_handled_requests( type );
 
             session.set_event_endpoint( m_eventEndpoint );
             session.set_event_epoch( m_eventEpoch );

@@ -83,7 +83,8 @@ public:
      * The fully qualified request message types that this server dispatches at this moment, in
      * ordinal order: its own session handshake, the automation controllers and every registered
      * handler.  Editors register their handlers when they open and remove them when they close,
-     * so the list is a snapshot of the current process state, not of the build.
+     * so the list is a snapshot of the current process state, not of the build.  The automation
+     * handshake publishes it as handled_requests.
      */
     std::vector<std::string> AdvertisedRequestTypes() const;
 

@@ -406,8 +406,16 @@ message AutomationSession {
   // -- lane 2C (300-399) --
   // -- end lane 2C --
   // -- lane 2D (400-499) --
-  // Says what capabilities lists. Peers built before this field send NCP_LEGACY_LABELS.
-  NativeCapabilityFormat capability_format = 400;
+  // 400 held a format marker for capabilities during lane 2D development and is not reused.
+  reserved 400;
+  reserved "capability_format";
+  // The fully qualified request message types this process dispatches at the time of the reply,
+  // in ordinal order, read from its registered handlers and automation controllers. Editors add
+  // their types when they open and remove them when they close. A dispatched request can still be
+  // rejected for its target, its arguments or the editor's state. capabilities (5) keeps the named
+  // feature contracts. A peer that answers this handshake always dispatches GetAutomationSession,
+  // so an empty list means a peer built before this field, whose request coverage is unknown.
+  repeated string handled_requests = 401;
   // -- end lane 2D --
 }
 
@@ -1011,14 +1019,4 @@ message SchematicOperationReceipt {
 // == end ==
 
 // == lane 2D messages ==
-// NCP_LEGACY_LABELS: capabilities holds fixed descriptive labels (session.info, version.read)
-// that identify no handler. NCP_REGISTERED_REQUEST_TYPES: capabilities holds, in ordinal order,
-// the fully qualified request message types this process dispatches at the time of the reply,
-// read from its registered handlers. Editors add their types when they open and remove them
-// when they close. A dispatched request can still be rejected for its target, its arguments or
-// the editor's state.
-enum NativeCapabilityFormat {
-  NCP_LEGACY_LABELS = 0;
-  NCP_REGISTERED_REQUEST_TYPES = 1;
-}
 // == end ==

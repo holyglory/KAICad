@@ -87,7 +87,7 @@ public sealed class CapabilityCatalogTests
             .Select(file => new VerificationEvidenceRules.Source(Path.GetFileName(file), File.ReadAllText(file))).ToArray();
         var problems = new List<string>();
         var declared = new Dictionary<string, KiCadCapabilityAttribute>(StringComparer.Ordinal);
-        int checkedClaims = 0;
+        var checkedNames = new List<string>();
         foreach (var method in typeof(InstanceTools).Assembly.GetTypes().SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)))
         {
             if (method.GetCustomAttribute<McpServerToolAttribute>() is not { Name: { } name }) continue;
@@ -104,9 +104,9 @@ public sealed class CapabilityCatalogTests
             if (verification is null) continue;
             if (capability is null) problems.Add($"{name} declares verification without its capability.");
             problems.AddRange(VerificationEvidenceRules.Check(name, verification.Level, verification.Evidence, sources, IsTestMethod));
-            checkedClaims++;
+            checkedNames.Add(name);
         }
-        Assert.IsGreaterThanOrEqualTo(DeclaredToolNames().Length, checkedClaims, "Every lane 2D tool claim must be checked.");
+        CollectionAssert.IsSubsetOf(DeclaredToolNames(), checkedNames, "Every lane 2D tool claim must be checked.");
         var rows = ServiceCapabilities.Registered;
         foreach (var duplicate in rows.GroupBy(r => r.Name).Where(g => g.Count() > 1))
             problems.Add($"Transitional capability row {duplicate.Key} is repeated.");
@@ -136,12 +136,55 @@ public sealed class CapabilityCatalogTests
             new("SampleNativeJourney.cs", $$"""
                 public sealed partial class {{native}}
                 {
+                    [TestMethod]
+                    public Task Foundation() => RunNativeSessions(NativeJourney.Foundation);
+
+                    [TestMethod]
+                    public Task Stubbed() => RunNativeSessions(NativeJourney.Stubbed);
+
+                    [TestMethod]
+                    public Task Defaulted(string theme) => RunNativeSessions(NativeJourney.Defaulted, theme);
+
+                    [TestMethod]
+                    public Task Delivered() => RunNativeSessions(NativeJourney.Delivered);
+
                     async Task Journey()
                     {
                         await Call("sample_attach", new { });
                         await mcp!.Tool("sample_close", new { });
                         var opened = await Open(endpoint, openTool: "sample_open");
+                        string endpoint = "ipc:///tmp/sample.sock"; await Call("sample_after_url", new { });
+                        // await Call("sample_commented", new { });
+                        /* await mcp!.Tool("sample_block_commented", new { }); */
+                        string toolName = "sample_local";
                     }
+
+                    private static Task Create(string endpoint, CancellationToken token,
+                        string toolName = "sample_default") => Task.CompletedTask;
+
+                    private static async Task RunLaneJourney(NativeJourney journey)
+                    {
+                        var seed = journey switch
+                        {
+                            NativeJourney.Stubbed or NativeJourney.Delivered or NativeJourney.Defaulted => Seed.Sheets,
+                            _ => throw new ArgumentOutOfRangeException(nameof(journey))
+                        };
+                        await (journey switch
+                        {
+                            NativeJourney.Stubbed => VerifyStubbed(seed),
+                            NativeJourney.Delivered => VerifyDelivered(seed),
+                            _ => VerifyDefaulted(seed)
+                        });
+                    }
+
+                    // Lane 2X replaces this body when it delivers the journey.
+                    private static Task VerifyStubbed(Seed seed)
+                        => throw new AssertInconclusiveException("Phase 2 lane 2X has not delivered this journey");
+
+                    private static Task VerifyDefaulted(Seed seed)
+                        => throw new AssertInconclusiveException("Phase 2 lane 2X has not delivered this journey");
+
+                    private static async Task VerifyDelivered(Seed seed) => await Call("sample_delivered", new { });
                 }
                 """),
             new("SampleStdioTests.cs", """
@@ -154,6 +197,9 @@ public sealed class CapabilityCatalogTests
                         string[] required = ["sample_listed", "sample_other", "sample_third"];
                         var listed = await Request(3, "tools/call", new { name = "sample_list", arguments = new { } });
                         var inspected = await mcp.Tool("sample_inspect", new { });
+                        string expectedTool = "sample_assigned";
+                        var described = new { tool = "sample_member", toolName = "sample_member" };
+                        // var commented = await mcp.Tool("sample_stdio_commented", new { });
                     }
                 }
                 """),
@@ -164,7 +210,8 @@ public sealed class CapabilityCatalogTests
                 }
                 """)
         ];
-        string[] tests = [native + ".Foundation", "SampleStdioTests.Run", "SampleUnitTests.Run"];
+        string[] tests = [native + ".Foundation", native + ".Stubbed", native + ".Defaulted", native + ".Delivered",
+            "SampleStdioTests.Run", "SampleUnitTests.Run"];
         IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, params string[] evidence) =>
             VerificationEvidenceRules.Check(tool, level, evidence, sources, (type, method) => tests.Contains(type + "." + method));
         string foundation = native + ".Foundation";
@@ -172,10 +219,14 @@ public sealed class CapabilityCatalogTests
         // Must not flag: real calls where the claim puts them.
         Assert.IsEmpty(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation));
         Assert.IsEmpty(Check("sample_open", KiCadVerificationLevel.McpNativeJourney, foundation), "A named tool argument of a journey helper is a call site.");
+        Assert.IsEmpty(Check("sample_default", KiCadVerificationLevel.McpNativeJourney, foundation), "A helper's default tool parameter is a call site.");
+        Assert.IsEmpty(Check("sample_after_url", KiCadVerificationLevel.McpNativeJourney, foundation), "A // inside a string is not a comment.");
         Assert.IsEmpty(Check("sample_close", KiCadVerificationLevel.NativeJourney, foundation));
         Assert.IsEmpty(Check("sample_list", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run"));
         Assert.IsEmpty(Check("sample_inspect", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run"));
         Assert.IsEmpty(Check("sample_unit", KiCadVerificationLevel.InProcess, "SampleUnitTests.Run"));
+        // A delivered journey of the same dispatch switch is real evidence.
+        Assert.IsEmpty(Check("sample_delivered", KiCadVerificationLevel.McpNativeJourney, native + ".Delivered"));
 
         // Must catch: an STDIO-only call backing a native claim (the removed-journey case).
         StringAssert.Contains(Check("sample_list", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "no NativeSessionTests journey calls it");
@@ -183,9 +234,27 @@ public sealed class CapabilityCatalogTests
         // A native claim that cites no native journey.
         Assert.IsTrue(Check("sample_list", KiCadVerificationLevel.McpNativeJourney, "SampleStdioTests.Run").Any(p => p.Contains("without citing")));
         Assert.IsTrue(Check("sample_close", KiCadVerificationLevel.NativeJourney, "SampleUnitTests.Run").Any(p => p.Contains("without citing")));
-        // A name that is only listed or asserted is not a call.
+        // A journey that is still an Inconclusive lane stub proves nothing, whether its switch arm
+        // names it or the default arm reaches it, and it does not count as citing a journey.
+        foreach (string stub in new[] { native + ".Stubbed", native + ".Defaulted" })
+        {
+            var stubbed = Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, stub);
+            Assert.IsTrue(stubbed.Any(p => p.Contains("Inconclusive lane stub") && p.Contains(stub)), string.Join(Environment.NewLine, stubbed));
+            Assert.IsTrue(stubbed.Any(p => p.Contains("without citing")), string.Join(Environment.NewLine, stubbed));
+            Assert.IsTrue(Check("sample_close", KiCadVerificationLevel.NativeJourney, stub).Any(p => p.Contains("Inconclusive lane stub")));
+            // Citing a real journey beside the stub still reports the stub.
+            StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation, stub).Single(), "Inconclusive lane stub");
+        }
+        // A name that is only listed, asserted, assigned or used as an object member is not a call.
         StringAssert.Contains(Check("sample_listed", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_listed");
         StringAssert.Contains(Check("sample_other", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_other");
+        StringAssert.Contains(Check("sample_assigned", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_assigned");
+        StringAssert.Contains(Check("sample_member", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_member");
+        StringAssert.Contains(Check("sample_local", KiCadVerificationLevel.McpNativeJourney, foundation).Single(), "no NativeSessionTests journey calls it");
+        // A commented-out call is not a call.
+        StringAssert.Contains(Check("sample_stdio_commented", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_stdio_commented");
+        StringAssert.Contains(Check("sample_commented", KiCadVerificationLevel.McpNativeJourney, foundation).Single(), "no NativeSessionTests journey calls it");
+        StringAssert.Contains(Check("sample_block_commented", KiCadVerificationLevel.McpNativeJourney, foundation).Single(), "no NativeSessionTests journey calls it");
         // A cited class that does not start the compiled server, or never calls the tool.
         StringAssert.Contains(Check("sample_unit", KiCadVerificationLevel.McpProcess, "SampleUnitTests.Run")[0], "does not start the compiled MCP STDIO server");
         StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "never calls sample_attach");
@@ -194,24 +263,31 @@ public sealed class CapabilityCatalogTests
         StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney).Single(), "without evidence");
     }
 
-    // Isolated format rule: older or newer native peers cannot be produced by this build, so the
-    // fail-closed mapping of their handshake is checked directly.
+    // Isolated mapping rule: a KiCad built before handled_requests cannot be produced by this build,
+    // so the fail-closed reading of its handshake is checked directly. The live half runs in the
+    // Foundation journey (McpReattachmentJourney).
     [TestMethod]
-    public void OnlyTheRegisteredRequestFormatIsReportedAsHandlers()
+    public void OlderKiCadBuildsReportUnknownRequestCoverageNeverHandlers()
     {
-        var registered = CapabilityCatalog.Native(new AutomationSession
+        string[] features = ["session.info", "version.read"];
+        string[] requests = ["kiapi.automation.v1.GetAutomationSession", "kiapi.common.commands.GetVersion"];
+        var current = CapabilityCatalog.Native(new AutomationSession { Capabilities = { features }, HandledRequests = { requests } });
+        CollectionAssert.AreEqual(features, current.Features.ToArray());
+        Assert.AreEqual(CapabilityCatalog.HandledRequestCoverage, current.RequestCoverage);
+        CollectionAssert.AreEqual(requests, current.Requests!.Select(r => r.Name).ToArray());
+        Assert.IsTrue(current.Requests!.All(r => r.Availability == "handler-registered"));
+
+        // A released build lists only feature labels; the interim lane build listed request types in
+        // capabilities. Neither says which requests it dispatches, so neither is reported as handlers.
+        foreach (string[] labels in new[] { features, requests })
         {
-            CapabilityFormat = NativeCapabilityFormat.NcpRegisteredRequestTypes,
-            Capabilities = { "kiapi.automation.v1.GetAutomationSession", "kiapi.common.commands.GetVersion" }
-        });
-        Assert.AreEqual("registered-request-types", registered.Format);
-        Assert.IsTrue(registered.Requests.All(r => r.Availability == "handler-registered"));
-        var legacy = CapabilityCatalog.Native(new AutomationSession { Capabilities = { "session.info", "version.read" } });
-        Assert.AreEqual("legacy-labels", legacy.Format);
-        CollectionAssert.AreEqual(new[] { "legacy-label", "legacy-label" }, legacy.Requests.Select(r => r.Availability).ToArray());
-        var future = CapabilityCatalog.Native(new AutomationSession { CapabilityFormat = (NativeCapabilityFormat)7, Capabilities = { "x" } });
-        Assert.AreEqual("unrecognized", future.Format);
-        Assert.AreEqual("unrecognized", future.Requests.Single().Availability);
+            var older = CapabilityCatalog.Native(new AutomationSession { Capabilities = { labels } });
+            CollectionAssert.AreEqual(labels, older.Features.ToArray());
+            Assert.AreEqual(CapabilityCatalog.UnknownRequestCoverage, older.RequestCoverage);
+            Assert.IsNull(older.Requests, "Unknown request coverage is not an empty handler list.");
+            var published = JsonSerializer.SerializeToElement(older, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            Assert.AreEqual(JsonValueKind.Null, published.GetProperty("requests").ValueKind, published.GetRawText());
+        }
     }
 
     private static string[] DeclaredToolNames() => DeclaredToolTypes
@@ -288,9 +364,12 @@ internal static class CapabilityCatalogAssertions
 /// <summary>
 /// Ties a tool's declared verification to the test sources of the classes it cites. A call is the
 /// tool's name passed to an MCP client (Tool, Call, CallToolAsync), sent as a raw tools/call request,
-/// or given to a journey helper as a named tool argument; a listed or asserted name is not a call.
-/// NativeSessionTests is the Linux native session fixture: its partial sources are the journeys that
-/// drive a real KiCad. The check is per class, not per method.
+/// given to a journey helper as a named tool argument (openTool: "name"), or the default value of a
+/// helper's tool parameter (string toolName = "name"). A listed, asserted or assigned name is not a
+/// call, and comments are removed before matching. NativeSessionTests is the Linux native session
+/// fixture: its partial sources are the journeys that drive a real KiCad. A cited NativeSessionTests
+/// method whose RunNativeSessions(NativeJourney.X) journey reaches an Inconclusive lane stub through
+/// a dispatch switch is rejected. The call check is per class, not per method.
 /// </summary>
 internal static class VerificationEvidenceRules
 {
@@ -301,17 +380,34 @@ internal static class VerificationEvidenceRules
     private static readonly Regex ClassDeclaration = new(
         @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file)\s+)*class\s+(\w+)", RegexOptions.Multiline);
     private static readonly Regex StartsCompiledServer = new(@"StdioMcpFixture\.StartAsync\(|""kicad-mcp\.dll""");
+    // A test method that runs one native journey: Name(...) => RunNativeSessions(NativeJourney.X...).
+    private static readonly Regex JourneyTest = new(@"\b(?<method>\w+)\s*\([^()]*\)\s*=>\s*RunNativeSessions\s*\(\s*NativeJourney\.(?<journey>\w+)");
+    // A journey body that only ends Inconclusive: the lane stubs of the shared fixture.
+    private static readonly Regex InconclusiveStub = new(
+        @"\b(?:Task(?:<[^<>()]*>)?|void)\s+(?<method>\w+)\s*\([^()]*\)\s*(?:=>|\{)\s*(?:throw\s+new\s+AssertInconclusiveException|Assert\.Inconclusive)\s*\(");
+    // Members start with an access modifier; local functions and lambdas never do.
+    private static readonly Regex MemberStart = new(@"^[ \t]*(?:public|private|internal|protected)\b", RegexOptions.Multiline);
+    private static readonly Regex SwitchStart = new(@"\bswitch\s*\{");
+    private static readonly Regex SwitchArm = new(
+        @"(?<pattern>NativeJourney\.\w+(?:\s+or\s+NativeJourney\.\w+)*|(?<![\w.])_)\s*=>\s*(?:(?:\w+\.)*(?<target>\w+)\s*\()?");
+    private static readonly Regex JourneyName = new(@"NativeJourney\.(\w+)");
+    // The sources are analysed once per source set, not once per checked claim.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<Source>, Analysis> Analyses = new();
+
+    // Classes by name with their comment-free sources, and each NativeSessionTests method whose
+    // journey is an Inconclusive lane stub, with that journey.
+    private sealed record Analysis(IReadOnlyDictionary<string, Source[]> Classes, IReadOnlyDictionary<string, string> StubbedTests);
 
     internal static IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, IReadOnlyList<string> evidence,
         IReadOnlyList<Source> sources, Func<string, string, bool> isTestMethod)
     {
         var problems = new List<string>();
         if (evidence.Count == 0) return [$"{tool} declares verification without evidence."];
-        var classes = sources.SelectMany(source => ClassDeclaration.Matches(source.Text).Select(match => (Name: match.Groups[1].Value, Source: source)))
-            .GroupBy(entry => entry.Name, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Select(entry => entry.Source).Distinct().ToArray(), StringComparer.Ordinal);
+        var (classes, stubbedTests) = Analyses.GetValue(sources, Analyse);
+        var nativeSources = classes.GetValueOrDefault(NativeJourneyClass) ?? [];
         string name = Regex.Escape(tool);
-        var call = new Regex($@"(?:\bTool|\bCall|\bCallToolAsync)\(\s*""{name}""|""tools/call""\s*,\s*new\s*\{{\s*name\s*=\s*""{name}""|\b\w*[Tt]ool\w*\s*[:=]\s*""{name}""");
+        var call = new Regex($@"(?:\bTool|\bCall|\bCallToolAsync)\(\s*""{name}""|""tools/call""\s*,\s*new\s*\{{\s*name\s*=\s*""{name}""" +
+            $@"|\b\w*[Tt]ool\w*\s*:\s*""{name}""|[(,]\s*string\??\s+\w*[Tt]ool\w*\s*=\s*""{name}""\s*(?=[,)])");
         bool citesNative = false, stdioCall = false;
         foreach (string item in evidence)
         {
@@ -321,7 +417,13 @@ internal static class VerificationEvidenceRules
                 problems.Add($"{tool} cites {item}, which is not a test method in KiCad.Automation.Tests.");
                 continue;
             }
-            if (parts[0] == NativeJourneyClass) { citesNative = true; continue; }
+            if (parts[0] == NativeJourneyClass)
+            {
+                if (stubbedTests.GetValueOrDefault(parts[1]) is { } stub)
+                    problems.Add($"{tool} cites {item}, whose journey NativeJourney.{stub} is still an Inconclusive lane stub.");
+                else citesNative = true;
+                continue;
+            }
             if (level == KiCadVerificationLevel.InProcess) continue;
             var files = classes.GetValueOrDefault(parts[0]) ?? [];
             if (!files.Any(file => StartsCompiledServer.IsMatch(file.Text)))
@@ -333,20 +435,189 @@ internal static class VerificationEvidenceRules
         string claim = CapabilityCatalog.Level(level);
         if (level is KiCadVerificationLevel.McpNativeJourney or KiCadVerificationLevel.NativeJourney && !citesNative)
             problems.Add($"{tool} claims {claim} without citing a {NativeJourneyClass} journey.");
-        if (level == KiCadVerificationLevel.McpNativeJourney
-            && !(classes.GetValueOrDefault(NativeJourneyClass) ?? []).Any(file => call.IsMatch(file.Text)))
+        if (level == KiCadVerificationLevel.McpNativeJourney && !nativeSources.Any(file => call.IsMatch(file.Text)))
             problems.Add($"{tool} claims {claim}, but no {NativeJourneyClass} journey calls it through MCP.");
         if (level == KiCadVerificationLevel.McpProcess && !stdioCall)
             problems.Add($"{tool} claims {claim}, but no cited compiled STDIO test calls it.");
         return problems;
     }
+
+    private static Analysis Analyse(IReadOnlyList<Source> sources)
+    {
+        var code = sources.Select(source => source with { Text = StripComments(source.Text) }).ToArray();
+        var classes = code.SelectMany(source => ClassDeclaration.Matches(source.Text).Select(match => (Name: match.Groups[1].Value, Source: source)))
+            .GroupBy(entry => entry.Name, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(entry => entry.Source).Distinct().ToArray(), StringComparer.Ordinal);
+        var nativeSources = classes.GetValueOrDefault(NativeJourneyClass) ?? [];
+        var stubbed = StubJourneys(nativeSources);
+        var stubbedTests = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match test in nativeSources.SelectMany(source => JourneyTest.Matches(source.Text)))
+            if (stubbed.Contains(test.Groups["journey"].Value)) stubbedTests.TryAdd(test.Groups["method"].Value, test.Groups["journey"].Value);
+        return new(classes, stubbedTests);
+    }
+
+    // The journeys that reach an Inconclusive stub. Dispatch switches are read member by member:
+    // an arm naming a journey counts, and a default arm covers the journeys that the member's other
+    // switch arms name but this switch does not (the journeys that reach it).
+    private static HashSet<string> StubJourneys(IReadOnlyList<Source> nativeSources)
+    {
+        var stubs = nativeSources.SelectMany(source => InconclusiveStub.Matches(source.Text))
+            .Select(match => match.Groups["method"].Value).ToHashSet(StringComparer.Ordinal);
+        var journeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var source in nativeSources)
+        {
+            var starts = MemberStart.Matches(source.Text).Select(match => match.Index).Append(source.Text.Length).ToArray();
+            for (int member = 0; member + 1 < starts.Length; member++)
+            {
+                var switches = Switches(source.Text[starts[member]..starts[member + 1]]);
+                foreach (var arms in switches)
+                {
+                    var named = arms.SelectMany(arm => arm.Journeys).ToHashSet(StringComparer.Ordinal);
+                    var reaching = switches.Where(other => other != arms).SelectMany(other => other).SelectMany(arm => arm.Journeys)
+                        .Except(named).ToArray();
+                    foreach (var arm in arms.Where(arm => arm.Target is not null && stubs.Contains(arm.Target)))
+                        journeys.UnionWith(arm.Journeys.Count > 0 ? arm.Journeys : reaching);
+                }
+            }
+        }
+        return journeys;
+    }
+
+    private sealed record SwitchArmEntry(IReadOnlyList<string> Journeys, string? Target);
+
+    // Arms of each switch expression in one member; nested braces inside an arm are skipped over.
+    private static List<List<SwitchArmEntry>> Switches(string member)
+    {
+        var result = new List<List<SwitchArmEntry>>();
+        foreach (Match start in SwitchStart.Matches(member))
+        {
+            int open = start.Index + start.Length - 1, depth = 0, close = open;
+            for (; close < member.Length; close++)
+            {
+                if (member[close] == '{') depth++;
+                else if (member[close] == '}' && --depth == 0) break;
+            }
+            string body = member[(open + 1)..Math.Min(close, member.Length)];
+            result.Add(SwitchArm.Matches(body).Select(arm => new SwitchArmEntry(
+                JourneyName.Matches(arm.Groups["pattern"].Value).Select(j => j.Groups[1].Value).ToArray(),
+                arm.Groups["target"].Success ? arm.Groups["target"].Value : null)).ToList());
+        }
+        return result;
+    }
+
+    // Removes // and /* */ comments while keeping string and character literals intact, so a "//"
+    // inside a string (an ipc:/// endpoint) is not a comment and a commented-out call is not a call.
+    // Interpolation holes are read as part of their string.
+    internal static string StripComments(string text)
+    {
+        var output = new System.Text.StringBuilder(text.Length);
+        int i = 0;
+        while (i < text.Length)
+        {
+            char c = text[i];
+            char next = i + 1 < text.Length ? text[i + 1] : '\0';
+            if (c == '/' && next == '/')
+            {
+                while (i < text.Length && text[i] != '\n') i++;
+                continue;
+            }
+            if (c == '/' && next == '*')
+            {
+                int end = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                end = end < 0 ? text.Length : end + 2;
+                output.Append('\n', text.AsSpan(i, end - i).Count('\n'));
+                i = end;
+                continue;
+            }
+            int quote = i;
+            while (quote < text.Length && text[quote] is '$' or '@') quote++;
+            if (quote < text.Length && text[quote] == '"')
+            {
+                int end = StringEnd(text, quote, text.AsSpan(i, quote - i).Contains('@'));
+                output.Append(text, i, end - i);
+                i = end;
+                continue;
+            }
+            if (c == '\'')
+            {
+                int end = i + 1;
+                while (end < text.Length && text[end] != '\'' && text[end] != '\n') end += text[end] == '\\' ? 2 : 1;
+                end = Math.Min(end + 1, text.Length);
+                output.Append(text, i, end - i);
+                i = end;
+                continue;
+            }
+            output.Append(c);
+            i++;
+        }
+        return output.ToString();
+    }
+
+    // The index just past the string literal whose opening quote run starts at quote.
+    private static int StringEnd(string text, int quote, bool verbatim)
+    {
+        int run = 0;
+        while (quote + run < text.Length && text[quote + run] == '"') run++;
+        if (verbatim)
+        {
+            // Verbatim string: "" is an escaped quote.
+            for (int i = quote + 1; i < text.Length; i++)
+            {
+                if (text[i] != '"') continue;
+                if (i + 1 < text.Length && text[i + 1] == '"') { i++; continue; }
+                return i + 1;
+            }
+            return text.Length;
+        }
+        if (run >= 3)
+        {
+            // Raw string: it ends at the next run of at least as many quotes.
+            for (int i = quote + run; i < text.Length; i++)
+            {
+                if (text[i] != '"') continue;
+                int closing = 0;
+                while (i + closing < text.Length && text[i + closing] == '"') closing++;
+                if (closing >= run) return i + closing;
+                i += closing - 1;
+            }
+            return text.Length;
+        }
+        if (run == 2) return quote + 2;
+        for (int i = quote + 1; i < text.Length; i++)
+        {
+            if (text[i] == '\\') { i++; continue; }
+            if (text[i] == '"' || text[i] == '\n') return i + 1;
+        }
+        return text.Length;
+    }
 }
 
 /// <summary>
-/// Proves that a native handshake advertises exactly the request types its process dispatches. Every
-/// message type the protocol defines, plus anything advertised, is sent with a payload that cannot be
-/// decoded: a registered handler rejects it before running anything, and an unregistered type comes
-/// back unhandled. Nothing is executed and no document changes.
+/// The handshake's capabilities field names feature contracts (session.info, version.read and, when a
+/// whole feature works, labels such as schematic.connection-realization.v1), never request types.
+/// </summary>
+internal static class NativeFeatureContracts
+{
+    private static readonly Regex FeatureName = new(@"^[a-z][a-z0-9-]*(\.[a-z0-9-]+)+$");
+
+    internal static string[] Verify(AutomationSession session)
+    {
+        string[] features = session.Capabilities.ToArray();
+        CollectionAssert.IsSubsetOf(new[] { "session.info", "version.read" }, features, "Every automation handshake names its base features.");
+        CollectionAssert.AllItemsAreUnique(features);
+        Assert.IsTrue(features.All(FeatureName.IsMatch), "Feature contracts are lower-case dotted names: " + string.Join(", ", features));
+        string[] requestNames = features.Intersect(NativeCapabilityProbe.KnownMessageTypes().Concat(session.HandledRequests)).ToArray();
+        Assert.IsEmpty(requestNames, "A request type is not a feature contract: " + string.Join(", ", requestNames));
+        return features;
+    }
+}
+
+/// <summary>
+/// Proves that a native handshake's handled_requests lists exactly the request types its process
+/// dispatches. Every message type the protocol defines, plus anything listed, is sent with a payload
+/// that cannot be decoded: a registered handler rejects it before running anything, and an
+/// unregistered type comes back unhandled. Nothing is executed and no document changes. The named
+/// feature contracts in capabilities are not request types and are checked by NativeFeatureContracts.
 /// </summary>
 internal static class NativeCapabilityProbe
 {
@@ -367,8 +638,8 @@ internal static class NativeCapabilityProbe
         {
             // A stable snapshot: the same list before and after probing, so no editor opened or closed meanwhile.
             var before = await client.HandshakeAsync(token);
-            Assert.AreEqual(NativeCapabilityFormat.NcpRegisteredRequestTypes, before.CapabilityFormat);
-            string[] advertised = before.Capabilities.ToArray();
+            string[] advertised = before.HandledRequests.ToArray();
+            Assert.IsNotEmpty(advertised, "This build's handshake must list the requests it handles.");
             CollectionAssert.AreEqual(advertised.Distinct().Order(StringComparer.Ordinal).ToArray(), advertised,
                 "The handshake lists each request type once, in ordinal order.");
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -393,7 +664,7 @@ internal static class NativeCapabilityProbe
             }, token);
             Console.WriteLine($"Probed {statuses.Count} request types of {client.Endpoint} in {elapsed.Elapsed.TotalSeconds:F2}s.");
             var after = await client.HandshakeAsync(token);
-            if (!after.Capabilities.SequenceEqual(advertised))
+            if (!after.HandledRequests.SequenceEqual(advertised))
             {
                 Assert.IsLessThan(3, attempt, "The native request handlers kept changing while they were probed.");
                 continue;
@@ -405,7 +676,7 @@ internal static class NativeCapabilityProbe
             if (evidenceFile is not null)
                 await File.WriteAllTextAsync(evidenceFile, JsonSerializer.Serialize(new
                 {
-                    epoch = client.Epoch, format = before.CapabilityFormat.ToString(), advertised, probed = statuses.Count,
+                    epoch = client.Epoch, features = before.Capabilities.ToArray(), advertised, probed = statuses.Count,
                     probeSeconds = elapsed.Elapsed.TotalSeconds,
                     statusCounts = statuses.GroupBy(s => s.Value).OrderBy(g => g.Key).ToDictionary(g => g.Key.ToString(), g => g.Count()),
                     unadvertised, unhandled, executed

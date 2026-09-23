@@ -12,8 +12,10 @@ using ModelContextProtocol.Protocol;
 namespace KiCad.Automation.Mcp;
 
 public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt);
+// NativeCapabilities keeps its original meaning: the named feature contracts of the handshake.
 public sealed record InspectedInstance(string InstanceId, string ProjectPath, string NativeVersion,
-                                      IReadOnlyList<string> NativeCapabilities, string NativeCapabilityFormat);
+                                      IReadOnlyList<string> NativeCapabilities, string NativeRequestCoverage,
+                                      IReadOnlyList<NativeRequestCapability>? NativeRequests);
 public sealed record InstanceCapability(string Name, string Scope, string Source, string Availability,
                                         string RevisionContract, bool NativeAdvertised);
 
@@ -65,7 +67,7 @@ public sealed class InstanceTools(InstanceRegistry registry)
         await InstanceToolBoundary.Run(async () => View(await registry.ReattachAsync(instanceId, cancellationToken)));
 
     [McpServerTool(Name = "kicad_instance_inspect", ReadOnly = true),
-     Description("Verify a live native instance and return its actual build version and advertised native capabilities: the request types it dispatches to registered handlers right now, and the format of that list."),
+     Description("Verify a live native instance and return its actual build version, its advertised native capabilities (named feature contracts such as session.info, each advertised only when the whole feature works) and nativeRequests: the request types it dispatches to registered handlers right now. nativeRequestCoverage is 'unknown' and nativeRequests null for a KiCad built before that list existed."),
      KiCadCapability("service", "compiled-mcp", "verified instance epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "InstanceToolBoundaryTests.CompiledStdioReturnsActionableUnknownInstanceErrorAndRecovers")]
     public Task<CallToolResult> Inspect(string instanceId, CancellationToken cancellationToken) => InstanceToolBoundary.Run<InspectedInstance>(async () =>
@@ -73,12 +75,13 @@ public sealed class InstanceTools(InstanceRegistry registry)
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         GetVersionResponse version = await client.GetVersionAsync(cancellationToken);
-        return new(session.InstanceId, session.ProjectPath, version.Version.FullVersion, session.Capabilities.ToArray(),
-                   CapabilityCatalog.Native(session).Format);
+        var native = CapabilityCatalog.Native(session);
+        return new(session.InstanceId, session.ProjectPath, version.Version.FullVersion, native.Features,
+                   native.RequestCoverage, native.Requests);
     });
 
     [McpServerTool(Name = "kicad_instance_capabilities", ReadOnly = true),
-     Description("Return the versioned capability catalogue of one verified native instance and this MCP server. nativeCapabilities are the request types that instance dispatches to registered handlers right now, read from its handshake; opening or closing an editor changes them. serviceCapabilities list every tool registered in this server with its scope, target and revision contract and verification evidence, and limitations name unfinished work that no registered tool provides. Does not change documents."),
+     Description("Return the versioned capability catalogue of one verified native instance and this MCP server, read from its handshake. nativeFeatures are the named feature contracts it advertises, each only when the whole feature works. nativeRequests are the request types it dispatches to registered handlers right now; opening or closing an editor changes them, and nativeRequestCoverage is 'unknown' with nativeRequests null for a KiCad built before that list existed. serviceCapabilities list every tool registered in this server with its scope, target and revision contract and verification evidence, and limitations name unfinished work that no registered tool provides. Does not change documents."),
      KiCadCapability("service", "compiled-mcp plus native-handshake", "explicit instance ID, verified instance epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Capabilities(string instanceId, McpServer server, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
@@ -91,7 +94,8 @@ public sealed class InstanceTools(InstanceRegistry registry)
         return new
         {
             schemaVersion = CapabilityCatalog.SchemaVersion, session.InstanceId, session.ProjectPath, session.Epoch,
-            nativeVersion = version.Version.FullVersion, nativeCapabilityFormat = native.Format, nativeCapabilities = native.Requests,
+            nativeVersion = version.Version.FullVersion, nativeFeatures = native.Features,
+            nativeRequestCoverage = native.RequestCoverage, nativeRequests = native.Requests,
             serviceCapabilities = service, limitations = CapabilityCatalog.Limitations(service), notes = CapabilityCatalog.Notes
         };
     });

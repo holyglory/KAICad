@@ -14,18 +14,29 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyCleanPcbClose(NativeClient client, DocumentSpecifier board,
         DocumentSpecifier schematic, string evidence, CancellationToken token)
     {
-        await VerifyCleanDocumentClose(client, board, schematic, openTool: "kicad_pcb_open", evidence, token);
-        await VerifyCleanDocumentClose(client, schematic, board, openTool: "kicad_schematic_open", evidence, token);
+        var pcbClose = await VerifyCleanDocumentClose(client, board, schematic, openTool: "kicad_pcb_open", evidence, token);
+        var schematicClose = await VerifyCleanDocumentClose(client, schematic, board, openTool: "kicad_schematic_open", evidence, token);
+        CollectionAssert.AreEqual(pcbClose.BothOpen, schematicClose.BothOpen, "Reopening an editor must restore the same handled requests.");
+        // Every request handled with both editors open is still handled after closing one editor or
+        // the other: the manager's, each editor's own and those both editors share. So losing any
+        // type that only the editor left open handles would show here.
+        string[] union = pcbClose.AfterClose.Union(schematicClose.AfterClose).Order(StringComparer.Ordinal).ToArray();
+        CollectionAssert.AreEqual(pcbClose.BothOpen, union,
+            "With both editors open the handshake must list exactly the requests of the PCB-only and schematic-only states together.");
+        Console.WriteLine($"Handled requests of {client.Endpoint}: {pcbClose.BothOpen.Length} with both editors open, "
+            + $"{pcbClose.AfterClose.Length} with only the schematic editor, {schematicClose.AfterClose.Length} with only the PCB editor.");
     }
 
-    private static async Task VerifyCleanDocumentClose(NativeClient client, DocumentSpecifier document,
-        DocumentSpecifier otherDocument, string openTool, string evidence, CancellationToken token)
+    // Returns the first pass's probed handled requests with both editors open and after closing this one.
+    private static async Task<(string[] BothOpen, string[] AfterClose)> VerifyCleanDocumentClose(NativeClient client,
+        DocumentSpecifier document, DocumentSpecifier otherDocument, string openTool, string evidence, CancellationToken token)
     {
+        (string[] BothOpen, string[] AfterClose) firstPass = (Array.Empty<string>(), Array.Empty<string>());
         string statePath = Directory.CreateTempSubdirectory("kicad-close-mcp-").FullName;
         try
         {
             string instanceId = (await client.HandshakeAsync(token)).InstanceId;
-            // The handshake follows the open editors: closing this one removes its request types,
+            // handled_requests follows the open editors: closing this one removes its request types,
             // the other editor keeps its own, and reopening restores exactly the same list.
             bool pcb = (int)document.Type == 3;
             string kind = pcb ? "pcb" : "schematic";
@@ -59,7 +70,7 @@ public sealed partial class NativeSessionTests
                     string[] bothOpen = pass == 0
                         ? await NativeCapabilityProbe.VerifyHandshakeAsync(client,
                             Path.Combine(evidence, $"{instanceId}-before-{kind}-close-capabilities.json"), token)
-                        : (await client.HandshakeAsync(token)).Capabilities.ToArray();
+                        : (await client.HandshakeAsync(token)).HandledRequests.ToArray();
                     CollectionAssert.Contains(bothOpen, closedEditorType);
                     CollectionAssert.Contains(bothOpen, otherEditorType);
                     string operation = Guid.NewGuid().ToString("D");
@@ -109,12 +120,13 @@ public sealed partial class NativeSessionTests
                     string[] afterClose = pass == 0
                         ? await NativeCapabilityProbe.VerifyHandshakeAsync(client,
                             Path.Combine(evidence, $"{instanceId}-after-{kind}-close-capabilities.json"), token)
-                        : (await client.HandshakeAsync(token)).Capabilities.ToArray();
+                        : (await client.HandshakeAsync(token)).HandledRequests.ToArray();
                     CollectionAssert.IsSubsetOf(afterClose, bothOpen, "Closing an editor must not add request types.");
                     CollectionAssert.DoesNotContain(afterClose, closedEditorType, "The closed editor's request types must leave the handshake.");
                     CollectionAssert.Contains(afterClose, otherEditorType, "The editor that stays open keeps its request types.");
                     Console.WriteLine($"Closing the {kind} editor of {instanceId} removed {bothOpen.Length - afterClose.Length} of {bothOpen.Length} native request types.");
                     reopenedTypes = bothOpen;
+                    if (pass == 0) firstPass = (bothOpen, afterClose);
                     await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
                         Path.Combine(evidence, "clean-close-reconnect-" + operation + ".stderr.log"), token))
                     {
@@ -141,11 +153,12 @@ public sealed partial class NativeSessionTests
                 string documentPath = current.NativeFiles.Single(path => Path.GetFileName(path) == filename);
                 var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, documentPath, evidence, token, toolName: openTool);
                 Assert.AreEqual(document, opened.Document);
-                CollectionAssert.AreEqual(reopenedTypes, (await client.HandshakeAsync(token)).Capabilities.ToArray(),
+                CollectionAssert.AreEqual(reopenedTypes, (await client.HandshakeAsync(token)).HandledRequests.ToArray(),
                     "Reopening the editor must restore exactly the request types it had before closing.");
             }
         }
         finally { Directory.Delete(statePath, true); }
+        return firstPass;
     }
 
     // The editor holds an unsaved edit and every document file is read-only. The save through the MCP

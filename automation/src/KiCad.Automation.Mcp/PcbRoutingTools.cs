@@ -17,7 +17,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRoutingTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_route_preview", ReadOnly = true),
-     Description("Run KiCad's native push-and-shove single-track router on an explicit start item and waypoint sequence, then return typed Track/Arc/Via candidates without committing copper. The preview is revision-bound and read-only; use candidate validation and detached DRC before any separate mutation. Active native routing sessions are rejected rather than hijacked.")]
+     Description("Run KiCad's native push-and-shove single-track router on an explicit start item and waypoint sequence, then return typed Track/Arc/Via candidates without committing copper. The preview is revision-bound and read-only; use candidate validation and detached DRC before any separate mutation. Active native routing sessions are rejected rather than hijacked."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-pns-router", "board lifecycle state, start item, native PNS waypoint preview"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Preview(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -51,7 +53,9 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_geometry", ReadOnly = true),
-     Description("Measure exact native PCB trace, arc and via geometry at one revision checkpoint. Returns net-grouped track length, arc length, layer usage, via transitions and object identities. An optional netName restricts the result. This is numerical routing feedback for placement, high-speed tuning and candidate comparison; it does not certify DRC, impedance, RF or electromagnetic performance and does not mutate the board.")]
+     Description("Measure exact native PCB trace, arc and via geometry at one revision checkpoint. Returns net-grouped track length, arc length, layer usage, via transitions and object identities. An optional netName restricts the result. This is numerical routing feedback for placement, high-speed tuning and candidate comparison; it does not certify DRC, impedance, RF or electromagnetic performance and does not mutate the board."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "board lifecycle state, track/arc/via geometry"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Measure(string instanceId, string documentJson, string expectedStateJson,
         CancellationToken cancellationToken, string? netName = null) => Execute(async () =>
     {

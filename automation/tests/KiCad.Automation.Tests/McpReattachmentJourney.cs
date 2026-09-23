@@ -48,8 +48,9 @@ public sealed partial class NativeSessionTests
         }
 
         // The reattached server reports exactly what is registered: its service tools equal tools/list,
-        // its native list equals a handshake read directly from KiCad, and that handshake equals the
-        // request types this process really dispatches with its schematic editor open.
+        // its native features and requests equal a handshake read directly from KiCad, and that
+        // handshake's handled requests equal the request types this process really dispatches with its
+        // schematic editor open.
         async Task VerifyInstanceCapabilityCatalogue()
         {
             var listed = new List<JsonElement>();
@@ -64,6 +65,7 @@ public sealed partial class NativeSessionTests
             var record = JsonSerializer.Deserialize<InstanceRecord>(await File.ReadAllTextAsync(Path.Combine(state, instanceId + ".json"), token))!;
             var direct = new NativeClient(new NngTransport(), record.Endpoint, record.Epoch);
             var session = await direct.HandshakeAsync(token);
+            string[] features = NativeFeatureContracts.Verify(session);
 
             var attached = JsonSerializer.Deserialize<InstanceView[]>((await Call("kicad_instances_list", new { }))
                 .GetProperty("content")[0].GetProperty("text").GetString()!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
@@ -72,18 +74,23 @@ public sealed partial class NativeSessionTests
             string[] serviceNames = CapabilityCatalogAssertions.VerifyServiceCatalogue(catalogue, listed);
             Assert.AreEqual(instanceId, catalogue.GetProperty("instanceId").GetString());
             Assert.AreEqual(session.Epoch, catalogue.GetProperty("epoch").GetString());
-            Assert.AreEqual("registered-request-types", catalogue.GetProperty("nativeCapabilityFormat").GetString());
-            var native = catalogue.GetProperty("nativeCapabilities").EnumerateArray().ToArray();
-            CollectionAssert.AreEqual(session.Capabilities.ToArray(), native.Select(n => n.GetProperty("name").GetString()!).ToArray(),
-                "The MCP catalogue must carry the native handshake unchanged.");
+            CollectionAssert.AreEqual(features, catalogue.GetProperty("nativeFeatures").EnumerateArray().Select(n => n.GetString()!).ToArray(),
+                "The MCP catalogue must carry the native feature contracts unchanged.");
+            Assert.AreEqual(CapabilityCatalog.HandledRequestCoverage, catalogue.GetProperty("nativeRequestCoverage").GetString());
+            var native = catalogue.GetProperty("nativeRequests").EnumerateArray().ToArray();
+            CollectionAssert.AreEqual(session.HandledRequests.ToArray(), native.Select(n => n.GetProperty("name").GetString()!).ToArray(),
+                "The MCP catalogue must carry the native handled requests unchanged.");
             Assert.IsTrue(native.All(n => n.GetProperty("availability").GetString() == "handler-registered"));
+            Assert.IsFalse(catalogue.TryGetProperty("nativeCapabilities", out _), "Catalogue v2 names features and requests separately.");
             var service = (await Call("kicad_service_capabilities", new { })).GetProperty("structuredContent");
             Assert.AreEqual(catalogue.GetProperty("serviceCapabilities").GetRawText(), service.GetProperty("serviceCapabilities").GetRawText());
             Assert.AreEqual(catalogue.GetProperty("limitations").GetRawText(), service.GetProperty("limitations").GetRawText());
             var inspected = (await Call("kicad_instance_inspect", new { instanceId })).GetProperty("structuredContent");
-            CollectionAssert.AreEqual(session.Capabilities.ToArray(), inspected.GetProperty("nativeCapabilities").EnumerateArray()
-                .Select(n => n.GetString()!).ToArray());
-            Assert.AreEqual("registered-request-types", inspected.GetProperty("nativeCapabilityFormat").GetString());
+            CollectionAssert.AreEqual(features, inspected.GetProperty("nativeCapabilities").EnumerateArray()
+                .Select(n => n.GetString()!).ToArray(), "Inspection keeps nativeCapabilities as the feature contracts.");
+            Assert.AreEqual(CapabilityCatalog.HandledRequestCoverage, inspected.GetProperty("nativeRequestCoverage").GetString());
+            CollectionAssert.AreEqual(session.HandledRequests.ToArray(), inspected.GetProperty("nativeRequests").EnumerateArray()
+                .Select(n => n.GetProperty("name").GetString()!).ToArray());
 
             string artifacts = Path.Combine(FindRoot(), "automation", "artifacts", "native-session-current");
             string[] advertised = await NativeCapabilityProbe.VerifyHandshakeAsync(direct,
@@ -95,7 +102,7 @@ public sealed partial class NativeSessionTests
             var documents = SchematicJson.Parser.Parse<GetOpenDocumentsResponse>((await Call("kicad_documents_list",
                 new { instanceId, kind = "schematic" })).GetProperty("content")[0].GetProperty("text").GetString()!);
             CollectionAssert.Contains(documents.Documents.ToArray(), document);
-            Console.WriteLine($"Capability catalogue {instanceId}: {serviceNames.Length} registered tools, {advertised.Length} native request types.");
+            Console.WriteLine($"Capability catalogue {instanceId}: {serviceNames.Length} registered tools, {features.Length} native features, {advertised.Length} native request types.");
         }
 
         async Task<JsonElement> Call(string name, object arguments)

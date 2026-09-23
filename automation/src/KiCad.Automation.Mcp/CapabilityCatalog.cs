@@ -23,8 +23,10 @@ public enum KiCadVerificationLevel
 /// journey and a call to the tool by name in a NativeSessionTests source (the Linux native
 /// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
 /// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
-/// STDIO server and call the tool by name. The check is per class, not per method: it cannot tell
-/// which journey of NativeSessionTests makes the call.
+/// STDIO server and call the tool by name. A cited NativeSessionTests method whose journey is still
+/// an Inconclusive lane stub proves nothing and is rejected. Comments never count as calls. The
+/// call check is per class, not per method: it cannot tell which journey of NativeSessionTests
+/// makes the call.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute
@@ -45,19 +47,26 @@ public sealed record ServiceToolCapability(string Name, string Availability, str
                                            string? Source, string? RevisionContract, bool? ReadOnly,
                                            ToolVerification Verification);
 
-/// <summary>One request type that the native handshake advertises.</summary>
+/// <summary>One request type that the native handshake lists as dispatched to a registered handler.</summary>
 public sealed record NativeRequestCapability(string Name, string Availability);
 
 /// <summary>
 /// Work that no registered tool provides. Tools listed in RegisteredToolsInScope share the scope and
 /// remain available within their own declared contracts; the summary names only what is missing.
-/// TrackedBy names the open KAICad completion-ledger outcomes (p...) and recorded decisions that
-/// hold the remaining work, so the summary can be traced to its authoritative record.
+/// TrackedBy names the KAICad completion-ledger outcomes (p...) and recorded decisions that hold
+/// the remaining work, so the summary can be traced to its authoritative record.
 /// </summary>
 public sealed record CapabilityLimitation(string Id, string Scope, string Summary, IReadOnlyList<string> RegisteredToolsInScope,
                                           IReadOnlyList<string> TrackedBy);
 
-public sealed record NativeCapabilityCatalog(string Format, IReadOnlyList<NativeRequestCapability> Requests);
+/// <summary>
+/// The native half of the catalogue. Features are the named feature contracts of the handshake's
+/// capabilities field, each advertised only when the whole feature works. RequestCoverage says
+/// whether the handshake lists handled requests: "handled-requests" when it does, and "unknown"
+/// for a KiCad built before that field, whose Requests are then null rather than guessed.
+/// </summary>
+public sealed record NativeCapabilityCatalog(IReadOnlyList<string> Features, string RequestCoverage,
+                                             IReadOnlyList<NativeRequestCapability>? Requests);
 
 /// <summary>
 /// Builds the capability catalogue from what is actually registered: the MCP server's own tool
@@ -70,9 +79,10 @@ public static class CapabilityCatalog
     public static IReadOnlyList<string> Notes { get; } =
     [
         "serviceCapabilities lists every tool registered in this MCP server process, derived from the server's tool collection; availability 'registered' means the tool can be called, subject to its revision contract.",
-        "nativeCapabilities lists the request types the native process dispatches to a registered handler at this moment. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support.",
+        "nativeFeatures lists the named feature contracts the native process advertises, for example session.info; each is advertised only when the whole feature works in that build.",
+        "nativeRequests lists the request types the native process dispatches to a registered handler at this moment, when nativeRequestCoverage is 'handled-requests'. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support. A KiCad built before this list existed reports nativeRequestCoverage 'unknown' and nativeRequests null: its request support is not known, not empty.",
         "verification.level names the strongest evidence in this build's test suite: mcp-native-journey, native-journey, mcp-process, in-process, or undeclared when a tool declares none.",
-        "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool. trackedBy cites the open KAICad completion-ledger outcomes and recorded decisions behind each one."
+        "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool. trackedBy cites the KAICad completion-ledger outcomes and recorded decisions behind each one."
     ];
 
     // Unfinished outcomes that cannot be derived from code. Each names what is missing, never a
@@ -103,16 +113,17 @@ public static class CapabilityCatalog
         return tools.Select(tool => Describe(tool, legacy)).OrderBy(tool => tool.Name, StringComparer.Ordinal).ToArray();
     }
 
+    public const string HandledRequestCoverage = "handled-requests", UnknownRequestCoverage = "unknown";
+
     public static NativeCapabilityCatalog Native(AutomationSession session)
     {
-        // An unknown future format fails closed: its entries are not claimed as handlers.
-        var (format, availability) = session.CapabilityFormat switch
-        {
-            NativeCapabilityFormat.NcpRegisteredRequestTypes => ("registered-request-types", "handler-registered"),
-            NativeCapabilityFormat.NcpLegacyLabels => ("legacy-labels", "legacy-label"),
-            _ => ("unrecognized", "unrecognized")
-        };
-        return new(format, session.Capabilities.Select(name => new NativeRequestCapability(name, availability)).ToArray());
+        string[] features = session.Capabilities.ToArray();
+        // A peer that answers the handshake dispatches the handshake request itself, so an empty
+        // list can only come from a KiCad built before handled_requests: coverage unknown, never
+        // "handles nothing", and its feature labels are never read as handlers.
+        if (session.HandledRequests.Count == 0) return new(features, UnknownRequestCoverage, null);
+        return new(features, HandledRequestCoverage,
+            session.HandledRequests.Select(name => new NativeRequestCapability(name, "handler-registered")).ToArray());
     }
 
     public static IReadOnlyList<CapabilityLimitation> Limitations(IReadOnlyList<ServiceToolCapability> service) =>

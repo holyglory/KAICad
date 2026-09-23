@@ -691,9 +691,13 @@ even when its optional XML coordinates are absent. Review/publish that proposal
 through the normal synchronization workflow, then check connectivity and rendered
 presentation. The tool itself writes neither the recovery record nor design XML.
 This is an initial arrangement, not a readability certificate: inherited fields
-can still overlap internally, and field-layout refinement remains open. It does
-not create unknown parts, generate wiring, infer drawing-sheet reservations or
-perform AI reasoning inside the service.
+can still overlap until they are refined. `kicad_design_propose_field_layout`
+proposes field positions for exact symbol fields (addressed by symbol or slot and
+expected name and revision) while preserving content, visibility, locks and repeated
+geometry; review and apply it through the same synchronization workflow. Neither
+tool creates unknown parts, generates wiring, infers drawing-sheet reservations or
+performs AI reasoning inside the service; general occlusion and hierarchy-wide
+presentation checks remain open.
 
 For an explicitly attached instance and initialized recovery record, use
 `kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,

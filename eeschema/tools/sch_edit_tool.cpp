@@ -37,6 +37,7 @@
 #include <sch_bitmap.h>
 #include <sch_bus_entry.h>
 #include <sch_commit.h>
+#include <api/api_sch_state_groups.h>
 #include <sch_group.h>
 #include <sch_label.h>
 #include <sch_junction.h>
@@ -1820,10 +1821,12 @@ int SCH_EDIT_TOOL::Swap( const TOOL_EVENT& aEvent )
 
         if( connections )
             m_frame->TestDanglingEnds();
-        m_frame->OnModify();
 
+        // A local commit records the swap; otherwise it is staged in the caller's commit.
         if( !localCommit.Empty() )
             localCommit.Push( _( "Swap" ) );
+
+        m_frame->OnModify();
     }
 
     return 0;
@@ -1970,10 +1973,11 @@ int SCH_EDIT_TOOL::SwapPins( const TOOL_EVENT& aEvent )
     if( connections )
         m_frame->TestDanglingEnds();
 
-    m_frame->OnModify();
-
+    // A local commit records the swap; otherwise it is staged in the caller's commit.
     if( !localCommit.Empty() )
         localCommit.Push( _( "Swap Pins" ) );
+
+    m_frame->OnModify();
 
     return 0;
 }
@@ -2977,6 +2981,10 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
         int         retval;
         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( aItem );
 
+        // The dialog pushes or reverts its own tracked edit.  Field placement after it is
+        // part of the same user action, so remember where that action began in the journal.
+        const SCH_TRACKED_CHANGE::MARK started = SCH_TRACKED_CHANGE::Mark( m_frame->Schematic() );
+
         // This needs to be scoped so the dialog destructor removes blocking status
         // before we launch the next dialog.
         {
@@ -2989,17 +2997,24 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
             retval = symbolPropsDialog.ShowQuasiModal();
         }
 
-        if( retval == SYMBOL_PROPS_EDIT_OK )
+        if( retval == SYMBOL_PROPS_EDIT_OK && m_frame->eeconfig()->m_AutoplaceFields.enable )
         {
-            if( m_frame->eeconfig()->m_AutoplaceFields.enable )
+            AUTOPLACE_ALGO fieldsAutoplaced = symbol->GetFieldsAutoplaced();
+
+            if( fieldsAutoplaced == AUTOPLACE_AUTO || fieldsAutoplaced == AUTOPLACE_MANUAL )
             {
-                AUTOPLACE_ALGO fieldsAutoplaced = symbol->GetFieldsAutoplaced();
+                // Placement moves only this symbol's fields, which are saved with the current
+                // screen.  When the dialog recorded its edit this is part of that revision;
+                // otherwise it is a revision of its own only if a field actually moved.  A
+                // confirmed dialog without persisted changes leaves the document unmodified.
+                SCH_TRACKED_CHANGE placement( m_frame->Schematic(), "Edit Symbol Properties",
+                                              { m_frame->GetScreen() }, started );
 
-                if( fieldsAutoplaced == AUTOPLACE_AUTO || fieldsAutoplaced == AUTOPLACE_MANUAL )
-                    symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+
+                if( placement.Complete() )
+                    m_frame->OnModify();
             }
-
-            m_frame->OnModify();
         }
         else if( retval == SYMBOL_PROPS_EDIT_SCHEMATIC_SYMBOL )
         {
@@ -3069,7 +3084,10 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
         SCH_SHEET_LIST originalHierarchy;
         originalHierarchy.BuildSheetList( &m_frame->Schematic().Root(), true );
 
-        SCH_COMMIT commit( m_toolMgr );
+        // A sheet file change is applied without an undo entry and clearing annotation below
+        // happens after any commit, so the whole action is tracked against the persisted state.
+        SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Sheet Properties" );
+        SCH_COMMIT         commit( m_toolMgr );
         commit.Modify( sheet, m_frame->GetScreen() );
         okPressed = m_frame->EditSheetProperties( sheet, &m_frame->GetCurrentSheet(), &isUndoable, &doClearAnnotation,
                                                   &updateHierarchyNavigator );
@@ -3078,7 +3096,8 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
         {
             if( isUndoable )
             {
-                commit.Push( _( "Edit Sheet Properties" ) );
+                // An unchanged OK reverts instead of adding an undo entry and a revision.
+                change.PushOrRevert( commit, _( "Edit Sheet Properties" ) );
             }
             else
             {
@@ -3111,6 +3130,8 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
             // because they are new:
             sheet->GetScreen()->ClearAnnotation( &m_frame->GetCurrentSheet(), false );
         }
+
+        change.Complete();
 
         if( okPressed )
             m_frame->GetCanvas()->Refresh();

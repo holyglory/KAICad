@@ -58,3 +58,7 @@ BOOST_AUTO_TEST_CASE( AutomationAttributionDoesNotLeakIntoUndoOrRedo )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// The schematic change-tracking coverage oracle reads only the source tree and needs no editor,
+// so the focused journal check compiles and runs it as well.
+#include "../eeschema/test_sch_change_tracking.cpp"

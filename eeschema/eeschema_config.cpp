@@ -168,10 +168,6 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
                     break;
             }
         }
-        // Mark document as modified so that project settings can be saved as part of doc save
-        if( settingsChanged )
-            OnModify();
-
         Kiway().CommonSettingsChanged( TEXTVARS_CHANGED );
 
         Prj().IncrementTextVarsTicker();
@@ -214,9 +210,18 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
         RefreshOperatingPointDisplay();
         GetCanvas()->Refresh();
 
-        if( settingsChanged && Schematic().ChangeJournal().Sequence() == beforeRevision )
-            Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                "Edit Schematic Setup" );
+        if( settingsChanged )
+        {
+            // Record the setup change unless a commit inside the dialog already recorded it.
+            if( Schematic().ChangeJournal().Sequence() == beforeRevision )
+            {
+                Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
+                                                   "Edit Schematic Setup" );
+            }
+
+            // Mark the document modified so the project settings are saved with it.
+            OnModify();
+        }
     }
 }
 

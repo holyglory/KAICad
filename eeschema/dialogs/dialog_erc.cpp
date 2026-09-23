@@ -990,9 +990,9 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
     {
         updateDisplayedCounts();
         redrawDrawPanel();
-        m_parent->OnModify();
         m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
                                                     "Edit ERC overrides" );
+        m_parent->OnModify();
     }
 }
 
@@ -1019,9 +1019,9 @@ void DIALOG_ERC::OnIgnoredItemRClick( wxListEvent& event )
 
             updateDisplayedCounts();
             redrawDrawPanel();
-            m_parent->OnModify();
             m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
                                                         "Edit ERC overrides" );
+            m_parent->OnModify();
         }
     }
 }
@@ -1114,9 +1114,9 @@ void DIALOG_ERC::ExcludeMarker( SCH_MARKER* aMarker )
 
     updateDisplayedCounts();
     redrawDrawPanel();
-    m_parent->OnModify();
     m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
                                                 "Edit ERC overrides" );
+    m_parent->OnModify();
 }
 
 

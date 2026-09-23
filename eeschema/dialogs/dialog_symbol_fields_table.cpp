@@ -842,6 +842,37 @@ void DIALOG_SYMBOL_FIELDS_TABLE::stageBomSettings( SCH_COMMIT& aCommit, bool aSa
     SCH_BOM_SETTINGS::Swap( m_cfgBomSettings, desired );
 }
 
+void DIALOG_SYMBOL_FIELDS_TABLE::OnExport( wxCommandEvent& aEvent )
+{
+    // The shared export writes a changed output file name straight into the project's BOM
+    // settings and then calls onBomSettingsChanged().  Remember the saved name it replaces.
+    m_exportFileNameBeforeExport = m_cfgBomSettings.m_BomExportFileName;
+    DIALOG_FIELDS_TABLE::OnExport( aEvent );
+    m_exportFileNameBeforeExport.reset();
+}
+
+
+void DIALOG_SYMBOL_FIELDS_TABLE::onBomSettingsChanged()
+{
+    wxCHECK_RET( m_exportFileNameBeforeExport && !m_job,
+                 wxS( "Only an interactive BOM export changes saved BOM settings here" ) );
+
+    // Put the replaced name back and apply the new one through a commit: saving the project
+    // writes it, so it is an undoable edit that makes older automation requests stale.
+    FIELDS_TABLE_BOM_SETTINGS desired = m_cfgBomSettings;
+    m_cfgBomSettings.m_BomExportFileName = *m_exportFileNameBeforeExport;
+
+    SCH_COMMIT commit( m_parent );
+    commit.SetBomSettings( SCH_BOM_SETTINGS::Capture( desired ) );
+
+    // Keep the exact live objects, as stageBomSettings does; the commit owns the saved fields.
+    SCH_BOM_SETTINGS::Swap( m_cfgBomSettings, desired );
+
+    if( !commit.Empty() )
+        commit.Push( _( "Change BOM Export File Name" ) );
+}
+
+
 void DIALOG_SYMBOL_FIELDS_TABLE::OnSaveAndContinue( wxCommandEvent& aEvent )
 {
     if( TransferDataFromWindow() )

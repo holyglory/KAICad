@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <api/api_plugin_manager.h>
+#include <api/api_sch_state_groups.h>
 #include <confirm.h>
 #include <connection_graph.h>
 #include <design_block.h>
@@ -519,9 +520,9 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();
 
-        m_frame->OnModify();
         m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
                                                    "Edit Page Settings" );
+        m_frame->OnModify();
     }
     else
     {
@@ -568,6 +569,11 @@ bool SCH_EDITOR_CONTROL::RescueSymbolLibTableProject( bool aRunningOnDemand )
 
 bool SCH_EDITOR_CONTROL::rescueProject( RESCUER& aRescuer, bool aRunningOnDemand )
 {
+    // Rescued symbols, relinked library links and the project's rescue library are applied
+    // directly and clear undo, so compare the persisted schematic and project state: the
+    // rescue is one revision when it changed anything and none when it was declined.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Rescue Symbols" );
+
     if( !RESCUER::RescueProject( m_frame, aRescuer, aRunningOnDemand ) )
         return false;
 
@@ -589,7 +595,9 @@ bool SCH_EDITOR_CONTROL::rescueProject( RESCUER& aRescuer, bool aRunningOnDemand
         m_frame->ClearUndoRedoList();
         m_frame->SyncView();
         m_frame->GetCanvas()->Refresh();
-        m_frame->OnModify();
+
+        if( change.Complete() )
+            m_frame->OnModify();
     }
 
     return true;
@@ -2123,10 +2131,10 @@ int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
     m_toolMgr->GetTool<SCH_SELECTION_TOOL>()->RebuildSelection();
 
     m_frame->GetCanvas()->Refresh();
-    m_frame->OnModify();
 
     m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::UNDO,
                                                "Undo" );
+    m_frame->OnModify();
 
     return 0;
 }
@@ -2157,10 +2165,10 @@ int SCH_EDITOR_CONTROL::Redo( const TOOL_EVENT& aEvent )
     m_toolMgr->GetTool<SCH_SELECTION_TOOL>()->RebuildSelection();
 
     m_frame->GetCanvas()->Refresh();
-    m_frame->OnModify();
 
     m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::REDO,
                                                "Redo" );
+    m_frame->OnModify();
 
     return 0;
 }

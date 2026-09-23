@@ -19,6 +19,7 @@
  */
 
 #include <api/api_handler_sch.h>
+#include <api/api_sch_state_groups.h>
 #include <api/api_server.h>
 #include <pgm_base.h>
 #include <sch_file_versions.h>
@@ -1894,28 +1895,17 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
         result.set_process_epoch( Pgm().GetApiServer().Token() );
         result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
-        NATIVE_DOCUMENT_DIGEST digest;
-        std::map<std::string, SCH_SHEET*> screens;
-        for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
-            screens.try_emplace( path.LastScreen()->GetUuid().AsStdString(), path.Last() );
-        // The first root owns schematic-wide embedded files and net chains.
-        auto* root = schematic()->GetTopLevelSheet( 0 );
-        screens[root->GetScreen()->GetUuid().AsStdString()] = root;
+        // The same grouped state that native change tracking compares, so a tracked owner
+        // records a revision exactly when this digest changes.
+        const SCH_STATE_GROUPS state = SCH_STATE_GROUPS::Capture( *schematic() );
         std::set<std::string> files;
-        for( const auto& [id, sheet] : screens )
+        for( SCH_SHEET* sheet : state.WrittenSheets() )
         {
-            NATIVE_STATE_DIGEST state;
-            SCH_IO_KICAD_SEXPR writer;
-            writer.FormatSchematicToFormatter( &state, sheet, schematic(), nullptr, false );
-            digest.Add( "screen:" + id, state );
             result.set_native_content_dirty( result.native_content_dirty() || sheet->GetScreen()->IsContentModified() );
             files.insert( project().AbsolutePath( sheet->GetScreen()->GetFileName() ).ToStdString( wxConvUTF8 ) );
             result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                     project().AbsolutePath( sheet->GetScreen()->GetFileName() ), sheet->GetScreen()->FileBaseline() ) );
         }
-        NATIVE_STATE_DIGEST settings;
-        settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
-        digest.Add( "project-settings", settings );
         result.set_project_settings_included( true );
         result.set_complete_change_tracking( false );
         result.set_disk_baseline_checked( false );
@@ -1923,7 +1913,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
-        result.set_state_sha256( digest.Hex() );
+        result.set_state_sha256( state.DocumentSha256() );
         if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
                 || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
         {
@@ -2487,8 +2477,8 @@ HANDLER_RESULT<types::PageSettings> API_HANDLER_SCH::handleSetPageSettings(
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
     }
 
-    onModified();
     schematic()->RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT, "Edit Page Settings" );
+    onModified();
     return API_HANDLER_EDITOR::handleGetPageSettings( query );
 }
 

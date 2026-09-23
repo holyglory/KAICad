@@ -167,8 +167,13 @@ DIALOG_ANNOTATE::~DIALOG_ANNOTATE()
             modified = true;
         }
 
+        // These are persisted project settings; only real value changes are edits.
         if( modified )
+        {
+            schFrame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
+                                                         "Edit Annotation Settings" );
             schFrame->OnModify();
+        }
     }
 }
 

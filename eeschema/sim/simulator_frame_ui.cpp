@@ -36,6 +36,8 @@
 
 #include <project/project_file.h>
 #include <sch_edit_frame.h>
+#include <sch_commit.h>
+#include <api/api_sch_state_groups.h>
 #include <confirm.h>
 #include <wildcards_and_files_ext.h>
 #include <widgets/tuner_slider.h>
@@ -1951,11 +1953,20 @@ void SIMULATOR_FRAME_UI::UpdateTunerValue( const SCH_SHEET_PATH& aSheetPath, con
         return;
     }
 
+    // Applying a tuned value is an ordinary, undoable symbol edit.  Writing the value the
+    // symbol already has leaves no undo entry, modified flag or revision.
+    SCH_TRACKED_CHANGE change( schematic, "Apply Tuned Value" );
+    SCH_COMMIT         commit( m_schematicFrame );
+
+    commit.Modify( symbol, aSheetPath.LastScreen() );
     model.SetParamValue( tunerParam->info.name, std::string( aValue.ToUTF8() ) );
     model.WriteFields( symbol->GetFields(), &aSheetPath, variant );
 
-    m_schematicFrame->UpdateItem( symbol, false, true );
-    m_schematicFrame->OnModify();
+    if( change.PushOrRevert( commit, _( "Apply Tuned Value" ) ) )
+    {
+        m_schematicFrame->UpdateItem( symbol, false, true );
+        m_schematicFrame->OnModify();
+    }
 }
 
 

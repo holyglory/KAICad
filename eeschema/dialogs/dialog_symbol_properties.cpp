@@ -23,6 +23,7 @@
 #include <memory>
 
 #include <bitmaps.h>
+#include <api/api_sch_state_groups.h>
 #include <wx/tooltip.h>
 #include <wx/uiaction.h>
 #include <grid_tricks.h>
@@ -760,6 +761,11 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
     if( !wxDialog::TransferDataFromWindow() )  // Calls our Validate() method.
         return false;
 
+    // Everything below, including embedded files that are applied outside the commit, is
+    // compared with the persisted state: an unchanged OK leaves no revision, undo entry or
+    // modified flag, and a real change is recorded exactly once.
+    SCH_TRACKED_CHANGE change( GetParent()->Schematic(), "Edit Symbol Properties" );
+
     if( m_embeddedFiles && !m_embeddedFiles->TransferDataFromWindow() )
         return false;
 
@@ -940,8 +946,7 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
     if( replaceOnCurrentScreen )
         currentScreen->Append( m_symbol );
 
-    if( !commit.Empty() )
-        commit.Push( _( "Edit Symbol Properties" ) );
+    change.PushOrRevert( commit, _( "Edit Symbol Properties" ) );
 
     return true;
 }

@@ -860,8 +860,9 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
                 m_frame->SetSheetNumberAndCount();
 
+                // The placement commit below marks the document modified when it is pushed; a
+                // cancelled placement reverts the import and leaves the document unmodified.
                 m_frame->SyncView();
-                m_frame->OnModify();
                 m_frame->HardRedraw(); // Full reinit of the current screen and the display.
 
                 SCH_GROUP* group = nullptr;
@@ -3179,20 +3180,22 @@ int SCH_DRAWING_TOOLS::doSyncSheetsPins( std::list<SCH_SHEET_PATH> sheetPaths, S
                          SHEET_SYNCHRONIZATION_AGENT::MODIFICATION const& aModify )
                     {
                         SCH_COMMIT commit( m_toolMgr );
+                        wxString   message;
 
                         if( auto pin = dynamic_cast<SCH_SHEET_PIN*>( aItem ) )
                         {
                             commit.Modify( pin->GetParent(), aPath.LastScreen() );
                             aModify();
-                            commit.Push( _( "Modify sheet pin" ) );
+                            message = _( "Modify sheet pin" );
                         }
                         else
                         {
                             commit.Modify( aItem, aPath.LastScreen() );
                             aModify();
-                            commit.Push( _( "Modify schematic item" ) );
+                            message = _( "Modify schematic item" );
                         }
 
+                        commit.Push( message );
                         updateItem( aItem, true );
                         m_frame->OnModify();
                     },

@@ -416,8 +416,8 @@ message AutomationEvent {
   oneof payload {
     AutomationHeartbeat heartbeat = 6;
     SchematicCommitNotification schematic_commit = 7;
-    // Phase 3 recursive-diagram document notifications take parent-allocated
-    // numbers in 500-999 (contract rbg-v2, deferred scope).
+    // 20-29: held for the Phase 3 recursive-diagram document notifications
+    // (contract rbg-v2 section 13), declared by the parent at a later freeze.
     // -- lane 2C (300-399) --
     // -- end lane 2C --
   }
@@ -553,6 +553,7 @@ message SchematicPlacementGeometry {
   // (label body and visible fields, including an automatic intersheet-references
   // field). symbol_pins is absent.
   repeated SchematicPlacementBounds item_candidates = 9;
+  // 10: held for the CN-1 milestone 2 measurement extension, declared at a later seam freeze.
   // -- lane 2A (100-199) --
   // -- end lane 2A --
 }
@@ -614,6 +615,7 @@ message SchematicPinAnchor {
   // Resolved implicit net name (the power symbol's value on this sheet path, or
   // the shown pin name); empty when power_scope is SPPS_NONE.
   string power_net = 13;
+  // 14: held for CN-1 connected realization, declared at a later seam freeze.
   // -- lane 2A (100-199) --
   // -- end lane 2A --
 }
@@ -882,6 +884,7 @@ message SchematicConnectivityAssertion {
   uint32 version = 1;
   // Complete final membership of every affected group; nonempty and disjoint.
   repeated SchematicPinGroup expected_groups = 2;
+  // 3-5: held for the CN-1 native assertion, declared at a later seam freeze.
   // -- lane 2A (100-199) --
   // -- end lane 2A --
   // -- lane 2C (300-399) --

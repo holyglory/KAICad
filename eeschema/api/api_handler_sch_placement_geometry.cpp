@@ -110,6 +110,10 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
     known.DiscardUnknownFields();
     if( known.ByteSizeLong() != aCtx.Request.ByteSizeLong() )
         return reject( "Placement measurement contains unsupported fields" );
+    // Label prototypes are declared for connected realization (contract CN-1) but not
+    // measured yet; they fail closed exactly as the unknown field did before.
+    if( aCtx.Request.item_candidates_size() > 0 )
+        return reject( "Placement measurement contains unsupported fields" );
     if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) ) return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );

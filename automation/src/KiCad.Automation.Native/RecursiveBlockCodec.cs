@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
 using Google.Protobuf;
+using Google.Protobuf.Reflection;
 using Google.Protobuf.WellKnownTypes;
 using M = KiCad.Automation.Model;
 using P = KiCad.Automation.Protocol.Diagrams;
@@ -457,12 +458,98 @@ public static class RecursiveBlockCodec
     }
     private static M.SourceReference Source(S.StructuralSourceReference source) => new(source.DocumentId, source.Revision,
         source.HasPage ? source.Page : null, source.HasTable ? source.Table : null, source.HasPartVariant ? source.PartVariant : null);
+
+    // Schema 2 fields declared at the Phase 2 freeze (contract rbg-v2) that this version neither
+    // reads nor writes. Until lane 2B implements each one and removes it here, a set value is refused
+    // as the unsupported field it was before the declaration, and observations leave it out, so no
+    // history is silently simplified and no computed default is reported as a measured fact.
+    private static readonly HashSet<FieldDescriptor> Unimplemented =
+    [
+        .. Declared(P.DiagramBoundaryInterfaceData.Descriptor,
+            P.DiagramBoundaryInterfaceData.DomainFieldNumber, P.DiagramBoundaryInterfaceData.DirectionFieldNumber),
+        .. Declared(P.BlockLocalDiagramData.Descriptor,
+            P.BlockLocalDiagramData.PresentationFieldNumber, P.BlockLocalDiagramData.InterfaceRealizationsFieldNumber),
+        .. Declared(P.ConnectionDraftData.Descriptor, P.ConnectionDraftData.DomainFieldNumber,
+            P.ConnectionDraftData.DirectionFieldNumber, P.ConnectionDraftData.RealizationFieldNumber),
+        .. Declared(P.ConnectionRevisionData.Descriptor, P.ConnectionRevisionData.DomainFieldNumber,
+            P.ConnectionRevisionData.DirectionFieldNumber, P.ConnectionRevisionData.RealizationFieldNumber),
+        .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
+        .. Declared(P.RecursiveEditorDocument.Descriptor,
+            P.RecursiveEditorDocument.StoredSchemaVersionFieldNumber, P.RecursiveEditorDocument.SourceWritableFieldNumber),
+        .. Declared(P.DiagramHistoryEntryData.Descriptor, P.DiagramHistoryEntryData.LayoutOnlyFieldNumber),
+        .. Declared(P.RecursiveDiagramEditorState.Descriptor, P.RecursiveDiagramEditorState.StoredSchemaVersionFieldNumber,
+            P.RecursiveDiagramEditorState.SourceWritableFieldNumber, P.RecursiveDiagramEditorState.LevelDraftFieldNumber,
+            P.RecursiveDiagramEditorState.LevelViewportsFieldNumber, P.RecursiveDiagramEditorState.CanvasToolFieldNumber,
+            P.RecursiveDiagramEditorState.SelectedInterfaceIdFieldNumber),
+        .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
+    ];
+
+    private static IEnumerable<FieldDescriptor> Declared(MessageDescriptor message, params int[] numbers) => numbers.Select(number =>
+        message.FindFieldByNumber(number) ?? throw new InvalidOperationException($"{message.FullName} does not declare field {number}."));
+
+    /// <summary>True when a declared schema 2 field this version does not implement carries a value
+    /// anywhere in the message tree.</summary>
+    public static bool CarriesUnimplementedField(IMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        foreach (var field in message.Descriptor.Fields.InFieldNumberOrder())
+        {
+            object? value = field.Accessor.GetValue(message);
+            if (Unimplemented.Contains(field) && IsSet(message, field, value)) return true;
+            if (field.FieldType != FieldType.Message) continue;
+            if (value is System.Collections.IDictionary map)
+            {
+                foreach (object? item in map.Values)
+                    if (item is IMessage child && CarriesUnimplementedField(child)) return true;
+            }
+            else if (value is System.Collections.IList list)
+            {
+                foreach (object? item in list)
+                    if (item is IMessage child && CarriesUnimplementedField(child)) return true;
+            }
+            else if (value is IMessage child && CarriesUnimplementedField(child)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Removes the declared schema 2 fields this version does not implement from the protobuf
+    /// JSON rendering of <paramref name="message"/>, so an observation keeps its earlier shape.</summary>
+    public static void OmitUnimplementedFields(IMessage message, System.Text.Json.Nodes.JsonObject json)
+    {
+        ArgumentNullException.ThrowIfNull(message); ArgumentNullException.ThrowIfNull(json);
+        foreach (var field in message.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (Unimplemented.Contains(field)) { json.Remove(field.JsonName); continue; }
+            if (field.FieldType != FieldType.Message || field.IsMap || json[field.JsonName] is not { } node) continue;
+            object? value = field.Accessor.GetValue(message);
+            if (field.IsRepeated && value is System.Collections.IList list && node is System.Text.Json.Nodes.JsonArray rows)
+            {
+                for (int i = 0; i < Math.Min(list.Count, rows.Count); ++i)
+                    if (list[i] is IMessage child && rows[i] is System.Text.Json.Nodes.JsonObject row) OmitUnimplementedFields(child, row);
+            }
+            else if (!field.IsRepeated && value is IMessage child && node is System.Text.Json.Nodes.JsonObject nested)
+                OmitUnimplementedFields(child, nested);
+        }
+    }
+
+    private static bool IsSet(IMessage message, FieldDescriptor field, object? value) => field.IsRepeated || field.IsMap
+        ? value is System.Collections.ICollection { Count: > 0 }
+        : field.HasPresence ? field.Accessor.HasValue(message) : value switch
+        {
+            null => false,
+            string text => text.Length != 0,
+            ByteString bytes => !bytes.IsEmpty,
+            bool flag => flag,
+            System.Enum choice => Convert.ToInt64(choice, CultureInfo.InvariantCulture) != 0,
+            _ => Convert.ToDouble(value, CultureInfo.InvariantCulture) != 0,
+        };
+
     private static void Known<T>(T data, MessageParser<T> parser) where T : class, IMessage<T>
     {
         Need(data);
         try
         {
-            if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))))
+            if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))) || CarriesUnimplementedField(data))
                 throw Invalid("The recursive diagram message contains unsupported fields; no history was simplified.");
         }
         catch (Exception error) when (error is InvalidOperationException or InvalidProtocolBufferException)

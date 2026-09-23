@@ -208,6 +208,19 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(before.ViewRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), state.GetProperty("viewRevision").GetString());
                 Assert.AreEqual(before.SourceToken, state.GetProperty("sourceToken").GetString());
                 Assert.AreEqual(3, state.GetProperty("views").GetArrayLength());
+                // Declared schema 2 editor, layout and realization fields are not produced yet; the observation
+                // keeps its earlier shape instead of reporting computed defaults such as sourceWritable=false.
+                static IEnumerable<string> Names(JsonElement element) => element.ValueKind switch
+                {
+                    JsonValueKind.Object => element.EnumerateObject().SelectMany(p => Names(p.Value).Prepend(p.Name)),
+                    JsonValueKind.Array => element.EnumerateArray().SelectMany(Names),
+                    _ => Enumerable.Empty<string>()
+                };
+                var observed = Names(state).ToHashSet(StringComparer.Ordinal);
+                Assert.IsTrue(observed.Contains("viewRevision"), "The observation names were not collected.");
+                foreach (string key in new[] { "storedSchemaVersion", "sourceWritable", "levelDraft", "levelViewports", "canvasTool",
+                    "selectedInterfaceId", "resolvedLayout", "domain", "direction", "presentation", "interfaceRealizations", "realization" })
+                    Assert.IsFalse(observed.Contains(key), "The observation reports undeclared schema 2 field " + key + ".");
                 var images = payload.GetProperty("content").EnumerateArray().Where(c => c.GetProperty("type").GetString() == "image").ToArray();
                 Assert.AreEqual(3, images.Length);
                 for (int i = 0; i < images.Length; ++i)

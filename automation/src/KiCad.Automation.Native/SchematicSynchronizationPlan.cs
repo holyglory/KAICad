@@ -13,11 +13,21 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
     IReadOnlyList<SchematicBindingDifference> ProjectionDifferences,
     SchematicElectricalComparisonResult? ObservedConnectivity, IReadOnlyList<HierarchyCoverageGap> CoverageGaps,
     bool NativeConnectivityValidationRequired, string? ErrorCode = null, string? ErrorMessage = null,
-    bool NativeLayoutResolutionRequired = false)
+    bool NativeLayoutResolutionRequired = false, SchematicConnectionIntent? Connections = null,
+    SchematicRebuildIntent? Rebuild = null)
 {
     // Preparation from saved observations is not live mutation admission or permission
     // to publish XML. The executor must revalidate native state and resulting connectivity.
     public bool CanPrepare => Candidate is not null && ErrorCode is null;
+
+    // A realization plan has no publishable preview (CandidateXml is null) and no
+    // native operations yet: the lane measures the checkpoint and returns them, and
+    // the executor builds the batch around them (CN-1 §9.1).
+    // Candidate is the pre-realization design.
+    public bool NativeConnectionRealizationRequired => Connections is not null;
+    // The Rebuild parameter is provisional until lane 2C confirms; changes go
+    // through a seam request.
+    public bool NativeRebuildRequired => Rebuild is not null;
 }
 
 /// <summary>Compose exact-identity reconcilers into one recoverable design candidate.
@@ -80,6 +90,20 @@ public static class SchematicSynchronizationPlanner
                 : SchematicHierarchyMerge.Plan(state.Baseline.Schematic, desired.Schematic, state.Observed, token);
             if (SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering))
                 return PrepareCreation(state, desired, hierarchy, gaps, token);
+            // Lane entry points. A diff neither lane admits keeps the general path
+            // below unchanged, including its error codes.
+            var connected = SchematicConnectedAddition.Classify(state, desired, token);
+            if (connected.Kind == SchematicConnectedAdditionKind.Rejected)
+                return Failure(connected.ErrorCode ?? SchematicConnectionErrors.XmlDisconnectionUnsupported, connected.ErrorMessage);
+            if (connected.Kind == SchematicConnectedAdditionKind.Admitted)
+                return SchematicConnectedAdditionPlanner.Prepare(state, desired, hierarchy, connected, gaps, token);
+            // The rebuild dispatch and its design_sync_conflict fallback are provisional
+            // until lane 2C confirms; changes go through a seam request.
+            var rebuild = SchematicRebuild.Classify(state, desired, token);
+            if (rebuild.Kind == SchematicRebuildKind.Rejected)
+                return Failure(rebuild.ErrorCode ?? "design_sync_conflict", rebuild.ErrorMessage);
+            if (rebuild.Kind == SchematicRebuildKind.Admitted)
+                return SchematicRebuild.Prepare(state, desired, hierarchy, rebuild, gaps, token);
             electrical = SchematicNetReconciliation.Plan(state, history, token);
             gaps.AddRange(hierarchy.CoverageGaps); gaps.AddRange(electrical.CoverageGaps);
             // Retain both independent diagnostics. Neither successful half is a full design.

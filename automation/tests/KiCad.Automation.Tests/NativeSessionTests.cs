@@ -68,7 +68,34 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbItemsAreCreatedAndUpdatedThroughMcp() => RunNativeSessions(NativeJourney.PcbItems);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor, Simulation, PcbItems }
+    // Shared PSU/CPU acceptance journeys (psu-cpu-fixture-and-ownership.md §1.9).
+    // Each ends Inconclusive (not passed) until its fixture seed and lane journey
+    // land; a category joins native-acceptance only after integration.
+    [TestMethod, TestCategory("NativePsuCpuSeed")]
+    public Task PsuCpuFixtureSeedsLoadWithExactIdentities() => RunNativeSessions(NativeJourney.PsuCpuSeed);
+
+    [TestMethod, TestCategory("NativeConnectedRealization")]
+    public Task PsuCpuXmlRealizesAConnectedHierarchicalSchematic() => RunNativeSessions(NativeJourney.ConnectedRealization);
+
+    [TestMethod, TestCategory("NativeDiagramCanvas")]
+    [DataRow("light")]
+    [DataRow("dark")]
+    public Task PerLevelCanvasEditsPersistLayout(string theme) => RunNativeSessions(NativeJourney.DiagramCanvas, theme);
+
+    [TestMethod, TestCategory("NativeStructuralMigration")]
+    public Task FlatStructureConvertsOnceIntoARootBlock() => RunNativeSessions(NativeJourney.StructuralMigration);
+
+    [TestMethod, TestCategory("NativeXmlRebuild")]
+    public Task DeletedNativeSheetsRebuildFromXmlWithoutLoss() => RunNativeSessions(NativeJourney.XmlRebuild);
+
+    [TestMethod, TestCategory("NativeOwnershipSync")]
+    public Task NativeEditsReachTheOwningBlockByExactIdentity() => RunNativeSessions(NativeJourney.OwnershipSync);
+
+    [TestMethod, TestCategory("NativeCrash")]
+    public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor, Simulation, PcbItems,
+        PsuCpuSeed, ConnectedRealization, DiagramCanvas, StructuralMigration, XmlRebuild, OwnershipSync, NativeCrash }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -92,6 +119,13 @@ public sealed partial class NativeSessionTests
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
+                NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
+                NativeJourney.ConnectedRealization => "native-connected-realization",
+                NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
+                NativeJourney.StructuralMigration => "native-structural-migration",
+                NativeJourney.XmlRebuild => "native-xml-rebuild",
+                NativeJourney.OwnershipSync => "native-ownership-sync",
+                NativeJourney.NativeCrash => "native-crash",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -102,7 +136,8 @@ public sealed partial class NativeSessionTests
         // cut off the second. Per-action deadlines remain unchanged.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 600
             : journey == NativeJourney.CheckedBatch ? 420
-            : journey == NativeJourney.SymbolSheets ? 600 : 300;
+            : journey is NativeJourney.SymbolSheets or NativeJourney.ConnectedRealization
+                or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 600 : 300;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)
@@ -117,7 +152,10 @@ public sealed partial class NativeSessionTests
         try
         {
             var displayStart = new ProcessStartInfo("Xvfb") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", journey is NativeJourney.StructuralEditor or NativeJourney.RecursiveEditor ? "1600x1150x24" : "1280x900x24", "-nolisten", "tcp" })
+            string screen = journey is NativeJourney.StructuralEditor or NativeJourney.RecursiveEditor
+                or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas or NativeJourney.StructuralMigration
+                ? "1600x1150x24" : "1280x900x24";
+            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", screen, "-nolisten", "tcp" })
                 displayStart.ArgumentList.Add(arg);
             Process display = Process.Start(displayStart)!;
             processes.Add(display);
@@ -167,7 +205,7 @@ public sealed partial class NativeSessionTests
                 start.Environment["WXTRACE"] = "KICAD_SETTINGS";
                 start.Environment["XDG_CONFIG_HOME"] = Path.Combine(projectDirectory, "config");
                 start.Environment["XDG_CACHE_HOME"] = Path.Combine(projectDirectory, "cache");
-                if (journey == NativeJourney.RecursiveEditor) start.Environment["GTK_THEME"] = theme == "dark" ? "Adwaita:dark" : "Adwaita";
+                if (journey is NativeJourney.RecursiveEditor or NativeJourney.DiagramCanvas) start.Environment["GTK_THEME"] = theme == "dark" ? "Adwaita:dark" : "Adwaita";
                 foreach (string arg in new[] { "--new", "--automation", id, "--api-socket", socket,
                                                "--automation-log", Path.Combine(evidence, $"native-{index}.log"),
                                                "--software-rendering", project })
@@ -228,6 +266,15 @@ public sealed partial class NativeSessionTests
                 var emptyRoot = await VerifyEmptyRootCreation(client, schematic,
                     Path.ChangeExtension(launched.Single(p => p.Id != target.Id).Project, ".kicad_sch"),
                     evidence, target.Id, target.RootId, deadline.Token);
+                if (journey is NativeJourney.PsuCpuSeed or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
+                    or NativeJourney.StructuralMigration or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync
+                    or NativeJourney.NativeCrash)
+                {
+                    // PSU/CPU journeys seed the shared frozen fixture on this native-created
+                    // root instead of the probe fixture. The fixture loader (PsuCpuFixture)
+                    // and the lane journey stubs arrive with the fixture freeze item.
+                    throw new AssertInconclusiveException("The shared PSU/CPU fixture has not been integrated; no journey ran.");
+                }
                 // Saving the native-created root records its instance identity
                 // in the project. Reuse that identity in the populated fixture.
                 string rootId = emptyRoot.SheetPath.Path[0].Value;

@@ -4,11 +4,20 @@
 #include <api/api_handler.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <map>
+#include <string>
+#include <vector>
 
 class KICOMMON_API DOCUMENT_LIFECYCLE_CONTROLLER
 {
 public:
     using DISPATCH = std::function<API_RESULT( ApiRequest& )>;
+
+    /**
+     * The fully qualified request message types this controller claims before any handler sees
+     * them, in ordinal order.  Handles() and the automation handshake both read this one list, so
+     * the handshake advertises exactly what the controller dispatches.
+     */
+    static const std::vector<std::string>& RequestTypes();
     static bool Handles( const ApiRequest& aRequest );
     API_RESULT Handle( ApiRequest& aRequest, const std::string& aProcessEpoch, const DISPATCH& aDispatch );
     void RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& aState );

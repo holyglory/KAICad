@@ -18,8 +18,13 @@ public enum KiCadVerificationLevel
 
 /// <summary>
 /// Declares how a tool's behaviour is proven. Evidence names test methods as "Class.Method" in
-/// KiCad.Automation.Tests; CapabilityCatalogTests resolves every name, so a removed or renamed
-/// test cannot stay advertised as proof.
+/// KiCad.Automation.Tests. CapabilityCatalogTests resolves every name and checks the claim against
+/// the source files of the cited classes: an mcp-native-journey claim needs a cited NativeSessionTests
+/// journey and a call to the tool by name in a NativeSessionTests source (the Linux native
+/// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
+/// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
+/// STDIO server and call the tool by name. The check is per class, not per method: it cannot tell
+/// which journey of NativeSessionTests makes the call.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute
@@ -46,8 +51,11 @@ public sealed record NativeRequestCapability(string Name, string Availability);
 /// <summary>
 /// Work that no registered tool provides. Tools listed in RegisteredToolsInScope share the scope and
 /// remain available within their own declared contracts; the summary names only what is missing.
+/// TrackedBy names the open KAICad completion-ledger outcomes (p...) and recorded decisions that
+/// hold the remaining work, so the summary can be traced to its authoritative record.
 /// </summary>
-public sealed record CapabilityLimitation(string Id, string Scope, string Summary, IReadOnlyList<string> RegisteredToolsInScope);
+public sealed record CapabilityLimitation(string Id, string Scope, string Summary, IReadOnlyList<string> RegisteredToolsInScope,
+                                          IReadOnlyList<string> TrackedBy);
 
 public sealed record NativeCapabilityCatalog(string Format, IReadOnlyList<NativeRequestCapability> Requests);
 
@@ -64,21 +72,26 @@ public static class CapabilityCatalog
         "serviceCapabilities lists every tool registered in this MCP server process, derived from the server's tool collection; availability 'registered' means the tool can be called, subject to its revision contract.",
         "nativeCapabilities lists the request types the native process dispatches to a registered handler at this moment. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support.",
         "verification.level names the strongest evidence in this build's test suite: mcp-native-journey, native-journey, mcp-process, in-process, or undeclared when a tool declares none.",
-        "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool."
+        "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool. trackedBy cites the open KAICad completion-ledger outcomes and recorded decisions behind each one."
     ];
 
     // Unfinished outcomes that cannot be derived from code. Each names what is missing, never a
-    // registered tool, so it cannot contradict a tool's availability.
-    private static readonly (string Id, string Scope, string Summary)[] Unfinished =
+    // registered tool, so it cannot contradict a tool's availability, and cites the open ledger
+    // outcomes and decisions that track it.
+    private static readonly (string Id, string Scope, string Summary, string[] TrackedBy)[] Unfinished =
     [
         ("pcb-routing-completion", "pcb-routing",
-            "The pcb-routing tools preview, propose, validate and measure routes; none of them commits copper, which is added only through the primitive kicad_pcb_items_create edit. Committing a validated candidate with undo and rollback, layer changes and vias, full push-and-shove, differential-pair and tuning modes, failure and cancellation recovery, and DRC, impedance or RF qualification of routed results are unfinished."),
+            "The pcb-routing tools preview, propose, validate and measure routes; none of them commits copper, which is added only through the primitive kicad_pcb_items_create edit. Committing a validated candidate with undo and rollback, layer changes and vias, full push-and-shove, differential-pair and tuning modes, failure and cancellation recovery, and DRC, impedance or RF qualification of routed results are unfinished.",
+            ["p09bc531842a6fe23"]),
         ("simulation-qualification", "simulation",
-            "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Capturing every model and library file a simulation depends on, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished."),
+            "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Capturing every model and library file a simulation depends on, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished.",
+            ["p682f6173a40ec389", "pbf17c124768447fb"]),
         ("agent-client-qualification", "qualification",
-            "Operation through an actual agent client is verified only for the Linux Codex fixture. The Mac-local and Mac-to-VPS modes and other agent clients are not qualified."),
+            "Operation through an actual agent client is verified only for the Linux Codex fixture. The Mac-local and Mac-to-VPS modes and other agent clients are not qualified.",
+            ["p8bf96f1c4b709a28", "p9bdc0986708bd9b2"]),
         ("platform-qualification", "qualification",
-            "All native verification evidence comes from Linux. Installed packages for Mac (Apple Silicon and Intel) and Windows are not qualified for this workflow.")
+            "The KiCad design workflow through this MCP server (native editing, synchronization and capability discovery) is verified only on Linux, where this build's native editing journeys run. Installed Mac (Apple Silicon and Intel) and Windows packages are not qualified for it; their separate startup, packaged-MCP, installer and update-helper runs do not qualify this workflow, and new Mac and Windows builds are on hold until the XML editing workflow is complete.",
+            ["kicad-hold-mac-windows-until-xml-editor", "p9bdc0986708bd9b2", "p4d6c4ee22fd8078d", "p67f11d25763f499e"])
     ];
 
     public static IReadOnlyList<ServiceToolCapability> Service(IEnumerable<McpServerTool> tools)
@@ -104,7 +117,7 @@ public static class CapabilityCatalog
 
     public static IReadOnlyList<CapabilityLimitation> Limitations(IReadOnlyList<ServiceToolCapability> service) =>
         Unfinished.Select(item => new CapabilityLimitation(item.Id, item.Scope, item.Summary,
-            service.Where(tool => tool.Scope == item.Scope).Select(tool => tool.Name).ToArray())).ToArray();
+            service.Where(tool => tool.Scope == item.Scope).Select(tool => tool.Name).ToArray(), item.TrackedBy)).ToArray();
 
     public static string Level(KiCadVerificationLevel level) => level switch
     {

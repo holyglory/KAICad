@@ -77,14 +77,17 @@ public sealed class CapabilityCatalogTests
     }
 
     // Isolated metadata check: evidence names are test-assembly identifiers, which no end-to-end
-    // path can resolve. It keeps the published verification tied to tests that exist and use the tool.
+    // path can resolve. It keeps the published verification tied to tests that exist and call the
+    // tool where the claim says they do (VerificationEvidenceRules).
     [TestMethod]
     public void DeclaredVerificationNamesExistingTestsThatUseTheTool()
     {
-        string sources = Path.Combine(AutomationRoot(), "tests", "KiCad.Automation.Tests");
-        string testCode = string.Join('\n', Directory.EnumerateFiles(sources, "*.cs").Order(StringComparer.Ordinal).Select(File.ReadAllText));
+        string directory = Path.Combine(AutomationRoot(), "tests", "KiCad.Automation.Tests");
+        var sources = Directory.EnumerateFiles(directory, "*.cs").Order(StringComparer.Ordinal)
+            .Select(file => new VerificationEvidenceRules.Source(Path.GetFileName(file), File.ReadAllText(file))).ToArray();
         var problems = new List<string>();
         var declared = new Dictionary<string, KiCadCapabilityAttribute>(StringComparer.Ordinal);
+        int checkedClaims = 0;
         foreach (var method in typeof(InstanceTools).Assembly.GetTypes().SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)))
         {
             if (method.GetCustomAttribute<McpServerToolAttribute>() is not { Name: { } name }) continue;
@@ -100,20 +103,10 @@ public sealed class CapabilityCatalogTests
                 problems.Add($"{name} is a lane 2D tool without both [KiCadCapability] and [KiCadVerification].");
             if (verification is null) continue;
             if (capability is null) problems.Add($"{name} declares verification without its capability.");
-            if (verification.Evidence.Count == 0) problems.Add($"{name} declares verification without evidence.");
-            foreach (string evidence in verification.Evidence)
-            {
-                string[] parts = evidence.Split('.');
-                var type = parts.Length == 2 ? typeof(CapabilityCatalogTests).Assembly.GetType("KiCad.Automation.Tests." + parts[0]) : null;
-                var test = type?.GetMethods(BindingFlags.Public | BindingFlags.Instance).SingleOrDefault(m => m.Name == parts[1]);
-                if (test?.GetCustomAttributes<TestMethodAttribute>(inherit: true).Any() != true)
-                    problems.Add($"{name} cites {evidence}, which is not a test method in KiCad.Automation.Tests.");
-            }
-            // A claim that the tool itself was called must be backed by a call in the test sources.
-            if (verification.Level is KiCadVerificationLevel.McpNativeJourney or KiCadVerificationLevel.McpProcess
-                && !Regex.IsMatch(testCode, $@"(Tool|Call)\(\s*""{name}""|name\s*=\s*""{name}""|toolName\s*[:=]\s*""{name}""|,\s*""{name}""\s*,"))
-                problems.Add($"{name} claims {CapabilityCatalog.Level(verification.Level)} but no test calls it.");
+            problems.AddRange(VerificationEvidenceRules.Check(name, verification.Level, verification.Evidence, sources, IsTestMethod));
+            checkedClaims++;
         }
+        Assert.IsGreaterThanOrEqualTo(DeclaredToolNames().Length, checkedClaims, "Every lane 2D tool claim must be checked.");
         var rows = ServiceCapabilities.Registered;
         foreach (var duplicate in rows.GroupBy(r => r.Name).Where(g => g.Count() > 1))
             problems.Add($"Transitional capability row {duplicate.Key} is repeated.");
@@ -124,6 +117,81 @@ public sealed class CapabilityCatalogTests
                 problems.Add($"{row.Name}: its [KiCadCapability] and transitional row disagree; the row must be removed or match.");
         }
         Assert.IsEmpty(problems, string.Join(Environment.NewLine, problems));
+
+        static bool IsTestMethod(string type, string method) =>
+            typeof(CapabilityCatalogTests).Assembly.GetType("KiCad.Automation.Tests." + type)?
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance).SingleOrDefault(m => m.Name == method)?
+                .GetCustomAttributes<TestMethodAttribute>(inherit: true).Any() == true;
+    }
+
+    // Isolated detector check: must-catch and must-not-flag cases for the rules above, over
+    // synthetic sources, because the real test tree has no failing claim to observe. The native
+    // class name is interpolated so this file is never read as a native journey source.
+    [TestMethod]
+    public void VerificationRulesOnlyCountCallsWhereTheClaimSaysTheyHappen()
+    {
+        const string native = VerificationEvidenceRules.NativeJourneyClass;
+        VerificationEvidenceRules.Source[] sources =
+        [
+            new("SampleNativeJourney.cs", $$"""
+                public sealed partial class {{native}}
+                {
+                    async Task Journey()
+                    {
+                        await Call("sample_attach", new { });
+                        await mcp!.Tool("sample_close", new { });
+                        var opened = await Open(endpoint, openTool: "sample_open");
+                    }
+                }
+                """),
+            new("SampleStdioTests.cs", """
+                public sealed class SampleStdioTests
+                {
+                    public async Task Run()
+                    {
+                        await using var mcp = await StdioMcpFixture.StartAsync(state, log, token);
+                        CollectionAssert.Contains(names, "sample_listed");
+                        string[] required = ["sample_listed", "sample_other", "sample_third"];
+                        var listed = await Request(3, "tools/call", new { name = "sample_list", arguments = new { } });
+                        var inspected = await mcp.Tool("sample_inspect", new { });
+                    }
+                }
+                """),
+            new("SampleUnitTests.cs", """
+                public sealed class SampleUnitTests
+                {
+                    public void Run() => tools.Tool("sample_unit", new { });
+                }
+                """)
+        ];
+        string[] tests = [native + ".Foundation", "SampleStdioTests.Run", "SampleUnitTests.Run"];
+        IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, params string[] evidence) =>
+            VerificationEvidenceRules.Check(tool, level, evidence, sources, (type, method) => tests.Contains(type + "." + method));
+        string foundation = native + ".Foundation";
+
+        // Must not flag: real calls where the claim puts them.
+        Assert.IsEmpty(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation));
+        Assert.IsEmpty(Check("sample_open", KiCadVerificationLevel.McpNativeJourney, foundation), "A named tool argument of a journey helper is a call site.");
+        Assert.IsEmpty(Check("sample_close", KiCadVerificationLevel.NativeJourney, foundation));
+        Assert.IsEmpty(Check("sample_list", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run"));
+        Assert.IsEmpty(Check("sample_inspect", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run"));
+        Assert.IsEmpty(Check("sample_unit", KiCadVerificationLevel.InProcess, "SampleUnitTests.Run"));
+
+        // Must catch: an STDIO-only call backing a native claim (the removed-journey case).
+        StringAssert.Contains(Check("sample_list", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "no NativeSessionTests journey calls it");
+        StringAssert.Contains(Check("sample_inspect", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "no NativeSessionTests journey calls it");
+        // A native claim that cites no native journey.
+        Assert.IsTrue(Check("sample_list", KiCadVerificationLevel.McpNativeJourney, "SampleStdioTests.Run").Any(p => p.Contains("without citing")));
+        Assert.IsTrue(Check("sample_close", KiCadVerificationLevel.NativeJourney, "SampleUnitTests.Run").Any(p => p.Contains("without citing")));
+        // A name that is only listed or asserted is not a call.
+        StringAssert.Contains(Check("sample_listed", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_listed");
+        StringAssert.Contains(Check("sample_other", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_other");
+        // A cited class that does not start the compiled server, or never calls the tool.
+        StringAssert.Contains(Check("sample_unit", KiCadVerificationLevel.McpProcess, "SampleUnitTests.Run")[0], "does not start the compiled MCP STDIO server");
+        StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "never calls sample_attach");
+        // A name that is not a test, and a claim with no evidence.
+        StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation, "Missing.Test").Single(), "not a test method");
+        StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney).Single(), "without evidence");
     }
 
     // Isolated format rule: older or newer native peers cannot be produced by this build, so the
@@ -207,9 +275,70 @@ internal static class CapabilityCatalogAssertions
             string[] expected = entries.Where(e => e.GetProperty("scope").ValueKind == JsonValueKind.String && e.GetProperty("scope").GetString() == scope)
                 .Select(e => e.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.AreEqual(expected, limitation.GetProperty("registeredToolsInScope").EnumerateArray().Select(n => n.GetString()!).ToArray(), scope);
+            // Each limitation cites the ledger outcomes (p + 16 hex digits) or decision refs that track it.
+            string[] tracking = limitation.GetProperty("trackedBy").EnumerateArray().Select(n => n.GetString()!).ToArray();
+            Assert.IsNotEmpty(tracking, scope);
+            Assert.IsTrue(tracking.All(reference => Regex.IsMatch(reference, "^(p[0-9a-f]{16}|[a-z0-9]+(-[a-z0-9]+)+)$")), string.Join(", ", tracking));
         }
         Assert.IsGreaterThan(0, structured.GetProperty("notes").GetArrayLength());
         return names;
+    }
+}
+
+/// <summary>
+/// Ties a tool's declared verification to the test sources of the classes it cites. A call is the
+/// tool's name passed to an MCP client (Tool, Call, CallToolAsync), sent as a raw tools/call request,
+/// or given to a journey helper as a named tool argument; a listed or asserted name is not a call.
+/// NativeSessionTests is the Linux native session fixture: its partial sources are the journeys that
+/// drive a real KiCad. The check is per class, not per method.
+/// </summary>
+internal static class VerificationEvidenceRules
+{
+    internal const string NativeJourneyClass = "NativeSessionTests";
+
+    internal sealed record Source(string File, string Text);
+
+    private static readonly Regex ClassDeclaration = new(
+        @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file)\s+)*class\s+(\w+)", RegexOptions.Multiline);
+    private static readonly Regex StartsCompiledServer = new(@"StdioMcpFixture\.StartAsync\(|""kicad-mcp\.dll""");
+
+    internal static IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, IReadOnlyList<string> evidence,
+        IReadOnlyList<Source> sources, Func<string, string, bool> isTestMethod)
+    {
+        var problems = new List<string>();
+        if (evidence.Count == 0) return [$"{tool} declares verification without evidence."];
+        var classes = sources.SelectMany(source => ClassDeclaration.Matches(source.Text).Select(match => (Name: match.Groups[1].Value, Source: source)))
+            .GroupBy(entry => entry.Name, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(entry => entry.Source).Distinct().ToArray(), StringComparer.Ordinal);
+        string name = Regex.Escape(tool);
+        var call = new Regex($@"(?:\bTool|\bCall|\bCallToolAsync)\(\s*""{name}""|""tools/call""\s*,\s*new\s*\{{\s*name\s*=\s*""{name}""|\b\w*[Tt]ool\w*\s*[:=]\s*""{name}""");
+        bool citesNative = false, stdioCall = false;
+        foreach (string item in evidence)
+        {
+            string[] parts = item.Split('.');
+            if (parts.Length != 2 || !isTestMethod(parts[0], parts[1]))
+            {
+                problems.Add($"{tool} cites {item}, which is not a test method in KiCad.Automation.Tests.");
+                continue;
+            }
+            if (parts[0] == NativeJourneyClass) { citesNative = true; continue; }
+            if (level == KiCadVerificationLevel.InProcess) continue;
+            var files = classes.GetValueOrDefault(parts[0]) ?? [];
+            if (!files.Any(file => StartsCompiledServer.IsMatch(file.Text)))
+                problems.Add($"{tool} cites {item}, whose class does not start the compiled MCP STDIO server.");
+            else if (!files.Any(file => call.IsMatch(file.Text)))
+                problems.Add($"{tool} cites {item}, whose class never calls {tool}.");
+            else stdioCall = true;
+        }
+        string claim = CapabilityCatalog.Level(level);
+        if (level is KiCadVerificationLevel.McpNativeJourney or KiCadVerificationLevel.NativeJourney && !citesNative)
+            problems.Add($"{tool} claims {claim} without citing a {NativeJourneyClass} journey.");
+        if (level == KiCadVerificationLevel.McpNativeJourney
+            && !(classes.GetValueOrDefault(NativeJourneyClass) ?? []).Any(file => call.IsMatch(file.Text)))
+            problems.Add($"{tool} claims {claim}, but no {NativeJourneyClass} journey calls it through MCP.");
+        if (level == KiCadVerificationLevel.McpProcess && !stdioCall)
+            problems.Add($"{tool} claims {claim}, but no cited compiled STDIO test calls it.");
+        return problems;
     }
 }
 

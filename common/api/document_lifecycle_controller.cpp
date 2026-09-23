@@ -72,11 +72,33 @@ bool FileCoverage( const DocumentLifecycleState& aState )
 }
 }
 
+const std::vector<std::string>& DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes()
+{
+    static const std::vector<std::string> types = []()
+    {
+        std::vector<std::string> names = {
+            std::string( kiapi::automation::v1::CheckedSaveDocument::descriptor()->full_name() ),
+            std::string( kiapi::automation::v1::CheckedCloseDocument::descriptor()->full_name() ),
+            std::string( kiapi::automation::v1::ReadLifecycleOperation::descriptor()->full_name() )
+        };
+        std::sort( names.begin(), names.end() );
+        return names;
+    }();
+
+    return types;
+}
+
 bool DOCUMENT_LIFECYCLE_CONTROLLER::Handles( const ApiRequest& aRequest )
 {
-    return aRequest.message().Is<kiapi::automation::v1::CheckedSaveDocument>()
-            || aRequest.message().Is<kiapi::automation::v1::CheckedCloseDocument>()
-            || aRequest.message().Is<kiapi::automation::v1::ReadLifecycleOperation>();
+    // The same type-name parsing as API_HANDLER::Handle, so a request is claimed exactly when
+    // its type is in the advertised list.
+    std::string typeName;
+
+    if( !google::protobuf::Any::ParseAnyTypeUrl( aRequest.message().type_url(), &typeName ) )
+        return false;
+
+    const std::vector<std::string>& types = RequestTypes();
+    return std::binary_search( types.begin(), types.end(), typeName );
 }
 
 bool DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines(

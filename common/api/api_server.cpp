@@ -496,20 +496,22 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
 
 namespace
 {
-// The automation controllers claim requests by type through static predicates, before any
-// handler sees them.  Probe those predicates with every message in the given scope, nested
-// messages included, so the advertisement follows the dispatch rule rather than a copied list.
-void collectControllerTypes( const google::protobuf::Descriptor* aMessage, std::set<std::string>& aTypes )
+// The checked schematic controller claims requests by type through a static predicate, before
+// any handler sees them, and does not publish its list.  Probe that predicate with every message
+// in the given scope, nested messages included, so the advertisement follows its dispatch rule
+// rather than a copied list.  The native capability probe fails if a claimed type is declared
+// outside this scope.
+void collectCheckedSchematicTypes( const google::protobuf::Descriptor* aMessage, std::set<std::string>& aTypes )
 {
     const std::string name( aMessage->full_name() );
     ApiRequest        probe;
     probe.mutable_message()->set_type_url( "type.googleapis.com/" + name );
 
-    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( probe ) || DOCUMENT_LIFECYCLE_CONTROLLER::Handles( probe ) )
+    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( probe ) )
         aTypes.insert( name );
 
     for( int i = 0; i < aMessage->nested_type_count(); ++i )
-        collectControllerTypes( aMessage->nested_type( i ), aTypes );
+        collectCheckedSchematicTypes( aMessage->nested_type( i ), aTypes );
 }
 } // namespace
 
@@ -524,11 +526,16 @@ std::vector<std::string> KICAD_API_SERVER::AdvertisedRequestTypes() const
         const google::protobuf::Descriptor* session = kiapi::automation::v1::GetAutomationSession::descriptor();
         types.insert( std::string( session->full_name() ) );
 
-        // Every controller request is declared beside the handshake in the automation protocol.
+        // The lifecycle controller's Handles() reads this same list.
+        for( const std::string& type : DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes() )
+            types.insert( type );
+
+        // Every checked schematic request is declared beside the handshake in the automation
+        // protocol.
         const google::protobuf::FileDescriptor* file = session->file();
 
         for( int i = 0; i < file->message_type_count(); ++i )
-            collectControllerTypes( file->message_type( i ), types );
+            collectCheckedSchematicTypes( file->message_type( i ), types );
     }
 
     for( const API_HANDLER* handler : m_handlers )

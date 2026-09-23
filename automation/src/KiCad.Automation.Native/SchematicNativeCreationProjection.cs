@@ -453,7 +453,16 @@ internal static class SchematicNativeCreationProjection
     /// symbol, as repeated sheets do. On a screen with one instance each occurrence is its own
     /// symbol, so units of several components can share a sheet. Any other arrangement would show a
     /// unit on a sheet instance that has no model occurrence for it, or show it twice, and is
-    /// rejected before anything is created.</summary>
+    /// rejected before anything is created.
+    /// <para>Identity invariant: on a single-instance screen a unit that is alone in its
+    /// (screen, definition, unit) bucket takes the shared key, while two or more occurrences there
+    /// take per-component keys. The key of one occurrence therefore depends on the other occurrences
+    /// of the same definition and unit in <paramref name="added"/>. That is deterministic only because
+    /// <c>component_definition_required</c> admits a component only with a definition introduced by the
+    /// same creation, so every component of a definition, and every occurrence of it, is projected in one
+    /// call. A later caller that projects a subset of a definition's occurrences (for example a rebuild of
+    /// one sheet) must pass the definition's complete occurrence set, or it will compute different
+    /// native identities.</para></summary>
     internal static IReadOnlyList<SchematicCreatedSymbolGroup> PhysicalSymbols(SchematicDesign baseline, Circuit desired,
         IEnumerable<SymbolOccurrence> added, CancellationToken token = default)
     {
@@ -498,7 +507,9 @@ internal static class SchematicNativeCreationProjection
     private static string StablePhysicalId(SchematicCreatedSymbolKey key)
     {
         // A per-component symbol extends the shared-symbol preimage, so neither form can
-        // reproduce the other and existing shared identities stay unchanged.
+        // reproduce the other and existing shared identities stay unchanged. Which form a key
+        // takes depends on the whole occurrence set of its definition (see PhysicalSymbols), so
+        // recomputing an identity requires that complete set, never one occurrence alone.
         byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes("kicad-created-symbol-v2\n" + key.PhysicalScreen
             + "\n" + key.Definition.ToString("D") + "\n" + key.Unit
             + (key.Component is Guid component ? "\ncomponent\n" + component.ToString("D") : "")));

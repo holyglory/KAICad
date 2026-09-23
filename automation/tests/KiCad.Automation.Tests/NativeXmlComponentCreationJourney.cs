@@ -125,6 +125,8 @@ public sealed partial class NativeSessionTests
                 page.PageBounds.Position.YNm + page.PageBounds.Size.YNm - 50_000_000), []));
         }
         JsonElement initialLayout;
+        // The codes the public tools actually returned for the inconsistent declaration.
+        object? crossSheetRejection = null;
         await using (var layoutHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
             Path.Combine(evidence, instanceId + "-layout-host"), Path.Combine(evidence, instanceId + "-layout-host.log"), token))
         {
@@ -346,6 +348,7 @@ public sealed partial class NativeSessionTests
         var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document.Clone() }, token);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-creation-render.png"), image.Preview.Png.ToByteArray(), token);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-creation-window.png"), token);
+        Assert.AreEqual(declaration is not null, crossSheetRejection is not null, "The declared editor must record its observed cross-sheet rejection.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-creation-proof.json"), JsonSerializer.Serialize(new
         { instanceId, createdIds, operation, realStdioApply = true, repeatedScreenSingleCreate = true,
             coordinateFreeInitialPlacement = true, nativeMeasurementReadOnly = true, explicitPageReservations = true,
@@ -353,7 +356,7 @@ public sealed partial class NativeSessionTests
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
             selectedBodyStyle = declaration?.BodyStyle, crossSheetUnits = crossSheet.Length,
-            crossSheetRejection = declaration is null ? null : "created_unit_sheet_coverage_mismatch",
+            crossSheetRejection,
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
@@ -434,8 +437,9 @@ public sealed partial class NativeSessionTests
                 regions, userInstructions = instructions });
             results["layout"] = layout;
             Assert.IsTrue(layout.GetProperty("isError").GetBoolean(), layout.GetRawText());
-            Assert.AreEqual(Code, JsonDocument.Parse(layout.GetProperty("content")[0].GetProperty("text").GetString()!)
-                .RootElement.GetProperty("code").GetString(), layout.GetRawText());
+            string? layoutCode = JsonDocument.Parse(layout.GetProperty("content")[0].GetProperty("text").GetString()!)
+                .RootElement.GetProperty("code").GetString();
+            Assert.AreEqual(Code, layoutCode, layout.GetRawText());
 
             byte[] placed = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(Misplaced(proposed), []));
             await File.WriteAllBytesAsync(path, placed, token);
@@ -446,7 +450,8 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-cross-sheet-rejection.json"),
                 JsonSerializer.Serialize(results), token);
             Assert.IsTrue(apply.GetProperty("isError").GetBoolean(), apply.GetRawText());
-            Assert.AreEqual(Code, apply.GetProperty("structuredContent").GetProperty("errorCode").GetString(), apply.GetRawText());
+            string? applyCode = apply.GetProperty("structuredContent").GetProperty("errorCode").GetString();
+            Assert.AreEqual(Code, applyCode, apply.GetRawText());
 
             Assert.AreEqual(nativeBefore, await Capture(), "A rejected declaration must not reach the native editor.");
             var after = store.Read()!;
@@ -454,6 +459,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(baselineXml, SchematicDesignXml.Write(after.State.Baseline, []));
             Assert.IsFalse(after.State.HasPendingWork);
             CollectionAssert.AreEqual(placed, await File.ReadAllBytesAsync(path, token), "A rejected apply must not publish XML.");
+            crossSheetRejection = new { layoutErrorCode = layoutCode, applyErrorCode = applyCode };
             await File.WriteAllBytesAsync(path, original, token);
             return store.Save(after.State with { DesiredFileBytes = original }, after.RevisionToken);
         }

@@ -306,6 +306,8 @@ public sealed class SchematicNativeCreationProjectionTests
     internal static (SchematicDesign Baseline, SchematicDesign Desired) PsuCpuComponents()
     {
         Guid root = Guid.NewGuid();
+        // The copied S1 builder must stay exactly the contract seed (§1.6.2), not only bind to the model.
+        PsuCpuFixture.RequireSeedHierarchy(PsuCpuSheets(root), PsuCpuSeed.Sheets, root);
         var baseline = PsuCpuFixture.Baseline(PsuCpuSheets(root), PsuCpuSeed.Sheets, root, CancellationToken.None);
         var engineering = PsuCpuFixture.Engineering(PsuCpuStage.Components);
         // Explicit grid placements: the rendered journeys measure real layout; this checks identity.

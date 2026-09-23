@@ -1,3 +1,4 @@
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
@@ -8,8 +9,68 @@ public sealed record PresentationRepairTarget(Guid ObjectId, Guid? OwnerId, stri
 public sealed record NativePresentationCheck(PresentationReport Report,
     IReadOnlyList<PresentationRepairTarget> RepairTargets, IReadOnlyList<string> Limitations);
 
+/// <summary>A placement problem among symbols on one sheet: a symbol whose body, pins or visible fields
+/// leave the usable region (<see cref="NativePresentationChecks.SymbolOutsideUsableRegion"/>), or two symbols
+/// whose bodies overlap (<see cref="NativePresentationChecks.SymbolBodiesOverlap"/>).</summary>
+public sealed record SymbolPlacementIssue(string Code, IReadOnlyList<Guid> Symbols);
+
 public static class NativePresentationChecks
 {
+    public const string SymbolOutsideUsableRegion = "symbol_outside_usable_region";
+    public const string SymbolBodiesOverlap = "symbol_bodies_overlap";
+
+    /// <summary>Measure <paramref name="symbols"/> in KiCad on the displayed sheet <paramref name="document"/>
+    /// and report every symbol whose body, pins or visible fields leave <paramref name="usable"/> (for example
+    /// a page inset and a title-block reserve), and every pair of symbols whose bodies with their pins overlap.
+    /// Fields may overhang each other; only bodies must be disjoint (psu-cpu fixture §1.6.3). KiCad measures
+    /// only the sheet it displays and refuses any other document, so the caller activates the sheet first.
+    /// An empty result means the placement is clean.</summary>
+    public static async Task<IReadOnlyList<SymbolPlacementIssue>> CheckSymbolPlacementAsync(NativeClient client,
+        DocumentSpecifier document, IReadOnlyList<Guid> symbols, PresentationBounds usable, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(symbols);
+        ArgumentNullException.ThrowIfNull(usable);
+        if (symbols.Count == 0) return [];
+        if (symbols.Contains(Guid.Empty) || symbols.Distinct().Count() != symbols.Count)
+            throw new ArgumentException("Name each symbol once by its native identity.", nameof(symbols));
+        async Task<PresentationBounds[]> Measure(BoundingBoxMode mode)
+        {
+            var query = new GetBoundingBox { Header = new() { Document = document.Clone() }, Mode = mode };
+            query.Items.Add(symbols.Select(id => new KIID { Value = id.ToString("D") }));
+            var response = await client.InvokeAsync<GetBoundingBox, GetBoundingBoxResponse>(query, cancellationToken);
+            if (response.Boxes.Count != symbols.Count || !response.Items.Select(Identity).SequenceEqual(symbols))
+                throw Invalid("Native symbol bounds identify other or missing symbols.");
+            return [.. response.Boxes.Select(Bounds)];
+        }
+        // Body and pins only (no fields) for overlap; body, pins and visible fields for the usable region.
+        var bodies = await Measure(BoundingBoxMode.BbmItemOnly);
+        var withFields = await Measure(BoundingBoxMode.BbmItemAndChildText);
+        return SymbolPlacementIssues(symbols, bodies, withFields, usable);
+    }
+
+    /// <summary>The geometry of <see cref="CheckSymbolPlacementAsync"/>: bounds are listed in the order of
+    /// <paramref name="symbols"/>. Boxes that only touch do not overlap.</summary>
+    internal static IReadOnlyList<SymbolPlacementIssue> SymbolPlacementIssues(IReadOnlyList<Guid> symbols,
+        IReadOnlyList<PresentationBounds> bodies, IReadOnlyList<PresentationBounds> withFields, PresentationBounds usable)
+    {
+        if (bodies.Count != symbols.Count || withFields.Count != symbols.Count)
+            throw new ArgumentException("Give one body and one field-inclusive box for each symbol.");
+        var issues = new List<SymbolPlacementIssue>();
+        for (int i = 0; i < symbols.Count; i++)
+            if (!usable.Contains(bodies[i]) || !usable.Contains(withFields[i]))
+                issues.Add(new(SymbolOutsideUsableRegion, [symbols[i]]));
+        for (int i = 0; i < symbols.Count; i++)
+            for (int j = i + 1; j < symbols.Count; j++)
+            {
+                PresentationBounds a = bodies[i], b = bodies[j];
+                if (a.LeftNm < b.RightNm && b.LeftNm < a.RightNm && a.TopNm < b.BottomNm && b.TopNm < a.BottomNm)
+                    issues.Add(new(SymbolBodiesOverlap, [symbols[i], symbols[j]]));
+            }
+        return issues;
+    }
+
     public static async Task<NativePresentationCheck> CheckAsync(NativeClient client, DocumentSpecifier document,
         PresentationPolicy policy, CancellationToken cancellationToken = default)
     {

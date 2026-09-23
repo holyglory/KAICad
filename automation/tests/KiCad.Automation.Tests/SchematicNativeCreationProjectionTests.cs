@@ -266,6 +266,26 @@ public sealed class SchematicNativeCreationProjectionTests
             Assert.AreEqual(bindings[occurrence.Id], ownBindings[occurrence.Id].ToString("D"));
         var retry = SchematicNativeCreationProjection.Project(moved.Baseline, moved.Desired, [moved.Library]);
         Assert.AreEqual(SchematicDesignXml.Write(result.Candidate, [moved.Library]), SchematicDesignXml.Write(retry.Candidate, [moved.Library]));
+
+        // Identity precondition: whether a unit gets the shared or a per-component identity depends on every
+        // occurrence of its definition, so a caller that supplies only some of them is refused as a defect
+        // before any identity is computed. Complete sets are accepted per definition and give the same groups.
+        var circuit = moved.Desired.Engineering.Circuit;
+        var channel = moved.Components.Where(c => c.SheetInstanceId != moved.Root).OrderBy(c => c.Id).ToArray();
+        foreach (var (problem, partial) in new (string, SymbolOccurrence[])[]
+        {
+            ("one channel component of the shared definition", [.. occurrences.Where(s => s.ComponentId != channel[0].Id)]),
+            ("only the moved units", units2),
+            ("one moved unit", [units2[0]]),
+            ("a channel component without its moved unit", [.. occurrences.Where(s => s.Id != units2[0].Id)])
+        })
+            Assert.ThrowsExactly<InvalidOperationException>(() => SchematicNativeCreationProjection.PhysicalSymbols(moved.Baseline, circuit, partial), problem);
+        var complete = SchematicNativeCreationProjection.PhysicalSymbols(moved.Baseline, circuit, occurrences).Select(g => g.Key).ToArray();
+        var rootDefinition = moved.Components.Single(c => c.SheetInstanceId == moved.Root).DefinitionId;
+        var perDefinition = new[] { rootDefinition, channel[0].DefinitionId }.SelectMany(definition => SchematicNativeCreationProjection.PhysicalSymbols(
+            moved.Baseline, circuit, occurrences.Where(s => moved.Components.Single(c => c.Id == s.ComponentId).DefinitionId == definition)))
+            .Select(g => g.Key).ToArray();
+        CollectionAssert.AreEquivalent(complete, perDefinition, "Each definition's identities depend only on its own complete occurrence set.");
     }
 
     [TestMethod]

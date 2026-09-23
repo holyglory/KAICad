@@ -471,10 +471,18 @@ internal static class SchematicNativeCreationProjection
     /// same creation, so every component of a definition, and every occurrence of it, is projected in one
     /// call. A later caller that projects a subset of a definition's occurrences (for example a rebuild of
     /// one sheet) must pass the definition's complete occurrence set, or it will compute different
-    /// native identities.</para></summary>
+    /// native identities. That precondition is enforced: when a definition appears in
+    /// <paramref name="added"/>, every occurrence of it in <paramref name="desired"/> must be supplied,
+    /// otherwise this throws <see cref="InvalidOperationException"/> (a caller defect, not a user
+    /// refusal).</para></summary>
     internal static IReadOnlyList<SchematicCreatedSymbolGroup> PhysicalSymbols(SchematicDesign baseline, Circuit desired,
         IEnumerable<SymbolOccurrence> added, CancellationToken token = default)
     {
+        var supplied = added.ToArray();
+        var omitted = OmittedOccurrences(desired, supplied);
+        if (omitted.Count != 0)
+            throw new InvalidOperationException("Created native identities depend on every occurrence of a definition; supply all of them. Omitted: "
+                + string.Join(", ", omitted.Select(id => id.ToString("D"))));
         var components = desired.Components.ToDictionary(c => c.Id);
         var paths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
         var screens = baseline.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), s => s.Metadata.ScreenId.Value,
@@ -482,7 +490,7 @@ internal static class SchematicNativeCreationProjection
         var instancesOfScreen = screens.GroupBy(pair => pair.Value, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal), StringComparer.Ordinal);
         var located = new List<(SymbolOccurrence Occurrence, string Path, string Screen, Guid Definition)>();
-        foreach (var occurrence in added)
+        foreach (var occurrence in supplied)
         {
             token.ThrowIfCancellationRequested();
             if (!components.TryGetValue(occurrence.ComponentId, out var component))
@@ -511,6 +519,23 @@ internal static class SchematicNativeCreationProjection
         }
         return result.OrderBy(g => g.Key.PhysicalScreen, StringComparer.Ordinal).ThenBy(g => g.Key.Definition)
             .ThenBy(g => g.Key.Unit).ThenBy(g => g.Key.Component ?? Guid.Empty).ToArray();
+    }
+
+    /// <summary>The occurrences in <paramref name="desired"/> of definitions that <paramref name="added"/>
+    /// mentions but does not supply, in identity order. Empty exactly when <see cref="PhysicalSymbols"/>
+    /// may compute identities for <paramref name="added"/>. Creation always satisfies this, because a new
+    /// component needs a new definition and may bring units only for itself; a caller that meets another
+    /// shape (a new unit of an existing component) reports creation's own refusal instead.</summary>
+    internal static IReadOnlyList<Guid> OmittedOccurrences(Circuit desired, IEnumerable<SymbolOccurrence> added)
+    {
+        var components = new Dictionary<Guid, ComponentInstance>();
+        foreach (var component in desired.Components) components.TryAdd(component.Id, component);
+        var supplied = added.ToArray();
+        var suppliedIds = supplied.Select(s => s.Id).ToHashSet();
+        var definitions = supplied.Where(s => components.ContainsKey(s.ComponentId))
+            .Select(s => components[s.ComponentId].DefinitionId).ToHashSet();
+        return [.. desired.Symbols.Where(s => !suppliedIds.Contains(s.Id) && components.TryGetValue(s.ComponentId, out var owner)
+            && definitions.Contains(owner.DefinitionId)).Select(s => s.Id).Order()];
     }
 
     private static string StablePhysicalId(SchematicCreatedSymbolKey key)

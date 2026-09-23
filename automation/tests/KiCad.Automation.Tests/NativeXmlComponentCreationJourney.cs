@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -19,12 +21,480 @@ public sealed partial class NativeSessionTests
         string display, string evidence, string instanceId, CancellationToken token)
         => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
 
-    // Creation-only PSU/CPU journey on the S1 seed: the fixture's Components stage,
-    // including U5 unit 4 on CPU_POWER, created from XML without nets.
-    // Lane 2A replaces this body when it delivers the journey.
-    private static Task VerifyPsuCpuComponentCreation(NativeClient client, PsuCpuNativeContext context, int processId,
+    // Creation-only PSU/CPU journey on the S1 seed (ledger p95e0c19e6143deb6): the frozen fixture's
+    // Components stage written as XML, laid out, prepared and applied through the public MCP tools over
+    // STDIO. The live editor must then hold every component with its exact pins on its sheet, processor
+    // U5 as one component and one declared definition whose units 1-3 sit on CPU and unit 4 on CPU_POWER,
+    // and all 222 pins unconnected (psu-cpu-fixture-and-ownership.md §1.4.2, §1.6.3). One native undo/redo
+    // and one save/reload follow, and the recovery record reattaches to the reloaded editor unchanged.
+    private static async Task VerifyPsuCpuComponentCreation(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
-        => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
+    {
+        const PsuCpuStage Stage = PsuCpuStage.Components;
+        var expected = PsuCpuFixture.ExpectedNative(Stage);
+        var document = context.Root;
+        var seedBaseline = context.Baseline ?? throw new AssertFailedException("The S1 seed must provide a native baseline.");
+        string path = context.DesignPath;
+        string Evidence(string name) => Path.Combine(evidence, instanceId + "-psu-cpu-" + name);
+        var store = new DesignRecoveryStore(Evidence("recovery.json"));
+        var saved = await PsuCpuFixture.InitializeRecoveryAsync(client, context, store.StatePath, token);
+        var desired = PsuCpuFixture.Desired(context, Stage);
+        var circuit = desired.Engineering.Circuit;
+        Assert.HasCount(8, circuit.Components); Assert.HasCount(11, circuit.Symbols); Assert.IsEmpty(circuit.Nets);
+        Assert.IsTrue(circuit.Symbols.All(s => s.Placement is null), "The frozen fixture occurrences are coordinate-free.");
+        Assert.AreEqual(222, circuit.Parts.Sum(p => p.Pins.Count));
+        byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, []));
+        await File.WriteAllBytesAsync(path, bytes, token);
+        saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
+        var seeded = await Capture();
+        Assert.IsTrue(expected.Symbols.All(s => circuit.Symbols.Any(o => o.Id == s.Occurrence)));
+
+        // Explicit fixture policy (§1.6.3 presentation): a 10 mm page inset and the bottom 50 mm kept
+        // for the title block, for every sheet that receives a symbol. The root sheet receives none.
+        string PathKey(IEnumerable<Guid> ids) => string.Join('/', ids.Select(id => id.ToString("D")));
+        var sheetPaths = expected.Sheets.ToDictionary(s => s.Key,
+            s => PathKey(seedBaseline.SheetBindings.Single(b => b.SheetInstanceId == s.ModelSheetInstance).NativePath));
+        var targetSheets = expected.Sheets.Where(s => expected.Symbols.Any(x => x.Sheet == s.Key)).ToArray();
+        CollectionAssert.AreEquivalent(new[] { "PSU", "CPU", "CPU_POWER" }, targetSheets.Select(s => s.Key).ToArray());
+        var regions = new List<SchematicLayoutRegion>();
+        var usable = new Dictionary<string, PresentationBounds>(StringComparer.Ordinal);
+        foreach (var sheet in targetSheets)
+        {
+            var screen = seedBaseline.Schematic.Instances.Single(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == sheetPaths[sheet.Key]);
+            var page = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = seeded.State.Revision.Clone() }, token);
+            Assert.AreEqual(sheet.NativeScreen.ToString("D"), page.ScreenId.Value, sheet.Key);
+            long inset = expected.Presentation.PageInsetMm * 1_000_000L, reserve = expected.Presentation.ReservedBottomMm * 1_000_000L;
+            var bounds = new PresentationBounds(page.PageBounds.Position.XNm + inset, page.PageBounds.Position.YNm + inset,
+                page.PageBounds.Position.XNm + page.PageBounds.Size.XNm - inset, page.PageBounds.Position.YNm + page.PageBounds.Size.YNm - reserve);
+            regions.Add(new(sheet.NativeScreen, bounds, []));
+            usable.Add(sheet.Key, bounds);
+        }
+
+        Guid operation = Guid.NewGuid();
+        string? coordinateFreeCode;
+        int publicPlanCreates;
+        JsonElement applied;
+        CheckedSchematicState created;
+        SchematicDesign synchronized;
+        await using var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(), Evidence("host"), Evidence("host.log"), token);
+        RequireToolSuccess(await host.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        object Recovery(string revision) => new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = revision };
+
+        // Preparing the coordinate-free XML refuses creation until layout places every unit.
+        var unplaced = await host.Tool("kicad_design_sync_plan", Recovery(saved.RevisionToken));
+        await File.WriteAllTextAsync(Evidence("coordinate-free-plan.json"), RetainedToolEvidence(unplaced), token);
+        Assert.IsTrue(unplaced.GetProperty("isError").GetBoolean(), unplaced.GetRawText());
+        coordinateFreeCode = unplaced.GetProperty("structuredContent").GetProperty("errorCode").GetString();
+        Assert.AreEqual("created_symbol_placement_required", coordinateFreeCode, unplaced.GetRawText());
+
+        var layout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = saved.RevisionToken, gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L, regions,
+            userInstructions = "Place each fixture component on its own sheet and keep the processor's power unit on CPU_POWER." });
+        await File.WriteAllTextAsync(Evidence("initial-layout.json"), RetainedToolEvidence(layout), token);
+        RequireToolSuccess(layout);
+        var proposal = layout.GetProperty("structuredContent");
+        Assert.IsTrue(proposal.GetProperty("canPropose").GetBoolean(), proposal.GetRawText());
+        CollectionAssert.AreEquivalent(circuit.Symbols.Select(s => s.Id).ToArray(), proposal.GetProperty("refinement").GetProperty("AffectedSymbols")
+            .EnumerateArray().Select(s => Guid.Parse(s.GetString()!)).ToArray());
+        Assert.AreEqual(seeded, await Capture(), "Layout preparation must not change the native document.");
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+        string proposedXml = proposal.GetProperty("desiredXml").GetString()!;
+        var placed = SchematicDesignXml.Read(proposedXml, []);
+        Assert.AreEqual(CircuitXml.Write(circuit), CircuitXml.Write(placed.Engineering.Circuit.WithoutPlacement()),
+            "Layout only adds coordinates; every unit stays on the sheet its occurrence names.");
+        Assert.IsTrue(placed.Engineering.Circuit.Symbols.All(s => s.Placement is not null));
+        bytes = Encoding.UTF8.GetBytes(proposedXml);
+        await File.WriteAllBytesAsync(path, bytes, token);
+        saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
+
+        // The public preview is exactly the planner's creation candidate: eleven new native symbols.
+        var planner = SchematicSynchronizationPlanner.Plan(saved.State, token);
+        Assert.IsTrue(planner.CanPrepare, planner.ErrorCode + ": " + planner.ErrorMessage);
+        var prepared = await host.Tool("kicad_design_sync_plan", Recovery(saved.RevisionToken));
+        await File.WriteAllTextAsync(Evidence("plan.json"), RetainedToolEvidence(prepared), token);
+        RequireToolSuccess(prepared);
+        var preview = prepared.GetProperty("structuredContent");
+        Assert.AreEqual(planner.CandidateXml, preview.GetProperty("candidateDesignXml").GetString());
+        CollectionAssert.AreEqual(planner.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
+            preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray());
+        publicPlanCreates = planner.NativeOperations.Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true);
+        Assert.AreEqual(expected.Symbols.Count, publicPlanCreates);
+        Assert.AreEqual(seeded, await Capture(), "Planning must not change the native document.");
+
+        var args = new { instanceId, recoveryPath = store.StatePath, designPath = path, expectedRevisionToken = saved.RevisionToken,
+            operationId = operation.ToString("D") };
+        applied = await host.Tool("kicad_design_sync_apply", args);
+        await File.WriteAllTextAsync(Evidence("apply.json"), applied.GetRawText(), token);
+        if (applied.TryGetProperty("isError", out var failed) && failed.GetBoolean())
+            await ObserveRefusedApply();
+        RequireToolSuccess(applied);
+        var result = applied.GetProperty("structuredContent");
+        Assert.IsTrue(result.GetProperty("nativeMutationCommitted").GetBoolean(), result.GetRawText());
+        Assert.IsTrue(result.GetProperty("nativeFilesSaved").GetBoolean(), result.GetRawText());
+        Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), result.GetRawText());
+        var replay = await host.Tool("kicad_design_sync_apply", args); RequireToolSuccess(replay);
+        Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+
+        synchronized = store.Read()!.State.Baseline;
+        Assert.AreEqual(SchematicDesignXml.Write(synchronized, []), await File.ReadAllTextAsync(path, token),
+            "The published XML is the synchronized design.");
+        created = await Capture();
+        Assert.IsFalse(created.State.NativeContentDirty, "Apply saves the created sheets.");
+        var afterApply = RequireCreated(created, "after apply");
+        await CheckPresentation(created);
+
+        // One native undo removes every created symbol from all three sheets; redo restores them exactly.
+        await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+        var undone = await Until("native undo", s => Same(WithoutLibraryCache(s.Electrical.Hierarchy.Data), WithoutLibraryCache(seedBaseline.Schematic)));
+        Assert.IsFalse(undone.Electrical.Hierarchy.Data.Instances.Any(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor))),
+            "Undo must remove every created unit, including U5 unit 4 on CPU_POWER.");
+        // Unused library cache entries carry no drawn object; whether undo also drops them is recorded.
+        bool undoRestoredLibraryCache = Same(undone.Electrical.Hierarchy.Data, seedBaseline.Schematic);
+        await FocusedSchematicShortcut(client, document, processId, display, "y", token);
+        var redone = await Until("native redo", s => Same(s.Electrical.Hierarchy.Data, synchronized.Schematic));
+        RequireCreated(redone, "after redo");
+
+        // Save the redone editor, reload the saved sheets from disk and require the same schematic.
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+        Assert.IsFalse((await Capture()).State.NativeContentDirty);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+        var reloaded = await Capture();
+        var loadedExpected = synchronized.Schematic.Clone();
+        foreach (var screen in loadedExpected.Instances)
+        {
+            // Loading the newly written files changes source-format provenance, not any persisted object.
+            var actual = reloaded.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(screen.Metadata.Document));
+            Assert.AreEqual(screen.Metadata.WriterNativeFormatVersion, actual.Metadata.LoadedNativeFormatVersion);
+            screen.Metadata.LoadedNativeFormatVersion = actual.Metadata.LoadedNativeFormatVersion;
+        }
+        if (!Same(reloaded.Electrical.Hierarchy.Data, loadedExpected))
+        {
+            await File.WriteAllTextAsync(Evidence("reloaded.xml"), SchematicDataXml.Write(reloaded.Electrical.Hierarchy.Data), token);
+            Assert.Fail("The reloaded sheets must equal the created schematic.");
+        }
+        Assert.IsFalse(reloaded.State.NativeContentDirty);
+        Assert.AreNotEqual(created.State.Revision.Epoch, reloaded.State.Revision.Epoch, "Revert reloads a new native document.");
+        var afterReload = RequireCreated(reloaded, "after reload");
+
+        // The recovery record adopts the reloaded editor unchanged, and nothing is left to apply.
+        var beforeReattach = store.Read()!;
+        var reattach = await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = beforeReattach.RevisionToken, expectedDocumentEpoch = reloaded.State.Revision.Epoch });
+        RequireToolSuccess(reattach);
+        Assert.AreEqual(SchematicDesignXml.Write(beforeReattach.State.Baseline, []), SchematicDesignXml.Write(store.Read()!.State.Baseline, []));
+        var settled = await host.Tool("kicad_design_sync_plan", Recovery(store.Read()!.RevisionToken));
+        await File.WriteAllTextAsync(Evidence("reloaded-plan.json"), RetainedToolEvidence(settled), token);
+        RequireToolSuccess(settled);
+        Assert.AreEqual(0, settled.GetProperty("structuredContent").GetProperty("nativeOperationsJson").GetArrayLength(), settled.GetRawText());
+        Assert.AreEqual(reloaded, await Capture());
+
+        // The published XML is retained in the recovery record; the proof names it by length and SHA-256.
+        byte[] published = await File.ReadAllBytesAsync(path, token);
+        await NativeKeyboard.CaptureAsync(display, Evidence("window.png"), token);
+        await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
+        {
+            instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, stage = Stage.ToString(), seed = context.Seed.ToString(), operation,
+            realStdioApply = true, coordinateFreePlanErrorCode = coordinateFreeCode, initialLayoutProposed = true,
+            publicPlanMatchesPlanner = true, publicPlanSymbolCreates = publicPlanCreates, exactReplay = true,
+            placements = afterApply.Placements, declaredPins = circuit.Parts.Sum(p => p.Pins.Count), modelNets = circuit.Nets.Count,
+            observedAfterApply = afterApply.Connectivity, observedAfterReload = afterReload.Connectivity,
+            publishedXml = new { length = published.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(published)) },
+            processorUnit4Sheet = "CPU_POWER", processorOneComponentOneDefinition = true,
+            nativeUndoRedoVerified = true, undoRestoredLibraryCache, saveReloadVerified = true, recoveryReattachedWithoutChanges = true,
+            presentation = expected.Presentation, crossPlatformReady = false
+        }), token);
+
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+            { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+        static SchematicHierarchyData WithoutLibraryCache(SchematicHierarchyData data)
+        {
+            var result = data.Clone();
+            foreach (var screen in result.Instances) screen.CachedSymbols.Clear();
+            return result;
+        }
+
+        bool Same(SchematicHierarchyData left, SchematicHierarchyData right) =>
+            SchematicHierarchyDelta.Plan(left, right, token).Count == 0 && SchematicHierarchyDelta.Plan(right, left, token).Count == 0;
+
+        // A native shortcut is processed asynchronously; read checked state until it takes effect.
+        async Task<CheckedSchematicState> Until(string what, Func<CheckedSchematicState, bool> reached)
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(20));
+            while (true)
+            {
+                var state = await Capture();
+                if (reached(state)) return state;
+                try { await Task.Delay(250, wait.Token); }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    await File.WriteAllTextAsync(Evidence(what.Replace(' ', '-') + "-actual.xml"), SchematicDataXml.Write(state.Electrical.Hierarchy.Data), token);
+                    throw new AssertFailedException(what + " did not reach the expected schematic within 20 s.");
+                }
+            }
+        }
+
+        // A refused apply is observed, never accepted: what KiCad shows, every pin group whose native connectivity
+        // differs from the planned candidate (by reference and pin number), whether the XML file and the recovery
+        // record stayed unpublished, whether KiCad holds exactly the planned symbols, and what the public recovery
+        // tools then let a user do. These are recorded as observations, not asserted, so a half-applied state is
+        // never locked in as expected behaviour; the journey still fails on the refused apply.
+        async Task ObserveRefusedApply()
+        {
+            var actual = await Capture();
+            await File.WriteAllTextAsync(Evidence("apply-actual.xml"), SchematicDataXml.Write(actual.Electrical.Hierarchy.Data), token);
+            var candidate = planner.Candidate!;
+            var references = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
+            var observed = SchematicElectricalComparison.Compare(candidate, actual.Electrical, [], token);
+            var planned = NativeSymbolKeys(candidate.Schematic);
+            var drawn = NativeSymbolKeys(actual.Electrical.Hierarchy.Data);
+            bool bindingsResolve;
+            try { bindingsResolve = SchematicModelProjection.NativeSymbols(candidate, actual.Electrical.Hierarchy.Data).Count == candidate.SymbolBindings.Count; }
+            catch (KeyNotFoundException) { bindingsResolve = false; }
+            string before = SchematicDesignXml.Write(saved.State.Baseline, []);
+            await File.WriteAllTextAsync(Evidence("apply-connectivity.json"), JsonSerializer.Serialize(new
+            {
+                observed.PinBindingsComplete, observed.ConnectivityEquivalent,
+                issues = observed.Issues.Select(i => new { i.Code, i.NativePath, i.NativeId, i.ComponentId }),
+                differences = observed.Differences.Select(d => new { d.Kind, d.ModelNetIds,
+                    pins = d.Pins.Select(p => references.GetValueOrDefault(p.ComponentId, p.ComponentId.ToString("D")) + "." + p.Pin) }),
+                multiPinNativeNets = (observed.PinPartitions ?? []).Where(p => p.Pins.Count > 1).Select(p => new { p.NativeName,
+                    pins = p.Pins.Select(x => references.GetValueOrDefault(x.ComponentId, x.ComponentId.ToString("D")) + "." + x.Pin) }),
+                refusedApply = new
+                {
+                    errorCode = ErrorCode(applied), xmlUnchanged = await XmlUnchanged(), recovery = RecoveryObservation(before),
+                    nativeDirty = actual.State.NativeContentDirty, nativeSymbols = drawn.Count, plannedSymbols = planned.Count,
+                    nativeHoldsExactlyPlannedSymbols = drawn.SetEquals(planned), plannedBindingsResolveOnPlannedSheets = bindingsResolve,
+                    nativeObjectsMatchCandidate = Same(actual.Electrical.Hierarchy.Data, candidate.Schematic)
+                }
+            }), token);
+
+            // What a user can do next through the public tools: inspect the record, resume the same operation,
+            // refresh the record from KiCad, then discard the unsaved editor change by reloading the saved sheets
+            // and ask the record to adopt that reload and plan again.
+            var attempts = new List<object>
+            {
+                await Attempt("kicad_design_recovery_plan", new { instanceId, recoveryPath = store.StatePath }),
+                await Attempt("kicad_design_sync_apply", args),
+                await Attempt("kicad_design_recovery_refresh", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = store.Read()!.RevisionToken })
+            };
+            object reload;
+            try
+            {
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+                var reverted = await Capture();
+                reload = new { reloadedSavedSheets = true, nativeSymbols = NativeSymbolKeys(reverted.Electrical.Hierarchy.Data).Count,
+                    equalsSeed = Same(reverted.Electrical.Hierarchy.Data, seedBaseline.Schematic), nativeDirty = reverted.State.NativeContentDirty };
+                attempts.Add(await Attempt("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = reverted.State.Revision.Epoch }));
+                attempts.Add(await Attempt("kicad_design_sync_plan", Recovery(store.Read()!.RevisionToken)));
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                reload = new { reloadedSavedSheets = false, exception = error.GetType().Name, error.Message };
+            }
+            var last = store.Read()!;
+            await File.WriteAllTextAsync(Evidence("apply-recovery.json"), JsonSerializer.Serialize(new
+            {
+                attempts, reload, finalRecovery = RecoveryObservation(before), finalXmlUnchanged = await XmlUnchanged(),
+                userCanLeaveHalfAppliedState = !last.State.HasPendingWork
+            }), token);
+
+            async Task<object> Attempt(string tool, object arguments)
+            {
+                try
+                {
+                    var outcome = await host.Tool(tool, arguments);
+                    var native = await Capture();
+                    return new
+                    {
+                        tool, isError = outcome.TryGetProperty("isError", out var error) && error.GetBoolean(), errorCode = ErrorCode(outcome),
+                        result = outcome.TryGetProperty("structuredContent", out var content) ? RetainedJson(content) : null,
+                        message = outcome.TryGetProperty("structuredContent", out _) ? null : Text(outcome) is { } text && text.Length > 2000 ? text[..2000] : Text(outcome),
+                        recovery = RecoveryObservation(before), xmlUnchanged = await XmlUnchanged(),
+                        nativeSymbols = NativeSymbolKeys(native.Electrical.Hierarchy.Data).Count, nativeDirty = native.State.NativeContentDirty
+                    };
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    return new { tool, exception = error.GetType().Name, error.Message };
+                }
+            }
+            async Task<bool> XmlUnchanged() => (await File.ReadAllBytesAsync(path, token)).AsSpan().SequenceEqual(bytes);
+            object RecoveryObservation(string baselineBefore)
+            {
+                var state = store.Read()!.State;
+                return new
+                {
+                    pendingWork = state.HasPendingWork, pendingMutation = state.PendingMutation is not null,
+                    pendingNativeSave = state.PendingNativeSave is not null, pendingPublication = state.PendingPublication?.Phase.ToString(),
+                    lastSynchronization = state.LastSynchronization?.OperationId,
+                    baselineAdvanced = SchematicDesignXml.Write(state.Baseline, []) != baselineBefore
+                };
+            }
+            // A refusal carries its code in the structured result or, for tools without one, in its JSON text.
+            static string? ErrorCode(JsonElement outcome)
+            {
+                if (outcome.TryGetProperty("structuredContent", out var content) && content.ValueKind == JsonValueKind.Object
+                    && content.TryGetProperty("errorCode", out var code) && code.ValueKind == JsonValueKind.String)
+                    return code.GetString();
+                try
+                {
+                    using var text = JsonDocument.Parse(Text(outcome) ?? "");
+                    if (text.RootElement.ValueKind != JsonValueKind.Object) return null;
+                    foreach (var name in new[] { "errorCode", "code" })
+                        if (text.RootElement.TryGetProperty(name, out var inner) && inner.ValueKind == JsonValueKind.String) return inner.GetString();
+                    return null;
+                }
+                catch (JsonException) { return null; }
+            }
+            static string? Text(JsonElement outcome) => outcome.TryGetProperty("content", out var blocks) && blocks.ValueKind == JsonValueKind.Array
+                ? string.Concat(blocks.EnumerateArray().Where(b => b.TryGetProperty("text", out _)).Select(b => b.GetProperty("text").GetString())) : null;
+        }
+
+        static HashSet<string> NativeSymbolKeys(SchematicHierarchyData data) => data.Instances.SelectMany(screen => screen.Items
+                .Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Select(i => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value)) + "#" + i.Unpack<SchematicSymbolInstance>().Id.Value))
+            .ToHashSet(StringComparer.Ordinal);
+
+        // The frozen fixture comparison plus the exact identities it does not spell out: every placed
+        // unit carries exactly its declared pins, U5 is one component with one declared definition drawn
+        // as four symbols on two sheets, and every one of the 222 pins is alone in its native net. Returns
+        // the placements and the connectivity KiCad itself reported.
+        (List<object> Placements, object Connectivity) RequireCreated(CheckedSchematicState state, string when)
+        {
+            try { PsuCpuFixture.AssertNative(synchronized, state.Electrical, Stage); }
+            catch (AssertFailedException error) { throw new AssertFailedException(when + ": " + error.Message, error); }
+            var data = state.Electrical.Hierarchy.Data;
+            var symbols = SchematicModelProjection.NativeSymbols(synchronized, data);
+            var model = synchronized.Engineering.Circuit;
+            var components = model.Components.ToDictionary(c => c.Id);
+            var definitions = model.Sheets.SelectMany(s => s.Components).ToDictionary(d => d.Id);
+            var parts = model.Parts.ToDictionary(p => p.Id);
+            var sheetKeys = expected.Sheets.ToDictionary(s => s.ModelSheetInstance, s => s.Key);
+            var result = new List<object>();
+            foreach (var occurrence in model.Symbols.OrderBy(s => s.Id))
+            {
+                var component = components[occurrence.ComponentId];
+                var part = parts[definitions[component.DefinitionId].PartId];
+                var symbol = symbols[occurrence.Id];
+                string sheet = sheetKeys[occurrence.EffectiveSheetInstanceId(component)];
+                Assert.AreEqual(sheetPaths[sheet], string.Join('/', symbol.Path.Path.Select(p => p.Value)), when + ": " + component.Reference);
+                CollectionAssert.AreEqual(part.Pins.Where(p => p.Unit == 0 || p.Unit == occurrence.Unit).Select(p => p.Number).Order(StringComparer.Ordinal).ToArray(),
+                    PlacedPins(symbol), $"{when}: {component.Reference} unit {occurrence.Unit} must carry exactly its declared pins.");
+                var record = symbol.InstanceRecords.Records.Single();
+                Assert.AreEqual((sheetPaths[sheet], component.Reference, occurrence.Unit),
+                    (string.Join('/', record.Path.Select(p => p.Value)), record.Reference, record.Unit), when);
+                result.Add(new { component.Reference, occurrence.Unit, sheet, native = symbol.Id.Value });
+            }
+            Assert.AreEqual(expected.Symbols.Count, symbols.Values.Select(s => s.Id.Value).Distinct().Count(), when);
+
+            var u5 = model.Components.Single(c => c.Reference == "U5");
+            Assert.AreEqual(PsuCpuIds.Id(0x07, 7), u5.Id);
+            var processor = parts[definitions[u5.DefinitionId].PartId];
+            var units = model.Symbols.Where(s => s.ComponentId == u5.Id).OrderBy(s => s.Unit).ToArray();
+            CollectionAssert.AreEqual(new[] { 1, 2, 3, 4 }, units.Select(s => s.Unit).ToArray());
+            CollectionAssert.AreEqual(new[] { "CPU", "CPU", "CPU", "CPU_POWER" }, units.Select(s => sheetKeys[s.EffectiveSheetInstanceId(u5)]).ToArray(), when);
+            Assert.AreEqual<Guid?>(PsuCpuIds.Id(0x05, 4), units[3].SheetInstanceId);
+            var drawn = units.Select(s => symbols[s.Id]).ToArray();
+            Assert.AreEqual(4, drawn.Select(s => s.Id.Value).Distinct().Count(), when);
+            var declaration = synchronized.PartSymbols!.Single(s => s.PartId == processor.Id);
+            foreach (var unit in drawn)
+            {
+                Assert.AreEqual(declaration.LibraryId, unit.LibraryId, when);
+                Assert.AreEqual(declaration.Symbol.CacheKey, unit.LibName, when);
+                Assert.AreEqual(declaration.Symbol.Definition.Id, unit.Definition.Id, when);
+                Assert.AreEqual("U5", unit.ReferenceField.Text.Text_, when);
+            }
+            CollectionAssert.AreEquivalent(processor.Pins.Select(p => p.Number).ToArray(), drawn.SelectMany(PlacedPins).ToArray(),
+                when + ": the four units cover all 177 processor pins exactly once across CPU and CPU_POWER.");
+            foreach (string sheet in new[] { "CPU", "CPU_POWER" })
+                Assert.IsTrue(SchematicLibraryCacheEquivalence.Equal(declaration.Symbol, data.Instances
+                    .Single(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == sheetPaths[sheet])
+                    .CachedSymbols.Single(c => c.CacheKey == declaration.Symbol.CacheKey)), $"{when}: one processor definition on {sheet}");
+
+            var comparison = SchematicElectricalComparison.Compare(synchronized, state.Electrical, [], token);
+            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, when);
+            var allPins = model.Components.SelectMany(c => parts[definitions[c.DefinitionId].PartId].Pins.Select(p => new PinEndpoint(c.Id, p.Number))).ToArray();
+            Assert.HasCount(222, allPins);
+            var partitions = comparison.PinPartitions ?? throw new AssertFailedException(when + ": the native pin partition is missing.");
+            Assert.IsTrue(partitions.All(p => p.Pins.Count == 1), when + ": no two pins may share a native net in this stage.");
+            CollectionAssert.AreEquivalent(allPins, partitions.SelectMany(p => p.Pins).ToArray(), when);
+            return (result, new
+            {
+                nativeNets = state.Electrical.Nets.Count, isolatedPins = partitions.Count(p => p.Pins.Count == 1),
+                multiPinNets = partitions.Count(p => p.Pins.Count > 1), pinsWithoutNativeNet = partitions.Count(p => p.SnapshotNetIndex is null)
+            });
+        }
+
+        // Every created symbol's body, pins and visible fields lie inside its sheet's usable region, and no two
+        // created symbol bodies on one sheet overlap (fields may overhang; §1.6.3), measured by 2A's
+        // NativePresentationChecks in KiCad. Each sheet is also rendered as retained evidence.
+        async Task CheckPresentation(CheckedSchematicState state)
+        {
+            var bindings = synchronized.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+            var names = expected.Symbols.ToDictionary(s => bindings[s.Occurrence], s => s.Reference + " unit " + s.Unit);
+            foreach (var sheet in expected.Sheets)
+            {
+                var screen = state.Electrical.Hierarchy.Data.Instances.Single(s =>
+                    string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == sheetPaths[sheet.Key]);
+                await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = screen.Metadata.Document.Clone() }, token);
+                var ids = expected.Symbols.Where(s => s.Sheet == sheet.Key).Select(s => bindings[s.Occurrence]).ToArray();
+                if (ids.Length > 0)
+                {
+                    var issues = (await NativePresentationChecks.CheckSymbolPlacementAsync(client, screen.Metadata.Document, ids, usable[sheet.Key], token))
+                        .Where(i => i.Code != NativePresentationChecks.SymbolBodiesOverlap || expected.Presentation.SymbolBodiesDisjoint).ToArray();
+                    Assert.AreEqual(0, issues.Length, $"{sheet.Key}: " + string.Join("; ",
+                        issues.Select(i => i.Code + " " + string.Join(" and ", i.Symbols.Select(id => names[id])))));
+                }
+                var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = screen.Metadata.Document.Clone() }, token);
+                await File.WriteAllBytesAsync(Evidence("render-" + sheet.Key.ToLowerInvariant() + ".png"), image.Preview.Png.ToByteArray(), token);
+            }
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, token);
+        }
+
+        static string[] PlacedPins(SchematicSymbolInstance symbol) => [.. symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+            .Select(c => (Child: c, Pin: c.Item.Unpack<SchematicPin>()))
+            .Where(p => p.Pin.LibraryPinId is not null && ((p.Child.Unit?.Unit ?? 0) == 0 || p.Child.Unit!.Unit == symbol.Unit.Unit)
+                && ((p.Child.BodyStyle?.Style ?? 0) == 0 || p.Child.BodyStyle!.Style == (symbol.BodyStyle?.Style ?? 1)))
+            .Select(p => p.Pin.Number).Order(StringComparer.Ordinal)];
+    }
+
+    // A tool result kept as evidence keeps every small field. A long string (such as candidate XML) becomes its
+    // length and SHA-256, and a long list of strings (such as native operations) its count and SHA-256, so a
+    // proof's evidence stays well inside its retained-artifact cap. The duplicated text content block is dropped.
+    private static string RetainedToolEvidence(JsonElement result) => new JsonObject
+    {
+        ["isError"] = result.TryGetProperty("isError", out var error) && error.GetBoolean(),
+        ["structuredContent"] = result.TryGetProperty("structuredContent", out var content) ? RetainedJson(content) : null
+    }.ToJsonString();
+
+    private static JsonNode? RetainedJson(JsonElement element)
+    {
+        const int Limit = 4096;
+        static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Undefined:
+                return null;
+            case JsonValueKind.String when element.GetString()!.Length > Limit:
+                return new JsonObject { ["length"] = element.GetString()!.Length, ["sha256"] = Hash(element.GetString()!) };
+            case JsonValueKind.Array when element.GetRawText().Length > Limit && element.EnumerateArray().All(e => e.ValueKind == JsonValueKind.String):
+                return new JsonObject { ["count"] = element.GetArrayLength(),
+                    ["sha256"] = Hash(string.Join('\n', element.EnumerateArray().Select(e => e.GetString()))) };
+            case JsonValueKind.Object:
+                var retained = new JsonObject();
+                foreach (var property in element.EnumerateObject()) retained[property.Name] = RetainedJson(property.Value);
+                return retained;
+            case JsonValueKind.Array:
+                return new JsonArray([.. element.EnumerateArray().Select(RetainedJson)]);
+            default:
+                return JsonNode.Parse(element.GetRawText());
+        }
+    }
 
     private static async Task VerifyXmlComponentCreation(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, bool interruptAfterNativeEdit, CancellationToken token)
@@ -61,7 +531,9 @@ public sealed partial class NativeSessionTests
             original.CacheKey = "Automation:DeclaredProbe";
             original.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "DeclaredProbeDefinition" };
             original.Definition.Keywords = "independent declared-part creation fixture";
-            original.Definition.UnitCount = 2;
+            // Three units: units 1 and 2 stay on the repeated channel sheets, where each must remain one
+            // symbol shared by both channels, and only unit 3 moves to the root sheet (ledger p8a7fc65faff17c1b).
+            original.Definition.UnitCount = 3;
             original.Definition.BodyStyle.Add(new SchematicBodyStyle { Name = "Detailed" });
             foreach (var child in original.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
             {
@@ -78,6 +550,12 @@ public sealed partial class NativeSessionTests
             extra.Id.Value = Guid.NewGuid().ToString("D"); extra.Number += "_extra"; extra.Name = "Extra_declared_pin";
             extra.Position.YNm += 2_540_000; extraChild.Item = Any.Pack(extra);
             original.Definition.Items.Add(extraChild);
+            var thirdChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+            thirdChild.Unit = new() { Unit = 3 };
+            var third = thirdChild.Item.Unpack<SchematicPin>();
+            third.Id.Value = Guid.NewGuid().ToString("D"); third.Number += "_unit3"; third.Name = "Unit3_declared_pin";
+            third.Position.YNm += 5_080_000; thirdChild.Item = Any.Pack(third);
+            original.Definition.Items.Add(thirdChild);
             var inactiveChild = original.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
             inactiveChild.BodyStyle = new() { Style = 1 };
             var inactivePin = inactiveChild.Item.Unpack<SchematicPin>();
@@ -89,8 +567,8 @@ public sealed partial class NativeSessionTests
             manufacturer.CustomProperties.Add(new CustomProperty { Key = "automation.guidance", Value = "Keep this field-owned instruction." });
             original.Definition.Items.Add(new SchematicSymbolChild { Item = Any.Pack(manufacturer),
                 IsPrivate = manufacturer.IsPrivate });
-            part = part with { Id = Guid.NewGuid(), Name = "Explicit declared two-unit probe", Units = 2,
-                Pins = [.. part.Pins.Select(p => p with { Unit = 1 }), new(extra.Number, extra.Name, 2)] };
+            part = part with { Id = Guid.NewGuid(), Name = "Explicit declared three-unit probe", Units = 3,
+                Pins = [.. part.Pins.Select(p => p with { Unit = 1 }), new(extra.Number, extra.Name, 2), new(third.Number, third.Name, 3)] };
             declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original, BodyStyle: 2);
         }
         int designator = 801;
@@ -237,6 +715,8 @@ public sealed partial class NativeSessionTests
             }
             catch { await pausedHost.TerminateAsync(); try { await call; } catch (Exception) { } throw; }
         }
+        object connectionGate;
+        SchematicDesign created;
         await using (var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
             Path.Combine(evidence, instanceId + "-creation-host"), Path.Combine(evidence, instanceId + "-creation-host.log"), token))
         {
@@ -259,25 +739,26 @@ public sealed partial class NativeSessionTests
             }
             var replay = await host.Tool("kicad_design_sync_apply", args); RequireToolSuccess(replay);
             Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+            await RequireAgreement(createdIds.Count);
+            await VerifyCreatedGeometry(client, document, geometry, token);
+            created = store.Read()!.State.Baseline;
+            var createdBindings = created.SymbolBindings.Where(b => !baseline.SymbolBindings.Any(old => old.SymbolOccurrenceId == b.SymbolOccurrenceId)).ToArray();
+            Assert.AreEqual(baseline.Engineering.Circuit.SheetInstances.Count * part.Units, createdBindings.Length);
+            // Every unit on its own sheet: one physical symbol per unit and physical screen, shared by
+            // repeated instances. With the channel components' last unit on the root sheet instead, the
+            // root screen holds all root units plus one separate symbol per moved unit, and the shared
+            // channel screen holds only the remaining units.
+            int screenCount = baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).Distinct().Count();
+            Assert.AreEqual(crossSheet.Length == 0 ? screenCount * part.Units : part.Units + crossSheet.Length + (part.Units - 1),
+                createdBindings.Select(b => b.NativeObjectId).Distinct().Count());
+            await VerifyCrossSheetUnits(created);
+            var beforeNoOp = await Capture();
+            var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
+            Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
+            Assert.AreEqual(beforeNoOp, await Capture());
+            // The CN-1 gate plans through this same attached public host rather than starting another one.
+            connectionGate = await RequireConnectionRealizationGated(host);
         }
-        await RequireAgreement(createdIds.Count);
-        await VerifyCreatedGeometry(client, document, geometry, token);
-        var created = store.Read()!.State.Baseline;
-        var createdBindings = created.SymbolBindings.Where(b => !baseline.SymbolBindings.Any(old => old.SymbolOccurrenceId == b.SymbolOccurrenceId)).ToArray();
-        Assert.AreEqual(baseline.Engineering.Circuit.SheetInstances.Count * part.Units, createdBindings.Length);
-        // Every unit on its own sheet: one physical symbol per unit and physical screen, shared by
-        // repeated instances. With the channel components' last unit on the root sheet instead, the
-        // root screen holds all root units plus one separate symbol per moved unit, and the shared
-        // channel screen holds only the remaining units.
-        int screenCount = baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).Distinct().Count();
-        Assert.AreEqual(crossSheet.Length == 0 ? screenCount * part.Units : part.Units + crossSheet.Length + (part.Units - 1),
-            createdBindings.Select(b => b.NativeObjectId).Distinct().Count());
-        await VerifyCrossSheetUnits(created);
-        var beforeNoOp = await Capture();
-        var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
-        Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
-        Assert.AreEqual(beforeNoOp, await Capture());
-        var connectionGate = await RequireConnectionRealizationGated();
         await using (var automatic = await AutomaticDesignSynchronization.StartAsync(store, client, path, store.Read()!.RevisionToken, token))
         {
             await Watching(createdIds.Count);
@@ -416,6 +897,20 @@ public sealed partial class NativeSessionTests
                 .GroupBy(s => s.Unit).ToArray();
             Assert.IsTrue(channelUnits.All(g => g.Count() == crossSheet.Length && g.Select(s => nativeIds[s.Id]).Distinct().Count() == 1),
                 "Repeated channel instances still share one physical symbol for each unit that stays there.");
+            // Every unit but the moved last one stays, including a later unit (unit 2), not just unit 1.
+            CollectionAssert.AreEqual(Enumerable.Range(1, part.Units - 1).ToArray(), channelUnits.Select(g => g.Key).Order().ToArray());
+            Assert.IsTrue(channelUnits.Any(g => g.Key > 1), "A later unit must stay on the repeated channel sheets.");
+            foreach (var shared in channelUnits)
+            {
+                var occurrencesOfUnit = shared.ToArray();
+                var symbol = symbols[occurrencesOfUnit[0].Id];
+                // One native symbol per unit, recorded once for each channel instance with that channel's reference.
+                var owners = occurrencesOfUnit.Select(s => design.Engineering.Circuit.Components.Single(c => c.Id == s.ComponentId)).ToArray();
+                CollectionAssert.AreEquivalent(owners.Select(c => (string.Join('/', paths[c.SheetInstanceId]), c.Reference, shared.Key)).ToArray(),
+                    symbol.InstanceRecords.Records.Select(r => (string.Join('/', r.Path.Select(p => p.Value)), r.Reference, r.Unit)).ToArray(),
+                    $"Unit {shared.Key} is one symbol shared by every channel instance.");
+                CollectionAssert.AreEqual(Declared(shared.Key), Placed(symbol), $"The shared unit {shared.Key} carries exactly its declared pins.");
+            }
         }
 
         // An inconsistent declaration: the root-owned probe places its last unit on only one of the
@@ -476,7 +971,7 @@ public sealed partial class NativeSessionTests
         // connection-realizing editor would receive, yet this editor does not advertise
         // schematic.connection-realization.v1, so nothing admits it: the public plan keeps its existing
         // result and KiCad, the recovery record and the XML file stay untouched.
-        async Task<object> RequireConnectionRealizationGated()
+        async Task<object> RequireConnectionRealizationGated(StdioMcpFixture host)
         {
             var session = await client.HandshakeAsync(token);
             Assert.AreEqual(instanceId, session.InstanceId);
@@ -511,14 +1006,8 @@ public sealed partial class NativeSessionTests
             var expected = SchematicSynchronizationPlanner.Plan(store.Read()!.State, token);
             Assert.IsTrue(expected.CanPrepare, expected.ErrorCode + ": " + expected.ErrorMessage);
             Assert.IsNull(expected.Connections);
-            JsonElement plan;
-            await using (var gateHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
-                Path.Combine(evidence, instanceId + "-creation-host"), Path.Combine(evidence, instanceId + "-connection-gate-host.log"), token))
-            {
-                RequireToolSuccess(await gateHost.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
-                plan = await gateHost.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
-                    expectedRevisionToken = planned.RevisionToken });
-            }
+            var plan = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = planned.RevisionToken });
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-gate-plan.json"), plan.GetRawText(), token);
             var planContent = plan.GetProperty("structuredContent");
             string? planCode = planContent.GetProperty("errorCode").GetString();

@@ -208,6 +208,36 @@ public sealed partial class SchematicSynchronizationPlanTests
             Assert.AreEqual(code, refused.ErrorCode, problem + ": " + refused.ErrorMessage);
             Assert.IsNull(refused.Candidate, problem); Assert.IsEmpty(refused.NativeOperations, problem);
         }
+
+        // Hierarchy merge refusals pass through with the merge's own result, as PrepareCreation reports them
+        // (§4.4 step 1): competing XML and native edits of one sheet are a conflict, and an invalid XML
+        // hierarchy keeps the merge's error code. Neither yields a candidate.
+        var duplicated = desired.Schematic.Clone(); duplicated.Instances.Add(duplicated.Instances[^1].Clone());
+        foreach (var (problem, input, wanted, code) in new (string, DesignRecoveryState, SchematicDesign, string)[]
+        {
+            ("competing XML and native hierarchy edits", Observe(saved, observedTitle.Clone()), desired with { Schematic = titled }, "design_sync_conflict"),
+            ("an invalid XML hierarchy", saved, desired with { Schematic = duplicated }, "invalid_merge_hierarchy")
+        })
+        {
+            var merge = SchematicHierarchyMerge.Plan(input.Baseline.Schematic, wanted.Schematic, input.Observed);
+            Assert.IsFalse(merge.CanApply, problem);
+            var refused = PrepareConnected(input, wanted, admitted);
+            Assert.AreEqual(code, refused.ErrorCode, problem + ": " + refused.ErrorMessage);
+            Assert.AreEqual(merge.ErrorCode ?? "design_sync_conflict", refused.ErrorCode, problem);
+            CollectionAssert.AreEqual(merge.Conflicts.Select(c => (c.InstancePath, c.Reason)).ToArray(),
+                refused.Hierarchy!.Conflicts.Select(c => (c.InstancePath, c.Reason)).ToArray(), problem);
+            Assert.IsNull(refused.Candidate, problem); Assert.IsNull(refused.CandidateXml, problem); Assert.IsEmpty(refused.NativeOperations, problem);
+        }
+
+        // §4.4 step 3: the candidate must resolve every binding. A classification that no longer lists the
+        // revision's created components builds no symbols for them, so their occurrences stay unbound: the plan
+        // stops with created_binding_invalid and reports exactly those occurrences, never a partial candidate.
+        var unbound = PrepareConnected(saved, desired, admitted with { AddedComponentIds = [] });
+        Assert.AreEqual(SchematicConnectionErrors.CreatedBindingInvalid, unbound.ErrorCode, unbound.ErrorMessage);
+        Assert.IsNull(unbound.Candidate); Assert.IsNull(unbound.CandidateXml); Assert.IsEmpty(unbound.NativeOperations);
+        CollectionAssert.AreEquivalent(desired.Engineering.Circuit.Symbols.Where(s => created.Contains(s.ComponentId)).Select(s => (Guid?)s.Id).ToArray(),
+            unbound.BindingIssues.Where(i => i.Code == "unmapped_model_symbol").Select(i => i.ModelId).ToArray());
+        Assert.IsTrue(unbound.BindingIssues.All(i => i.Code == "unmapped_model_symbol"), string.Join(",", unbound.BindingIssues.Select(i => i.Code)));
         Assert.ThrowsExactly<ArgumentException>(() => PrepareConnected(saved, desired, admitted with { Kind = SchematicConnectedAdditionKind.NotApplicable }));
     }
 

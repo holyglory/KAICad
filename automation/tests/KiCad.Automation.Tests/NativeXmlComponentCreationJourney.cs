@@ -270,6 +270,7 @@ public sealed partial class NativeSessionTests
         var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
         Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
         Assert.AreEqual(beforeNoOp, await Capture());
+        var connectionGate = await RequireConnectionRealizationGated();
         await using (var automatic = await AutomaticDesignSynchronization.StartAsync(store, client, path, store.Read()!.RevisionToken, token))
         {
             await Watching(createdIds.Count);
@@ -356,7 +357,7 @@ public sealed partial class NativeSessionTests
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
             selectedBodyStyle = declaration?.BodyStyle, crossSheetUnits = crossSheet.Length,
-            crossSheetRejection,
+            crossSheetRejection, connectionGate,
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
@@ -463,6 +464,64 @@ public sealed partial class NativeSessionTests
             await File.WriteAllBytesAsync(path, original, token);
             return store.Save(after.State with { DesiredFileBytes = original }, after.RevisionToken);
         }
+        // CN-1 gate (cn1-wiring-intent.md §4.1, §8.3) against this editor's real handshake and captured state.
+        // A saved XML revision that only connects drawn pins of the created components is exactly what a
+        // connection-realizing editor would receive, yet this editor does not advertise
+        // schematic.connection-realization.v1, so nothing admits it: the public plan keeps its existing
+        // result and KiCad, the recovery record and the XML file stay untouched.
+        async Task<object> RequireConnectionRealizationGated()
+        {
+            var session = await client.HandshakeAsync(token);
+            Assert.AreEqual(instanceId, session.InstanceId);
+            Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
+                "This editor must not advertise connection realization before every native piece exists: " + string.Join(",", session.Capabilities));
+            var current = store.Read()!;
+            Assert.IsFalse(current.State.HasPendingWork);
+            var circuit = current.State.Baseline.Engineering.Circuit;
+            var ends = circuit.Components.Where(c => createdIds.Contains(c.Id)).OrderBy(c => c.Id).Take(2).ToArray();
+            var drawnPin = part.Pins.Where(p => p.Unit is 0 or 1).OrderBy(p => p.Number, StringComparer.Ordinal).First();
+            Assert.HasCount(2, ends);
+            Assert.IsFalse(circuit.Nets.Any(n => n.Pins.Any(p => ends.Any(c => c.Id == p.ComponentId))), "Created components start unconnected.");
+            Guid probeNet = Guid.NewGuid();
+            var connected = current.State.Baseline with { Engineering = current.State.Baseline.Engineering with { Circuit = circuit with
+                { Nets = [.. circuit.Nets, new(probeNet, "XML_CONNECTION_PROBE", ends.Select(c => new PinEndpoint(c.Id, drawnPin.Number)).ToArray())] } } };
+            byte[] connectedBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, []));
+            var probe = current.State with { DesiredFileBytes = connectedBytes };
+            var probeDesign = DesignRecoveryStore.ReadDesired(probe);
+            var real = SchematicConnectedAddition.Classify(probe, probeDesign, session, token);
+            Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, real.Kind, real.ErrorCode + ": " + real.ErrorMessage);
+            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var withCapability = SchematicConnectedAddition.Classify(probe, probeDesign, advertised, token);
+            Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, withCapability.Kind,
+                "The real captured state must be recognized as a connected addition: " + withCapability.ErrorCode + " " + withCapability.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { probeNet }, withCapability.ChangedNetIds.ToArray());
+            Assert.IsEmpty(withCapability.AddedComponentIds);
+
+            var nativeBefore = await Capture();
+            byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+            var planned = store.Save(probe, current.RevisionToken);
+            JsonElement plan;
+            await using (var gateHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
+                Path.Combine(evidence, instanceId + "-creation-host"), Path.Combine(evidence, instanceId + "-connection-gate-host.log"), token))
+            {
+                RequireToolSuccess(await gateHost.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                plan = await gateHost.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = planned.RevisionToken });
+            }
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-gate-plan.json"), plan.GetRawText(), token);
+            var planContent = plan.GetProperty("structuredContent");
+            string? planCode = planContent.GetProperty("errorCode").GetString();
+            Assert.IsFalse(planCode is SchematicConnectionErrors.XmlDisconnectionUnsupported
+                or SchematicConnectionErrors.ConnectedAdditionUnavailable, plan.GetRawText());
+            Assert.AreEqual(nativeBefore, await Capture(), "Planning a gated connected addition must not change the native document.");
+            Assert.AreEqual(planned.RevisionToken, store.Read()!.RevisionToken, "Planning must not advance recovery.");
+            CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning must not publish XML.");
+            store.Save(current.State, planned.RevisionToken);
+            return new { nativeCapabilities = session.Capabilities.ToArray(), classification = real.Kind.ToString(),
+                classificationIfAdvertised = withCapability.Kind.ToString(), changedNets = withCapability.ChangedNetIds,
+                publicPlanCanPrepare = planContent.GetProperty("canPrepare").GetBoolean(), publicPlanErrorCode = planCode };
+        }
+
         async Task RequireAgreement(int count, bool afterReload = false)
         {
             var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(path, token), []);

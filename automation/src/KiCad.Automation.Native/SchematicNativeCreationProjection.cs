@@ -23,10 +23,13 @@ internal sealed record SchematicCreatedSymbolGroup(SchematicCreatedSymbolKey Key
 /// Creates the native representation for a narrow, unambiguous XML-first
 /// addition. The new component must use an exact part/unit template or an explicitly
 /// declared standalone symbol definition, have
-/// explicit placement, and have no new net membership. Each unit is created on the
+/// explicit placement, and have no new net membership unless an admitted connected
+/// addition asks for it (<c>allowConnected</c>). Each unit is created on the
 /// sheet its occurrence names, which may differ from the component's own sheet; all
 /// units keep the one component identity, reference and definition. Connectivity-changing
-/// creation remains a separate ownership operation and is never inferred here.
+/// creation remains a separate ownership operation and is never inferred here: this
+/// projection only places the symbols, and the connected-addition plan realizes and
+/// proves their connections.
 /// </summary>
 internal static class SchematicNativeCreationProjection
 {
@@ -55,23 +58,29 @@ internal static class SchematicNativeCreationProjection
             net.Name,
             Pins = net.Pins.OrderBy(pin => pin.ComponentId).ThenBy(pin => pin.Pin, StringComparer.Ordinal).ToArray()
         });
-
-        static string NormalizePart(PartDefinition part) => JsonSerializer.Serialize(new
-        {
-            part.Id,
-            part.Name,
-            part.Units,
-            Pins = part.Pins.OrderBy(pin => pin.Number, StringComparer.Ordinal)
-                .ThenBy(pin => pin.Unit).Select(pin => new { pin.Number, pin.Name, pin.Unit }).ToArray()
-        });
     }
 
-    internal static SchematicNativeCreationResult Project(SchematicDesign baseline, EngineeringDesign desired,
-        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
-        => Project(baseline, baseline with { Engineering = desired }, libraries, token);
+    /// <summary>Order-independent part identity used by the creation and connected-addition
+    /// shape checks (cn1-wiring-intent.md §4.1): name, unit count and exact (number, name, unit) pins.</summary>
+    internal static string NormalizePart(PartDefinition part) => JsonSerializer.Serialize(new
+    {
+        part.Id,
+        part.Name,
+        part.Units,
+        Pins = part.Pins.OrderBy(pin => pin.Number, StringComparer.Ordinal)
+            .ThenBy(pin => pin.Unit).Select(pin => new { pin.Number, pin.Name, pin.Unit }).ToArray()
+    });
 
+    /// <param name="allowConnected">Only for an admitted connected addition (cn1-wiring-intent.md §4.3):
+    /// skip exactly the <c>created_component_connectivity_requires_resolution</c> refusal, because that
+    /// plan realizes the new pins' connections natively in the same batch. Every other check still applies.</param>
+    internal static SchematicNativeCreationResult Project(SchematicDesign baseline, EngineeringDesign desired,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default, bool allowConnected = false)
+        => Project(baseline, baseline with { Engineering = desired }, libraries, token, allowConnected);
+
+    /// <inheritdoc cref="Project(SchematicDesign, EngineeringDesign, IReadOnlyCollection{ComponentKnowledgeLibrary}, CancellationToken, bool)"/>
     internal static SchematicNativeCreationResult Project(SchematicDesign baseline, SchematicDesign desiredDesign,
-        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default, bool allowConnected = false)
     {
         var desired = desiredDesign.Engineering;
         token.ThrowIfCancellationRequested();
@@ -126,7 +135,7 @@ internal static class SchematicNativeCreationProjection
                 throw Invalid("component_definition_required", "A new component must introduce an exact component definition.");
             if (!newCircuit.SheetInstances.Any(s => s.Id == component.SheetInstanceId))
                 throw Invalid("unknown_component_sheet", "A new component must target an existing sheet instance.");
-            if (newCircuit.Nets.Any(n => n.Pins.Any(pin => pin.ComponentId == component.Id)))
+            if (!allowConnected && newCircuit.Nets.Any(n => n.Pins.Any(pin => pin.ComponentId == component.Id)))
                 throw Invalid("created_component_connectivity_requires_resolution", "A connected component requires an explicit native wiring operation.");
         }
 

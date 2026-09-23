@@ -80,6 +80,37 @@ public sealed class SchematicNativeCreationProjectionTests
         var coordinateFree = AddComponent(baseline, coordinateFree: true);
         Assert.AreEqual("created_symbol_placement_required",
             Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, coordinateFree, [library])).Code);
+
+        // An admitted connected addition (cn1-wiring-intent.md §4.3) lifts exactly the connectivity refusal:
+        // the connected request places the same symbols with the same identities and operations as the
+        // unconnected one, keeps its nets for the connection plan, and every other refusal still applies.
+        var unconnected = SchematicNativeCreationProjection.Project(baseline, wanted, [library]);
+        var allowed = SchematicNativeCreationProjection.Project(baseline, connected, [library], allowConnected: true);
+        Assert.AreEqual(SchematicDataXml.Write(unconnected.Candidate.Schematic), SchematicDataXml.Write(allowed.Candidate.Schematic));
+        CollectionAssert.AreEqual(unconnected.Candidate.SymbolBindings.ToArray(), allowed.Candidate.SymbolBindings.ToArray());
+        CollectionAssert.AreEqual(unconnected.Operations.ToArray(), allowed.Operations.ToArray());
+        Assert.AreEqual(connected.Circuit.Nets.Last(), allowed.Candidate.Engineering.Circuit.Nets.Last());
+        Assert.IsTrue(SchematicDesignBindings.Inspect(allowed.Candidate, [library]).IdentitiesResolved);
+        var coordinateFreeConnected = coordinateFree with { Circuit = coordinateFree.Circuit with { Nets = [.. coordinateFree.Circuit.Nets,
+            new(Guid.NewGuid(), "new connection", [new(coordinateFree.Circuit.Components.First(c => !baselineIds.Contains(c.Id)).Id, part.Pins[0].Number)])] } };
+        Assert.AreEqual("created_component_connectivity_requires_resolution", Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicNativeCreationProjection.Project(baseline, coordinateFreeConnected, [library])).Code, "the connectivity refusal comes first");
+        Assert.AreEqual("created_symbol_placement_required", Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicNativeCreationProjection.Project(baseline, coordinateFreeConnected, [library], allowConnected: true)).Code);
+
+        // The frozen PSU-CPU circuit with all eleven nets: refused as before, and with connections admitted
+        // it creates exactly the eleven placements of the unconnected Components stage.
+        var (sheets, components) = PsuCpuComponents();
+        var complete = components with { Engineering = components.Engineering with { Circuit = components.Engineering.Circuit with
+            { Nets = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets } } };
+        Assert.AreEqual("created_component_connectivity_requires_resolution",
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(sheets, complete, [])).Code);
+        var fixturePlaced = SchematicNativeCreationProjection.Project(sheets, components, []);
+        var fixtureConnected = SchematicNativeCreationProjection.Project(sheets, complete, [], allowConnected: true);
+        Assert.AreEqual(SchematicDataXml.Write(fixturePlaced.Candidate.Schematic), SchematicDataXml.Write(fixtureConnected.Candidate.Schematic));
+        CollectionAssert.AreEqual(fixturePlaced.Operations.ToArray(), fixtureConnected.Operations.ToArray());
+        Assert.AreEqual(11, fixtureConnected.CreatedOccurrences.Count);
+        Assert.AreEqual(41, fixtureConnected.Candidate.Engineering.Circuit.Nets.Sum(n => n.Pins.Count));
     }
 
     // Supporting evidence for the frozen PSU-CPU target case (contract §1.4.2, §1.6.3): processor U5

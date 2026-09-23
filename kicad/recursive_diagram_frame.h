@@ -8,6 +8,7 @@
 #include <wx/geometry.h>
 #include <wx/process.h>
 #include <wx/timer.h>
+#include <wx/weakref.h>
 #include <array>
 #include <map>
 #include <memory>
@@ -163,6 +164,30 @@ private:
     wxTimer m_ioTimer;
     long m_pid = 0;
     std::string m_stdout, m_stderr;
+};
+
+/** Serves the per-level diagram editor's native API commands for one project manager.
+ * It opens, reads and observes the diagram windows it created, nothing else. */
+class RECURSIVE_DIAGRAM_CONTROL : public API_HANDLER
+{
+public:
+    explicit RECURSIVE_DIAGRAM_CONTROL( wxWindow* aParent );
+    ~RECURSIVE_DIAGRAM_CONTROL() override;
+
+    /// Ask every open diagram window to close; false when one of them stays open.
+    bool CloseEditors();
+
+private:
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramEditorState> open(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor>& aCtx );
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramEditorState> read(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ReadRecursiveDiagramEditor>& aCtx );
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramObservation> observe(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ObserveRecursiveDiagramEditor>& aCtx );
+    RECURSIVE_DIAGRAM_FRAME* openEditor( const std::string& aDocumentId ) const;
+
+    wxWindow* m_parent;
+    std::vector<wxWeakRef<RECURSIVE_DIAGRAM_FRAME>> m_editors;
 };
 
 #endif

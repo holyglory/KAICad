@@ -40,6 +40,7 @@ public sealed partial class NativeSessionTests
             var attach = await client.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
                 { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
             Assert.IsFalse(attach.IsError == true);
+            await VerifyFlatEditorRetired(client, native, instanceId, evidence, token);
             // Creating a new system diagram next to this session's project through the same production MCP server and
             // live instance (contract rbg-v2 section 8); the created diagram is opened in the real editor at the end.
             var createdDiagram = await VerifyDiagramCreationOverMcp(client, native, source, graph, instanceId, evidence, token);
@@ -1362,6 +1363,45 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>The diagram <see cref="VerifyDiagramCreationOverMcp"/> created, for opening it in the editor.</summary>
+    /// <summary>Flat structural diagrams are discarded, not converted (owner decision n9af098253fec71da), so the per-level
+    /// editor is the only diagram editor. The production MCP server attached to this live session advertises no flat editor
+    /// tool and no conversion tool, and the live project manager has no handler for the flat editor's native commands. The
+    /// same raw probe reaches the per-level editor's handler, so the refusal is the missing flat editor, not the probe.</summary>
+    private static async Task VerifyFlatEditorRetired(McpClient client, NativeClient native, string instanceId, string evidence,
+        CancellationToken token)
+    {
+        string[] tools = [.. (await client.ListToolsAsync(cancellationToken: token)).Select(tool => tool.Name).Order(StringComparer.Ordinal)];
+        await File.WriteAllLinesAsync(Path.Combine(evidence, instanceId + "-mcp-tools.txt"), tools, token);
+        Assert.IsFalse(tools.Any(name => name.StartsWith("kicad_structure_", StringComparison.Ordinal)), string.Join(", ", tools));
+        CollectionAssert.DoesNotContain(tools, "kicad_diagram_migrate");
+        foreach (string tool in new[] { "kicad_diagram_create", "kicad_diagram_discover", "kicad_diagram_open", "kicad_diagram_state" })
+            CollectionAssert.Contains(tools, tool);
+        var transport = new NngTransport();
+        async Task<Kiapi.Common.ApiResponse> Probe(string type)
+        {
+            var request = new Kiapi.Common.ApiRequest
+            {
+                Header = new Kiapi.Common.ApiRequestHeader { KicadToken = native.Epoch, ClientName = "kicad-automation-flat-editor-probe" },
+                Message = new Google.Protobuf.WellKnownTypes.Any { TypeUrl = "type.googleapis.com/" + type }
+            };
+            var reply = Kiapi.Common.ApiResponse.Parser.ParseFrom(await transport.ExchangeAsync(native.Endpoint,
+                Google.Protobuf.MessageExtensions.ToByteArray(request), TimeSpan.FromSeconds(15), token));
+            await File.AppendAllTextAsync(Path.Combine(evidence, instanceId + "-flat-editor-probe.txt"),
+                $"{type}: {reply.Status?.Status} {reply.Status?.ErrorMessage}{Environment.NewLine}", token);
+            Assert.AreEqual(native.Epoch, reply.Header?.KicadToken, type + ": the reply must come from the same live manager");
+            return reply;
+        }
+        foreach (string type in new[] { "kiapi.automation.structure.v1.OpenStructuralEditor", "kiapi.automation.structure.v1.ReadStructuralEditor" })
+        {
+            var reply = await Probe(type);
+            Assert.AreEqual(Kiapi.Common.ApiStatusCode.AsUnhandled, reply.Status.Status, type + ": " + reply.Status.ErrorMessage);
+            Assert.AreEqual("no handler available for request of type " + type, reply.Status.ErrorMessage);
+        }
+        var perLevel = await Probe(P.ReadRecursiveDiagramEditor.Descriptor.FullName);
+        Assert.AreEqual(Kiapi.Common.ApiStatusCode.AsBadRequest, perLevel.Status.Status, perLevel.Status.ErrorMessage);
+        Assert.AreEqual("The explicitly identified recursive diagram is not open", perLevel.Status.ErrorMessage);
+    }
+
     private sealed record CreatedDiagram(string RepositoryRoot, string Path, string DocumentId, string SourceToken, BlockSelection Root, string Caption);
 
     /// <summary>Creating a new system diagram next to the live session's project through the production MCP server

@@ -2903,8 +2903,8 @@ explicit repository. `kicad_diagram_state(instanceId, documentId)` reports the
 current diagram path, file token, block/connection draft, dirty/busy/rendered
 state, selected annotation and errors. Opening is asynchronous: wait for a
 ready state without an error. These calls do not imply electrical realization
-or synchronized schematic/PCB generation. The earlier `kicad_structure_open`
-surface remains the legacy flat engineering-model editor, not this workflow.
+or synchronized schematic/PCB generation. This per-level editor is the only
+diagram editor; the earlier flat structural editor and its tools were removed.
 
 Agents can use `kicad_diagram_read` with the same instance/repository/path/document
 target to inspect one saved diagram level without opening a window. Omit all

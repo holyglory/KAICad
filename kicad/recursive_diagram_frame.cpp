@@ -3,7 +3,9 @@
 #include "dialogs/dialog_diagram_field_history.h"
 #include "dialogs/dialog_diagram_conflict.h"
 #include "dialogs/panel_diagram_history.h"
+#include <api/api_server.h>
 #include <bitmaps.h>
+#include <pgm_base.h>
 #include <kiid.h>
 #include <google/protobuf/util/json_util.h>
 #include <algorithm>
@@ -1459,4 +1461,75 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( utf8( focused->GetName() ) );
     return result;
+}
+
+namespace
+{
+auto controlFailure( kiapi::common::ApiStatusCode code, const std::string& message )
+{
+    kiapi::common::ApiResponseStatus error; error.set_status( code ); error.set_error_message( message );
+    return tl::unexpected( error );
+}
+}
+
+RECURSIVE_DIAGRAM_CONTROL::RECURSIVE_DIAGRAM_CONTROL( wxWindow* parent ) : m_parent( parent )
+{
+    registerHandler<D::OpenRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &RECURSIVE_DIAGRAM_CONTROL::open );
+    registerHandler<D::ReadRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &RECURSIVE_DIAGRAM_CONTROL::read );
+    registerHandler<D::ObserveRecursiveDiagramEditor, D::RecursiveDiagramObservation>( &RECURSIVE_DIAGRAM_CONTROL::observe );
+    Pgm().GetApiServer().RegisterHandler( this );
+}
+
+RECURSIVE_DIAGRAM_CONTROL::~RECURSIVE_DIAGRAM_CONTROL()
+{
+    Pgm().GetApiServer().DeregisterHandler( this );
+}
+
+bool RECURSIVE_DIAGRAM_CONTROL::CloseEditors()
+{
+    for( auto& editor : m_editors )
+        if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && !editor->Close() )
+            return false;
+    return true;
+}
+
+RECURSIVE_DIAGRAM_FRAME* RECURSIVE_DIAGRAM_CONTROL::openEditor( const std::string& documentId ) const
+{
+    for( const auto& editor : m_editors )
+        if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == documentId )
+            return editor.get();
+    return nullptr;
+}
+
+HANDLER_RESULT<D::RecursiveDiagramEditorState> RECURSIVE_DIAGRAM_CONTROL::open( const HANDLER_CONTEXT<D::OpenRecursiveDiagramEditor>& ctx )
+{
+    const auto& request = ctx.Request;
+    auto known = request; known.DiscardUnknownFields();
+    if( known.ByteSizeLong() != request.ByteSizeLong() || request.schema_version() != 1
+        || !KIID::SniffTest( wxString::FromUTF8( request.document_id() ) ) || request.expected_source_token().size() != 64
+        || !wxFileName( wxString::FromUTF8( request.source_path() ) ).IsAbsolute()
+        || !wxFileName( wxString::FromUTF8( request.helper_path() ) ).IsAbsolute()
+        || !wxFileName::FileExists( wxString::FromUTF8( request.helper_path() ) )
+        || !wxFileName::DirExists( wxString::FromUTF8( request.repository_root() ) ) )
+        return controlFailure( kiapi::common::AS_BAD_REQUEST, "An exact diagram target and compiled companion are required" );
+    if( auto* editor = openEditor( request.document_id() ) )
+    {
+        if( editor->SourcePath() != request.source_path() )
+            return controlFailure( kiapi::common::AS_BUSY, "This diagram is already open from another source" );
+        editor->Show(); editor->Raise(); return editor->State();
+    }
+    auto* frame = new RECURSIVE_DIAGRAM_FRAME( m_parent, request );
+    m_editors.emplace_back( frame ); frame->Show(); frame->Raise(); return frame->State();
+}
+
+HANDLER_RESULT<D::RecursiveDiagramEditorState> RECURSIVE_DIAGRAM_CONTROL::read( const HANDLER_CONTEXT<D::ReadRecursiveDiagramEditor>& ctx )
+{
+    if( auto* editor = openEditor( ctx.Request.document_id() ) ) return editor->State();
+    return controlFailure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
+}
+
+HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_CONTROL::observe( const HANDLER_CONTEXT<D::ObserveRecursiveDiagramEditor>& ctx )
+{
+    if( auto* editor = openEditor( ctx.Request.document_id() ) ) return editor->Observe( ctx.Request );
+    return controlFailure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
 }

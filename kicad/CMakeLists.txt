@@ -22,6 +22,7 @@ set( KICAD_SRCS
     structural_editor_control.cpp
     structural_editor_frame.cpp
     recursive_diagram_frame.cpp
+    recursive_diagram_canvas.cpp
     dialogs/dialog_diagram_field_history.cpp
     dialogs/panel_diagram_history.cpp
     dialogs/dialog_diagram_conflict.cpp

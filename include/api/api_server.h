@@ -39,7 +39,7 @@ class CHECKED_SCHEMATIC_CONTROLLER;
 class KINNG_REQUEST_SERVER;
 class KINNG_PUBLISHER;
 class wxEvtHandler;
-namespace kiapi::automation::v1 { class SchematicCommitNotification; }
+namespace kiapi::automation::v1 { class AutomationEvent; class SchematicCommitNotification; }
 namespace kiapi::common::types { class DocumentSpecifier; }
 
 
@@ -102,6 +102,16 @@ public:
 
     bool IsAutomation() const { return !m_automationInstanceId.empty(); }
     const std::string& AutomationInstanceId() const { return m_automationInstanceId; }
+
+    /**
+     * Publish one change on the automation event stream.  Editor-thread only, after the native
+     * state that the payload describes has been committed.
+     *
+     * The caller sets exactly one change payload; the server stamps the envelope (protocol
+     * version, instance, process and event epochs, next sequence) and derives the heartbeat.
+     * Heartbeats themselves are never published through this call.
+     */
+    void PublishAutomationEvent( const kiapi::automation::v1::AutomationEvent& aEvent );
 
     // Editor-thread only, after the native journal has accepted the commit.
     void PublishSchematicCommit( const kiapi::automation::v1::SchematicCommitNotification& aCommit );

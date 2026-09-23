@@ -42,7 +42,7 @@ public static class ImplementationFiles
         }
         token.ThrowIfCancellationRequested();
         if (ReferenceEquals(graph, loaded.Snapshot.Graph)) return new(loaded.Snapshot, stateId);
-        var (bytes, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, graph);
+        var (bytes, version) = RecursiveBlockFiles.Serialize(graph);
         string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
         return new(RecursiveBlockFiles.Published(loaded.Snapshot, loaded.Snapshot.Path, hash, graph, version), stateId);
     }

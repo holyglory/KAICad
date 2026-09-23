@@ -5,9 +5,9 @@ using System.Xml.Schema;
 
 namespace KiCad.Automation.Model;
 
-/// <summary>Typed connection archive storage. Reads schema 1 and 2; writes schema 1 while the
-/// archive holds no schema 2 fact, so version 1 content keeps its exact bytes (contract rbg-v2
-/// section 5). The version 1 schema is frozen.</summary>
+/// <summary>Typed connection archive storage. Reads schema 1 and 2 and writes schema 2 (contract
+/// rbg-v2 section 5). The version 1 schema is frozen; a version 1 archive element is produced only
+/// inside a version 1 graph written by the fixture-bound <c>RecursiveBlockGraphXml.Write(graph)</c>.</summary>
 public static class DiagramConnectionArchiveXml
 {
     public const string Namespace = "urn:kicad:automation:connection-archive:2";
@@ -33,10 +33,11 @@ public static class DiagramConnectionArchiveXml
     public static string Write(DiagramConnectionArchive archive)
     {
         ArgumentNullException.ThrowIfNull(archive);
-        return Write(archive, RequiredSchemaVersion(archive));
+        return Write(archive, 2);
     }
 
-    public static string Write(DiagramConnectionArchive archive, int schemaVersion)
+    /// <summary>The archive in the namespace of its containing graph document.</summary>
+    internal static string Write(DiagramConnectionArchive archive, int schemaVersion)
     {
         var root = Element(archive, schemaVersion);
         new XDocument(root).Validate(Schema.Value, null); return EngineeringXmlText.Render(root);

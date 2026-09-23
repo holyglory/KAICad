@@ -144,14 +144,15 @@ public sealed class RecursiveBlockGraphV2XmlTests
     }
 
     [TestMethod]
-    public void VersionOneDocumentsStayVersionOneUntilAChangeNeedsSchemaTwoAndKeepEveryFact()
+    public void VersionOneDocumentsReadNeutrallyAndTheFileFormatStoresEveryVersionOneFactAsSchemaTwo()
     {
         var linked = LinkedDiagramFixture.Create(); var graph = linked.Graph;
         string v1 = RecursiveBlockGraphXml.Write(graph);
         Assert.AreEqual(1, RecursiveBlockGraphXml.RequiredSchemaVersion(graph));
+        // The fixture-bound writer keeps version 1 text for a graph without schema 2 facts (PSU-CPU fixture contract section 1.1).
         Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.NamespaceV1), XElement.Parse(v1).Name);
         var (read, version) = RecursiveBlockGraphXml.ReadVersioned(v1);
-        Assert.AreEqual(1, version); Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(read), "R4: an unchanged version 1 document keeps its bytes.");
+        Assert.AreEqual(1, version); Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(read));
         Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(read))));
         // R2: a version 1 document reads with neutral schema 2 values.
         foreach (var revision in read.Revisions)
@@ -160,19 +161,18 @@ public sealed class RecursiveBlockGraphV2XmlTests
             Assert.IsTrue(revision.LocalDiagram.Interfaces.All(i => i.Domain == DiagramDomain.Unspecified && i.Direction == DiagramInterfaceDirection.Unspecified));
         }
         Assert.IsTrue(read.ConnectionArchives.SelectMany(a => a.Revisions).All(r => !r.UsesSchemaTwo));
-        // A change that schema 1 can store keeps the file at version 1.
+        // R4: every diagram file write uses schema 2, also for a change version 1 could hold; the archives move with the document.
         var root = read.StartDraft(read.SelectedRoot);
         root = root with { Requirements = root.Requirements.Edit(DiagramRequirementField.Routing, "Keep the supply short.") };
         var requirementOnly = read.SaveDraft(read.SelectedRoot, [read.SelectedRoot], root, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
-        Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.NamespaceV1), XElement.Parse(RecursiveBlockGraphXml.Write(requirementOnly)).Name);
-        // The first change that needs schema 2 moves the document to version 2 and keeps every version 1 fact.
-        var layout = requirementOnly.StartDraft(requirementOnly.SelectedRoot);
-        layout = layout with { Diagram = layout.LocalDiagram with { Presentation = new([new(linked.Blocks["PSU"].BlockId, new(10, 10, 240, 145))], [], []) } };
-        var upgraded = requirementOnly.SaveDraft(requirementOnly.SelectedRoot, [requirementOnly.SelectedRoot], layout, Guid.NewGuid(), Guid.NewGuid(), [],
-            RecursiveBlockFixture.Origin()).Graph;
-        string v2 = RecursiveBlockGraphXml.Write(upgraded);
-        Assert.AreEqual(2, RecursiveBlockGraphXml.ReadVersioned(v2).StoredSchemaVersion);
-        var reread = RecursiveBlockGraphXml.Read(v2);
+        string v2 = RecursiveBlockGraphXml.Write(requirementOnly, RecursiveBlockGraphXml.SchemaVersion);
+        var stored = XElement.Parse(v2);
+        Assert.AreEqual(Ns + "recursive-block-graph", stored.Name); Assert.AreEqual("2", (string?)stored.Attribute("version"));
+        Assert.IsTrue(stored.Descendants(XName.Get("connection-archive", DiagramConnectionArchiveXml.Namespace)).Any());
+        Assert.IsFalse(stored.Descendants().Any(e => e.Name.NamespaceName is RecursiveBlockGraphXml.NamespaceV1 or DiagramConnectionArchiveXml.NamespaceV1));
+        var (reread, storedVersion) = RecursiveBlockGraphXml.ReadVersioned(v2);
+        Assert.AreEqual(2, storedVersion);
+        Assert.AreEqual(v2, RecursiveBlockGraphXml.Write(reread, RecursiveBlockGraphXml.SchemaVersion), "R5: stored schema 2 text is canonical.");
         foreach (var revision in requirementOnly.Revisions)
         {
             var kept = reread.Inspect(revision.Selection);
@@ -182,9 +182,15 @@ public sealed class RecursiveBlockGraphV2XmlTests
         }
         foreach (var archive in requirementOnly.ConnectionArchives)
             Assert.IsTrue(reread.Connections(archive.OwnerBlockId).Retains(archive));
-        // A version 2 file never falls back: the stored version is a floor for later writes.
-        Assert.AreEqual(Ns + "recursive-block-graph", XElement.Parse(RecursiveBlockGraphXml.Write(requirementOnly, 2)).Name);
-        Assert.AreEqual(requirementOnly.Revisions.Length + 1, upgraded.Revisions.Length, "The upgrade itself adds no revision.");
+        Assert.AreEqual(requirementOnly.Revisions.Length, reread.Revisions.Length, "The upgrade itself adds no revision.");
+        Assert.AreEqual(read.Revisions.Length + 1, requirementOnly.Revisions.Length);
+        // A layout, the first schema 2 fact, can only be written as schema 2.
+        var layout = requirementOnly.StartDraft(requirementOnly.SelectedRoot);
+        layout = layout with { Diagram = layout.LocalDiagram with { Presentation = new([new(linked.Blocks["PSU"].BlockId, new(10, 10, 240, 145))], [], []) } };
+        var laidOut = requirementOnly.SaveDraft(requirementOnly.SelectedRoot, [requirementOnly.SelectedRoot], layout, Guid.NewGuid(), Guid.NewGuid(), [],
+            RecursiveBlockFixture.Origin()).Graph;
+        Assert.AreEqual(2, RecursiveBlockGraphXml.RequiredSchemaVersion(laidOut));
+        Assert.AreEqual(RecursiveBlockGraphXml.Write(laidOut, RecursiveBlockGraphXml.SchemaVersion), RecursiveBlockGraphXml.Write(laidOut));
     }
 
     [TestMethod]

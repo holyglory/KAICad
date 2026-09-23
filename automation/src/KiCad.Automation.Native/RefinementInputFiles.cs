@@ -54,7 +54,7 @@ public static class RefinementInputFiles
         foreach (var attachment in input.Attachments)
             await RefinementAssetFiles.RequireAvailable(repositoryRoot, attachment, token);
         var updated = graph.WithRefinementInput(input);
-        var (bytes, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, updated);
+        var (bytes, version) = RecursiveBlockFiles.Serialize(updated);
         var prepared = new RefinementInputPublicationReceipt(1, input.Id, loaded.Snapshot.Path, DiagramRefinementInputXml.Write(input),
             loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
             RefinementPublicationStage.Prepared, null, null);

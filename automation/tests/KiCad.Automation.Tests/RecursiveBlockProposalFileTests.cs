@@ -71,8 +71,11 @@ public sealed class RecursiveBlockProposalFileTests
             Assert.HasCount(1, saved.Snapshot.Graph.Proposals); Assert.HasCount(1, saved.Proposal.Issues);
             Assert.AreEqual(f.Proposal.Issues[0].Message, saved.Proposal.Issues[0].Message);
             string xml = await File.ReadAllTextAsync(path);
-            Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(xml)));
-            Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(saved.Snapshot.Graph))));
+            // R4: publishing into a version 1 file is its first changed write, which stores schema 2 and reports the upgrade.
+            Assert.AreEqual(1, before.StoredSchemaVersion); Assert.AreEqual(2, saved.Snapshot.StoredSchemaVersion);
+            Assert.AreEqual(1, saved.Snapshot.UpgradedFromSchemaVersion);
+            Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(xml), 2));
+            Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(saved.Snapshot.Graph)), 2));
             var wire = RecursiveBlockCodec.Encode(saved.Proposal); wire.MergeFrom(new byte[] { 0x98, 0x06, 1 });
             Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Decode(wire));
             var retry = await BlockProposalFiles.PublishAsync(root, path, f.Graph.DocumentId, before.ContentSha256, f.Proposal, state);

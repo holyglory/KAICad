@@ -409,13 +409,15 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(decimal.Parse(movedX, System.Globalization.CultureInfo.InvariantCulture), savedNote.Position!.X);
             Key("5", control: true); Key("End"); await Wait(s => s.SelectedAnnotationId == "");
             Key("4", control: true); Type("Second independent block comment."); await Wait(s => s.Dirty); await Save();
-            var multiple = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string multipleXml = await File.ReadAllTextAsync(source, token); var multiple = RecursiveBlockGraphXml.Read(multipleXml);
             var multipleCpu = multiple.Inspect(multiple.SelectedRoot).Children[1];
             Assert.AreEqual(4, multiple.Inspect(multipleCpu).LocalDiagram.Notes.Length);
             Assert.IsTrue(multiple.Inspect(multipleCpu).LocalDiagram.Notes.Any(n => n.Id == savedNote.Id && n.Text == savedNote.Text));
+            // R4: the native editor's changed saves stored the file as schema 2, and the schema 1 editor keeps working on it.
+            Assert.AreEqual(2, RecursiveBlockGraphXml.ReadVersioned(multipleXml).StoredSchemaVersion);
             Key("5", control: true); Key("Home"); Key("4", control: true); Key("a", control: true); Type("Unsaved first-comment edit.");
             await Wait(s => s.Dirty); Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(multiple), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(multipleXml, await File.ReadAllTextAsync(source, token));
             // Import original sketch points through the same typed source model;
             // this verifies rendering/preservation, not a still-missing sketch tool.
             var sketchDraft = multiple.StartDraft(multipleCpu);
@@ -580,19 +582,19 @@ public sealed partial class NativeSessionTests
             Name("Serviceable copy", "Duplicate implementation");
             var duplicated = await Wait(s => !s.Busy && s.ImplementationPreview && s.Draft.Baseline.StateId != sourceCpu.StateId.ToString("D"));
             Guid copyState = Guid.Parse(duplicated.Draft.Baseline.StateId);
-            var copiedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string copiedGraphXml = await File.ReadAllTextAsync(source, token); var copiedGraph = RecursiveBlockGraphXml.Read(copiedGraphXml);
             Assert.AreEqual(beforeManagementGraph.SelectedRoot, copiedGraph.SelectedRoot);
             Assert.AreEqual(sourceCpu, copiedGraph.States.Single(s => s.Id == copyState).ForkedFrom);
             Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements,
                 copiedGraph.Requirements(new(sourceCpu.BlockId, copyState, Guid.Parse(duplicated.Draft.Baseline.RevisionId))).Requirements);
             await ImplementationMenu(); Key("r"); await Window("Rename implementation");
             Name("Initial approach", "Rename implementation"); await Window("Invalid implementation name");
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(copiedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(copiedGraphXml, await File.ReadAllTextAsync(source, token));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-implementation-name-error.png"), token);
             Key("Return", title: "Invalid implementation name"); await Window("Invalid implementation name", false); await Window("Rename implementation");
             Key("a", control: true, title: "Rename implementation"); Key("BackSpace", title: "Rename implementation"); Key("Return", title: "Rename implementation");
             await Window("Invalid implementation name");
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(copiedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(copiedGraphXml, await File.ReadAllTextAsync(source, token));
             Key("Return", title: "Invalid implementation name"); await Window("Invalid implementation name", false); await Window("Rename implementation");
             Name("Thermal copy", "Rename implementation");
             await Wait(s => !s.Busy && s.ImplementationPreview && s.SourceToken != duplicated.SourceToken);
@@ -825,7 +827,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(topologyXml, await File.ReadAllTextAsync(source, token));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-restored-draft.png"), token);
             await Save();
-            var wholeSaved = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string wholeSavedXml = await File.ReadAllTextAsync(source, token); var wholeSaved = RecursiveBlockGraphXml.Read(wholeSavedXml);
             Assert.AreEqual(topologyGraph.SelectedRoot.RevisionId, wholeSaved.Inspect(wholeSaved.SelectedRoot).ParentRevisionId);
             Assert.AreEqual(oldDiagram, wholeSaved.Inspect(wholeSaved.SelectedRoot).RestoredFrom);
             Assert.HasCount(1, wholeSaved.Inspect(topologyGraph.SelectedRoot).Children);
@@ -871,7 +873,7 @@ public sealed partial class NativeSessionTests
             await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h && !string.IsNullOrEmpty(h.ErrorMessage));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-stale.png"), token);
             Key("r", alt: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h && !string.IsNullOrEmpty(h.ErrorMessage));
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(wholeSaved) + "\n", await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(wholeSavedXml + "\n", await File.ReadAllTextAsync(source, token));
             Key("Escape"); await Wait(s => s.DiagramHistory is null); Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty);
             Key("Escape"); Key("Right"); await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && !s.Busy);
@@ -891,7 +893,7 @@ public sealed partial class NativeSessionTests
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-child-preview.png"), token);
             Key("d", alt: true); await Window("Unsaved changes"); Key("s", alt: true, title: "Unsaved changes");
             await Wait(s => !s.Busy && s.DiagramHistory is null && s.Draft.RestoredFrom?.RevisionId == oldPsu.RevisionId.ToString("D"));
-            var savedBeforeRestore = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string savedBeforeRestoreXml = await File.ReadAllTextAsync(source, token); var savedBeforeRestore = RecursiveBlockGraphXml.Read(savedBeforeRestoreXml);
             var savedPsuBeforeRestore = savedBeforeRestore.Inspect(savedBeforeRestore.SelectedRoot).Children[0];
             Assert.AreEqual("Save my work before restoration.", savedBeforeRestore.Requirements(savedPsuBeforeRestore).Requirements.Routing);
             Assert.HasCount(1, savedBeforeRestore.Inspect(savedPsuBeforeRestore).Children);
@@ -902,7 +904,7 @@ public sealed partial class NativeSessionTests
             Key("d", alt: true); await Window("Unsaved changes"); Key("d", alt: true, title: "Unsaved changes");
             var childRestoredDraft = await Wait(s => !s.Busy && s.DiagramHistory is null && s.Draft.RestoredFrom?.RevisionId == oldPsu.RevisionId.ToString("D"));
             Assert.HasCount(2, childRestoredDraft.Draft.Children); Assert.HasCount(2, childRestoredDraft.Draft.LocalDiagram.Connections);
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(savedBeforeRestore), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(savedBeforeRestoreXml, await File.ReadAllTextAsync(source, token));
             await Save();
             var restoredChildGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual(unchangedSibling, restoredChildGraph.Inspect(restoredChildGraph.SelectedRoot).Children[1]);
@@ -929,7 +931,7 @@ public sealed partial class NativeSessionTests
             var definitionResult = await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token);
             if (definitionResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-definition-error.json"), JsonSerializer.Serialize(definitionResult), token);
             Assert.IsFalse(definitionResult.IsError == true);
-            var definedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string definedGraphXml = await File.ReadAllTextAsync(source, token); var definedGraph = RecursiveBlockGraphXml.Read(definedGraphXml);
             Assert.IsTrue(selectedDefinition.SameContents(definedGraph.Inspect(definedGraph.SelectedRoot).EffectiveDefinition));
             Assert.IsTrue(definedGraph.Inspect(definedGraph.SelectedRoot).Origin.InputIds.Contains(originalInput.Id));
             Assert.AreEqual(restoredChildGraph.Requirements(restoredChildGraph.SelectedRoot).Requirements, definedGraph.Requirements(definedGraph.SelectedRoot).Requirements);
@@ -940,7 +942,7 @@ public sealed partial class NativeSessionTests
             var definitionNoOp = await client.CallToolAsync("kicad_diagram_definition_set", definitionArguments, cancellationToken: token);
             Assert.IsFalse(definitionNoOp.IsError == true);
             Assert.IsFalse(JsonSerializer.SerializeToElement(definitionNoOp).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(definedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(definedGraphXml, await File.ReadAllTextAsync(source, token));
             var classReference = selectedDefinition.KnowledgeClass!.Values.Single();
             var statement = new GuidanceStatement(Guid.NewGuid(), "routing", "routing", "Keep the sensing region accessible.", GuidanceStrength.Preference, "", []);
             var knowledge = new ComponentKnowledgeLibrary(classReference.LibraryId, classReference.LibraryRevision,
@@ -961,7 +963,7 @@ public sealed partial class NativeSessionTests
             var missingClass = await client.CallToolAsync("kicad_diagram_definition_guidance", guidanceArguments, cancellationToken: token);
             Assert.IsFalse(missingClass.IsError == true);
             Assert.AreEqual("MissingLibrary", JsonSerializer.SerializeToElement(missingClass).GetProperty("structuredContent").GetProperty("resolution").GetProperty("selected").GetProperty("availability").GetString());
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(definedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(definedGraphXml, await File.ReadAllTextAsync(source, token));
             var electrical = await RecursiveBlockComponentTests.WriteRepository(project, token);
             var componentArguments = new Dictionary<string, object?>(arguments)
             {
@@ -976,7 +978,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(componentResult.IsError == true);
             var componentData = JsonSerializer.SerializeToElement(componentResult).GetProperty("structuredContent");
             string componentToken = componentData.GetProperty("sourceToken").GetString()!;
-            var mappedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string mappedGraphXml = await File.ReadAllTextAsync(source, token); var mappedGraph = RecursiveBlockGraphXml.Read(mappedGraphXml);
             Assert.IsTrue(electrical.Bindings.SameContents(mappedGraph.Inspect(mappedGraph.SelectedRoot).EffectiveComponentBindings));
             Assert.IsTrue(initialBindings.SameContents(mappedGraph.Inspect(definedGraph.SelectedRoot).EffectiveComponentBindings));
             Assert.AreEqual(definedGraph.Requirements(definedGraph.SelectedRoot).Requirements, mappedGraph.Requirements(mappedGraph.SelectedRoot).Requirements);
@@ -1007,7 +1009,7 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-component-observation.json"), JsonSerializer.Serialize(componentObservation), token);
             inspectComponents["expectedManifestToken"] = "stale";
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_components", inspectComponents, cancellationToken: token)).IsError == true);
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(mappedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(mappedGraphXml, await File.ReadAllTextAsync(source, token));
             var proposal = RecursiveBlockProposalTests.CreateFor(mappedGraph, originalInput);
             var proposalArguments = new Dictionary<string, object?>(arguments)
             {
@@ -1029,7 +1031,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(proposalPublication.IsError == true);
             Assert.AreEqual("Published", JsonSerializer.SerializeToElement(proposalPublication).GetProperty("structuredContent")
                 .GetProperty("receipt").GetProperty("stage").GetString());
-            var proposalGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            string proposalGraphXml = await File.ReadAllTextAsync(source, token); var proposalGraph = RecursiveBlockGraphXml.Read(proposalGraphXml);
             Assert.IsTrue(proposalGraph.Proposal(proposal.Id).Issues.Any());
             var proposalReadArguments = new Dictionary<string, object?>(arguments)
             {
@@ -1042,7 +1044,7 @@ public sealed partial class NativeSessionTests
             proposalReadArguments["proposalId"] = Guid.NewGuid();
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_proposal_read", proposalReadArguments, cancellationToken: token)).IsError == true);
             componentToken = proposalData.GetProperty("sourceToken").GetString()!;
-            mappedGraph = proposalGraph;
+            mappedGraph = proposalGraph; mappedGraphXml = proposalGraphXml;
             Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == componentToken);
             // Reload preserves the PSU location used above; root mutations made
             // through MCP must not silently change that native editing scope.
@@ -1060,7 +1062,7 @@ public sealed partial class NativeSessionTests
             Key("d", alt: true);
             var restoredComponents = await Wait(s => !s.Busy && s.DiagramHistory is null && s.Dirty);
             Assert.IsTrue(initialBindings.SameContents(RecursiveBlockCodec.Decode(restoredComponents.Draft.ComponentBindings)));
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(mappedGraph), await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(mappedGraphXml, await File.ReadAllTextAsync(source, token));
             Key("d", alt: true); var declinedComponents = await Wait(s => !s.Busy && !s.Dirty);
             Assert.IsTrue(electrical.Bindings.SameContents(RecursiveBlockCodec.Decode(declinedComponents.Draft.ComponentBindings)));
             Key("3", control: true); Key("a", control: true); Type("Keep mapped components reachable."); await Wait(s => s.Dirty);
@@ -1244,8 +1246,8 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Schema 2 through the real MCP server and native instance (contract rbg-v2 sections 2.4 and 8):
-    /// an agent reads a schema 2 level's layout, realizations, domains and directions; a write that needs
-    /// schema 2 upgrades a version 1 file and reports it; and the native editor of this build, which still
+    /// an agent reads a schema 2 level's layout, realizations, domains and directions; a changed write
+    /// upgrades a version 1 file and reports it (R4); and the native editor of this build, which still
     /// speaks schema 1, is never opened on a schema 2 document, so nothing can be dropped or written.</summary>
     private static async Task VerifySchemaTwoDiagramTools(McpClient client, NativeClient native, string project, string instanceId,
         string evidence, CancellationToken token)
@@ -1277,7 +1279,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("DRS_RESOLVED", link.GetProperty("realization").GetProperty("state").GetString());
         Assert.AreEqual(5, link.GetProperty("realization").GetProperty("segments").GetArrayLength());
         Assert.AreEqual(4, link.GetProperty("realization").GetProperty("joins").GetArrayLength());
-        // A write that needs schema 2 (a harness target) upgrades a version 1 file and reports the upgrade.
+        // A changed write (here a harness target, which only schema 2 can hold) upgrades a version 1 file and reports the upgrade.
         var plain = LinkedDiagramFixture.Create().Graph;
         string upgradedPath = Path.Combine(project, "system.upgrade.design.xml");
         await File.WriteAllTextAsync(upgradedPath, RecursiveBlockGraphXml.Write(plain), token);

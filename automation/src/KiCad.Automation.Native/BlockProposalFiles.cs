@@ -85,7 +85,7 @@ public static class BlockProposalFiles
         var record = new BlockProposalRecord(proposal.Id, proposal.InputId, fingerprint, proposal.BasePath, proposal.Candidate,
             proposal.Issues, prepared.Graph.Inspect(proposal.Candidate).Origin);
         var updated = prepared.Graph.WithProposal(record);
-        var (replacement, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, updated);
+        var (replacement, version) = RecursiveBlockFiles.Serialize(updated);
         BlockProposalPublicationReceipt? preparedReceipt = null;
         if (operationId is { } operation)
         {
@@ -123,7 +123,7 @@ public static class BlockProposalFiles
         var selected = BlockProposalCompiler.Select(loaded.Snapshot.Graph, proposalId, expectedRoot, currentPath, ancestorIds, origin);
         token.ThrowIfCancellationRequested();
         if (!selected.Changed) return loaded.Snapshot;
-        var (replacement, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, selected.Graph);
+        var (replacement, version) = RecursiveBlockFiles.Serialize(selected.Graph);
         BlockProposalPublicationReceipt? preparedReceipt = null;
         BlockProposalReceipts? receipts = null;
         if (stateDirectory is not null && operationId is { } operation)

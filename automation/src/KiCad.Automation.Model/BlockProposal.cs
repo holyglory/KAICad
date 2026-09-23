@@ -45,14 +45,7 @@ public static class BlockProposalCompiler
             throw Invalid("The proposed implementation belongs to the input's target block, not a replacement occurrence.");
         var originalScope = graph.Walk(proposal.BasePath[^1]).Select(s => s.BlockId).ToHashSet();
         var knownBlocks = graph.States.Select(s => s.BlockId).ToHashSet();
-        var used = graph.States.Select(s => s.Id).Concat(knownBlocks).Concat(graph.Revisions.Select(r => r.Selection.RevisionId))
-            .Concat(graph.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)))
-            .Concat(graph.ConnectionArchives.SelectMany(a => a.States.Select(s => s.ConnectionId).Concat(a.States.Select(s => s.Id))
-                .Concat(a.Revisions.Select(r => r.Selection.RevisionId)).Concat(a.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)))))
-            .Concat(graph.ConnectionArchives.SelectMany(a => a.SegmentOwners.Keys))
-            .Concat(graph.Revisions.SelectMany(r => r.LocalDiagram.Interfaces.Select(i => i.Id).Concat(r.LocalDiagram.Notes.Select(n => n.Id))))
-            .Concat(graph.RefinementInputs.Select(i => i.Id)).Concat(graph.Proposals.Select(p => p.Id))
-            .Concat(graph.Proposals.SelectMany(p => p.Issues.Select(i => i.Id))).Append(graph.DocumentId).ToHashSet();
+        var used = graph.RetainedIdentities();
         Fresh(proposal.Id); var declaredBlocks = new HashSet<Guid>();
         var states = graph.States.ToBuilder(); var revisions = graph.Revisions.ToBuilder(); var histories = graph.RequirementHistories.ToBuilder();
         var origin = proposal.Origin with { InputIds = proposal.Origin.InputIds.Append(input.Id).Append(proposal.Id).Distinct().ToImmutableArray() };

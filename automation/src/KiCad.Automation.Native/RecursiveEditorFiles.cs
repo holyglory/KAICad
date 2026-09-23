@@ -9,7 +9,10 @@ namespace KiCad.Automation.Native;
 /// save or activate; the separate save action requires the exact file, root and draft baseline.
 /// Request, document and graph schema versions move together (contract rbg-v2 section 2.3):
 /// schema 2 carries every implemented schema 2 fact; schema 1, which the native editor of this
-/// build still speaks, works only on documents without schema 2 content and is refused otherwise.</summary>
+/// build still speaks, works only on documents without schema 2 content and is refused otherwise.
+/// That schema 1 acceptance is the interim bridge described at RecursiveBlockCodec.IsSupportedSchema.
+/// Every changed write stores schema 2 (R4), also for a schema 1 exchange, whose schema 1 result
+/// cannot carry the upgrade report.</summary>
 public static class RecursiveEditorFiles
 {
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)

@@ -44,13 +44,18 @@ public sealed class DiagramConnectionArchiveXmlTests
     public void StrictXmlRejectsUnknownFieldsInconsistentEndpointStatesAndMissingMembers()
     {
         var archive = DiagramConnectionFixture.Create().Archive;
-        string xml = DiagramConnectionArchiveXml.Write(archive); XNamespace ns = DiagramConnectionArchiveXml.NamespaceV1;
+        string xml = DiagramConnectionArchiveXml.Write(archive); XNamespace ns = DiagramConnectionArchiveXml.Namespace;
+        // Contract rbg-v2 section 5: the archive writer emits schema 2 and the reader also accepts the frozen schema 1.
+        Assert.AreEqual(ns + "connection-archive", XElement.Parse(xml).Name);
+        string v1 = xml.Replace(DiagramConnectionArchiveXml.Namespace, DiagramConnectionArchiveXml.NamespaceV1, StringComparison.Ordinal)
+            .Replace("version=\"2\"", "version=\"1\"", StringComparison.Ordinal);
+        Assert.AreEqual(xml, DiagramConnectionArchiveXml.Write(DiagramConnectionArchiveXml.Read(v1)), "A version 1 archive is read and written as version 2.");
         void Reject(Action<XElement> change)
         {
             var root = XElement.Parse(xml, LoadOptions.PreserveWhitespace); change(root);
             Assert.ThrowsExactly<AutomationException>(() => DiagramConnectionArchiveXml.Read(root.ToString(SaveOptions.DisableFormatting)));
         }
-        Reject(r => r.SetAttributeValue("version", 2));
+        Reject(r => r.SetAttributeValue("version", 1));
         Reject(r => r.SetAttributeValue("unknown", "must not lose"));
         Reject(r => r.Add(new XElement(ns + "future-field", "must not lose")));
         Reject(r => r.Descendants(ns + "revision").First().SetAttributeValue("kind", "FutureType"));

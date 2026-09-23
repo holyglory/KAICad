@@ -61,7 +61,7 @@ public sealed class RecursiveBlockRefinementInterruptionTests
             Assert.AreEqual(RefinementRecoveryDisposition.CompletedPreviously, recovered.Disposition);
             Assert.AreEqual(RefinementPublicationStage.Published, recovered.Receipt.Stage);
             string after = await File.ReadAllTextAsync(path);
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(graph.WithRefinementInput(input)), after);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(graph.WithRefinementInput(input), 2), after, "R4: the publication stores schema 2.");
             Assert.HasCount(1, RecursiveBlockGraphXml.Read(after).RefinementInputs);
             Assert.IsNotNull(recovered.Receipt.RetainedPath);
             Assert.AreEqual(before, await File.ReadAllTextAsync(recovered.Receipt.RetainedPath));

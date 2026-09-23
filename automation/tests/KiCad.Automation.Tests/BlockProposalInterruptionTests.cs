@@ -67,7 +67,7 @@ public sealed class BlockProposalInterruptionTests
             Assert.AreEqual(fixture.Graph.SelectedRoot, graph.SelectedRoot);
             var second = await BlockProposalRecovery.ResumeAsync(root, source, fixture.Graph.DocumentId, operation, state);
             Assert.AreEqual(recovered.Receipt, second.Receipt);
-            Assert.AreEqual(RecursiveBlockGraphXml.Write(graph), await File.ReadAllTextAsync(source));
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(graph, 2), await File.ReadAllTextAsync(source), "R4: the publication stores schema 2.");
         }
         finally { Directory.Delete(root, true); }
     }

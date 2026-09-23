@@ -2,8 +2,10 @@ using System.Collections.Immutable;
 
 namespace KiCad.Automation.Model;
 
+/// <summary>AnnotationResolved (a lane 2B addition, proto LEEK_ANNOTATION_RESOLVED = 200) reports a note
+/// whose exact target returns to a level, for example when a block is moved back to its parent.</summary>
 public enum LevelEditEffectKind { ChildRemoved, ConnectionRemoved, InterfaceRemoved, AnnotationUnresolved, RealizationTargetRemoved,
-    RealizationStateChanged, RealizationRemoved, PresentationEntryRemoved }
+    RealizationStateChanged, RealizationRemoved, PresentationEntryRemoved, AnnotationResolved }
 
 /// <summary>One consequence of removing something from a diagram level, reported to the user
 /// before it is saved (contract rbg-v2 section 4.7).</summary>
@@ -17,6 +19,7 @@ internal static class RecursiveLevelCascade
 {
     internal const string TargetRemoved = "Target removed from this diagram level.";
     internal const string RealizingElementRemoved = "Realizing element was removed.";
+    internal const string TargetReturned = "Target returned to this diagram level.";
 
     internal sealed record Result(ImmutableArray<BlockSelection> Children, BlockLocalDiagram? Diagram, ImmutableArray<LevelEditEffect> Effects);
 
@@ -100,9 +103,10 @@ internal static class RecursiveLevelCascade
         return new([.. scope.Children.Where(c => c.BlockId != blockId)], diagram, Ordered(effects));
     }
 
-    /// <summary>Effects in (kind, object identity, detail) order.</summary>
+    /// <summary>Effects in (kind, object identity, detail, level) order; one list may cover two levels.</summary>
     internal static ImmutableArray<LevelEditEffect> Ordered(IEnumerable<LevelEditEffect> effects) => [.. effects.OrderBy(e => e.Kind)
-        .ThenBy(e => e.ObjectId.ToString("D"), StringComparer.Ordinal).ThenBy(e => e.Detail, StringComparer.Ordinal)];
+        .ThenBy(e => e.ObjectId.ToString("D"), StringComparer.Ordinal).ThenBy(e => e.Detail, StringComparer.Ordinal)
+        .ThenBy(e => e.ScopeBlockId.ToString("D"), StringComparer.Ordinal)];
 
     private static string Describe(InterfaceRealizationTarget target) => target.Kind switch
     {

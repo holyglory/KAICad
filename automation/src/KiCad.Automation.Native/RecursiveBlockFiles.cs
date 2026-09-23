@@ -100,7 +100,8 @@ public static class RecursiveBlockFiles
             newRequirementRevisionId, ancestorRevisionIds, origin, choices);
         if (!saved.Changed)
         {
-            if (RecursiveBlockGraphXml.Write(graph) != RecursiveBlockGraphXml.Write(loaded.Snapshot.Graph))
+            if (RecursiveBlockGraphXml.Write(graph, RecursiveBlockGraphXml.SchemaVersion)
+                != RecursiveBlockGraphXml.Write(loaded.Snapshot.Graph, RecursiveBlockGraphXml.SchemaVersion))
                 throw new AutomationException("unselected_connection_change", "Select the changed connections in the block draft before saving them together.");
             return (loaded.Snapshot, saved, loaded.Snapshot.Graph);
         }
@@ -130,21 +131,22 @@ public static class RecursiveBlockFiles
         return (await PublishAsync(loaded, moved.Graph, token), moved, loaded.Snapshot.Graph);
     }
 
-    /// <summary>The bytes of a changed graph in the format it needs: never below the stored version
-    /// (a version 2 file is never rewritten as version 1), and version 2 only when a fact needs it.</summary>
-    internal static (byte[] Bytes, int SchemaVersion) Serialize(RecursiveBlockFileSnapshot loaded, RecursiveBlockGraph graph)
-    {
-        int version = Math.Max(loaded.StoredSchemaVersion, RecursiveBlockGraphXml.RequiredSchemaVersion(graph));
-        return (Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(graph, version)), version);
-    }
+    /// <summary>The bytes of every changed write, for all writers of a diagram file (contract rbg-v2
+    /// R4): always schema 2, so the first changed write of a version 1 file upgrades it and later
+    /// writes keep version 2. Callers write nothing when content is unchanged, so an unchanged save
+    /// leaves a version 1 file byte-identical. The upgrade adds no revision and no history row.</summary>
+    internal static (byte[] Bytes, int SchemaVersion) Serialize(RecursiveBlockGraph graph) =>
+        (Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(graph, RecursiveBlockGraphXml.SchemaVersion)), RecursiveBlockGraphXml.SchemaVersion);
 
+    /// <summary>The snapshot of a changed write; it reports upgraded_from_schema_version = 1 when the
+    /// loaded file was version 1.</summary>
     internal static RecursiveBlockFileSnapshot Published(RecursiveBlockFileSnapshot loaded, string path, string hash, RecursiveBlockGraph graph,
         int version) => new(path, hash, graph, version, version > loaded.StoredSchemaVersion ? loaded.StoredSchemaVersion : 0);
 
     private static async Task<RecursiveBlockFileSnapshot> PublishAsync((RecursiveBlockFileSnapshot Snapshot, byte[] Bytes) loaded,
         RecursiveBlockGraph graph, CancellationToken token)
     {
-        var (bytes, version) = Serialize(loaded.Snapshot, graph);
+        var (bytes, version) = Serialize(graph);
         string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
         return Published(loaded.Snapshot, loaded.Snapshot.Path, hash, graph, version);
     }

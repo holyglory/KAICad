@@ -9,9 +9,13 @@ namespace KiCad.Automation.Model;
 
 /// <summary>Typed revision-graph storage. Children pin exact revisions and requirement
 /// histories are explicit XML fields, never an embedded opaque native schematic.
-/// Schema 2 (contract rbg-v2 section 2.2): readers accept versions 1 and 2 by root namespace;
-/// the writer emits version 1 while the graph holds no schema 2 fact, so a version 1 file keeps
-/// its exact bytes until a change needs schema 2, and a version 2 file never falls back.</summary>
+/// Schema 2 (contract rbg-v2 section 2.2): readers accept versions 1 and 2 by root namespace.
+/// Every diagram file write emits version 2 (R4, <c>Write(graph, SchemaVersion)</c> through the
+/// file layer), so a version 1 file keeps its exact bytes only until its first changed write.
+/// The one remaining version 1 output is <see cref="Write(RecursiveBlockGraph)"/> for a graph
+/// without schema 2 facts: the frozen PSU-CPU fixture contract (section 1.1) pins
+/// <c>system.blocks.xml</c> to <c>Write(G1)</c> in schema 1 and its parent-owned checks compare
+/// those bytes, which contradicts R4's "no v1 writer" until the integration owner resolves it.</summary>
 public static partial class RecursiveBlockGraphXml
 {
     public const string Namespace = "urn:kicad:automation:recursive-block-graph:2";
@@ -53,11 +57,14 @@ public static partial class RecursiveBlockGraphXml
             || graph.ConnectionArchives.Any(a => DiagramConnectionArchiveXml.RequiredSchemaVersion(a) > 1) ? 2 : 1;
     }
 
-    /// <summary>Writes the lowest schema version that stores every fact of the graph.</summary>
+    /// <summary>Canonical text in the lowest schema version that stores every fact of the graph. This
+    /// is not how diagram files are written: every file writer uses <c>Write(graph, SchemaVersion)</c>.
+    /// Version 1 output here exists only for the frozen PSU-CPU fixture (see the class summary).</summary>
     public static string Write(RecursiveBlockGraph graph) => Write(graph, 1);
 
-    /// <summary>Writes at least <paramref name="minimumSchemaVersion"/>; the file layer passes the
-    /// stored version so a version 2 document is never rewritten as version 1.</summary>
+    /// <summary>Writes at least <paramref name="minimumSchemaVersion"/>; diagram file writers pass
+    /// <see cref="SchemaVersion"/> (contract rbg-v2 R4), which also makes <c>Write(Read(x), 2) == x</c>
+    /// for every canonical version 2 file (R5).</summary>
     public static string Write(RecursiveBlockGraph graph, int minimumSchemaVersion)
     {
         ArgumentNullException.ThrowIfNull(graph);

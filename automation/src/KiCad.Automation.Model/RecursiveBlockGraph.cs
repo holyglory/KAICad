@@ -215,6 +215,29 @@ public sealed partial class RecursiveBlockGraph
         foreach (var revision in Revisions) _ = Walk(revision.Selection);
     }
 
+    /// <summary>Every identity this document already uses (contract rbg-v2 G1): the document, block
+    /// occurrences, implementations, revisions and requirement revisions; connection occurrences,
+    /// implementations, revisions, requirement revisions and interconnect segments; interfaces and
+    /// notes; implementation changes, refinement inputs, proposals and proposal issues. Operations that
+    /// accept caller-chosen identities (proposal compilation, moving a block) require fresh ones against
+    /// this one set, so no new object can alias a retained one.</summary>
+    internal HashSet<Guid> RetainedIdentities()
+    {
+        var used = new HashSet<Guid>(States.SelectMany(s => new[] { s.Id, s.BlockId }).Concat(_revisions.Keys).Append(DocumentId));
+        used.UnionWith(RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)));
+        foreach (var archive in ConnectionArchives)
+        {
+            used.UnionWith(archive.States.SelectMany(s => new[] { s.Id, s.ConnectionId }));
+            used.UnionWith(archive.Revisions.Select(r => r.Selection.RevisionId));
+            used.UnionWith(archive.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)));
+            used.UnionWith(archive.SegmentOwners.Keys);
+        }
+        used.UnionWith(Revisions.SelectMany(r => r.LocalDiagram.Interfaces.Select(i => i.Id).Concat(r.LocalDiagram.Notes.Select(n => n.Id))));
+        used.UnionWith(ImplementationChanges.Select(c => c.Id)); used.UnionWith(RefinementInputs.Select(i => i.Id));
+        used.UnionWith(Proposals.Select(p => p.Id)); used.UnionWith(Proposals.SelectMany(p => p.Issues.Select(i => i.Id)));
+        return used;
+    }
+
     public RecursiveBlockRevision Inspect(BlockSelection selection)
     {
         if (selection is null || !_revisions.TryGetValue(selection.RevisionId, out var revision)

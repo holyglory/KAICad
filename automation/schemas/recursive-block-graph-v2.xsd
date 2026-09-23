@@ -2,7 +2,8 @@
 <!-- Recursive block graph schema 2 (contract rbg-v2 section 5): version 1 plus interface domain and
      direction, the revision-bound per-level layout, interface realizations, the Harness physical
      allocation kind, connection archive schema 2 and the one-time conversion receipt. Version 1
-     stays frozen byte-for-byte; readers accept both and writers emit 2 only when content needs it. -->
+     stays frozen byte-for-byte; readers accept both, and every changed diagram file write emits 2
+     (R4), so a version 1 file keeps its bytes only until its first changed write. -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            targetNamespace="urn:kicad:automation:recursive-block-graph:2"
            xmlns="urn:kicad:automation:recursive-block-graph:2"

@@ -21,7 +21,12 @@ public static class RecursiveBlockCodec
     /// editor moves to schema 2 with its own (lane C) change; until then its exchanges stay schema 1.</summary>
     public const uint NativeEditorSchemaVersion = 1;
 
-    public static bool IsSupportedSchema(uint schemaVersion) => schemaVersion is 1 or SchemaVersion;
+    /// <summary>Interim schema 1 bridge. Contract rbg-v2 sections 2.3 and 2.4 require exactly schema 2;
+    /// schema 1 is still accepted only because the native editor of this build speaks it, and only for
+    /// documents without schema 2 content. It is removed here, in RecursiveEditorFiles.ExecuteAsync and
+    /// in kicad_diagram_open (NativeEditorSchemaVersion) in the section 12 version flip together with the
+    /// native per-level editor and project-manager entry.</summary>
+    public static bool IsSupportedSchema(uint schemaVersion) => schemaVersion is NativeEditorSchemaVersion or SchemaVersion;
 
     public static P.RequirementMergeData Encode(M.RecursiveRequirementMerge merge,
         IEnumerable<M.DiagramRequirementResolution>? choices = null)
@@ -206,7 +211,10 @@ public static class RecursiveBlockCodec
 
     public static P.LevelEditEffectData Encode(M.LevelEditEffect effect) => new()
     {
-        Kind = (P.LevelEditEffectKind)((int)effect.Kind + 1), ObjectId = Id(effect.ObjectId), ScopeBlockId = Id(effect.ScopeBlockId), Detail = effect.Detail
+        // Frozen kinds are C# + 1; the lane 2B addition uses its band number.
+        Kind = effect.Kind == M.LevelEditEffectKind.AnnotationResolved ? P.LevelEditEffectKind.LeekAnnotationResolved
+            : (P.LevelEditEffectKind)((int)effect.Kind + 1),
+        ObjectId = Id(effect.ObjectId), ScopeBlockId = Id(effect.ScopeBlockId), Detail = effect.Detail
     };
 
     /// <summary>What a save created: block revisions other than the containing snapshots, connection

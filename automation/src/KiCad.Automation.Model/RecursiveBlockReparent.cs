@@ -10,8 +10,9 @@ public sealed record ReparentRequest(BlockSelection ExpectedRoot, ImmutableArray
     DiagramBlockPlacement? TargetPlacement, ImmutableDictionary<Guid, Guid> NewRevisionIds, RequirementRevisionOrigin? Origin);
 
 /// <summary>What a move would do: the root connections of P attached to B that must be detached,
-/// the removal cascade in P, and the blocks that receive one successor revision each
-/// (root first, then the source branch, then the rest of the target branch).</summary>
+/// every effect on both levels (the removal cascade in P; in Q, stale layout entries of B that are
+/// dropped and notes on B that become resolved again), and the blocks that receive one successor
+/// revision each (root first, then the source branch, then the rest of the target branch).</summary>
 public sealed record ReparentPreview(ImmutableHashSet<Guid> RequiredDetachConnectionIds, ImmutableArray<LevelEditEffect> Effects,
     ImmutableArray<Guid> SuccessorBlockIds);
 
@@ -21,13 +22,15 @@ public sealed partial class RecursiveBlockGraph
     public ReparentPreview PrepareReparent(ReparentRequest request)
     {
         var plan = PlanReparent(request, commit: false);
-        return new(plan.Required, plan.Cascade.Effects, [.. plan.Union.Select(s => s.BlockId)]);
+        return new(plan.Required, RecursiveLevelCascade.Ordered(plan.Cascade.Effects.Concat(plan.Arrival.Effects)),
+            [.. plan.Union.Select(s => s.BlockId)]);
     }
 
     /// <summary>Immediately saves the move as one successor revision of every block on both paths,
     /// built deepest first; B keeps its identity, interior, interfaces, archive, bindings and
     /// allocation, P's detached connections stay in P's archive history, and every historic root still
-    /// reproduces the old hierarchy. Any failure leaves this graph unchanged.</summary>
+    /// reproduces the old hierarchy. PrunedPresentationEntries counts B's dormant layout entries dropped
+    /// from Q. Any failure leaves this graph unchanged.</summary>
     public RecursiveBlockSelectionResult Reparent(ReparentRequest request)
     {
         var plan = PlanReparent(request, commit: true);
@@ -43,7 +46,7 @@ public sealed partial class RecursiveBlockGraph
             if (node.BlockId == plan.Target.Selection.BlockId)
             {
                 children = children.Add(moved);
-                diagram = WithMovedBlock(diagram, request.BlockId, request.TargetPlacement, request.Origin!);
+                diagram = plan.Arrival.Diagram;
             }
             var selection = new BlockSelection(node.BlockId, node.StateId, request.NewRevisionIds[node.BlockId]);
             revisions.Add(revision with { Selection = selection, ParentRevisionId = revision.Selection.RevisionId, Children = children,
@@ -56,7 +59,7 @@ public sealed partial class RecursiveBlockGraph
             ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals);
         // The two changed parents are the created revisions; every other successor is a containing snapshot.
         return new(graph, [.. plan.Union.Where(s => s.BlockId != plan.Parent.Selection.BlockId && s.BlockId != plan.Target.Selection.BlockId)
-            .Select(s => successors[s.BlockId])], true);
+            .Select(s => successors[s.BlockId])], true, plan.Arrival.Pruned);
 
         int Depth(BlockSelection node)
         {
@@ -66,7 +69,11 @@ public sealed partial class RecursiveBlockGraph
     }
 
     private sealed record ReparentPlan(RecursiveBlockRevision Parent, RecursiveBlockRevision Target, ImmutableHashSet<Guid> Required,
-        RecursiveLevelCascade.Result Cascade, ImmutableArray<BlockSelection> Union);
+        RecursiveLevelCascade.Result Cascade, ArrivalResult Arrival, ImmutableArray<BlockSelection> Union);
+
+    /// <summary>Q's local diagram after B arrives, what changed there, and how many of B's dormant layout
+    /// entries were dropped.</summary>
+    private sealed record ArrivalResult(BlockLocalDiagram? Diagram, ImmutableArray<LevelEditEffect> Effects, int Pruned);
 
     private ReparentPlan PlanReparent(ReparentRequest request, bool commit)
     {
@@ -105,7 +112,7 @@ public sealed partial class RecursiveBlockGraph
             var keys = union.Select(s => s.BlockId).ToHashSet();
             if (request.NewRevisionIds.Count != keys.Count || !request.NewRevisionIds.Keys.All(keys.Contains))
                 throw Reparent("invalid_reparent_request", "Supply one new revision identity for every block on the source and target paths.");
-            var used = UsedIdentities();
+            var used = RetainedIdentities();
             if (request.NewRevisionIds.Values.Any(id => id == Guid.Empty || !used.Add(id)))
                 throw new AutomationException("identity_reused", "New revision identities must be fresh and distinct.");
             request.Origin!.Validate();
@@ -121,41 +128,44 @@ public sealed partial class RecursiveBlockGraph
             { throw DiagramPresentationView.Invalid("The target placement needs valid diagram-unit geometry: " + error.Message); }
         }
         var cascade = RecursiveLevelCascade.RemoveChild(this, parentRevision, block, required, request.Origin ?? parentRevision.Origin);
-        return new(parentRevision, targetRevision, required, cascade, union);
+        var arrival = Arrive(targetRevision, block, request.TargetPlacement, request.Origin ?? targetRevision.Origin);
+        return new(parentRevision, targetRevision, required, cascade, arrival, union);
     }
 
-    /// <summary>B becomes a child of Q: stale layout entries for B are replaced by the requested
-    /// placement (or B is unplaced), and a note whose target B returns becomes resolved again.</summary>
-    private static BlockLocalDiagram? WithMovedBlock(BlockLocalDiagram? diagram, Guid block, DiagramBlockPlacement? placement,
+    /// <summary>B becomes a child of Q (contract rbg-v2 section 4.9: Q' adds TargetPlacement if given,
+    /// otherwise B is unplaced in Q). Dormant layout entries Q still keeps for B (its placement and
+    /// ports, for example copied verbatim from an older revision) would come back into use, so they are
+    /// dropped and reported as PresentationEntryRemoved. A note whose exact target is B would otherwise
+    /// claim a present target is unresolved, so it becomes resolved again and is reported as
+    /// AnnotationResolved. Nothing else in Q changes.</summary>
+    private static ArrivalResult Arrive(RecursiveBlockRevision target, Guid block, DiagramBlockPlacement? placement,
         RequirementRevisionOrigin origin)
     {
+        Guid level = target.Selection.BlockId;
+        var diagram = target.Diagram;
         if (diagram is null)
-            return placement is null ? null : new([], [], [], new DiagramPresentationView([placement], [], []), default);
+            return new(placement is null ? null : new BlockLocalDiagram([], [], [], new DiagramPresentationView([placement], [], []), default), [], 0);
+        var effects = ImmutableArray.CreateBuilder<LevelEditEffect>();
         var view = diagram.Layout;
+        var staleBlocks = view.BlockPlacements.Where(b => b.BlockId == block).ToArray();
+        var stalePorts = view.PortPlacements.Where(p => p.BlockId == block).ToArray();
+        foreach (var entry in staleBlocks)
+            effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, entry.BlockId, level, DiagramPresentationView.Key(entry)));
+        foreach (var entry in stalePorts)
+            effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, entry.InterfaceId, level, DiagramPresentationView.Key(entry)));
         var blocks = view.BlockPlacements.Where(b => b.BlockId != block).ToList();
         if (placement is not null) blocks.Add(placement);
         view = view with { Blocks = [.. blocks], Ports = [.. view.PortPlacements.Where(p => p.BlockId != block)] };
-        var notes = diagram.Notes.Select(n => n.Target.Kind == DiagramAnnotationTargetKind.Block && n.Target.TargetId == block && n.Target.UnresolvedReason is not null
-            ? n with { Target = n.Target with { UnresolvedReason = null }, Origin = origin } : n).ToImmutableArray();
-        return diagram with { Presentation = view.IsEmpty ? null : view,
-            Annotations = diagram.Annotations.IsDefault && notes.IsEmpty ? diagram.Annotations : notes };
-    }
-
-    private HashSet<Guid> UsedIdentities()
-    {
-        var used = new HashSet<Guid>(States.SelectMany(s => new[] { s.Id, s.BlockId }).Concat(_revisions.Keys).Append(DocumentId));
-        used.UnionWith(RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)));
-        foreach (var archive in ConnectionArchives)
+        var notes = diagram.Notes.Select(note =>
         {
-            used.UnionWith(archive.States.SelectMany(s => new[] { s.Id, s.ConnectionId }));
-            used.UnionWith(archive.Revisions.Select(r => r.Selection.RevisionId));
-            used.UnionWith(archive.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)));
-            used.UnionWith(archive.SegmentOwners.Keys);
-        }
-        used.UnionWith(Revisions.SelectMany(r => r.LocalDiagram.Interfaces.Select(i => i.Id).Concat(r.LocalDiagram.Notes.Select(n => n.Id))));
-        used.UnionWith(ImplementationChanges.Select(c => c.Id)); used.UnionWith(RefinementInputs.Select(i => i.Id));
-        used.UnionWith(Proposals.Select(p => p.Id));
-        return used;
+            if (note.Target.Kind != DiagramAnnotationTargetKind.Block || note.Target.TargetId != block || note.Target.UnresolvedReason is null)
+                return note;
+            effects.Add(new(LevelEditEffectKind.AnnotationResolved, note.Id, level, RecursiveLevelCascade.TargetReturned));
+            return note with { Target = note.Target with { UnresolvedReason = null }, Origin = origin };
+        }).ToImmutableArray();
+        return new(diagram with { Presentation = view.IsEmpty ? null : view,
+                Annotations = diagram.Annotations.IsDefault && notes.IsEmpty ? diagram.Annotations : notes },
+            RecursiveLevelCascade.Ordered(effects), staleBlocks.Length + stalePorts.Length);
     }
 
     private static AutomationException Reparent(string code, string message) => new(code, message);

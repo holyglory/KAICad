@@ -1413,6 +1413,97 @@ name="native-objects"
 tier="development"
 command=["cmake", "--build", "automation/artifacts/native", "--target", "kiapi", "common/CMakeFiles/kicommon.dir/api/api_server.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad_manager_frame.cpp.o"]
 
+# Frozen PSU-CPU acceptance fixture v1 (automation/tests/fixtures/psu-cpu). The managed
+# checks pin every fixture file, model, identity and expected table. The gating native check
+# proves this fork's eeschema still reads the pinned sources to exactly the frozen definition
+# pins (numbers, names, units, body styles and K21 identities) and keeps them on load and save.
+# Byte-for-byte reproduction of lib_symbols.kicad_sexpr is psu-cpu-fixture-writer-drift below.
+[test.psu-cpu-fixture]
+timeout_seconds=3600
+env={ DOTNET_CLI_TELEMETRY_OPTOUT = "1", DOTNET_NOLOGO = "1", TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.psu-cpu-fixture.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["managed-build", "fixture-contracts", "symbol-normalization"]
+command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.psu-cpu-fixture.check]]
+name="managed-build"
+tier="development"
+role="preflight"
+invalidates=["fixture-contracts", "symbol-normalization"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.psu-cpu-fixture.check]]
+name="fixture-contracts"
+tier="development"
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~PsuCpuFixtureTests&TestCategory!=NativeSession", "--logger", "trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/contracts"]
+retained_artifacts=[{ name = "psu-cpu-fixture-contracts", path = "automation/artifacts/psu-cpu-fixture/contracts", max_bytes = 16777216 }, { name = "psu-cpu-fixture-generated", path = "automation/artifacts/psu-cpu-fixture/generated", max_bytes = 4194304 }]
+
+[[test.psu-cpu-fixture.check]]
+name="native-configure"
+tier="development"
+role="preflight"
+invalidates=["native-build", "symbol-normalization"]
+command=["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.psu-cpu-fixture.check]]
+name="native-build"
+tier="development"
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad-cli", "eeschema_kiface"]
+
+[[test.psu-cpu-fixture.check]]
+name="symbol-normalization"
+tier="development"
+requires=["native-build"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PsuCpuFixtureNative", "--logger", "trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/native-tests"]
+retained_artifacts=[{ name = "psu-cpu-fixture-native-tests", path = "automation/artifacts/psu-cpu-fixture/native-tests", max_bytes = 16777216 }, { name = "psu-cpu-fixture-native-evidence", path = "automation/artifacts/psu-cpu-fixture/native", max_bytes = 16777216 }]
+
+# Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
+# that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
+# sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means
+# only that the symbol writer changed (for example a schematic file-format bump): the lanes are
+# not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
+# as psu-cpu-fixture-writer-drift-evidence.
+[test.psu-cpu-fixture-writer-drift]
+timeout_seconds=3600
+env={ DOTNET_CLI_TELEMETRY_OPTOUT = "1", DOTNET_NOLOGO = "1", TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.psu-cpu-fixture-writer-drift.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["managed-build", "writer-drift"]
+command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.psu-cpu-fixture-writer-drift.check]]
+name="managed-build"
+tier="development"
+role="preflight"
+invalidates=["writer-drift"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.psu-cpu-fixture-writer-drift.check]]
+name="native-configure"
+tier="development"
+role="preflight"
+invalidates=["native-build", "writer-drift"]
+command=["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.psu-cpu-fixture-writer-drift.check]]
+name="native-build"
+tier="development"
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad-cli", "eeschema_kiface"]
+
+[[test.psu-cpu-fixture-writer-drift.check]]
+name="writer-drift"
+tier="development"
+requires=["native-build"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PsuCpuFixtureWriterDrift", "--logger", "trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/writer-drift-tests"]
+retained_artifacts=[{ name = "psu-cpu-fixture-writer-drift-tests", path = "automation/artifacts/psu-cpu-fixture/writer-drift-tests", max_bytes = 16777216 }, { name = "psu-cpu-fixture-writer-drift-evidence", path = "automation/artifacts/psu-cpu-fixture/writer-drift", max_bytes = 16777216 }]
+
 [test.native-intake-model]
 timeout_seconds=600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }

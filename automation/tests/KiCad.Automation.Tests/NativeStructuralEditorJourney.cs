@@ -105,12 +105,10 @@ public sealed partial class NativeSessionTests
             }
             void AddProperty()
             {
-                // Use the native focus order: Name -> Purpose -> strength ->
-                // instruction text -> Add custom property. The optional
-                // instruction chooser has just been hidden by Undo.
-                Key("click", x: 180, y: 160);
-                for (int tab = 0; tab < 4; tab++) Key("Tab");
-                Key("Return");
+                // The native mnemonic stays usable as the property list grows;
+                // a fixed Tab count stops reaching the button once the
+                // inspector's property table joins the focus order.
+                NativeKeyboard.SchematicShortcut(display, processId, "a", "Structure", false, false, altKey: true);
             }
             async Task Save()
             {

@@ -63,6 +63,7 @@ builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequi
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddMcpServer().WithStdioServerTransport()
     .WithTools<InstanceTools>().WithTools<RecoveryTools>().WithTools<SchematicViewTools>()
+    .WithTools<RecoveryObservationTools>()
     .WithTools<CheckedSchematicTools>()
     .WithTools<AutomaticDesignTools>();
 await builder.Build().RunAsync();

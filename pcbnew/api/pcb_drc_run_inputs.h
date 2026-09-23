@@ -9,6 +9,7 @@
 #include <json_common.h>
 #include <memory>
 #include <string>
+#include <tl/expected.hpp>
 #include <vector>
 namespace PNS { class ROUTING_SETTINGS; }
 namespace kiapi::automation::v1 { class SchematicParityNetlistSnapshot; }

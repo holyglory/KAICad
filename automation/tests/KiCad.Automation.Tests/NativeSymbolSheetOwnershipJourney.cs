@@ -58,10 +58,20 @@ public sealed partial class NativeSessionTests
             }
             return symbol;
         }
-        GlobalLabel Label(Vector2 position) => new() { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = position.Clone(),
-            Text = new() { Text_ = "CROSS_SHEET_LINK", Position = position.Clone(), Attributes = new()
-                { Size = new() { XNm = 1270000, YNm = 1270000 }, HorizontalAlignment = HorizontalAlignment.HaLeft,
-                    VerticalAlignment = VerticalAlignment.VaCenter } }, Shape = SchematicLabelShape.SlshBidi, SpinStyle = SchematicLabelSpinStyle.SlssRight };
+        GlobalLabel Label(Vector2 position)
+        {
+            var label = new GlobalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = position.Clone(),
+                Text = new() { Text_ = "CROSS_SHEET_LINK", Position = position.Clone(), Attributes = new()
+                    { Size = new() { XNm = 1270000, YNm = 1270000 }, HorizontalAlignment = HorizontalAlignment.HaLeft,
+                        VerticalAlignment = VerticalAlignment.VaCenter } }, Shape = SchematicLabelShape.SlshBidi, SpinStyle = SchematicLabelSpinStyle.SlssRight };
+            // Every native global label owns a hidden inter-sheet reference field;
+            // later project-setting refreshes read it. Create the label KiCad creates.
+            label.IntersheetRefsField = new SchematicField { Name = "Intersheetrefs", AllowAutoPlace = true, Visible = false,
+                Text = label.Text.Clone() };
+            label.IntersheetRefsField.Text.Text_ = "${INTERSHEET_REFS}";
+            label.IntersheetRefsField.Text.Attributes.Multiline = true;
+            return label;
+        }
         var rootBatch = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Cross-sheet component root units" };
         for (int index = 0; index < 2; index++)
         {
@@ -228,7 +238,7 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
         await VerifySynchronizationServiceRestart(client, root, store, designPath, evidence, instanceId, token,
             ["publication-replaced", "baseline-committed", "retained-archived"]);
-        await VerifyAutomaticSynchronization(client, root, store, designPath, evidence, instanceId, token);
+        await VerifyAutomaticSynchronization(client, root, store, designPath, evidence, instanceId, processId, display, token);
         Assert.AreEqual(3, restorationStops.Count);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-owner-restoration-restarts.json"), JsonSerializer.Serialize(restorationStops), token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-result.json"), JsonSerializer.Serialize(new

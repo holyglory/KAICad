@@ -5,11 +5,13 @@
 #include <api/api_sch_state_groups.h>
 
 #include <api/document_change_journal.h>
+#include <erc/erc_exclusion.h>
 #include <nlohmann/json.hpp>
 #include <project.h>
 #include <project/project_file.h>
 #include <sch_commit.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <sch_marker.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
@@ -19,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -48,6 +51,44 @@ std::map<std::string, SCH_SHEET*> writtenScreens( SCHEMATIC& aSchematic )
 
     screens[first->GetScreen()->GetUuid().AsStdString()] = first;
     return screens;
+}
+
+
+/// The project settings exactly as saving writes them.  Saving first records the live ERC
+/// exclusions (SCHEMATIC::RecordERCExclusions), so the stored exclusion list can lag an
+/// unsaved exclusion edit.  Digest the list the save will write, computed the same way on a
+/// copy: capturing must never update the saved cache behind the editor.
+nlohmann::json persistedProjectSettings( SCHEMATIC& aSchematic )
+{
+    nlohmann::json settings = aSchematic.Project().GetProjectFile().CaptureCurrentState();
+    auto           erc = settings.find( "erc" );
+
+    if( erc == settings.end() || !erc->is_object() )
+        return settings;
+
+    std::set<ERC_EXCLUSION, ERC_EXCLUSION_COMPARE> exclusions;
+
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        if( SCH_SCREEN* screen = path.LastScreen() )
+        {
+            for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+            {
+                SCH_MARKER* marker = static_cast<SCH_MARKER*>( item );
+
+                if( marker->IsExcluded() )
+                    exclusions.insert( ERC_EXCLUSION::FromMarker( *marker ) );
+            }
+        }
+    }
+
+    nlohmann::json recorded = nlohmann::json::array();
+
+    for( const ERC_EXCLUSION& exclusion : exclusions )
+        recorded.push_back( exclusion );
+
+    ( *erc )["erc_exclusions"] = std::move( recorded );
+    return settings;
 }
 } // namespace
 
@@ -89,7 +130,7 @@ SCH_STATE_GROUPS SCH_STATE_GROUPS::CaptureScreens( SCHEMATIC& aSchematic,
     if( aScreens.empty() )
     {
         NATIVE_STATE_DIGEST settings;
-        settings.Append( aSchematic.Project().GetProjectFile().CaptureCurrentState().dump() );
+        settings.Append( persistedProjectSettings( aSchematic ).dump() );
         result.add( "project-settings", settings );
     }
     else if( result.m_sheets.size() != aScreens.size() )

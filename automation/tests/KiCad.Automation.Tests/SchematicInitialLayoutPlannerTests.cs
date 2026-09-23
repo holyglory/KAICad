@@ -71,6 +71,50 @@ public sealed class SchematicInitialLayoutPlannerTests
             Assert.AreEqual(pinned, result.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.Id == id).Placement);
     }
 
+    // Isolated grouping rule behind the rendered NativeXmlComponentCreation journey, which lays out the
+    // same arrangement natively: units moved from the repeated channels to the single-instance root are
+    // separate bodies, so one explicit position never propagates to the other component's unit.
+    [TestMethod]
+    public async Task UnitsMovedFromRepeatedSheetsToOneSheetAreSeparateBodies()
+    {
+        var state = SchematicSynchronizationPlanTests.Fixture();
+        Guid root = state.Baseline.Engineering.Circuit.SheetInstances.Single(s => s.ParentId is null).Id;
+        var old = state.Baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+        var added = SchematicNativeCreationProjectionTests.AddComponent(state.Baseline, coordinateFree: true);
+        var moved = added.Circuit.Symbols.Where(s => !old.Contains(s.Id) && s.Unit == 2).OrderBy(s => s.Id).ToArray();
+        var stays = added.Circuit.Symbols.Where(s => !old.Contains(s.Id) && s.Unit == 1).Select(s => s.Id).ToArray();
+        Assert.HasCount(2, moved);
+        var pinned = new SymbolPlacement(101.6m, 50.8m, 0, false, false, false);
+        EngineeringDesign Move(params SymbolOccurrence[] units) => added with { Circuit = added.Circuit with { Symbols = added.Circuit.Symbols
+            .Select(s => !units.Any(u => u.Id == s.Id) ? s : s with { SheetInstanceId = root, Placement = s.Id == moved[0].Id ? pinned : null })
+            .ToArray() } };
+        state = SchematicNetReconciliationTests.Desired(state, Move(moved));
+        var result = await Propose(state);
+        Assert.IsTrue(result.CanPropose);
+        var bodies = result.Layout.Placements!;
+        foreach (var unit in moved)
+            Assert.AreEqual(unit.Id, bodies.Single(b => b.SymbolOccurrences.Contains(unit.Id)).SymbolOccurrences.Single());
+        Assert.IsTrue(bodies.Single(b => b.SymbolOccurrences.Contains(moved[0].Id)).Fixed);
+        Assert.IsFalse(bodies.Single(b => b.SymbolOccurrences.Contains(moved[1].Id)).Fixed);
+        CollectionAssert.AreEquivalent(stays, bodies.Single(b => b.SymbolOccurrences.Contains(stays[0])).SymbolOccurrences.ToArray(),
+            "The unit left on the repeated channels is still one shared body.");
+        var placed = result.DesiredDesign!.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+        Assert.AreEqual(pinned, placed[moved[0].Id].Placement);
+        Assert.AreNotEqual(pinned, placed[moved[1].Id].Placement);
+        Assert.IsTrue(moved.All(m => placed[m.Id].SheetInstanceId == root));
+        Assert.IsTrue(SchematicSynchronizationPlanner.Plan(state with { DesiredFileBytes = Encoding.UTF8.GetBytes(result.DesiredXml!) }).CanPrepare,
+            "The proposal must be directly applicable by ordinary creation.");
+
+        // Moving only one channel's unit would leave the other channel's copy of the shared symbol
+        // without an occurrence; the proposal refuses it before measuring anything.
+        int calls = 0;
+        var partial = SchematicNetReconciliationTests.Desired(state, Move(moved[0]));
+        var error = await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            partial, Policy, Regions(partial), "", (request, token) => { calls++; return Task.FromResult(Measurement(partial, request, 7_000_000)); }));
+        Assert.AreEqual("created_unit_sheet_coverage_mismatch", error.Code);
+        Assert.AreEqual(0, calls);
+    }
+
     [TestMethod]
     public async Task WrongOrIncompleteMeasurementNeverProducesAnApplicableCandidate()
     {

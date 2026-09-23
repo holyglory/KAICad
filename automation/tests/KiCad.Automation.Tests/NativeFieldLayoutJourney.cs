@@ -20,15 +20,19 @@ public sealed partial class NativeSessionTests
         var bindings = baseline.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
         var nativeSymbols = SchematicModelProjection.NativeSymbols(baseline, baseline.Schematic);
         var changes = new List<SchematicFieldPlacement>();
+        // One revision-bound measurement per sheet instance serves every symbol on it.
+        var sheetMeasurements = new Dictionary<string, SchematicPlacementGeometry>(StringComparer.Ordinal);
         // Fixture-specific arrangement proposal. Text stays visible and retains
         // content/font settings; actual post-commit bounds verify the result.
         foreach (var occurrence in added.DistinctBy(s => bindings[s.Id]))
         {
             var symbol = nativeSymbols[occurrence.Id];
             var owner = baseline.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Equals(symbol.Path));
-            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
-            { Document = owner.Metadata.Document.Clone(), ExpectedRevision = new() { Epoch = saved.State.NativeRevision.Epoch,
-                Sequence = saved.State.NativeRevision.Sequence } }, token);
+            string ownerPath = string.Join('/', owner.Metadata.Document.SheetPath.Path.Select(p => p.Value));
+            if (!sheetMeasurements.TryGetValue(ownerPath, out var measured))
+                sheetMeasurements.Add(ownerPath, measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = owner.Metadata.Document.Clone(), ExpectedRevision = new() { Epoch = saved.State.NativeRevision.Epoch,
+                    Sequence = saved.State.NativeRevision.Sequence } }, token));
             var envelope = measured.Obstacles.Single(o => o.Id.Value == symbol.Id.Value).Bounds;
             long x = ((envelope.Position.XNm + envelope.Size.XNm + 2_540_000 + 99) / 100) * 100;
             long y = symbol.Position.YNm;

@@ -71,7 +71,7 @@ internal static class SchematicSynchronizationExecutor
         byte[] original = await File.ReadAllBytesAsync(designPath, cancellationToken);
         if (!original.AsSpan().SequenceEqual(saved.State.DesiredFileBytes))
             throw Error("design_file_changed", "Capture the latest saved XML before planning synchronization.");
-        var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store, saved, cancellationToken);
+        var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store, saved, session, cancellationToken);
         bool connections = plan.NativeConnectionRealizationRequired, rebuild = plan.NativeRebuildRequired;
         bool realization = connections || rebuild;
         if (!plan.CanPrepare || plan.Candidate is null || (plan.CandidateXml is null && !realization))

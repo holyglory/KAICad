@@ -21,9 +21,12 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
     public bool CanPrepare => Candidate is not null && ErrorCode is null;
 
     // A realization plan has no publishable preview (CandidateXml is null) and no
-    // native operations yet: the executor measures the checkpoint and builds them.
+    // native operations yet: the lane measures the checkpoint and returns them, and
+    // the executor builds the batch around them (CN-1 §9.1).
     // Candidate is the pre-realization design.
     public bool NativeConnectionRealizationRequired => Connections is not null;
+    // The Rebuild parameter is provisional until lane 2C confirms; changes go
+    // through a seam request.
     public bool NativeRebuildRequired => Rebuild is not null;
 }
 
@@ -94,6 +97,8 @@ public static class SchematicSynchronizationPlanner
                 return Failure(connected.ErrorCode ?? SchematicConnectionErrors.XmlDisconnectionUnsupported, connected.ErrorMessage);
             if (connected.Kind == SchematicConnectedAdditionKind.Admitted)
                 return SchematicConnectedAdditionPlanner.Prepare(state, desired, hierarchy, connected, gaps, token);
+            // The rebuild dispatch and its design_sync_conflict fallback are provisional
+            // until lane 2C confirms; changes go through a seam request.
             var rebuild = SchematicRebuild.Classify(state, desired, token);
             if (rebuild.Kind == SchematicRebuildKind.Rejected)
                 return Failure(rebuild.ErrorCode ?? "design_sync_conflict", rebuild.ErrorMessage);

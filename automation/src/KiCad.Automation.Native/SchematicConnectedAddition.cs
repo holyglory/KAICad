@@ -25,18 +25,22 @@ public static class SchematicConnectedAddition
         return new(SchematicConnectedAdditionKind.NotApplicable, [], []);
     }
 
-    /// <summary>Whether a journaled native mutation is a connection realization
-    /// (its batch carries the connectivity assertion) rather than a connected move.</summary>
-    internal static bool IsRealization(ApplySchematicItemBatch batch)
+    /// <summary>Whether the pending layout recorded in <paramref name="state"/> was produced
+    /// by a connection-realization plan rather than a connected move or a rebuild. Decide
+    /// from the recorded plan, not from batch contents: a rebuild batch may also assert
+    /// connectivity, and the executor asks the rebuild lane first.</summary>
+    internal static bool IsRealization(DesignRecoveryState state)
     {
-        ArgumentNullException.ThrowIfNull(batch);
+        ArgumentNullException.ThrowIfNull(state);
         return false;
     }
 
-    /// <summary>Measure the checkpoint natively and build the one checked realization
-    /// batch plus the exact design it plans to publish (§9.1 steps 2-4).</summary>
-    internal static Task<SchematicPreparedRealization> RealizeAsync(NativeClient client, DesignRecoveryState state,
-        SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)
+    /// <summary>Check the <paramref name="session"/> handshake for the realization capability,
+    /// measure the checkpoint natively and return the operations, ending with the connectivity
+    /// assertion, plus the exact design they plan to publish (§9.1 steps 2-4). The executor
+    /// builds, validates and journals the batch envelope.</summary>
+    internal static Task<SchematicPreparedRealization> RealizeAsync(NativeClient client, AutomationSession session,
+        DesignRecoveryState state, SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)
         => throw Unavailable();
 
     /// <summary>Check a realization receipt before generic handling (§9.2): abandon a

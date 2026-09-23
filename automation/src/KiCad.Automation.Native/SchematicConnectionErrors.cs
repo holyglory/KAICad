@@ -65,6 +65,36 @@ public static class SchematicConnectionErrors
     public const string RealizationPageReservationsUnspecified = "realization_page_reservations_unspecified";
 
     // Existing codes CN-1 reuses unchanged, so lane code spells them once.
+    // Every SchematicNativeCreationProjection code (§13 "Reused unchanged"). Each equals
+    // the literal that projection throws; CreatedBindingInvalid and
+    // CreatedSymbolPlacementRequired below are also projection codes.
+    public const string UnresolvedDesignBindings = "unresolved_design_bindings";
+    public const string PartDefinitionChangeRequiresResolution = "part_definition_change_requires_resolution";
+    public const string NewPartRequiresLibraryDefinition = "new_part_requires_library_definition";
+    public const string SheetOwnershipChangeRequiresResolution = "sheet_ownership_change_requires_resolution";
+    public const string ComponentRebindingRequiresResolution = "component_rebinding_requires_resolution";
+    public const string DuplicateComponentDefinition = "duplicate_component_definition";
+    public const string NoComponentCreation = "no_component_creation";
+    public const string ComponentDefinitionRequired = "component_definition_required";
+    public const string UnknownComponentSheet = "unknown_component_sheet";
+    public const string CreatedComponentConnectivityRequiresResolution = "created_component_connectivity_requires_resolution";
+    public const string SymbolRebindingRequiresResolution = "symbol_rebinding_requires_resolution";
+    public const string SymbolOwnerRequiresResolution = "symbol_owner_requires_resolution";
+    public const string ComponentUnitsIncomplete = "component_units_incomplete";
+    public const string SharedSymbolPlacementConflict = "shared_symbol_placement_conflict";
+    public const string CreatedNativeIdentityCollision = "created_native_identity_collision";
+    public const string MissingNativeSheet = "missing_native_sheet";
+    public const string CreatedNativeIdentityMissing = "created_native_identity_missing";
+    public const string MissingSymbolTemplate = "missing_symbol_template";
+    public const string AmbiguousSymbolTemplate = "ambiguous_symbol_template";
+    public const string IncompleteSymbolFields = "incomplete_symbol_fields";
+    public const string IncompleteSymbolInstanceRecords = "incomplete_symbol_instance_records";
+    public const string AmbiguousSymbolInstanceRecord = "ambiguous_symbol_instance_record";
+    public const string IncompleteSymbolTemplate = "incomplete_symbol_template";
+    public const string SymbolUnitMismatch = "symbol_unit_mismatch";
+    public const string SymbolPinTemplateMismatch = "symbol_pin_template_mismatch";
+    public const string UnsupportedSymbolChild = "unsupported_symbol_child";
+    public const string CreatedSymbolCacheConflict = "created_symbol_cache_conflict";
     public const string CreationBindingsChanged = "creation_bindings_changed";
     public const string CreationRequiresStableNativeHierarchy = "creation_requires_stable_native_hierarchy";
     public const string CreationRequiresStableConnectivity = "creation_requires_stable_connectivity";

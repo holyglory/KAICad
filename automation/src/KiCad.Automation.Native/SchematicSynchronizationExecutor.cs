@@ -12,9 +12,10 @@ public sealed record SchematicSynchronizationExecution(string RecoveryRevisionTo
     bool SynchronizationCommitted, CheckedSchematicBatchReceipt? NativeReceipt,
     Guid? PublicationId = null, string? PreviousXmlPath = null, bool Replayed = false, RetainedXmlLocation? RetainedXml = null);
 
-/// <summary>A lane-built native mutation and the exact design it plans to publish.
-/// It is journaled and resolved like a connected move; the bytes are not publishable yet.</summary>
-internal sealed record SchematicPreparedRealization(ApplySchematicItemBatch Batch, byte[] PlannedDesignFileBytes);
+/// <summary>What a lane realizes for one exact checkpoint: only its native operations and
+/// the exact design they plan to publish. The executor owns the batch envelope, then
+/// journals and resolves the batch like a connected move; the bytes are not publishable yet.</summary>
+internal sealed record SchematicPreparedRealization(IReadOnlyList<SchematicItemOperation> Operations, byte[] PlannedDesignFileBytes);
 
 /// <summary>Journaled execution of a supported design candidate. Still internal
 /// until the complete executor and retained-file lifecycle are qualified.</summary>
@@ -71,9 +72,12 @@ internal static class SchematicSynchronizationExecutor
         if (!original.AsSpan().SequenceEqual(saved.State.DesiredFileBytes))
             throw Error("design_file_changed", "Capture the latest saved XML before planning synchronization.");
         var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store, saved, cancellationToken);
-        bool realization = plan.NativeConnectionRealizationRequired || plan.NativeRebuildRequired;
+        bool connections = plan.NativeConnectionRealizationRequired, rebuild = plan.NativeRebuildRequired;
+        bool realization = connections || rebuild;
         if (!plan.CanPrepare || plan.Candidate is null || (plan.CandidateXml is null && !realization))
             throw Error(plan.ErrorCode ?? "design_sync_conflict", plan.ErrorMessage ?? "Resolve the design conflicts before applying changes.");
+        if (connections && rebuild)
+            throw Error("design_sync_conflict", "A synchronization plan must name exactly one lane to realize it.");
         var checkpoint = await Capture(client, saved.State, cancellationToken);
         if (checkpoint.State.Revision.Epoch != saved.State.NativeRevision.Epoch
             || checkpoint.State.Revision.Sequence != saved.State.NativeRevision.Sequence
@@ -84,14 +88,21 @@ internal static class SchematicSynchronizationExecutor
             throw Error("native_file_conflict", "Native file baselines must be known and unchanged before synchronization.");
         if (realization)
         {
-            // Lanes measure this exact checkpoint natively and build the one checked
-            // batch; there is no no-op shortcut and no ordinary batch. The mutation
-            // is journaled and resolved like a connected move.
-            var prepared = plan.NativeConnectionRealizationRequired
-                ? await SchematicConnectedAddition.RealizeAsync(client, saved.State, plan, checkpoint, cancellationToken)
-                : await SchematicRebuild.RealizeAsync(client, saved.State, plan, checkpoint, cancellationToken);
-            saved = store.Save(saved.State with { PendingMutation = prepared.Batch.Clone(), PendingNativeState = checkpoint.State.Clone(),
-                PendingLayout = DesignLayoutIntent.Create(designPath, original, prepared.PlannedDesignFileBytes, operationId, expectedRevisionToken) }, saved.RevisionToken);
+            // CN-1 §9.1 split: the lane checks this session's handshake capability,
+            // measures this exact checkpoint natively and returns only its operations
+            // and planned design (steps 2-4). The executor builds and validates the
+            // batch envelope exactly as the ordinary builder below does, journals it
+            // and resolves it through the lane that planned it (steps 4-6). There is
+            // no no-op shortcut and no ordinary batch.
+            var prepared = connections
+                ? await SchematicConnectedAddition.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken)
+                : await SchematicRebuild.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken);
+            var realized = RealizationBatch(checkpoint.State, saved.State.OriginId, prepared, requireAssertion: connections,
+                connections ? "Apply XML connections" : "Rebuild native sheets from XML");
+            var journal = saved.State with { PendingMutation = realized, PendingNativeState = checkpoint.State.Clone(),
+                PendingLayout = DesignLayoutIntent.Create(designPath, original, prepared.PlannedDesignFileBytes, operationId, expectedRevisionToken) };
+            RequireLane(journal, connections ? LayoutLane.ConnectionRealization : LayoutLane.Rebuild);
+            saved = store.Save(journal, saved.RevisionToken);
             if (executionCheckpoint is not null) await executionCheckpoint("layout-prepared", cancellationToken);
             saved = await ResolveLayoutAsync(store, client, saved, cancellationToken, executionCheckpoint);
             return await ResumeAsync(store, receipts, client, saved, cancellationToken, executionCheckpoint);
@@ -113,16 +124,13 @@ internal static class SchematicSynchronizationExecutor
 
         ApplySchematicItemBatch? batch = null;
         if (plan.NativeOperations.Count != 0)
-        {
-            batch = new() { Document = checkpoint.State.Document.Clone(), DocumentEpoch = checkpoint.State.Revision.Epoch,
-                ExpectedRevision = checkpoint.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
-                OriginId = saved.State.OriginId.ToString("D"), Description = "Apply XML synchronization candidate" };
-            batch.Operations.Add(plan.NativeOperations.Select(operation => operation.Clone()));
-        }
+            batch = NewBatch(checkpoint.State, saved.State.OriginId, "Apply XML synchronization candidate", plan.NativeOperations);
         if (plan.NativeLayoutResolutionRequired)
         {
-            saved = store.Save(saved.State with { PendingMutation = batch, PendingNativeState = checkpoint.State.Clone(),
-                PendingLayout = DesignLayoutIntent.Create(designPath, original, candidateBytes, operationId, expectedRevisionToken) }, saved.RevisionToken);
+            var journal = saved.State with { PendingMutation = batch, PendingNativeState = checkpoint.State.Clone(),
+                PendingLayout = DesignLayoutIntent.Create(designPath, original, candidateBytes, operationId, expectedRevisionToken) };
+            RequireLane(journal, LayoutLane.ConnectedMove);
+            saved = store.Save(journal, saved.RevisionToken);
             if (executionCheckpoint is not null) await executionCheckpoint("layout-prepared", cancellationToken);
             saved = await ResolveLayoutAsync(store, client, saved, cancellationToken, executionCheckpoint);
             return await ResumeAsync(store, receipts, client, saved, cancellationToken, executionCheckpoint);
@@ -269,15 +277,14 @@ internal static class SchematicSynchronizationExecutor
             || !(await File.ReadAllBytesAsync(intent.DesignPath, token)).AsSpan().SequenceEqual(intent.ExpectedFileBytes))
             throw Error("publication_target_changed", "XML changed before the pending move was resolved; no native request was replayed.");
         Read(store, saved.RevisionToken);
+        var lane = Lane(saved.State);
         var request = new CheckedSchematicBatch { Batch = saved.State.PendingMutation!.Clone(), ExpectedState = initial.Clone() };
         var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, token);
         CheckedSchematicContract.ValidateResult(request, receipt, inspect: false);
         // Lane realizations check their own receipt first, for example to abandon a
         // batch that their native assertion rejected without any mutation.
-        bool connected = SchematicConnectedAddition.IsRealization(request.Batch);
-        bool rebuild = !connected && SchematicRebuild.IsRebuild(request.Batch);
-        if (connected) SchematicConnectedAddition.CheckReceipt(store, saved, receipt);
-        else if (rebuild) SchematicRebuild.CheckReceipt(store, saved, receipt);
+        if (lane == LayoutLane.ConnectionRealization) SchematicConnectedAddition.CheckReceipt(store, saved, receipt);
+        else if (lane == LayoutLane.Rebuild) SchematicRebuild.CheckReceipt(store, saved, receipt);
         if (receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted)
             throw Error("native_sync_not_committed", receipt.ErrorMessage.Length == 0
                 ? "Inspect the retained connected-move operation before continuing." : receipt.ErrorMessage);
@@ -285,9 +292,12 @@ internal static class SchematicSynchronizationExecutor
         if (!observed.State.Equals(receipt.ObservedAfter))
             throw Error("native_changed_during_sync", "Native state changed after the move; preserve the pending versions for reconciliation.");
         var planned = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.PlannedDesignFileBytes), saved.State.KnowledgeLibraries);
-        var resolved = connected ? SchematicConnectedAddition.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token)
-            : rebuild ? SchematicRebuild.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token)
-            : SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token);
+        var resolved = lane switch
+        {
+            LayoutLane.ConnectionRealization => SchematicConnectedAddition.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
+            LayoutLane.Rebuild => SchematicRebuild.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
+            _ => SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token)
+        };
         byte[] candidate = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(resolved, saved.State.KnowledgeLibraries));
         if (!(await File.ReadAllBytesAsync(intent.DesignPath, token)).AsSpan().SequenceEqual(intent.ExpectedFileBytes))
             throw Error("publication_target_changed", "XML changed while resolving the move; retain the pending native result.");
@@ -295,6 +305,53 @@ internal static class SchematicSynchronizationExecutor
             intent.DesignPath, intent.ExpectedFileBytes, candidate, intent.OperationId, intent.RequestedRecoveryRevisionToken) }, saved.RevisionToken);
         if (checkpoint is not null) await checkpoint("layout-resolved", token);
         return saved;
+    }
+
+    // A pending layout is checked and resolved by the lane whose plan produced it.
+    // Lanes recognise their own journal from the recorded recovery state, never from
+    // batch contents alone. Rebuild is asked first, so a rebuild batch that also
+    // asserts connectivity stays in the rebuild lane.
+    private enum LayoutLane { ConnectedMove, ConnectionRealization, Rebuild }
+
+    private static LayoutLane Lane(DesignRecoveryState state) => SchematicRebuild.IsRebuild(state) ? LayoutLane.Rebuild
+        : SchematicConnectedAddition.IsRealization(state) ? LayoutLane.ConnectionRealization : LayoutLane.ConnectedMove;
+
+    // Checked before journaling, so a later resume cannot route the batch elsewhere.
+    private static void RequireLane(DesignRecoveryState journal, LayoutLane planned)
+    {
+        if (Lane(journal) != planned)
+            throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "The pending layout would be resolved by a different lane than the plan that produced it.");
+    }
+
+    private static ApplySchematicItemBatch NewBatch(DocumentLifecycleState checkpoint, Guid originId, string description,
+        IEnumerable<SchematicItemOperation> operations)
+    {
+        var batch = new ApplySchematicItemBatch { Document = checkpoint.Document.Clone(), DocumentEpoch = checkpoint.Revision.Epoch,
+            ExpectedRevision = checkpoint.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
+            OriginId = originId.ToString("D"), Description = description };
+        batch.Operations.Add(operations.Select(operation => operation.Clone()));
+        return batch;
+    }
+
+    // SchematicItemOperation.assert_connectivity, field 27 (CN-1 §8.1). The generated
+    // case name arrives with the frozen protocol; before it, no operation can carry it.
+    private const SchematicItemOperation.OperationOneofCase AssertConnectivityCase = (SchematicItemOperation.OperationOneofCase)27;
+
+    // Admit only complete lane operations: none empty, and at most one connectivity
+    // assertion, which is the final operation and targets the whole batch document.
+    // A connection realization always ends with its assertion (CN-1 §6.8 and §9.3).
+    private static ApplySchematicItemBatch RealizationBatch(DocumentLifecycleState checkpoint, Guid originId,
+        SchematicPreparedRealization prepared, bool requireAssertion, string description)
+    {
+        if (prepared?.Operations is not { Count: > 0 } operations || prepared.PlannedDesignFileBytes is null
+            || operations.Any(operation => operation is null || operation.OperationCase == SchematicItemOperation.OperationOneofCase.None))
+            throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "The realization returned no complete native operations and planned design.");
+        int assertions = operations.Count(operation => operation.OperationCase == AssertConnectivityCase);
+        var last = operations[operations.Count - 1];
+        if (assertions > 1 || (assertions == 1 && (last.OperationCase != AssertConnectivityCase || last.TargetDocument is not null))
+            || (requireAssertion && assertions == 0))
+            throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "A realization batch must end with its single whole-batch connectivity assertion.");
+        return NewBatch(checkpoint, originId, description, operations);
     }
 
     private static async Task<CheckedSchematicState> Capture(NativeClient client, DesignRecoveryState state, CancellationToken token)

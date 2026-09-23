@@ -194,6 +194,7 @@ set( QA_EESCHEMA_SRCS
     test_sch_api_hittest.cpp
     test_sch_api_proto.cpp
     test_sch_commit.cpp
+    test_sch_change_tracking.cpp
     test_shape_corner_radius.cpp
     test_sch_group.cpp
     test_pin_numbers.cpp
@@ -215,6 +216,7 @@ set( QA_EESCHEMA_SRCS
     test_sch_sheet_path.cpp
     test_sch_sheet_list.cpp
     test_sch_symbol.cpp
+    test_sch_variant_pin_mapping.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
     test_schematic_setup_draft.cpp

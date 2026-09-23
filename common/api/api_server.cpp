@@ -248,25 +248,41 @@ bool KICAD_API_SERVER::Running() const
     return m_server && m_server->Running();
 }
 
-void KICAD_API_SERVER::PublishSchematicCommit(
-        const kiapi::automation::v1::SchematicCommitNotification& aCommit )
+void KICAD_API_SERVER::PublishAutomationEvent(
+        const kiapi::automation::v1::AutomationEvent& aEvent )
 {
+    using EVENT = kiapi::automation::v1::AutomationEvent;
+
+    // Only changes advance the sequence; heartbeats are derived below.
+    wxCHECK( aEvent.payload_case() != EVENT::PAYLOAD_NOT_SET
+                     && aEvent.payload_case() != EVENT::kHeartbeat, /* void */ );
+
     if( !m_eventPublisher ) return;
     if( m_eventSequence == std::numeric_limits<uint64_t>::max() )
     {
         m_eventEpoch = KIID().AsStdString();
         m_eventSequence = 0;
     }
-    kiapi::automation::v1::AutomationEvent event;
+    // The envelope belongs to this stream, whatever the caller left in it.
+    EVENT event = aEvent;
     event.set_protocol_version( 1 );
     event.set_instance_id( m_automationInstanceId );
     event.set_process_epoch( m_token );
     event.set_event_epoch( m_eventEpoch );
     event.set_sequence( ++m_eventSequence );
-    *event.mutable_schematic_commit() = aCommit;
-    kiapi::automation::v1::AutomationEvent heartbeat = event;
+    EVENT heartbeat = event;
     heartbeat.mutable_heartbeat(); // Clears the mutually exclusive change payload.
     m_eventPublisher->Publish( event.SerializeAsString(), heartbeat.SerializeAsString() );
+}
+
+
+void KICAD_API_SERVER::PublishSchematicCommit(
+        const kiapi::automation::v1::SchematicCommitNotification& aCommit )
+{
+    if( !m_eventPublisher ) return;
+    kiapi::automation::v1::AutomationEvent event;
+    *event.mutable_schematic_commit() = aCommit;
+    PublishAutomationEvent( event );
 }
 
 

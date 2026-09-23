@@ -1829,7 +1829,7 @@ requires=["native-build"]
 # Source-editor journeys use the freshly built modules. Updater journeys remain
 # in their separate catalogue-bound graphs; they are not source-build fixtures.
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSourceSession", "--logger", "trx", "--results-directory", "automation/artifacts/native-session-results"]
-retained_artifacts=[{ name = "native-session-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
+retained_artifacts=[{ name = "native-session-evidence", path = "automation/artifacts/native-session-current", max_bytes = 67108864 }]
 
 [[test.native-foundation.check]]
 name="native-erc-exclusion"
@@ -3189,7 +3189,7 @@ name="journey-native-foundation"
 tier="development"
 requires=["native-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSourceSession", "--logger", "trx", "--results-directory", "automation/artifacts/native-session-results"]
-retained_artifacts=[{ name = "native-session-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
+retained_artifacts=[{ name = "native-session-evidence", path = "automation/artifacts/native-session-current", max_bytes = 67108864 }]
 
 [[test.native-acceptance.check]]
 name="journey-native-erc-dialog"

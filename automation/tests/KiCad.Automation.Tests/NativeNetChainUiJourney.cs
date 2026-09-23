@@ -317,6 +317,18 @@ public sealed partial class NativeSessionTests
                         screen.Metadata.NetChainClasses.Assignments.Remove(oldName);
                         screen.Metadata.NetChainClasses.Assignments[draftChain] = assignment;
                     }
+                    // The same acceptance commits the imported class into the
+                    // declared project net settings that every snapshot reports.
+                    // The Setup class grid rebuilds each non-default class from
+                    // its visible columns: the row index becomes its priority and
+                    // there is no differential-pair via-gap column. The imported
+                    // copy of Default sorts after every existing class.
+                    var settings = screen.Metadata.NetSettings;
+                    Assert.IsNotNull(settings, "Snapshots must report the declared project net settings.");
+                    var imported = settings.DefaultClass.Clone();
+                    imported.Name = draftClass; imported.Priority = settings.Classes.Count;
+                    imported.Board.DiffPairViaGap = null;
+                    settings.Classes.Add(imported);
                 }
                 await Same(expected, actual.Data, "chain-draft-applied");
                 Assert.AreEqual(draftBefore.Revision.Sequence + 1, actual.Revision.Sequence);

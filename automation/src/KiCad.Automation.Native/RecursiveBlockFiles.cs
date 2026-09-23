@@ -5,7 +5,10 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
-public sealed record RecursiveBlockFileSnapshot(string Path, string ContentSha256, RecursiveBlockGraph Graph);
+/// <summary>StoredSchemaVersion is the on-disk format (1 or 2). UpgradedFromSchemaVersion is 1 when
+/// the write that produced this snapshot moved a version 1 file to version 2, otherwise 0.</summary>
+public sealed record RecursiveBlockFileSnapshot(string Path, string ContentSha256, RecursiveBlockGraph Graph,
+    int StoredSchemaVersion = 1, int UpgradedFromSchemaVersion = 0);
 
 /// <summary>One guarded publication contains the root, all newly created ancestors and
 /// requirement history. This is a persistence primitive, not native activation or an
@@ -15,7 +18,16 @@ public static class RecursiveBlockFiles
     public static async Task<RecursiveBlockFileSnapshot> SaveImplementationAsync(string repositoryRoot, string path,
         Guid documentId, string expectedContentSha256, BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
         RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds,
-        RequirementRevisionOrigin origin, CancellationToken token = default)
+        RequirementRevisionOrigin origin, CancellationToken token = default) =>
+        (await SaveImplementationWithSummaryAsync(repositoryRoot, path, documentId, expectedContentSha256, expectedRoot, blockPath, draft,
+            revisionId, requirementRevisionId, ancestorRevisionIds, origin, token)).Snapshot;
+
+    /// <summary>As <see cref="SaveImplementationAsync"/>, also returning what the save created and the
+    /// exact graph it started from.</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, RecursiveBlockSelectionResult Result, RecursiveBlockGraph Before)> SaveImplementationWithSummaryAsync(
+        string repositoryRoot, string path, Guid documentId, string expectedContentSha256, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> blockPath, RecursiveBlockDraft draft, Guid revisionId, Guid requirementRevisionId,
+        ImmutableArray<Guid> ancestorRevisionIds, RequirementRevisionOrigin origin, CancellationToken token = default)
     {
         var loaded = await Load(repositoryRoot, path, documentId, token);
         if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
@@ -23,10 +35,8 @@ public static class RecursiveBlockFiles
         token.ThrowIfCancellationRequested();
         var saved = loaded.Snapshot.Graph.SaveImplementationDraft(expectedRoot, blockPath, draft, revisionId,
             requirementRevisionId, ancestorRevisionIds, origin);
-        if (!saved.Changed) return loaded.Snapshot;
-        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(saved.Graph));
-        string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
-        return new(loaded.Snapshot.Path, hash, saved.Graph);
+        if (!saved.Changed) return (loaded.Snapshot, saved, loaded.Snapshot.Graph);
+        return (await PublishAsync(loaded, saved.Graph, token), saved, loaded.Snapshot.Graph);
     }
 
     public static async Task<RecursiveBlockFileSnapshot> SaveConnectionAsync(string repositoryRoot, string path,
@@ -42,9 +52,7 @@ public static class RecursiveBlockFiles
         var saved = loaded.Snapshot.Graph.SaveConnectionDraft(expectedRoot, blockPath, connectionPath, draft,
             connectionRevisionId, requirementRevisionId, connectionAncestorIds, blockRevisionId, blockRequirementRevisionId, blockAncestorIds, origin);
         if (!saved.Changed) return loaded.Snapshot;
-        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(saved.Graph));
-        string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
-        return new(loaded.Snapshot.Path, hash, saved.Graph);
+        return await PublishAsync(loaded, saved.Graph, token);
     }
     public static async Task<RecursiveBlockFileSnapshot> ReadAsync(string repositoryRoot, string path,
         Guid expectedDocumentId, CancellationToken token = default)
@@ -55,6 +63,17 @@ public static class RecursiveBlockFiles
 
     public static async Task<RecursiveBlockFileSnapshot> SaveDraftAsync(string repositoryRoot, string path,
         Guid expectedDocumentId, string expectedContentSha256, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> blockPath, RecursiveBlockDraft draft, Guid newRevisionId,
+        Guid newRequirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds, RequirementRevisionOrigin origin,
+        IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null,
+        IReadOnlyCollection<DiagramConnectionArchive>? connectionArchives = null, CancellationToken token = default) =>
+        (await SaveDraftWithSummaryAsync(repositoryRoot, path, expectedDocumentId, expectedContentSha256, expectedRoot, blockPath, draft,
+            newRevisionId, newRequirementRevisionId, ancestorRevisionIds, origin, resolutions, connectionArchives, token)).Snapshot;
+
+    /// <summary>As <see cref="SaveDraftAsync"/>, also returning what the save created (including the
+    /// dormant layout entries it pruned) and the exact graph it started from.</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, RecursiveBlockSelectionResult Result, RecursiveBlockGraph Before)> SaveDraftWithSummaryAsync(
+        string repositoryRoot, string path, Guid expectedDocumentId, string expectedContentSha256, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> blockPath, RecursiveBlockDraft draft, Guid newRevisionId,
         Guid newRequirementRevisionId, ImmutableArray<Guid> ancestorRevisionIds, RequirementRevisionOrigin origin,
         IReadOnlyCollection<DiagramRequirementResolution>? resolutions = null,
@@ -83,11 +102,51 @@ public static class RecursiveBlockFiles
         {
             if (RecursiveBlockGraphXml.Write(graph) != RecursiveBlockGraphXml.Write(loaded.Snapshot.Graph))
                 throw new AutomationException("unselected_connection_change", "Select the changed connections in the block draft before saving them together.");
-            return loaded.Snapshot;
+            return (loaded.Snapshot, saved, loaded.Snapshot.Graph);
         }
-        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(saved.Graph));
+        return (await PublishAsync(loaded, saved.Graph, token), saved, loaded.Snapshot.Graph);
+    }
+
+    /// <summary>Checks a move against the exact observed file; never writes (contract rbg-v2 action 14).</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, ReparentPreview Preview)> PrepareReparentAsync(string repositoryRoot, string path,
+        Guid documentId, string expectedContentSha256, ReparentRequest request, CancellationToken token = default)
+    {
+        var loaded = await Load(repositoryRoot, path, documentId, token);
+        if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The design file changed; reload it before moving a block.");
+        return (loaded.Snapshot, loaded.Snapshot.Graph.PrepareReparent(request));
+    }
+
+    /// <summary>Publishes a move as one guarded write protected by the same file token the preview
+    /// used (contract rbg-v2 action 15).</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, RecursiveBlockSelectionResult Result, RecursiveBlockGraph Before)> ReparentAsync(string repositoryRoot,
+        string path, Guid documentId, string expectedContentSha256, ReparentRequest request, CancellationToken token = default)
+    {
+        var loaded = await Load(repositoryRoot, path, documentId, token);
+        if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The design file changed; reload it and preview the move again.");
+        token.ThrowIfCancellationRequested();
+        var moved = loaded.Snapshot.Graph.Reparent(request);
+        return (await PublishAsync(loaded, moved.Graph, token), moved, loaded.Snapshot.Graph);
+    }
+
+    /// <summary>The bytes of a changed graph in the format it needs: never below the stored version
+    /// (a version 2 file is never rewritten as version 1), and version 2 only when a fact needs it.</summary>
+    internal static (byte[] Bytes, int SchemaVersion) Serialize(RecursiveBlockFileSnapshot loaded, RecursiveBlockGraph graph)
+    {
+        int version = Math.Max(loaded.StoredSchemaVersion, RecursiveBlockGraphXml.RequiredSchemaVersion(graph));
+        return (Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(graph, version)), version);
+    }
+
+    internal static RecursiveBlockFileSnapshot Published(RecursiveBlockFileSnapshot loaded, string path, string hash, RecursiveBlockGraph graph,
+        int version) => new(path, hash, graph, version, version > loaded.StoredSchemaVersion ? loaded.StoredSchemaVersion : 0);
+
+    private static async Task<RecursiveBlockFileSnapshot> PublishAsync((RecursiveBlockFileSnapshot Snapshot, byte[] Bytes) loaded,
+        RecursiveBlockGraph graph, CancellationToken token)
+    {
+        var (bytes, version) = Serialize(loaded.Snapshot, graph);
         string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
-        return new(loaded.Snapshot.Path, hash, saved.Graph);
+        return Published(loaded.Snapshot, loaded.Snapshot.Path, hash, graph, version);
     }
 
     internal static async Task<(RecursiveBlockFileSnapshot Snapshot, byte[] Bytes)> Load(string root, string path,
@@ -102,9 +161,9 @@ public static class RecursiveBlockFiles
         try { xml = new UTF8Encoding(false, true).GetString(bytes); }
         catch (DecoderFallbackException)
         { throw new AutomationException("invalid_recursive_block_encoding", "The structural design must be valid UTF-8; no file was changed."); }
-        var graph = RecursiveBlockGraphXml.Read(xml);
+        var (graph, version) = RecursiveBlockGraphXml.ReadVersioned(xml);
         if (graph.DocumentId != documentId)
             throw new AutomationException("recursive_document_identity_changed", "The file belongs to a different structural design; no file was changed.");
-        return (new(source, Convert.ToHexStringLower(SHA256.HashData(bytes)), graph), bytes);
+        return (new(source, Convert.ToHexStringLower(SHA256.HashData(bytes)), graph, version), bytes);
     }
 }

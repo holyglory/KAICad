@@ -36,13 +36,20 @@ public static class BlockProposalFiles
             {
                 Interfaces = block.Diagram.Interfaces.IsDefault ? [] : block.Diagram.Interfaces,
                 Connections = block.Diagram.Connections.IsDefault ? [] : block.Diagram.Connections,
-                Annotations = block.Diagram.Annotations.IsDefault ? [] : block.Diagram.Annotations
+                Annotations = block.Diagram.Annotations.IsDefault ? [] : block.Diagram.Annotations,
+                // Schema 2 collections an agent may omit read as empty. An absent realization list stays
+                // absent, so a version 1 shaped request keeps its exact fingerprint.
+                Presentation = block.Diagram.Presentation?.Canonical(),
+                InterfaceRealizations = block.Diagram.InterfaceRealizations.IsDefault ? default : [.. block.Diagram.InterfaceRealizations.Select(r =>
+                    r is null ? r! : r with { Targets = r.TargetList, Sources = r.SourceList })]
             }
         }).ToImmutableArray();
         var connections = proposal.Connections.Select(connection => connection with
         {
             Endpoints = connection.Endpoints.IsDefault ? [] : connection.Endpoints,
-            Members = connection.Members.IsDefault ? [] : connection.Members
+            Members = connection.Members.IsDefault ? [] : connection.Members,
+            Realization = connection.Realization is { } realization ? realization with { Segments = [.. realization.SegmentList.Select(s =>
+                s is null ? s! : s with { Pins = s.PinList })], Joins = realization.JoinList, Sources = realization.SourceList } : null
         }).ToImmutableArray();
         var issues = proposal.Issues.Select(issue => issue with { Sources = issue.Sources.IsDefault ? [] : issue.Sources }).ToImmutableArray();
         var origin = proposal.Origin with
@@ -78,7 +85,7 @@ public static class BlockProposalFiles
         var record = new BlockProposalRecord(proposal.Id, proposal.InputId, fingerprint, proposal.BasePath, proposal.Candidate,
             proposal.Issues, prepared.Graph.Inspect(proposal.Candidate).Origin);
         var updated = prepared.Graph.WithProposal(record);
-        byte[] replacement = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(updated));
+        var (replacement, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, updated);
         BlockProposalPublicationReceipt? preparedReceipt = null;
         if (operationId is { } operation)
         {
@@ -102,7 +109,7 @@ public static class BlockProposalFiles
             receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Published, StagedPath = staged,
                 RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
         if (checkpoint is not null) await checkpoint("proposal-published", token);
-        return new(new(path, hash, updated), record, true, prepared.ContextStillSelected);
+        return new(RecursiveBlockFiles.Published(loaded.Snapshot, path, hash, updated, version), record, true, prepared.ContextStillSelected);
     }
 
     public static async Task<RecursiveBlockFileSnapshot> SelectAsync(string root, string path, Guid documentId, Guid proposalId,
@@ -116,7 +123,7 @@ public static class BlockProposalFiles
         var selected = BlockProposalCompiler.Select(loaded.Snapshot.Graph, proposalId, expectedRoot, currentPath, ancestorIds, origin);
         token.ThrowIfCancellationRequested();
         if (!selected.Changed) return loaded.Snapshot;
-        byte[] replacement = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(selected.Graph));
+        var (replacement, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, selected.Graph);
         BlockProposalPublicationReceipt? preparedReceipt = null;
         BlockProposalReceipts? receipts = null;
         if (stateDirectory is not null && operationId is { } operation)
@@ -141,7 +148,7 @@ public static class BlockProposalFiles
         if (preparedReceipt is not null) receipts!.Write(preparedReceipt with { Stage = BlockProposalOperationStage.Published,
             StagedPath = staged, RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
         if (checkpoint is not null) await checkpoint("proposal-selection-published", token);
-        return new(loaded.Snapshot.Path, hash, selected.Graph);
+        return RecursiveBlockFiles.Published(loaded.Snapshot, loaded.Snapshot.Path, hash, selected.Graph, version);
     }
 
     public static RetainedBlockProposal ReadRetained(string stateDirectory, Guid proposalId)

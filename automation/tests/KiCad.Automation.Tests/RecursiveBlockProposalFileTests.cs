@@ -9,6 +9,55 @@ namespace KiCad.Automation.Tests;
 public sealed class RecursiveBlockProposalFileTests
 {
     [TestMethod]
+    public async Task AgentProposalsCarrySchemaTwoFactsAndUpgradeTheFileWhileVersionOneRequestsKeepTheirFingerprint()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-block-proposal-v2-").FullName;
+        try
+        {
+            var f = RecursiveBlockProposalTests.Fixture(); string path = Path.Combine(root, "diagram.xml"), state = Path.Combine(root, "state");
+            // A version 1 shaped request serializes exactly as before schema 2: its recorded fingerprint cannot move.
+            string plain = JsonSerializer.Serialize(BlockProposalFiles.Normalize(f.Proposal));
+            foreach (string member in new[] { "\"Domain\"", "\"Direction\"", "\"Presentation\"", "\"InterfaceRealizations\"", "\"Realization\"", "\"Layout\"" })
+                Assert.IsFalse(plain.Contains(member, StringComparison.Ordinal), member);
+            var target = f.Proposal.Blocks[0]; var link = f.Proposal.Connections[0]; var member0 = f.Proposal.Connections[1];
+            var layout = new DiagramPresentationView([new(target.Children[0].BlockId, new(140, 110, 240, 145)), new(target.Children[1].BlockId, new(510, 110, 240, 145))],
+                [], [new(link.Selection.ConnectionId, 1, [new(420, 180)], null)]);
+            var telemetryPort = target.Diagram.Interfaces[1].Id;
+            var proposal = f.Proposal with
+            {
+                Blocks = f.Proposal.Blocks.SetItem(0, target with { Diagram = target.Diagram with { Presentation = layout,
+                    InterfaceRealizations = [new(telemetryPort, DiagramRealizationState.Partial,
+                        [InterfaceRealizationTarget.LocalConnection(link.Selection.ConnectionId)], "Member signals are not mapped yet.", [])] } }),
+                Connections = [link with { Domain = DiagramDomain.Data }, member0 with { Direction = DiagramConnectionDirection.FromFirst,
+                    Realization = new(DiagramRealizationState.Unknown, [], [], "Wiring is not chosen.", []) }]
+            };
+            // Agents may omit empty collections; the request still validates and publishes.
+            var web = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            var json = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(proposal, web))!;
+            json["blocks"]![0]!["diagram"]!["interfaceRealizations"]![0]!.AsObject().Remove("sources");
+            json["connections"]![1]!["realization"]!.AsObject().Remove("segments");
+            json["connections"]![1]!["realization"]!.AsObject().Remove("joins");
+            var sent = BlockProposalFiles.Normalize(JsonSerializer.Deserialize<BlockProposal>(json.ToJsonString(), web)!);
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(f.Graph));
+            var before = await RecursiveBlockFiles.ReadAsync(root, path, f.Graph.DocumentId);
+            Assert.AreEqual(1, before.StoredSchemaVersion);
+            var saved = await BlockProposalFiles.PublishAsync(root, path, f.Graph.DocumentId, before.ContentSha256, sent, state);
+            Assert.IsTrue(saved.Added); Assert.AreEqual(1, saved.Snapshot.UpgradedFromSchemaVersion); Assert.AreEqual(2, saved.Snapshot.StoredSchemaVersion);
+            var stored = RecursiveBlockGraphXml.ReadVersioned(await File.ReadAllTextAsync(path));
+            Assert.AreEqual(2, stored.StoredSchemaVersion);
+            var candidate = stored.Graph.Inspect(proposal.Candidate).LocalDiagram;
+            Assert.IsTrue(layout.SameContents(candidate.Presentation)); Assert.AreEqual(DiagramRealizationState.Partial, candidate.Realizations.Single().State);
+            var archive = stored.Graph.Connections(target.Selection.BlockId);
+            Assert.AreEqual(DiagramDomain.Data, archive.Inspect(link.Selection).Domain);
+            Assert.AreEqual(DiagramConnectionDirection.FromFirst, archive.Inspect(member0.Selection).Direction);
+            Assert.AreEqual(DiagramRealizationState.Unknown, archive.Inspect(member0.Selection).Realization!.State);
+            var retry = await BlockProposalFiles.PublishAsync(root, path, f.Graph.DocumentId, before.ContentSha256, sent, state);
+            Assert.IsFalse(retry.Added, "An identical schema 2 request observes the published candidate.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task PublishedProposalKeepsIssuesHistoryAndIndependentActiveSelection()
     {
         string root = Directory.CreateTempSubdirectory("kicad-block-proposal-").FullName;

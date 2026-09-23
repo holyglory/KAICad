@@ -42,7 +42,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
         { throw new AutomationException("invalid_block_proposal", error.Message); }
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.Snapshot.ContentSha256,
-            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal });
+            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal },
+            result.Snapshot.UpgradedFromSchemaVersion);
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_read", ReadOnly = true),
@@ -118,14 +119,23 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
             expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, sourceToken = result.ContentSha256,
-            selectedRoot = result.Graph.SelectedRoot, proposalId });
+            selectedRoot = result.Graph.SelectedRoot, proposalId }, result.UpgradedFromSchemaVersion);
     });
 
-    private static CallToolResult Data(object value)
+    private static CallToolResult Data(object value, int upgradedFromSchemaVersion = 0)
     {
-        var data = JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)
-            { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        var data = Upgraded(JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }), upgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
+
+    /// <summary>Reports a silent version 1 to version 2 file upgrade made by this write (contract rbg-v2 section 8).</summary>
+    private static JsonElement Upgraded(JsonElement data, int upgradedFromSchemaVersion)
+    {
+        if (upgradedFromSchemaVersion == 0) return data;
+        var node = JsonNode.Parse(data.GetRawText())!.AsObject();
+        node["upgradedFromSchemaVersion"] = upgradedFromSchemaVersion;
+        return JsonSerializer.SerializeToElement(node);
     }
 
     [McpServerTool(Name = "kicad_diagram_refinement_publication"),
@@ -178,6 +188,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
             inputId = recorded.Input.Id, sourceToken = recorded.Snapshot.ContentSha256, selectedRoot = recorded.Snapshot.Graph.SelectedRoot,
             added = recorded.Added, observation = recorded.Added ? "Recorded" : "AlreadyPresent" }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        data = Upgraded(data, recorded.Snapshot.UpgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
@@ -262,6 +273,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
             sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection,
             bindings = saved.Graph.Inspect(selection).EffectiveComponentBindings, changed = saved.ContentSha256 != loaded.ContentSha256 });
+        data = Upgraded(data, saved.UpgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
@@ -313,6 +325,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection,
             allocation = saved.Graph.Inspect(selection).PhysicalAllocation,
             changed = saved.ContentSha256 != loaded.ContentSha256 });
+        result = Upgraded(result, saved.UpgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
     });
 
@@ -364,6 +377,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var result = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
             sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection = selected, definition = definitionData,
             changed = saved.ContentSha256 != loaded.ContentSha256 });
+        result = Upgraded(result, saved.UpgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
     });
 
@@ -408,8 +422,9 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         // an unspecified engineering fact. Keep these computed defaults explicit.
         var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
         var wire = JsonNode.Parse(formatter.Format(metadata))!.AsObject();
-        // Declared schema 2 fields are not produced yet; keep them out rather than report defaults as facts.
-        RecursiveBlockCodec.OmitUnimplementedFields(metadata, wire);
+        // The native editor speaks schema 1: keep its observation in that shape rather than report
+        // schema 2 defaults it never produced as facts.
+        RecursiveBlockCodec.OmitFieldsBeyondSchema(metadata, wire, RecursiveBlockCodec.NativeEditorSchemaVersion);
         foreach (var view in wire["views"]!.AsArray()) view!.AsObject().Remove("png");
         var structured = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = native.Epoch,
             observation = wire, imageReferences });
@@ -424,7 +439,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     {
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
-        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaDiagramHistory,
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, Action = RecursiveFileAction.RfaDiagramHistory,
             RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "",
             Block = HistorySelection(context), Offset = offset, Limit = limit }, cancellationToken);
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
@@ -439,7 +454,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     {
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
-        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaCompareDiagramHistory,
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, Action = RecursiveFileAction.RfaCompareDiagramHistory,
             RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "",
             Block = HistorySelection(context), InspectedBlock = HistorySelection(inspected) }, cancellationToken);
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
@@ -455,10 +470,10 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
         if (string.IsNullOrEmpty(expectedSourceToken)) throw new AutomationException("missing_diagram_source_token", "Supply the exact observed file token before preparing a restoration.");
-        var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = repositoryRoot,
+        var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = repositoryRoot,
             SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken }, cancellationToken);
         var graph = RecursiveBlockCodec.Decode(loaded.Document.Graph);
-        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaPrepareDiagramRestoration,
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, Action = RecursiveFileAction.RfaPrepareDiagramRestoration,
             RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken,
             Restoration = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(context)), Source = HistorySelection(source) } }, cancellationToken);
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.SourceToken,
@@ -493,24 +508,25 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (kind is ImplementationActionKind.IakNew or ImplementationActionKind.IakDuplicate)
         { management.NewStateId = operationId.ToString("D"); management.NewRevisionId = Guid.NewGuid().ToString("D"); management.NewRequirementRevisionId = Guid.NewGuid().ToString("D"); }
         else management.ChangeId = operationId.ToString("D");
-        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaManageImplementation,
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, Action = RecursiveFileAction.RfaManageImplementation,
             RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken, Implementation = management }, cancellationToken);
         var implementation = result.Document.Graph.States.Single(s => s.Id == result.ImplementationId);
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
             sourceToken = result.SourceToken, implementation = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(implementation)),
             selectedRoot = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.Document.Graph.SelectedRoot)) });
+        data = Upgraded(data, checked((int)result.UpgradedFromSchemaVersion));
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
     [McpServerTool(Name = "kicad_diagram_read", ReadOnly = true),
-     Description("Read one exact saved recursive diagram level as structured data: requirements, direct child selections, boundary interfaces, connection/member revisions, partial endpoints, comments and implementation metadata. Omitting block/state/revision reads the saved root; otherwise provide all three exact IDs. Returns the source token and native instance epoch. Does not return an unsaved window draft, activate an implementation, or claim schematic/PCB realization.")]
+     Description("Read one exact saved recursive diagram level as structured data: requirements, direct child selections, boundary interfaces with their domain and direction, connection/member revisions with domain, direction and any stated interconnect realization, partial endpoints, comments, the level's saved layout (diagram units; absent entries are unplaced) and its interface realizations, plus implementation metadata. Omitting block/state/revision reads the saved root; otherwise provide all three exact IDs. Returns the source token, the stored file format (storedSchemaVersion 1 or 2), whether the file is writable and the native instance epoch. Unknown and Partial realizations are never resolved facts. Does not return an unsaved window draft, activate an implementation, or claim schematic/PCB realization.")]
     public Task<CallToolResult> ReadSaved(string instanceId, string repositoryRoot, string sourcePath, string documentId,
         CancellationToken cancellationToken, string? blockId = null, string? stateId = null, string? revisionId = null,
         string? expectedSourceToken = null) => Execute(async () =>
     {
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
-        var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = repositoryRoot,
+        var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = repositoryRoot,
             SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "" }, cancellationToken);
         var graph = RecursiveBlockCodec.Decode(loaded.Document.Graph);
         var selection = blockId is null && stateId is null && revisionId is null ? graph.SelectedRoot
@@ -537,7 +553,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         }
         var data = JsonSerializer.SerializeToElement(new
         {
-            schemaVersion = 1, instanceId, instanceEpoch = session.Epoch, documentId,
+            schemaVersion = loaded.Document.SchemaVersion, storedSchemaVersion = loaded.Document.StoredSchemaVersion,
+            sourceWritable = loaded.Document.SourceWritable, instanceId, instanceEpoch = session.Epoch, documentId,
             sourcePath = loaded.Document.SourcePath, sourceToken = loaded.SourceToken, units = "diagram-unit",
             selectedRoot = Wire(protocol.SelectedRoot), inspectedSelection = Wire(block.Selection),
             isSelected = graph.Walk(graph.SelectedRoot).Contains(selection), block = Wire(block), requirements = Wire(fields),
@@ -558,7 +575,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     {
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
-        var request = new RecursiveFileRequest { SchemaVersion = 1, Action = RecursiveFileAction.RfaBlockFieldHistory,
+        var request = new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, Action = RecursiveFileAction.RfaBlockFieldHistory,
             RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = expectedSourceToken ?? "",
             Block = new() { BlockId = Identity(blockId).ToString("D"), StateId = Identity(stateId).ToString("D"), RevisionId = Identity(revisionId).ToString("D") },
             Field = field switch { "General" => RequirementFieldKind.RfkGeneral, "Schematic" => RequirementFieldKind.RfkSchematic,
@@ -580,18 +597,23 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         ? id : throw new AutomationException("invalid_diagram_identity", "Specify exact canonical non-empty diagram UUIDs.");
 
     [McpServerTool(Name = "kicad_diagram_open"),
-     Description("Open a native recursive diagram editor for one exact diagram document and attached KiCad instance. The compiled companion validates XML before displaying it. The returned ready/busy/error state is authoritative; opening is not proof of rendering, saving, or native electrical realization. Existing dirty windows are retained.")]
+     Description("Open a native recursive diagram editor for one exact diagram document and attached KiCad instance. The compiled companion validates XML before displaying it. The returned ready/busy/error state is authoritative; opening is not proof of rendering, saving, or native electrical realization. Existing dirty windows are retained. The native editor in this build keeps only diagram schema 1 content, so a document with schema 2 facts (layout, realizations, domains, directions or harness targets) is refused with unsupported_diagram_file_request and nothing is opened or changed; read it with kicad_diagram_read.")]
     public Task<CallToolResult> Open(string instanceId, string repositoryRoot, string sourcePath,
         string documentId, CancellationToken cancellationToken) => Execute(async () =>
     {
         var native = registry.Client(instanceId);
         var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest
-        { SchemaVersion = 1, RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId }, cancellationToken);
+        { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId }, cancellationToken);
+        // The native editor of this build still speaks diagram schema 1 and could not keep a schema 2
+        // document's layout, realizations, domains or directions; refuse before opening any window.
+        if (RecursiveBlockGraphXml.RequiredSchemaVersion(RecursiveBlockCodec.Decode(loaded.Document.Graph)) > RecursiveBlockCodec.NativeEditorSchemaVersion)
+            throw new AutomationException("unsupported_diagram_file_request", "This diagram holds schema 2 content (per-level layout, realizations, domains, "
+                + "directions or harness targets) that the native editor in this build cannot keep yet; read it with kicad_diagram_read. Nothing was opened or changed.");
         string executable = Environment.ProcessPath ?? throw new AutomationException("missing_companion", "The compiled companion path is unavailable.");
         string helper = Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase)
             ? Assembly.GetEntryAssembly()!.Location : executable;
         var state = await native.InvokeAsync<OpenRecursiveDiagramEditor, RecursiveDiagramEditorState>(new()
-        { SchemaVersion = 1, DocumentId = documentId, RepositoryRoot = repositoryRoot, SourcePath = loaded.Document.SourcePath,
+        { SchemaVersion = RecursiveBlockCodec.NativeEditorSchemaVersion, DocumentId = documentId, RepositoryRoot = repositoryRoot, SourcePath = loaded.Document.SourcePath,
             ExpectedSourceToken = loaded.SourceToken, HelperPath = helper }, cancellationToken);
         if (state.DocumentId != documentId || state.SourcePath != loaded.Document.SourcePath)
             throw new AutomationException("recursive_diagram_target_mismatch", "The native window belongs to another diagram.");
@@ -612,7 +634,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     private static CallToolResult Result(string instanceId, RecursiveDiagramEditorState state)
     {
         var wire = JsonNode.Parse(JsonFormatter.Default.Format(state))!.AsObject();
-        RecursiveBlockCodec.OmitUnimplementedFields(state, wire);
+        RecursiveBlockCodec.OmitFieldsBeyondSchema(state, wire, RecursiveBlockCodec.NativeEditorSchemaVersion);
         var data = JsonSerializer.SerializeToElement(new { instanceId, state = wire });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     }
@@ -622,7 +644,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         catch (Exception error) when (error is AutomationException or NativeApiException or IOException or UnauthorizedAccessException)
         {
             string code = error is AutomationException a ? a.Code : error is NativeApiException n ? "native_status_" + n.Status : "diagram_file_error";
-            var data = JsonSerializer.SerializeToElement(new { code, message = error.Message });
+            var data = JsonSerializer.SerializeToElement(new { code, message = error.Message,
+                details = DiagramErrorDetails.Of(error).Select(d => new { kind = d.Kind, scopeBlockId = d.ScopeBlockId, objectId = d.ObjectId, message = d.Message }) });
             return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
         }
     }

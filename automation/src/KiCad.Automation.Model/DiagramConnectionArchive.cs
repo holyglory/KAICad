@@ -1,19 +1,32 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace KiCad.Automation.Model;
 
 public enum DiagramConnectionKind { Abstract, Interface, SignalGroup, DifferentialPair, Signal }
+/// <summary>FromFirst: Endpoints[0] drives every other endpoint; ToFirst: the reverse.
+/// Unspecified is a valid "not stated" value.</summary>
+public enum DiagramConnectionDirection { Unspecified, FromFirst, ToFirst, Bidirectional }
 public sealed record ConnectionSelection(Guid ConnectionId, Guid StateId, Guid RevisionId);
 public sealed record ConnectionDesignState(Guid Id, Guid ConnectionId, string Name, Guid HeadRevisionId);
 public sealed record DiagramConnectionRevision(ConnectionSelection Selection, Guid? ParentRevisionId,
     string Name, DiagramConnectionKind Kind, ImmutableArray<DiagramEndpointBinding> Endpoints,
-    Guid RequirementRevisionId, ImmutableArray<ConnectionSelection> Members, RequirementRevisionOrigin Origin);
+    Guid RequirementRevisionId, ImmutableArray<ConnectionSelection> Members, RequirementRevisionOrigin Origin,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DiagramDomain Domain = DiagramDomain.Unspecified,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DiagramConnectionDirection Direction = DiagramConnectionDirection.Unspecified,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] InterconnectRealization? Realization = null)
+{
+    /// <summary>True when this revision carries a fact that only schema 2 can store.</summary>
+    [JsonIgnore] public bool UsesSchemaTwo => Domain != DiagramDomain.Unspecified || Direction != DiagramConnectionDirection.Unspecified
+        || Realization is not null;
+}
 
 public sealed record DiagramConnectionSelectionResult(DiagramConnectionArchive Archive,
     ImmutableArray<ConnectionSelection> Roots, ImmutableArray<ConnectionSelection> CreatedAncestors, bool Changed);
 public sealed record DiagramConnectionDraft(ConnectionSelection Baseline, string Name, DiagramConnectionKind Kind,
     ImmutableArray<DiagramEndpointBinding> Endpoints, ImmutableArray<ConnectionSelection> Members, DiagramRequirementDraft Requirements,
-    ImmutableArray<DiagramAnnotation> DiagramAnnotations = default);
+    ImmutableArray<DiagramAnnotation> DiagramAnnotations = default, DiagramDomain Domain = DiagramDomain.Unspecified,
+    DiagramConnectionDirection Direction = DiagramConnectionDirection.Unspecified, InterconnectRealization? Realization = null);
 public sealed record DiagramConnectionCommit(DiagramConnectionArchive Archive, DiagramConnectionRevision Revision, bool Changed);
 
 /// <summary>Immutable connection implementations belonging to one block's local diagram.
@@ -26,6 +39,8 @@ public sealed class DiagramConnectionArchive
     public ImmutableArray<ConnectionDesignState> States { get; }
     public ImmutableArray<DiagramConnectionRevision> Revisions { get; }
     public ImmutableArray<DiagramRequirementHistory> RequirementHistories { get; }
+    /// <summary>Every interconnect segment identity in this archive and its owning connection occurrence.</summary>
+    public ImmutableDictionary<Guid, Guid> SegmentOwners { get; }
     private readonly ImmutableDictionary<Guid, ConnectionDesignState> _states;
     private readonly ImmutableDictionary<Guid, DiagramConnectionRevision> _revisions;
     private readonly ImmutableDictionary<Guid, DiagramRequirementHistory> _requirements;
@@ -61,6 +76,9 @@ public sealed class DiagramConnectionArchive
                 || revision.Endpoints.IsDefaultOrEmpty || revision.Endpoints.Length < 2 || revision.Members.IsDefault
                 || revision.Origin is null) throw Invalid("Connections need exact identities, a supported kind, at least two endpoints and an explicit member list.");
             Name(revision.Name); revision.Origin.Validate();
+            if (!Enum.IsDefined(revision.Domain) || !Enum.IsDefined(revision.Direction))
+                throw Invalid("A connection uses a supported domain and direction, or leaves them unspecified.");
+            revision.Realization?.Validate();
             foreach (var endpoint in revision.Endpoints)
             {
                 if (endpoint is null) throw Invalid("A connection endpoint cannot be null.");
@@ -74,6 +92,15 @@ public sealed class DiagramConnectionArchive
         if (!identities.Add(DocumentId) || !identities.Add(OwnerBlockId) || States.Any(s => !identities.Add(s.Id))
             || Revisions.Any(r => !identities.Add(r.Selection.RevisionId)))
             throw Invalid("Connection, implementation, revision, document and block identities cannot alias.");
+        // A segment identity stays owned by one connection occurrence; later revisions of that
+        // connection may carry it forward unchanged in meaning.
+        var segments = new Dictionary<Guid, Guid>();
+        foreach (var revision in Revisions)
+            foreach (var segment in revision.Realization?.SegmentList ?? [])
+                if (segments.TryGetValue(segment.Id, out var owner) ? owner != revision.Selection.ConnectionId
+                    : identities.Contains(segment.Id) || !segments.TryAdd(segment.Id, revision.Selection.ConnectionId))
+                    throw InterconnectRealization.Invalid("A segment identity is owned by one connection occurrence and cannot alias other identities.");
+        SegmentOwners = segments.ToImmutableDictionary();
         foreach (var state in States)
         {
             var seen = new HashSet<Guid>(); Guid? current = state.HeadRevisionId;
@@ -116,7 +143,8 @@ public sealed class DiagramConnectionArchive
     {
         var revision = Inspect(selection); var requirements = Requirements(selection);
         return new(selection, revision.Name, revision.Kind, revision.Endpoints, revision.Members,
-            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty));
+            new(requirements, requirements.Requirements, ImmutableDictionary<DiagramRequirementField, Guid>.Empty),
+            Domain: revision.Domain, Direction: revision.Direction, Realization: revision.Realization);
     }
 
     public DiagramConnectionCommit SaveDraft(DiagramConnectionDraft draft, Guid revisionId, Guid requirementRevisionId,
@@ -130,12 +158,16 @@ public sealed class DiagramConnectionArchive
             throw new AutomationException("stale_connection_revision", "This connection has a newer saved revision; retain the current draft for comparison.");
         var history = _requirements[draft.Baseline.StateId];
         var requirements = history.Commit(history.Current.Id, draft.Requirements, requirementRevisionId, origin, resolutions);
+        if (!Enum.IsDefined(draft.Domain) || !Enum.IsDefined(draft.Direction))
+            throw Invalid("A connection uses a supported domain and direction, or leaves them unspecified.");
+        draft.Realization?.Validate();
         if (baseline.Name == draft.Name && baseline.Kind == draft.Kind && baseline.Members.SequenceEqual(draft.Members)
             && baseline.Endpoints.Length == draft.Endpoints.Length && baseline.Endpoints.Zip(draft.Endpoints).All(p => p.First.SameDefinition(p.Second))
+            && baseline.Domain == draft.Domain && baseline.Direction == draft.Direction && InterconnectRealization.Same(baseline.Realization, draft.Realization)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return new(this, baseline, false);
         var revision = new DiagramConnectionRevision(draft.Baseline with { RevisionId = revisionId }, baseline.Selection.RevisionId,
-            draft.Name, draft.Kind, draft.Endpoints, requirements.Revision.Id, draft.Members, origin);
+            draft.Name, draft.Kind, draft.Endpoints, requirements.Revision.Id, draft.Members, origin, draft.Domain, draft.Direction, draft.Realization);
         var archive = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
         return new(archive, revision, true);
     }
@@ -171,10 +203,15 @@ public sealed class DiagramConnectionArchive
         && saved.RequirementHistories.All(h => _requirements.TryGetValue(h.Scope.DesignStateId, out var current) && current.Retains(h));
 
     private static bool Same(DiagramConnectionRevision a, DiagramConnectionRevision b) =>
-        a.Selection == b.Selection && a.ParentRevisionId == b.ParentRevisionId && a.Name == b.Name && a.Kind == b.Kind
-        && a.RequirementRevisionId == b.RequirementRevisionId && a.Members.SequenceEqual(b.Members)
-        && DiagramRequirementHistory.SameOrigin(a.Origin, b.Origin) && a.Endpoints.Length == b.Endpoints.Length
-        && a.Endpoints.Zip(b.Endpoints).All(p => p.First.SameDefinition(p.Second));
+        a.Selection == b.Selection && a.ParentRevisionId == b.ParentRevisionId && SameDefinition(a, b)
+        && a.RequirementRevisionId == b.RequirementRevisionId && DiagramRequirementHistory.SameOrigin(a.Origin, b.Origin);
+
+    /// <summary>Equal name, kind, endpoints, members, domain, direction and realization; identity,
+    /// history position, requirements and origin are not compared.</summary>
+    public static bool SameDefinition(DiagramConnectionRevision a, DiagramConnectionRevision b) =>
+        a.Name == b.Name && a.Kind == b.Kind && a.Members.SequenceEqual(b.Members) && a.Endpoints.Length == b.Endpoints.Length
+        && a.Endpoints.Zip(b.Endpoints).All(p => p.First.SameDefinition(p.Second)) && a.Domain == b.Domain && a.Direction == b.Direction
+        && InterconnectRealization.Same(a.Realization, b.Realization);
 
     public DiagramConnectionArchive AppendRevision(Guid expectedHead, DiagramConnectionRevision revision,
         DiagramRequirementHistory? requirementHistory = null)

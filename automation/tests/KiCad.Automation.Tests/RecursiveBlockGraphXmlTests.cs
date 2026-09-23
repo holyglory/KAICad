@@ -7,7 +7,8 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class RecursiveBlockGraphXmlTests
 {
-    private static readonly XNamespace Ns = RecursiveBlockGraphXml.Namespace;
+    // The fixture holds no schema 2 fact, so it is written (and must stay) version 1.
+    private static readonly XNamespace Ns = RecursiveBlockGraphXml.NamespaceV1;
 
     [TestMethod]
     public void RoundTripPreservesSelectedAndHistoricTreesAlternativesAndRequirementText()

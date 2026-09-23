@@ -54,7 +54,7 @@ public static class RefinementInputFiles
         foreach (var attachment in input.Attachments)
             await RefinementAssetFiles.RequireAvailable(repositoryRoot, attachment, token);
         var updated = graph.WithRefinementInput(input);
-        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(updated));
+        var (bytes, version) = RecursiveBlockFiles.Serialize(loaded.Snapshot, updated);
         var prepared = new RefinementInputPublicationReceipt(1, input.Id, loaded.Snapshot.Path, DiagramRefinementInputXml.Write(input),
             loaded.Snapshot.ContentSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
             RefinementPublicationStage.Prepared, null, null);
@@ -75,7 +75,7 @@ public static class RefinementInputFiles
         receipts?.Write(prepared with { Stage = RefinementPublicationStage.Published, StagedPath = staged,
             RetainedPath = retained, ConfirmedAt = DateTimeOffset.UtcNow });
         if (checkpoint is not null) await checkpoint("input-published", token);
-        return new(new(loaded.Snapshot.Path, hash, updated), input, true);
+        return new(RecursiveBlockFiles.Published(loaded.Snapshot, loaded.Snapshot.Path, hash, updated, version), input, true);
     }
 
     public static RequirementRevisionOrigin AttachOrigin(RecursiveBlockGraph graph, ImmutableArray<BlockSelection> targetPath,

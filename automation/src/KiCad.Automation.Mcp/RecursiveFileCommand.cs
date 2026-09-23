@@ -23,6 +23,8 @@ public static class RecursiveFileCommand
             or InvalidJsonException or InvalidProtocolBufferException or XmlException or DecoderFallbackException or InvalidOperationException)
         {
             result = new() { ErrorCode = error is AutomationException a ? a.Code : "diagram_file_error", ErrorMessage = error.Message };
+            // Structured causes (for example the connections still using a boundary interface).
+            result.ErrorDetails.Add(DiagramErrorDetails.Of(error).Select(detail => RecursiveBlockCodec.Encode(detail)));
         }
         await output.WriteLineAsync(JsonFormatter.Default.Format(result));
         return result.Success ? 0 : 1;

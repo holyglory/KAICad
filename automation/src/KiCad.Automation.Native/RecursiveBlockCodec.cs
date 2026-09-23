@@ -10,9 +10,19 @@ using S = KiCad.Automation.Protocol.Structural;
 namespace KiCad.Automation.Native;
 
 /// <summary>Lossless shared C++/.NET messages. Unsupported fields and precision are
-/// rejected, not simplified into a success. No I/O or agent execution occurs here.</summary>
+/// rejected, not simplified into a success. No I/O or agent execution occurs here.
+/// Schema versions move together (contract rbg-v2 section 2.3): a schema 1 exchange never carries
+/// a schema 2 field and cannot describe a graph holding schema 2 content; both are refused.</summary>
 public static class RecursiveBlockCodec
 {
+    /// <summary>The newest diagram protocol schema this build speaks.</summary>
+    public const uint SchemaVersion = 2;
+    /// <summary>The protocol schema the native per-level editor of this build speaks. The native
+    /// editor moves to schema 2 with its own (lane C) change; until then its exchanges stay schema 1.</summary>
+    public const uint NativeEditorSchemaVersion = 1;
+
+    public static bool IsSupportedSchema(uint schemaVersion) => schemaVersion is 1 or SchemaVersion;
+
     public static P.RequirementMergeData Encode(M.RecursiveRequirementMerge merge,
         IEnumerable<M.DiagramRequirementResolution>? choices = null)
     {
@@ -82,9 +92,9 @@ public static class RecursiveBlockCodec
         (M.DefinitionChoiceState)data.State, data.Values.ToImmutableArray(), (M.GuidanceStrength)data.Strength, data.Applicability,
         data.Sources.Select(Source).ToImmutableArray(), (M.VerificationState)data.Verification, data.HasUnknownReason ? data.UnknownReason : null);
 
-    public static M.RecursiveBlockDraft Decode(P.BlockDraftData data, Guid documentId)
+    public static M.RecursiveBlockDraft Decode(P.BlockDraftData data, Guid documentId, uint schemaVersion = SchemaVersion)
     {
-        Known(data, P.BlockDraftData.Parser);
+        Known(data, P.BlockDraftData.Parser, schemaVersion);
         var baseline = Selection(Need(data.Baseline));
         var scope = new M.DiagramRequirementScope(documentId, baseline.BlockId, baseline.StateId);
         var restored = ImmutableDictionary.CreateBuilder<M.DiagramRequirementField, Guid>();
@@ -98,7 +108,7 @@ public static class RecursiveBlockCodec
             data.LocalDiagram is { } diagram ? Local(diagram) : null,
             data.Definition is { } definition ? Decode(definition) : null,
             data.ComponentBindings is { } bindings ? Decode(bindings) : null,
-            data.PhysicalAllocation is { } allocation ? Decode(allocation) : null);
+            data.PhysicalAllocation is { } allocation ? Decode(allocation, schemaVersion) : null);
     }
 
     public static P.BlockDraftData Encode(M.RecursiveBlockDraft draft)
@@ -150,15 +160,77 @@ public static class RecursiveBlockCodec
         return data;
     }
 
-    public static M.BlockPhysicalAllocation Decode(P.BlockPhysicalAllocationData data)
+    public static M.BlockPhysicalAllocation Decode(P.BlockPhysicalAllocationData data) => Decode(data, SchemaVersion);
+
+    private static M.BlockPhysicalAllocation Decode(P.BlockPhysicalAllocationData data, uint schemaVersion)
     {
-        Known(data, P.BlockPhysicalAllocationData.Parser);
+        Known(data, P.BlockPhysicalAllocationData.Parser, schemaVersion);
+        if (schemaVersion < 2 && data.Targets.Any(t => t.Kind == P.PhysicalAllocationKindData.PakHarness))
+            throw Invalid("A schema 1 exchange cannot carry a Harness physical target; no history was simplified.");
         var allocation = new M.BlockPhysicalAllocation((M.PhysicalAllocationState) data.State,
             data.Targets.Select(t => new M.PhysicalAllocationTarget(GuidValue(t.Id),
                 (M.PhysicalAllocationKind) ((int) t.Kind - 1), t.Name, t.HasReference ? t.Reference : null,
                 t.HasRepositoryPath ? t.RepositoryPath : null, t.HasParentId ? GuidValue(t.ParentId) : null)).ToImmutableArray(),
             data.HasUnknownReason ? data.UnknownReason : null);
         allocation.Validate(); return allocation;
+    }
+
+    /// <summary>A move request (contract rbg-v2 section 4.9). The preview needs neither revision
+    /// identities nor an origin; each new revision assignment leaves the requirement revision empty.</summary>
+    public static M.ReparentRequest Decode(P.ReparentBlockData data)
+    {
+        Known(data, P.ReparentBlockData.Parser);
+        var assignments = ImmutableDictionary.CreateBuilder<Guid, Guid>();
+        foreach (var assignment in data.NewRevisions)
+            if (assignment.NewRequirementRevisionId.Length != 0
+                || !assignments.TryAdd(GuidValue(assignment.ObjectId), GuidValue(assignment.NewRevisionId)))
+                throw Invalid("Assign one new block revision per moved-path block and no requirement revision.");
+        var detach = ImmutableHashSet.CreateBuilder<Guid>();
+        foreach (string id in data.DetachConnectionIds)
+            if (!detach.Add(GuidValue(id))) throw Invalid("List each detached connection once.");
+        return new(Selection(Need(data.ExpectedRoot)), data.SourceParentPath.Select(Selection).ToImmutableArray(),
+            data.TargetParentPath.Select(Selection).ToImmutableArray(), GuidValue(data.BlockId), detach.ToImmutable(),
+            data.TargetPlacement is { } placement ? new M.DiagramBlockPlacement(GuidValue(placement.BlockId), Rect(Need(placement.Rect)),
+                placement.Locked, placement.HasFillRgb ? placement.FillRgb : null) : null,
+            assignments.ToImmutable(), data.Origin is { } origin ? Origin(origin) : null);
+    }
+
+    public static P.ReparentPreviewData Encode(M.ReparentPreview preview)
+    {
+        var data = new P.ReparentPreviewData();
+        data.RequiredDetachConnectionIds.Add(preview.RequiredDetachConnectionIds.Select(Id).Order(StringComparer.Ordinal));
+        data.Effects.Add(preview.Effects.Select(Encode));
+        data.SuccessorBlockIds.Add(preview.SuccessorBlockIds.Select(Id));
+        return data;
+    }
+
+    public static P.LevelEditEffectData Encode(M.LevelEditEffect effect) => new()
+    {
+        Kind = (P.LevelEditEffectKind)((int)effect.Kind + 1), ObjectId = Id(effect.ObjectId), ScopeBlockId = Id(effect.ScopeBlockId), Detail = effect.Detail
+    };
+
+    /// <summary>What a save created: block revisions other than the containing snapshots, connection
+    /// revisions, the containing snapshots and the dormant layout entries it pruned.</summary>
+    public static P.SaveSummaryData Summary(M.RecursiveBlockGraph before, M.RecursiveBlockGraph after, M.RecursiveBlockSelectionResult result)
+    {
+        var known = before.Revisions.Select(r => r.Selection.RevisionId).ToHashSet();
+        var knownConnections = before.ConnectionArchives.SelectMany(a => a.Revisions).Select(r => r.Selection.RevisionId).ToHashSet();
+        var summary = new P.SaveSummaryData { Changed = result.Changed, PrunedPresentationEntries = checked((uint)result.PrunedPresentationEntries),
+            SelectedRoot = Selection(after.SelectedRoot) };
+        summary.CreatedBlockRevisions.Add(after.Revisions.Where(r => !known.Contains(r.Selection.RevisionId) && !result.CreatedAncestors.Contains(r.Selection))
+            .Select(r => Selection(r.Selection)));
+        summary.CreatedConnectionRevisions.Add(after.ConnectionArchives.SelectMany(a => a.Revisions)
+            .Where(r => !knownConnections.Contains(r.Selection.RevisionId)).Select(r => Selection(r.Selection)));
+        summary.CreatedAncestors.Add(result.CreatedAncestors.Select(Selection));
+        return summary;
+    }
+
+    internal static P.DiagramErrorDetailData Encode(M.AutomationErrorDetail detail)
+    {
+        var data = new P.DiagramErrorDetailData { Kind = detail.Kind, Message = detail.Message };
+        if (detail.ScopeBlockId is { } scope) data.ScopeBlockId = Id(scope);
+        if (detail.ObjectId is { } target) data.ObjectId = Id(target);
+        return data;
     }
 
     internal static M.RequirementRevisionOrigin DecodeOrigin(P.DiagramRevisionOriginData origin) => Origin(Need(origin));
@@ -168,9 +240,9 @@ public static class RecursiveBlockCodec
     private static M.DiagramRequirements Fields(P.RequirementFieldsData data) => new(data.General, data.Schematic, data.Routing);
     private static P.RequirementFieldsData Fields(M.DiagramRequirements fields) => new() { General = fields.General, Schematic = fields.Schematic, Routing = fields.Routing };
 
-    public static M.DiagramConnectionDraft Decode(P.ConnectionDraftData data, Guid documentId)
+    public static M.DiagramConnectionDraft Decode(P.ConnectionDraftData data, Guid documentId, uint schemaVersion = SchemaVersion)
     {
-        Known(data, P.ConnectionDraftData.Parser); var baseline = Selection(Need(data.Baseline));
+        Known(data, P.ConnectionDraftData.Parser, schemaVersion); var baseline = Selection(Need(data.Baseline));
         var restored = ImmutableDictionary.CreateBuilder<M.DiagramRequirementField, Guid>();
         foreach (var field in data.RestoredFields)
             if (!System.Enum.IsDefined((M.DiagramRequirementField)((int)field.Field - 1))
@@ -179,7 +251,8 @@ public static class RecursiveBlockCodec
         return new(baseline, data.Name, (M.DiagramConnectionKind)((int)data.Kind - 1), data.Endpoints.Select(Decode).ToImmutableArray(),
             data.Members.Select(Selection).ToImmutableArray(), new(new(new(documentId, baseline.ConnectionId, baseline.StateId),
                 GuidValue(data.BaselineRequirementRevisionId), Fields(Need(data.BaselineFields))), Fields(Need(data.Fields)), restored.ToImmutable()),
-            data.DiagramAnnotations is { } notes ? notes.Annotations.Select(Note).ToImmutableArray() : default);
+            data.DiagramAnnotations is { } notes ? notes.Annotations.Select(Note).ToImmutableArray() : default,
+            Domain(data.Domain), Direction(data.Direction), data.Realization is { } realization ? Realization(realization) : null);
     }
     public static P.ConnectionDraftData Encode(M.DiagramConnectionDraft draft)
     {
@@ -191,6 +264,8 @@ public static class RecursiveBlockCodec
             { Field = (P.RequirementFieldKind)((int)r.Key + 1), SourceRevisionId = Id(r.Value) }));
         if (!draft.DiagramAnnotations.IsDefault)
         { result.DiagramAnnotations = new(); result.DiagramAnnotations.Annotations.Add(draft.DiagramAnnotations.Select(Note)); }
+        result.Domain = (P.DiagramDomain)draft.Domain; result.Direction = (P.DiagramConnectionDirection)draft.Direction;
+        if (draft.Realization is { } realization) result.Realization = Realization(realization);
         return result;
     }
 
@@ -200,7 +275,7 @@ public static class RecursiveBlockCodec
             ContextVersion = checked((uint)page.ContextVersion), Offset = checked((uint)page.Offset), Total = checked((uint)page.Total) };
         result.Entries.Add(page.Entries.Select(e => new P.DiagramHistoryEntryData { Selection = Selection(e.Selection), Version = checked((uint)e.Version),
             Name = e.Name, Origin = Origin(e.Origin), ChildCount = checked((uint)e.ChildCount), ConnectionCount = checked((uint)e.ConnectionCount),
-            AnnotationCount = checked((uint)e.AnnotationCount), IsContext = e.IsContext }));
+            AnnotationCount = checked((uint)e.AnnotationCount), IsContext = e.IsContext, LayoutOnly = e.LayoutOnly }));
         return result;
     }
 
@@ -226,9 +301,16 @@ public static class RecursiveBlockCodec
         return result;
     }
 
-    public static P.RecursiveBlockGraphData Encode(M.RecursiveBlockGraph graph)
+    public static P.RecursiveBlockGraphData Encode(M.RecursiveBlockGraph graph) => Encode(graph, SchemaVersion);
+
+    /// <summary>A schema 1 encoding exists only for a graph without schema 2 content.</summary>
+    public static P.RecursiveBlockGraphData Encode(M.RecursiveBlockGraph graph, uint schemaVersion)
     {
-        var data = new P.RecursiveBlockGraphData { SchemaVersion = 1, DocumentId = Id(graph.DocumentId), SelectedRoot = Selection(graph.SelectedRoot) };
+        ArgumentNullException.ThrowIfNull(graph);
+        if (!IsSupportedSchema(schemaVersion)) throw Invalid("Use a supported recursive diagram message version.");
+        if (schemaVersion < M.RecursiveBlockGraphXml.RequiredSchemaVersion(graph))
+            throw Invalid("This diagram holds schema 2 content (layout, realizations, domains, directions or harness targets) that a schema 1 exchange cannot carry; no history was simplified.");
+        var data = new P.RecursiveBlockGraphData { SchemaVersion = schemaVersion, DocumentId = Id(graph.DocumentId), SelectedRoot = Selection(graph.SelectedRoot) };
         data.States.Add(graph.States.Select(s =>
         {
             var state = new P.BlockDesignStateData { Id = Id(s.Id), BlockId = Id(s.BlockId), Name = s.Name, HeadRevisionId = Id(s.HeadRevisionId), Archived = s.Archived };
@@ -259,8 +341,9 @@ public static class RecursiveBlockCodec
 
     public static M.RecursiveBlockGraph Decode(P.RecursiveBlockGraphData data)
     {
-        Known(data, P.RecursiveBlockGraphData.Parser);
-        if (data.SchemaVersion != 1) throw Invalid("Use the supported recursive diagram message version.");
+        Need(data);
+        if (!IsSupportedSchema(data.SchemaVersion)) throw Invalid("Use the supported recursive diagram message version.");
+        Known(data, P.RecursiveBlockGraphData.Parser, data.SchemaVersion);
         return new(GuidValue(data.DocumentId), Selection(Need(data.SelectedRoot)),
             data.States.Select(s => new M.BlockDesignState(GuidValue(s.Id), GuidValue(s.BlockId), s.Name, GuidValue(s.HeadRevisionId),
                 s.ForkedFrom is { } source ? Selection(source) : null, s.Archived)),
@@ -269,7 +352,7 @@ public static class RecursiveBlockCodec
                 r.RestoredFrom is { } source ? Selection(source) : null, r.LocalDiagram is { } diagram ? Local(diagram) : null,
                 r.Definition is { } definition ? Decode(definition) : null,
                 r.ComponentBindings is { } bindings ? Decode(bindings) : null,
-                r.PhysicalAllocation is { } allocation ? Decode(allocation) : null)),
+                r.PhysicalAllocation is { } allocation ? Decode(allocation, data.SchemaVersion) : null)),
             data.RequirementHistories.Select(History), data.ConnectionArchives.Select(Decode),
             data.ImplementationChanges.Select(c => new M.ImplementationChange(GuidValue(c.Id), GuidValue(c.StateId),
                 (M.ImplementationChangeKind)((int)c.Kind - 1), c.BeforeName, c.AfterName, c.BeforeArchived, c.AfterArchived, Origin(Need(c.Origin)))),
@@ -334,6 +417,8 @@ public static class RecursiveBlockCodec
             var row = new P.ConnectionRevisionData { Selection = Selection(r.Selection), Name = r.Name,
                 Kind = (P.DiagramConnectionKind)((int)r.Kind + 1), RequirementRevisionId = Id(r.RequirementRevisionId), Origin = Origin(r.Origin) };
             if (r.ParentRevisionId is { } parent) row.ParentRevisionId = Id(parent);
+            row.Domain = (P.DiagramDomain)r.Domain; row.Direction = (P.DiagramConnectionDirection)r.Direction;
+            if (r.Realization is { } realization) row.Realization = Realization(realization);
             row.Endpoints.Add(r.Endpoints.Select(Encode)); row.Members.Add(r.Members.Select(Selection)); data.Revisions.Add(row);
         }
         data.RequirementHistories.Add(archive.RequirementHistories.Select(History)); return data;
@@ -346,7 +431,8 @@ public static class RecursiveBlockCodec
             data.States.Select(s => new M.ConnectionDesignState(GuidValue(s.Id), GuidValue(s.ConnectionId), s.Name, GuidValue(s.HeadRevisionId))),
             data.Revisions.Select(r => new M.DiagramConnectionRevision(Selection(Need(r.Selection)), r.HasParentRevisionId ? GuidValue(r.ParentRevisionId) : null,
                 r.Name, (M.DiagramConnectionKind)((int)r.Kind - 1), r.Endpoints.Select(Decode).ToImmutableArray(), GuidValue(r.RequirementRevisionId),
-                r.Members.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)))), data.RequirementHistories.Select(History));
+                r.Members.Select(Selection).ToImmutableArray(), Origin(Need(r.Origin)), Domain(r.Domain), Direction(r.Direction),
+                r.Realization is { } realization ? Realization(realization) : null)), data.RequirementHistories.Select(History));
     }
 
     private static P.RequirementHistoryData History(M.DiagramRequirementHistory history)
@@ -370,12 +456,122 @@ public static class RecursiveBlockCodec
     private static P.BlockLocalDiagramData Local(M.BlockLocalDiagram diagram)
     {
         var result = new P.BlockLocalDiagramData();
-        result.Interfaces.Add(diagram.Interfaces.Select(i => new P.DiagramBoundaryInterfaceData { Id = Id(i.Id), Name = i.Name, Intent = i.Intent }));
-        result.Connections.Add(diagram.Connections.Select(Selection)); result.Annotations.Add(diagram.Notes.Select(Note)); return result;
+        result.Interfaces.Add(diagram.Interfaces.Select(i => new P.DiagramBoundaryInterfaceData { Id = Id(i.Id), Name = i.Name, Intent = i.Intent,
+            Domain = (P.DiagramDomain)i.Domain, Direction = (P.DiagramInterfaceDirection)i.Direction }));
+        result.Connections.Add(diagram.Connections.Select(Selection)); result.Annotations.Add(diagram.Notes.Select(Note));
+        // An empty layout is the same as no layout; it never travels as a present-but-empty view.
+        if (diagram.Presentation is { IsEmpty: false } view) result.Presentation = Presentation(view);
+        result.InterfaceRealizations.Add(diagram.Realizations.Select(Realization));
+        return result;
     }
     private static M.BlockLocalDiagram Local(P.BlockLocalDiagramData diagram) => new(
-        diagram.Interfaces.Select(i => new M.DiagramBoundaryInterface(GuidValue(i.Id), i.Name, i.Intent)).ToImmutableArray(),
-        diagram.Connections.Select(Selection).ToImmutableArray(), diagram.Annotations.Select(Note).ToImmutableArray());
+        diagram.Interfaces.Select(i => new M.DiagramBoundaryInterface(GuidValue(i.Id), i.Name, i.Intent,
+            Defined((M.DiagramDomain)(int)i.Domain), Defined((M.DiagramInterfaceDirection)(int)i.Direction))).ToImmutableArray(),
+        diagram.Connections.Select(Selection).ToImmutableArray(), diagram.Annotations.Select(Note).ToImmutableArray(),
+        diagram.Presentation is { } view ? Presentation(view) : null,
+        diagram.InterfaceRealizations.Count == 0 ? default : diagram.InterfaceRealizations.Select(Realization).ToImmutableArray());
+
+    // Presentation decimals travel as canonical strings; protocol text is accepted when exact to 0.001.
+    private static P.DiagramPresentationViewData Presentation(M.DiagramPresentationView view)
+    {
+        var data = new P.DiagramPresentationViewData { Units = "diagram-unit" };
+        if (view.Frame is { } frame) data.Frame = Rect(frame);
+        data.Blocks.Add(view.BlockPlacements.Select(b =>
+        {
+            var row = new P.DiagramBlockPlacementData { BlockId = Id(b.BlockId), Rect = Rect(b.Rect), Locked = b.Locked };
+            if (b.FillRgb is { } fill) row.FillRgb = fill;
+            return row;
+        }));
+        data.Ports.Add(view.PortPlacements.Select(p => new P.DiagramPortPlacementData { BlockId = Id(p.BlockId), InterfaceId = Id(p.InterfaceId),
+            Side = (P.DiagramPortSide)((int)p.Side + 1), Offset = M.DiagramCoordinates.Format(p.Offset) }));
+        data.Routes.Add(view.ConnectionRoutes.Select(r =>
+        {
+            var row = new P.DiagramConnectionRouteData { ConnectionId = Id(r.ConnectionId), EndpointIndex = checked((uint)r.EndpointIndex), Locked = r.Locked };
+            row.Waypoints.Add(r.Points.Select(Point));
+            if (r.Label is { } label) row.Label = Point(label);
+            return row;
+        }));
+        return data;
+    }
+    private static M.DiagramPresentationView Presentation(P.DiagramPresentationViewData view)
+    {
+        if (view.Units != "diagram-unit") throw Invalid("A level layout must use diagram-unit presentation coordinates.");
+        return new(view.Blocks.Select(b => new M.DiagramBlockPlacement(GuidValue(b.BlockId), Rect(Need(b.Rect)), b.Locked, b.HasFillRgb ? b.FillRgb : null)).ToImmutableArray(),
+            view.Ports.Select(p => new M.DiagramPortPlacement(GuidValue(p.BlockId), GuidValue(p.InterfaceId),
+                Defined((M.DiagramPortSide)((int)p.Side - 1)), M.DiagramCoordinates.ParseProtocol(p.Offset))).ToImmutableArray(),
+            view.Routes.Select(r => new M.DiagramConnectionRoute(GuidValue(r.ConnectionId),
+                r.EndpointIndex is >= 1 and <= int.MaxValue ? (int)r.EndpointIndex : throw Invalid("A route endpoint index starts at one."),
+                r.Waypoints.Select(PresentationPoint).ToImmutableArray(), r.Label is { } label ? PresentationPoint(label) : null, r.Locked)).ToImmutableArray(),
+            view.Frame is { } frame ? Rect(frame) : null);
+    }
+    private static P.DiagramRectData Rect(M.DiagramRect rect) => new() { X = M.DiagramCoordinates.Format(rect.X), Y = M.DiagramCoordinates.Format(rect.Y),
+        Width = M.DiagramCoordinates.Format(rect.Width), Height = M.DiagramCoordinates.Format(rect.Height) };
+    private static M.DiagramRect Rect(P.DiagramRectData rect) => new(M.DiagramCoordinates.ParseProtocol(rect.X), M.DiagramCoordinates.ParseProtocol(rect.Y),
+        M.DiagramCoordinates.ParseProtocol(rect.Width), M.DiagramCoordinates.ParseProtocol(rect.Height));
+    private static P.DiagramAnnotationPointData Point(M.DiagramPoint point) => new()
+        { X = M.DiagramCoordinates.Format(point.X), Y = M.DiagramCoordinates.Format(point.Y) };
+    private static M.DiagramPoint PresentationPoint(P.DiagramAnnotationPointData point) =>
+        new(M.DiagramCoordinates.ParseProtocol(point.X), M.DiagramCoordinates.ParseProtocol(point.Y));
+
+    private static P.InterfaceRealizationData Realization(M.InterfaceRealization record)
+    {
+        var data = new P.InterfaceRealizationData { InterfaceId = Id(record.InterfaceId), State = (P.DiagramRealizationState)((int)record.State + 1) };
+        foreach (var target in record.TargetList)
+        {
+            var row = new P.InterfaceRealizationTargetData { Kind = (P.InterfaceRealizationTargetKind)((int)target.Kind + 1) };
+            if (target.BlockId is { } block) row.BlockId = Id(block);
+            if (target.InterfaceId is { } port) row.InterfaceId = Id(port);
+            if (target.ConnectionId is { } link) row.ConnectionId = Id(link);
+            if (target.Pin is { } pin) row.Pin = Pin(pin);
+            data.Targets.Add(row);
+        }
+        if (record.UnresolvedReason is { } reason) data.UnresolvedReason = reason;
+        data.Sources.Add(record.SourceList.Select(Source)); return data;
+    }
+    private static M.InterfaceRealization Realization(P.InterfaceRealizationData data) => new(GuidValue(data.InterfaceId),
+        Defined((M.DiagramRealizationState)((int)data.State - 1)),
+        data.Targets.Select(t => new M.InterfaceRealizationTarget(Defined((M.InterfaceRealizationTargetKind)((int)t.Kind - 1)),
+            t.HasBlockId ? GuidValue(t.BlockId) : null, t.HasInterfaceId ? GuidValue(t.InterfaceId) : null,
+            t.HasConnectionId ? GuidValue(t.ConnectionId) : null, t.Pin is { } pin ? Pin(pin) : null)).ToImmutableArray(),
+        data.HasUnresolvedReason ? data.UnresolvedReason : null, data.Sources.Select(Source).ToImmutableArray());
+
+    private static P.InterconnectRealizationData Realization(M.InterconnectRealization realization)
+    {
+        var data = new P.InterconnectRealizationData { State = (P.DiagramRealizationState)((int)realization.State + 1) };
+        foreach (var segment in realization.SegmentList)
+        {
+            var row = new P.InterconnectSegmentData { Id = Id(segment.Id), Kind = (P.InterconnectSegmentKind)((int)segment.Kind + 1) };
+            if (segment.Label is { } label) row.Label = label;
+            if (segment.DesignId is { } design) row.DesignId = Id(design);
+            if (segment.CircuitId is { } circuit) row.CircuitId = Id(circuit);
+            if (segment.NetId is { } net) row.NetId = Id(net);
+            if (segment.ComponentId is { } component) row.ComponentId = Id(component);
+            row.Pins.Add(segment.PinList.Select(Pin));
+            if (segment.PhysicalTargetId is { } target) row.PhysicalTargetId = Id(target);
+            if (segment.HardwareInterfaceId is { } hardware) row.HardwareInterfaceId = Id(hardware);
+            if (segment.Reference is { } reference) row.Reference = reference;
+            if (segment.RepositoryPath is { } path) row.RepositoryPath = path;
+            if (segment.UnresolvedReason is { } reason) row.UnresolvedReason = reason;
+            data.Segments.Add(row);
+        }
+        data.Joins.Add(realization.JoinList.Select(j => new P.InterconnectJoinData { FirstSegmentId = Id(j.FirstSegmentId), SecondSegmentId = Id(j.SecondSegmentId) }));
+        if (realization.UnresolvedReason is { } unresolved) data.UnresolvedReason = unresolved;
+        data.Sources.Add(realization.SourceList.Select(Source)); return data;
+    }
+    private static M.InterconnectRealization Realization(P.InterconnectRealizationData data) => new(Defined((M.DiagramRealizationState)((int)data.State - 1)),
+        data.Segments.Select(s => new M.InterconnectSegment(GuidValue(s.Id), Defined((M.InterconnectSegmentKind)((int)s.Kind - 1)),
+            s.HasLabel ? s.Label : null, s.HasDesignId ? GuidValue(s.DesignId) : null, s.HasCircuitId ? GuidValue(s.CircuitId) : null,
+            s.HasNetId ? GuidValue(s.NetId) : null, s.HasComponentId ? GuidValue(s.ComponentId) : null, s.Pins.Select(Pin).ToImmutableArray(),
+            s.HasPhysicalTargetId ? GuidValue(s.PhysicalTargetId) : null, s.HasHardwareInterfaceId ? GuidValue(s.HardwareInterfaceId) : null,
+            s.HasReference ? s.Reference : null, s.HasRepositoryPath ? s.RepositoryPath : null, s.HasUnresolvedReason ? s.UnresolvedReason : null)).ToImmutableArray(),
+        data.Joins.Select(j => new M.InterconnectJoin(GuidValue(j.FirstSegmentId), GuidValue(j.SecondSegmentId))).ToImmutableArray(),
+        data.HasUnresolvedReason ? data.UnresolvedReason : null, data.Sources.Select(Source).ToImmutableArray());
+
+    // Domain and direction zero is a valid Unspecified and casts directly (contract rbg-v2 section 2.5).
+    private static M.DiagramDomain Domain(P.DiagramDomain value) => Defined((M.DiagramDomain)(int)value);
+    private static M.DiagramConnectionDirection Direction(P.DiagramConnectionDirection value) => Defined((M.DiagramConnectionDirection)(int)value);
+    private static T Defined<T>(T value) where T : struct, System.Enum => System.Enum.IsDefined(value) ? value
+        : throw Invalid("The diagram message has an unsupported enumeration value; no history was changed.");
     private static P.DiagramAnnotationData Note(M.DiagramAnnotation note)
     {
         var result = new P.DiagramAnnotationData { Id = Id(note.Id), Role = (P.DiagramAnnotationRole)((int)note.Role + 1), Text = note.Text,
@@ -459,11 +655,10 @@ public static class RecursiveBlockCodec
     private static M.SourceReference Source(S.StructuralSourceReference source) => new(source.DocumentId, source.Revision,
         source.HasPage ? source.Page : null, source.HasTable ? source.Table : null, source.HasPartVariant ? source.PartVariant : null);
 
-    // Schema 2 fields declared at the Phase 2 freeze (contract rbg-v2) that this version neither
-    // reads nor writes. Until lane 2B implements each one and removes it here, a set value is refused
-    // as the unsupported field it was before the declaration, and observations leave it out, so no
-    // history is silently simplified and no computed default is reported as a measured fact.
-    private static readonly HashSet<FieldDescriptor> Unimplemented =
+    // Every field contract rbg-v2 declares for schema 2 data. A schema 1 exchange carries none of
+    // them: a set value is refused as the unsupported field it is for that version, and a schema 1
+    // observation leaves it out, so no history is simplified and no default is reported as a fact.
+    private static readonly HashSet<FieldDescriptor> SchemaTwoFields =
     [
         .. Declared(P.DiagramBoundaryInterfaceData.Descriptor,
             P.DiagramBoundaryInterfaceData.DomainFieldNumber, P.DiagramBoundaryInterfaceData.DirectionFieldNumber),
@@ -484,51 +679,74 @@ public static class RecursiveBlockCodec
         .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
     ];
 
+    // Schema 2 fields this build still neither reads nor writes, even in a schema 2 exchange: the
+    // flat-diagram conversion receipt (its own lane 2B item) and the per-level editor's state and
+    // resolved layout, which only the schema 2 native editor (lane C) produces.
+    private static readonly HashSet<FieldDescriptor> Unimplemented =
+    [
+        .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
+        .. Declared(P.RecursiveDiagramEditorState.Descriptor, P.RecursiveDiagramEditorState.StoredSchemaVersionFieldNumber,
+            P.RecursiveDiagramEditorState.SourceWritableFieldNumber, P.RecursiveDiagramEditorState.LevelDraftFieldNumber,
+            P.RecursiveDiagramEditorState.LevelViewportsFieldNumber, P.RecursiveDiagramEditorState.CanvasToolFieldNumber,
+            P.RecursiveDiagramEditorState.SelectedInterfaceIdFieldNumber),
+        .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
+    ];
+
     private static IEnumerable<FieldDescriptor> Declared(MessageDescriptor message, params int[] numbers) => numbers.Select(number =>
         message.FindFieldByNumber(number) ?? throw new InvalidOperationException($"{message.FullName} does not declare field {number}."));
 
-    /// <summary>True when a declared schema 2 field this version does not implement carries a value
-    /// anywhere in the message tree.</summary>
-    public static bool CarriesUnimplementedField(IMessage message)
+    private static HashSet<FieldDescriptor> Refused(uint schemaVersion) => schemaVersion >= SchemaVersion ? Unimplemented : SchemaTwoFields;
+
+    /// <summary>True when a field the given schema version cannot carry (or this build does not
+    /// implement) holds a value anywhere in the message tree.</summary>
+    public static bool CarriesFieldBeyondSchema(IMessage message, uint schemaVersion) => Carries(message, Refused(schemaVersion));
+
+    /// <summary>True when a declared field this build does not implement in any schema holds a value.</summary>
+    public static bool CarriesUnimplementedField(IMessage message) => Carries(message, Unimplemented);
+
+    private static bool Carries(IMessage message, HashSet<FieldDescriptor> refused)
     {
         ArgumentNullException.ThrowIfNull(message);
         foreach (var field in message.Descriptor.Fields.InFieldNumberOrder())
         {
             object? value = field.Accessor.GetValue(message);
-            if (Unimplemented.Contains(field) && IsSet(message, field, value)) return true;
+            if (refused.Contains(field) && IsSet(message, field, value)) return true;
             if (field.FieldType != FieldType.Message) continue;
             if (value is System.Collections.IDictionary map)
             {
                 foreach (object? item in map.Values)
-                    if (item is IMessage child && CarriesUnimplementedField(child)) return true;
+                    if (item is IMessage child && Carries(child, refused)) return true;
             }
             else if (value is System.Collections.IList list)
             {
                 foreach (object? item in list)
-                    if (item is IMessage child && CarriesUnimplementedField(child)) return true;
+                    if (item is IMessage child && Carries(child, refused)) return true;
             }
-            else if (value is IMessage child && CarriesUnimplementedField(child)) return true;
+            else if (value is IMessage child && Carries(child, refused)) return true;
         }
         return false;
     }
 
-    /// <summary>Removes the declared schema 2 fields this version does not implement from the protobuf
-    /// JSON rendering of <paramref name="message"/>, so an observation keeps its earlier shape.</summary>
-    public static void OmitUnimplementedFields(IMessage message, System.Text.Json.Nodes.JsonObject json)
+    /// <summary>Removes the fields the given schema version does not carry from the protobuf JSON
+    /// rendering of <paramref name="message"/>, so a schema 1 observation keeps its schema 1 shape.</summary>
+    public static void OmitFieldsBeyondSchema(IMessage message, System.Text.Json.Nodes.JsonObject json, uint schemaVersion) =>
+        Omit(message, json, Refused(schemaVersion));
+
+    private static void Omit(IMessage message, System.Text.Json.Nodes.JsonObject json, HashSet<FieldDescriptor> refused)
     {
         ArgumentNullException.ThrowIfNull(message); ArgumentNullException.ThrowIfNull(json);
         foreach (var field in message.Descriptor.Fields.InFieldNumberOrder())
         {
-            if (Unimplemented.Contains(field)) { json.Remove(field.JsonName); continue; }
+            if (refused.Contains(field)) { json.Remove(field.JsonName); continue; }
             if (field.FieldType != FieldType.Message || field.IsMap || json[field.JsonName] is not { } node) continue;
             object? value = field.Accessor.GetValue(message);
             if (field.IsRepeated && value is System.Collections.IList list && node is System.Text.Json.Nodes.JsonArray rows)
             {
                 for (int i = 0; i < Math.Min(list.Count, rows.Count); ++i)
-                    if (list[i] is IMessage child && rows[i] is System.Text.Json.Nodes.JsonObject row) OmitUnimplementedFields(child, row);
+                    if (list[i] is IMessage child && rows[i] is System.Text.Json.Nodes.JsonObject row) Omit(child, row, refused);
             }
             else if (!field.IsRepeated && value is IMessage child && node is System.Text.Json.Nodes.JsonObject nested)
-                OmitUnimplementedFields(child, nested);
+                Omit(child, nested, refused);
         }
     }
 
@@ -544,12 +762,12 @@ public static class RecursiveBlockCodec
             _ => Convert.ToDouble(value, CultureInfo.InvariantCulture) != 0,
         };
 
-    private static void Known<T>(T data, MessageParser<T> parser) where T : class, IMessage<T>
+    private static void Known<T>(T data, MessageParser<T> parser, uint schemaVersion = SchemaVersion) where T : class, IMessage<T>
     {
         Need(data);
         try
         {
-            if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))) || CarriesUnimplementedField(data))
+            if (!data.Equals(parser.ParseJson(JsonFormatter.Default.Format(data))) || CarriesFieldBeyondSchema(data, schemaVersion))
                 throw Invalid("The recursive diagram message contains unsupported fields; no history was simplified.");
         }
         catch (Exception error) when (error is InvalidOperationException or InvalidProtocolBufferException)

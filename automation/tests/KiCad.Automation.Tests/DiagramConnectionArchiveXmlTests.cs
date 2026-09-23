@@ -44,7 +44,7 @@ public sealed class DiagramConnectionArchiveXmlTests
     public void StrictXmlRejectsUnknownFieldsInconsistentEndpointStatesAndMissingMembers()
     {
         var archive = DiagramConnectionFixture.Create().Archive;
-        string xml = DiagramConnectionArchiveXml.Write(archive); XNamespace ns = DiagramConnectionArchiveXml.Namespace;
+        string xml = DiagramConnectionArchiveXml.Write(archive); XNamespace ns = DiagramConnectionArchiveXml.NamespaceV1;
         void Reject(Action<XElement> change)
         {
             var root = XElement.Parse(xml, LoadOptions.PreserveWhitespace); change(root);

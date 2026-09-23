@@ -11,7 +11,9 @@ public enum PhysicalAllocationKind
     Component,
     Board,
     BoardStack,
-    Assembly
+    Assembly,
+    /// <summary>A cable harness. Schema 2 only: a version 1 file cannot store it.</summary>
+    Harness
 }
 
 /// <summary>Whether a block's physical allocation is known completely, partially,

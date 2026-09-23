@@ -47,6 +47,10 @@ public sealed partial class NativeSessionTests
             var savedReadData = JsonSerializer.SerializeToElement(savedRead).GetProperty("structuredContent");
             Assert.AreEqual(graph.DocumentId.ToString("D"), savedReadData.GetProperty("documentId").GetString());
             Assert.AreEqual(2, savedReadData.GetProperty("children").GetArrayLength());
+            // Schema 2 agent reads (contract rbg-v2 section 8) report the exchange and the stored file format.
+            Assert.AreEqual(2, savedReadData.GetProperty("schemaVersion").GetInt32());
+            Assert.AreEqual(1, savedReadData.GetProperty("storedSchemaVersion").GetInt32());
+            Assert.IsTrue(savedReadData.GetProperty("sourceWritable").GetBoolean());
             Assert.AreEqual(2, savedReadData.GetProperty("connections").GetArrayLength());
             Assert.AreEqual("DCSD_UNKNOWN", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("model").GetProperty("state").GetString());
             Assert.AreEqual("SGS_REQUIREMENT", savedReadData.GetProperty("block").GetProperty("definition").GetProperty("package").GetProperty("strength").GetString());
@@ -120,6 +124,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), firstWholeHistory.GetProperty("context").GetProperty("revisionId").GetString());
             var invalidTargetArguments = new Dictionary<string, object?>(arguments) { ["blockId"] = graph.SelectedRoot.BlockId.ToString("D") };
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_read", invalidTargetArguments, cancellationToken: token)).IsError == true);
+            await VerifySchemaTwoDiagramTools(client, native, project, instanceId, evidence, token);
             string openingBytes = await File.ReadAllTextAsync(source, token);
             var opened = await client.CallToolAsync("kicad_diagram_open", arguments, cancellationToken: token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-open.json"), JsonSerializer.Serialize(opened), token);
@@ -1236,6 +1241,82 @@ public sealed partial class NativeSessionTests
         }
         finally { Directory.Delete(stateRoot, true); }
         if (interactionFailures.Count != 0) throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
+    }
+
+    /// <summary>Schema 2 through the real MCP server and native instance (contract rbg-v2 sections 2.4 and 8):
+    /// an agent reads a schema 2 level's layout, realizations, domains and directions; a write that needs
+    /// schema 2 upgrades a version 1 file and reports it; and the native editor of this build, which still
+    /// speaks schema 1, is never opened on a schema 2 document, so nothing can be dropped or written.</summary>
+    private static async Task VerifySchemaTwoDiagramTools(McpClient client, NativeClient native, string project, string instanceId,
+        string evidence, CancellationToken token)
+    {
+        var f = SchemaTwoFixture.Create(); var psu = f.Linked.Blocks["PSU"];
+        string layered = Path.Combine(project, "system.schema-two.design.xml"), layeredXml = RecursiveBlockGraphXml.Write(f.Graph);
+        await File.WriteAllTextAsync(layered, layeredXml, token);
+        var target = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project, ["sourcePath"] = layered,
+            ["documentId"] = f.Graph.DocumentId.ToString("D") };
+        var levelRead = await client.CallToolAsync("kicad_diagram_read", new Dictionary<string, object?>(target)
+            { ["blockId"] = psu.BlockId.ToString("D"), ["stateId"] = psu.StateId.ToString("D"), ["revisionId"] = psu.RevisionId.ToString("D") }, cancellationToken: token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-schema-two-level-read.json"), JsonSerializer.Serialize(levelRead), token);
+        Assert.IsFalse(levelRead.IsError == true, "A schema 2 level must be readable by agents.");
+        var level = JsonSerializer.SerializeToElement(levelRead).GetProperty("structuredContent");
+        Assert.AreEqual(2, level.GetProperty("storedSchemaVersion").GetInt32());
+        var local = level.GetProperty("block").GetProperty("localDiagram");
+        Assert.AreEqual("diagram-unit", local.GetProperty("presentation").GetProperty("units").GetString());
+        Assert.AreEqual("1200", local.GetProperty("presentation").GetProperty("frame").GetProperty("width").GetString());
+        Assert.AreEqual("101.6", local.GetProperty("presentation").GetProperty("blocks")[0].GetProperty("rect").GetProperty("x").GetString());
+        var power = local.GetProperty("interfaces").EnumerateArray().Single(i => i.GetProperty("id").GetString() == f.Linked.Ports["PSU/Power"].ToString("D"));
+        Assert.AreEqual("DD_POWER", power.GetProperty("domain").GetString()); Assert.AreEqual("DIDR_OUTPUT", power.GetProperty("direction").GetString());
+        Assert.AreEqual("DRS_PARTIAL", local.GetProperty("interfaceRealizations")[0].GetProperty("state").GetString());
+        Assert.AreEqual(2, local.GetProperty("interfaceRealizations")[0].GetProperty("targets").GetArrayLength());
+        var rootRead = await client.CallToolAsync("kicad_diagram_read", target, cancellationToken: token);
+        Assert.IsFalse(rootRead.IsError == true);
+        var link = JsonSerializer.SerializeToElement(rootRead).GetProperty("structuredContent").GetProperty("connections").EnumerateArray()
+            .Select(c => c.GetProperty("revision")).Single(r => r.GetProperty("selection").GetProperty("connectionId").GetString() == f.Linked.Links["System/Power"].ConnectionId.ToString("D"));
+        Assert.AreEqual("DD_POWER", link.GetProperty("domain").GetString()); Assert.AreEqual("DCDR_FROM_FIRST", link.GetProperty("direction").GetString());
+        Assert.AreEqual("DRS_RESOLVED", link.GetProperty("realization").GetProperty("state").GetString());
+        Assert.AreEqual(5, link.GetProperty("realization").GetProperty("segments").GetArrayLength());
+        Assert.AreEqual(4, link.GetProperty("realization").GetProperty("joins").GetArrayLength());
+        // A write that needs schema 2 (a harness target) upgrades a version 1 file and reports the upgrade.
+        var plain = LinkedDiagramFixture.Create().Graph;
+        string upgradedPath = Path.Combine(project, "system.upgrade.design.xml");
+        await File.WriteAllTextAsync(upgradedPath, RecursiveBlockGraphXml.Write(plain), token);
+        var plainTarget = new Dictionary<string, object?>(target) { ["sourcePath"] = upgradedPath, ["documentId"] = plain.DocumentId.ToString("D") };
+        var before = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", plainTarget, cancellationToken: token)).GetProperty("structuredContent");
+        Assert.AreEqual(1, before.GetProperty("storedSchemaVersion").GetInt32());
+        var harness = new BlockPhysicalAllocation(PhysicalAllocationState.Partial,
+            [new PhysicalAllocationTarget(Guid.NewGuid(), PhysicalAllocationKind.Harness, "Test-only supply harness")], "Connector pins are not chosen yet.");
+        var allocation = await client.CallToolAsync("kicad_diagram_physical_allocation_set", new Dictionary<string, object?>(plainTarget)
+        {
+            ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = before.GetProperty("sourceToken").GetString(),
+            ["expectedRoot"] = plain.SelectedRoot, ["blockPath"] = new[] { plain.SelectedRoot },
+            ["allocation"] = JsonSerializer.SerializeToElement(harness, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }),
+            ["operationId"] = Guid.NewGuid(), ["actor"] = "Schema 2 allocation agent fixture"
+        }, cancellationToken: token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-schema-two-upgrade.json"), JsonSerializer.Serialize(allocation), token);
+        Assert.IsFalse(allocation.IsError == true);
+        var upgraded = JsonSerializer.SerializeToElement(allocation).GetProperty("structuredContent");
+        Assert.IsTrue(upgraded.GetProperty("changed").GetBoolean());
+        Assert.AreEqual(1, upgraded.GetProperty("upgradedFromSchemaVersion").GetInt32(), "The silent version 1 to 2 upgrade is reported.");
+        string upgradedXml = await File.ReadAllTextAsync(upgradedPath, token);
+        Assert.AreEqual(2, RecursiveBlockGraphXml.ReadVersioned(upgradedXml).StoredSchemaVersion);
+        var after = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", plainTarget, cancellationToken: token)).GetProperty("structuredContent");
+        Assert.AreEqual(2, after.GetProperty("storedSchemaVersion").GetInt32());
+        Assert.AreEqual("PAK_HARNESS", after.GetProperty("block").GetProperty("physicalAllocation").GetProperty("targets")[0].GetProperty("kind").GetString());
+        // The schema 1 native editor is never opened on a schema 2 document: nothing is shown, dropped or written.
+        foreach (var (path, documentId, bytes) in new[] { (layered, f.Graph.DocumentId, layeredXml), (upgradedPath, plain.DocumentId, upgradedXml) })
+        {
+            var open = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?>(target) { ["sourcePath"] = path,
+                ["documentId"] = documentId.ToString("D") }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-schema-two-open-" + Path.GetFileNameWithoutExtension(path) + ".json"),
+                JsonSerializer.Serialize(open), token);
+            Assert.IsTrue(open.IsError == true, "A schema 1 editor must not open a schema 2 document.");
+            Assert.AreEqual("unsupported_diagram_file_request", JsonSerializer.SerializeToElement(open).GetProperty("structuredContent").GetProperty("code").GetString());
+            var closed = await Assert.ThrowsAsync<NativeApiException>(() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(
+                new() { DocumentId = documentId.ToString("D") }, token));
+            Assert.IsFalse(string.IsNullOrEmpty(closed.Message));
+            Assert.AreEqual(bytes, await File.ReadAllTextAsync(path, token));
+        }
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)

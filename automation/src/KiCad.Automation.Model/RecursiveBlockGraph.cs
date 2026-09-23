@@ -22,8 +22,10 @@ public sealed record RecursiveBlockRevision(BlockSelection Selection, Guid? Pare
     public BlockComponentBindings EffectiveComponentBindings => ComponentBindings ?? BlockComponentBindings.Empty;
 }
 
+/// <summary>PrunedPresentationEntries counts dormant layout entries a changed save removed from
+/// the new scope revision (contract rbg-v2 PV6); pruning alone never causes a write.</summary>
 public sealed record RecursiveBlockSelectionResult(RecursiveBlockGraph Graph,
-    ImmutableArray<BlockSelection> CreatedAncestors, bool Changed);
+    ImmutableArray<BlockSelection> CreatedAncestors, bool Changed, int PrunedPresentationEntries = 0);
 
 public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
     ImmutableArray<BlockSelection> Children, DiagramRequirementDraft Requirements, BlockSelection? RestoredFrom = null,
@@ -38,7 +40,7 @@ public sealed record RecursiveBlockDraft(BlockSelection Baseline, string Name,
 /// <summary>Immutable block occurrence/revision graph. Publishing an unselected revision
 /// and selecting it are separate operations. Persistence and native activation belong
 /// to the owning document transaction, not this domain object.</summary>
-public sealed class RecursiveBlockGraph
+public sealed partial class RecursiveBlockGraph
 {
     public Guid DocumentId { get; }
     public BlockSelection SelectedRoot { get; }
@@ -115,6 +117,14 @@ public sealed class RecursiveBlockGraph
             if (archive.States.Select(s => s.ConnectionId).Distinct().Any(id => !identities.Add(id))
                 || archive.States.Any(s => !identities.Add(s.Id)) || archive.Revisions.Any(r => !identities.Add(r.Selection.RevisionId)))
                 throw Invalid("Connection identities cannot alias block or other connection identities.");
+        // Interconnect segment identities join the no-alias set; each stays owned by one
+        // connection occurrence across the whole document (contract rbg-v2 G1).
+        var segmentOwners = new Dictionary<Guid, Guid>();
+        foreach (var archive in ConnectionArchives)
+            foreach (var (segment, owner) in archive.SegmentOwners)
+                if (identities.Contains(segment) || !segmentOwners.TryAdd(segment, owner))
+                    throw InterconnectRealization.Invalid("A segment identity is owned by one connection occurrence and cannot alias other identities.");
+        identities.UnionWith(segmentOwners.Keys);
         var latestChanges = new Dictionary<Guid, ImplementationChange>();
         foreach (var change in ImplementationChanges)
         {
@@ -143,7 +153,7 @@ public sealed class RecursiveBlockGraph
         var annotationOwners = new Dictionary<Guid, Guid>();
         foreach (var revision in Revisions)
         {
-            revision.LocalDiagram.Validate();
+            revision.LocalDiagram.Validate(revision.Selection.BlockId);
             revision.EffectiveDefinition.Validate();
             revision.EffectiveComponentBindings.Validate();
             revision.PhysicalAllocation?.Validate();
@@ -264,7 +274,7 @@ public sealed class RecursiveBlockGraph
         ValidateDraft(draft);
         var baseline = Inspect(draft.Baseline);
         if (draft.Name != baseline.Name || !draft.Children.SequenceEqual(baseline.Children)
-            || !draft.LocalDiagram.SameContents(baseline.LocalDiagram)
+            || !SameLevel(draft.Baseline.BlockId, draft.Children, draft.LocalDiagram, baseline)
             || !draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             || !draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings)
             || !SamePhysical(draft.PhysicalAllocation, baseline.PhysicalAllocation)
@@ -309,18 +319,26 @@ public sealed class RecursiveBlockGraph
         var history = _requirements[draft.Baseline.StateId];
         var requirements = history.Commit(history.Current.Id, draft.Requirements, requirementRevisionId, origin, resolutions);
         var baseline = Inspect(draft.Baseline);
+        // Dormant layout entries (targets absent from this revision) never count as a change.
         if (draft.Name == baseline.Name && draft.Children.SequenceEqual(baseline.Children)
-            && draft.LocalDiagram.SameContents(baseline.LocalDiagram)
+            && SameLevel(draft.Baseline.BlockId, draft.Children, draft.LocalDiagram, baseline)
             && draft.EffectiveDefinition.SameContents(baseline.EffectiveDefinition)
             && draft.EffectiveComponentBindings.SameContents(baseline.EffectiveComponentBindings)
             && SamePhysical(draft.PhysicalAllocation, baseline.PhysicalAllocation)
             && requirements.Revision.Requirements == Requirements(draft.Baseline).Requirements)
             return Select(expectedRoot, path, draft.Baseline, ancestorRevisionIds, origin);
+        // PV6: an otherwise changed save removes dormant layout entries from the new revision.
+        var diagram = draft.Diagram; int pruned = 0;
+        if (diagram?.Presentation is not null)
+        {
+            (var active, pruned) = ClassifyPresentation(draft.Baseline.BlockId, draft.Children, diagram);
+            if (pruned != 0) diagram = diagram with { Presentation = active.IsEmpty ? null : active };
+        }
         var revision = new RecursiveBlockRevision(new(draft.Baseline.BlockId, draft.Baseline.StateId, revisionId),
             baseline.Selection.RevisionId, draft.Name, requirements.Revision.Id, draft.Children, origin,
-            draft.RestoredFrom, draft.Diagram, draft.Definition, draft.ComponentBindings, draft.PhysicalAllocation);
+            draft.RestoredFrom, diagram, draft.Definition, draft.ComponentBindings, draft.PhysicalAllocation);
         var appended = AppendRevision(baseline.Selection.RevisionId, revision, requirements.History);
-        return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin);
+        return appended.Select(expectedRoot, path, revision.Selection, ancestorRevisionIds, origin) with { PrunedPresentationEntries = pruned };
     }
 
     /// <summary>Publish a candidate without changing the root's chosen design. A changed
@@ -373,10 +391,17 @@ public sealed class RecursiveBlockGraph
             [new(requirementRevisionId, null, originalRequirements.Requirements, origin, [])]);
         BlockLocalDiagram? diagram = original.Diagram;
         if (emptyInterior)
+        {
+            // G3: the boundary (interfaces, frame and boundary ports) is kept; child placements,
+            // child ports, routes and interface realizations belong to the dropped interior.
+            DiagramPresentationView? layout = original.LocalDiagram.Presentation is { } view
+                ? new([], [.. view.PortPlacements.Where(p => p.BlockId == source.BlockId)], [], view.Frame) : null;
             diagram = new(original.LocalDiagram.Interfaces, [], original.LocalDiagram.Notes.Select(n =>
                 n.Target.Kind == DiagramAnnotationTargetKind.Canvas || n.Target.Kind == DiagramAnnotationTargetKind.Block && n.Target.TargetId == source.BlockId
                     ? n : n with { Target = n.Target with { UnresolvedReason = n.Target.UnresolvedReason ?? "The source target is not present in this new implementation." },
-                        Origin = n.Target.UnresolvedReason is null ? origin : n.Origin }).ToImmutableArray());
+                        Origin = n.Target.UnresolvedReason is null ? origin : n.Origin }).ToImmutableArray(),
+                layout is { IsEmpty: false } ? layout : null, default);
+        }
         var initial = new RecursiveBlockRevision(selection, null, original.Name, requirementRevisionId,
             emptyInterior ? [] : original.Children, origin, Diagram: diagram, Definition: original.Definition,
             ComponentBindings: original.ComponentBindings, PhysicalAllocation: original.PhysicalAllocation);
@@ -473,7 +498,7 @@ public sealed class RecursiveBlockGraph
         if (draft is null || draft.Requirements is null || draft.Children.IsDefault)
             throw Invalid("Provide the saved baseline, current fields and diagram children for this draft.");
         _ = Inspect(draft.Baseline); Text(draft.Name, "A block draft needs a name.");
-        draft.LocalDiagram.Validate();
+        draft.LocalDiagram.Validate(draft.Baseline.BlockId);
         draft.EffectiveDefinition.Validate();
         draft.EffectiveComponentBindings.Validate();
         if (draft.Requirements.Baseline != Requirements(draft.Baseline))
@@ -559,17 +584,108 @@ public sealed class RecursiveBlockGraph
         return new(DocumentId, SelectedRoot, States, Revisions, RequirementHistories, ConnectionArchives, ImplementationChanges, RefinementInputs, Proposals.Add(record));
     }
 
+    /// <summary>Connections, layout and realizations of one level against this exact revision:
+    /// endpoints and realization targets must exist (rule U), block placements name children, and
+    /// interconnect realizations agree with the block's circuits and physical targets (IC5, IC6).</summary>
     private void ValidateConnections(RecursiveBlockRevision revision)
     {
-        if (revision.LocalDiagram.Connections.IsEmpty) return;
-        var archive = Connections(revision.Selection.BlockId);
-        var available = revision.Children.Select(Inspect).Append(revision).ToDictionary(r => r.Selection.BlockId);
-        foreach (var selection in archive.Walk(revision.LocalDiagram.Connections))
-            foreach (var endpoint in archive.Inspect(selection).Endpoints)
-                if (!available.TryGetValue(endpoint.BlockId, out var target)
-                    || (endpoint.InterfaceId is { } id && !target.LocalDiagram.Interfaces.Any(i => i.Id == id)))
+        var local = revision.LocalDiagram; Guid scope = revision.Selection.BlockId;
+        var children = revision.Children.Select(Inspect).ToDictionary(r => r.Selection.BlockId);
+        var available = children.Values.Append(revision).ToDictionary(r => r.Selection.BlockId);
+        var archive = local.Connections.IsEmpty ? null : Connections(scope);
+        var pinned = archive is null ? [] : archive.Walk(local.Connections).Select(archive.Inspect).ToImmutableArray();
+        var dangling = new List<AutomationErrorDetail>();
+        foreach (var connection in pinned)
+            foreach (var endpoint in connection.Endpoints)
+            {
+                if (!available.TryGetValue(endpoint.BlockId, out var target))
                     throw Invalid("A connection endpoint must target this diagram's boundary or an exact direct child and its pinned interface; do not guess a replacement.");
+                if (endpoint.InterfaceId is { } id && !target.LocalDiagram.Interfaces.Any(i => i.Id == id))
+                    dangling.Add(new("connection", scope, connection.Selection.ConnectionId,
+                        $"Connection '{connection.Name}' uses interface {id:D} of block '{target.Name}', which this revision does not have."));
+            }
+        var connectionIds = pinned.Select(c => c.Selection.ConnectionId).ToHashSet();
+        var boundComponents = revision.EffectiveComponentBindings.Targets.Select(t => (t.DesignId, t.ComponentId)).ToHashSet();
+        foreach (var record in local.Realizations)
+            foreach (var target in record.TargetList)
+                switch (target.Kind)
+                {
+                    case InterfaceRealizationTargetKind.ChildInterface:
+                        if (!children.TryGetValue(target.BlockId!.Value, out var child))
+                            throw InterfaceRealization.Invalid("A child-interface target names a direct child pinned by this revision.");
+                        if (!child.LocalDiagram.Interfaces.Any(i => i.Id == target.InterfaceId))
+                            dangling.Add(new("interface_realization", scope, record.InterfaceId,
+                                $"The realization of interface {record.InterfaceId:D} uses interface {target.InterfaceId:D} of block '{child.Name}', which this revision does not have."));
+                        break;
+                    case InterfaceRealizationTargetKind.LocalConnection:
+                        if (!connectionIds.Contains(target.ConnectionId!.Value))
+                            throw InterfaceRealization.Invalid("A connection target names a connection of this level (a root or a member).");
+                        break;
+                    case InterfaceRealizationTargetKind.Pin:
+                        if (!boundComponents.Contains((target.Pin!.DesignId, target.Pin.ComponentId)))
+                            throw InterfaceRealization.Invalid("A pin target belongs to a component bound to this block.");
+                        break;
+                }
+        if (dangling.Count != 0)
+            throw DiagramErrorDetails.Attach(new AutomationException("boundary_interface_in_use",
+                "A boundary interface is still used by a connection or realization at this level; detach those uses first. Nothing was changed."), dangling);
+        var circuits = revision.EffectiveComponentBindings.Targets.GroupBy(t => t.DesignId).ToDictionary(g => g.Key, g => g.First().CircuitId);
+        foreach (var connection in pinned)
+        {
+            if (connection.Realization is not { } realization) continue;
+            foreach (var (design, circuit) in realization.Circuits)
+                if (circuits.TryGetValue(design, out var bound) && bound != circuit)
+                    throw new AutomationException("ambiguous_block_circuit", "An interconnect segment names a different circuit than this block binds for the same design.");
+            foreach (var segment in realization.SegmentList)
+            {
+                if (segment.Kind != InterconnectSegmentKind.Harness || segment.PhysicalTargetId is not { } id || HasHarness(revision, id)) continue;
+                bool dropped = revision.ParentRevisionId is { } parent && HasHarness(_revisions[parent], id);
+                throw dropped
+                    ? new AutomationException("physical_target_in_use", "A physical target is still used by a harness segment of a connection at this level; keep it or change that realization first.")
+                    : InterconnectRealization.Invalid("A harness segment names a Harness or Assembly target of this block's physical allocation.");
+            }
+        }
+
+        static bool HasHarness(RecursiveBlockRevision revision, Guid id) => revision.PhysicalAllocation?.Targets
+            .Any(t => t.Id == id && t.Kind is PhysicalAllocationKind.Harness or PhysicalAllocationKind.Assembly) == true;
     }
+
+    /// <summary>The stored layout entries whose targets exist in this exact revision (contract
+    /// rbg-v2 section 4.3). Dormant entries are kept verbatim but never rendered or compared.</summary>
+    public DiagramPresentationView ActivePresentation(BlockSelection selection)
+    {
+        var revision = Inspect(selection);
+        return ClassifyPresentation(revision.Selection.BlockId, revision.Children, revision.LocalDiagram).Active;
+    }
+
+    public int DormantPresentationCount(BlockSelection selection)
+    {
+        var revision = Inspect(selection);
+        return ClassifyPresentation(revision.Selection.BlockId, revision.Children, revision.LocalDiagram).Dormant;
+    }
+
+    internal (DiagramPresentationView Active, int Dormant) ClassifyPresentation(Guid scope, ImmutableArray<BlockSelection> children, BlockLocalDiagram local)
+    {
+        var view = local.Layout;
+        if (view.EntryCount == 0) return (view, 0);
+        var childInterfaces = children.ToDictionary(c => c.BlockId, c => Inspect(c).LocalDiagram.Interfaces.Select(i => i.Id).ToHashSet());
+        var own = local.Interfaces.Select(i => i.Id).ToHashSet();
+        var endpoints = new Dictionary<Guid, int>();
+        if (!local.Connections.IsEmpty && _connections.TryGetValue(scope, out var archive))
+            foreach (var selection in archive.Walk(local.Connections)) endpoints[selection.ConnectionId] = archive.Inspect(selection).Endpoints.Length;
+        var active = new DiagramPresentationView(
+            [.. view.BlockPlacements.Where(b => childInterfaces.ContainsKey(b.BlockId))],
+            [.. view.PortPlacements.Where(p => p.BlockId == scope ? own.Contains(p.InterfaceId)
+                : childInterfaces.TryGetValue(p.BlockId, out var ports) && ports.Contains(p.InterfaceId))],
+            [.. view.ConnectionRoutes.Where(r => endpoints.TryGetValue(r.ConnectionId, out int count) && r.EndpointIndex < count)], view.Frame);
+        return (active, view.EntryCount - active.EntryCount);
+    }
+
+    /// <summary>A draft level equals a saved revision when its structure and its active layout are equal.</summary>
+    private bool SameLevel(Guid scope, ImmutableArray<BlockSelection> children, BlockLocalDiagram local, RecursiveBlockRevision baseline) =>
+        local.SameStructure(baseline.LocalDiagram)
+        && DiagramPresentationView.Same(ClassifyPresentation(scope, children, local).Active,
+            ClassifyPresentation(baseline.Selection.BlockId, baseline.Children, baseline.LocalDiagram).Active);
 
     private void ValidateAnnotations(RecursiveBlockRevision revision, HashSet<Guid> identities, Dictionary<Guid, Guid> interfaces)
     {

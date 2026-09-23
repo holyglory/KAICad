@@ -229,8 +229,11 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_results_fresh( aJob->resultsFresh );
     result.set_cancellation_requested( aJob->reporter->IsCancelled() );
     result.set_worker_finished( aJob->workerFinished );
-    // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
-    result.set_snapshot_complete( false );
+    // Ordinary jobs retain the incomplete-snapshot contract. Explicit
+    // candidate dry-runs are complete for the detached board/project/rule/
+    // library input set captured before their worker starts.
+    result.set_snapshot_complete( aJob->candidateDryRun && aJob->workerFinished
+                                  && aJob->status == PDRCJS_COMPLETED && !aJob->invalidated );
     result.set_candidate_dry_run( aJob->candidateDryRun );
     for( const KIID& identity : aJob->candidateItemIds )
         result.add_candidate_item_ids( identity.AsStdString() );
@@ -470,7 +473,10 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : job->reporter->Progress();
         job->phase = job->reporter->Phase();
         if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
-        job->resultsFresh = false; // Full project/rule snapshot remains unqualified.
+        // Candidate dry-runs have a complete detached input set for the guarded
+        // candidate-commit boundary. Ordinary jobs retain the legacy false
+        // freshness contract until their broader qualification is complete.
+        job->resultsFresh = job->candidateDryRun && terminal == PDRCJS_COMPLETED;
     } );
     }
     catch( const std::exception& error )

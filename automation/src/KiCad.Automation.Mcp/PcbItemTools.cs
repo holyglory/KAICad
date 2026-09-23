@@ -270,6 +270,49 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             structuralValidation = true, guideResolutionChecked = true, drcValidated = false, nativeCommit = false });
     });
 
+    [McpServerTool(Name = "kicad_pcb_route_candidate_commit"),
+     Description("Commit an explicitly qualified native routing candidate as one undoable atomic PCB transaction. qualificationJson must be the terminal PcbDrcJobState produced by kicad_pcb_drc_start/job for the exact same candidate IDs, revision and process epoch; it must be a completed detached dry-run with a complete snapshot, fresh results and no findings. Stale, incomplete, failed or violating qualifications are rejected, and a failed mutation leaves no partial copper.")]
+    public Task<CallToolResult> CommitQualifiedCandidate(string instanceId, string requestJson,
+        string expectedStateJson, string qualificationJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
+        ValidateHeader(request.Header, requireItems: true);
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        var qualification = SchematicJson.Parser.Parse<PcbDrcJobState>(qualificationJson);
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(request.Header.Document)
+            || qualification.Document is null || !qualification.Document.Equals(request.Header.Document)
+            || qualification.ProcessEpoch != expected.ProcessEpoch
+            || qualification.CheckedRevision is null || !qualification.CheckedRevision.Equals(expected.Revision))
+            throw new AutomationException("route_qualification_stale", "The DRC qualification is for a different PCB revision, process epoch or document.");
+        if (!qualification.CandidateDryRun || !qualification.WorkerFinished
+            || qualification.Status != PcbDrcJobStatus.PdrcjsCompleted
+            || !qualification.SnapshotComplete || !qualification.ResultsFresh)
+            throw new AutomationException("route_qualification_incomplete", "Only a completed, fresh detached DRC qualification can authorize a route commit.");
+        if (qualification.Findings.Count != 0)
+            throw new AutomationException("route_qualification_has_findings", "The detached DRC qualification contains violations; no copper was committed.");
+        var candidateIds = CandidateIds(request);
+        var qualifiedIds = qualification.CandidateItemIds.ToHashSet(StringComparer.Ordinal);
+        if (!candidateIds.SetEquals(qualifiedIds))
+            throw new AutomationException("route_qualification_identity_mismatch", "Candidate identities do not match the detached DRC qualification.");
+        return await Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
+    });
+
+    private static HashSet<string> CandidateIds(CreateItems request)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var packed in request.Items)
+        {
+            string id = packed.Is(Track.Descriptor) ? packed.Unpack<Track>().Id.Value
+                : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().Id.Value
+                : packed.Is(Via.Descriptor) ? packed.Unpack<Via>().Id.Value
+                : throw new AutomationException("invalid_pcb_route_candidate", "Candidates must contain only Track, Arc or Via items.");
+            if (!Guid.TryParseExact(id, "D", out var identity) || identity == Guid.Empty || !ids.Add(id))
+                throw new AutomationException("invalid_pcb_route_candidate", "Every route candidate needs a distinct canonical identity.");
+        }
+        if (ids.Count == 0) throw new AutomationException("invalid_pcb_route_candidate", "Supply at least one route candidate item.");
+        return ids;
+    }
+
     private static void ValidateGuideIdentity(string guideId, string sourceSha256, string errorCode)
     {
         if (!Guid.TryParseExact(guideId, "D", out var id) || id == Guid.Empty

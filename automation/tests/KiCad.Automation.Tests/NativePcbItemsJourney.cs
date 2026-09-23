@@ -239,6 +239,57 @@ public sealed partial class NativeSessionTests
             var previewCandidate = BoardJson.Parser.Parse<CreateItems>(routePreviewData.GetProperty("candidateRequestJson").GetString()!);
             Assert.IsTrue(previewCandidate.Items.Count > 0);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+            Assert.IsTrue(dryRun.SnapshotComplete);
+            Assert.IsTrue(dryRun.ResultsFresh);
+            Assert.IsTrue(dryRun.Findings.Count > 0);
+            var rejectedCommit = await mcp.Tool("kicad_pcb_route_candidate_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest),
+                expectedStateJson = svgState, qualificationJson = SchematicJson.Formatter.Format(dryRun)
+            });
+            Assert.IsTrue(rejectedCommit.TryGetProperty("isError", out var rejectedCommitError) && rejectedCommitError.GetBoolean(), rejectedCommit.GetRawText());
+            Assert.AreEqual("route_qualification_has_findings", rejectedCommit.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var previewDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board),
+                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                reportAllTrackErrors = true, testFootprints = false,
+                expectedRevisionJson = SchematicJson.Formatter.Format(dryRunState.Revision),
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(previewCandidate)
+            });
+            Assert.IsFalse(previewDrcReply.TryGetProperty("isError", out var previewDrcError) && previewDrcError.GetBoolean(), previewDrcReply.GetRawText());
+            var previewDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(
+                previewDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            for (int attempt = 0; attempt < 60 && !previewDrc.WorkerFinished; ++attempt)
+            {
+                await Task.Delay(100, token);
+                var drcUpdate = await mcp.Tool("kicad_pcb_drc_job", new
+                { instanceId, documentJson = SchematicJson.Formatter.Format(board), jobId = previewDrc.JobId, processEpoch = client.Epoch });
+                Assert.IsFalse(drcUpdate.TryGetProperty("isError", out var drcUpdateError) && drcUpdateError.GetBoolean(), drcUpdate.GetRawText());
+                previewDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(drcUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
+            }
+            Assert.IsTrue(previewDrc.WorkerFinished, "Native route-preview DRC did not reach a terminal state.");
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, previewDrc.Status, previewDrc.ErrorMessage);
+            Assert.IsTrue(previewDrc.SnapshotComplete);
+            Assert.IsTrue(previewDrc.ResultsFresh);
+            Assert.AreEqual(0, previewDrc.Findings.Count,
+                previewDrc.ErrorMessage + " findings=" + string.Join(",", previewDrc.Findings.Select(f => f.Marker.ErrorType.ToString())));
+            var committed = await mcp.Tool("kicad_pcb_route_candidate_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(previewCandidate),
+                expectedStateJson = svgState, qualificationJson = SchematicJson.Formatter.Format(previewDrc)
+            });
+            Assert.IsFalse(committed.TryGetProperty("isError", out var committedError) && committedError.GetBoolean(), committed.GetRawText());
+            Assert.IsTrue(committed.GetProperty("structuredContent").GetProperty("mutationConfirmed").GetBoolean());
+            var committedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+                committed.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            Assert.AreNotEqual(svgState, SchematicJson.Formatter.Format(committedState));
+            var committedIds = previewCandidate.Items.Select(item => item.Is(Track.Descriptor)
+                ? item.Unpack<Track>().Id : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id : item.Unpack<Via>().Id).ToArray();
+            var committedItemsRequest = new GetItemsById { Header = new() { Document = board } };
+            committedItemsRequest.Items.Add(committedIds);
+            var committedItems = await client.InvokeAsync<GetItemsById, GetItemsResponse>(committedItemsRequest, token);
+            Assert.AreEqual(previewCandidate.Items.Count, committedItems.Items.Count);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

@@ -14,7 +14,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_document_save", ReadOnly = false),
-     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. Does not close editors or promise atomic multi-file persistence.")]
+     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. Does not close editors or promise atomic multi-file persistence."),
+     KiCadCapability("document-lifecycle", "native-api", "document state observation, operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Save(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
     {
@@ -45,7 +47,9 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_close", ReadOnly = false),
-     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure.")]
+     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure."),
+     KiCadCapability("document-lifecycle", "native-api", "clean document state observation, operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public async Task<CallToolResult> Close(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
     {
@@ -74,7 +78,9 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_operation", ReadOnly = true),
-     Description("Read the retained result of an exact document lifecycle operation in its original native process. This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive.")]
+     Description("Read the retained result of an exact document lifecycle operation in its original native process. This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive."),
+     KiCadCapability("document-lifecycle", "native-api", "document, operation UUID, process epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> Operation(string instanceId, string documentJson, string operationId,
         string processEpoch, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
         {

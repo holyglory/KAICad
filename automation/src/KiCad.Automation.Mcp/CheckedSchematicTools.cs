@@ -13,7 +13,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class CheckedSchematicTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_schematic_checked_state", ReadOnly = true),
-     Description("Capture whole-schematic electrical data, typed hierarchy and full native admission state together at one native checkpoint. Requires an explicit root documentJson and instance ID. The native reader rejects changed or pending captures. The returned state can guard a CheckedSchematicBatch planned from its paired electrical snapshot; it may become stale afterward. Reports existing file conflicts and incomplete tracking without authorizing mutation. No design edits, file writes, navigation or image capture occur.")]
+     Description("Capture whole-schematic electrical data, typed hierarchy and full native admission state together at one native checkpoint. Requires an explicit root documentJson and instance ID. The native reader rejects changed or pending captures. The returned state can guard a CheckedSchematicBatch planned from its paired electrical snapshot; it may become stale afterward. Reports existing file conflicts and incomplete tracking without authorizing mutation. No design edits, file writes, navigation or image capture occur."),
+     KiCadCapability("schematic-design", "native-api", "explicit instance ID and root document"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
     public async Task<CallToolResult> Observe(string instanceId, string documentJson, CancellationToken cancellationToken)
     {
         CheckedSchematicState? result = null;
@@ -39,12 +41,16 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_schematic_apply_checked_batch", ReadOnly = false),
-     Description("Apply a typed schematic batch only to its exact observed native document state, including process epoch, native content digest, project settings and file baselines. requestJson is CheckedSchematicBatch with batch and expectedState from kicad_document_state; its batch requires an operation UUID and matching document epoch/revision. Reuse the identical request after a timeout or inspect its checked receipt. Old peers reject this distinct command; no unchecked fallback exists. Native commits remain undoable. A rejected or indeterminate result is not success; cancellation or transport failure does not prove rollback. Does not save files or complete XML synchronization.")]
+     Description("Apply a typed schematic batch only to its exact observed native document state, including process epoch, native content digest, project settings and file baselines. requestJson is CheckedSchematicBatch with batch and expectedState from kicad_document_state; its batch requires an operation UUID and matching document epoch/revision. Reuse the identical request after a timeout or inspect its checked receipt. Old peers reject this distinct command; no unchecked fallback exists. Native commits remain undoable. A rejected or indeterminate result is not success; cancellation or transport failure does not prove rollback. Does not save files or complete XML synchronization."),
+     KiCadCapability("schematic-design", "native-api", "document state observation, process epoch, document revision, operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
     public Task<CallToolResult> Apply(string instanceId, string requestJson, CancellationToken cancellationToken) =>
         Run(instanceId, requestJson, inspect: false, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_checked_batch_receipt", ReadOnly = true),
-     Description("Inspect the process-owned receipt for an exact CheckedSchematicBatch requestJson and instance ID. Does not submit or repeat a mutation. The original process, operation UUID, document and complete request must match; missing receipts remain not-found, and indeterminate results require reconciliation rather than a new operation ID. Receipts do not prove that the live document has not changed since the recorded operation.")]
+     Description("Inspect the process-owned receipt for an exact CheckedSchematicBatch requestJson and instance ID. Does not submit or repeat a mutation. The original process, operation UUID, document and complete request must match; missing receipts remain not-found, and indeterminate results require reconciliation rather than a new operation ID. Receipts do not prove that the live document has not changed since the recorded operation."),
+     KiCadCapability("schematic-design", "native-api", "exact checked request, process epoch, operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
     public Task<CallToolResult> Inspect(string instanceId, string requestJson, CancellationToken cancellationToken) =>
         Run(instanceId, requestJson, inspect: true, cancellationToken);
 

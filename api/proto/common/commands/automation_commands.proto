@@ -399,6 +399,8 @@ message AutomationSession {
   // -- lane 2C (300-399) --
   // -- end lane 2C --
   // -- lane 2D (400-499) --
+  // Says what capabilities lists. Peers built before this field send NCP_LEGACY_LABELS.
+  NativeCapabilityFormat capability_format = 400;
   // -- end lane 2D --
 }
 
@@ -1002,4 +1004,14 @@ message SchematicOperationReceipt {
 // == end ==
 
 // == lane 2D messages ==
+// NCP_LEGACY_LABELS: capabilities holds fixed descriptive labels (session.info, version.read)
+// that identify no handler. NCP_REGISTERED_REQUEST_TYPES: capabilities holds, in ordinal order,
+// the fully qualified request message types this process dispatches at the time of the reply,
+// read from its registered handlers. Editors add their types when they open and remove them
+// when they close. A dispatched request can still be rejected for its target, its arguments or
+// the editor's state.
+enum NativeCapabilityFormat {
+  NCP_LEGACY_LABELS = 0;
+  NCP_REGISTERED_REQUEST_TYPES = 1;
+}
 // == end ==

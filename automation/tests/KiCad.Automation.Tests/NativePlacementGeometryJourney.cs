@@ -5,6 +5,7 @@ using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using ModelContextProtocol.Client;
 
 namespace KiCad.Automation.Tests;
 
@@ -19,6 +20,7 @@ public sealed partial class NativeSessionTests
             .Select(b => b.NativeObjectId.ToString("D")).ToHashSet(StringComparer.Ordinal);
         var human = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = root.Clone() }, token);
         var result = new List<SchematicPlacementGeometry>();
+        var mcp = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Expected)>();
         foreach (var screen in proposed.Schematic.Instances)
         {
             var request = new MeasureSchematicPlacement { Document = screen.Metadata.Document.Clone(), ExpectedRevision = before.State.Revision.Clone() };
@@ -119,8 +121,9 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual("Placement measurement contains unsupported fields", unmeasured.Message);
             }
             result.Add(measured);
-            await VerifyMcpGeometry(client, instanceId, request, measured, evidence, token);
+            mcp.Add((request, measured));
         }
+        await VerifyMcpGeometries(client, instanceId, mcp, evidence, token);
         Assert.AreEqual(human, await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = root.Clone() }, token));
         Assert.AreEqual(before, await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token));
@@ -161,6 +164,49 @@ public sealed partial class NativeSessionTests
                 "Hidden active pins are still electrical connection points.");
             Assert.IsTrue(hidden.Candidates.Single().SymbolPins.Pins.All(p => !p.Visible));
         }
+    }
+
+    // The public MCP measurement tool must return exactly the native geometry for every measured
+    // sheet instance, reject a stale revision and replay the same answer. One service session serves
+    // all instances, so the check does not pay a process start and shutdown per sheet.
+    private static async Task VerifyMcpGeometries(NativeClient native, string instanceId,
+        IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Expected)> measured,
+        string evidence, CancellationToken token)
+    {
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        string state = Directory.CreateTempSubdirectory("kicad-mcp-geometry-").FullName;
+        try
+        {
+            var transport = new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = "dotnet",
+                Arguments = [Path.Combine(FindRoot(), "automation", "src", "KiCad.Automation.Mcp", "bin",
+                    configuration, "net10.0", "kicad-mcp.dll")],
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = state }
+            });
+            await using var client = await McpClient.CreateAsync(transport, cancellationToken: token);
+            var attached = await client.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
+                { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
+            Assert.IsFalse(attached.IsError == true);
+            async Task<ModelContextProtocol.Protocol.CallToolResult> Read(MeasureSchematicPlacement query) =>
+                await client.CallToolAsync("kicad_schematic_measure_placement", new Dictionary<string, object?>
+                    { ["instanceId"] = instanceId, ["requestJson"] = SchematicJson.Formatter.Format(query) }, cancellationToken: token);
+            foreach (var (request, expected) in measured)
+            {
+                var observed = await Read(request);
+                Assert.IsFalse(observed.IsError == true);
+                Assert.AreEqual(expected, SchematicJson.Parser.Parse<SchematicPlacementGeometry>(
+                    observed.StructuredContent!.Value.GetProperty("geometry").GetRawText()));
+                var stale = request.Clone(); stale.ExpectedRevision.Sequence++;
+                Assert.IsTrue((await Read(stale)).IsError == true);
+                var recovered = await Read(request);
+                Assert.IsFalse(recovered.IsError == true);
+                Assert.AreEqual(observed.StructuredContent.Value.GetRawText(), recovered.StructuredContent!.Value.GetRawText());
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-mcp-geometry-"
+                    + request.Document.SheetPath.Path[^1].Value + ".json"), observed.StructuredContent.Value.GetRawText(), token);
+            }
+        }
+        finally { Directory.Delete(state, true); }
     }
 
     private static async Task VerifyCreatedGeometry(NativeClient client, DocumentSpecifier root,

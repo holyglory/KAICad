@@ -41,7 +41,31 @@ coverage are still being qualified; native Mac Setup evidence and full automatic
 XML synchronization remain open. The authoritative completion state is in
 DevCoordinator, not this usage guide.
 
-## Linux preview — September 11, 2026
+## Linux preview — September 23, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-source.tar.gz)
+identify `be8312a6716c0f892da4c1eb0b7824eaa4fd9aba`, signed preview sequence 22.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 21 it adds, as preliminary tools: native ngspice simulation
+jobs (caller-supplied decks must be plain circuits: no `.control`/`.exec` blocks,
+`*ng_script` decks or `.include`/`.lib` file references; an empty netlist simulates
+the deck KiCad generates from the schematic), revision-guarded PCB item editing,
+non-copper visual routing guides, route candidates, numerical route geometry and
+native route previews, and detached PCB DRC jobs. DRC jobs never claim a complete
+input snapshot or fresh results yet. Committing routed copper is not included.
+
+Every gate ran on the exact commit before publication (native Setup from a cold
+checkout, recursive editor and field history in both themes, simulation, PCB items,
+net settings with DRC jobs, structural editor, the DRC contract suites, managed
+contracts and the installed-package journey). Public runs `t20260923T141053Z-f8ccb4`
+and `t20260923T141935Z-2d25fe` verified the downloads, the signed caption update
+from sequence 21 and the landing page. Mac and Windows builds remain on hold until
+the XML editing workflow is complete; their existing downloads stay available.
+
+### Earlier Linux preview — September 11, 2026
 
 [Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260911T163551Z-dd74f7aca989-debian13-x64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260911T163551Z-dd74f7aca989-source.tar.gz)
@@ -2164,7 +2188,7 @@ MCP EOF must leave the native editor alive. It does not use
 Run from this Linux checkout:
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test linux-package-stage --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test linux-package-stage --tier development --client codex
 ```
 
 Each candidate retains its `staging.json` inventory; the generated
@@ -2236,7 +2260,7 @@ partially installed; Mac archive preparation remains separate work.
 Run focused signature, HTTPS transfer and persistence checks with:
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test update-contracts --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test update-contracts --tier development --client codex
 ```
 
 The focused contracts use synthetic release payloads and ephemeral test keys.
@@ -2399,7 +2423,7 @@ these checks; this is Linux evidence, not a completed different-build update,
 dirty-editor restart, production feed or native-Mac execution.
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test native-updater-journey --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test native-updater-journey --tier development --client codex
 ```
 
 ### Native restart handoff (Linux, preliminary)

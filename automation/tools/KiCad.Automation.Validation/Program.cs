@@ -6,6 +6,7 @@ try
     if (args.Length == 0 || args[0] is "--help" or "-h")
     {
         Console.WriteLine("kicad-validate upstream-detect --repository CHECKOUT --output NEW_JSON_FILE");
+        Console.WriteLine("kicad-validate verify-build-isolation --repository CHECKOUT --output NEW_EVIDENCE_DIRECTORY");
         Console.WriteLine("kicad-validate upstream-prepare --repository CHECKOUT --tag STABLE_VERSION --commit UPSTREAM_SHA --output NEW_DIRECTORY");
         Console.WriteLine("kicad-validate upstream-verify --repository CHECKOUT --commit SOURCE_SHA --output NEW_JSON_FILE");
         Console.WriteLine("kicad-validate mac --repository LOCAL_CHECKOUT --commit FULL_SHA --architecture arm64|x64 --builder MAC_BUILDER_CHECKOUT --toolchain EXISTING_CMAKE_TOOLCHAIN --output NEW_DIRECTORY [--native-tests CTEST_REGEX]");
@@ -33,7 +34,7 @@ try
     }
     string Required(string name) => options.TryGetValue(name, out string? value) ? value
         : throw new ArgumentException($"Missing --{name}.");
-    string[] allowed = args[0] == "upstream-detect" ? ["repository", "output"]
+    string[] allowed = args[0] is "upstream-detect" or "verify-build-isolation" ? ["repository", "output"]
         : args[0] == "upstream-prepare" ? ["repository", "tag", "commit", "output"]
         : args[0] == "upstream-verify" ? ["repository", "commit", "output"]
         : args[0] == "hosted" ? ["repository", "commit", "architecture", "output", "dependency-commit", "phase"]
@@ -54,6 +55,11 @@ try
         if (!allowed.Contains(name, StringComparer.Ordinal)) throw new ArgumentException($"Unknown option --{name}.");
     using var cancel = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancel.Cancel(); };
+    if (args[0] == "verify-build-isolation")
+    {
+        await HostedValidatorIsolation.VerifyAsync(Required("repository"), Required("output"), cancel.Token);
+        Console.WriteLine("{\"status\":\"passed\",\"isolatedRebuild\":true}"); return 0;
+    }
     if (args[0].StartsWith("upstream-", StringComparison.Ordinal))
     {
         object result = args[0] switch

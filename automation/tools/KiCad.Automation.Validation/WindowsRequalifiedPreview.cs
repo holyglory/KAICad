@@ -33,6 +33,12 @@ public static class WindowsRequalifiedPreview
         if (runs.Length != 1) throw new InvalidDataException("Require one complete outer retained-package test receipt.");
         byte[] trxBytes = await HostedPreviewStaging.Metadata(runs[0], token);
         RequirePassingOuterTest(trxBytes);
+        if (binding.RequiresManagedRecovery)
+        {
+            string[] managedRuns = Directory.GetFiles(Path.Combine(evidence, "windows-retained-package/managed-run"), "*.trx");
+            if (managedRuns.Length != 1) throw new InvalidDataException("Require one exact managed-contract recovery receipt.");
+            RequirePassingManagedTests(await HostedPreviewStaging.Metadata(managedRuns[0], token));
+        }
         await HostedPreviewStaging.VerifyWindowsEditorResult(Path.Combine(evidence, "windows-installed-editor/result.json"), token);
         string archive = Path.Combine(request.NativeCandidate, "diagnostics", "unqualified-windows-" + request.Commit + ".zip");
         await HostedPreviewStaging.VerifyFile(archive, binding.Bytes, binding.Sha256, token);
@@ -85,7 +91,7 @@ public static class WindowsRequalifiedPreview
         }
     }
 
-    internal sealed record Binding(string RunId, string HarnessCommit, long Bytes, string Sha256);
+    internal sealed record Binding(string RunId, string HarnessCommit, long Bytes, string Sha256, bool RequiresManagedRecovery);
     internal static Binding ValidateProvenance(JsonElement original, JsonElement inputs, JsonElement result, string commit)
     {
         try
@@ -94,12 +100,20 @@ public static class WindowsRequalifiedPreview
                 || original.GetProperty("Platform").GetString() != "windows" || original.GetProperty("Architecture").GetString() != "x64")
                 throw new InvalidDataException("Wrong original native build identity.");
             var steps = original.GetProperty("Steps").EnumerateArray().ToArray();
-            foreach (string name in new[] { "source-commit", "pinned-ancestry", "native-build", "native-tests", "native-install", "installed-native-commit", "managed-runtime", "managed-contracts" })
+            foreach (string name in new[] { "source-commit", "pinned-ancestry", "native-build", "native-tests", "native-install", "installed-native-commit", "managed-runtime" })
                 if (steps.Count(step => step.GetProperty("Name").GetString() == name && step.GetProperty("ExitCode").GetInt32() == 0) != 1)
                     throw new InvalidDataException("Missing native prerequisite: " + name);
             var failures = steps.Where(step => step.GetProperty("ExitCode").GetInt32() != 0).ToArray();
-            if (failures.Length != 1 || failures[0].GetProperty("Name").GetString() != "installed-editor-journey")
-                throw new InvalidDataException("Only a failed installed-editor qualification can use this path.");
+            if (failures.Length != 1 || failures[0].GetProperty("Name").GetString() is not ("installed-editor-journey" or "managed-contracts"))
+                throw new InvalidDataException("Only managed-contract or installed-editor qualification failures can use this path.");
+            bool managedRecovery = failures[0].GetProperty("Name").GetString() == "managed-contracts";
+            if (managedRecovery)
+            {
+                if (!result.GetProperty("managedContractsPassed").GetBoolean() || !result.GetProperty("managedRuntimeSourceUnchanged").GetBoolean())
+                    throw new InvalidDataException("Managed failure recovery needs current tests over unchanged runtime source.");
+            }
+            else if (steps.Count(step => step.GetProperty("Name").GetString() == "managed-contracts" && step.GetProperty("ExitCode").GetInt32() == 0) != 1)
+                throw new InvalidDataException("Missing successful managed-contract prerequisite.");
             var artifact = original.GetProperty("DiagnosticArtifacts").EnumerateArray().Single(item =>
                 item.GetProperty("Path").GetString() == "unqualified-windows-" + commit + ".zip");
             string hash = artifact.GetProperty("Sha256").GetString()!;
@@ -116,7 +130,7 @@ public static class WindowsRequalifiedPreview
                 || !result.GetProperty("originalReceiptUnchanged").GetBoolean())
                 throw new InvalidDataException("Native rerun evidence does not bind the original exact payload.");
             string harness = inputs.GetProperty("harnessCommit").GetString()!; Evidence.RequireCommit(harness);
-            return new(run, harness, bytes, hash);
+            return new(run, harness, bytes, hash, managedRecovery);
         }
         catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or JsonException or ArgumentException)
         { throw new InvalidDataException("Incomplete requalification provenance.", error); }
@@ -135,5 +149,29 @@ public static class WindowsRequalifiedPreview
             || (string?)counters.Attribute("executed") != "1"
             || new[] { "failed", "error", "timeout", "aborted", "inconclusive", "notExecuted" }.Any(name => (string?)counters.Attribute(name) != "0"))
             throw new InvalidDataException("The complete retained-package test, including cleanup, did not pass.");
+    }
+
+    internal static void RequirePassingManagedTests(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = XmlReader.Create(stream, new() { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 4 * 1024 * 1024 });
+        var document = XDocument.Load(reader); XNamespace ns = document.Root!.Name.Namespace;
+        var tests = document.Descendants(ns + "UnitTestResult").ToArray();
+        var counters = document.Descendants(ns + "Counters").Single();
+        if (tests.Length == 0 || tests.Any(t => (string?)t.Attribute("outcome") != "Passed")
+            || (string?)counters.Attribute("total") != tests.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            || (string?)counters.Attribute("passed") != tests.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            || (string?)counters.Attribute("executed") != tests.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            || new[] { "failed", "error", "timeout", "aborted", "inconclusive", "notExecuted" }
+                .Any(name => (string?)counters.Attribute(name) != "0"))
+            throw new InvalidDataException("Managed recovery requires complete passing tests, without skips or cleanup failures.");
+        foreach (string required in new[] { "HostedDeliveryTests", "RuntimeInfoTests", "NngTransportTests", "NativeIpcEndpointTests" })
+        {
+            var ids = document.Descendants(ns + "UnitTest").Where(t => t.Descendants(ns + "TestMethod")
+                .Any(m => ((string?)m.Attribute("className"))?.Split(',')[0].EndsWith("." + required, StringComparison.Ordinal) == true))
+                .Select(t => (string?)t.Attribute("id")).ToHashSet();
+            if (!tests.Any(t => ids.Contains((string?)t.Attribute("testId"))))
+                throw new InvalidDataException("Managed recovery omitted required class " + required);
+        }
     }
 }

@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using KiCad.Automation.Distribution;
+using KiCad.Automation.Validation;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -68,6 +69,21 @@ public sealed class WindowsRetainedPackageTests
             while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "KiCad.Automation.slnx"))) repository = repository.Parent;
             Assert.IsNotNull(repository);
             string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+            var unchanged = await WindowsLauncherTests.Invoke("git", ["diff", "--quiet", commit, "HEAD", "--", "automation/src"],
+                repository.Parent!.FullName, deadline.Token, input: null);
+            Assert.AreEqual(0, unchanged.ExitCode, "Retained payload qualification requires unchanged managed runtime source.");
+            var managed = await WindowsLauncherTests.Invoke("dotnet", ["test", "KiCad.Automation.slnx", "--configuration", configuration,
+                "--no-build", "--no-restore", "--filter",
+                "FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~RuntimeInfoTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~NativeIpcEndpointTests",
+                "--logger", "trx", "--results-directory", Path.Combine(evidence, "managed-run")], repository.FullName,
+                deadline.Token, input: null, environment: new Dictionary<string, string?>
+                { ["KICAD_AUTOMATION_NNG_LIBRARY"] = Path.Combine(install, "bin/nng.dll") });
+            await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stdout.log"), managed.Output, deadline.Token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stderr.log"), managed.Error, deadline.Token);
+            Assert.AreEqual(0, managed.ExitCode, "The retained managed contracts failed; keep the candidate unqualified.");
+            string[] managedTrx = Directory.GetFiles(Path.Combine(evidence, "managed-run"), "*.trx");
+            Assert.HasCount(1, managedTrx);
+            WindowsRequalifiedPreview.RequirePassingManagedTests(await File.ReadAllBytesAsync(managedTrx[0], deadline.Token));
             // The native NNG library must unload before deleting the extracted
             // installation. Run the editor journey in its own test process.
             var journey = await WindowsLauncherTests.Invoke("dotnet", ["test", "KiCad.Automation.slnx", "--configuration", configuration,
@@ -80,7 +96,8 @@ public sealed class WindowsRetainedPackageTests
             await File.WriteAllTextAsync(Path.Combine(evidence, "result.json"), JsonSerializer.Serialize(new
             { schemaVersion = 1, status = "passed", sourceCommit = commit, archiveSha256 = hash,
                 exactRetainedPayload = true, nativeEditorJourneyPassed = true, rebuiltNativeCode = false,
-                originalReceiptUnchanged = true, publiclyPublishable = false, crossPlatformReady = false }), deadline.Token);
+                originalReceiptUnchanged = true, managedContractsPassed = true, managedRuntimeSourceUnchanged = true,
+                publiclyPublishable = false, crossPlatformReady = false }), deadline.Token);
         }
         catch (Exception error) { await File.WriteAllTextAsync(Path.Combine(evidence, "failure.txt"), error.ToString()); throw; }
         finally

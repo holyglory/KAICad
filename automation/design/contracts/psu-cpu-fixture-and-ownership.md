@@ -4,6 +4,16 @@
 > (2A 100-199, 2B 200-299, 2C 300-399, 2D 400-499, 500-999 Phase 3). Items marked owner-pending below
 > use the stated default until the owner decides; changing them later is a contract revision.
 
+> **Errata 2026-09-23** (decision `kicad-phase2-contract-errata-20260923`): the expected native result has
+> **11** placements (K20:0x10 to 0x1a), not 12; the standard `Device:R` pins have empty names in this file format
+> (a lone `~` reads as empty before format 20250318); `fixture.json` `normalizedAt` records the base commit because a
+> commit cannot contain its own hash. The parent graphs are `psu-cpu-fixture` (gating, including the native seed
+> check `NativePsuCpuSeed`) and `psu-cpu-fixture-writer-drift` (non-gating); a writer-drift failure alone means the
+> symbol writer changed and triggers a version-2 re-freeze, not a lane block. CN-1 parent-seam behaviour
+> (classification, policy/geometry/identity helpers, `allowConnected`) is built by lane 2A; the recovery-store
+> version-10 rule and `AbandonRejectedRealization` are landed by the parent at the freeze integration. The rebuild
+> seam used by lane 2C is provisional.
+
 # KAICad Phase 2 shared contract — PSU→CPU acceptance fixture and lane file ownership
 
 Base read: worktree `the codex/finalization-integration worktree`, branch `codex/finalization-integration`. HEAD moved from `0da1dcdbd8` to `86dbd67c5d` while I was reading. That merge touched only `NativeStructuralEditorJourney.cs` and `pcbnew/api/pcb_drc_run_inputs.h`, so nothing below is affected. The work was read-only: I edited nothing, ran no build or test, and wrote no Coordinator record.

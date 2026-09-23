@@ -37,6 +37,7 @@ public sealed class DesignLayoutRecoveryTests
         using var f = new Fixture(transform, lockOnly);
         byte[] before = File.ReadAllBytes(f.Path);
         Assert.AreEqual(8, JsonNode.Parse(before)!["Version"]!.GetValue<int>());
+        Assert.IsNull(JsonNode.Parse(before)!["PendingLayout"]!["Lane"], "A connected move records no synchronization lane.");
         var restored = new DesignRecoveryStore(f.Path).Read()!;
         Assert.IsTrue(restored.State.HasPendingWork);
         Assert.IsNull(restored.State.PendingPublication); Assert.IsNull(restored.State.PendingNativeSave);
@@ -125,6 +126,101 @@ public sealed class DesignLayoutRecoveryTests
         CollectionAssert.AreEqual(xml, File.ReadAllBytes(f.Intent.DesignPath));
         Assert.ThrowsExactly<AutomationException>(() => f.Store.Save(f.Saved.State, new string('c', 64)));
         CollectionAssert.AreEqual(before, File.ReadAllBytes(f.Path));
+    }
+
+    // CN-1 §9.3/§9.4: a lane realization journals its planning lane at envelope version 10
+    // and contains only creations, updates and library-cache replacements followed by one
+    // whole-batch connectivity assertion (mandatory for connection realizations).
+    private static ApplySchematicItemBatch LaneMutation(Fixture f, params SchematicItemOperation[] operations)
+    {
+        var mutation = f.Saved.State.PendingMutation!.Clone();
+        mutation.Operations.Clear(); mutation.Operations.Add(operations);
+        return mutation;
+    }
+
+    private static SchematicItemOperation Created() =>
+        new() { Create = Google.Protobuf.WellKnownTypes.Any.Pack(new Google.Protobuf.WellKnownTypes.Empty()) };
+
+    private static SchematicItemOperation Assertion() => new() { AssertConnectivity = new SchematicConnectivityAssertion() };
+
+    [TestMethod]
+    [DataRow(DesignLayoutIntent.ConnectionRealizationLane), DataRow(DesignLayoutIntent.RebuildLane)]
+    public void LaneRealizationJournalsItsPlanningLaneAtVersionTen(string lane)
+    {
+        using var f = new Fixture();
+        var intent = f.Intent with { Lane = lane };
+        string path = f.Path + ".lane.json"; var store = new DesignRecoveryStore(path);
+        var saved = store.Save(f.Saved.State with { PendingMutation = LaneMutation(f, Created(), Assertion()), PendingLayout = intent }, null);
+        var json = JsonNode.Parse(File.ReadAllBytes(path))!;
+        Assert.AreEqual(10, json["Version"]!.GetValue<int>());
+        Assert.AreEqual(lane, json["PendingLayout"]!["Lane"]!.GetValue<string>());
+        var restored = new DesignRecoveryStore(path).Read()!;
+        Assert.AreEqual(lane, restored.State.PendingLayout!.Lane);
+        Assert.AreEqual(saved.State.PendingMutation, restored.State.PendingMutation);
+        var older = json.DeepClone(); older["Version"] = 8;
+        File.WriteAllText(path, older.ToJsonString());
+        Assert.AreEqual("invalid_design_recovery", Assert.ThrowsExactly<AutomationException>(() => store.Read()).Code,
+            "A lane record must not load under an older envelope version.");
+    }
+
+    [TestMethod]
+    public void LaneRealizationRejectsBatchesOutsideItsContract()
+    {
+        using var f = new Fixture();
+        var connection = f.Intent with { Lane = DesignLayoutIntent.ConnectionRealizationLane };
+        var move = f.Saved.State.PendingMutation!.Operations[0].Clone();
+        foreach (var (layout, operations) in new (DesignLayoutIntent, SchematicItemOperation[])[]
+        {
+            (connection, [Created()]),                       // connection realization without its assertion
+            (connection, [Assertion(), Created()]),          // assertion not last
+            (connection, [Created(), Assertion(), Assertion()]),
+            (connection, [move, Assertion()]),               // connected moves belong to the move path
+            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [Created(), new() { Remove = new KIID { Value = Guid.NewGuid().ToString("D") } }]),
+            (f.Intent with { Lane = "unknown-lane" }, [Created(), Assertion()]),
+        })
+        {
+            var failure = Assert.ThrowsExactly<AutomationException>(() => new DesignRecoveryStore(f.Path + ".lane.json").Save(
+                f.Saved.State with { PendingMutation = LaneMutation(f, operations), PendingLayout = layout }, null));
+            Assert.AreEqual("invalid_layout_intent", failure.Code);
+        }
+        // A rebuild may omit the assertion; an ordinary connected move still needs its move.
+        new DesignRecoveryStore(f.Path + ".rebuild.json").Save(f.Saved.State with { PendingMutation = LaneMutation(f, Created()),
+            PendingLayout = f.Intent with { Lane = DesignLayoutIntent.RebuildLane } }, null);
+        Assert.ThrowsExactly<ArgumentException>(() => DesignLayoutIntent.Create(f.Intent.DesignPath, f.Intent.ExpectedFileBytes,
+            f.Intent.PlannedDesignFileBytes, Guid.NewGuid(), f.Intent.RequestedRecoveryRevisionToken, "unknown-lane"));
+    }
+
+    [TestMethod]
+    public void RejectedRealizationIsAbandonedOnlyWhenNothingNativeChanged()
+    {
+        using var f = new Fixture();
+        var store = new DesignRecoveryStore(f.Path + ".lane.json");
+        var lane = store.Save(f.Saved.State with { PendingMutation = LaneMutation(f, Created(), Assertion()),
+            PendingLayout = f.Intent with { Lane = DesignLayoutIntent.ConnectionRealizationLane } }, null);
+        var native = lane.State.PendingNativeState!;
+        CheckedSchematicBatchReceipt Receipt(CheckedSchematicBatchStatus status, DocumentLifecycleState after, string? operationId = null) => new()
+        {
+            Document = lane.State.PendingMutation!.Document.Clone(), ProcessEpoch = native.ProcessEpoch,
+            OperationId = operationId ?? lane.State.PendingMutation.OperationId, Status = status, ExpectedRequestVerified = true,
+            ObservedBefore = native.Clone(), ObservedAfter = after.Clone(), ErrorCode = "realization_connectivity_mismatch"
+        };
+        var changed = native.Clone(); changed.Revision.Sequence++;
+        foreach (var receipt in new[] { Receipt(CheckedSchematicBatchStatus.CsbsCompleted, native),
+            Receipt(CheckedSchematicBatchStatus.CsbsRejected, changed),
+            Receipt(CheckedSchematicBatchStatus.CsbsRejected, native, Guid.NewGuid().ToString("D")) })
+        {
+            var failure = Assert.ThrowsExactly<AutomationException>(() => store.AbandonRejectedRealization(lane, receipt));
+            Assert.AreEqual("invalid_layout_intent", failure.Code, receipt.Status + ": " + failure.Code + " " + failure.Message);
+        }
+        Assert.AreEqual("invalid_layout_intent", Assert.ThrowsExactly<AutomationException>(
+            () => f.Store.AbandonRejectedRealization(f.Saved, Receipt(CheckedSchematicBatchStatus.CsbsRejected, native))).Code,
+            "A connected move is not a lane realization.");
+        var abandoned = store.AbandonRejectedRealization(lane, Receipt(CheckedSchematicBatchStatus.CsbsRejected, native));
+        Assert.IsNull(abandoned.State.PendingMutation); Assert.IsNull(abandoned.State.PendingNativeState);
+        Assert.IsNull(abandoned.State.PendingLayout);
+        CollectionAssert.AreEqual(lane.State.DesiredFileBytes, abandoned.State.DesiredFileBytes);
+        Assert.AreEqual(SchematicDesignXml.Write(lane.State.Baseline, lane.State.KnowledgeLibraries),
+            SchematicDesignXml.Write(abandoned.State.Baseline, abandoned.State.KnowledgeLibraries));
     }
 
     private sealed class Fixture : IDisposable

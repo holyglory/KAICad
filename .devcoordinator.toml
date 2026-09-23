@@ -1461,6 +1461,22 @@ requires=["native-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PsuCpuFixtureNative", "--logger", "trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/native-tests"]
 retained_artifacts=[{ name = "psu-cpu-fixture-native-tests", path = "automation/artifacts/psu-cpu-fixture/native-tests", max_bytes = 16777216 }, { name = "psu-cpu-fixture-native-evidence", path = "automation/artifacts/psu-cpu-fixture/native", max_bytes = 16777216 }]
 
+[[test.psu-cpu-fixture.check]]
+name="native-runtime"
+tier="development"
+requires=["native-build"]
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+# Loads seeds S0, S1 and S2 in a real editor and checks exact identities, captured
+# pin IDs against lib_symbols.kicad_sexpr and every NativePsuCpuSeed contract code.
+# Lanes 2A, 2C and 2D start from this API, so it gates the Phase 2 fan-out.
+[[test.psu-cpu-fixture.check]]
+name="native-seed"
+tier="development"
+requires=["native-runtime"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuSeed", "--logger", "trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/native-seed-tests"]
+retained_artifacts=[{ name = "psu-cpu-seed-tests", path = "automation/artifacts/psu-cpu-fixture/native-seed-tests", max_bytes = 16777216 }, { name = "psu-cpu-seed-evidence", path = "automation/artifacts/native-psu-cpu-seed/native-session-current", max_bytes = 67108864 }]
+
 # Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
 # that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
 # sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means

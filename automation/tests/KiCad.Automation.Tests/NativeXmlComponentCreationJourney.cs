@@ -13,6 +13,12 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9).
+    // Lane 2A replaces this body when it delivers the journey.
+    private static Task VerifyPsuCpuConnectedRealization(NativeClient client, PsuCpuNativeContext context, int processId,
+        string display, string evidence, string instanceId, CancellationToken token)
+        => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
+
     private static async Task VerifyXmlComponentCreation(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, bool interruptAfterNativeEdit, CancellationToken token)
     {

@@ -271,9 +271,21 @@ public sealed partial class NativeSessionTests
                     or NativeJourney.NativeCrash)
                 {
                     // PSU/CPU journeys seed the shared frozen fixture on this native-created
-                    // root instead of the probe fixture. The fixture loader (PsuCpuFixture)
-                    // and the lane journey stubs arrive with the fixture freeze item.
-                    throw new AssertInconclusiveException("The shared PSU/CPU fixture has not been integrated; no journey ran.");
+                    // root instead of the probe fixture. An Inconclusive lane stub ends the
+                    // test as not passed; real failures still let the other project run.
+                    Process nativeProcess = processes.Single(p => p.StartInfo.ArgumentList.Contains(target.Project));
+                    try
+                    {
+                        await RunPsuCpuJourney(journey, client, emptyRoot, Path.GetDirectoryName(schematic)!, nativeProcess,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                    }
+                    catch (Exception error) when (error is not AssertInconclusiveException && !deadline.IsCancellationRequested)
+                    {
+                        synchronizationFailures.Add(error);
+                        await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-psu-cpu-failure.txt"), error.ToString(), deadline.Token);
+                    }
+                    Console.WriteLine($"Focused {journey} {target.Id} completed at {elapsed.Elapsed.TotalSeconds:F1}s.");
+                    continue;
                 }
                 // Saving the native-created root records its instance identity
                 // in the project. Reuse that identity in the populated fixture.
@@ -863,6 +875,35 @@ public sealed partial class NativeSessionTests
             foreach (Process process in processes) process.Dispose();
             Directory.Delete(temporary, true);
         }
+    }
+
+    // Seeds per psu-cpu-fixture-and-ownership.md §1.9. The seed journey itself
+    // prepares and checks S0, S1 and S2 inside the parent fixture.
+    private static async Task RunPsuCpuJourney(NativeJourney journey, NativeClient client, DocumentSpecifier emptyRoot,
+        string projectDirectory, Process native, string display, string evidence, string instanceId, CancellationToken token)
+    {
+        if (journey == NativeJourney.PsuCpuSeed)
+        {
+            await PsuCpuFixture.VerifySeedsAsync(client, emptyRoot, projectDirectory, evidence, token);
+            return;
+        }
+        var seed = journey switch
+        {
+            NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync or NativeJourney.NativeCrash => PsuCpuSeed.Sheets,
+            NativeJourney.XmlRebuild => PsuCpuSeed.RootOnly,
+            NativeJourney.DiagramCanvas or NativeJourney.StructuralMigration => PsuCpuSeed.None,
+            _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
+        };
+        var context = await PsuCpuFixture.PrepareNativeAsync(client, emptyRoot, projectDirectory, seed, evidence, token);
+        await (journey switch
+        {
+            NativeJourney.ConnectedRealization => VerifyPsuCpuConnectedRealization(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.StructuralMigration => VerifyStructuralMigration(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
+            _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
+        });
     }
 
     private static async Task Capture(StreamReader input, string path)

@@ -101,7 +101,10 @@ public sealed class DesignRecoveryStore(string statePath)
         { throw Failure("design_recovery_io", error.Message); }
     }
 
-    public StoredDesignRecovery Save(DesignRecoveryState state, string? expectedRevisionToken)
+    public StoredDesignRecovery Save(DesignRecoveryState state, string? expectedRevisionToken) =>
+        SaveCore(state, expectedRevisionToken, abandoningRealization: false);
+
+    private StoredDesignRecovery SaveCore(DesignRecoveryState state, string? expectedRevisionToken, bool abandoningRealization)
     {
         Validate(state);
         var fileIntent = state.PendingPublication ?? (state.PendingLayout is { } layout
@@ -141,7 +144,7 @@ public sealed class DesignRecoveryStore(string statePath)
             var current = ReadCore();
             if (current?.RevisionToken != expectedRevisionToken)
                 throw Failure("design_recovery_changed", "Recovery state changed; reload it before saving.");
-            ValidateTransition(current?.State, state);
+            ValidateTransition(current?.State, state, abandoningRealization);
             if (current?.RevisionToken == next.RevisionToken) return current;
             temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -268,7 +271,8 @@ public sealed class DesignRecoveryStore(string statePath)
             || receipt.ObservedBefore is null || receipt.ObservedAfter is null
             || !receipt.ObservedBefore.Equals(state.PendingNativeState) || !receipt.ObservedAfter.Equals(state.PendingNativeState))
             throw Failure("invalid_layout_intent", "Abandon only a rejected realization whose native state is unchanged.");
-        return Save(state with { PendingMutation = null, PendingNativeState = null, PendingLayout = null }, saved.RevisionToken);
+        return SaveCore(state with { PendingMutation = null, PendingNativeState = null, PendingLayout = null }, saved.RevisionToken,
+            abandoningRealization: true);
     }
 
     private static void Validate(DesignRecoveryState state)
@@ -392,13 +396,29 @@ public sealed class DesignRecoveryStore(string statePath)
             throw Failure("invalid_design_publication", "Native-save identity must be retained before publishing XML.");
     }
 
-    private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next)
+    private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next, bool abandoningRealization = false)
     {
         if (current?.HasPendingWork == true && !Equals(current.OwnershipResolution, next.OwnershipResolution)
             && !(next.OwnershipResolution is null && !next.HasPendingWork
                 && next.LastSynchronization is { } completed
                 && completed.OperationId == (current.PendingPublication?.OperationId ?? current.PendingLayout?.OperationId)))
             throw Failure("ownership_resolution_pending", "Keep the selected ownership mapping unchanged until the pending synchronization is completed.");
+        if (current?.PendingLayout is { } abandoned && abandoningRealization)
+        {
+            // Only AbandonRejectedRealization reaches here, after verifying the rejected
+            // receipt: clear exactly the pending lane request and nothing else.
+            if (abandoned.Lane is null || next.PendingLayout is not null || next.PendingMutation is not null
+                || next.PendingNativeState is not null || next.PendingNativeSave is not null || next.PendingPublication is not null
+                || next.PendingCandidateFileBytes is not null || current.OriginId != next.OriginId || current.InstanceId != next.InstanceId
+                || current.NativeRevision != next.NativeRevision || !Equals(current.Observed, next.Observed)
+                || !Equals(current.ObservedElectrical, next.ObservedElectrical) || !Equals(current.BaselineElectrical, next.BaselineElectrical)
+                || !current.DesiredFileBytes.AsSpan().SequenceEqual(next.DesiredFileBytes)
+                || !current.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary)
+                    .SequenceEqual(next.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary))
+                || SchematicDesignXml.Write(current.Baseline, current.KnowledgeLibraries) != SchematicDesignXml.Write(next.Baseline, next.KnowledgeLibraries))
+                throw Failure("layout_intent_changed", "Abandoning a rejected realization clears only its pending request.");
+            return;
+        }
         if (current?.PendingLayout is { } layout)
         {
             if (!Equals(current.PendingMutation, next.PendingMutation) || !Equals(current.PendingNativeState, next.PendingNativeState)

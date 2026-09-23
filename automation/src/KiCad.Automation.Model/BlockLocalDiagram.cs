@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace KiCad.Automation.Model;
 
@@ -6,9 +7,12 @@ public sealed record DiagramBoundaryInterface(Guid Id, string Name, string Inten
 
 /// <summary>Interfaces and selected relationships at one diagram level. Child interiors
 /// are not duplicated here. Geometry and physical allocation are separate concerns.</summary>
+[method: JsonConstructor]
 public sealed record BlockLocalDiagram(ImmutableArray<DiagramBoundaryInterface> Interfaces,
-    ImmutableArray<ConnectionSelection> Connections, ImmutableArray<DiagramAnnotation> Annotations = default)
+    ImmutableArray<ConnectionSelection> Connections, ImmutableArray<DiagramAnnotation> Annotations)
 {
+    public BlockLocalDiagram(ImmutableArray<DiagramBoundaryInterface> Interfaces, ImmutableArray<ConnectionSelection> Connections)
+        : this(Interfaces, Connections, []) { }
     // Keep optional presentation collections materialized so MCP's JSON-schema
     // exporter can describe the record without enumerating a default ImmutableArray.
     public static BlockLocalDiagram Empty { get; } = new([], [], []);

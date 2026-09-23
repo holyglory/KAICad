@@ -1082,6 +1082,137 @@ public sealed partial class NativeSessionTests
             var savedPhysical = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual("Main controller PCB", savedPhysical.Inspect(physicalSelection).PhysicalAllocation!.Targets[0].Name);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-physical-allocation.json"), JsonSerializer.Serialize(physicalRead), token);
+            // Choosing a published whole-block proposal applies it only to the
+            // exact target it refined. Competing edits that advanced the target
+            // keep both versions for comparison; siblings and history stay intact.
+            var beforeSelectionRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
+            Assert.IsFalse(beforeSelectionRead.IsError == true);
+            string selectionToken = JsonSerializer.SerializeToElement(beforeSelectionRead).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
+            var selectionBase = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var selectArguments = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = selectionToken, ["proposalId"] = proposal.Id,
+                ["expectedRoot"] = selectionBase.SelectedRoot, ["currentPath"] = new[] { selectionBase.SelectedRoot },
+                ["ancestorRevisionIds"] = Array.Empty<Guid>(), ["actor"] = "Compatible agent fixture"
+            };
+            async Task RejectedSelection(string label, string code)
+            {
+                string unchanged = await File.ReadAllTextAsync(source, token); var nativeBefore = await Read();
+                Guid rejectedOperation = Guid.NewGuid(); selectArguments["operationId"] = rejectedOperation;
+                var rejected = await client.CallToolAsync("kicad_diagram_proposal_select", selectArguments, cancellationToken: token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-select-" + label + ".json"), JsonSerializer.Serialize(rejected), token);
+                Assert.IsTrue(rejected.IsError == true, "A " + label + " proposal selection must be rejected, not applied over newer work.");
+                Assert.AreEqual(code, JsonSerializer.SerializeToElement(rejected).GetProperty("structuredContent").GetProperty("code").GetString());
+                Assert.AreEqual(unchanged, await File.ReadAllTextAsync(source, token), "A rejected " + label + " selection must leave the saved design unchanged.");
+                var nativeAfter = await Read();
+                Assert.AreEqual(nativeBefore.SourceToken, nativeAfter.SourceToken); Assert.AreEqual(nativeBefore.DiagramPath, nativeAfter.DiagramPath);
+                Assert.AreEqual(nativeBefore.Draft, nativeAfter.Draft);
+                var noReceipt = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                    { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = rejectedOperation }, cancellationToken: token);
+                Assert.AreEqual("missing_block_proposal_receipt", JsonSerializer.SerializeToElement(noReceipt).GetProperty("structuredContent").GetProperty("code").GetString(),
+                    "A rejected selection must not leave a prepared write behind.");
+            }
+            // The first proposal refined the original root revision; the native
+            // and agent edits above have since advanced that exact target.
+            await RejectedSelection("changed-target", "proposal_target_changed");
+            var psu = selectionBase.Inspect(selectionBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
+            var psuInput = RecursiveBlockRefinementInputTests.Input(selectionBase) with
+                { SourceSha256 = selectionToken, BlockPath = [selectionBase.SelectedRoot, psu], Attachments = [] };
+            var psuInputResult = await client.CallToolAsync("kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = selectionToken,
+                ["input"] = JsonSerializer.SerializeToElement(psuInput, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, cancellationToken: token);
+            if (psuInputResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-psu-input-error.json"), JsonSerializer.Serialize(psuInputResult), token);
+            Assert.IsFalse(psuInputResult.IsError == true);
+            string inputToken = JsonSerializer.SerializeToElement(psuInputResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
+            var psuProposal = RecursiveBlockProposalTests.CreateFor(selectionBase, psuInput);
+            var psuPublished = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = inputToken, ["operationId"] = Guid.NewGuid(),
+                ["proposalJson"] = JsonSerializer.SerializeToElement(psuProposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, cancellationToken: token);
+            if (psuPublished.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-psu-proposal-error.json"), JsonSerializer.Serialize(psuPublished), token);
+            Assert.IsFalse(psuPublished.IsError == true);
+            var psuPublishedData = JsonSerializer.SerializeToElement(psuPublished).GetProperty("structuredContent");
+            Assert.IsTrue(psuPublishedData.GetProperty("added").GetBoolean());
+            Assert.IsTrue(psuPublishedData.GetProperty("contextStillSelected").GetBoolean(), "No competing edit has advanced the refined supply block yet.");
+            string proposalToken = psuPublishedData.GetProperty("sourceToken").GetString()!;
+            var beforeChoiceGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(selectionBase.SelectedRoot, beforeChoiceGraph.SelectedRoot, "Publishing a proposal must not activate it.");
+            var psuRead = await client.CallToolAsync("kicad_diagram_proposal_read", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = proposalToken, ["proposalId"] = psuProposal.Id }, cancellationToken: token);
+            Assert.IsFalse(psuRead.IsError == true);
+            Assert.AreEqual(psuProposal.Candidate.RevisionId.ToString("D"), JsonSerializer.SerializeToElement(psuRead).GetProperty("structuredContent")
+                .GetProperty("proposal").GetProperty("candidate").GetProperty("revisionId").GetString());
+            selectArguments["proposalId"] = psuProposal.Id; selectArguments["currentPath"] = new[] { selectionBase.SelectedRoot, psu };
+            selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() }; selectArguments["expectedSourceToken"] = inputToken;
+            // A token observed before the proposal was saved is outdated, even
+            // though the refined block itself has not changed.
+            await RejectedSelection("outdated-token", "block_proposal_source_changed");
+            Guid appliedRootRevision = Guid.NewGuid(), applyOperation = Guid.NewGuid();
+            selectArguments["expectedSourceToken"] = proposalToken; selectArguments["ancestorRevisionIds"] = new[] { appliedRootRevision };
+            selectArguments["operationId"] = applyOperation;
+            var applyResult = await client.CallToolAsync("kicad_diagram_proposal_select", selectArguments, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-selection.json"), JsonSerializer.Serialize(applyResult), token);
+            Assert.IsFalse(applyResult.IsError == true, "Choosing a current whole-block proposal must succeed; its exact response is retained.");
+            var applyData = JsonSerializer.SerializeToElement(applyResult).GetProperty("structuredContent");
+            string appliedToken = applyData.GetProperty("sourceToken").GetString()!;
+            Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(source, token))), appliedToken);
+            Assert.AreEqual(appliedRootRevision.ToString("D"), applyData.GetProperty("selectedRoot").GetProperty("revisionId").GetString());
+            var applied = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var appliedRoot = new BlockSelection(beforeChoiceGraph.SelectedRoot.BlockId, beforeChoiceGraph.SelectedRoot.StateId, appliedRootRevision);
+            Assert.AreEqual(appliedRoot, applied.SelectedRoot);
+            Assert.AreEqual(beforeChoiceGraph.SelectedRoot.RevisionId, applied.Inspect(appliedRoot).ParentRevisionId);
+            CollectionAssert.AreEqual(beforeChoiceGraph.Inspect(beforeChoiceGraph.SelectedRoot).Children.Select(c => c == psu ? psuProposal.Candidate : c).ToArray(),
+                applied.Inspect(appliedRoot).Children.ToArray(), "Only the refined supply occurrence changes; its sibling keeps its exact revision.");
+            CollectionAssert.IsSubsetOf(psuProposal.Blocks.Select(b => b.Selection).ToArray(), applied.Walk(appliedRoot).ToArray());
+            Assert.HasCount(beforeChoiceGraph.Revisions.Length + 1, applied.Revisions, "Selection adds exactly one containing root snapshot.");
+            CollectionAssert.IsSubsetOf(beforeChoiceGraph.Revisions.Select(r => r.Selection).ToArray(), applied.Revisions.Select(r => r.Selection).ToArray());
+            CollectionAssert.AreEqual(beforeChoiceGraph.Walk(beforeChoiceGraph.SelectedRoot).ToArray(), applied.Walk(beforeChoiceGraph.SelectedRoot).ToArray());
+            CollectionAssert.AreEquivalent(beforeChoiceGraph.States.Where(s => s.Id != appliedRoot.StateId).ToArray(), applied.States.Where(s => s.Id != appliedRoot.StateId).ToArray(),
+                "The replaced supply implementation and every other implementation head remain available.");
+            Assert.HasCount(beforeChoiceGraph.RequirementHistories.Length, applied.RequirementHistories);
+            Assert.AreEqual(beforeChoiceGraph.Requirements(beforeChoiceGraph.SelectedRoot).Requirements, applied.Requirements(appliedRoot).Requirements);
+            Assert.AreEqual(beforeChoiceGraph.Requirements(psu).Requirements, applied.Requirements(psu).Requirements);
+            Assert.AreEqual("Main controller PCB", applied.Inspect(appliedRoot).PhysicalAllocation!.Targets[0].Name);
+            Assert.IsTrue(electrical.Bindings.SameContents(applied.Inspect(appliedRoot).EffectiveComponentBindings));
+            Assert.IsTrue(beforeChoiceGraph.Proposal(proposal.Id).SameContents(applied.Proposal(proposal.Id)), "The stale proposal stays available for comparison.");
+            Assert.IsTrue(originalInput.SameContents(applied.RefinementInput(originalInput.Id)));
+            Assert.IsTrue(psuInput.SameContents(applied.RefinementInput(psuInput.Id)));
+            var appliedOrigin = applied.Inspect(appliedRoot).Origin;
+            Assert.AreEqual(RequirementRevisionActor.Agent, appliedOrigin.ActorKind);
+            CollectionAssert.IsSubsetOf(new[] { psuInput.Id, psuProposal.Id }, appliedOrigin.InputIds.ToArray());
+            var selectionReceipt = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = applyOperation }, cancellationToken: token);
+            Assert.IsFalse(selectionReceipt.IsError == true);
+            var receiptData = JsonSerializer.SerializeToElement(selectionReceipt).GetProperty("structuredContent").GetProperty("receipt");
+            Assert.AreEqual("Select", receiptData.GetProperty("kind").GetString()); Assert.AreEqual("Published", receiptData.GetProperty("stage").GetString());
+            Assert.AreEqual(proposalToken, receiptData.GetProperty("beforeSha256").GetString()); Assert.AreEqual(appliedToken, receiptData.GetProperty("afterSha256").GetString());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-selection-receipt.json"), JsonSerializer.Serialize(selectionReceipt), token);
+            Key("r", control: true);
+            var nativeChoice = await Wait(s => !s.Busy && !s.Dirty && s.SourceToken == appliedToken);
+            Assert.AreEqual(appliedRootRevision.ToString("D"), nativeChoice.DiagramPath.Single().RevisionId);
+            Assert.AreEqual(appliedRootRevision.ToString("D"), nativeChoice.CanvasDiagram.Selection.RevisionId);
+            Assert.AreEqual(psuProposal.Candidate.RevisionId.ToString("D"), nativeChoice.CanvasDiagram.Children.Single(c => c.BlockId == psu.BlockId.ToString("D")).RevisionId);
+            Assert.AreEqual((uint)nativeChoice.CanvasDiagram.Children.Count, nativeChoice.ResolvedCanvasChildren, "The editor must load every chosen child revision.");
+            Key("Escape"); Key("Right");
+            var chosenSupply = await Wait(s => s.Draft.Baseline.BlockId == psu.BlockId.ToString("D"));
+            Assert.AreEqual(psuProposal.Candidate.StateId.ToString("D"), chosenSupply.Draft.Baseline.StateId, "The native editor must show the chosen proposed implementation.");
+            Assert.AreEqual(psuProposal.Candidate.RevisionId.ToString("D"), chosenSupply.Draft.Baseline.RevisionId);
+            Key("Return");
+            var insideChoice = await Wait(s => !s.Busy && s.Rendered && s.DiagramPath.Count == 2
+                && s.DiagramPath[^1].RevisionId == psuProposal.Candidate.RevisionId.ToString("D"));
+            Assert.HasCount(applied.Inspect(psuProposal.Candidate).Children.Length, insideChoice.CanvasDiagram.Children);
+            Assert.AreEqual((uint)insideChoice.CanvasDiagram.Children.Count, insideChoice.ResolvedCanvasChildren);
+            Assert.HasCount(applied.Inspect(psuProposal.Candidate).LocalDiagram.Connections.Length, insideChoice.CanvasDiagram.LocalDiagram.Connections);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-selected-state.json"), SchematicJson.Formatter.Format(insideChoice), token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-proposal-selected.png"), token);
+            // After selection the target is the candidate itself; choosing the
+            // proposal again must not re-apply it over the now-current target.
+            selectArguments["expectedSourceToken"] = appliedToken; selectArguments["expectedRoot"] = appliedRoot;
+            selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
+            await RejectedSelection("reselected-target", "proposal_target_changed");
             Key("w", control: true);
         }
         finally { Directory.Delete(stateRoot, true); }

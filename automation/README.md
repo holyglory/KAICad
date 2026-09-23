@@ -819,14 +819,17 @@ inspection, persistent choices and reopening, wrong-instance/stale-write/locked-
 file failures followed by success; direct handler checks cover cancellation
 before the write. Native application and automatic synchronization remain separate.
 
-The high-level synchronization executor is internal development work and is not
-advertised as `kicad_design_sync_apply`. Version-5 recovery records can retain
-candidate XML and a native-save request, but serialization tests do not establish
-safe execution. Retained-file lifecycle, complete executor qualification and
-automatic event-driven synchronization remain open under Coordinator outcome
-`p7e712f1bb764e327`. Use the existing
-read-only synchronization planner and individually qualified native tools; do not
-treat the draft executor as automatic synchronization or cross-platform evidence.
+The high-level synchronization executor is advertised as `kicad_design_sync_apply`
+(since `4b9cdd9b86`), and `kicad_design_candidate_commit` stores a validated XML
+candidate for it. Apply requires the exact recovery token, absolute XML destination
+and a caller-stable operation ID; it replays a completed operation from its receipt
+and reports stale instances, changed files, conflicts and interrupted phases as
+explicit recovery results. Its Linux evidence is the two-editor MCP lifecycle
+(automatic native/XML application, invalid-file pause and recovery, missed-event
+reattach, ownership rejection and dirty-editor preservation). Interruption across
+creation, removal and placement, ownership changes and other platforms remain open
+under Coordinator outcomes `p7e712f1bb764e327` and `p74ee7c1da24272d9`; do not treat
+it as cross-platform evidence.
 
 Version-6 recovery records additionally bind an XML publication to its exact
 operation ID, destination, staged/displaced paths, original bytes, candidate bytes
@@ -867,8 +870,8 @@ Completed displaced XML is moved without overwrite or copy/delete fallback into
 resolve the original or archived location; collisions, missing files, links and
 unexpected paths remain explicit. History is preserved, not purged. Cleanup
 status is separate from the historical native result, and replay itself remains
-read-only. Broader edit qualification and the automatic event loop remain open;
-the normal MCP server still does not advertise the high-level apply tool.
+read-only. Broader edit qualification remains open; the normal MCP server
+advertises the apply tool and the `kicad_design_automatic_sync_*` lifecycle tools.
 
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
@@ -1492,10 +1495,17 @@ schematic/project files unchanged. Linux journeys exercise explicit resolution,
 undo back into conflict, redo and reload from both displayed instances. Broader
 flat-hierarchy qualification and complete document reconstruction remain open.
 
-No revision-safe editing, synchronized rendering, XML reconstruction, automatic
-synchronization, routing, document extraction or simulation tools are advertised.
-Their absence is unfinished work, not a reduction of scope. The authoritative
-DevCoordinator completion ledger retains these outcomes.
+Preliminary tools are advertised for revision-safe schematic batches
+(`kicad_schematic_apply_checked_batch`), synchronization apply and the automatic
+synchronization lifecycle, source PDF page reading (`kicad_source_pdf_page`), PCB
+item editing and visual guides (`kicad_pcb_items_*`, `kicad_pcb_guide_*`), route
+candidates, geometry and native route previews (`kicad_pcb_route_*`), detached PCB
+DRC jobs (`kicad_pcb_drc_*`; ordinary jobs never claim a complete input snapshot or
+fresh results) and ngspice simulation jobs (`kicad_simulation_*`; supplied decks may
+not contain interpreter blocks or file includes). Committing routed copper, complete
+XML reconstruction, lossless ownership changes, simulation result retention and
+revision binding remain unfinished work, not a reduction of scope. The
+authoritative DevCoordinator completion ledger retains these outcomes.
 
 ## Source ownership
 

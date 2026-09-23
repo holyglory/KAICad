@@ -66,8 +66,8 @@ public sealed class RecoveryTools
         });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
-    // Qualification pending (p7e712f1bb764e327): do not advertise a mutation tool
-    // before competing-file writes and interrupted commits have native evidence.
+    // Advertised through ApplySynchronizationTool. Interruption across creation,
+    // removal and placement still needs native evidence (p7e712f1bb764e327).
     internal async Task<CallToolResult> ApplySynchronization(string instanceId, string recoveryPath,
         string designPath, string expectedRevisionToken, string operationId, CancellationToken cancellationToken,
         Func<string, CancellationToken, Task>? checkpoint = null)

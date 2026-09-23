@@ -38,7 +38,7 @@ public sealed class RecursiveBlockProposalFileTests
             json["connections"]![1]!["realization"]!.AsObject().Remove("segments");
             json["connections"]![1]!["realization"]!.AsObject().Remove("joins");
             var sent = BlockProposalFiles.Normalize(JsonSerializer.Deserialize<BlockProposal>(json.ToJsonString(), web)!);
-            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(f.Graph));
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(f.Graph, 1)); // A version 1 file as an earlier build stored it.
             var before = await RecursiveBlockFiles.ReadAsync(root, path, f.Graph.DocumentId);
             Assert.AreEqual(1, before.StoredSchemaVersion);
             var saved = await BlockProposalFiles.PublishAsync(root, path, f.Graph.DocumentId, before.ContentSha256, sent, state);
@@ -64,7 +64,7 @@ public sealed class RecursiveBlockProposalFileTests
         try
         {
             var f = RecursiveBlockProposalTests.Fixture(); string path = Path.Combine(root, "diagram.xml"), state = Path.Combine(root, "state");
-            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(f.Graph));
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(f.Graph, 1)); // A version 1 file as an earlier build stored it.
             var before = await RecursiveBlockFiles.ReadAsync(root, path, f.Graph.DocumentId);
             var saved = await BlockProposalFiles.PublishAsync(root, path, f.Graph.DocumentId, before.ContentSha256, f.Proposal, state);
             Assert.IsTrue(saved.Added); Assert.AreEqual(f.Graph.SelectedRoot, saved.Snapshot.Graph.SelectedRoot);

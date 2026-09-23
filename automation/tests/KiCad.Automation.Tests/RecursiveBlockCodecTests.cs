@@ -44,7 +44,8 @@ public sealed class RecursiveBlockCodecTests
     [DataRow("unknown-root-field")]
     [DataRow("unknown-nested-field")]
     // A schema 1 exchange (the native editor of this build) cannot carry any schema 2 field; each is refused
-    // as the unsupported field it is for that version. The conversion receipt stays refused in schema 2 too.
+    // as the unsupported field it is for that version. The flat-diagram conversion receipt is refused in every
+    // schema: flat diagrams are discarded, not converted.
     [DataRow("v2-interface-domain")]
     [DataRow("v2-interface-direction")]
     [DataRow("v2-level-presentation")]

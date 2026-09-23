@@ -21,7 +21,8 @@ public sealed class BlockProposalInterruptionTests
             var fixture = RecursiveBlockProposalTests.Fixture();
             var proposal = BlockProposalFiles.Normalize(fixture.Proposal);
             string source = Path.Combine(root, "diagram.xml"), state = Path.Combine(root, "state");
-            string before = RecursiveBlockGraphXml.Write(fixture.Graph);
+            // A version 1 file as an earlier build stored it, so the publication is its first changed write (R4).
+            string before = RecursiveBlockGraphXml.Write(fixture.Graph, 1);
             await File.WriteAllTextAsync(source, before);
             string request = Path.Combine(root, "proposal.json"), marker = Path.Combine(root, "paused.json");
             Guid operation = Guid.NewGuid();
@@ -59,6 +60,7 @@ public sealed class BlockProposalInterruptionTests
                 _ => BlockProposalRecoveryDisposition.CompletedPreviously
             };
             Assert.AreEqual(expected, observed.Disposition);
+            Assert.AreEqual(0, observed.UpgradedFromSchemaVersion, "Inspection reports what exists; it writes and upgrades nothing.");
             var recovered = await BlockProposalRecovery.ResumeAsync(root, source, fixture.Graph.DocumentId, operation, state);
             Assert.AreEqual(BlockProposalRecoveryDisposition.CompletedPreviously, recovered.Disposition);
             Assert.AreEqual(BlockProposalOperationStage.Published, recovered.Receipt.Stage);
@@ -67,6 +69,9 @@ public sealed class BlockProposalInterruptionTests
             Assert.AreEqual(fixture.Graph.SelectedRoot, graph.SelectedRoot);
             var second = await BlockProposalRecovery.ResumeAsync(root, source, fixture.Graph.DocumentId, operation, state);
             Assert.AreEqual(recovered.Receipt, second.Receipt);
+            // The completed publication reports the version 1 to 2 upgrade its retained preimage proves, on every resume.
+            Assert.IsNotNull(recovered.Retained); Assert.AreEqual(before, await File.ReadAllTextAsync(recovered.Retained.Path));
+            Assert.AreEqual(1, recovered.UpgradedFromSchemaVersion); Assert.AreEqual(1, second.UpgradedFromSchemaVersion);
             Assert.AreEqual(RecursiveBlockGraphXml.Write(graph, 2), await File.ReadAllTextAsync(source), "R4: the publication stores schema 2.");
         }
         finally { Directory.Delete(root, true); }

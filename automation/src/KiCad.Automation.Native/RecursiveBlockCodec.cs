@@ -687,12 +687,14 @@ public static class RecursiveBlockCodec
         .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
     ];
 
-    // Schema 2 fields this build still neither reads nor writes, even in a schema 2 exchange: the
-    // flat-diagram conversion receipt (its own lane 2B item) and the per-level editor's state and
-    // resolved layout, which only the schema 2 native editor (lane C) produces.
+    // Schema 2 fields this build neither reads nor writes, even in a schema 2 exchange: the flat-diagram
+    // conversion receipt and conversion request, which are never implemented because legacy flat
+    // diagrams are discarded, not converted (owner decision n9af098253fec71da), and the per-level
+    // editor's state and resolved layout, which only the schema 2 native editor (lane C) produces.
     private static readonly HashSet<FieldDescriptor> Unimplemented =
     [
         .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
+        .. Declared(P.RecursiveFileRequest.Descriptor, P.RecursiveFileRequest.MigrateFieldNumber),
         .. Declared(P.RecursiveDiagramEditorState.Descriptor, P.RecursiveDiagramEditorState.StoredSchemaVersionFieldNumber,
             P.RecursiveDiagramEditorState.SourceWritableFieldNumber, P.RecursiveDiagramEditorState.LevelDraftFieldNumber,
             P.RecursiveDiagramEditorState.LevelViewportsFieldNumber, P.RecursiveDiagramEditorState.CanvasToolFieldNumber,

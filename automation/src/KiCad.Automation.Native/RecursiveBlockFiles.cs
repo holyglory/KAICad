@@ -143,6 +143,46 @@ public static class RecursiveBlockFiles
     internal static RecursiveBlockFileSnapshot Published(RecursiveBlockFileSnapshot loaded, string path, string hash, RecursiveBlockGraph graph,
         int version) => new(path, hash, graph, version, version > loaded.StoredSchemaVersion ? loaded.StoredSchemaVersion : 0);
 
+    /// <summary>1 when a completed publication moved a version 1 diagram file to version 2, proven by
+    /// its retained preimage (exact before hash, version 1 root) and its postimage (the recorded
+    /// candidate, or the current file while it still has the after hash, with a version 2 root);
+    /// otherwise 0, also when that evidence is no longer available. Reads only.</summary>
+    internal static int UpgradedFromRetained(PublicationFileObservation? retained, string beforeSha256,
+        PublicationFileObservation current, string afterSha256, string? postimage = null)
+    {
+        if (retained is not { Status: PublicationFileStatus.Present } || retained.Sha256 != beforeSha256) return 0;
+        int before = StoredVersion(retained.Path, beforeSha256);
+        int after = postimage is not null ? StoredVersion(Encoding.UTF8.GetBytes(postimage))
+            : current.Status == PublicationFileStatus.Present && current.Sha256 == afterSha256 ? StoredVersion(current.Path, afterSha256) : 0;
+        return before == 1 && after == RecursiveBlockGraphXml.SchemaVersion ? 1 : 0;
+    }
+
+    /// <summary>The recursive-block-graph version named by the root of exactly these bytes, or 0.</summary>
+    private static int StoredVersion(string path, string expectedSha256)
+    {
+        byte[] bytes;
+        try { bytes = File.ReadAllBytes(path); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return 0; }
+        return Convert.ToHexStringLower(SHA256.HashData(bytes)) == expectedSha256 ? StoredVersion(bytes) : 0;
+    }
+
+    private static int StoredVersion(byte[] bytes)
+    {
+        try
+        {
+            using var reader = System.Xml.XmlReader.Create(new MemoryStream(bytes), new System.Xml.XmlReaderSettings
+                { DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null, IgnoreComments = true, IgnoreWhitespace = true });
+            if (reader.MoveToContent() != System.Xml.XmlNodeType.Element || reader.LocalName != "recursive-block-graph") return 0;
+            return reader.NamespaceURI switch
+            {
+                RecursiveBlockGraphXml.NamespaceV1 => 1,
+                RecursiveBlockGraphXml.Namespace => RecursiveBlockGraphXml.SchemaVersion,
+                _ => 0
+            };
+        }
+        catch (System.Xml.XmlException) { return 0; }
+    }
+
     private static async Task<RecursiveBlockFileSnapshot> PublishAsync((RecursiveBlockFileSnapshot Snapshot, byte[] Bytes) loaded,
         RecursiveBlockGraph graph, CancellationToken token)
     {

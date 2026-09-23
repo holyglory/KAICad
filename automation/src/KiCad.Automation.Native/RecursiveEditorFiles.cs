@@ -18,19 +18,24 @@ public static class RecursiveEditorFiles
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        // Actions 11-13 and 16-19 and their payloads (level draft, edit and rebase; create, migrate and
-        // discover) are declared for contract rbg-v2 but not implemented yet: they fail closed here, before
-        // any file access, exactly like the unknown values they were before the declaration. The move
-        // actions 14 and 15 and every schema 2 field of the diagram data are implemented for schema 2.
+        // Actions 11-13 and their payloads (level draft, edit and rebase) are declared for contract rbg-v2
+        // but not implemented yet: they fail closed here, before any file access, exactly like the
+        // unknown values they were before the declaration. Flat-diagram conversion (actions 17 and 18 and
+        // the migrate payload) is never implemented: legacy flat diagrams are discarded, not converted
+        // (owner decision n9af098253fec71da). The move actions 14 and 15, create and discover (16 and 19)
+        // and every schema 2 field of the diagram data are implemented for schema 2.
         if (request is null || !RecursiveBlockCodec.IsSupportedSchema(request.SchemaVersion) || !Enum.IsDefined(request.Action)
             || !Implemented(request.Action, request.SchemaVersion)
-            || request.LevelEdit is not null || request.SaveLevel is not null || request.RebaseLevel is not null
-            || request.Create is not null || request.Migrate is not null || request.Discover is not null
-            || request.Reparent is not null && request.SchemaVersion < 2
+            || request.LevelEdit is not null || request.SaveLevel is not null || request.RebaseLevel is not null || request.Migrate is not null
+            || (request.Create is not null || request.Discover is not null || request.Reparent is not null) && request.SchemaVersion < 2
             || RecursiveBlockCodec.CarriesFieldBeyondSchema(request, request.SchemaVersion)
             || !request.Equals(P.RecursiveFileRequest.Parser.ParseJson(JsonFormatter.Default.Format(request))))
             throw Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields.");
         uint schema = request.SchemaVersion;
+        // Create and discover name no existing document (contract rbg-v2 section 7): they are dispatched
+        // before any document identity is read.
+        if (request.Action is P.RecursiveFileAction.RfaCreateDiagram or P.RecursiveFileAction.RfaDiscoverDiagrams)
+            return await RecursiveDiagramFiles.ExecuteAsync(request, token);
         bool move = request.Action is P.RecursiveFileAction.RfaPrepareReparent or P.RecursiveFileAction.RfaReparentBlock;
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
@@ -42,6 +47,7 @@ public static class RecursiveEditorFiles
             || request.Action != P.RecursiveFileAction.RfaCompareDiagramHistory && request.InspectedBlock is not null
             || request.Action != P.RecursiveFileAction.RfaPrepareDiagramRestoration && request.Restoration is not null
             || !move && request.Reparent is not null
+            || request.Create is not null || request.Discover is not null
             || move && (request.Reparent is null || request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0))
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
@@ -178,7 +184,8 @@ public static class RecursiveEditorFiles
     }
 
     private static bool Implemented(P.RecursiveFileAction action, uint schema) => action <= P.RecursiveFileAction.RfaPrepareDiagramRestoration
-        || schema >= 2 && action is P.RecursiveFileAction.RfaPrepareReparent or P.RecursiveFileAction.RfaReparentBlock;
+        || schema >= 2 && action is P.RecursiveFileAction.RfaPrepareReparent or P.RecursiveFileAction.RfaReparentBlock
+            or P.RecursiveFileAction.RfaCreateDiagram or P.RecursiveFileAction.RfaDiscoverDiagrams;
 
     /// <summary>A schema 1 writer (the native editor of this build) would drop schema 2 facts it cannot
     /// represent; it may act only on the exact observed bytes, and only when they hold none.</summary>
@@ -197,7 +204,7 @@ public static class RecursiveEditorFiles
                 + "open it with an editor that speaks diagram schema 2. Nothing was read into the editor or changed.");
     }
 
-    private static P.RecursiveFileResult Describe(RecursiveBlockFileSnapshot loaded, uint schema)
+    internal static P.RecursiveFileResult Describe(RecursiveBlockFileSnapshot loaded, uint schema)
     {
         var result = new P.RecursiveFileResult
         {
@@ -216,7 +223,7 @@ public static class RecursiveEditorFiles
 
     /// <summary>Opens the file for writing without truncating it and closes it at once: bytes and
     /// modification time stay unchanged. False means Save must be disabled with an explanation.</summary>
-    private static bool Writable(string path)
+    internal static bool Writable(string path)
     {
         try
         {

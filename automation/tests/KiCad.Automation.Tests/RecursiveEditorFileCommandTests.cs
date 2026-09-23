@@ -421,14 +421,14 @@ public sealed class RecursiveEditorFileCommandTests
         {
             var v1 = LinkedDiagramFixture.Create().Graph; var v2 = SchemaTwoFixture.Create().Graph;
             string first = Path.Combine(root, "v1.xml"), second = Path.Combine(root, "v2.xml");
-            string v1Xml = RecursiveBlockGraphXml.Write(v1), v2Xml = RecursiveBlockGraphXml.Write(v2);
+            string v1Xml = RecursiveBlockGraphXml.Write(v1, 1), v2Xml = RecursiveBlockGraphXml.Write(v2);
             await File.WriteAllTextAsync(first, v1Xml); await File.WriteAllTextAsync(second, v2Xml);
             var modified = File.GetLastWriteTimeUtc(first);
             var old = await Invoke(ReadRequest(root, first, v1, 2));
             Assert.IsTrue(old.Success, old.ErrorMessage);
             Assert.AreEqual(2U, old.Document.SchemaVersion); Assert.AreEqual(2U, old.Document.Graph.SchemaVersion);
             Assert.AreEqual(1U, old.Document.StoredSchemaVersion); Assert.IsTrue(old.Document.SourceWritable); Assert.AreEqual(0U, old.UpgradedFromSchemaVersion);
-            Assert.AreEqual(v1Xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(old.Document.Graph)));
+            Assert.AreEqual(v1Xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(old.Document.Graph), 1));
             var current = await Invoke(ReadRequest(root, second, v2, 2));
             Assert.IsTrue(current.Success, current.ErrorMessage); Assert.AreEqual(2U, current.Document.StoredSchemaVersion);
             Assert.AreEqual(v2Xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(current.Document.Graph)), "Every schema 2 fact crosses the helper.");
@@ -468,7 +468,8 @@ public sealed class RecursiveEditorFileCommandTests
         try
         {
             var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
-            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph);
+            // A version 1 file as an earlier build stored it (the explicit version 1 writer).
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph, 1);
             await File.WriteAllTextAsync(path, original);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read);
             var psu = f.Blocks["PSU"];
@@ -572,7 +573,7 @@ public sealed class RecursiveEditorFileCommandTests
             }
             Assert.AreEqual(xml, await File.ReadAllTextAsync(path), "No schema 1 exchange changed the schema 2 file.");
             // On a version 1 file the schema 1 protocol still works, and still refuses schema 2 fields.
-            string plainPath = Path.Combine(root, "v1.xml"), plainXml = RecursiveBlockGraphXml.Write(plain.Graph); await File.WriteAllTextAsync(plainPath, plainXml);
+            string plainPath = Path.Combine(root, "v1.xml"), plainXml = RecursiveBlockGraphXml.Write(plain.Graph, 1); await File.WriteAllTextAsync(plainPath, plainXml);
             var one = await Invoke(ReadRequest(root, plainPath, plain.Graph, 1));
             Assert.IsTrue(one.Success, one.ErrorMessage); Assert.AreEqual(1U, one.Document.SchemaVersion); Assert.AreEqual(1U, one.Document.Graph.SchemaVersion);
             Assert.AreEqual(0U, one.Document.StoredSchemaVersion, "A schema 1 document has no stored-format field.");
@@ -607,7 +608,8 @@ public sealed class RecursiveEditorFileCommandTests
         try
         {
             var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
-            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            // A version 1 file as an earlier build stored it (the explicit version 1 writer); the move is its first changed write.
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read);
             var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"]; var telemetry = f.Blocks["Telemetry"];
             var attached = f.Links["PSU/Telemetry"].ConnectionId;
@@ -853,7 +855,7 @@ public sealed class RecursiveEditorFileCommandTests
             var record = new BlockProposalRecord(f.Proposal.Id, f.Proposal.InputId, BlockProposalFiles.Fingerprint(f.Proposal), f.Proposal.BasePath,
                 f.Proposal.Candidate, f.Proposal.Issues, prepared.Graph.Inspect(f.Proposal.Candidate).Origin);
             var graph = prepared.Graph.WithProposal(record); Guid issue = record.Issues.Single().Id;
-            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
             var system = graph.SelectedRoot; var psu = graph.Inspect(system).Children[0]; var cpu = graph.Inspect(system).Children[1];
             var telemetry = graph.Inspect(psu).Children[1]; Guid attached = graph.Inspect(psu).LocalDiagram.Connections[1].ConnectionId;
@@ -918,20 +920,34 @@ public sealed class RecursiveEditorFileCommandTests
         try
         {
             var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
-            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
             var probes = new List<(string Name, P.RecursiveFileRequest Request, string Code)>();
+            // Level edits (11-13) are not implemented yet, and flat-diagram conversion (17, 18 and its payload) never will be:
+            // legacy flat diagrams are discarded, not converted (owner decision n9af098253fec71da).
             foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareLevelEdit, P.RecursiveFileAction.RfaSaveLevel, P.RecursiveFileAction.RfaRebaseLevel,
-                P.RecursiveFileAction.RfaCreateDiagram, P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram,
-                P.RecursiveFileAction.RfaDiscoverDiagrams })
+                P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram })
             { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe, "unsupported_diagram_file_request")); }
             foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
             {
                 ("level_edit", r => r.LevelEdit = new()), ("save_level", r => r.SaveLevel = new()), ("rebase_level", r => r.RebaseLevel = new()),
-                ("create", r => r.Create = new()), ("migrate", r => r.Migrate = new()),
-                ("discover", r => r.Discover = new() { ProjectFile = Path.Combine(root, "board.kicad_pro") }),
+                ("migrate", r => r.Migrate = new()),
             })
             { var probe = read.Clone(); attach(probe); probes.Add((name, probe, "unsupported_diagram_file_request")); }
+            var conversion = read.Clone(); conversion.DocumentId = ""; conversion.Action = P.RecursiveFileAction.RfaMigrateFlatDiagram;
+            conversion.Migrate = new() { OperationId = Guid.NewGuid().ToString("D"), FlatSourcePath = Path.Combine(root, "flat.engineering.xml"),
+                RootName = "System", ImplementationName = "Initial" };
+            probes.Add(("complete conversion request", conversion, "unsupported_diagram_file_request"));
+            // Create and discover (actions 16 and 19) are implemented (RecursiveDiagramCreationTests); they name no existing
+            // document, so a document identity, and their payloads on any other action, are ambiguous (section 7).
+            foreach (var action in new[] { P.RecursiveFileAction.RfaCreateDiagram, P.RecursiveFileAction.RfaDiscoverDiagrams })
+            { var probe = read.Clone(); probe.Action = action; probes.Add((action + " with a document", probe, "ambiguous_diagram_file_request")); }
+            foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
+            {
+                ("create", r => r.Create = new()),
+                ("discover", r => r.Discover = new() { ProjectFile = Path.Combine(root, "board.kicad_pro") }),
+            })
+            { var probe = read.Clone(); attach(probe); probes.Add((name + " payload on a read", probe, "ambiguous_diagram_file_request")); }
             var stray = read.Clone(); stray.Reparent = new(); probes.Add(("reparent payload on a read", stray, "ambiguous_diagram_file_request"));
             var paged = read.Clone(); paged.Action = P.RecursiveFileAction.RfaPrepareReparent; paged.ExpectedSourceToken = loaded.SourceToken;
             paged.Reparent = new(); paged.Limit = 5; probes.Add(("paged move", paged, "ambiguous_diagram_file_request"));
@@ -953,7 +969,8 @@ public sealed class RecursiveEditorFileCommandTests
         finally { Directory.Delete(root, true); }
     }
 
-    private static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request)
+    /// <summary>Runs one request through the production helper process (<c>kicad-mcp --diagram-file</c>).</summary>
+    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request)
     {
         string? root = null;
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)

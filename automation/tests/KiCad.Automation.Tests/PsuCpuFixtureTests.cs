@@ -153,7 +153,7 @@ public sealed class PsuCpuFixtureTests
             Assert.AreEqual(text, EngineeringDesignXml.Write(EngineeringDesignXml.Read(text, []), []), name);
         }
         string blocks = PsuCpuFixture.ReadText("system.blocks.xml");
-        Assert.AreEqual(blocks, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(blocks)));
+        Assert.AreEqual(blocks, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(blocks), 1));
         foreach (var stage in Enum.GetValues<PsuCpuStage>())
         {
             var staged = PsuCpuFixture.Engineering(stage);
@@ -264,9 +264,9 @@ public sealed class PsuCpuFixtureTests
             graph.Connections(PsuCpuIds.Id(0x11, 3)).Requirements(new(PsuCpuIds.Id(0x16, 0x1d), PsuCpuIds.Id(0x17, 0x1d), PsuCpuIds.Id(0x18, 0x1d))).Requirements);
         // G-6: storage and wire codecs are lossless.
         string xml = PsuCpuFixture.ReadText("system.blocks.xml");
-        Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(xml)));
+        Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(xml), 1));
         Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(
-            P.RecursiveBlockGraphData.Parser.ParseFrom(RecursiveBlockCodec.Encode(graph).ToByteArray()))));
+            P.RecursiveBlockGraphData.Parser.ParseFrom(RecursiveBlockCodec.Encode(graph).ToByteArray())), 1));
     }
 
     [TestMethod]

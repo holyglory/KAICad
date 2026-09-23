@@ -10,12 +10,11 @@ namespace KiCad.Automation.Model;
 /// <summary>Typed revision-graph storage. Children pin exact revisions and requirement
 /// histories are explicit XML fields, never an embedded opaque native schematic.
 /// Schema 2 (contract rbg-v2 section 2.2): readers accept versions 1 and 2 by root namespace.
-/// Every diagram file write emits version 2 (R4, <c>Write(graph, SchemaVersion)</c> through the
-/// file layer), so a version 1 file keeps its exact bytes only until its first changed write.
-/// The one remaining version 1 output is <see cref="Write(RecursiveBlockGraph)"/> for a graph
-/// without schema 2 facts: the frozen PSU-CPU fixture contract (section 1.1) pins
-/// <c>system.blocks.xml</c> to <c>Write(G1)</c> in schema 1 and its parent-owned checks compare
-/// those bytes, which contradicts R4's "no v1 writer" until the integration owner resolves it.</summary>
+/// Every write emits version 2 (R4): <see cref="Write(RecursiveBlockGraph)"/> and every diagram file
+/// write, so a version 1 file keeps its exact bytes only until its first changed write. The one
+/// version 1 output is the explicit <c>Write(graph, 1)</c> for a graph without schema 2 facts, used
+/// only by the frozen PSU-CPU fixture, whose <c>system.blocks.xml</c> stays version 1 byte for byte
+/// (owner clarification n4d3b2157f0a9f98d).</summary>
 public static partial class RecursiveBlockGraphXml
 {
     public const string Namespace = "urn:kicad:automation:recursive-block-graph:2";
@@ -57,14 +56,13 @@ public static partial class RecursiveBlockGraphXml
             || graph.ConnectionArchives.Any(a => DiagramConnectionArchiveXml.RequiredSchemaVersion(a) > 1) ? 2 : 1;
     }
 
-    /// <summary>Canonical text in the lowest schema version that stores every fact of the graph. This
-    /// is not how diagram files are written: every file writer uses <c>Write(graph, SchemaVersion)</c>.
-    /// Version 1 output here exists only for the frozen PSU-CPU fixture (see the class summary).</summary>
-    public static string Write(RecursiveBlockGraph graph) => Write(graph, 1);
+    /// <summary>Canonical schema 2 text (R4), so <c>Write(Read(x)) == x</c> for every canonical version 2
+    /// file (R5).</summary>
+    public static string Write(RecursiveBlockGraph graph) => Write(graph, SchemaVersion);
 
-    /// <summary>Writes at least <paramref name="minimumSchemaVersion"/>; diagram file writers pass
-    /// <see cref="SchemaVersion"/> (contract rbg-v2 R4), which also makes <c>Write(Read(x), 2) == x</c>
-    /// for every canonical version 2 file (R5).</summary>
+    /// <summary>Writes at least <paramref name="minimumSchemaVersion"/>. Diagram writers use schema 2;
+    /// <c>1</c> keeps a graph without schema 2 facts in version 1 and is used only by the frozen PSU-CPU
+    /// fixture (see the class summary).</summary>
     public static string Write(RecursiveBlockGraph graph, int minimumSchemaVersion)
     {
         ArgumentNullException.ThrowIfNull(graph);
@@ -93,8 +91,10 @@ public static partial class RecursiveBlockGraphXml
             if (version == 0) throw Invalid("Use the supported recursive block graph root and namespace.");
             new XDocument(root).Validate(Schema.Value, null);
             var format = new Format(version);
+            // Legacy flat diagrams are discarded, never converted (owner decision n9af098253fec71da), so no
+            // build writes a conversion receipt; a file claiming one is refused rather than silently dropped.
             if (root.Element(format.Ns + "migration") is not null)
-                throw Invalid("This diagram carries a flat-diagram conversion receipt, which this build cannot keep yet; nothing was changed.");
+                throw Invalid("This diagram carries a flat-diagram conversion receipt; flat diagrams are not converted, so this file is not supported and nothing was changed.");
             return (format.Read(root), version);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)

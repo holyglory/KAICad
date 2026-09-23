@@ -82,7 +82,7 @@ internal static class PsuCpuFixture
     private static readonly Lazy<EngineeringDesign> flat = new(() => EngineeringDesignXml.Read(
         Checked("flat-structure.engineering.xml", EngineeringDesignXml.Write(PsuCpuFixtureBuilder.FlatStructure(Parts()), [])), []));
     private static readonly Lazy<RecursiveBlockGraph> graph = new(() => RecursiveBlockGraphXml.Read(
-        Checked("system.blocks.xml", RecursiveBlockGraphXml.Write(PsuCpuFixtureBuilder.Graph()))));
+        Checked("system.blocks.xml", RecursiveBlockGraphXml.Write(PsuCpuFixtureBuilder.Graph(), 1))));
     private static readonly Lazy<PsuCpuExpectedNative> expectedNative = new(ReadExpectedNative);
     private static readonly Lazy<PsuCpuExpectedRealization> expectedRealization = new(ReadExpectedRealization);
     private static readonly Lazy<PsuCpuExpectedMigration> expectedMigration = new(ReadExpectedMigration);

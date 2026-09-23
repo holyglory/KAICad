@@ -147,13 +147,15 @@ public sealed class RecursiveBlockGraphV2XmlTests
     public void VersionOneDocumentsReadNeutrallyAndTheFileFormatStoresEveryVersionOneFactAsSchemaTwo()
     {
         var linked = LinkedDiagramFixture.Create(); var graph = linked.Graph;
-        string v1 = RecursiveBlockGraphXml.Write(graph);
+        string v1 = RecursiveBlockGraphXml.Write(graph, 1);
         Assert.AreEqual(1, RecursiveBlockGraphXml.RequiredSchemaVersion(graph));
-        // The fixture-bound writer keeps version 1 text for a graph without schema 2 facts (PSU-CPU fixture contract section 1.1).
+        // Only the explicit version 1 writer (used by the frozen PSU-CPU fixture) keeps version 1 text for a graph
+        // without schema 2 facts; the plain writer emits schema 2 like every diagram file write (R4).
         Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.NamespaceV1), XElement.Parse(v1).Name);
+        Assert.AreEqual(Ns + "recursive-block-graph", XElement.Parse(RecursiveBlockGraphXml.Write(graph)).Name);
         var (read, version) = RecursiveBlockGraphXml.ReadVersioned(v1);
-        Assert.AreEqual(1, version); Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(read));
-        Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(read))));
+        Assert.AreEqual(1, version); Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(read, 1));
+        Assert.AreEqual(v1, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(RecursiveBlockCodec.Encode(read)), 1));
         // R2: a version 1 document reads with neutral schema 2 values.
         foreach (var revision in read.Revisions)
         {
@@ -265,8 +267,10 @@ public sealed class RecursiveBlockGraphV2XmlTests
     }
 
     [TestMethod]
-    public void ConversionReceiptsAreRefusedUntilThisBuildCanKeepThem()
+    public void FlatConversionReceiptsAreAlwaysRefusedBecauseFlatDiagramsAreNotConverted()
     {
+        // Owner decision n9af098253fec71da: legacy flat diagrams are discarded, not converted, so no build
+        // writes a receipt and a file claiming one is refused instead of being silently dropped on save.
         var f = SchemaTwoFixture.Create(); var graph = f.Graph;
         var root = XElement.Parse(RecursiveBlockGraphXml.Write(graph), LoadOptions.PreserveWhitespace);
         string op = Guid.NewGuid().ToString("D"), sha = new('a', 64);
@@ -285,7 +289,7 @@ public sealed class RecursiveBlockGraphV2XmlTests
         var set = RecursiveBlockGraphXml.CreateSchemaSet();
         new XDocument(root).Validate(set, null); // The receipt itself is valid schema 2 text...
         var error = Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockGraphXml.Read(root.ToString(SaveOptions.DisableFormatting)));
-        Assert.AreEqual("invalid_recursive_block_graph_xml", error.Code); // ...but this build would drop it, so it refuses the file.
+        Assert.AreEqual("invalid_recursive_block_graph_xml", error.Code); // ...but no build keeps one, so the file is refused.
         StringAssert.Contains(error.Message, "conversion receipt");
     }
 }

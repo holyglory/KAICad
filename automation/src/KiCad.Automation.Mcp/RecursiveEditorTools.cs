@@ -88,7 +88,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         var result = await BlockProposalRecovery.ResumeAsync(repositoryRoot, sourcePath, Identity(documentId), operationId,
             registry.StateDirectory, cancellationToken);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recovery = result });
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recovery = result }, result.UpgradedFromSchemaVersion);
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_retained", ReadOnly = true),
@@ -149,8 +149,10 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         var inspection = resume ? await RefinementInputRecovery.ResumeAsync(repositoryRoot, sourcePath, Identity(documentId), inputId,
             registry.StateDirectory, cancellationToken) : await RefinementInputRecovery.InspectAsync(repositoryRoot, sourcePath, Identity(documentId), inputId,
             registry.StateDirectory, cancellationToken);
-        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, inputId, inspection },
-            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } });
+        // A completed resume reports the version 1 to 2 upgrade its retained preimage proves (contract rbg-v2 section 8).
+        var data = Upgraded(JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, inputId, inspection },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }),
+            inspection.UpgradedFromSchemaVersion);
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
@@ -596,6 +598,44 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     private static Guid Identity(string value) => Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty && id.ToString("D") == value
         ? id : throw new AutomationException("invalid_diagram_identity", "Specify exact canonical non-empty diagram UUIDs.");
 
+    [McpServerTool(Name = "kicad_diagram_create"),
+     KiCadCapability("structural-diagram", "compiled-mcp", "instance epoch, new diagram path, operation ID"),
+     Description("Create a new system diagram file whose root block is only its caption (rootName, for example the product or board name), with one first implementation (\"Initial\" unless named). Requirement text, interfaces, blocks and connections are added later, when they are known. The project convention is <project>.system-diagram.xml next to the .kicad_pro file; kicad_diagram_discover reports that suggested path. The path must be an absolute .xml path inside the repository, in an existing folder, without filesystem links. An existing file is never overwritten: repeating the same operationId returns the diagram it created with created=false, and any other existing file is refused with diagram_file_exists; an unwritable folder is refused with diagram_file_read_only. Requires the observed native instance epoch. It opens no window, starts no agent and touches no schematic or PCB file.")]
+    public Task<CallToolResult> CreateDiagram(string instanceId, string expectedInstanceEpoch, string repositoryRoot, string sourcePath,
+        string rootName, Guid operationId, string actor, CancellationToken cancellationToken, string implementationName = "Initial") => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor))
+            throw new AutomationException("invalid_diagram_create_request", "Provide a stable operation UUID and the agent's name.");
+        var origin = new DiagramRevisionOriginData { Kind = DiagramActorKind.DakAgent, Actor = actor, Summary = "Create diagram",
+            RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) };
+        origin.InputIds.Add(operationId.ToString("D"));
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+            Action = RecursiveFileAction.RfaCreateDiagram, RepositoryRoot = repositoryRoot ?? "", SourcePath = sourcePath ?? "",
+            Create = new() { OperationId = operationId.ToString("D"), RootName = rootName ?? "", ImplementationName = implementationName ?? "", Origin = origin } },
+            cancellationToken);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, operationId, documentId = result.Document.DocumentId,
+            sourcePath = result.Document.SourcePath, sourceToken = result.SourceToken, created = result.Created,
+            selectedRoot = RecursiveBlockCodec.DecodeSelection(result.Document.Graph.SelectedRoot),
+            storedSchemaVersion = (int)result.Document.StoredSchemaVersion });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_discover", ReadOnly = true),
+     KiCadCapability("structural-diagram", "compiled-mcp", "explicit project file"),
+     Description("List the system diagrams that belong to one KiCad project, recognised by content among the project folder's top-level XML files: each with its path, status (DDS_READY, DDS_READ_ONLY, DDS_TOO_NEW, DDS_INVALID or DDS_UNREADABLE), document ID, stored format, root caption and source token. Also returns the repository root to create in, the suggested new diagram path <project>.system-diagram.xml and whether that path is taken, and whether the listing was truncated at 256 files. Other XML documents, including legacy flat structural diagrams, are not diagrams and are not listed. Never writes.")]
+    public Task<CallToolResult> DiscoverDiagrams(string instanceId, string projectFile, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+            Action = RecursiveFileAction.RfaDiscoverDiagrams, Discover = new() { ProjectFile = projectFile ?? "" } }, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch,
+            discovery = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.Discovery)) });
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
     [McpServerTool(Name = "kicad_diagram_open"),
      Description("Open a native recursive diagram editor for one exact diagram document and attached KiCad instance. The compiled companion validates XML before displaying it. The returned ready/busy/error state is authoritative; opening is not proof of rendering, saving, or native electrical realization. Existing dirty windows are retained. The native editor in this build keeps only diagram schema 1 content, so a document with schema 2 facts (layout, realizations, domains, directions or harness targets) is refused with unsupported_diagram_file_request and nothing is opened or changed; read it with kicad_diagram_read.")]
     public Task<CallToolResult> Open(string instanceId, string repositoryRoot, string sourcePath,
@@ -645,7 +685,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         {
             string code = error is AutomationException a ? a.Code : error is NativeApiException n ? "native_status_" + n.Status : "diagram_file_error";
             var data = JsonSerializer.SerializeToElement(new { code, message = error.Message,
-                details = DiagramErrorDetails.Of(error).Select(d => new { kind = d.Kind, scopeBlockId = d.ScopeBlockId, objectId = d.ObjectId, message = d.Message }) });
+                details = (error is AutomationException { Details: var causes } ? causes : []).Select(d => new { kind = d.Kind, scopeBlockId = d.ScopeBlockId,
+                    objectId = d.ObjectId, message = d.Message }) });
             return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
         }
     }

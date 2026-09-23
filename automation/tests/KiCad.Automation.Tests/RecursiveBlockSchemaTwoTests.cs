@@ -173,7 +173,7 @@ public sealed class RecursiveBlockSchemaTwoTests
         var error = Assert.ThrowsExactly<AutomationException>(() => graph.SaveDraft(root, [root, psu, power], draft,
             Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid(), Guid.NewGuid()], Origin));
         Assert.AreEqual("boundary_interface_in_use", error.Code);
-        var details = DiagramErrorDetails.Of(error);
+        var details = error.Details;
         Assert.HasCount(2, details);
         Assert.IsTrue(details.All(d => d.ScopeBlockId == psu.BlockId));
         CollectionAssert.AreEquivalent(new[] { "connection", "interface_realization" }, details.Select(d => d.Kind).ToArray());
@@ -187,7 +187,7 @@ public sealed class RecursiveBlockSchemaTwoTests
             graph.Revisions.Select(r => r.Selection == choice ? r with { Diagram = BlockLocalDiagram.Empty } : r), graph.RequirementHistories, graph.ConnectionArchives);
         var selection = Assert.ThrowsExactly<AutomationException>(() => bare.Select(root, [root, cpu], choice, [Guid.NewGuid()], Origin));
         Assert.AreEqual("boundary_interface_in_use", selection.Code);
-        Assert.IsTrue(DiagramErrorDetails.Of(selection).Any(d => d.ObjectId == f.Linked.Links["System/Power"].ConnectionId && d.ScopeBlockId == root.BlockId));
+        Assert.IsTrue(selection.Details.Any(d => d.ObjectId == f.Linked.Links["System/Power"].ConnectionId && d.ScopeBlockId == root.BlockId));
     }
 
     [TestMethod]

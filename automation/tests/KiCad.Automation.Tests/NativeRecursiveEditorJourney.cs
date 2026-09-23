@@ -25,7 +25,8 @@ public sealed partial class NativeSessionTests
         graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], definitionDraft, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
         string project = Path.GetDirectoryName((await native.HandshakeAsync(token)).ProjectPath)!;
         string source = Path.Combine(project, "system.design.xml");
-        await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(graph), token);
+        // A version 1 file as an earlier build stored it (the explicit version 1 writer); the first agent write upgrades it (R4).
+        await File.WriteAllTextAsync(source, RecursiveBlockGraphXml.Write(graph, 1), token);
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
         string stateRoot = Directory.CreateTempSubdirectory("kicad-recursive-mcp-").FullName;
         var interactionFailures = new List<Exception>();
@@ -39,6 +40,9 @@ public sealed partial class NativeSessionTests
             var attach = await client.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
                 { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
             Assert.IsFalse(attach.IsError == true);
+            // Creating a new system diagram next to this session's project through the same production MCP server and
+            // live instance (contract rbg-v2 section 8); the created diagram is opened in the real editor at the end.
+            var createdDiagram = await VerifyDiagramCreationOverMcp(client, native, source, graph, instanceId, evidence, token);
             var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project,
                 ["sourcePath"] = source, ["documentId"] = graph.DocumentId.ToString("D") };
             var savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
@@ -69,7 +73,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(assetResult.IsError == true);
             var capturedAsset = JsonSerializer.SerializeToElement(assetResult).GetProperty("structuredContent").GetProperty("attachment")
                 .Deserialize<DiagramRefinementAttachment>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
-            var originalInput = RecursiveBlockRefinementInputTests.Input(graph) with { Attachments = [capturedAsset] };
+            var originalInput = RecursiveBlockRefinementInputTests.Input(graph, 1) with { Attachments = [capturedAsset] };
             var inputArguments = new Dictionary<string, object?>(arguments)
             {
                 ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(),
@@ -79,9 +83,13 @@ public sealed partial class NativeSessionTests
             if (inputResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-refinement-input-error.json"), JsonSerializer.Serialize(inputResult), token);
             Assert.IsFalse(inputResult.IsError == true);
             Assert.IsTrue(JsonSerializer.SerializeToElement(inputResult).GetProperty("structuredContent").GetProperty("added").GetBoolean());
+            // R4: recording the input is this version 1 file's first changed write; it stores schema 2 and reports the upgrade.
+            Assert.AreEqual(1, JsonSerializer.SerializeToElement(inputResult).GetProperty("structuredContent").GetProperty("upgradedFromSchemaVersion").GetInt32());
             var repeatedInput = await client.CallToolAsync("kicad_diagram_refinement_input_record", inputArguments, cancellationToken: token);
             Assert.IsFalse(repeatedInput.IsError == true);
             Assert.IsFalse(JsonSerializer.SerializeToElement(repeatedInput).GetProperty("structuredContent").GetProperty("added").GetBoolean());
+            Assert.IsFalse(JsonSerializer.SerializeToElement(repeatedInput).GetProperty("structuredContent").TryGetProperty("upgradedFromSchemaVersion", out _),
+                "An observation writes nothing, so it upgrades nothing.");
             graph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.IsTrue(originalInput.SameContents(graph.RefinementInput(originalInput.Id)));
             savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
@@ -101,11 +109,15 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(publicationState.IsError == true);
             Assert.AreEqual("CompletedPreviously", JsonSerializer.SerializeToElement(publicationState).GetProperty("structuredContent")
                 .GetProperty("inspection").GetProperty("disposition").GetString());
+            Assert.IsFalse(JsonSerializer.SerializeToElement(publicationState).GetProperty("structuredContent").TryGetProperty("upgradedFromSchemaVersion", out _),
+                "Inspection never writes, so it reports no upgrade.");
             publicationArguments["resume"] = true;
             var resumedPublication = await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token);
             Assert.IsFalse(resumedPublication.IsError == true);
             Assert.AreEqual("CompletedPreviously", JsonSerializer.SerializeToElement(resumedPublication).GetProperty("structuredContent")
                 .GetProperty("inspection").GetProperty("disposition").GetString());
+            // The resumed publication reports the version 1 to 2 upgrade its retained preimage proves.
+            Assert.AreEqual(1, JsonSerializer.SerializeToElement(resumedPublication).GetProperty("structuredContent").GetProperty("upgradedFromSchemaVersion").GetInt32());
             publicationArguments["inputId"] = Guid.NewGuid();
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_refinement_publication", publicationArguments, cancellationToken: token)).IsError == true);
             publicationArguments["inputId"] = originalInput.Id; publicationArguments["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
@@ -1240,6 +1252,7 @@ public sealed partial class NativeSessionTests
             selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
             await RejectedSelection("reselected-target", "proposal_target_changed");
             Key("w", control: true);
+            await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
         }
         finally { Directory.Delete(stateRoot, true); }
         if (interactionFailures.Count != 0) throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
@@ -1282,7 +1295,7 @@ public sealed partial class NativeSessionTests
         // A changed write (here a harness target, which only schema 2 can hold) upgrades a version 1 file and reports the upgrade.
         var plain = LinkedDiagramFixture.Create().Graph;
         string upgradedPath = Path.Combine(project, "system.upgrade.design.xml");
-        await File.WriteAllTextAsync(upgradedPath, RecursiveBlockGraphXml.Write(plain), token);
+        await File.WriteAllTextAsync(upgradedPath, RecursiveBlockGraphXml.Write(plain, 1), token); // A version 1 file as an earlier build stored it.
         var plainTarget = new Dictionary<string, object?>(target) { ["sourcePath"] = upgradedPath, ["documentId"] = plain.DocumentId.ToString("D") };
         var before = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", plainTarget, cancellationToken: token)).GetProperty("structuredContent");
         Assert.AreEqual(1, before.GetProperty("storedSchemaVersion").GetInt32());
@@ -1305,6 +1318,33 @@ public sealed partial class NativeSessionTests
         var after = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", plainTarget, cancellationToken: token)).GetProperty("structuredContent");
         Assert.AreEqual(2, after.GetProperty("storedSchemaVersion").GetInt32());
         Assert.AreEqual("PAK_HARNESS", after.GetProperty("block").GetProperty("physicalAllocation").GetProperty("targets")[0].GetProperty("kind").GetString());
+        // R4 also for a write version 1 could hold: a definition choice on a fresh version 1 copy stores schema 2 and reports the upgrade.
+        string definedPath = Path.Combine(project, "system.upgrade-definition.design.xml"), definedV1 = RecursiveBlockGraphXml.Write(plain, 1);
+        await File.WriteAllTextAsync(definedPath, definedV1, token);
+        Assert.AreEqual(1, RecursiveBlockGraphXml.RequiredSchemaVersion(plain), "The fixture holds no schema 2 fact.");
+        var definedTarget = new Dictionary<string, object?>(target) { ["sourcePath"] = definedPath, ["documentId"] = plain.DocumentId.ToString("D") };
+        var definedBefore = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", definedTarget, cancellationToken: token)).GetProperty("structuredContent");
+        Assert.AreEqual(1, definedBefore.GetProperty("storedSchemaVersion").GetInt32());
+        var definition = await client.CallToolAsync("kicad_diagram_definition_set", new Dictionary<string, object?>(definedTarget)
+        {
+            ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = definedBefore.GetProperty("sourceToken").GetString(),
+            ["expectedRoot"] = plain.SelectedRoot, ["blockPath"] = new[] { plain.SelectedRoot },
+            ["definition"] = JsonSerializer.SerializeToElement(RecursiveBlockDefinitionTests.Partial(), new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            ["operationId"] = Guid.NewGuid(), ["actor"] = "Version 1 definition agent fixture"
+        }, cancellationToken: token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-schema-two-definition-upgrade.json"), JsonSerializer.Serialize(definition), token);
+        Assert.IsFalse(definition.IsError == true);
+        var definedResult = JsonSerializer.SerializeToElement(definition).GetProperty("structuredContent");
+        Assert.IsTrue(definedResult.GetProperty("changed").GetBoolean());
+        Assert.AreEqual(1, definedResult.GetProperty("upgradedFromSchemaVersion").GetInt32(), "A change version 1 could hold still upgrades the file.");
+        string definedXml = await File.ReadAllTextAsync(definedPath, token);
+        var (definedGraph, definedVersion) = RecursiveBlockGraphXml.ReadVersioned(definedXml);
+        Assert.AreEqual(2, definedVersion);
+        Assert.AreEqual(1, RecursiveBlockGraphXml.RequiredSchemaVersion(definedGraph), "The stored content itself still needs no schema 2 fact.");
+        Assert.IsTrue(RecursiveBlockDefinitionTests.Partial().SameContents(definedGraph.Inspect(definedGraph.SelectedRoot).EffectiveDefinition));
+        var definedAfter = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", definedTarget, cancellationToken: token)).GetProperty("structuredContent");
+        Assert.AreEqual(2, definedAfter.GetProperty("storedSchemaVersion").GetInt32());
+        Assert.AreEqual(definedResult.GetProperty("sourceToken").GetString(), definedAfter.GetProperty("sourceToken").GetString());
         // The schema 1 native editor is never opened on a schema 2 document: nothing is shown, dropped or written.
         foreach (var (path, documentId, bytes) in new[] { (layered, f.Graph.DocumentId, layeredXml), (upgradedPath, plain.DocumentId, upgradedXml) })
         {
@@ -1319,6 +1359,193 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(string.IsNullOrEmpty(closed.Message));
             Assert.AreEqual(bytes, await File.ReadAllTextAsync(path, token));
         }
+    }
+
+    /// <summary>The diagram <see cref="VerifyDiagramCreationOverMcp"/> created, for opening it in the editor.</summary>
+    private sealed record CreatedDiagram(string RepositoryRoot, string Path, string DocumentId, string SourceToken, BlockSelection Root, string Caption);
+
+    /// <summary>Creating a new system diagram next to the live session's project through the production MCP server
+    /// (contract rbg-v2 section 8, owner decision n98a3f3c41084f0ed): discovery finds the project's existing diagram and the
+    /// conventional new path; create writes a root that is only its caption, once; a retry observes it; and an existing file,
+    /// bad paths, a blank caption, a changed epoch and an unwritable folder are refused without writing any diagram file.</summary>
+    private static async Task<CreatedDiagram> VerifyDiagramCreationOverMcp(McpClient client, NativeClient native, string existingSource,
+        RecursiveBlockGraph existing, string instanceId, string evidence, CancellationToken token)
+    {
+        var session = await native.HandshakeAsync(token);
+        string projectFile = session.ProjectPath, directory = Path.GetDirectoryName(projectFile)!, epoch = session.Epoch;
+        int step = 0;
+        async Task<JsonElement> Call(string tool, Dictionary<string, object?> arguments, bool expectError = false)
+        {
+            var result = await client.CallToolAsync(tool, arguments, cancellationToken: token);
+            string text = string.Concat(result.Content.OfType<ModelContextProtocol.Protocol.TextContentBlock>().Select(c => c.Text));
+            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-diagram-create-{++step:D2}-{tool}.json"), text, token);
+            Assert.AreEqual(expectError, result.IsError == true, tool + ": " + text);
+            return JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+        }
+        // Diagram files and any staged or refused creation file; the native session's own project, settings and lock files are not diagrams.
+        string locked = Path.Combine(directory, "locked-diagrams");
+        Dictionary<string, byte[]> Diagrams() => Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
+            .Where(f => Path.GetFileName(f).Contains(".xml", StringComparison.Ordinal) || Path.GetFileName(f).Contains("system-diagram", StringComparison.Ordinal))
+            .Concat(Directory.Exists(locked) ? Directory.EnumerateFiles(locked, "*", SearchOption.AllDirectories) : [])
+            .ToDictionary(f => f, File.ReadAllBytes);
+        void Unchanged(Dictionary<string, byte[]> before, string name)
+        {
+            var after = Diagrams();
+            CollectionAssert.AreEquivalent(before.Keys.ToArray(), after.Keys.ToArray(), name + ": no diagram file may appear or disappear");
+            foreach (var (path, bytes) in before) CollectionAssert.AreEqual(bytes, after[path], name + ": " + path);
+        }
+        async Task Refused(string name, Dictionary<string, object?> arguments, string code)
+        {
+            var before = Diagrams();
+            var error = await Call("kicad_diagram_create", arguments, expectError: true);
+            Assert.AreEqual(code, error.GetProperty("code").GetString(), name);
+            Unchanged(before, name);
+        }
+
+        // Opening the project finds its existing diagram by content and suggests the conventional new path.
+        var discovered = (await Call("kicad_diagram_discover", new() { ["instanceId"] = instanceId, ["projectFile"] = projectFile })).GetProperty("discovery");
+        string target = Path.Combine(directory, Path.GetFileNameWithoutExtension(projectFile) + ".system-diagram.xml");
+        Assert.AreEqual(target, discovered.GetProperty("suggestedNewPath").GetString());
+        Assert.IsFalse(discovered.TryGetProperty("suggestedPathExists", out _), "Protobuf JSON omits false: the conventional path is free.");
+        string root = discovered.GetProperty("repositoryRoot").GetString()!;
+        Assert.IsTrue(directory == root || directory.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal), root);
+        var present = discovered.GetProperty("diagrams").EnumerateArray().Single(d => d.GetProperty("path").GetString() == existingSource);
+        Assert.AreEqual("DDS_READY", present.GetProperty("status").GetString());
+        Assert.AreEqual(existing.DocumentId.ToString("D"), present.GetProperty("documentId").GetString());
+        Assert.AreEqual(existing.Inspect(existing.SelectedRoot).Name, present.GetProperty("rootName").GetString());
+        Assert.IsFalse(present.TryGetProperty("conventional", out _));
+        Assert.IsFalse(discovered.TryGetProperty("flatDiagrams", out _), "Legacy flat diagrams are neither listed nor converted.");
+
+        // Create: the new diagram's root is only its caption, stored in format 2.
+        const string caption = "Fixture board";
+        Guid operation = Guid.NewGuid();
+        Dictionary<string, object?> Creation(Guid op, string path, string rootName = caption) => new()
+        {
+            ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = epoch, ["repositoryRoot"] = root, ["sourcePath"] = path,
+            ["rootName"] = rootName, ["operationId"] = op, ["actor"] = "Diagram creation journey"
+        };
+        var created = await Call("kicad_diagram_create", Creation(operation, target));
+        Assert.IsTrue(created.GetProperty("created").GetBoolean());
+        Assert.AreEqual(target, created.GetProperty("sourcePath").GetString());
+        Assert.AreEqual(2, created.GetProperty("storedSchemaVersion").GetInt32());
+        string documentId = created.GetProperty("documentId").GetString()!, createdToken = created.GetProperty("sourceToken").GetString()!;
+        Assert.AreEqual(DiagramIdentity.Derive(operation, "document").ToString("D"), documentId);
+        byte[] stored = await File.ReadAllBytesAsync(target, token);
+        Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(stored)), createdToken);
+        Assert.IsFalse(Directory.EnumerateFiles(directory, "*.initial-*").Any(), "The staged file is moved into place, never left behind.");
+        var (graph, version) = RecursiveBlockGraphXml.ReadVersioned(System.Text.Encoding.UTF8.GetString(stored));
+        Assert.AreEqual(2, version);
+        var rootRevision = graph.Inspect(graph.SelectedRoot);
+        Assert.AreEqual(DiagramIdentity.Derive(operation, "root-block"), graph.SelectedRoot.BlockId);
+        Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), created.GetProperty("selectedRoot").GetProperty("blockId").GetString());
+        Assert.AreEqual("Initial", graph.States.Single().Name);
+        Assert.AreEqual(caption, rootRevision.Name); Assert.IsNull(rootRevision.ParentRevisionId); Assert.IsEmpty(rootRevision.Children);
+        Assert.IsTrue(rootRevision.LocalDiagram.SameContents(BlockLocalDiagram.Empty), "No interfaces, connections, notes or layout.");
+        Assert.IsNull(rootRevision.Definition); Assert.IsNull(rootRevision.ComponentBindings); Assert.IsNull(rootRevision.PhysicalAllocation);
+        Assert.AreEqual(DiagramRequirements.Empty, graph.Requirements(graph.SelectedRoot).Requirements, "The caption is the only definition so far.");
+        Assert.HasCount(1, graph.Revisions); Assert.HasCount(1, graph.RequirementHistories);
+        Assert.AreEqual(RequirementRevisionActor.Agent, rootRevision.Origin.ActorKind);
+        Assert.AreEqual("Diagram creation journey", rootRevision.Origin.Actor);
+        CollectionAssert.Contains(rootRevision.Origin.InputIds.ToArray(), operation);
+
+        // Agents read it like any other diagram: a caption with nothing else defined yet.
+        var read = await Call("kicad_diagram_read", new() { ["instanceId"] = instanceId, ["repositoryRoot"] = root, ["sourcePath"] = target, ["documentId"] = documentId });
+        Assert.AreEqual(2, read.GetProperty("storedSchemaVersion").GetInt32()); Assert.IsTrue(read.GetProperty("sourceWritable").GetBoolean());
+        Assert.AreEqual(caption, read.GetProperty("block").GetProperty("name").GetString());
+        Assert.AreEqual(0, read.GetProperty("children").GetArrayLength()); Assert.AreEqual(0, read.GetProperty("connections").GetArrayLength());
+        Assert.IsFalse(read.GetProperty("block").TryGetProperty("definition", out _));
+        if (read.GetProperty("requirements").TryGetProperty("fields", out var fields))
+            Assert.IsFalse(fields.EnumerateObject().Any(), "No requirement text is stated: " + fields.GetRawText());
+
+        // Repeating the operation observes the same diagram; nothing else is ever overwritten or created.
+        var before = Diagrams();
+        var repeated = await Call("kicad_diagram_create", Creation(operation, target));
+        Assert.IsFalse(repeated.GetProperty("created").GetBoolean());
+        Assert.AreEqual(createdToken, repeated.GetProperty("sourceToken").GetString()); Assert.AreEqual(documentId, repeated.GetProperty("documentId").GetString());
+        Unchanged(before, "repeated create");
+        var existingFile = await Call("kicad_diagram_create", Creation(Guid.NewGuid(), target), expectError: true);
+        Assert.AreEqual("diagram_file_exists", existingFile.GetProperty("code").GetString());
+        Assert.AreEqual(documentId, existingFile.GetProperty("details")[0].GetProperty("objectId").GetString());
+        Unchanged(before, "create over an existing diagram");
+        await Refused("create over another existing diagram", Creation(Guid.NewGuid(), existingSource), "diagram_file_exists");
+        await Refused("relative path", Creation(Guid.NewGuid(), "second.system-diagram.xml"), "invalid_diagram_path");
+        await Refused("not an XML path", Creation(Guid.NewGuid(), Path.Combine(directory, "second.system-diagram.json")), "invalid_diagram_path");
+        await Refused("outside the repository", Creation(Guid.NewGuid(), Path.Combine(Path.GetDirectoryName(root)!, "escaped.system-diagram.xml")), "invalid_diagram_path");
+        await Refused("missing folder", Creation(Guid.NewGuid(), Path.Combine(directory, "missing", "second.system-diagram.xml")), "invalid_diagram_path");
+        await Refused("blank caption", Creation(Guid.NewGuid(), Path.Combine(directory, "blank.system-diagram.xml"), " "), "invalid_diagram_create_request");
+        var changedEpoch = Creation(Guid.NewGuid(), Path.Combine(directory, "second.system-diagram.xml")); changedEpoch["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
+        await Refused("changed instance epoch", changedEpoch, "recursive_instance_changed");
+        if (OperatingSystem.IsLinux()) // Native sessions are Linux evidence; read-only folders are Unix file modes.
+        {
+            Directory.CreateDirectory(locked);
+            try
+            {
+                File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                if (RecursiveDiagramCreationTests.IsWritable(locked))
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-diagram-create-locked-skipped.txt"),
+                        "The test account can write to a read-only folder (for example as root); the helper-process test covers this refusal.", token);
+                else await Refused("unwritable folder", Creation(Guid.NewGuid(), Path.Combine(locked, "board.system-diagram.xml")), "diagram_file_read_only");
+            }
+            finally
+            {
+                File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                Directory.Delete(locked, true);
+            }
+        }
+
+        // The next project open lists the new diagram at the conventional path.
+        var reopened = (await Call("kicad_diagram_discover", new() { ["instanceId"] = instanceId, ["projectFile"] = projectFile })).GetProperty("discovery");
+        Assert.IsTrue(reopened.GetProperty("suggestedPathExists").GetBoolean());
+        var listed = reopened.GetProperty("diagrams").EnumerateArray().Single(d => d.GetProperty("path").GetString() == target);
+        Assert.AreEqual(("DDS_READY", documentId, 2, caption, createdToken, true), (listed.GetProperty("status").GetString(), listed.GetProperty("documentId").GetString(),
+            listed.GetProperty("storedSchemaVersion").GetInt32(), listed.GetProperty("rootName").GetString(), listed.GetProperty("sourceToken").GetString(),
+            listed.GetProperty("conventional").GetBoolean()));
+        return new(root, target, documentId, createdToken, graph.SelectedRoot, caption);
+    }
+
+    /// <summary>The created diagram opens in the real per-level editor as one level whose root is only its caption; opening
+    /// writes nothing, and the clean window closes without a prompt.</summary>
+    private static async Task VerifyCreatedDiagramOpensInTheEditor(McpClient client, NativeClient native, int processId, string display,
+        CreatedDiagram created, string instanceId, string evidence, CancellationToken token)
+    {
+        const string title = "Structural diagram";
+        async Task WindowState(bool visible)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title) != visible) await Task.Delay(50, timeout.Token);
+        }
+        await WindowState(false); // The journey's own editor window has closed.
+        byte[] bytes = await File.ReadAllBytesAsync(created.Path, token);
+        var opened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+            ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-created-diagram-open.json"), JsonSerializer.Serialize(opened), token);
+        Assert.IsFalse(opened.IsError == true, "A newly created diagram opens in the native editor of this build.");
+        P.RecursiveDiagramEditorState state = new();
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            while (true)
+            {
+                state = await native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(new() { DocumentId = created.DocumentId }, token);
+                if (state.Ready && !state.Busy && state.Rendered) break;
+                await Task.Delay(50, timeout.Token);
+            }
+        }
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-created-diagram-state.json"), SchematicJson.Formatter.Format(state), token);
+        await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-created-diagram.png"), token);
+        Assert.AreEqual("", state.ErrorMessage); Assert.IsFalse(state.Dirty);
+        Assert.AreEqual(created.SourceToken, state.SourceToken);
+        Assert.AreEqual(created.Root.RevisionId.ToString("D"), state.DiagramPath.Single().RevisionId);
+        Assert.AreEqual(created.Caption, state.Draft.Name);
+        var draftFields = state.Draft.Fields ?? new P.RequirementFieldsData();
+        Assert.AreEqual(("", "", ""), (draftFields.General, draftFields.Schematic, draftFields.Routing), "The caption is the only definition so far.");
+        Assert.IsNotNull(state.CanvasDiagram, "The rendered level is reported.");
+        Assert.IsEmpty(state.CanvasDiagram.Children, "A new diagram level has no blocks yet.");
+        Assert.AreEqual(0U, state.ResolvedCanvasChildren);
+        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(created.Path, token), "Opening never writes.");
+        NativeKeyboard.SchematicShortcut(display, processId, "w", title, true, false);
+        await WindowState(false);
+        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(created.Path, token), "Closing a clean window never writes.");
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)

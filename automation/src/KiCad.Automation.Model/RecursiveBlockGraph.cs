@@ -650,8 +650,8 @@ public sealed partial class RecursiveBlockGraph
                         break;
                 }
         if (dangling.Count != 0)
-            throw DiagramErrorDetails.Attach(new AutomationException("boundary_interface_in_use",
-                "A boundary interface is still used by a connection or realization at this level; detach those uses first. Nothing was changed."), dangling);
+            throw new AutomationException("boundary_interface_in_use",
+                "A boundary interface is still used by a connection or realization at this level; detach those uses first. Nothing was changed.", dangling);
         var circuits = revision.EffectiveComponentBindings.Targets.GroupBy(t => t.DesignId).ToDictionary(g => g.Key, g => g.First().CircuitId);
         foreach (var connection in pinned)
         {

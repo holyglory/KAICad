@@ -7,7 +7,8 @@ namespace KiCad.Automation.Model;
 
 /// <summary>Typed connection archive storage. Reads schema 1 and 2 and writes schema 2 (contract
 /// rbg-v2 section 5). The version 1 schema is frozen; a version 1 archive element is produced only
-/// inside a version 1 graph written by the fixture-bound <c>RecursiveBlockGraphXml.Write(graph)</c>.</summary>
+/// inside a version 1 graph written explicitly by <c>RecursiveBlockGraphXml.Write(graph, 1)</c>, which
+/// only the frozen PSU-CPU fixture uses.</summary>
 public static class DiagramConnectionArchiveXml
 {
     public const string Namespace = "urn:kicad:automation:connection-archive:2";

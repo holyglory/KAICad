@@ -21,9 +21,10 @@ public sealed class RecursiveBlockRefinementInterruptionTests
         try
         {
             var graph = LinkedDiagramFixture.Create().Graph;
-            var input = RecursiveBlockRefinementInputTests.Input(graph) with { Attachments = [] };
+            // A version 1 file as an earlier build stored it, so the publication is its first changed write (R4).
+            var input = RecursiveBlockRefinementInputTests.Input(graph, 1) with { Attachments = [] };
             string path = Path.Combine(root, "diagram.xml"), state = Path.Combine(root, "state");
-            string before = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, before);
+            string before = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, before);
             string request = Path.Combine(root, "request.json"), marker = Path.Combine(root, "paused.json");
             await File.WriteAllTextAsync(request, JsonSerializer.Serialize(new { repositoryRoot = root, designPath = path,
                 documentId = graph.DocumentId, sourceToken = input.SourceSha256, input }));
@@ -55,6 +56,7 @@ public sealed class RecursiveBlockRefinementInterruptionTests
                 _ => RefinementRecoveryDisposition.CompletedPreviously
             };
             Assert.AreEqual(expected, interrupted.Disposition);
+            Assert.AreEqual(0, interrupted.UpgradedFromSchemaVersion, "Inspection reports what exists; it writes and upgrades nothing.");
             // Process identity is not reused: the file service resumes from the
             // persisted receipt and paths after OS-enforced termination.
             var recovered = await RefinementInputRecovery.ResumeAsync(root, path, graph.DocumentId, input.Id, state);
@@ -67,6 +69,8 @@ public sealed class RecursiveBlockRefinementInterruptionTests
             Assert.AreEqual(before, await File.ReadAllTextAsync(recovered.Receipt.RetainedPath));
             var again = await RefinementInputRecovery.ResumeAsync(root, path, graph.DocumentId, input.Id, state);
             Assert.AreEqual(recovered.Receipt, again.Receipt); Assert.AreEqual(after, await File.ReadAllTextAsync(path));
+            // The completed publication reports the version 1 to 2 upgrade its retained preimage proves, on every resume.
+            Assert.AreEqual(1, recovered.UpgradedFromSchemaVersion); Assert.AreEqual(1, again.UpgradedFromSchemaVersion);
             var repeat = await RefinementInputFiles.RecordAsync(root, path, graph.DocumentId, input.SourceSha256, input, stateDirectory: state);
             Assert.IsFalse(repeat.Added);
         }

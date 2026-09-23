@@ -12,11 +12,20 @@ namespace KiCad.Automation.Native;
 internal sealed record SchematicNativeCreationResult(SchematicDesign Candidate,
     IReadOnlyList<SchematicItemOperation> Operations, IReadOnlyList<Guid> CreatedOccurrences);
 
+/// <summary>The physical native symbol that created occurrences share: one definition and unit
+/// on one physical screen. <paramref name="Component"/> is set only when several components place
+/// that unit on a screen with a single sheet instance, where each needs its own symbol.</summary>
+internal readonly record struct SchematicCreatedSymbolKey(string PhysicalScreen, Guid Definition, int Unit, Guid? Component);
+
+internal sealed record SchematicCreatedSymbolGroup(SchematicCreatedSymbolKey Key, IReadOnlyList<SymbolOccurrence> Occurrences);
+
 /// <summary>
 /// Creates the native representation for a narrow, unambiguous XML-first
 /// addition. The new component must use an exact part/unit template or an explicitly
 /// declared standalone symbol definition, have
-/// explicit placement, and have no new net membership. Connectivity-changing
+/// explicit placement, and have no new net membership. Each unit is created on the
+/// sheet its occurrence names, which may differ from the component's own sheet; all
+/// units keep the one component identity, reference and definition. Connectivity-changing
 /// creation remains a separate ownership operation and is never inferred here.
 /// </summary>
 internal static class SchematicNativeCreationProjection
@@ -149,24 +158,18 @@ internal static class SchematicNativeCreationProjection
         var augmented = baseline.Schematic.Clone();
         var screens = augmented.Instances.ToDictionary(s => Path(s.Metadata.Document), StringComparer.Ordinal);
         var created = new List<Guid>();
-        var groupedSymbols = addedSymbols.GroupBy(occurrence =>
-        {
-            var component = newComponents[occurrence.ComponentId];
-            var definition = newSheets.Values.SelectMany(s => s.Components).Single(c => c.Id == component.DefinitionId);
-            string path = existingPaths[occurrence.EffectiveSheetInstanceId(component)];
-            string physicalScreen = screens[path].Metadata.ScreenId.Value;
-            return (PhysicalScreen: physicalScreen, Definition: definition.Id, Unit: occurrence.Unit);
-        }).OrderBy(g => g.Key.PhysicalScreen, StringComparer.Ordinal).ThenBy(g => g.Key.Definition).ThenBy(g => g.Key.Unit).ToArray();
-        foreach (var group in groupedSymbols)
+        // A unit may be placed on another sheet than its component (EffectiveSheetInstanceId);
+        // it then lands on that sheet's physical screen while keeping the component identity.
+        foreach (var group in PhysicalSymbols(baseline, newCircuit, addedSymbols, token))
         {
             token.ThrowIfCancellationRequested();
-            var occurrences = group.OrderBy(s => s.Id).ToArray();
+            var occurrences = group.Occurrences.ToArray();
             var representative = occurrences[0];
             if (occurrences.Any(s => s.Placement is null))
                 throw Invalid("created_symbol_placement_required", "Coordinate-free creation needs layout resolution before a native symbol can be inserted.");
             if (occurrences.Skip(1).Any(s => !SchematicOrientation.Equivalent(s.Placement, representative.Placement)))
                 throw Invalid("shared_symbol_placement_conflict", "Repeated instances of one physical symbol must request the same placement.");
-            string nativeId = StablePhysicalId(group.Key.PhysicalScreen, group.Key.Definition, group.Key.Unit);
+            string nativeId = StablePhysicalId(group.Key);
             if (nativeIds.Contains(nativeId)) throw Invalid("created_native_identity_collision", "The deterministic native identity is already in use.");
             var representativeComponent = newComponents[representative.ComponentId];
             var representativeDefinition = newSheets.Values.SelectMany(s => s.Components).Single(c => c.Id == representativeComponent.DefinitionId);
@@ -443,10 +446,62 @@ internal static class SchematicNativeCreationProjection
         if (existing is null) target.CachedSymbols.Add(entry.Clone());
     }
 
-    private static string StablePhysicalId(string physicalScreen, Guid definition, int unit)
+    /// <summary>Partition created occurrences into the physical native symbols they will occupy.
+    /// Each occurrence lands on the physical screen of its effective sheet instance, which is the
+    /// component's own sheet unless the occurrence places the unit on another sheet. Occurrences of
+    /// one definition and unit that reach every instance of their screen exactly once share one
+    /// symbol, as repeated sheets do. On a screen with one instance each occurrence is its own
+    /// symbol, so units of several components can share a sheet. Any other arrangement would show a
+    /// unit on a sheet instance that has no model occurrence for it, or show it twice, and is
+    /// rejected before anything is created.</summary>
+    internal static IReadOnlyList<SchematicCreatedSymbolGroup> PhysicalSymbols(SchematicDesign baseline, Circuit desired,
+        IEnumerable<SymbolOccurrence> added, CancellationToken token = default)
     {
-        byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes("kicad-created-symbol-v2\n" + physicalScreen
-            + "\n" + definition.ToString("D") + "\n" + unit));
+        var components = desired.Components.ToDictionary(c => c.Id);
+        var paths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+        var screens = baseline.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), s => s.Metadata.ScreenId.Value,
+            StringComparer.Ordinal);
+        var instancesOfScreen = screens.GroupBy(pair => pair.Value, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal), StringComparer.Ordinal);
+        var located = new List<(SymbolOccurrence Occurrence, string Path, string Screen, Guid Definition)>();
+        foreach (var occurrence in added)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!components.TryGetValue(occurrence.ComponentId, out var component))
+                throw Invalid("symbol_owner_requires_resolution", "A new symbol occurrence must belong to a known component instance.");
+            if (!paths.TryGetValue(occurrence.EffectiveSheetInstanceId(component), out var path) || !screens.TryGetValue(path, out var screen))
+                throw Invalid("missing_native_sheet", "A created symbol must target a bound existing sheet instance.");
+            located.Add((occurrence, path, screen, component.DefinitionId));
+        }
+        var result = new List<SchematicCreatedSymbolGroup>();
+        foreach (var bucket in located.GroupBy(x => (x.Screen, x.Definition, x.Occurrence.Unit)))
+        {
+            var members = bucket.OrderBy(x => x.Occurrence.Id).ToArray();
+            var reached = members.Select(x => x.Path).ToHashSet(StringComparer.Ordinal);
+            var instances = instancesOfScreen[bucket.Key.Screen];
+            if (reached.Count == members.Length && reached.SetEquals(instances))
+                result.Add(new(new(bucket.Key.Screen, bucket.Key.Definition, bucket.Key.Unit, null),
+                    members.Select(x => x.Occurrence).ToArray()));
+            else if (instances.Count == 1)
+                result.AddRange(members.Select(x => new SchematicCreatedSymbolGroup(
+                    new(bucket.Key.Screen, bucket.Key.Definition, bucket.Key.Unit, x.Occurrence.ComponentId), [x.Occurrence])));
+            else
+                throw Invalid("created_unit_sheet_coverage_mismatch", "Unit " + bucket.Key.Unit.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " would appear on a repeated sheet without exactly one symbol occurrence for each of its "
+                    + instances.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " instances. Place the unit once on every instance of that sheet, or on a sheet with a single instance.");
+        }
+        return result.OrderBy(g => g.Key.PhysicalScreen, StringComparer.Ordinal).ThenBy(g => g.Key.Definition)
+            .ThenBy(g => g.Key.Unit).ThenBy(g => g.Key.Component ?? Guid.Empty).ToArray();
+    }
+
+    private static string StablePhysicalId(SchematicCreatedSymbolKey key)
+    {
+        // A per-component symbol extends the shared-symbol preimage, so neither form can
+        // reproduce the other and existing shared identities stay unchanged.
+        byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes("kicad-created-symbol-v2\n" + key.PhysicalScreen
+            + "\n" + key.Definition.ToString("D") + "\n" + key.Unit
+            + (key.Component is Guid component ? "\ncomponent\n" + component.ToString("D") : "")));
         digest[6] = (byte)((digest[6] & 0x0f) | 0x50); digest[8] = (byte)((digest[8] & 0x3f) | 0x80);
         return new Guid(digest.AsSpan(0, 16), bigEndian: true).ToString("D");
     }

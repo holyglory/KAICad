@@ -50,24 +50,19 @@ public static class SchematicInitialLayoutPlanner
         var added = desired.Engineering.Circuit.Symbols.Where(s => !oldIds.Contains(s.Id)).ToArray();
         if (!added.Any(s => s.Placement is null))
             throw Error("no_missing_placement", "All new symbols already have positions; use scoped visual refinement to adjust them.");
-        var components = desired.Engineering.Circuit.Components.ToDictionary(c => c.Id);
         var sheets = state.Baseline.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), StringComparer.Ordinal);
-        var paths = state.Baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
-        var groups = added.GroupBy(s =>
-        {
-            var component = components[s.ComponentId];
-            string path = paths[s.EffectiveSheetInstanceId(component)];
-            return (Screen: Id(sheets[path].Metadata.ScreenId), component.DefinitionId, s.Unit);
-        }).ToArray();
+        // Seed exactly the physical symbols creation will make, including units placed on
+        // another sheet than their component; an inconsistent placement is rejected here.
+        var groups = SchematicNativeCreationProjection.PhysicalSymbols(state.Baseline, desired.Engineering.Circuit, added, token);
         var seed = new Dictionary<Guid, SymbolPlacement>();
         var fixedOccurrences = new HashSet<Guid>();
         foreach (var group in groups)
         {
-            var specified = group.Where(s => s.Placement is not null).ToArray();
+            var specified = group.Occurrences.Where(s => s.Placement is not null).ToArray();
             var placement = specified.FirstOrDefault()?.Placement ?? new(0, 0, 0, false, false, false);
             if (specified.Any(s => !SchematicOrientation.Equivalent(s.Placement, placement)))
                 throw Error("shared_symbol_placement_conflict", "Repeated instances of one physical symbol request different positions or orientations.");
-            foreach (var occurrence in group)
+            foreach (var occurrence in group.Occurrences)
             {
                 seed.Add(occurrence.Id, placement);
                 if (specified.Length != 0) fixedOccurrences.Add(occurrence.Id);

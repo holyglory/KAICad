@@ -87,14 +87,20 @@ public sealed partial class NativeSessionTests
             declaration = new(part.Id, new() { LibraryNickname = "Declared", EntryName = "ProbeSource" }, original, BodyStyle: 2);
         }
         int designator = 801;
+        var rootInstance = baseline.Engineering.Circuit.SheetInstances.Single(s => s.ParentId is null);
         foreach (var sheet in baseline.Engineering.Circuit.SheetInstances.OrderBy(s => s.Id))
         {
             if (!newDefinitions.TryGetValue(sheet.DefinitionId, out var definition))
                 newDefinitions.Add(sheet.DefinitionId, definition = new(Guid.NewGuid(), part.Id, "XML-created probe"));
             Guid id = Guid.NewGuid(); createdIds.Add(id);
             components.Add(new(id, definition.Id, sheet.Id, "TP" + designator++));
-            occurrences.AddRange(Enumerable.Range(1, part.Units).Select(unit => new SymbolOccurrence(Guid.NewGuid(), id, unit, null)));
+            // Declared multi-unit parts owned by the repeated channel sheets place their last unit
+            // on the root sheet: one component identity whose units sit on different sheets.
+            occurrences.AddRange(Enumerable.Range(1, part.Units).Select(unit => new SymbolOccurrence(Guid.NewGuid(), id, unit, null,
+                declaration is not null && unit == part.Units && sheet.Id != rootInstance.Id ? rootInstance.Id : null)));
         }
+        var crossSheet = occurrences.Where(s => s.SheetInstanceId is not null && createdIds.Contains(s.ComponentId)).ToArray();
+        Assert.AreEqual(declaration is null ? 0 : baseline.Engineering.Circuit.SheetInstances.Count - 1, crossSheet.Length);
         var desired = baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with
         {
             Parts = declaration is null ? baseline.Engineering.Circuit.Parts : [.. baseline.Engineering.Circuit.Parts, part],
@@ -139,6 +145,13 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(invalidGrid.GetProperty("isError").GetBoolean());
             var reply = await layoutHost.Tool("kicad_design_propose_initial_layout", layoutArgs);
             RequireToolSuccess(reply); initialLayout = reply.GetProperty("structuredContent").Clone();
+            Assert.AreEqual(layoutBefore, await Capture(), "Initial placement preparation must not change the native document.");
+            Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+            CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+            Assert.IsTrue(initialLayout.GetProperty("canPropose").GetBoolean(), initialLayout.GetRawText());
+            if (declaration is not null)
+                saved = await RejectPartialRepeatedSheetUnit(layoutHost, layoutArgs.regions, layoutArgs.userInstructions,
+                    SchematicDesignXml.Read(initialLayout.GetProperty("desiredXml").GetString()!, []));
         }
         Assert.IsTrue(initialLayout.GetProperty("canPropose").GetBoolean(), initialLayout.GetRawText());
         Assert.AreNotEqual(JsonValueKind.Null, initialLayout.GetProperty("refinement").ValueKind);
@@ -152,6 +165,11 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(layoutBefore, await Capture(), "Initial placement preparation must not change the native document.");
         Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
         CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+        var layoutPlaced = SchematicDesignXml.Read(initialLayout.GetProperty("desiredXml").GetString()!, []).Engineering.Circuit.Symbols
+            .ToDictionary(s => s.Id);
+        foreach (var unit in crossSheet)
+            Assert.AreEqual(unit with { Placement = layoutPlaced[unit.Id].Placement }, layoutPlaced[unit.Id],
+                "Initial placement must keep a unit on the sheet its occurrence names.");
         bytes = Encoding.UTF8.GetBytes(initialLayout.GetProperty("desiredXml").GetString()!);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-initial-layout.json"),
             initialLayout.GetRawText(), token);
@@ -238,8 +256,14 @@ public sealed partial class NativeSessionTests
         var created = store.Read()!.State.Baseline;
         var createdBindings = created.SymbolBindings.Where(b => !baseline.SymbolBindings.Any(old => old.SymbolOccurrenceId == b.SymbolOccurrenceId)).ToArray();
         Assert.AreEqual(baseline.Engineering.Circuit.SheetInstances.Count * part.Units, createdBindings.Length);
-        Assert.AreEqual(baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).Distinct().Count() * part.Units,
+        // Every unit on its own sheet: one physical symbol per unit and physical screen, shared by
+        // repeated instances. With the channel components' last unit on the root sheet instead, the
+        // root screen holds all root units plus one separate symbol per moved unit, and the shared
+        // channel screen holds only the remaining units.
+        int screenCount = baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).Distinct().Count();
+        Assert.AreEqual(crossSheet.Length == 0 ? screenCount * part.Units : part.Units + crossSheet.Length + (part.Units - 1),
             createdBindings.Select(b => b.NativeObjectId).Distinct().Count());
+        await VerifyCrossSheetUnits(created);
         var beforeNoOp = await Capture();
         var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
         Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
@@ -328,11 +352,111 @@ public sealed partial class NativeSessionTests
             nativeUndoRedoAutomaticallyPublished = true, xmlFileEventCreation = true, interruptAfterNativeEdit,
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
-            selectedBodyStyle = declaration?.BodyStyle,
+            selectedBodyStyle = declaration?.BodyStyle, crossSheetUnits = crossSheet.Length,
+            crossSheetRejection = declaration is null ? null : "created_unit_sheet_coverage_mismatch",
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+        // Each moved unit is a native symbol on the root sheet with the component's own reference, the
+        // same declared definition as its sibling unit on the channel sheet, and exactly its unit's pins.
+        async Task VerifyCrossSheetUnits(SchematicDesign design)
+        {
+            if (crossSheet.Length == 0) return;
+            var native = (await Capture()).Electrical.Hierarchy.Data;
+            var symbols = SchematicModelProjection.NativeSymbols(design, native);
+            var paths = design.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => b.NativePath.Select(id => id.ToString("D")).ToArray());
+            var persisted = design.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+            var nativeIds = design.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+            string[] Placed(SchematicSymbolInstance symbol) => [.. symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+                .Select(c => (Child: c, Pin: c.Item.Unpack<SchematicPin>()))
+                .Where(p => p.Pin.LibraryPinId is not null && ((p.Child.Unit?.Unit ?? 0) == 0 || p.Child.Unit!.Unit == symbol.Unit.Unit)
+                    && ((p.Child.BodyStyle?.Style ?? 0) == 0 || p.Child.BodyStyle!.Style == (symbol.BodyStyle?.Style ?? 1)))
+                .Select(p => p.Pin.Number).Order(StringComparer.Ordinal)];
+            string[] Declared(int unit) => [.. part.Pins.Where(p => p.Unit == 0 || p.Unit == unit).Select(p => p.Number).Order(StringComparer.Ordinal)];
+            foreach (var unit in crossSheet)
+            {
+                Assert.AreEqual(unit, persisted[unit.Id] with { Placement = null }, "The published XML keeps the unit on its own sheet.");
+                var component = design.Engineering.Circuit.Components.Single(c => c.Id == unit.ComponentId);
+                Assert.AreNotEqual(rootInstance.Id, component.SheetInstanceId);
+                var moved = symbols[unit.Id];
+                CollectionAssert.AreEqual(paths[rootInstance.Id], moved.Path.Path.Select(p => p.Value).ToArray());
+                Assert.AreEqual(component.Reference, moved.ReferenceField.Text.Text_);
+                Assert.AreEqual(unit.Unit, moved.Unit.Unit);
+                var record = moved.InstanceRecords.Records.Single();
+                CollectionAssert.AreEqual(paths[rootInstance.Id], record.Path.Select(p => p.Value).ToArray());
+                Assert.AreEqual((component.Reference, unit.Unit), (record.Reference, record.Unit));
+                CollectionAssert.AreEqual(Declared(unit.Unit), Placed(moved));
+                foreach (var sibling in design.Engineering.Circuit.Symbols.Where(s => s.ComponentId == unit.ComponentId && s.Id != unit.Id))
+                {
+                    var stays = symbols[sibling.Id];
+                    Assert.IsNull(sibling.SheetInstanceId);
+                    CollectionAssert.AreEqual(paths[component.SheetInstanceId], stays.Path.Path.Select(p => p.Value).ToArray());
+                    Assert.AreEqual(component.Reference, stays.ReferenceField.Text.Text_);
+                    Assert.AreEqual(moved.LibraryId, stays.LibraryId); Assert.AreEqual(moved.LibName, stays.LibName);
+                    Assert.AreEqual(moved.Definition.Id, stays.Definition.Id);
+                    CollectionAssert.AreEqual(Declared(sibling.Unit), Placed(stays));
+                }
+            }
+            Assert.AreEqual(crossSheet.Length, crossSheet.Select(u => nativeIds[u.Id]).Distinct().Count(),
+                "Units of different components on one single-instance sheet stay separate symbols.");
+            var channelUnits = design.Engineering.Circuit.Symbols.Where(s => crossSheet.Any(u => u.ComponentId == s.ComponentId) && s.SheetInstanceId is null)
+                .GroupBy(s => s.Unit).ToArray();
+            Assert.IsTrue(channelUnits.All(g => g.Count() == crossSheet.Length && g.Select(s => nativeIds[s.Id]).Distinct().Count() == 1),
+                "Repeated channel instances still share one physical symbol for each unit that stays there.");
+        }
+
+        // An inconsistent declaration: the root-owned probe places its last unit on only one of the
+        // two repeated channel instances, so their shared screen would show that unit on the other
+        // channel with no model occurrence for it. Both the layout proposal and a real public apply
+        // must refuse it with the exact code, leaving KiCad, the recovery record and XML untouched.
+        async Task<StoredDesignRecovery> RejectPartialRepeatedSheetUnit(StdioMcpFixture host,
+            List<SchematicLayoutRegion> regions, string instructions, SchematicDesign proposed)
+        {
+            const string Code = "created_unit_sheet_coverage_mismatch";
+            var rootComponent = components.Single(c => createdIds.Contains(c.Id) && c.SheetInstanceId == rootInstance.Id);
+            var channel = baseline.Engineering.Circuit.SheetInstances.Where(s => s.ParentId == rootInstance.Id).OrderBy(s => s.Id).First();
+            SchematicDesign Misplaced(SchematicDesign design) => design with { Engineering = design.Engineering with
+            { Circuit = design.Engineering.Circuit with { Symbols = design.Engineering.Circuit.Symbols.Select(s =>
+                s.ComponentId == rootComponent.Id && s.Unit == part.Units ? s with { SheetInstanceId = channel.Id } : s).ToArray() } } };
+            byte[] original = await File.ReadAllBytesAsync(path, token);
+            var nativeBefore = await Capture();
+            var current = store.Read()!;
+            string baselineXml = SchematicDesignXml.Write(current.State.Baseline, []);
+            var results = new Dictionary<string, JsonElement>();
+
+            byte[] unplaced = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(Misplaced(desired), []));
+            await File.WriteAllBytesAsync(path, unplaced, token);
+            current = store.Save(current.State with { DesiredFileBytes = unplaced }, current.RevisionToken);
+            var layout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = current.RevisionToken, gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L,
+                regions, userInstructions = instructions });
+            results["layout"] = layout;
+            Assert.IsTrue(layout.GetProperty("isError").GetBoolean(), layout.GetRawText());
+            Assert.AreEqual(Code, JsonDocument.Parse(layout.GetProperty("content")[0].GetProperty("text").GetString()!)
+                .RootElement.GetProperty("code").GetString(), layout.GetRawText());
+
+            byte[] placed = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(Misplaced(proposed), []));
+            await File.WriteAllBytesAsync(path, placed, token);
+            current = store.Save(current.State with { DesiredFileBytes = placed }, current.RevisionToken);
+            var apply = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = store.StatePath,
+                designPath = path, expectedRevisionToken = current.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+            results["apply"] = apply;
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-cross-sheet-rejection.json"),
+                JsonSerializer.Serialize(results), token);
+            Assert.IsTrue(apply.GetProperty("isError").GetBoolean(), apply.GetRawText());
+            Assert.AreEqual(Code, apply.GetProperty("structuredContent").GetProperty("errorCode").GetString(), apply.GetRawText());
+
+            Assert.AreEqual(nativeBefore, await Capture(), "A rejected declaration must not reach the native editor.");
+            var after = store.Read()!;
+            Assert.AreEqual(current.RevisionToken, after.RevisionToken, "A rejected declaration must not advance recovery.");
+            Assert.AreEqual(baselineXml, SchematicDesignXml.Write(after.State.Baseline, []));
+            Assert.IsFalse(after.State.HasPendingWork);
+            CollectionAssert.AreEqual(placed, await File.ReadAllBytesAsync(path, token), "A rejected apply must not publish XML.");
+            await File.WriteAllBytesAsync(path, original, token);
+            return store.Save(after.State with { DesiredFileBytes = original }, after.RevisionToken);
+        }
         async Task RequireAgreement(int count, bool afterReload = false)
         {
             var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(path, token), []);

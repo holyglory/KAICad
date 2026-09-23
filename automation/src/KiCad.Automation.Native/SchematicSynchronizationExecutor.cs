@@ -90,17 +90,19 @@ internal static class SchematicSynchronizationExecutor
         {
             // CN-1 §9.1 split: the lane checks this session's handshake capability,
             // measures this exact checkpoint natively and returns only its operations
-            // and planned design (steps 2-4). The executor builds and validates the
-            // batch envelope exactly as the ordinary builder below does, journals it
-            // and resolves it through the lane that planned it (steps 4-6). There is
-            // no no-op shortcut and no ordinary batch.
+            // and planned design (steps 2-3). The executor builds and validates the
+            // batch envelope exactly as the ordinary builder below does, including the
+            // serialized-size limit (step 4), records the planning lane in the layout
+            // intent, journals it and resolves it through that lane (steps 5-6). There
+            // is no no-op shortcut and no ordinary batch.
             var prepared = connections
                 ? await SchematicConnectedAddition.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken)
                 : await SchematicRebuild.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken);
             var realized = RealizationBatch(checkpoint.State, saved.State.OriginId, prepared, requireAssertion: connections,
                 connections ? "Apply XML connections" : "Rebuild native sheets from XML");
             var journal = saved.State with { PendingMutation = realized, PendingNativeState = checkpoint.State.Clone(),
-                PendingLayout = DesignLayoutIntent.Create(designPath, original, prepared.PlannedDesignFileBytes, operationId, expectedRevisionToken) };
+                PendingLayout = DesignLayoutIntent.Create(designPath, original, prepared.PlannedDesignFileBytes, operationId, expectedRevisionToken,
+                    connections ? DesignLayoutIntent.ConnectionRealizationLane : DesignLayoutIntent.RebuildLane) };
             RequireLane(journal, connections ? LayoutLane.ConnectionRealization : LayoutLane.Rebuild);
             saved = store.Save(journal, saved.RevisionToken);
             if (executionCheckpoint is not null) await executionCheckpoint("layout-prepared", cancellationToken);
@@ -307,14 +309,28 @@ internal static class SchematicSynchronizationExecutor
         return saved;
     }
 
-    // A pending layout is checked and resolved by the lane whose plan produced it.
-    // Lanes recognise their own journal from the recorded recovery state, never from
-    // batch contents alone. Rebuild is asked first, so a rebuild batch that also
-    // asserts connectivity stays in the rebuild lane.
+    // A pending layout is checked and resolved by the lane whose plan produced it. That
+    // lane is recorded in the layout intent when the batch is journaled (absent means an
+    // ordinary connected move), so routing never depends on batch contents or on which
+    // build resumes it. The lane predicates only validate: a record they contradict, or
+    // one both lanes claim, is rejected instead of silently preferring either lane.
     private enum LayoutLane { ConnectedMove, ConnectionRealization, Rebuild }
 
-    private static LayoutLane Lane(DesignRecoveryState state) => SchematicRebuild.IsRebuild(state) ? LayoutLane.Rebuild
-        : SchematicConnectedAddition.IsRealization(state) ? LayoutLane.ConnectionRealization : LayoutLane.ConnectedMove;
+    private static LayoutLane Lane(DesignRecoveryState state)
+    {
+        var recorded = state.PendingLayout?.Lane switch
+        {
+            null => LayoutLane.ConnectedMove,
+            DesignLayoutIntent.ConnectionRealizationLane => LayoutLane.ConnectionRealization,
+            DesignLayoutIntent.RebuildLane => LayoutLane.Rebuild,
+            _ => throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "The pending layout names an unknown synchronization lane.")
+        };
+        bool rebuild = SchematicRebuild.IsRebuild(state), realization = SchematicConnectedAddition.IsRealization(state);
+        if ((rebuild && realization) || (rebuild && recorded != LayoutLane.Rebuild)
+            || (realization && recorded != LayoutLane.ConnectionRealization))
+            throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "The pending layout's recorded lane is contradicted by the lane that recognises it.");
+        return recorded;
+    }
 
     // Checked before journaling, so a later resume cannot route the batch elsewhere.
     private static void RequireLane(DesignRecoveryState journal, LayoutLane planned)
@@ -336,6 +352,7 @@ internal static class SchematicSynchronizationExecutor
     // SchematicItemOperation.assert_connectivity, field 27 (CN-1 §8.1). The generated
     // case name arrives with the frozen protocol; before it, no operation can carry it.
     private const SchematicItemOperation.OperationOneofCase AssertConnectivityCase = (SchematicItemOperation.OperationOneofCase)27;
+    private const int MaximumRealizationBatchBytes = 2_097_152;
 
     // Admit only complete lane operations: none empty, and at most one connectivity
     // assertion, which is the final operation and targets the whole batch document.
@@ -351,7 +368,12 @@ internal static class SchematicSynchronizationExecutor
         if (assertions > 1 || (assertions == 1 && (last.OperationCase != AssertConnectivityCase || last.TargetDocument is not null))
             || (requireAssertion && assertions == 0))
             throw Error(SchematicConnectionErrors.InvalidLayoutIntent, "A realization batch must end with its single whole-batch connectivity assertion.");
-        return NewBatch(checkpoint, originId, description, operations);
+        var batch = NewBatch(checkpoint, originId, description, operations);
+        // CN-1 §6.8 step 4: the checked native controller refuses larger requests, so an
+        // oversized realization is rejected before it is journaled and resent on resume.
+        if (new CheckedSchematicBatch { Batch = batch, ExpectedState = checkpoint.Clone() }.CalculateSize() > MaximumRealizationBatchBytes)
+            throw Error(SchematicConnectionErrors.RealizationBatchTooLarge, "The realization exceeds the checked native batch size limit; split the XML change.");
+        return batch;
     }
 
     private static async Task<CheckedSchematicState> Capture(NativeClient client, DesignRecoveryState state, CancellationToken token)

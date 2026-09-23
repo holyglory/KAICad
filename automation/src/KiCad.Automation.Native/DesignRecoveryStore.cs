@@ -114,7 +114,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 .Any(p => string.Equals(p, path, comparison) || string.Equals(p, path + ".lock", comparison)))
                 throw Failure("invalid_design_publication", "Design publication and recovery files must remain separate.");
         }
-        var envelope = new Envelope(state.OwnershipResolution is not null ? 9 : state.PendingLayout is not null ? 8
+        var envelope = new Envelope(state.PendingLayout?.Lane is not null ? 10 : state.OwnershipResolution is not null ? 9 : state.PendingLayout is not null ? 8
             : state.LastSynchronization is not null || state.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
             : state.PendingPublication is not null ? 6
             : state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
@@ -202,7 +202,7 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            int requiredVersion = envelope.OwnershipResolution is not null ? 9 : envelope.PendingLayout is not null ? 8
+            int requiredVersion = envelope.PendingLayout?.Lane is not null ? 10 : envelope.OwnershipResolution is not null ? 9 : envelope.PendingLayout is not null ? 8
                 : envelope.LastSynchronization is not null || envelope.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
                 : envelope.PendingPublication is not null ? 6
                 : envelope.PendingNativeSave is not null || envelope.PendingCandidateFileBytes is not null ? 5
@@ -227,6 +227,48 @@ public sealed class DesignRecoveryStore(string statePath)
         }
         catch (Exception error) when (error is JsonException or ArgumentException or InvalidProtocolBufferException)
         { throw Failure("invalid_design_recovery", error.Message); }
+    }
+
+    // An ordinary pending layout is a connected move, transform or lock request. A lane
+    // realization (CN-1 §9.3) contains only creations, updates and library-cache
+    // replacements, followed by one whole-batch connectivity assertion (field 27), which
+    // a connection realization always carries.
+    private static bool LayoutMutationMatchesLane(ApplySchematicItemBatch batch, string? lane)
+    {
+        if (lane is null)
+            return batch.Operations.Any(o => o.MoveConnectedSymbols is not null
+                || o.TransformConnectedSymbols is not null || o.SetSymbolLocks is not null);
+        if (lane is not DesignLayoutIntent.ConnectionRealizationLane and not DesignLayoutIntent.RebuildLane
+            || batch.Operations.Count == 0)
+            return false;
+        const SchematicItemOperation.OperationOneofCase assertion = (SchematicItemOperation.OperationOneofCase)27;
+        int assertions = batch.Operations.Count(o => o.OperationCase == assertion);
+        if (assertions > 1 || (assertions == 1 && batch.Operations[^1].OperationCase != assertion)
+            || (lane == DesignLayoutIntent.ConnectionRealizationLane && assertions == 0))
+            return false;
+        return batch.Operations.All(o => o.OperationCase is assertion
+            or SchematicItemOperation.OperationOneofCase.Create
+            or SchematicItemOperation.OperationOneofCase.Update
+            or SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache);
+    }
+
+    /// <summary>Clear a lane realization whose native assertion rejected the batch before any
+    /// mutation (CN-1 §9.4). Verified against the exact journaled request: the receipt must be a
+    /// rejection for the pending operation whose observations equal the journaled native state,
+    /// so nothing native changed. The XML, baseline and publication state stay untouched.</summary>
+    public StoredDesignRecovery AbandonRejectedRealization(StoredDesignRecovery saved, CheckedSchematicBatchReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(saved);
+        ArgumentNullException.ThrowIfNull(receipt);
+        var state = saved.State;
+        if (state.PendingLayout?.Lane is null || state.PendingMutation is null || state.PendingNativeState is null)
+            throw Failure("invalid_layout_intent", "Only a pending lane realization can be abandoned.");
+        if (receipt.Status != CheckedSchematicBatchStatus.CsbsRejected
+            || receipt.OperationId != state.PendingMutation.OperationId
+            || receipt.ObservedBefore is null || receipt.ObservedAfter is null
+            || !receipt.ObservedBefore.Equals(state.PendingNativeState) || !receipt.ObservedAfter.Equals(state.PendingNativeState))
+            throw Failure("invalid_layout_intent", "Abandon only a rejected realization whose native state is unchanged.");
+        return Save(state with { PendingMutation = null, PendingNativeState = null, PendingLayout = null }, saved.RevisionToken);
     }
 
     private static void Validate(DesignRecoveryState state)
@@ -272,8 +314,7 @@ public sealed class DesignRecoveryStore(string statePath)
         if (state.PendingLayout is { } layout)
         {
             if (state.PendingPublication is not null || state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null
-                || state.PendingMutation is null || !state.PendingMutation.Operations.Any(o => o.MoveConnectedSymbols is not null
-                    || o.TransformConnectedSymbols is not null || o.SetSymbolLocks is not null)
+                || state.PendingMutation is null || !LayoutMutationMatchesLane(state.PendingMutation, layout.Lane)
                 || layout.ExpectedFileBytes is null || layout.PlannedDesignFileBytes is null
                 || string.IsNullOrEmpty(layout.RequestedRecoveryRevisionToken))
                 throw Failure("invalid_layout_intent", "Unresolved layout requires its exact connected-move request, not a save or final publication.");

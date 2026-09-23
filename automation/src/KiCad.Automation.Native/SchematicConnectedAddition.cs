@@ -26,9 +26,9 @@ public static class SchematicConnectedAddition
     }
 
     /// <summary>Whether the pending layout recorded in <paramref name="state"/> was produced
-    /// by a connection-realization plan rather than a connected move or a rebuild. Decide
-    /// from the recorded plan, not from batch contents: a rebuild batch may also assert
-    /// connectivity, and the executor asks the rebuild lane first.</summary>
+    /// by a connection-realization plan rather than a connected move or a rebuild. The executor
+    /// routes by the lane recorded in the layout intent; this predicate only validates
+    /// that record and must never claim a layout another lane recorded.</summary>
     internal static bool IsRealization(DesignRecoveryState state)
     {
         ArgumentNullException.ThrowIfNull(state);
@@ -37,7 +37,7 @@ public static class SchematicConnectedAddition
 
     /// <summary>Check the <paramref name="session"/> handshake for the realization capability,
     /// measure the checkpoint natively and return the operations, ending with the connectivity
-    /// assertion, plus the exact design they plan to publish (§9.1 steps 2-4). The executor
+    /// assertion, plus the exact design they plan to publish (§9.1 steps 2-3). The executor
     /// builds, validates and journals the batch envelope.</summary>
     internal static Task<SchematicPreparedRealization> RealizeAsync(NativeClient client, AutomationSession session,
         DesignRecoveryState state, SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)

@@ -44,9 +44,9 @@ public static class SchematicRebuild
         List<HierarchyCoverageGap> gaps, CancellationToken token = default) => throw Unavailable();
 
     /// <summary>Whether the pending layout recorded in <paramref name="state"/> was produced
-    /// by a rebuild plan rather than a connected move or a connection realization. Decide
-    /// from the recorded plan, not from batch contents; the executor asks this lane first,
-    /// so a rebuild batch that also asserts connectivity is resolved here.</summary>
+    /// by a rebuild plan rather than a connected move or a connection realization. The executor
+    /// routes by the lane recorded in the layout intent; this predicate only validates
+    /// that record and must never claim a layout another lane recorded.</summary>
     internal static bool IsRebuild(DesignRecoveryState state)
     {
         ArgumentNullException.ThrowIfNull(state);

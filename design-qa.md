@@ -4,7 +4,7 @@ final result: blocked
 
 ## Active comparison: requirement field history
 
-The approved target is `/home/holyglory/kicad/automation/design/history-and-conflicts/02-field-history.png` (1536 × 1024 full scene, with the Routing requirements history dialog). The approved recursive System/PSU/CPU diagrams supersede the earlier option-1 layout retained below. This is native desktop UI; CSS viewport and browser density do not apply.
+The approved target is `automation/design/history-and-conflicts/02-field-history.png` (1536 × 1024 full scene, with the Routing requirements history dialog). The approved recursive System/PSU/CPU diagrams supersede the earlier option-1 layout retained below. This is native desktop UI; CSS viewport and browser density do not apply.
 
 The first component captures are the hash-verified `native-dialog` artifacts from `t20260919T225954Z-d035cc`, materialized at `/mnt/build-storage/codex/kicad/evidence/field-history-d035cc/`. The source, `light/02-earlier-text.png`, and `dark/02-earlier-text.png` were opened together in one comparison input. Both implementation images are 426 × 330. The fixture has no resolvable source instruction, so no source-opening control is enabled. This is a component test, not the complete editor journey or its background canvas.
 
@@ -44,7 +44,7 @@ Remaining P1/P2 scope at that snapshot: diagram implementation/history selection
 
 ### Requirement conflict workflow
 
-The reference is `/home/holyglory/kicad/automation/design/history-and-conflicts/03-save-conflict.png` (1536 × 1024 full editor scene). Compare its modal with the isolated native dialog; the test fixture deliberately has two conflicting fields and uses a field selector, whereas the reference shows one. Single-conflict dialogs identify the field beside the owner instead of displaying a disabled selector.
+The reference is `automation/design/history-and-conflicts/03-save-conflict.png` (1536 × 1024 full editor scene). Compare its modal with the isolated native dialog; the test fixture deliberately has two conflicting fields and uses a field selector, whereas the reference shows one. Single-conflict dialogs identify the field beside the owner instead of displaying a disabled selector.
 
 The first real comparison from `t20260920T003315Z-6c8204` was too tall and omitted the base/saved version labels. Its light unresolved and dark resolved captures were opened alongside the reference. The repair added model-derived revision numbers and changed the vertical sizing proportions. No revision number or actor is inferred from a timestamp or label.
 
@@ -58,7 +58,7 @@ This qualifies requirement-text conflicts for block edits. It does not claim str
 
 ### Connection requirements and comments
 
-The approved CPU connection inspector reference is `/home/holyglory/kicad/automation/design/level-diagram-walkthrough/03-cpu-v2-edit-controls.png`. It was opened alongside the real selected-link capture from `t20260920T005043Z-bfed53`, materialized at `/mnt/build-storage/codex/kicad/evidence/recursive-connections-bfed53/editor/4a6e7a47-e065-4823-8064-c2553bb39e14-recursive-connection.png`. The view shows the CPU local diagram and selected memory link; fixture names and connectivity are intentionally not the reference's proposed engineering solution.
+The approved CPU connection inspector reference is `automation/design/level-diagram-walkthrough/03-cpu-v2-edit-controls.png`. It was opened alongside the real selected-link capture from `t20260920T005043Z-bfed53`, materialized at `/mnt/build-storage/codex/kicad/evidence/recursive-connections-bfed53/editor/4a6e7a47-e065-4823-8064-c2553bb39e14-recursive-connection.png`. The view shows the CPU local diagram and selected memory link; fixture names and connectivity are intentionally not the reference's proposed engineering solution.
 
 The selected link is visibly highlighted and its General/Schematic/Routing fields, exact connection version and History actions are readable. P2: the initial capture omitted endpoint context and retained an irrelevant disabled Open diagram control. A subsequent repair displays real partial endpoint states and hides that block-only control. The existing hierarchy/connection navigation and draft-save journeys passed after that change in `t20260920T005659Z-a1d346`.
 
@@ -94,7 +94,7 @@ Final scoped management run `t20260920T034034Z-30c9e9` passes managed contracts,
 
 ### Complete requirement-history paging
 
-The approved field-history reference remains `/home/holyglory/kicad/automation/design/history-and-conflicts/02-field-history.png`. Its modal, the final light `02-earlier-text.png`, dark `07-history-load-error.png`, and two full-editor history captures were opened together at original resolution from `/mnt/build-storage/codex/kicad/evidence/history-pages-final-4974e9/`. The normal component is 740 × 520 and compact error state is 590 × 440; full-editor captures are 1600 × 1150 around a 1536 × 1024 native editor. Compare the reference's modal region with the component, not the illustrative background. The long General-field history and stale-page state intentionally differ from the reference's short Routing example; there is no CSS or density scaling.
+The approved field-history reference remains `automation/design/history-and-conflicts/02-field-history.png`. Its modal, the final light `02-earlier-text.png`, dark `07-history-load-error.png`, and two full-editor history captures were opened together at original resolution from `/mnt/build-storage/codex/kicad/evidence/history-pages-final-4974e9/`. The normal component is 740 × 520 and compact error state is 590 × 440; full-editor captures are 1600 × 1150 around a 1536 × 1024 native editor. Compare the reference's modal region with the component, not the illustrative background. The long General-field history and stale-page state intentionally differ from the reference's short Routing example; there is no CSS or density scaling.
 
 The first paging run `t20260920T040632Z-1ce6a5` exposed two interaction defects: later process completions were blocked while the first completion handler held the modal loop, and disabling the focused Load older button could lose Escape. The repair opens history through its own event dispatcher and moves focus to the live revision list before disabling the loading action. The complete native run `t20260920T041717Z-83fb29` then passed cancellation, older-page loading, stale-file recovery, exact restoration and independent drafts. The failed evidence is retained unchanged.
 
@@ -106,7 +106,7 @@ The rendered checks cover a 206-change history, retained selection while appendi
 
 ### Whole-diagram history: first native integration pass
 
-The source is `/home/holyglory/kicad/automation/design/history-and-conflicts/01-diagram-history.png`. The same approved right-side history panel is used at root and child levels; it does not replace the current canvas on row selection. The first native pass `t20260920T051110Z-988798` passed all four focused checks against source `86a580a1a1689cdb97888d845efb868af21fc0846d4537fcddf9122d6a1f7320`. Native evidence manifest: `505e6f27af994bbb8e848ce34915fbb9e9d1d37c952479e68a4ff52cf72038cb`.
+The source is `automation/design/history-and-conflicts/01-diagram-history.png`. The same approved right-side history panel is used at root and child levels; it does not replace the current canvas on row selection. The first native pass `t20260920T051110Z-988798` passed all four focused checks against source `86a580a1a1689cdb97888d845efb868af21fc0846d4537fcddf9122d6a1f7320`. Native evidence manifest: `505e6f27af994bbb8e848ce34915fbb9e9d1d37c952479e68a4ff52cf72038cb`.
 
 The reference and original-resolution light inspection/dark preview captures were opened together from `/mnt/build-storage/codex/kicad/evidence/whole-history-988798/`: `editor-light/75567681-7a9e-40a5-bac6-9d9f473e2f6e-diagram-history-inspection.png` and `editor-dark/8d321443-a4a0-4d86-8c2f-d3fe6b785e48-diagram-history-preview.png`. The native editor is 1536 × 1024 inside a 1600 × 1150 display capture; the reference is a 1536 × 1024 scene. Compare the native region directly, without CSS or density scaling. The test shows the root with many revisions and a deliberately removed CPU, while the reference shows three PSU revisions; compare shared composition and inspection/preview semantics, not invented diagram contents.
 
@@ -140,7 +140,7 @@ The following records describe the earlier native editor and are retained as his
 
 ## Evidence and state
 
-Source visual: `/home/holyglory/.codex/generated_images/01a06e57-5f4c-7b23-8476-b42467c8c6c7/exec-14f611d6-b267-4632-a0ee-71436aff425f.png` (1487 × 1058).
+Source visual: `automation/design/option-1/native-canvas.png` (1487 × 1058).
 
 First native capture: `/mnt/build-storage/codex/kicad/evidence/structural-option1-528c0d/editor-evidence/6b23a438-cbca-4ab8-83f8-8c9f3fbce479-structural-initial.png` (1600 × 1150 display, 1440 × 1024 editor).
 

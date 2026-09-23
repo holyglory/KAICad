@@ -159,6 +159,9 @@ public sealed partial class NativeSessionTests
                     StringAssert.Contains(result.ErrorMessage, text, $"{phase}: the error must name the cause.");
                 StringAssert.Contains(result.ErrorMessage, "KiCad replaced none of the document's files.", phase);
                 StringAssert.Contains(result.ErrorMessage, "The editor still holds all unsaved changes.", phase);
+                // A pure write problem is not described as a refusal, and the advice is to make files writable.
+                Assert.IsFalse(result.ErrorMessage.Contains("KiCad refused to save", StringComparison.Ordinal), $"{phase}: {result.ErrorMessage}");
+                StringAssert.Contains(result.ErrorMessage, "make the file or folder writable", phase);
                 Assert.AreEqual(dirty, result.ObservedState, $"{phase}: the receipt shows the editor after the failure.");
                 await WorkKept(phase, disk);
                 // The failure is retained: repeating the request or reading the receipt returns it without writing.
@@ -198,7 +201,7 @@ public sealed partial class NativeSessionTests
             string cancelled = Guid.NewGuid().ToString("D");
             var cancelledRequest = new { instanceId, expectedStateJson, operationId = cancelled };
             var cancelledReply = await CancelWhileKiCadIsStopped(mcp, processId, "kicad_document_save", cancelledRequest, token);
-            await OperationNotReceived(mcp, client, document, instanceId, cancelled, token);
+            await OperationNotStarted(mcp, client, document, instanceId, cancelled, token);
             await WorkKept("cancelled save", beforeCancel);
             NotReportedAsSuccess(cancelledReply, "cancelled save");
 
@@ -272,20 +275,24 @@ public sealed partial class NativeSessionTests
             $"{phase}: a cancelled call reported success: {message.GetRawText()}");
     }
 
-    private static async Task OperationNotReceived(CancellableMcpClient mcp, NativeClient client, DocumentSpecifier document,
+    private static async Task OperationNotStarted(CancellableMcpClient mcp, NativeClient client, DocumentSpecifier document,
         string instanceId, string operation, CancellationToken token)
     {
         var reply = await mcp.Tool("kicad_document_operation", new
             { instanceId, documentJson = SchematicJson.Formatter.Format(document), operationId = operation, processEpoch = client.Epoch });
         Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), reply.GetRawText());
         var error = reply.GetProperty("structuredContent");
-        Assert.AreEqual("operation_not_received", error.GetProperty("code").GetString(), reply.GetRawText());
+        Assert.AreEqual("operation_not_started", error.GetProperty("code").GetString(), reply.GetRawText());
         string message = error.GetProperty("message").GetString()!;
         StringAssert.Contains(message, operation);
-        StringAssert.Contains(message, "never received");
-        // KiCad itself agrees: it has no receipt, so it saved or closed nothing for this operation.
-        await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(
+        StringAssert.Contains(message, "has no record of starting");
+        StringAssert.Contains(message, "saved or closed nothing");
+        // KiCad itself agrees: it has no receipt, so it saved or closed nothing for this operation, and
+        // it says so with the fixed marker the MCP server matches rather than with prose.
+        var native = await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(
             new() { Document = document.Clone(), OperationId = operation, ProcessEpoch = client.Epoch }, token));
+        Assert.AreEqual(3, native.Status, native.Message);
+        StringAssert.StartsWith(native.Message, KiCad.Automation.Mcp.DocumentLifecycleTools.NativeUnknownOperation + ":", native.Message);
     }
 
     // Holds KiCad still (SIGSTOP) so the MCP server's request cannot reach it, cancels the call the

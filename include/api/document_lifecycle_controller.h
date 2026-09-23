@@ -33,12 +33,29 @@ public:
      */
     static wxString WriteBlocker( const wxString& aPath );
 
+    /// Why a native saver did not write a document file during a checked save.
+    enum class SAVE_PROBLEM
+    {
+        /// The file system would not accept the write: a read-only file or folder, a folder that
+        /// cannot be created, a full disk or another system error while writing.
+        WRITE_BLOCKED,
+        /// KiCad refused to save for a reason that making files writable does not fix, for
+        /// example conflicting root page numbers or a sheet without a file name.
+        SAVE_REFUSED
+    };
+
+    /// Message prefix, followed by ':', of the refusal to read an operation this process has no
+    /// receipt for.  Clients match this fixed marker, never the explanation after it.
+    static constexpr const char* UNKNOWN_OPERATION_MARKER = "lifecycle_operation_not_started";
+
     /**
-     * Native writers call this during a checked save to say why a file was not written, for
-     * example because it is read-only or the disk is full.  The checked save result names the
-     * file and the reason.  Outside a checked save on this thread it does nothing.
+     * Native savers call this during a checked save to say why they did not write a file.  The
+     * checked save result names every problem with its reason.  Only WRITE_BLOCKED problems
+     * make the result report file_not_writable and list the file among its blocked files.
+     * @a aPath may be empty when the problem concerns no single file.  Outside a checked save on
+     * this thread it does nothing.
      */
-    static void ReportWriteFailure( const wxString& aPath, const wxString& aReason );
+    static void ReportSaveProblem( SAVE_PROBLEM aKind, const wxString& aPath, const wxString& aReason );
 
 private:
     struct RECEIPT

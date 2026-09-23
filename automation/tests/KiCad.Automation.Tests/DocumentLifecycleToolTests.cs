@@ -129,7 +129,7 @@ public sealed class DocumentLifecycleToolTests
     }
 
     [TestMethod]
-    public async Task UnknownOperationExplainsThatKiCadNeverReceivedIt()
+    public async Task UnknownOperationExplainsThatKiCadNeverStartedIt()
     {
         string directory = Directory.CreateTempSubdirectory("lifecycle-unknown-").FullName;
         try
@@ -141,15 +141,23 @@ public sealed class DocumentLifecycleToolTests
             var tool = new DocumentLifecycleTools(registry);
             var state = State(directory, transport.Session.Epoch);
             string id = Guid.NewGuid().ToString("D");
-            transport.ReceiptError = DocumentLifecycleTools.NativeUnknownOperation + ": KiCad never received a save or close with this operation ID";
+            // The native refusal starts with a fixed marker; the explanation after it may change freely.
+            transport.ReceiptError = DocumentLifecycleTools.NativeUnknownOperation + ": any explanation";
             var unknown = await tool.Operation(transport.Session.InstanceId, SchematicJson.Formatter.Format(state.Document), id, state.ProcessEpoch, default);
             Assert.IsTrue(unknown.IsError);
-            Assert.AreEqual("operation_not_received", unknown.StructuredContent!.Value.GetProperty("code").GetString());
-            StringAssert.Contains(unknown.StructuredContent!.Value.GetProperty("message").GetString()!, id);
-            // Any other native refusal keeps its own status; only the unknown-operation reply is reinterpreted.
-            transport.ReceiptError = "Lifecycle operation belongs to another document";
-            var other = await tool.Operation(transport.Session.InstanceId, SchematicJson.Formatter.Format(state.Document), id, state.ProcessEpoch, default);
-            Assert.AreEqual("native_status_3", other.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual("operation_not_started", unknown.StructuredContent!.Value.GetProperty("code").GetString());
+            string message = unknown.StructuredContent!.Value.GetProperty("message").GetString()!;
+            StringAssert.Contains(message, id);
+            StringAssert.Contains(message, "has no record of starting");
+            StringAssert.Contains(message, "saved or closed nothing");
+            // Any other native refusal keeps its own status, including prose that merely resembles the marker.
+            foreach (string other in new[] { "Lifecycle operation belongs to another document",
+                         "Lifecycle operation is not known in this process", DocumentLifecycleTools.NativeUnknownOperation + "_later" })
+            {
+                transport.ReceiptError = other;
+                var refused = await tool.Operation(transport.Session.InstanceId, SchematicJson.Formatter.Format(state.Document), id, state.ProcessEpoch, default);
+                Assert.AreEqual("native_status_3", refused.StructuredContent!.Value.GetProperty("code").GetString(), other);
+            }
         }
         finally { Directory.Delete(directory, true); }
     }

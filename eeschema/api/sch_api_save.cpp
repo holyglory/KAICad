@@ -43,11 +43,23 @@ namespace SCH_API_SAVE
 
 namespace
 {
-// Tell a running checked save why a file cannot be written; plain saves only keep the trace.
+using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+
+// Tell a running checked save that the file system will not accept a write of this file; plain
+// saves only keep the trace.
 void ReportBlocked( const wxString& aPath, const wxString& aReason )
 {
-    DOCUMENT_LIFECYCLE_CONTROLLER::ReportWriteFailure( aPath, aReason );
-    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Cannot save '%s': %s" ), aPath, aReason );
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Cannot write '%s': %s" ), aPath, aReason );
+}
+
+
+// Tell a running checked save that KiCad refuses to save for a reason that writable files would
+// not fix. @a aPath may be empty.
+void ReportRefused( const wxString& aPath, const wxString& aReason )
+{
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Save refused for '%s': %s" ), aPath, aReason );
 }
 
 
@@ -101,8 +113,16 @@ bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& 
     }
     catch( const IO_ERROR& ioe )
     {
-        // For example a full disk: the writer names the file and the system error.
-        ReportBlocked( schematicFileName.GetFullPath(), ioe.What() );
+        // Formatting refuses conflicting root page numbers before anything is written; every
+        // other error comes from writing the file, for example a full disk, and names the file
+        // and the system error.
+        if( ResolveRootInstance( &aSchematic, *aSheet ).conflict )
+            ReportRefused( schematicFileName.GetFullPath(),
+                           wxS( "one shared sheet file has conflicting root page numbers; set its root page "
+                                "number explicitly" ) );
+        else
+            ReportBlocked( schematicFileName.GetFullPath(), ioe.Problem() );
+
         return false;
     }
 }
@@ -185,14 +205,14 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     if( HasRootInstanceConflicts( aSchematic ) )
     {
-        ReportBlocked( rootScreen ? aProject.AbsolutePath( rootScreen->GetFileName() ) : aProject.GetProjectFullName(),
-                       wxS( "one shared sheet file has conflicting root page numbers" ) );
+        ReportRefused( wxEmptyString, wxS( "one shared sheet file has conflicting root page numbers; set its root "
+                                           "page number explicitly" ) );
         return false;
     }
 
     if( !rootScreen || rootScreen->GetFileName().IsEmpty() )
     {
-        ReportBlocked( aProject.GetProjectFullName(), wxS( "the root schematic has no file name" ) );
+        ReportRefused( wxEmptyString, wxS( "the root schematic has no file name" ) );
         return false;
     }
 
@@ -205,7 +225,10 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     if( aProject.IsReadOnly() || aProject.GetProjectFile().IsReadOnly() )
     {
-        ReportBlocked( aProject.GetProjectFullName(), wxS( "the project is open read-only in KiCad" ) );
+        // KiCad's own state, not the file system: making the file writable does not change it.
+        ReportRefused( aProject.GetProjectFullName(),
+                       wxS( "KiCad opened this project read-only (another KiCad may hold its lock, or the "
+                            "schematic was opened without its project file) and writes no files for it" ) );
         writable = false;
     }
     else if( !WritableDestination( aProject.GetProjectFullName() ) )
@@ -220,7 +243,9 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
         const SCH_SCREEN* screen = screens.GetScreen( i );
         if( !sheet || !screen || screen->GetFileName().empty() )
         {
-            ReportBlocked( sheet ? sheet->GetName() : wxString( wxS( "<sheet>" ) ), wxS( "the sheet has no file name" ) );
+            ReportRefused( wxEmptyString,
+                           sheet ? wxString::Format( wxS( "sheet '%s' has no file name" ), sheet->GetName() )
+                                 : wxString( wxS( "a sheet has no file name" ) ) );
             writable = false;
         }
         else if( !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
@@ -259,7 +284,13 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 
     if( !UpdateProjectFile( aSchematic, aProject ) )
     {
-        ReportBlocked( aProject.GetProjectFullName(), wxS( "KiCad could not write the project settings" ) );
+        // The project file and its folder accepted writes before the first sheet was written,
+        // so check again for what changed; the settings writer itself gives no reason.
+        const wxString reason = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( aProject.GetProjectFullName() );
+        ReportBlocked( aProject.GetProjectFullName(),
+                       reason.empty() ? wxString( wxS( "writing the project settings failed after the sheets were "
+                                                       "written, and the settings writer gave no system reason" ) )
+                                      : reason );
         return false;
     }
 

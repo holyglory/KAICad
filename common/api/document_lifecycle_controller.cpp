@@ -6,22 +6,25 @@
 #include <file_content_baseline.h>
 #include <ki_exception.h>
 #include <kiplatform/io.h>
+#include <optional>
 #include <set>
 #include <algorithm>
+#include <cctype>
 
 namespace
 {
 using namespace kiapi::automation::v1;
 using google::protobuf::util::MessageDifferencer;
 
-// Why native writers could not write a file during the checked save running on this thread.
-struct WRITE_FAILURE
+// Why native savers did not write a file during the checked save running on this thread.
+struct SAVE_PROBLEM_REPORT
 {
+    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM kind;
     wxString path;
     wxString reason;
 };
 
-thread_local std::vector<WRITE_FAILURE>* activeWriteFailures = nullptr;
+thread_local std::vector<SAVE_PROBLEM_REPORT>* activeSaveProblems = nullptr;
 
 std::string Utf8( const wxString& aText )
 {
@@ -31,6 +34,20 @@ std::string Utf8( const wxString& aText )
 std::string FileName( const std::string& aPath )
 {
     return Utf8( wxFileName( wxString::FromUTF8( aPath ) ).GetFullName() );
+}
+
+// A reason as a clause of a longer sentence: without surrounding space or a final period.
+std::string Clause( std::string aText )
+{
+    while( !aText.empty() && ( aText.back() == '.' || std::isspace( static_cast<unsigned char>( aText.back() ) ) ) )
+        aText.pop_back();
+
+    size_t start = 0;
+
+    while( start < aText.size() && std::isspace( static_cast<unsigned char>( aText[start] ) ) )
+        ++start;
+
+    return aText.substr( start );
 }
 
 // Protobuf strings must stay valid UTF-8, so never cut through a multi-byte character.
@@ -198,11 +215,12 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
 }
 
 
-void DOCUMENT_LIFECYCLE_CONTROLLER::ReportWriteFailure( const wxString& aPath, const wxString& aReason )
+void DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM aKind, const wxString& aPath,
+                                                       const wxString& aReason )
 {
-    // Bounded: the result carries at most one entry per observed file anyway.
-    if( activeWriteFailures && activeWriteFailures->size() < 64 )
-        activeWriteFailures->push_back( { aPath, aReason } );
+    // Bounded: savers report at most a few problems per observed file.
+    if( activeSaveProblems && activeSaveProblems->size() < 64 )
+        activeSaveProblems->push_back( { aKind, aPath, aReason } );
 }
 
 void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& state )
@@ -231,9 +249,12 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         if( !aEnvelope.message().UnpackTo( &query ) || !Uuid( query.operation_id() )
                 || query.process_epoch() != aProcessEpoch ) return Error( "Invalid lifecycle receipt target or process epoch" );
         const auto found = m_receipts.find( query.operation_id() );
+        // No receipt means this process never started the operation: the request did not reach
+        // KiCad, or KiCad refused it before starting (for example a malformed request).
         if( found == m_receipts.end() )
-            return Error( "Lifecycle operation is not known in this process: KiCad never received a save or close "
-                          "with this operation ID, so it saved or closed nothing for it" );
+            return Error( std::string( UNKNOWN_OPERATION_MARKER )
+                          + ": KiCad has no record of starting a save or close with this operation ID in this "
+                            "process, so it saved or closed nothing for it" );
         if( !MessageDifferencer::Equals( found->second.request.document(), query.document() ) )
             return Error( "Lifecycle operation belongs to another document" );
         return Pack( found->second.result );
@@ -312,9 +333,27 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         return state;
     };
 
-    // Observed files this save replaced, and why native writers could not write others.
+    // Observed files this save replaced, and every problem the native savers reported.
     std::vector<std::string> writtenFiles;
-    std::vector<WRITE_FAILURE> writeFailures;
+    std::vector<SAVE_PROBLEM_REPORT> saveProblems;
+
+    // This controller's own refusal to let a writer replace a file. Savers report the exception
+    // it raises as their own write failure, so their reports from that point on describe this
+    // refusal rather than a separate cause.
+    struct REFUSAL
+    {
+        std::string code;
+        wxString    path;
+        wxString    reason;
+        std::string next;
+        size_t      reportsBefore = 0;
+    };
+    std::optional<REFUSAL> refusal;
+    auto refuse = [&]( const char* aCode, const wxString& aPath, const wxString& aReason, const char* aNext )
+    {
+        if( !refusal )
+            refusal = REFUSAL{ aCode, aPath, aReason, aNext, saveProblems.size() };
+    };
     auto recordWrites = [&]()
     {
         result.clear_written_files();
@@ -323,13 +362,23 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             result.add_written_files( path );
     };
 
-    // A failed save names what reached the disk, what could not be written and why, and whether
-    // the editor still holds the work, so the caller can fix the cause and save again.
+    // A failed save names what reached the disk, what stopped it and why, and whether the editor
+    // still holds the work, so the caller can fix the actual cause and save again.
     auto describeSaveFailure = [&]( const DocumentLifecycleState& aBefore, const DocumentLifecycleState* aAfter,
                                     const std::string& aNative ) -> API_RESULT
     {
+        using CAUSES = std::vector<std::pair<std::string, std::string>>;
+        auto observed = [&]( const std::string& aPath )
+        {
+            return std::find( aBefore.native_files().begin(), aBefore.native_files().end(), aPath )
+                   != aBefore.native_files().end();
+        };
+        // Results name a document file exactly as the observation spelled it.
         auto observedPath = [&]( const wxString& aPath ) -> std::string
         {
+            if( aPath.empty() )
+                return {};
+
             for( const std::string& file : aBefore.native_files() )
                 if( FILE_CONTENT_BASELINE::SamePath( wxString::FromUTF8( file ), aPath ) )
                     return file;
@@ -340,18 +389,43 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         {
             return std::find( writtenFiles.begin(), writtenFiles.end(), aPath ) != writtenFiles.end();
         };
-        std::vector<std::pair<std::string, std::string>> blocked;
-
-        for( const WRITE_FAILURE& failure : writeFailures )
+        auto add = []( CAUSES& aCauses, const std::string& aPath, const std::string& aReason )
         {
-            std::string path = observedPath( failure.path );
+            const std::string reason = Clause( aReason );
 
-            if( std::none_of( blocked.begin(), blocked.end(), [&]( const auto& b ) { return b.first == path; } ) )
-                blocked.emplace_back( path, Utf8( failure.reason ) );
+            if( std::none_of( aCauses.begin(), aCauses.end(), [&]( const auto& cause )
+                              { return cause.first == aPath && ( !aPath.empty() || cause.second == reason ); } ) )
+                aCauses.emplace_back( aPath, reason );
+        };
+        auto describe = []( const std::string& aPath, const std::string& aReason )
+        {
+            return aPath.empty() ? aReason : "'" + FileName( aPath ) + "' (" + aPath + "): " + aReason;
+        };
+        auto list = [&]( const CAUSES& aCauses )
+        {
+            std::string text;
+
+            for( const auto& [path, reason] : aCauses )
+                text += ( text.empty() ? "" : "; " ) + describe( path, reason );
+
+            return text;
+        };
+
+        CAUSES blocked, refused;
+        const size_t reports = refusal ? refusal->reportsBefore : saveProblems.size();
+
+        for( size_t i = 0; i < reports; ++i )
+        {
+            const SAVE_PROBLEM_REPORT& problem = saveProblems[i];
+            add( problem.kind == SAVE_PROBLEM::WRITE_BLOCKED ? blocked : refused, observedPath( problem.path ),
+                 Utf8( problem.reason ) );
         }
 
-        // Writers that do not report a reason are explained by checking every unwritten file.
-        if( blocked.empty() )
+        // A saver that reports nothing, such as the PCB editor, is explained by checking every
+        // file it did not write. KiCad's own message is quoted as well.
+        const bool unexplained = saveProblems.empty() && !refusal;
+
+        if( unexplained )
         {
             for( const std::string& file : aBefore.native_files() )
             {
@@ -361,36 +435,57 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                 wxString reason = WriteBlocker( wxString::FromUTF8( file ) );
 
                 if( !reason.empty() )
-                    blocked.emplace_back( file, Utf8( reason ) );
+                    add( blocked, file, Utf8( reason ) );
             }
         }
 
-        std::string causes;
+        // Only files the file system would not let KiCad write are blocked files; a refusal that
+        // writable files would not fix never marks one.
+        for( const auto& cause : blocked )
+            if( observed( cause.first ) )
+                result.add_blocked_files( cause.first );
 
-        for( const auto& [path, reason] : blocked )
-        {
-            // The field lists document files only; other causes appear in the message alone.
-            if( std::find( aBefore.native_files().begin(), aBefore.native_files().end(), path )
-                    != aBefore.native_files().end() )
-                result.add_blocked_files( path );
+        std::string cause;
+        auto sentence = [&]( const std::string& aText ) { cause += ( cause.empty() ? "" : ". " ) + aText; };
 
-            causes += ( causes.empty() ? "'" : "; '" ) + FileName( path ) + "' (" + path + "): " + reason;
-        }
+        if( unexplained || ( !refusal && blocked.empty() && refused.empty() ) )
+            sentence( "KiCad reported: " + Clause( aNative ) );
 
-        std::string editor = !aAfter ? "KiCad could not report the editor state afterwards; read kicad_document_state "
-                                       "before doing anything else."
-                             : aAfter->native_content_dirty() ? "The editor still holds all unsaved changes."
-                                                              : "The editor reports no unsaved changes.";
-        const std::string next = "Fix the cause (for example make the file or folder writable or free disk space), "
-                                 "read a fresh kicad_document_state and save again with a new operation ID.";
-        // Writer reports are the cause; otherwise quote KiCad and add what the file check found.
-        const std::string cause = !writeFailures.empty() ? "KiCad cannot write " + causes
-                                  : blocked.empty()      ? "KiCad reported: " + aNative
-                                                         : "KiCad reported: " + aNative + ". KiCad cannot write " + causes;
+        if( refusal )
+            sentence( "KiCad stopped before replacing "
+                      + describe( observedPath( refusal->path ), Clause( Utf8( refusal->reason ) ) ) );
+
+        if( !refused.empty() )
+            sentence( "KiCad refused to save: " + list( refused ) );
+
+        if( !blocked.empty() )
+            sentence( "KiCad cannot write " + list( blocked ) );
+
+        const bool blockedFiles = result.blocked_files_size() > 0;
+        const std::string code = refusal         ? refusal->code
+                                 : blockedFiles  ? "file_not_writable"
+                                 : !refused.empty() ? "native_save_refused"
+                                                    : "native_save_failed";
+        const std::string again = "read a fresh kicad_document_state and save again with a new operation ID.";
+        const std::string next =
+                refusal ? refusal->next
+                : !blocked.empty() && !refused.empty()
+                        ? "Fix every cause named above: make the named files and folders writable (or free disk "
+                          "space) and resolve what KiCad refused. Then " + again
+                : !blocked.empty()
+                        ? "Fix what stops KiCad writing the named files (for example make the file or folder "
+                          "writable or free disk space), then " + again
+                : !refused.empty()
+                        ? "Resolve what KiCad refused; making files writable does not help. Then " + again
+                        : "Inspect the document in KiCad, then " + again;
+        const std::string editor = !aAfter ? "KiCad could not report the editor state afterwards; read "
+                                             "kicad_document_state before doing anything else."
+                                   : aAfter->native_content_dirty() ? "The editor still holds all unsaved changes."
+                                                                    : "The editor reports no unsaved changes.";
 
         if( writtenFiles.empty() )
         {
-            return fail( LOS_FAILED, blocked.empty() ? "native_save_failed" : "file_not_writable",
+            return fail( LOS_FAILED, code.c_str(),
                          "The document was not saved. " + cause + ". KiCad replaced none of the document's files. "
                                  + editor + " " + next );
         }
@@ -470,6 +565,8 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             return std::find_if( accepted.begin(), accepted.end(), [&]( const auto& entry )
                     { return FILE_CONTENT_BASELINE::SamePath( entry.first, path ); } );
         };
+        // The writer calls the first function just before it replaces a file and the second once
+        // it has. A refusal here is recorded with its own code before the writer sees it fail.
         FILE_WRITE_OBSERVER writes(
             [&]( const wxString& path )
             {
@@ -478,34 +575,59 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                 {
                     const wxString extension = wxFileName( path ).GetExt();
                     if( extension == "kicad_sch" || extension == "kicad_pcb" || extension == "kicad_pro" )
+                    {
+                        refuse( "save_outside_document", path,
+                                wxS( "the save tried to write this design file, which is not one of the observed "
+                                     "document's files" ),
+                                "Read a fresh kicad_document_state, which lists every file of the document, and save "
+                                "again with a new operation ID." );
                         THROW_IO_ERROR( "Save attempted a design file outside the observed document: " + path );
+                    }
                     return; // Local UI settings are not design-state persistence.
                 }
                 const auto current = FILE_CONTENT_BASELINE::Read( path );
-                if( !current.Known() || current.Exists() != entry->second.exists
-                        || current.Bytes() != entry->second.bytes || current.Sha256() != entry->second.sha )
+                if( !current.Known() )
+                {
+                    refuse( "file_unreadable_during_save", path,
+                            wxS( "KiCad could not read it to confirm that no other program changed it after the save "
+                                 "began" ),
+                            "Make the file readable again, then read a fresh kicad_document_state and save again "
+                            "with a new operation ID." );
+                    THROW_IO_ERROR( "File could not be read during checked save: " + path );
+                }
+                if( current.Exists() != entry->second.exists || current.Bytes() != entry->second.bytes
+                        || current.Sha256() != entry->second.sha )
+                {
+                    refuse( "file_changed_during_save", path,
+                            wxS( "another program changed it after the save began, and KiCad keeps that version "
+                                 "rather than overwrite it" ),
+                            "Read a fresh kicad_document_state, which shows the file as changed on disk, decide "
+                            "which version to keep, and save again with a new operation ID." );
                     THROW_IO_ERROR( "File changed during checked save: " + path );
+                }
             },
             [&]( const FILE_CONTENT_BASELINE& written )
             {
                 auto entry = locate( written.Path() );
-                if( entry != accepted.end() && written.Known() )
-                {
+                if( entry == accepted.end() )
+                    return;
+                // Called only after the file was replaced, so it counts as written even when its
+                // new version is unknown; only a known version can accept a later write.
+                if( std::find( writtenFiles.begin(), writtenFiles.end(), entry->second.path ) == writtenFiles.end() )
+                    writtenFiles.push_back( entry->second.path );
+                if( written.Known() )
                     entry->second = FILE_VERSION{ written.Exists(), written.Bytes(), written.Sha256(), entry->second.path };
-                    if( std::find( writtenFiles.begin(), writtenFiles.end(), entry->second.path ) == writtenFiles.end() )
-                        writtenFiles.push_back( entry->second.path );
-                }
             } );
         attemptedSave = true;
         API_RESULT saved;
         {
-            struct FAILURE_SCOPE
+            struct PROBLEM_SCOPE
             {
-                std::vector<WRITE_FAILURE>* previous;
-                explicit FAILURE_SCOPE( std::vector<WRITE_FAILURE>& aFailures ) : previous( activeWriteFailures )
-                { activeWriteFailures = &aFailures; }
-                ~FAILURE_SCOPE() { activeWriteFailures = previous; }
-            } failureScope( writeFailures );
+                std::vector<SAVE_PROBLEM_REPORT>* previous;
+                explicit PROBLEM_SCOPE( std::vector<SAVE_PROBLEM_REPORT>& aProblems ) : previous( activeSaveProblems )
+                { activeSaveProblems = &aProblems; }
+                ~PROBLEM_SCOPE() { activeSaveProblems = previous; }
+            } problemScope( saveProblems );
             saved = aDispatch( envelope );
         }
         auto after = observe();

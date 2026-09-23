@@ -14,7 +14,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_document_save", ReadOnly = false),
-     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved: its errorMessage says which file could not be written and why (for example a read-only file or folder), blockedFiles lists those files, writtenFiles lists any files already replaced, and the editor keeps the unsaved changes. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad received it. Does not close editors or promise atomic multi-file persistence."),
+     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. Its errorMessage names every cause and the next step; errorCode file_not_writable means the file system would not let KiCad write the files listed in blockedFiles (for example a read-only file or folder), native_save_refused means KiCad refused for a reason that writable files would not fix, file_changed_during_save means another program changed a file during the save, and partial_save means the files in writtenFiles were already replaced. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
      KiCadCapability("document-lifecycle", "native-api", "document state observation, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
@@ -48,7 +48,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_close", ReadOnly = false),
-     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad received it."),
+     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it."),
      KiCadCapability("document-lifecycle", "native-api", "clean document state observation, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
@@ -80,7 +80,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_operation", ReadOnly = true),
-     Description("Read the retained result of an exact document lifecycle operation in its original native process. This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive. The error operation_not_received means KiCad never received that operation ID (for example the call was cancelled first), so it saved or closed nothing for it."),
+     Description("Read the retained result of an exact document lifecycle operation in its original native process. This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive. The error operation_not_started means KiCad has no record of starting that operation ID (for example the call was cancelled before KiCad received it), so it saved or closed nothing for it."),
      KiCadCapability("document-lifecycle", "native-api", "document, operation UUID, process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
@@ -101,20 +101,23 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                     { Document = document, OperationId = id, ProcessEpoch = processEpoch }, cancellationToken);
             }
             catch (NativeApiException error) when (error.Status == 3
-                && error.Message.StartsWith(NativeUnknownOperation, StringComparison.Ordinal))
+                && error.Message.StartsWith(NativeUnknownOperation + ":", StringComparison.Ordinal))
             {
-                throw new AutomationException("operation_not_received",
-                    $"KiCad (process epoch {processEpoch}) never received a save or close with operation ID {id}, so it saved "
-                    + "or closed nothing for it. This happens when the call was cancelled or timed out before KiCad received it. "
-                    + "Read kicad_document_state: the editor keeps any unsaved changes. Then repeat the original request with "
-                    + "the same operation ID, or save or close again with a fresh observation and a new operation ID.");
+                throw new AutomationException("operation_not_started",
+                    $"KiCad (process epoch {processEpoch}) has no record of starting a save or close with operation ID {id}, "
+                    + "so it saved or closed nothing for it. Usually the call was cancelled or timed out before KiCad received "
+                    + "it; KiCad also keeps no record of a request it refused before starting (for example a malformed "
+                    + "request). Read kicad_document_state: the editor keeps any unsaved changes. Then repeat the original "
+                    + "request with the same operation ID, or save or close again with a fresh observation and a new "
+                    + "operation ID.");
             }
             ValidateResult(result, document, id, processEpoch);
             return SchematicJson.Formatter.Format(result);
         });
 
-    // The native controller's refusal for an operation ID it never received.
-    internal const string NativeUnknownOperation = "Lifecycle operation is not known in this process";
+    // Fixed marker (DOCUMENT_LIFECYCLE_CONTROLLER::UNKNOWN_OPERATION_MARKER) that starts, followed by ':',
+    // the native refusal to read an operation ID the process never started. Only the marker is matched.
+    internal const string NativeUnknownOperation = "lifecycle_operation_not_started";
 
     // A transport failure is not a lifecycle result. Say whether KiCad received the request, so the
     // caller knows whether it may still complete, and how to find out without saving twice.

@@ -22,8 +22,9 @@ public sealed partial class NativeSessionTests
     {
         // The original journey used 60 s. The ERC round trips add one rendered Setup
         // edit, four keyboard undo/redo steps, one XML apply and a save/reload
-        // reattachment, each a full worker synchronization with a checked native save.
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(180));
+        // reattachment, each a full worker synchronization with a checked native save,
+        // and a fresh KiCad process that reopens the saved files (bounded at 60 s).
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(240));
         var driver = await AutomaticDesignDriver.CreateAsync(store, client, designPath, store.Read()!.RevisionToken, deadline.Token);
         await using var session = new AutomaticDesignSynchronization(driver);
         await Watching(_ => true);
@@ -92,14 +93,16 @@ public sealed partial class NativeSessionTests
         var publicStop = await publicHost.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId = publicSession });
         RequireToolSuccess(publicStop);
         Assert.AreEqual("Stopped", publicStop.GetProperty("structuredContent").GetProperty("status").GetProperty("phase").GetString());
-        await VerifyAutomaticErcReload(publicHost, client, root, store, designPath, savedErc, evidence, instanceId, deadline.Token);
+        await VerifyAutomaticErcReload(publicHost, client, root, store, designPath, savedErc, display, evidence, instanceId,
+            deadline.Token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-sync-result.json"), JsonSerializer.Serialize(new
         {
             instanceId, nativeCommitPublishedWithoutApplyCall = true, xmlSaveAppliedWithoutApplyCall = true,
             invalidXmlPreserved = true, correctedXmlResumed = true, competingOwnerRejected = true,
             stopPreservedEditor = true, missedEditRecoveredAfterReattach = true,
             publicToolsQualified = true, ercNativeSetupEditPublished = true, ercXmlEditApplied = true,
-            ercNativeUndoRedoPublished = true, ercSavedReloadedAndReattached = true, crossPlatformReady = false
+            ercNativeUndoRedoPublished = true, ercSavedProjectComplete = true, ercReopenedFromDiskInFreshProcess = true,
+            ercRevertedAndReattached = true, crossPlatformReady = false
         }), deadline.Token);
 
         SchematicDesign Read() => SchematicDesignXml.Read(File.ReadAllText(designPath), []);
@@ -150,6 +153,9 @@ public sealed partial class NativeSessionTests
         // The same rendered page row and measured input/input matrix cell that
         // VerifySetupPinMap uses on this fixed 1280x900 Linux display.
         await NativeSetupUi.SelectPage(display, processId, 180, token);
+        // As VerifySetupPinMap does, retain the selected page before the click: the
+        // matrix page is built lazily, and a click before it is shown edits nothing.
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-automatic-erc-setup-selected.png"), token);
         NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false, clickFromLeft: 414, clickFromTop: 59);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-automatic-erc-setup-edited.png"), token);
         Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Import Settings"),
@@ -211,6 +217,28 @@ public sealed partial class NativeSessionTests
                 throw;
             }
         }
+        // Accepting the edited Setup records one native change before the worker can see it.
+        using (var recorded = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            recorded.CancelAfter(TimeSpan.FromSeconds(30));
+            int delay = 25;
+            try
+            {
+                while (true)
+                {
+                    var journal = await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
+                        new() { Document = root.Clone() }, recorded.Token);
+                    Assert.AreEqual(original.State.Revision.Epoch, journal.DocumentEpoch);
+                    if (journal.Sequence != original.State.Revision.Sequence) break;
+                    await Task.Delay(delay, recorded.Token); delay = Math.Min(delay * 2, 500);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                Assert.Fail("The rendered Setup edit recorded no native change; see the retained "
+                    + instanceId + "-automatic-erc-setup-selected/edited screenshots.");
+            }
+        }
         var setupNative = await Synchronized("native-setup", cursor, setupErc);
         var setupDesign = Read();
         OnlyErcChanged("The Setup edit", original.Electrical.Hierarchy.Data, setupNative.Electrical.Hierarchy.Data, setupErc);
@@ -228,7 +256,13 @@ public sealed partial class NativeSessionTests
             "Undoing the Setup edit must restore the complete native design.");
         Assert.IsEmpty(SchematicHierarchyDelta.Plan(originalDesign.Schematic, Read().Schematic, token),
             "The XML must return to the design it had before the Setup edit.");
-        await History("y", setupErc);
+        await SameOutsideSchematic("native-setup-undo", originalDesign, Read());
+        var setupRedone = await History("y", setupErc);
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(setupNative.Electrical.Hierarchy.Data, setupRedone.Electrical.Hierarchy.Data, token),
+            "Redoing the Setup edit must restore the complete edited native design.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(setupDesign.Schematic, Read().Schematic, token),
+            "The XML must return to the design the Setup edit published.");
+        await SameOutsideSchematic("native-setup-redo", originalDesign, Read());
 
         // XML to native: one saved XML edit changes a rule severity, another matrix
         // pair and adds an exclusion with exact marker references and a comment.
@@ -251,10 +285,14 @@ public sealed partial class NativeSessionTests
         cursor = session.Inspect().Sequence;
         await File.WriteAllBytesAsync(designPath, Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithErc(xmlDesign, xmlErc), [])), token);
         var xmlNative = await Synchronized("xml-apply", cursor, xmlErc);
+        var xmlApplied = Read();
         OnlyErcChanged("The XML apply", beforeXml.Electrical.Hierarchy.Data, xmlNative.Electrical.Hierarchy.Data, xmlErc);
-        await SameOutsideSchematic("xml-apply", xmlDesign, Read());
+        await SameOutsideSchematic("xml-apply", xmlDesign, xmlApplied);
         var xmlApplication = store.Read()!.State.LastSynchronization!;
         Assert.IsTrue(xmlApplication.NativeMutationCommitted, "The XML ERC edit must be one committed native change.");
+        Assert.AreEqual(beforeXml.State.Revision.Epoch, xmlNative.State.Revision.Epoch);
+        Assert.AreEqual(beforeXml.State.Revision.Sequence + 1, xmlNative.State.Revision.Sequence,
+            "The saved XML ERC edit must advance the native revision by exactly one commit.");
         Assert.IsTrue(xmlApplication.NativeFilesSaved);
         var liveExclusion = Erc(xmlNative.Electrical.Hierarchy.Data).Exclusions.Single();
         Assert.AreEqual(marker, liveExclusion.Marker, "KiCad must keep the exact marker references from XML.");
@@ -264,13 +302,22 @@ public sealed partial class NativeSessionTests
         var xmlUndone = await History("z", setupErc);
         Assert.IsEmpty(SchematicHierarchyDelta.Plan(beforeXml.Electrical.Hierarchy.Data, xmlUndone.Electrical.Hierarchy.Data, token),
             "Undoing the XML edit must restore the complete native design.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(xmlDesign.Schematic, Read().Schematic, token),
+            "The XML must return to the design it had before the XML edit.");
+        await SameOutsideSchematic("xml-undo", xmlDesign, Read());
         var xmlRedone = await History("y", xmlErc);
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(xmlNative.Electrical.Hierarchy.Data, xmlRedone.Electrical.Hierarchy.Data, token),
+            "Redoing the XML edit must restore the complete native design it applied.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(xmlApplied.Schematic, Read().Schematic, token),
+            "The XML must return to the design the XML edit applied.");
+        await SameOutsideSchematic("xml-redo", xmlDesign, Read());
         Assert.AreEqual(liveExclusion, Erc(xmlRedone.Electrical.Hierarchy.Data).Exclusions.Single());
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-erc-result.json"), JsonSerializer.Serialize(new
         {
             instanceId, original = originalErc.ToString(), setup = setupErc.ToString(), xml = xmlErc.ToString(),
             nativeSetupEditPublished = true, nativeUndoRedoPublished = true, xmlEditAppliedAsOneCommit = true,
-            xmlUndoRedoPublished = true, exactExclusionReferencesKept = true, otherDesignContentUnchanged = true
+            xmlUndoRedoPublished = true, exactExclusionReferencesKept = true,
+            otherDesignContentUnchangedAsCanonicalXml = true
         }), token);
         return xmlErc;
 
@@ -293,6 +340,10 @@ public sealed partial class NativeSessionTests
         async Task<CheckedSchematicState> Synchronized(string stage, ulong after, ErcSettings expected)
         {
             var status = session.Inspect();
+            // One worker synchronization with a checked save takes seconds; this failure
+            // ceiling keeps a lost edit from consuming the other project's session time.
+            using var stageLimit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            stageLimit.CancelAfter(TimeSpan.FromSeconds(90));
             try
             {
                 while (true)
@@ -302,13 +353,15 @@ public sealed partial class NativeSessionTests
                     if (status.Phase == AutomaticDesignPhase.Watching && status.Sequence > after
                         && store.Read() is { State.HasPendingWork: false })
                     {
-                        var native = await Capture(); var design = Read();
+                        var native = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+                            { Document = root.Clone(), ProcessEpoch = client.Epoch }, stageLimit.Token);
+                        var design = Read();
                         if (SchematicErcSettingsValidation.Same(expected, Erc(native.Electrical.Hierarchy.Data))
                             && SchematicErcSettingsValidation.Same(expected, Erc(design.Schematic))
                             && SchematicHierarchyDelta.Plan(native.Electrical.Hierarchy.Data, design.Schematic, token).Count == 0)
                             return native;
                     }
-                    status = await session.WaitAsync(status.Sequence, token);
+                    status = await session.WaitAsync(status.Sequence, stageLimit.Token);
                 }
             }
             catch (OperationCanceledException)
@@ -332,7 +385,8 @@ public sealed partial class NativeSessionTests
                 what + " must carry exactly the expected ERC settings.");
         }
 
-        // Engineering intent, bindings and part symbols are compared byte for byte.
+        // Engineering intent, bindings and part symbols must be unchanged. Both sides are
+        // re-serialized by the same canonical XML writer, so this compares content, not file bytes.
         async Task SameOutsideSchematic(string stage, SchematicDesign before, SchematicDesign after)
         {
             string expected = SchematicDesignXml.Write(before with { Schematic = after.Schematic }, []);
@@ -344,12 +398,15 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    // Every automatic synchronization saves KiCad's checked files. Reload them from
-    // disk, reattach the saved design through the public tools and let a new worker
-    // settle: the reloaded project, KiCad and the XML all keep the XML-applied ERC.
+    // Every automatic synchronization saves KiCad's checked files. The saved project must hold
+    // the complete ERC section, and a fresh KiCad process that opens a copy of the saved files
+    // (so the project is read from disk, not kept from memory) must restore it exactly. Then the
+    // running editor is reverted and a new worker is reattached through the public tools: revert
+    // reloads the schematic files but keeps this process's loaded project settings, so it proves
+    // the reattachment, not the disk round trip.
     private static async Task VerifyAutomaticErcReload(StdioMcpFixture publicHost, NativeClient client,
-        DocumentSpecifier root, DesignRecoveryStore store, string designPath, ErcSettings saved, string evidence,
-        string instanceId, CancellationToken token)
+        DocumentSpecifier root, DesignRecoveryStore store, string designPath, ErcSettings saved, string display,
+        string evidence, string instanceId, CancellationToken token)
     {
         Assert.IsFalse(store.Read()!.State.HasPendingWork, "The stopped worker must leave no pending operation before reload.");
         var exclusion = saved.Exclusions.Single();
@@ -359,19 +416,36 @@ public sealed partial class NativeSessionTests
             var rule = saved.RuleSeverities.Single(r => r.RuleType == ErcRule.ErcetPinNotConnected);
             Assert.AreEqual(rule.Severity == RuleSeverity.RsWarning ? "warning" : "error",
                 erc.GetProperty("rule_severities").GetProperty("pin_not_connected").GetString());
-            foreach (var cell in saved.PinMap.Where(c => c.First == c.Second
-                && c.First is ElectricalPinType.EptInput or ElectricalPinType.EptOutput))
-                Assert.AreEqual((int)cell.Conflict - 1, erc.GetProperty("pin_map")[(int)cell.First - 1][(int)cell.Second - 1].GetInt32());
+            // Every cell of the pin conflict matrix, indexed by native pin type.
+            var pinMap = erc.GetProperty("pin_map");
+            int types = saved.PinMap.Select(cell => cell.First).Distinct().Count();
+            Assert.AreEqual(types, pinMap.GetArrayLength());
+            foreach (var cell in saved.PinMap)
+            {
+                var row = pinMap[(int)cell.First - 1];
+                Assert.AreEqual(types, row.GetArrayLength());
+                Assert.AreEqual((int)cell.Conflict - 1, row[(int)cell.Second - 1].GetInt32(),
+                    $"The saved pin rule {cell.First}/{cell.Second} must be the synchronized one.");
+            }
+            // The exclusion exactly as KiCad writes it: every marker reference and the comment.
             var exclusions = erc.GetProperty("erc_exclusions");
             Assert.AreEqual(1, exclusions.GetArrayLength());
-            Assert.AreEqual(exclusion.Comment, exclusions[0].GetProperty("comment").GetString());
+            Assert.AreEqual(exclusion, Google.Protobuf.JsonParser.Default.Parse<ErcExclusion>(exclusions[0].GetRawText()),
+                "The saved exclusion must keep the exact marker references and comment.");
         }
+        // The native reader is the oracle for every persisted rule severity: a fresh process
+        // reads the saved project from disk and must restore exactly the synchronized settings.
+        var reopenedErc = await ReopenSavedErc(root, display, evidence, instanceId, token);
+        Assert.IsTrue(SchematicErcSettingsValidation.Same(saved, reopenedErc),
+            "A fresh KiCad process must restore every saved ERC rule, pin rule and exclusion from disk.");
+        Assert.AreEqual(exclusion, reopenedErc.Exclusions.Single(), "Reopening must keep the exact exclusion references.");
+
         var beforeReload = await Capture();
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
         var reloaded = await Capture();
-        Assert.AreNotEqual(beforeReload.State.Revision.Epoch, reloaded.State.Revision.Epoch, "Reloading starts a new native document session.");
+        Assert.AreNotEqual(beforeReload.State.Revision.Epoch, reloaded.State.Revision.Epoch, "Reverting starts a new native document session.");
         Assert.IsTrue(SchematicErcSettingsValidation.Same(saved, Erc(reloaded.Electrical.Hierarchy.Data)),
-            "The reloaded project must restore the saved ERC policy and exclusions.");
+            "The reverted editor must keep the saved ERC policy and resolve the saved exclusions onto its reloaded markers.");
         Assert.AreEqual(exclusion, Erc(reloaded.Electrical.Hierarchy.Data).Exclusions.Single());
 
         var beforeReattach = store.Read()!;
@@ -405,13 +479,88 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-erc-reload.json"), JsonSerializer.Serialize(new
         {
             instanceId, previousEpoch = beforeReload.State.Revision.Epoch, reloadedEpoch = reloaded.State.Revision.Epoch,
-            savedProjectVerified = true, reloadedNativeVerified = true, publicReattachVerified = true, reattachedXmlVerified = true
+            savedErcSectionVerified = true, freshProcessReopenVerified = true, revertedNativeVerified = true,
+            publicReattachVerified = true, reattachedXmlVerified = true
         }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
         ErcSettings Erc(Kiapi.Schematic.Types.SchematicHierarchyData data) =>
             data.Instances.Single(s => s.Metadata.Document.Equals(root)).Metadata.ErcSettings;
+    }
+
+    // Opens a copy of the saved design and project files in a fresh KiCad process, so its project
+    // settings are read from disk, and returns the ERC settings that process restored.
+    private static async Task<ErcSettings> ReopenSavedErc(DocumentSpecifier root, string display, string evidence,
+        string instanceId, CancellationToken token)
+    {
+        string executable = Path.Combine(FindRoot(), "automation", "artifacts", "native", "kicad", "kicad");
+        string scratch = Directory.CreateTempSubdirectory("kicad-erc-reopen-").FullName;
+        string copy = Directory.CreateDirectory(Path.Combine(scratch, "project")).FullName;
+        // Only the saved design, project and library files: never the running editor's
+        // configuration, cache, locks, socket or history.
+        foreach (string file in Directory.EnumerateFiles(root.Project.Path, "*", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(root.Project.Path, file);
+            string[] parts = relative.Split(Path.DirectorySeparatorChar);
+            if (parts[0] is "config" or "cache" || parts.Any(part => part.StartsWith('.') || part.StartsWith('~')))
+                continue;
+            if (Path.GetExtension(file) is not (".kicad_sch" or ".kicad_pro" or ".kicad_prl" or ".kicad_sym")
+                && Path.GetFileName(file) is not ("sym-lib-table" or "fp-lib-table"))
+                continue;
+            string target = Path.Combine(copy, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+        string project = Path.Combine(copy, root.Project.Name + ".kicad_pro");
+        Assert.IsTrue(File.Exists(project), "The saved project file must be copied for the fresh process.");
+        string reopenId = Guid.NewGuid().ToString("D");
+        string socket = Path.Combine(scratch, "api.sock");
+        var start = new System.Diagnostics.ProcessStartInfo(executable)
+        {
+            WorkingDirectory = copy, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.Environment["DISPLAY"] = display;
+        start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+        start.Environment["XDG_CONFIG_HOME"] = Path.Combine(scratch, "config");
+        start.Environment["XDG_CACHE_HOME"] = Path.Combine(scratch, "cache");
+        foreach (string argument in new[] { "--new", "--automation", reopenId, "--api-socket", socket,
+            "--automation-log", Path.Combine(evidence, instanceId + "-erc-reopen-native.log"), "--software-rendering", project })
+            start.ArgumentList.Add(argument);
+        using var process = System.Diagnostics.Process.Start(start)!;
+        var output = Capture(process.StandardOutput, Path.Combine(evidence, instanceId + "-erc-reopen.stdout.log"));
+        var errors = Capture(process.StandardError, Path.Combine(evidence, instanceId + "-erc-reopen.stderr.log"));
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(60));
+            var registry = new InstanceRegistry(new NngTransport(), Path.Combine(scratch, "registry"));
+            int delay = 25;
+            while (true)
+            {
+                limit.Token.ThrowIfCancellationRequested();
+                Assert.IsFalse(process.HasExited, "The fresh KiCad process exited before serving requests.");
+                try { await registry.AttachAsync("ipc://" + socket, reopenId, limit.Token); break; }
+                catch (NngException) { }
+                catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                await Task.Delay(delay, limit.Token); delay = Math.Min(delay * 2, 500);
+            }
+            var reopened = registry.Client(reopenId);
+            var opened = await reopened.OpenRootSchematicAsync(Path.ChangeExtension(project, ".kicad_sch"), limit.Token);
+            var metadata = await reopened.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(
+                new() { Document = opened.Document }, limit.Token);
+            Assert.IsNotNull(metadata.Metadata.ErcSettings, "The fresh process must report the ERC settings it loaded.");
+            return metadata.Metadata.ErcSettings;
+        }
+        finally
+        {
+            // Only this disposable process and its copied files are removed.
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(output, errors);
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     private static string ProjectFile(DocumentSpecifier root) =>

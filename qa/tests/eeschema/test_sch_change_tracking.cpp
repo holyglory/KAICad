@@ -1319,6 +1319,14 @@ inline std::vector<OWNER> reviewedOwners()
           DISPOSITION::ROUTED, { G_PROJECT }, {}, "Changed annotation settings record a committed change." },
         { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::ExcludeMarker", "m_parent->", 1, DISPOSITION::ROUTED,
           { G_PROJECT }, {}, "ERC exclusions record a committed change." },
+        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteOneClick", "m_parent->", 1, DISPOSITION::ROUTED,
+          { G_PROJECT }, {},
+          "Deleting an excluded violation deletes a saved exclusion; the whole-state tracker records it, and "
+          "deleting a computed violation records nothing." },
+        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", "m_parent->", 1, DISPOSITION::ROUTED,
+          { G_PROJECT }, {},
+          "Deleting the exclusions with every marker deletes saved exclusions; the whole-state tracker records "
+          "it, and deleting only computed violations records nothing." },
         { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnERCItemRClick", "m_parent->", 1,
           DISPOSITION::ROUTED, { G_PROJECT }, {}, "ERC overrides record a committed change." },
         { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnIgnoredItemRClick", "m_parent->", 1,
@@ -1603,6 +1611,8 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
 {
     return {
         { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 1, 0, "" },
+        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteOneClick", 1, 0, "" },
+        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", 1, 0, "" },
         { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, "" },
         { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, "" },
         { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 1, 0, "" },
@@ -1654,6 +1664,9 @@ inline std::vector<UNPROVEN> unprovenRoutes()
         { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup", ANY_ROUTE, 40,
           "An unchanged Page Settings OK still records a revision and an undo entry, because the shared page "
           "dialog marks the screen modified; needs no-op precision." },
+        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", ANY_ROUTE, 40,
+          "Delete All Markers with exclusions needs the rendered 'Delete exclusions too?' choice; deleting one "
+          "excluded violation is proven by the rendered ERC dialog journey." },
         { "eeschema/eeschema_config.cpp", "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "RecordCommittedChange(", 30,
           "Schematic Setup compares only the project settings, without file metadata, instead of the shared "
           "whole-state groups: a Setup that changes a screen outside a commit, or whose project save rewrites "
@@ -1678,6 +1691,90 @@ inline std::vector<PROOF> journeyProofs()
         { "SCH_EDIT_TOOL::EditProperties", "Edit Sheet Properties" },
         { "HIERARCHY_PANE::onRightClick", "New Top-Level Sheet" },
         { "HIERARCHY_PANE::onRightClick", "Delete Top-Level Sheet" },
+    };
+}
+
+
+/// How a native call that deletes ERC markers or changes their exclusion keeps the saved
+/// exclusions tracked.  An excluded marker is a saved exclusion of the project, but deleting or
+/// excluding a marker never marks the document modified by itself, so the OnModify owner review
+/// cannot see these paths; they are reviewed here instead.
+enum class EXCLUSION_RULE
+{
+    RECORDED,     ///< Its function records the change: a tracker, a recorded change or a commit push.
+    HELPER,       ///< Inside a helper whose every call site is reviewed here as well.
+    RERESOLVED,   ///< The exclusions are recorded first and resolved again afterwards (evidence).
+    STAGED,       ///< Staged in the SCH_COMMIT that its caller pushes (evidence).
+    PROVIDER,     ///< The ERC items provider acting for a reviewed tree-model deletion (evidence).
+    RESOLUTION    ///< Restores the saved exclusions onto markers; not a user edit.
+};
+
+
+struct EXCLUSION_SITE
+{
+    std::string           file;
+    std::string           function;
+    std::string           identifier;
+    int                   calls;
+    EXCLUSION_RULE        rule;
+    std::vector<EVIDENCE> evidence;
+    std::string           reason;
+};
+
+
+/// Calls that delete ERC markers or change whether a marker is excluded.
+inline std::set<std::string> exclusionIdentifiers()
+{
+    return { "DeleteMarkers", "DeleteAllMarkers", "DeleteMarker", "DeleteCurrentItem", "DeleteItems",
+             "SetExcluded", "SetMarkerExcluded", "setMarkerExcluded", "deleteAllMarkers" };
+}
+
+
+inline std::vector<EXCLUSION_SITE> reviewedExclusionSites()
+{
+    const std::string dialog = "eeschema/dialogs/dialog_erc.cpp";
+    const std::string provider = "eeschema/erc/erc_settings.cpp";
+    const std::string commit = "eeschema/sch_commit.cpp";
+
+    return {
+        { dialog, "DIALOG_ERC::OnDeleteOneClick", "DeleteCurrentItem", 1, EXCLUSION_RULE::RECORDED, {},
+          "Deleting an excluded violation is recorded by the whole-state tracker around the deletion." },
+        { dialog, "DIALOG_ERC::OnDeleteAllClick", "deleteAllMarkers", 1, EXCLUSION_RULE::RECORDED, {},
+          "Deleting the exclusions with every marker is recorded by the whole-state tracker." },
+        { dialog, "DIALOG_ERC::OnRunERCClick", "deleteAllMarkers", 1, EXCLUSION_RULE::RERESOLVED,
+          { { dialog, "DIALOG_ERC::OnRunERCClick", "RecordERCExclusions();deleteAllMarkers(true);" },
+            { dialog, "DIALOG_ERC::OnRunERCClick", "testErc();" },
+            { dialog, "DIALOG_ERC::testErc", "RunTests(" },
+            { "eeschema/erc/erc.cpp", "ERC_TESTER::RunTests", "ResolveERCExclusionsPostUpdate();" } },
+          "Running the checks records every exclusion before clearing the markers and resolves the same "
+          "exclusions onto the new markers afterwards." },
+        { dialog, "DIALOG_ERC::deleteAllMarkers", "DeleteItems", 1, EXCLUSION_RULE::HELPER, {},
+          "Removes the tree nodes of the markers the helper deletes." },
+        { dialog, "DIALOG_ERC::deleteAllMarkers", "DeleteAllMarkers", 1, EXCLUSION_RULE::HELPER, {},
+          "Deletes the ERC markers for the helper's reviewed callers." },
+        { dialog, "DIALOG_ERC::OnERCItemRClick", "setMarkerExcluded", 3, EXCLUSION_RULE::RECORDED, {},
+          "Exclusions, restorations and comments record 'Edit ERC overrides'." },
+        { dialog, "DIALOG_ERC::OnERCItemRClick", "DeleteMarkers", 1, EXCLUSION_RULE::RECORDED, {},
+          "Ignoring a rule deletes its markers, exclusions included, inside the recorded severity change." },
+        { dialog, "DIALOG_ERC::ExcludeMarker", "setMarkerExcluded", 1, EXCLUSION_RULE::RECORDED, {},
+          "The exclusion hotkey and canvas action record 'Edit ERC overrides'." },
+        { dialog, "setMarkerExcluded", "SetMarkerExcluded", 1, EXCLUSION_RULE::HELPER, {},
+          "Routes the exclusion through the provider so its cached counts follow it." },
+        { provider, "SHEETLIST_ERC_ITEMS_PROVIDER::SetMarkerExcluded", "SetExcluded", 2, EXCLUSION_RULE::HELPER,
+          {}, "Changes the exclusion for the dialog helper's reviewed callers." },
+        { provider, "SHEETLIST_ERC_ITEMS_PROVIDER::DeleteItem", "DeleteMarker", 1, EXCLUSION_RULE::PROVIDER,
+          { { "common/rc_item.cpp", "RC_TREE_MODEL::DeleteItems", "DeleteItem(" } },
+          "The provider deletes a marker only for a deep tree-model deletion; every schematic tree-model "
+          "deletion is reviewed here." },
+        { "eeschema/sch_screen.cpp", "SCH_SCREENS::DeleteAllMarkers", "DeleteMarkers", 1, EXCLUSION_RULE::HELPER,
+          {}, "Deletes every marker of a type for its reviewed callers." },
+        { commit, "SCH_COMMIT::SetErcSettings", "SetExcluded", 2, EXCLUSION_RULE::STAGED,
+          { { commit, "SCH_COMMIT::SetErcSettings", "Modify(marker,screen);marker->SetExcluded(" },
+            { commit, "SCH_COMMIT::SetErcSettings", "Added(marker,exclusion.screen);" } },
+          "An ERC replacement stages every changed or added marker in its commit before changing it." },
+        { "eeschema/schematic.cpp", "SCHEMATIC::ResolveERCExclusions", "SetExcluded", 2,
+          EXCLUSION_RULE::RESOLUTION, {},
+          "Restores the saved exclusions onto markers after a load or an ERC run." },
     };
 }
 
@@ -2454,6 +2551,113 @@ BOOST_AUTO_TEST_CASE( TrackingStaysIncompleteWhileOwnersArePending )
 
         BOOST_CHECK_MESSAGE( count > 0, claim.file + " no longer reports " + claim.call + ")." );
     }
+}
+
+
+BOOST_AUTO_TEST_CASE( EveryErcExclusionChangeIsReviewed )
+{
+    ORACLE_FIXTURE oracle;
+    BOOST_REQUIRE( !oracle.root.empty() );
+    oracle.watched = exclusionIdentifiers();
+
+    std::map<std::string, int> found;
+
+    for( const std::string& relative : oracle.OwnerFiles() )
+    {
+        if( !startsWith( relative, "eeschema/" ) )
+            continue;
+
+        for( const CALL_SITE& call : oracle.Scan( relative ).calls )
+            ++found[relative + " | " + call.function + " | " + call.identifier];
+    }
+
+    // Guard against a vacuous pass on a wrong or partial tree.
+    BOOST_REQUIRE_MESSAGE( found.size() >= 10, "Only " + std::to_string( found.size() )
+                                                       + " ERC marker deletion or exclusion sites were found." );
+
+    std::map<std::string, EXCLUSION_SITE> reviewed;
+
+    for( const EXCLUSION_SITE& site : reviewedExclusionSites() )
+    {
+        const std::string key = site.file + " | " + site.function + " | " + site.identifier;
+        BOOST_CHECK_MESSAGE( reviewed.emplace( key, site ).second, "Duplicate exclusion review entry: " + key );
+    }
+
+    for( const auto& [key, count] : found )
+    {
+        auto it = reviewed.find( key );
+
+        if( it == reviewed.end() )
+        {
+            BOOST_ERROR( "Unreviewed ERC marker deletion or exclusion change (" + std::to_string( count )
+                         + " call(s)): " + key
+                         + ". An excluded marker is a saved exclusion: record the change with SCH_TRACKED_CHANGE, "
+                           "RecordCommittedChange or a pushed SCH_COMMIT, or review why it keeps them." );
+            continue;
+        }
+
+        const EXCLUSION_SITE& site = it->second;
+
+        BOOST_CHECK_MESSAGE( site.calls == count, key + " now has " + std::to_string( count )
+                                                          + " call(s); the review covers "
+                                                          + std::to_string( site.calls ) + "." );
+        BOOST_CHECK_MESSAGE( !site.reason.empty(), key + " is reviewed without a reason." );
+
+        switch( site.rule )
+        {
+        case EXCLUSION_RULE::RECORDED:
+            BOOST_CHECK_MESSAGE( oracle.Scan( site.file ).FunctionRoutes( site.function ),
+                                 key + " deletes or changes a saved exclusion without recording the change." );
+            break;
+
+        case EXCLUSION_RULE::HELPER:
+        {
+            const size_t      separator = site.function.rfind( "::" );
+            const std::string name = separator == std::string::npos ? site.function
+                                                                    : site.function.substr( separator + 2 );
+
+            BOOST_CHECK_MESSAGE( oracle.watched.count( name ),
+                                 key + " is reviewed as a helper, but calls to " + name + " are not reviewed." );
+            break;
+        }
+
+        case EXCLUSION_RULE::RERESOLVED:
+        case EXCLUSION_RULE::STAGED:
+        case EXCLUSION_RULE::PROVIDER:
+            BOOST_CHECK_MESSAGE( !site.evidence.empty(), key + " needs evidence for its rule." );
+            break;
+
+        case EXCLUSION_RULE::RESOLUTION:
+            break;
+        }
+
+        for( const EVIDENCE& evidence : site.evidence )
+        {
+            std::string failure;
+            BOOST_CHECK_MESSAGE( oracle.Evidence( evidence, failure ), key + ": " + failure );
+        }
+    }
+
+    for( const auto& [key, site] : reviewed )
+    {
+        BOOST_CHECK_MESSAGE( found.count( key ), "Stale exclusion review entry, the call is gone: " + key
+                                                         + ". Remove it so the review stays exact." );
+    }
+
+    // Recall and precision of the scan itself: a deletion inside an unrouted function is found
+    // with its function, and a comment or text mentioning one is not a call.
+    const SOURCE_SCAN probe = scanSource( "void DIALOG_X::OnClear( wxCommandEvent& aEvent )\n"
+                                          "{\n"
+                                          "    // screens.DeleteAllMarkers( MARKER_BASE::MARKER_ERC, true );\n"
+                                          "    wxLogDebug( \"DeleteMarkers( all )\" );\n"
+                                          "    screens.DeleteAllMarkers( MARKER_BASE::MARKER_ERC, true );\n"
+                                          "}\n",
+                                          exclusionIdentifiers() );
+
+    BOOST_REQUIRE_EQUAL( probe.calls.size(), 1u );
+    BOOST_CHECK_EQUAL( probe.calls[0].function, "DIALOG_X::OnClear" );
+    BOOST_CHECK_EQUAL( probe.calls[0].identifier, "DeleteAllMarkers" );
+    BOOST_CHECK( !probe.FunctionRoutes( "DIALOG_X::OnClear" ) );
 }
 
 

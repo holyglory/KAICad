@@ -2107,6 +2107,21 @@ int SCH_EDITOR_CONTROL::ShowCreateNetChain( const TOOL_EVENT& aEvent )
 }
 
 
+/// True when an undo or redo command restores ERC markers.  An open ERC dialog lists marker
+/// pointers, so it must be rebuilt once the whole command is restored: a refresh from inside
+/// the command can run before its markers are added back or removed.
+static bool restoresErcMarkers( const PICKED_ITEMS_LIST& aList )
+{
+    for( unsigned ii = 0; ii < aList.GetCount(); ++ii )
+    {
+        if( const EDA_ITEM* item = aList.GetPickedItem( ii ); item && item->Type() == SCH_MARKER_T )
+            return true;
+    }
+
+    return false;
+}
+
+
 int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
 {
     wxCHECK( m_frame, 0 );
@@ -2123,6 +2138,9 @@ int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
     wxCHECK( undo_list, 0 );
 
     m_frame->PutDataInPreviousState( undo_list );
+
+    if( restoresErcMarkers( *undo_list ) )
+        m_frame->RefreshErcDialog();
 
     // Now push the old command to the RedoList
     undo_list->ReversePickersListOrder();
@@ -2157,6 +2175,9 @@ int SCH_EDITOR_CONTROL::Redo( const TOOL_EVENT& aEvent )
 
     /* Redo the command: */
     m_frame->PutDataInPreviousState( list );
+
+    if( restoresErcMarkers( *list ) )
+        m_frame->RefreshErcDialog();
 
     /* Put the old list in UndoList */
     list->ReversePickersListOrder();

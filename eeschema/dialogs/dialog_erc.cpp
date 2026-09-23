@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <api/api_sch_state_groups.h>
 #include <settings/settings_manager.h>
 #include <advanced_config.h>
 #include <gestfich.h>
@@ -406,6 +407,10 @@ void DIALOG_ERC::OnDeleteOneClick( wxCommandEvent& aEvent )
 {
     if( m_notebook->GetSelection() == 0 )
     {
+        // Deleting an excluded violation deletes an exclusion the project saves; deleting a
+        // computed violation changes nothing that is saved and records nothing.
+        SCH_TRACKED_CHANGE change( m_parent->Schematic(), "Delete ERC exclusion" );
+
         // Clear the selection.  It may be the selected ERC marker.
         m_parent->GetToolManager()->RunAction( ACTIONS::selectionClear );
 
@@ -413,6 +418,9 @@ void DIALOG_ERC::OnDeleteOneClick( wxCommandEvent& aEvent )
 
         // redraw the schematic
         redrawDrawPanel();
+
+        if( change.Complete() )
+            m_parent->OnModify();
     }
 
     updateDisplayedCounts();
@@ -442,12 +450,18 @@ void DIALOG_ERC::OnDeleteAllClick( wxCommandEvent& event )
             includeExclusions = true;
     }
 
+    // Deleting the exclusions too deletes exclusions the project saves.
+    SCH_TRACKED_CHANGE change( m_parent->Schematic(), "Delete ERC exclusions" );
+
     deleteAllMarkers( includeExclusions );
     m_ercRun = false;
 
     // redraw the schematic
     redrawDrawPanel();
     updateDisplayedCounts();
+
+    if( change.Complete() )
+        m_parent->OnModify();
 }
 
 

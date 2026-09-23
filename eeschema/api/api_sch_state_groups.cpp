@@ -57,14 +57,16 @@ std::map<std::string, SCH_SHEET*> writtenScreens( SCHEMATIC& aSchematic )
 /// The project settings exactly as saving writes them.  Saving first records the live ERC
 /// exclusions (SCHEMATIC::RecordERCExclusions), so the stored exclusion list can lag an
 /// unsaved exclusion edit.  Digest the list the save will write, computed the same way on a
-/// copy: capturing must never update the saved cache behind the editor.
+/// copy: capturing must never update the saved cache behind the editor.  A project without
+/// its ERC section cannot be digested the way it is saved, so the capture fails instead of
+/// silently digesting the stale stored exclusion list.
 nlohmann::json persistedProjectSettings( SCHEMATIC& aSchematic )
 {
     nlohmann::json settings = aSchematic.Project().GetProjectFile().CaptureCurrentState();
     auto           erc = settings.find( "erc" );
 
     if( erc == settings.end() || !erc->is_object() )
-        return settings;
+        throw std::runtime_error( "The project settings have no ERC section to digest" );
 
     std::set<ERC_EXCLUSION, ERC_EXCLUSION_COMPARE> exclusions;
 

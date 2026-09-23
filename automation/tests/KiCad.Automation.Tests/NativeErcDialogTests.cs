@@ -168,7 +168,17 @@ public sealed class NativeErcDialogTests
             StringAssert.Contains(rejected.Message, "Stale document revision");
             Assert.AreEqual(originalTitle, await first.Client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
                 new() { Document = first.Document }, deadline.Token));
+            // The unsaved exclusion is live on its marker while the stored exclusion list that
+            // saving rewrites still lags it. The native state digest must already describe what
+            // saving writes: the save leaves it unchanged and only clears the unsaved flag.
+            var excludedState = await Lifecycle();
+            Assert.IsTrue(excludedState.NativeContentDirty, "The rendered exclusion is an unsaved edit.");
             await first.Client.InvokeAsync<SaveDocument, Empty>(new() { Document = first.Document }, deadline.Token);
+            var excludedSaved = await Lifecycle();
+            Assert.AreEqual(excludedState.Revision, excludedSaved.Revision, "Saving is not an edit.");
+            Assert.AreEqual(excludedState.StateSha256, excludedSaved.StateSha256,
+                "The digest of an unsaved exclusion must equal the digest of the project saving writes.");
+            Assert.IsFalse(excludedSaved.NativeContentDirty);
             using var saved = JsonDocument.Parse(await File.ReadAllBytesAsync(first.Project, deadline.Token));
             Assert.AreEqual(1, saved.RootElement.GetProperty("erc").GetProperty("erc_exclusions").GetArrayLength());
 
@@ -276,6 +286,31 @@ public sealed class NativeErcDialogTests
             using (var restoredProject = JsonDocument.Parse(await File.ReadAllBytesAsync(first.Project, deadline.Token)))
                 Assert.AreEqual("restored", restoredProject.RootElement.GetProperty("erc")
                     .GetProperty("erc_exclusions")[0].GetProperty("comment").GetString());
+
+            // Redo restored the exclusion's marker, and the open dialog lists it again. Deleting
+            // that excluded violation deletes a saved exclusion: exactly one tracked revision and
+            // an unsaved edit, while the saved project keeps the exclusion until the next save.
+            var beforeDelete = await Journal();
+            var cleanBeforeDelete = await Lifecycle();
+            Assert.IsFalse(cleanBeforeDelete.NativeContentDirty);
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", "Electrical Rules Checker", false,
+                clickFromLeft: 250, clickFromTop: 85);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "delete-exclusion-selected.png"), deadline.Token);
+            // The retained 1280x900 dialog places Delete Marker left of Delete All Markers.
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", "Electrical Rules Checker", false,
+                clickFromLeft: 78, clickFromBottom: 25);
+            await Changed(beforeDelete, "Delete ERC exclusion");
+            await CapturedErc(0, "");
+            var deletedState = await Lifecycle();
+            Assert.AreEqual(beforeDelete.Sequence + 1, deletedState.Revision.Sequence);
+            Assert.IsTrue(deletedState.NativeContentDirty, "Deleting a saved exclusion is an unsaved edit.");
+            Assert.AreNotEqual(cleanBeforeDelete.StateSha256, deletedState.StateSha256,
+                "Deleting a saved exclusion must change the native state digest.");
+            using (var unsaved = JsonDocument.Parse(await File.ReadAllBytesAsync(first.Project, deadline.Token)))
+                Assert.AreEqual("restored", unsaved.RootElement.GetProperty("erc")
+                    .GetProperty("erc_exclusions")[0].GetProperty("comment").GetString());
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "deleted-exclusion.png"), deadline.Token);
+
             NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", "Electrical Rules Checker", false,
                 clickFromRight: 150, clickFromBottom: 25);
             using (var closed = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token))
@@ -284,6 +319,9 @@ public sealed class NativeErcDialogTests
                 while (NativeKeyboard.HasWindow(display, first.ProcessId, "Electrical Rules Checker"))
                     await Task.Delay(50, closed.Token);
             }
+            // Revert discards the unsaved deletion. This process keeps its project settings loaded,
+            // so the saved exclusion returns from the stored exclusion list: every read-only capture
+            // since the deletion must have left that list exactly as the last save wrote it.
             await first.Client.InvokeAsync<RevertDocument, Empty>(new() { Document = first.Document }, deadline.Token);
             var reopened = await first.Client.OpenRootSchematicAsync(Path.ChangeExtension(first.Project, ".kicad_sch"), deadline.Token);
             Assert.AreEqual(first.Document, reopened.Document);
@@ -305,10 +343,15 @@ public sealed class NativeErcDialogTests
                 xmlRestoreVerified = true, failedBatchRolledBack = true, retryReusedReceipt = true,
                 reorderedPolicyNoOp = true, nativeUndoRedoVerified = true,
                 plannedXmlDeltaApplied = true, nativeSaveReopenVerified = true,
+                unsavedExclusionDigestMatchesSave = true, renderedExclusionDeletionTracked = true,
+                revertRestoredSavedExclusion = true, exclusionDeletionUndoable = false,
                 completeErcOverrideCoverage = false, trackingComplete = false
             }), deadline.Token);
 
             Task<SchematicChangeJournal> Journal() => first.Client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
+                new() { Document = first.Document }, deadline.Token);
+
+            Task<DocumentLifecycleState> Lifecycle() => first.Client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                 new() { Document = first.Document }, deadline.Token);
 
             async Task<Kiapi.Schematic.Types.SchematicErcSettings> CapturedErc(int exclusions, string comment)
@@ -329,7 +372,7 @@ public sealed class NativeErcDialogTests
                 return erc;
             }
 
-            async Task<SchematicChangeJournal> Changed(SchematicChangeJournal before)
+            async Task<SchematicChangeJournal> Changed(SchematicChangeJournal before, string description = "Edit ERC overrides")
             {
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                 wait.CancelAfter(TimeSpan.FromSeconds(10));
@@ -342,7 +385,7 @@ public sealed class NativeErcDialogTests
                     if (after.Sequence != before.Sequence)
                     {
                         Assert.AreEqual(before.Sequence + 1, after.Sequence);
-                        Assert.AreEqual("Edit ERC overrides", after.Changes.Single().Description);
+                        Assert.AreEqual(description, after.Changes.Single().Description);
                         return after;
                     }
                     await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 500);

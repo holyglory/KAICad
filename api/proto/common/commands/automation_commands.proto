@@ -12,6 +12,11 @@ import "schematic/schematic_types.proto";
 import "board/board_rules.proto";
 import "board/board_types.proto";
 
+// Shared Phase 2 seam. Lanes add fields and values only between their own
+// "-- lane" markers, numbered inside their band (2A 100-199, 2B 200-299,
+// 2C 300-399, 2D 400-499), and new messages only inside their "== lane"
+// block at the end of this file. SharedProtoBandTests enforces this.
+
 message ReadPcbDrcState {
   kiapi.common.types.DocumentSpecifier document = 1;
 }
@@ -242,6 +247,8 @@ message NativeFileBaselineState {
   string current_sha256 = 9;
   uint64 current_bytes = 10;
   NativeFileBaselineStatus status = 11;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message DocumentLifecycleState {
@@ -259,12 +266,18 @@ message DocumentLifecycleState {
   string process_epoch = 12;
   // Exact native state at a successful load/save checkpoint; empty means unavailable.
   string clean_checkpoint_sha256 = 13;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message CheckedSaveDocument {
   kiapi.common.types.DocumentSpecifier document = 1;
   string operation_id = 2;
   DocumentLifecycleState expected_state = 3;
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 // Clean-only: this request never authorizes saving or discarding unsaved changes.
@@ -272,6 +285,8 @@ message CheckedCloseDocument {
   kiapi.common.types.DocumentSpecifier document = 1;
   string operation_id = 2;
   DocumentLifecycleState expected_state = 3;
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message ReadLifecycleOperation {
@@ -297,6 +312,8 @@ message LifecycleOperationResult {
   string error_code = 5;
   string error_message = 6;
   DocumentLifecycleState observed_state = 7;
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message SchematicSaveState {
@@ -334,6 +351,8 @@ message SchematicHierarchyDataSnapshot {
   kiapi.schematic.types.SchematicHierarchyData data = 1;
   DocumentRevision revision = 2;
   bool tracking_complete = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // One native checkpoint for electrical reconciliation. Net names are display
@@ -349,6 +368,8 @@ message SchematicElectricalState {
   SchematicHierarchyDataSnapshot hierarchy = 1;
   repeated kiapi.schematic.types.SchematicNet nets = 2;
   repeated string limitations = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Current-canvas capture and supported objects collected in one native dispatch.
@@ -375,6 +396,10 @@ message AutomationSession {
   // Separate local notification channel; no request may infer another endpoint.
   string event_endpoint = 6;
   string event_epoch = 7;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 // Notifications are hints to committed state, not a replacement for native
@@ -391,7 +416,13 @@ message AutomationEvent {
   oneof payload {
     AutomationHeartbeat heartbeat = 6;
     SchematicCommitNotification schematic_commit = 7;
+    // 20-29: held for the Phase 3 recursive-diagram document notifications
+    // (contract rbg-v2 section 13), declared by the parent at a later freeze.
+    // -- lane 2C (300-399) --
+    // -- end lane 2C --
   }
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message AutomationHeartbeat {}
@@ -403,6 +434,8 @@ message SchematicCommitNotification {
   DocumentRevision revision = 2;
   SchematicChange change = 3;
   bool tracking_complete = 4;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // An epoch changes when its native process restarts. Sequence numbers alone
@@ -494,6 +527,14 @@ message MeasureSchematicPlacement {
   DocumentRevision expected_revision = 2;
   repeated kiapi.schematic.types.SchematicSymbolInstance candidates = 3;
   uint32 schema_version = 4;
+  // Detached LocalLabel, GlobalLabel or HierarchicalLabel prototypes. Like
+  // candidates: a canonical new UUID absent from the document and unique in the
+  // request, a position on the 100 nm quantum and single-line text. Never
+  // inserted or committed. At most 256 candidates and item candidates together.
+  repeated google.protobuf.Any item_candidates = 5;
+  // 6: reserved for explicit variant selection (p20323), declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPlacementGeometry {
@@ -507,6 +548,14 @@ message SchematicPlacementGeometry {
   repeated string limitations = 7;
   // False on older servers; per-symbol completeness remains separate.
   bool pin_geometry_available = 8;
+  // One entry per request item candidate, in request order: the candidate id,
+  // its position as anchor and the envelope native renders after insertion
+  // (label body and visible fields, including an automatic intersheet-references
+  // field). symbol_pins is absent.
+  repeated SchematicPlacementBounds item_candidates = 9;
+  // 10: held for the CN-1 milestone 2 measurement extension, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPlacementBounds {
@@ -515,12 +564,34 @@ message SchematicPlacementBounds {
   kiapi.common.types.Box2 bounds = 3;
   // Absent for objects other than symbols. Never infer pins from the envelope.
   SchematicSymbolPinGeometry symbol_pins = 4;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+}
+
+enum SchematicPinGeometryIncompleteReason {
+  // Complete geometry, or a peer that predates this field.
+  SPGIR_UNSPECIFIED = 0;
+  SPGIR_DEFINITION_UNRESOLVED = 1;
+  SPGIR_PLACED_IDENTITY_MISSING = 2;
+  SPGIR_VARIANT_PIN_MAPPING_UNRESOLVED = 3;
+  // 4-7: reserved for exact variant pin identities (p20323), declared at a later seam freeze.
 }
 
 message SchematicSymbolPinGeometry {
   bool complete = 1;
   repeated SchematicPinAnchor pins = 2;
   repeated string limitations = 3;
+  // Set whenever complete is false.
+  SchematicPinGeometryIncompleteReason incomplete_reason = 4;
+  // 5: reserved for per-variant pin geometry (p20323), declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+}
+
+enum SchematicPinPowerScope {
+  SPPS_NONE = 0;
+  SPPS_GLOBAL = 1;
+  SPPS_LOCAL = 2;
 }
 
 message SchematicPinAnchor {
@@ -537,10 +608,22 @@ message SchematicPinAnchor {
   int32 unit = 8;
   int32 body_style = 9;
   bool visible = 10;
+  // Effective type, with the active alternate applied.
+  kiapi.common.types.ElectricalPinType electrical_type = 11;
+  // Whether this placed pin is an implicit global or local power connection.
+  SchematicPinPowerScope power_scope = 12;
+  // Resolved implicit net name (the power symbol's value on this sheet path, or
+  // the shown pin name); empty when power_scope is SPPS_NONE.
+  string power_net = 13;
+  // 14: held for CN-1 connected realization, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message ReadSchematicPresentationFacts {
   kiapi.common.types.DocumentSpecifier document = 1;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPresentationFacts {
@@ -552,6 +635,8 @@ message SchematicPresentationFacts {
   repeated string limitations = 6;
   repeated SchematicPresentationWire wires = 7;
   repeated kiapi.common.types.Vector2 junctions = 8;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPresentationWire {
@@ -560,6 +645,8 @@ message SchematicPresentationWire {
   kiapi.common.types.Vector2 end = 3;
   // Native graph code, scoped to the document revision. Not a persistent XML net ID.
   string signal_key = 4;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPresentationObject {
@@ -577,6 +664,8 @@ message SchematicPresentationObject {
   // Text-box/table container bounds do not include overflowing text. Native
   // font metrics, transformed to sheet coordinates; not a clipping rectangle.
   kiapi.common.types.Box2 text_bounds = 9;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 // Recovery-journal foundation. Until tracking_complete becomes true, this
@@ -586,6 +675,8 @@ message ReadSchematicChangeJournal {
   kiapi.common.types.DocumentSpecifier document = 1;
   string document_epoch = 2;
   uint64 after_sequence = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicChangeJournal {
@@ -594,10 +685,19 @@ message SchematicChangeJournal {
   bool reset_required = 3;
   bool tracking_complete = 4;
   repeated SchematicChange changes = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicChange {
-  enum Kind { UNKNOWN = 0; COMMIT = 1; UNDO = 2; REDO = 3; }
+  enum Kind {
+    UNKNOWN = 0;
+    COMMIT = 1;
+    UNDO = 2;
+    REDO = 3;
+    // -- lane 2C (300-399) --
+    // -- end lane 2C --
+  }
   uint64 sequence = 1;
   Kind kind = 2;
   string description = 3;
@@ -605,6 +705,8 @@ message SchematicChange {
   // identifies the original automation commit, not all later uses of its undo.
   string origin_id = 4;
   string operation_id = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Native atomic-commit primitive. Not exposed as a completed MCP mutation:
@@ -630,6 +732,10 @@ message ApplySchematicItemBatch {
   // Zero retains the ordinary native receipt budget. The checked controller
   // sets a bounded allowance from its remaining process-owned receipt space.
   uint32 maximum_result_bytes = 8;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // A separate command, not an optional guard on a legacy batch: an older peer
@@ -637,6 +743,10 @@ message ApplySchematicItemBatch {
 message CheckedSchematicBatch {
   ApplySchematicItemBatch batch = 1;
   DocumentLifecycleState expected_state = 2;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Capture the planner input and the checked-batch precondition at one native
@@ -649,6 +759,8 @@ message ReadCheckedSchematicState {
 message CheckedSchematicState {
   DocumentLifecycleState state = 1;
   SchematicElectricalState electrical = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message ReadCheckedSchematicBatchReceipt {
@@ -679,6 +791,10 @@ message CheckedSchematicBatchReceipt {
   DocumentLifecycleState observed_after = 8;
   string error_code = 9;
   string error_message = 10;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message SchematicItemOperation {
@@ -716,6 +832,15 @@ message SchematicItemOperation {
     kiapi.schematic.types.SchematicNetSettings set_net_settings = 24;
     SchematicConnectedSymbolTransform transform_connected_symbols = 25;
     SchematicSymbolLocks set_symbol_locks = 26;
+    // At most one, and only as the final operation, without target_document and
+    // alongside only create, update and replace_library_cache operations. The
+    // batch needs operation_id and expected_revision. A mismatch rejects the whole
+    // batch with the prefix "connectivity_postcondition_failed:" and no state change.
+    SchematicConnectivityAssertion assert_connectivity = 27;
+    // -- lane 2A (100-199) --
+    // -- end lane 2A --
+    // -- lane 2C (300-399) --
+    // -- end lane 2C --
   }
 }
 
@@ -752,10 +877,32 @@ message SchematicSymbolLocks {
   kiapi.common.types.LockedState locked = 2;
 }
 
+// Exact final pin partition of a batch: the groups it states replace every
+// captured group they touch, and every other group stays unchanged.
+message SchematicConnectivityAssertion {
+  // Must be 1.
+  uint32 version = 1;
+  // Complete final membership of every affected group; nonempty and disjoint.
+  repeated SchematicPinGroup expected_groups = 2;
+  // 3-5: held for the CN-1 native assertion, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// Exact loaded sheet-instance path (packed like SchematicNetSheetContents.path)
+// plus the placed pin UUID.
+message SchematicPinGroup {
+  repeated kiapi.schematic.types.SchematicNetChainPinAnchor pins = 1;
+}
+
 message SchematicLibraryCacheState {
   // Stable screen identity also admits cache ownership before sheet reparenting.
   kiapi.common.types.KIID screen_id = 1;
   repeated kiapi.schematic.types.SchematicCachedSymbol definitions = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicEmbeddedFileState {
@@ -775,6 +922,8 @@ message SchematicNetChainState {
   // Full replacement of schematic-wide declarations. committed is an
   // observation, not an instruction; callers must clear it on every entry.
   repeated kiapi.schematic.types.SchematicNetChainDefinition definitions = 1;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicVariantRegistryState {
@@ -811,6 +960,12 @@ message SchematicItemBatchResult {
   bool symbol_comparison_changed = 22;
   bool bom_settings_changed = 23;
   bool net_settings_changed = 24;
+  // True only when an assert_connectivity operation was evaluated and passed.
+  bool connectivity_assertion_verified = 25;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message InspectSchematicOperation {
@@ -834,4 +989,17 @@ message SchematicOperationReceipt {
   // True only when the retained command matched expected_request. Older
   // peers and NOT_FOUND responses cannot establish payload verification.
   bool expected_request_verified = 8;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
+
+// == lane 2A messages ==
+// == end ==
+
+// == lane 2C messages ==
+// == end ==
+
+// == lane 2D messages ==
+// == end ==

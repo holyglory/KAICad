@@ -28,6 +28,10 @@ import "common/types/embedded_files.proto";
 import "common/types/project_settings.proto";
 import "schematic/schematic_rules.proto";
 
+// Shared Phase 2 seam. Lanes add fields only between their own "-- lane"
+// markers, numbered inside their band (2A 100-199, 2C 300-399). New schematic
+// types go in lane files. SharedProtoBandTests enforces this.
+
 // One native screen's top-level objects and settings collected in one handler.
 // Nested fields/pins/cells remain inside their owning objects. This is not a
 // complete multi-file design until metadata and unsupported-item gaps are empty.
@@ -38,6 +42,8 @@ message SchematicScreenData
   repeated SchematicUnrepresentedItem unrepresented_items = 3;
   // Native cache ownership is separate from placed symbol instances.
   repeated SchematicCachedSymbol cached_symbols = 4;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // All loaded sheet instances captured in one native dispatch. Repeated sheets
@@ -47,6 +53,8 @@ message SchematicHierarchyData
 {
   kiapi.common.types.DocumentSpecifier document = 1;
   repeated SchematicScreenData instances = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicUnrepresentedItem
@@ -84,6 +92,8 @@ message SchematicNetChainDefinition
   // Schema 4. Presence distinguishes an explicitly empty restriction from an
   // older client that cannot represent removal intent.
   SchematicNetChainExclusions exclusions = 8;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicNetChainExclusions
@@ -146,6 +156,8 @@ message SchematicMetadata
   // Schema 9: declared shared project net settings, excluding effective caches
   // and the separately owned net-chain grouping definitions.
   SchematicNetSettings net_settings = 24;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicNetClassNames
@@ -170,6 +182,8 @@ message SchematicNetSettings
   repeated SchematicNetClassPattern patterns = 4;
   map<string, kiapi.common.types.Color> net_colors = 5;
   map<string, string> chain_netclasses = 6;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicBomField
@@ -220,6 +234,8 @@ message SchematicBomSettings
   repeated SchematicBomView saved_views = 3;
   SchematicBomFormat current_format = 4;
   repeated SchematicBomFormat saved_formats = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicFieldTemplate
@@ -233,6 +249,8 @@ message SchematicFieldTemplate
 message SchematicFieldTemplates
 {
   repeated SchematicFieldTemplate fields = 1;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicSymbolComparisonSettings
@@ -249,12 +267,16 @@ message SchematicSymbolComparisonSettings
   bool dnp_flags = 10;
   bool exclude_from_bom_flags = 11;
   bool exclude_from_position_file_flags = 12;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicReferenceInventory
 {
   // Individual canonical reference entries, not a serialized native range string.
   repeated string allocated = 1;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicAnnotationSettings
@@ -264,6 +286,8 @@ message SchematicAnnotationSettings
   SchematicAnnotationOrder order = 2;
   SchematicAnnotationMethod method = 3;
   bool reuse_designators = 4;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 enum SchematicAnnotationOrder
@@ -285,6 +309,8 @@ message SchematicNetChainClassState
 {
   repeated string definitions = 1;
   map<string, string> assignments = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Project-owned ERC policy and saved exclusions. A complete replacement has
@@ -296,6 +322,8 @@ message SchematicErcSettings
   repeated kiapi.schematic.ErcSeveritySetting rule_severities = 1;
   repeated SchematicErcPinRule pin_map = 2;
   repeated kiapi.schematic.ErcExclusion exclusions = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 enum SchematicErcPinConflict
@@ -334,6 +362,8 @@ message SchematicFormattingSettings
   // Required for a complete formatting replacement; absence is not defaults.
   SchematicOperatingPointFormatting operating_point = 13;
   SchematicUnitReferenceFormatting unit_reference = 14;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Exact persisted project character codes, not component identities. Separator
@@ -362,6 +392,8 @@ message SchematicDrawingRatios
   double text_offset_ratio = 3;
   double label_size_ratio = 4;
   double overbar_height_ratio = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // The native file's own root-page record, not a placement in a parent sheet.
@@ -369,6 +401,8 @@ message SchematicDrawingRatios
 message SchematicRootInstance
 {
   optional string page_number = 1;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicField
@@ -530,6 +564,8 @@ message LocalLabel
   bool fields_autoplaced = 7;
 
   repeated kiapi.common.types.CustomProperty custom_properties = 8;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message GlobalLabel
@@ -559,6 +595,8 @@ message HierarchicalLabel
   bool fields_autoplaced = 8;
 
   repeated kiapi.common.types.CustomProperty custom_properties = 9;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message DirectiveLabel
@@ -621,6 +659,8 @@ message SheetPin
   SchematicLabelShape shape = 5;
   SheetSide side = 6;
   kiapi.common.types.LockedState locked = 7;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SheetSymbol
@@ -666,6 +706,8 @@ message SheetSymbol
   // on mutation it must match the referenced screen; a newly created empty
   // screen adopts it. Absence is supported only for legacy native requests.
   kiapi.common.types.KIID child_screen_id = 21;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SheetPlacementRecord
@@ -757,6 +799,8 @@ message SchematicPin
   optional string active_alternate = 13;
 
   repeated kiapi.common.types.CustomProperty custom_properties = 14;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicSymbolUnit
@@ -816,6 +860,9 @@ message SchematicSymbolVariant
   // Optional on updates: absent preserves the existing pin mapping. Snapshots
   // always include this record, including the library-default mode.
   PinMapInstanceOverride pin_map_override = 6;
+
+  // 7: reserved for the explicit placed-pin to variant-library-pin map of exact
+  // variant pin identities (p20323), declared at a later seam freeze.
 }
 
 // All variants for a symbol
@@ -966,6 +1013,8 @@ message SchematicSymbol
   // Native De Morgan semantics are distinct from custom styles with the same
   // display names. True requires the Standard/Alternate pair, in that order.
   bool demorgan_body_styles = 21;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicSymbolTransform
@@ -985,6 +1034,10 @@ message SchematicCachedSymbol
   bool show_pin_names = 3;
   bool show_pin_numbers = 4;
   kiapi.common.types.Distance pin_name_offset = 5;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Persisted placements of one shared symbol, including placements belonging to
@@ -1071,6 +1124,8 @@ message SchematicSymbolInstance
   // Owned LIB_SYMBOL spacing, independent of the placement's SYMBOL base
   // offset above. Legacy absence retains the decoder's library default.
   kiapi.common.types.Distance definition_pin_name_offset = 29;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SheetInstance

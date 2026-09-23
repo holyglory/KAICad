@@ -346,6 +346,51 @@ public sealed class RecursiveEditorFileCommandTests
         Assert.AreEqual("cancelled", P.RecursiveFileResult.Parser.ParseJson(cancelledOutput.ToString()).ErrorCode);
         var wrongVersion = await Invoke(new P.RecursiveFileRequest { SchemaVersion = 999 });
         Assert.IsFalse(wrongVersion.Success); Assert.AreEqual("unsupported_diagram_file_request", wrongVersion.ErrorCode);
+        // Schema 2 actions, payloads and nested fields are declared (contract rbg-v2) but not implemented yet:
+        // each fails closed before any file access, exactly like the unknown value it was before the declaration.
+        var level = await Invoke(new P.RecursiveFileRequest { SchemaVersion = 1, Action = P.RecursiveFileAction.RfaSaveLevel });
+        Assert.IsFalse(level.Success); Assert.AreEqual("unsupported_diagram_file_request", level.ErrorCode);
+        string root = Directory.CreateTempSubdirectory("kicad-schema-two-fields-").FullName;
+        try
+        {
+            var graph = LinkedDiagramFixture.Create().Graph;
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var read = new P.RecursiveFileRequest { SchemaVersion = 1, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var loaded = await Run(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var rebase = read.Clone(); rebase.Action = P.RecursiveFileAction.RfaRebaseRequirements; rebase.ExpectedSourceToken = loaded.SourceToken;
+            rebase.Rebase = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)) };
+            var compared = await Run(rebase); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
+            var probes = new List<(string Name, P.RecursiveFileRequest Request)>();
+            foreach (var action in Enum.GetValues<P.RecursiveFileAction>().Where(a => a > P.RecursiveFileAction.RfaPrepareDiagramRestoration))
+            { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe)); }
+            foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
+            {
+                ("level_edit", r => r.LevelEdit = new()), ("save_level", r => r.SaveLevel = new()), ("rebase_level", r => r.RebaseLevel = new()),
+                ("reparent", r => r.Reparent = new()), ("create", r => r.Create = new()), ("migrate", r => r.Migrate = new()),
+                ("discover", r => r.Discover = new() { ProjectFile = Path.Combine(root, "board.kicad_pro") }),
+            })
+            { var probe = read.Clone(); attach(probe); probes.Add((name, probe)); }
+            var nested = rebase.Clone(); nested.Rebase.Draft.LocalDiagram.Presentation = new() { Units = "diagram-unit" };
+            probes.Add(("nested presentation", nested));
+            var connection = rebase.Clone(); connection.Rebase.Draft.LocalDiagram.Interfaces.Add(new P.DiagramBoundaryInterfaceData
+                { Id = Guid.NewGuid().ToString("D"), Name = "Test-only port", Direction = P.DiagramInterfaceDirection.DidrOutput });
+            probes.Add(("nested interface direction", connection));
+            foreach (var (name, probe) in probes)
+            {
+                var rejected = await Run(probe);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
+            }
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+
+        static async Task<P.RecursiveFileResult> Run(P.RecursiveFileRequest request)
+        {
+            using var response = new StringWriter();
+            await RecursiveFileCommand.RunAsync(new StringReader(JsonFormatter.Default.Format(request)), response, CancellationToken.None);
+            return P.RecursiveFileResult.Parser.ParseJson(response.ToString());
+        }
     }
 
     private static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request)

@@ -37,6 +37,10 @@ set( KIAPI_PROTO_SRCS
     common/commands/project_commands.proto
     common/commands/structural_commands.proto
     common/commands/recursive_diagram_commands.proto
+    common/commands/schematic_realization_commands.proto
+    common/commands/diagram_canvas_commands.proto
+    common/commands/schematic_tracking_commands.proto
+    common/commands/capability_commands.proto
 
     board/board.proto
     board/board_commands.proto

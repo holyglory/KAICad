@@ -1,0 +1,4 @@
+/* KiCad schematic change-tracking commands, owned by Phase 2 lane 2C. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";

@@ -108,6 +108,15 @@ public sealed partial class NativeSessionTests
                 var unknown = MeasureSchematicPlacement.Parser.ParseFrom(unknownBytes);
                 Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
                     client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(unknown, token))).Status);
+                // Label prototypes are declared for connected realization (contract CN-1) but not measured yet:
+                // they fail closed exactly as the unknown field did before the declaration.
+                var prototype = request.Clone();
+                prototype.ItemCandidates.Add(Any.Pack(new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") },
+                    Position = request.Candidates[0].Position.Clone(), Text = new() { Text_ = "PROBE" } }));
+                var unmeasured = await Assert.ThrowsAsync<NativeApiException>(() =>
+                    client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(prototype, token));
+                Assert.AreEqual(3, unmeasured.Status);
+                Assert.AreEqual("Placement measurement contains unsupported fields", unmeasured.Message);
             }
             result.Add(measured);
             await VerifyMcpGeometry(client, instanceId, request, measured, evidence, token);

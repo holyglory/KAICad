@@ -408,6 +408,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         // an unspecified engineering fact. Keep these computed defaults explicit.
         var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
         var wire = JsonNode.Parse(formatter.Format(metadata))!.AsObject();
+        // Declared schema 2 fields are not produced yet; keep them out rather than report defaults as facts.
+        RecursiveBlockCodec.OmitUnimplementedFields(metadata, wire);
         foreach (var view in wire["views"]!.AsArray()) view!.AsObject().Remove("png");
         var structured = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = native.Epoch,
             observation = wire, imageReferences });
@@ -609,7 +611,9 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
 
     private static CallToolResult Result(string instanceId, RecursiveDiagramEditorState state)
     {
-        var data = JsonSerializer.SerializeToElement(new { instanceId, state = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(state)) });
+        var wire = JsonNode.Parse(JsonFormatter.Default.Format(state))!.AsObject();
+        RecursiveBlockCodec.OmitUnimplementedFields(state, wire);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, state = wire });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     }
     private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> action)

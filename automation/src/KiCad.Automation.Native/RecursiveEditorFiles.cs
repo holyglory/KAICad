@@ -12,7 +12,14 @@ public static class RecursiveEditorFiles
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
+        // Actions 11-19, their payloads (fields 18-24) and the other schema 2 fields are declared for
+        // contract rbg-v2 but not implemented yet. Until lane 2B implements them they fail closed here,
+        // before any file access, exactly like the unknown values they were before the declaration.
         if (request is null || request.SchemaVersion != 1 || !Enum.IsDefined(request.Action)
+            || request.Action > P.RecursiveFileAction.RfaPrepareDiagramRestoration
+            || request.LevelEdit is not null || request.SaveLevel is not null || request.RebaseLevel is not null
+            || request.Reparent is not null || request.Create is not null || request.Migrate is not null || request.Discover is not null
+            || RecursiveBlockCodec.CarriesUnimplementedField(request)
             || !request.Equals(P.RecursiveFileRequest.Parser.ParseJson(JsonFormatter.Default.Format(request))))
             throw Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields.");
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null

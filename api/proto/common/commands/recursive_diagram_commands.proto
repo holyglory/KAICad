@@ -65,6 +65,8 @@ message RecursiveDiagramView {
   RequirementFieldsData requirements = 10;
   bool contains_unsaved_draft = 11;
   string coordinate_system = 12;
+  // Schema 2 (contract rbg-v2 section 9.2): what this view actually rendered.
+  ResolvedDiagramLayoutData resolved_layout = 13;
 }
 message RecursiveDiagramObservation {
   string document_id = 1;
@@ -102,4 +104,60 @@ message RecursiveDiagramEditorState {
   uint32 canvas_pixel_height = 26;
   BlockRevisionData canvas_diagram = 27;
   uint32 resolved_canvas_children = 28;
+  // Schema 2 per-level editor (contract rbg-v2 section 9.1). Declared at the
+  // Phase 2 freeze and not produced yet: the editor leaves 29-34 unset and the
+  // MCP diagram tools omit them until the per-level editor implements them.
+  // On-disk format of the open file (1 or 2).
+  uint32 stored_schema_version = 29;
+  // False disables Save with an explanation.
+  bool source_writable = 30;
+  // The authoritative level draft; draft (13) mirrors its scope and
+  // connection_draft (14) remains only for member-path edits.
+  LevelDraftData level_draft = 31;
+  // Session-only pan and zoom per level; never saved and never dirties a draft.
+  repeated DiagramLevelViewportState level_viewports = 32;
+  // "select", "add-block", "connect", "add-port", "note" or "pan".
+  string canvas_tool = 33;
+  string selected_interface_id = 34;
+}
+
+// One diagram level's session viewport, in diagram units.
+message DiagramLevelViewportState {
+  string block_id = 1;
+  double origin_x = 2;
+  double origin_y = 3;
+  double scale = 4;
+}
+
+// The layout a view rendered (contract rbg-v2 section 9.2): stored placements
+// where the level has them, otherwise the deterministic fallback, which is
+// never saved implicitly. Presentation decimals are canonical strings.
+enum ResolvedPlacementSource { RPS_UNSPECIFIED = 0; RPS_PLACED = 1; RPS_FALLBACK = 2; }
+message ResolvedBlockPlacementData {
+  string block_id = 1;
+  DiagramRectData rect = 2;
+  ResolvedPlacementSource source = 3;
+}
+message ResolvedPortPlacementData {
+  string block_id = 1;
+  string interface_id = 2;
+  DiagramPortSide side = 3;
+  string offset = 4;
+  DiagramAnnotationPointData anchor = 5;
+  ResolvedPlacementSource source = 6;
+}
+message ResolvedRouteData {
+  string connection_id = 1;
+  uint32 endpoint_index = 2;
+  repeated DiagramAnnotationPointData points = 3;
+  ResolvedPlacementSource source = 4;
+}
+message ResolvedDiagramLayoutData {
+  repeated ResolvedBlockPlacementData blocks = 1;
+  repeated ResolvedPortPlacementData ports = 2;
+  repeated ResolvedRouteData routes = 3;
+  DiagramRectData frame = 4;
+  ResolvedPlacementSource frame_source = 5;
+  // Stored layout entries whose target is absent from this revision; never rendered.
+  uint32 dormant_entries = 6;
 }

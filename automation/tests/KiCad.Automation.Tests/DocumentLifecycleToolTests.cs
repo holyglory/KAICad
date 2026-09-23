@@ -91,16 +91,94 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    // Timeouts need KiCad to stay silent for the full 15 s native deadline per case, so the
+    // mapping from the transport's delivery evidence to the tool error is checked here in
+    // isolation; the native journey proves the cancelled, never-received case end to end.
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task TransportFailuresSayWhetherKiCadReceivedTheRequest(bool delivered)
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-transport-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var state = State(directory, transport.Session.Epoch);
+            transport.Failure = new NngException(5, "Timed out", requestDelivered: delivered);
+            foreach (bool close in new[] { false, true })
+            {
+                string id = Guid.NewGuid().ToString("D");
+                var response = close
+                    ? await tool.Close(transport.Session.InstanceId, SchematicJson.Formatter.Format(state), id, default)
+                    : await tool.Save(transport.Session.InstanceId, SchematicJson.Formatter.Format(state), id, default);
+                Assert.IsTrue(response.IsError, "A transport failure is never a lifecycle success.");
+                var error = response.StructuredContent!.Value;
+                string message = error.GetProperty("message").GetString()!;
+                Assert.AreEqual(delivered ? "operation_outcome_unknown" : "native_not_reached", error.GetProperty("code").GetString(), message);
+                StringAssert.Contains(message, id, "The error names the operation to query or repeat.");
+                StringAssert.Contains(message, delivered ? "kicad_document_operation" : "never received it");
+                StringAssert.Contains(message, "same operation ID");
+                if (!delivered && !close) StringAssert.Contains(message, "nothing was saved");
+            }
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task UnknownOperationExplainsThatKiCadNeverReceivedIt()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-unknown-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var state = State(directory, transport.Session.Epoch);
+            string id = Guid.NewGuid().ToString("D");
+            transport.ReceiptError = DocumentLifecycleTools.NativeUnknownOperation + ": KiCad never received a save or close with this operation ID";
+            var unknown = await tool.Operation(transport.Session.InstanceId, SchematicJson.Formatter.Format(state.Document), id, state.ProcessEpoch, default);
+            Assert.IsTrue(unknown.IsError);
+            Assert.AreEqual("operation_not_received", unknown.StructuredContent!.Value.GetProperty("code").GetString());
+            StringAssert.Contains(unknown.StructuredContent!.Value.GetProperty("message").GetString()!, id);
+            // Any other native refusal keeps its own status; only the unknown-operation reply is reinterpreted.
+            transport.ReceiptError = "Lifecycle operation belongs to another document";
+            var other = await tool.Operation(transport.Session.InstanceId, SchematicJson.Formatter.Format(state.Document), id, state.ProcessEpoch, default);
+            Assert.AreEqual("native_status_3", other.StructuredContent!.Value.GetProperty("code").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static DocumentLifecycleState State(string directory, string epoch) => new()
+    {
+        Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
+            Project = new() { Name = "fixture", Path = directory } },
+        ProcessEpoch = epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
+        Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64)
+    };
+
     private sealed class LifecycleTransport : INativeTransport
     {
         public NativeClientTests.FixtureTransport Session { get; } = new();
         public int LifecycleCalls { get; private set; }
         public LifecycleOperationStatus Status { get; set; } = LifecycleOperationStatus.LosSaved;
         public bool WrongTarget { get; set; }
+        public NngException? Failure { get; set; }
+        public string? ReceiptError { get; set; }
         private LifecycleOperationResult? result;
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var envelope = ApiRequest.Parser.ParseFrom(request);
+            if (Failure is not null && (envelope.Message.Is(CheckedSaveDocument.Descriptor) || envelope.Message.Is(CheckedCloseDocument.Descriptor)))
+                return Task.FromException<byte[]>(Failure);
+            if (ReceiptError is not null && envelope.Message.Is(ReadLifecycleOperation.Descriptor))
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                    Status = new() { Status = (ApiStatusCode)3, ErrorMessage = ReceiptError } }.ToByteArray());
             if (envelope.Message.Is(CheckedSaveDocument.Descriptor))
             {
                 ++LifecycleCalls;

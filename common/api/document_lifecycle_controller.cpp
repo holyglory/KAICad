@@ -5,6 +5,7 @@
 #include <wx/filename.h>
 #include <file_content_baseline.h>
 #include <ki_exception.h>
+#include <kiplatform/io.h>
 #include <set>
 #include <algorithm>
 
@@ -12,6 +13,39 @@ namespace
 {
 using namespace kiapi::automation::v1;
 using google::protobuf::util::MessageDifferencer;
+
+// Why native writers could not write a file during the checked save running on this thread.
+struct WRITE_FAILURE
+{
+    wxString path;
+    wxString reason;
+};
+
+thread_local std::vector<WRITE_FAILURE>* activeWriteFailures = nullptr;
+
+std::string Utf8( const wxString& aText )
+{
+    return aText.ToStdString( wxConvUTF8 );
+}
+
+std::string FileName( const std::string& aPath )
+{
+    return Utf8( wxFileName( wxString::FromUTF8( aPath ) ).GetFullName() );
+}
+
+// Protobuf strings must stay valid UTF-8, so never cut through a multi-byte character.
+std::string Truncated( const std::string& aText, size_t aLimit )
+{
+    if( aText.size() <= aLimit )
+        return aText;
+
+    size_t end = aLimit;
+
+    while( end > 0 && ( static_cast<unsigned char>( aText[end] ) & 0xC0 ) == 0x80 )
+        --end;
+
+    return aText.substr( 0, end );
+}
 
 bool Uuid( const std::string& aValue )
 {
@@ -107,6 +141,70 @@ bool DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines(
     return FileCoverage( aState );
 }
 
+wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
+{
+    wxFileName requested( aPath );
+
+    if( aPath.empty() || !requested.IsOk() || !requested.IsAbsolute() )
+        return wxS( "its path is not an absolute file path" );
+
+    if( wxDirExists( aPath ) )
+        return wxS( "a folder has this name" );
+
+    // The writers replace the file a symbolic link names, beside that file.
+    const wxFileName target( KIPLATFORM::IO::ResolveSymlinkTarget( aPath ) );
+    const wxString   folder = target.GetPath();
+
+    if( target.FileExists() )
+    {
+        if( !target.IsFileWritable() )
+        {
+            if( target.GetFullPath() == requested.GetFullPath() )
+                return wxS( "the file is read-only" );
+
+            return wxString::Format( wxS( "the file it links to, '%s', is read-only" ), target.GetFullPath() );
+        }
+
+        if( !wxFileName::IsDirWritable( folder ) )
+            return wxString::Format( wxS( "its folder '%s' does not allow KiCad to create or replace files" ), folder );
+
+        return wxEmptyString;
+    }
+
+    if( wxDirExists( folder ) )
+    {
+        if( !wxFileName::IsDirWritable( folder ) )
+            return wxString::Format( wxS( "its folder '%s' does not allow KiCad to create files" ), folder );
+
+        return wxEmptyString;
+    }
+
+    // Writers create one missing folder level, never a deeper tree.
+    wxFileName parent( folder, wxEmptyString );
+
+    if( parent.GetDirCount() == 0 )
+        return wxString::Format( wxS( "its folder '%s' does not exist" ), folder );
+
+    parent.RemoveLastDir();
+
+    if( !parent.DirExists() )
+        return wxString::Format( wxS( "its folder '%s' does not exist and cannot be created" ), folder );
+
+    if( !parent.IsDirWritable() )
+        return wxString::Format( wxS( "its folder '%s' does not exist and '%s' does not allow creating it" ),
+                                 folder, parent.GetPath() );
+
+    return wxEmptyString;
+}
+
+
+void DOCUMENT_LIFECYCLE_CONTROLLER::ReportWriteFailure( const wxString& aPath, const wxString& aReason )
+{
+    // Bounded: the result carries at most one entry per observed file anyway.
+    if( activeWriteFailures && activeWriteFailures->size() < 64 )
+        activeWriteFailures->push_back( { aPath, aReason } );
+}
+
 void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& state )
 {
     if( state.native_content_dirty() || !FileCoverage( state ) || !Digest( state.state_sha256() )
@@ -133,7 +231,9 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         if( !aEnvelope.message().UnpackTo( &query ) || !Uuid( query.operation_id() )
                 || query.process_epoch() != aProcessEpoch ) return Error( "Invalid lifecycle receipt target or process epoch" );
         const auto found = m_receipts.find( query.operation_id() );
-        if( found == m_receipts.end() ) return Error( "Lifecycle operation is not known in this process" );
+        if( found == m_receipts.end() )
+            return Error( "Lifecycle operation is not known in this process: KiCad never received a save or close "
+                          "with this operation ID, so it saved or closed nothing for it" );
         if( !MessageDifferencer::Equals( found->second.request.document(), query.document() ) )
             return Error( "Lifecycle operation belongs to another document" );
         return Pack( found->second.result );
@@ -187,7 +287,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
     auto fail = [&]( LifecycleOperationStatus status, const char* code, const std::string& message ) -> API_RESULT
     {
         result.set_status( status ); result.set_error_code( code );
-        result.set_error_message( message.substr( 0, 2048 ) );
+        result.set_error_message( Truncated( message, 2048 ) );
         return Pack( result );
     };
     auto observe = [&]() -> HANDLER_RESULT<DocumentLifecycleState>
@@ -210,6 +310,111 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         }
         AnnotateCleanState( state );
         return state;
+    };
+
+    // Observed files this save replaced, and why native writers could not write others.
+    std::vector<std::string> writtenFiles;
+    std::vector<WRITE_FAILURE> writeFailures;
+    auto recordWrites = [&]()
+    {
+        result.clear_written_files();
+
+        for( const std::string& path : writtenFiles )
+            result.add_written_files( path );
+    };
+
+    // A failed save names what reached the disk, what could not be written and why, and whether
+    // the editor still holds the work, so the caller can fix the cause and save again.
+    auto describeSaveFailure = [&]( const DocumentLifecycleState& aBefore, const DocumentLifecycleState* aAfter,
+                                    const std::string& aNative ) -> API_RESULT
+    {
+        auto observedPath = [&]( const wxString& aPath ) -> std::string
+        {
+            for( const std::string& file : aBefore.native_files() )
+                if( FILE_CONTENT_BASELINE::SamePath( wxString::FromUTF8( file ), aPath ) )
+                    return file;
+
+            return Utf8( aPath );
+        };
+        auto written = [&]( const std::string& aPath )
+        {
+            return std::find( writtenFiles.begin(), writtenFiles.end(), aPath ) != writtenFiles.end();
+        };
+        std::vector<std::pair<std::string, std::string>> blocked;
+
+        for( const WRITE_FAILURE& failure : writeFailures )
+        {
+            std::string path = observedPath( failure.path );
+
+            if( std::none_of( blocked.begin(), blocked.end(), [&]( const auto& b ) { return b.first == path; } ) )
+                blocked.emplace_back( path, Utf8( failure.reason ) );
+        }
+
+        // Writers that do not report a reason are explained by checking every unwritten file.
+        if( blocked.empty() )
+        {
+            for( const std::string& file : aBefore.native_files() )
+            {
+                if( written( file ) )
+                    continue;
+
+                wxString reason = WriteBlocker( wxString::FromUTF8( file ) );
+
+                if( !reason.empty() )
+                    blocked.emplace_back( file, Utf8( reason ) );
+            }
+        }
+
+        std::string causes;
+
+        for( const auto& [path, reason] : blocked )
+        {
+            // The field lists document files only; other causes appear in the message alone.
+            if( std::find( aBefore.native_files().begin(), aBefore.native_files().end(), path )
+                    != aBefore.native_files().end() )
+                result.add_blocked_files( path );
+
+            causes += ( causes.empty() ? "'" : "; '" ) + FileName( path ) + "' (" + path + "): " + reason;
+        }
+
+        std::string editor = !aAfter ? "KiCad could not report the editor state afterwards; read kicad_document_state "
+                                       "before doing anything else."
+                             : aAfter->native_content_dirty() ? "The editor still holds all unsaved changes."
+                                                              : "The editor reports no unsaved changes.";
+        const std::string next = "Fix the cause (for example make the file or folder writable or free disk space), "
+                                 "read a fresh kicad_document_state and save again with a new operation ID.";
+        // Writer reports are the cause; otherwise quote KiCad and add what the file check found.
+        const std::string cause = !writeFailures.empty() ? "KiCad cannot write " + causes
+                                  : blocked.empty()      ? "KiCad reported: " + aNative
+                                                         : "KiCad reported: " + aNative + ". KiCad cannot write " + causes;
+
+        if( writtenFiles.empty() )
+        {
+            return fail( LOS_FAILED, blocked.empty() ? "native_save_failed" : "file_not_writable",
+                         "The document was not saved. " + cause + ". KiCad replaced none of the document's files. "
+                                 + editor + " " + next );
+        }
+
+        std::string done, pending;
+
+        for( const std::string& file : writtenFiles )
+            done += ( done.empty() ? "" : ", " ) + FileName( file );
+
+        for( const std::string& file : aBefore.native_files() )
+            if( !written( file ) )
+                pending += ( pending.empty() ? "" : ", " ) + FileName( file );
+
+        if( pending.empty() )
+        {
+            return fail( LOS_FAILED, "partial_save",
+                         "KiCad wrote every file (" + done + ") but still reported a failure. " + cause + ". "
+                                 + editor + " " + next );
+        }
+
+        return fail( LOS_FAILED, "partial_save",
+                     "Saving stopped part way. " + cause + ". Already written: " + done + ". Not written: " + pending
+                             + ". The files on disk now mix old and new content. " + editor
+                             + " A successful save writes every file again. " + next );
     };
 
     try
@@ -255,11 +460,11 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         ApiRequest envelope;
         envelope.mutable_header()->CopyFrom( aEnvelope.header() );
         envelope.mutable_message()->PackFrom( save );
-        struct FILE_VERSION { bool exists; uint64_t bytes; std::string sha; };
+        struct FILE_VERSION { bool exists; uint64_t bytes; std::string sha; std::string path; };
         std::map<wxString, FILE_VERSION> accepted;
         for( const auto& file : before->file_baselines() )
             accepted.emplace( wxString::FromUTF8( file.path() ),
-                              FILE_VERSION{ file.current_exists(), file.current_bytes(), file.current_sha256() } );
+                              FILE_VERSION{ file.current_exists(), file.current_bytes(), file.current_sha256(), file.path() } );
         auto locate = [&]( const wxString& path )
         {
             return std::find_if( accepted.begin(), accepted.end(), [&]( const auto& entry )
@@ -285,14 +490,30 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             {
                 auto entry = locate( written.Path() );
                 if( entry != accepted.end() && written.Known() )
-                    entry->second = FILE_VERSION{ written.Exists(), written.Bytes(), written.Sha256() };
+                {
+                    entry->second = FILE_VERSION{ written.Exists(), written.Bytes(), written.Sha256(), entry->second.path };
+                    if( std::find( writtenFiles.begin(), writtenFiles.end(), entry->second.path ) == writtenFiles.end() )
+                        writtenFiles.push_back( entry->second.path );
+                }
             } );
         attemptedSave = true;
-        auto saved = aDispatch( envelope );
+        API_RESULT saved;
+        {
+            struct FAILURE_SCOPE
+            {
+                std::vector<WRITE_FAILURE>* previous;
+                explicit FAILURE_SCOPE( std::vector<WRITE_FAILURE>& aFailures ) : previous( activeWriteFailures )
+                { activeWriteFailures = &aFailures; }
+                ~FAILURE_SCOPE() { activeWriteFailures = previous; }
+            } failureScope( writeFailures );
+            saved = aDispatch( envelope );
+        }
         auto after = observe();
         if( after ) result.mutable_observed_state()->CopyFrom( *after );
+        recordWrites();
         if( !saved || saved->status().status() != ApiStatusCode::AS_OK )
-            return fail( LOS_FAILED, "native_save_failed", saved ? saved->status().error_message() : saved.error().error_message() );
+            return describeSaveFailure( *before, after ? &*after : nullptr,
+                                        saved ? saved->status().error_message() : saved.error().error_message() );
         if( !after ) return fail( LOS_INDETERMINATE, "saved_state_unavailable", after.error().error_message() );
         if( !MessageDifferencer::Equals( request.document(), after->document() )
                 || after->process_epoch() != aProcessEpoch || after->native_identity() != before->native_identity()
@@ -307,11 +528,13 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
     }
     catch( const std::exception& error )
     {
+        recordWrites();
         return fail( attemptedSave ? LOS_INDETERMINATE : LOS_REJECTED,
                      "native_lifecycle_error", error.what() );
     }
     catch( ... )
     {
+        recordWrites();
         return fail( attemptedSave ? LOS_INDETERMINATE : LOS_REJECTED,
                      "native_lifecycle_error", "Native lifecycle operation raised an unexpected error; inspect the document before further saves" );
     }

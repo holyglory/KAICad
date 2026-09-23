@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <wx/string.h>
 
 class KICOMMON_API DOCUMENT_LIFECYCLE_CONTROLLER
 {
@@ -24,6 +25,20 @@ public:
     void AnnotateCleanState( kiapi::automation::v1::DocumentLifecycleState& aState ) const;
     bool IsCleanCloseActive() const { return m_cleanCloseActive; }
     static bool HasUnchangedFileBaselines( const kiapi::automation::v1::DocumentLifecycleState& aState );
+
+    /**
+     * Why KiCad cannot replace @a aPath, or an empty string when it can.  Native saves write a
+     * sibling temporary file and rename it over the target, so the folder that holds the file
+     * (after following a symbolic link, as the writer does) must accept new files as well.
+     */
+    static wxString WriteBlocker( const wxString& aPath );
+
+    /**
+     * Native writers call this during a checked save to say why a file was not written, for
+     * example because it is read-only or the disk is full.  The checked save result names the
+     * file and the reason.  Outside a checked save on this thread it does nothing.
+     */
+    static void ReportWriteFailure( const wxString& aPath, const wxString& aReason );
 
 private:
     struct RECEIPT

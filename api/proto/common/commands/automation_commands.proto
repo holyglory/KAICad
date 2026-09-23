@@ -313,6 +313,12 @@ message LifecycleOperationResult {
   string error_message = 6;
   DocumentLifecycleState observed_state = 7;
   // -- lane 2D (400-499) --
+  // Observed document files this save replaced on disk, in write order. A failed save that lists
+  // files here left the disk partly updated; the editor still holds the complete design.
+  repeated string written_files = 400;
+  // Observed document files KiCad could not write (read-only file or folder, full disk, ...).
+  // The error message says why for each one.
+  repeated string blocked_files = 401;
   // -- end lane 2D --
 }
 

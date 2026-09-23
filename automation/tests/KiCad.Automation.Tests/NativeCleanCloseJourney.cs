@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -74,6 +75,22 @@ public sealed partial class NativeSessionTests
                         Assert.IsTrue(refused.GetProperty("isError").GetBoolean());
                         Assert.AreEqual(LifecycleOperationStatus.LosRejected, Parse(refused).Status);
                         Assert.AreEqual(current, await ObserveLifecycleState(client, document, token));
+                        if (pass == 1)
+                        {
+                            // Read-only files: a save is refused before anything is written and names every
+                            // file, and the editor stays exactly as it was, so the close below still succeeds.
+                            var refusedSave = await mcp.Tool("kicad_document_save", new { instanceId,
+                                expectedStateJson = SchematicJson.Formatter.Format(current), operationId = Guid.NewGuid().ToString("D") });
+                            Assert.IsTrue(refusedSave.GetProperty("isError").GetBoolean(), refusedSave.GetRawText());
+                            var failed = Parse(refusedSave);
+                            Assert.AreEqual(LifecycleOperationStatus.LosFailed, failed.Status);
+                            Assert.AreEqual("file_not_writable", failed.ErrorCode, failed.ErrorMessage);
+                            CollectionAssert.AreEquivalent(current.NativeFiles.ToArray(), failed.BlockedFiles.ToArray(), failed.ErrorMessage);
+                            Assert.IsEmpty(failed.WrittenFiles, failed.ErrorMessage);
+                            Assert.AreEqual(current, failed.ObservedState);
+                            Assert.AreEqual(current, await ObserveLifecycleState(client, document, token));
+                            Console.WriteLine($"Read-only {kind} save refused for {instanceId}: {failed.ErrorMessage}");
+                        }
                         var request = new { instanceId, expectedStateJson = SchematicJson.Formatter.Format(current), operationId = operation };
                         var reply = await mcp.Tool("kicad_document_close", request);
                         Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
@@ -124,5 +141,31 @@ public sealed partial class NativeSessionTests
             }
         }
         finally { Directory.Delete(statePath, true); }
+    }
+
+    // An agent cancels a close while KiCad is not answering. KiCad never receives it: the editor
+    // stays open with the same saved document, no file is written, and the receipt query says so.
+    private static async Task VerifyCancelledCloseKeepsEditor(CancellableMcpClient mcp, NativeClient client,
+        DocumentSpecifier document, int processId, string evidence, string instanceId, CancellationToken token)
+    {
+        var clean = await ObserveLifecycleState(client, document, token);
+        Assert.IsFalse(clean.NativeContentDirty);
+        Assert.AreEqual(clean.StateSha256, clean.CleanCheckpointSha256, "A close needs a verified clean checkpoint.");
+        var files = clean.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+        string operation = Guid.NewGuid().ToString("D");
+        var reply = await CancelWhileKiCadIsStopped(mcp, processId, "kicad_document_close",
+            new { instanceId, expectedStateJson = SchematicJson.Formatter.Format(clean), operationId = operation }, token);
+        await OperationNotReceived(mcp, client, document, instanceId, operation, token);
+        Assert.AreEqual(clean, await ObserveLifecycleState(client, document, token), "The editor must stay open and unchanged.");
+        var open = await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(new() { Type = document.Type }, token);
+        CollectionAssert.Contains(open.Documents.ToArray(), document, "The cancelled close must leave the document open.");
+        foreach (var (path, before) in files)
+        {
+            CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
+            Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was written by a cancelled close.");
+        }
+        NotReportedAsSuccess(reply, "cancelled close");
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-cancelled-close.json"), SchematicJson.Formatter.Format(clean), token);
+        Console.WriteLine($"Cancelled close of {instanceId} left the editor open; KiCad never received operation {operation}.");
     }
 }

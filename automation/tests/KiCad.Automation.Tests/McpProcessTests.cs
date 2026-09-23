@@ -102,6 +102,15 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_simulation_job");
             CollectionAssert.Contains(names, "kicad_simulation_wait");
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
+            // Deck admission runs before any instance lookup, so a script deck is refused
+            // even when no native editor could ever receive it.
+            var scriptDeck = await Request(9089, "tools/call", new { name = "kicad_simulation_start", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedInstanceEpoch = Guid.NewGuid().ToString("D"), document = new { },
+                netlist = "Divider\nR1 in 0 1k\n.control\nshell touch pwned\n.endc\n.end\n", operationId = Guid.NewGuid()
+            } });
+            Assert.IsTrue(scriptDeck.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("simulation_deck_rejected", scriptDeck.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_pcb_items_read");
             CollectionAssert.Contains(names, "kicad_pcb_items_create");
             CollectionAssert.Contains(names, "kicad_pcb_items_update");

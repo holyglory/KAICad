@@ -13,10 +13,11 @@ namespace KiCad.Automation.Mcp;
 public sealed class SimulationTools(InstanceRegistry instances)
 {
     [McpServerTool(Name = "kicad_simulation_start"),
-     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. The native editor owns the simulator and its result vectors. Retry the same operation ID after a lost reply; a different operation cannot run concurrently in this document.")]
+     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The native editor owns the simulator and its result vectors. Retry the same operation ID after a lost reply; a different operation cannot run concurrently in this document.")]
     public Task<CallToolResult> Start(string instanceId, string expectedInstanceEpoch, DocumentSpecifier document,
         string netlist, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
+        SimulationDeckAdmission.Validate(netlist);
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");

@@ -34,22 +34,34 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
 /// Reads no files or native editor, writes nothing and never advances a baseline.</summary>
 public static class SchematicSynchronizationPlanner
 {
+    // The optional session is the recorded instance's handshake, already held by the
+    // caller (the executor's live handshake or a cached attach). Planning never contacts
+    // KiCad for it; without one, connection realization is never admitted (CN-1 §4.1).
     public static SchematicSynchronizationPlan Plan(DesignRecoveryState state, CancellationToken token = default)
-        => Prepare(state, false, token);
+        => Prepare(state, false, token, session: null);
+
+    public static SchematicSynchronizationPlan Plan(DesignRecoveryState state, AutomationSession? session, CancellationToken token = default)
+        => Prepare(state, false, token, session: session);
 
     internal static SchematicSynchronizationPlan PlanForExecution(DesignRecoveryState state, CancellationToken token = default)
-        => Prepare(state, true, token);
+        => Prepare(state, true, token, session: null);
 
     public static Task<SchematicSynchronizationPlan> PlanWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
-        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, false, token);
+        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, false, null, token);
+
+    public static Task<SchematicSynchronizationPlan> PlanWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
+        AutomationSession? session, CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, false, session, token);
 
     internal static Task<SchematicSynchronizationPlan> PlanForExecutionWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
-        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, true, token);
+        CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, true, null, token);
+
+    internal static Task<SchematicSynchronizationPlan> PlanForExecutionWithHistoryAsync(DesignRecoveryStore store, StoredDesignRecovery saved,
+        AutomationSession? session, CancellationToken token = default) => PrepareWithHistoryAsync(store, saved, true, session, token);
 
     private static async Task<SchematicSynchronizationPlan> PrepareWithHistoryAsync(DesignRecoveryStore store,
-        StoredDesignRecovery saved, bool allowConnectedLayout, CancellationToken token)
+        StoredDesignRecovery saved, bool allowConnectedLayout, AutomationSession? session, CancellationToken token)
     {
-        var plan = Prepare(saved.State, allowConnectedLayout, token);
+        var plan = Prepare(saved.State, allowConnectedLayout, token, session: session);
         if (saved.State.HasPendingWork) return plan;
         bool selected = saved.State.OwnershipResolution is not null;
         bool sameOwners = SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed);
@@ -61,7 +73,7 @@ public static class SchematicSynchronizationPlanner
                 throw new AutomationException("native_owner_resolution_stale", "The selected restoration no longer applies; clear it or inspect the current owners.");
             var history = await SchematicOwnershipHistoryReader.ReadAsync(store, saved.State, token);
             if (selected) _ = SchematicNativeRestorationProjection.Project(saved.State, history, token);
-            return Prepare(saved.State, allowConnectedLayout, token, history);
+            return Prepare(saved.State, allowConnectedLayout, token, history, session);
         }
         catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -72,7 +84,7 @@ public static class SchematicSynchronizationPlanner
     }
 
     private static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, bool allowConnectedLayout, CancellationToken token,
-        IReadOnlyList<SchematicOwnershipHistory>? history = null)
+        IReadOnlyList<SchematicOwnershipHistory>? history = null, AutomationSession? session = null)
     {
         token.ThrowIfCancellationRequested();
         SchematicHierarchyMergeResult? hierarchy = null;
@@ -92,7 +104,7 @@ public static class SchematicSynchronizationPlanner
                 return PrepareCreation(state, desired, hierarchy, gaps, token);
             // Lane entry points. A diff neither lane admits keeps the general path
             // below unchanged, including its error codes.
-            var connected = SchematicConnectedAddition.Classify(state, desired, token);
+            var connected = SchematicConnectedAddition.Classify(state, desired, session, token);
             if (connected.Kind == SchematicConnectedAdditionKind.Rejected)
                 return Failure(connected.ErrorCode ?? SchematicConnectionErrors.XmlDisconnectionUnsupported, connected.ErrorMessage);
             if (connected.Kind == SchematicConnectedAdditionKind.Admitted)

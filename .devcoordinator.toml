@@ -3042,6 +3042,16 @@ requires=["native-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlComponentCreation", "--logger", "trx", "--results-directory", "automation/artifacts/native-xml-component-creation-tests"]
 retained_artifacts=[{ name = "native-xml-component-creation-tests", path = "automation/artifacts/native-xml-component-creation-tests", max_bytes = 16777216 }, { name = "native-xml-component-creation-evidence", path = "automation/artifacts/native-xml-component-creation/native-session-current", max_bytes = 33554432 }]
 
+# Creation-only PSU/CPU journey on the frozen S1 seed: the fixture's Components
+# stage from XML, including U5 unit 4 on CPU_POWER (ledger p95e0c19e6143deb6).
+[[test.native-xml-component-creation.check]]
+name="psu-cpu-rendered"
+tier="development"
+requires=["native-build"]
+after=["rendered"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests"]
+retained_artifacts=[{ name = "native-psu-cpu-creation-tests", path = "automation/artifacts/native-psu-cpu-creation-tests", max_bytes = 16777216 }, { name = "native-psu-cpu-creation-evidence", path = "automation/artifacts/native-psu-cpu-creation/native-session-current", max_bytes = 67108864 }]
+
 [test.native-transform-sync]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }

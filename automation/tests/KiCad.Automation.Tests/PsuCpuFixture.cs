@@ -528,6 +528,38 @@ internal static class PsuCpuFixture
         return issues;
     }
 
+    /// <summary>The loaded S1 "Sheets" (or S2 "RootOnly") hierarchy exactly as contract section 1.6.2
+    /// declares it, below the native-created root instance. Offline tests build
+    /// the seed with this instead of copying it.</summary>
+    internal static SchematicHierarchyData SeedHierarchy(Guid root, PsuCpuSeed seed)
+    {
+        KIID Id(Guid id) => new() { Value = id.ToString("D") };
+        KIID Native(int n) => Id(PsuCpuIds.Id(0x20, n));
+        var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new(), Project = new() { Name = "fixture", Path = "/fixture" } };
+        document.SheetPath.Path.Add(Id(root));
+        var data = new SchematicHierarchyData { Document = document.Clone() };
+        SchematicScreenData Screen(KIID[] path, int screen, PageSize paper)
+        {
+            var target = document.Clone(); target.SheetPath.Path.Clear(); target.SheetPath.Path.Add(path);
+            var result = new SchematicScreenData { Metadata = new() { Document = target, ScreenId = Native(screen), Page = new() { PageSize = paper } } };
+            data.Instances.Add(result);
+            return result;
+        }
+        SchematicField Field(string text) => new() { Text = new() { Text_ = text, Attributes = new() { Multiline = true } } };
+        void Sheet(SchematicScreenData parent, int symbol, int child, string name, string file, string page) =>
+            parent.Items.Add(Any.Pack(new SheetSymbol { Id = Native(symbol), ChildScreenId = Native(child), Path = parent.Metadata.Document.SheetPath.Clone(),
+                NameField = Field(name), FilenameField = Field(file), PageNumber = page }));
+        var top = Screen([Id(root)], 1, PageSize.PsA4);
+        if (seed == PsuCpuSeed.RootOnly) return data;
+        Sheet(top, 2, 5, "PSU", "psu.kicad_sch", "2");
+        Sheet(top, 3, 6, "CPU", "cpu.kicad_sch", "3");
+        Screen([Id(root), Native(2)], 5, PageSize.PsA4);
+        var cpu = Screen([Id(root), Native(3)], 6, PageSize.PsA3);
+        Sheet(cpu, 4, 7, "CPU_POWER", "cpu_power.kicad_sch", "4");
+        Screen([Id(root), Native(3), Native(4)], 7, PageSize.PsA4);
+        return data;
+    }
+
     /// <summary>psu_cpu_seed_hierarchy_mismatch unless the loaded screens, paths, papers and sheet
     /// symbols are exactly the seed's (contract section 1.6.2).</summary>
     internal static void RequireSeedHierarchy(SchematicHierarchyData data, PsuCpuSeed seed, Guid rootInstance)

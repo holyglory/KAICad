@@ -74,6 +74,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePsuCpuSeed")]
     public Task PsuCpuFixtureSeedsLoadWithExactIdentities() => RunNativeSessions(NativeJourney.PsuCpuSeed);
 
+    [TestMethod, TestCategory("NativePsuCpuComponentCreation")]
+    public Task PsuCpuComponentsAreCreatedAcrossSheetsFromXml() => RunNativeSessions(NativeJourney.PsuCpuComponentCreation);
+
     [TestMethod, TestCategory("NativeConnectedRealization")]
     public Task PsuCpuXmlRealizesAConnectedHierarchicalSchematic() => RunNativeSessions(NativeJourney.ConnectedRealization);
 
@@ -95,7 +98,7 @@ public sealed partial class NativeSessionTests
     public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor, Simulation, PcbItems,
-        PsuCpuSeed, ConnectedRealization, DiagramCanvas, StructuralMigration, XmlRebuild, OwnershipSync, NativeCrash }
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, StructuralMigration, XmlRebuild, OwnershipSync, NativeCrash }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -120,6 +123,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
                 NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
+                NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
                 NativeJourney.ConnectedRealization => "native-connected-realization",
                 NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
                 NativeJourney.StructuralMigration => "native-structural-migration",
@@ -134,10 +138,12 @@ public sealed partial class NativeSessionTests
         // Connected-layout recovery adds twelve real service stop/restart
         // cases. The first editor took 159.5s in aa4d8d; the old 300s ceiling
         // cut off the second. Per-action deadlines remain unchanged.
+        // Component creation measured 251-294s on 2026-09-23 (one run cut off at
+        // 300s after every assertion passed), so it joins the heavy group.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 600
             : journey == NativeJourney.CheckedBatch ? 420
-            : journey is NativeJourney.SymbolSheets or NativeJourney.ConnectedRealization
-                or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 600 : 300;
+            : journey is NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
+                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 600 : 300;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)
@@ -266,7 +272,7 @@ public sealed partial class NativeSessionTests
                 var emptyRoot = await VerifyEmptyRootCreation(client, schematic,
                     Path.ChangeExtension(launched.Single(p => p.Id != target.Id).Project, ".kicad_sch"),
                     evidence, target.Id, target.RootId, deadline.Token);
-                if (journey is NativeJourney.PsuCpuSeed or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
+                if (journey is NativeJourney.PsuCpuSeed or NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
                     or NativeJourney.StructuralMigration or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync
                     or NativeJourney.NativeCrash)
                 {
@@ -889,7 +895,8 @@ public sealed partial class NativeSessionTests
         }
         var seed = journey switch
         {
-            NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync or NativeJourney.NativeCrash => PsuCpuSeed.Sheets,
+            NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync
+                or NativeJourney.NativeCrash => PsuCpuSeed.Sheets,
             NativeJourney.XmlRebuild => PsuCpuSeed.RootOnly,
             NativeJourney.DiagramCanvas or NativeJourney.StructuralMigration => PsuCpuSeed.None,
             _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
@@ -897,6 +904,7 @@ public sealed partial class NativeSessionTests
         var context = await PsuCpuFixture.PrepareNativeAsync(client, emptyRoot, projectDirectory, seed, evidence, token);
         await (journey switch
         {
+            NativeJourney.PsuCpuComponentCreation => VerifyPsuCpuComponentCreation(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.ConnectedRealization => VerifyPsuCpuConnectedRealization(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.StructuralMigration => VerifyStructuralMigration(client, context, native.Id, display, evidence, instanceId, token),

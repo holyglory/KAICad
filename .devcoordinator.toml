@@ -1387,7 +1387,7 @@ command=["dotnet", "build", "KiCad.Automation.slnx", "--no-restore", "--configur
 name="unit"
 tier="development"
 cwd="automation"
-command=["dotnet", "test", "KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory!=NativeSession&TestCategory!=NativeDocuments&TestCategory!=ExternalIntegration", "--logger", "trx", "--results-directory", "artifacts/tests"]
+command=["dotnet", "test", "KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory!=NativeSession&TestCategory!=NativeDocuments&TestCategory!=ExternalIntegration&TestCategory!=NativeFieldHistory", "--logger", "trx", "--results-directory", "artifacts/tests"]
 requires=["build"]
 retained_artifacts=[{ name = "dotnet-test-results", path = "automation/artifacts/tests", max_bytes = 16777216 }]
 

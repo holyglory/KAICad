@@ -1,0 +1,12 @@
+<hardware id="7e57f1c5-0000-4000-8000-000100000001" name="PSU-CPU acceptance fixture" version="1" xmlns="urn:kicad:automation:hardware:1">
+  <designs>
+    <design id="7e57f1c5-0000-4000-8000-000100000002" name="Controller" project="fixture.kicad_pro" model="design.xml">
+      <port id="7e57f1c5-0000-4000-8000-000100000003" name="DC input">
+        <description>External supply connector J1 (fixture data).</description>
+      </port>
+    </design>
+  </designs>
+  <documents />
+  <libraries />
+  <interfaces />
+</hardware>

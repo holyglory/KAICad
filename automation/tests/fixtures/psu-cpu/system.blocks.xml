@@ -1,0 +1,1453 @@
+<recursive-block-graph version="1" document="7e57f1c5-0000-4000-8000-001000000001" xmlns="urn:kicad:automation:recursive-block-graph:1">
+  <selected-root block="7e57f1c5-0000-4000-8000-001100000001" state="7e57f1c5-0000-4000-8000-001200000001" revision="7e57f1c5-0000-4000-8000-001300000001" />
+  <states>
+    <state id="7e57f1c5-0000-4000-8000-001200000001" block="7e57f1c5-0000-4000-8000-001100000001" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000001" />
+    <state id="7e57f1c5-0000-4000-8000-001200000002" block="7e57f1c5-0000-4000-8000-001100000002" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000002" />
+    <state id="7e57f1c5-0000-4000-8000-001200000003" block="7e57f1c5-0000-4000-8000-001100000003" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000003" />
+    <state id="7e57f1c5-0000-4000-8000-001200000004" block="7e57f1c5-0000-4000-8000-001100000004" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000004" />
+    <state id="7e57f1c5-0000-4000-8000-001200000005" block="7e57f1c5-0000-4000-8000-001100000005" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000005" />
+    <state id="7e57f1c5-0000-4000-8000-001200000006" block="7e57f1c5-0000-4000-8000-001100000006" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000006" />
+    <state id="7e57f1c5-0000-4000-8000-001200000007" block="7e57f1c5-0000-4000-8000-001100000007" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000007" />
+    <state id="7e57f1c5-0000-4000-8000-001200000008" block="7e57f1c5-0000-4000-8000-001100000008" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000008" />
+    <state id="7e57f1c5-0000-4000-8000-001200000009" block="7e57f1c5-0000-4000-8000-001100000009" name="Initial approach" head="7e57f1c5-0000-4000-8000-001300000009" />
+  </states>
+  <revisions>
+    <revision id="7e57f1c5-0000-4000-8000-001300000001" block="7e57f1c5-0000-4000-8000-001100000001" state="7e57f1c5-0000-4000-8000-001200000001" name="System" requirements="7e57f1c5-0000-4000-8000-001400000001">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children>
+        <child block="7e57f1c5-0000-4000-8000-001100000002" state="7e57f1c5-0000-4000-8000-001200000002" revision="7e57f1c5-0000-4000-8000-001300000002" />
+        <child block="7e57f1c5-0000-4000-8000-001100000003" state="7e57f1c5-0000-4000-8000-001200000003" revision="7e57f1c5-0000-4000-8000-001300000003" />
+      </children>
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000001" name="DC input">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections>
+          <connection connection="7e57f1c5-0000-4000-8000-001600000001" state="7e57f1c5-0000-4000-8000-001700000001" revision="7e57f1c5-0000-4000-8000-001800000001" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000002" state="7e57f1c5-0000-4000-8000-001700000002" revision="7e57f1c5-0000-4000-8000-001800000002" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000006" state="7e57f1c5-0000-4000-8000-001700000006" revision="7e57f1c5-0000-4000-8000-001800000006" />
+        </connections>
+        <annotations>
+          <annotation id="7e57f1c5-0000-4000-8000-001a00000001" role="Comment" units="diagram-unit">
+            <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+              <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+            </origin>
+            <text>Keep PSU replaceable as a unit.</text>
+            <target kind="Canvas" />
+            <position x="40" y="260" />
+            <strokes />
+          </annotation>
+          <annotation id="7e57f1c5-0000-4000-8000-001a00000002" role="Comment" units="diagram-unit">
+            <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+              <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+            </origin>
+            <text>Explore a quieter supply.</text>
+            <target kind="Block" ref="7e57f1c5-0000-4000-8000-001100000002" />
+            <strokes />
+          </annotation>
+        </annotations>
+      </local-diagram>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000002" block="7e57f1c5-0000-4000-8000-001100000002" state="7e57f1c5-0000-4000-8000-001200000002" name="PSU" requirements="7e57f1c5-0000-4000-8000-001400000002">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children>
+        <child block="7e57f1c5-0000-4000-8000-001100000004" state="7e57f1c5-0000-4000-8000-001200000004" revision="7e57f1c5-0000-4000-8000-001300000004" />
+        <child block="7e57f1c5-0000-4000-8000-001100000005" state="7e57f1c5-0000-4000-8000-001200000005" revision="7e57f1c5-0000-4000-8000-001300000005" />
+        <child block="7e57f1c5-0000-4000-8000-001100000006" state="7e57f1c5-0000-4000-8000-001200000006" revision="7e57f1c5-0000-4000-8000-001300000006" />
+        <child block="7e57f1c5-0000-4000-8000-001100000007" state="7e57f1c5-0000-4000-8000-001200000007" revision="7e57f1c5-0000-4000-8000-001300000007" />
+      </children>
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000002" name="DC input">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000003" name="Power">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000004" name="Telemetry">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections>
+          <connection connection="7e57f1c5-0000-4000-8000-001600000009" state="7e57f1c5-0000-4000-8000-001700000009" revision="7e57f1c5-0000-4000-8000-001800000009" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000000a" state="7e57f1c5-0000-4000-8000-00170000000a" revision="7e57f1c5-0000-4000-8000-00180000000a" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000000b" state="7e57f1c5-0000-4000-8000-00170000000b" revision="7e57f1c5-0000-4000-8000-00180000000b" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000000c" state="7e57f1c5-0000-4000-8000-00170000000c" revision="7e57f1c5-0000-4000-8000-00180000000c" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000000d" state="7e57f1c5-0000-4000-8000-00170000000d" revision="7e57f1c5-0000-4000-8000-00180000000d" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000010" state="7e57f1c5-0000-4000-8000-001700000010" revision="7e57f1c5-0000-4000-8000-001800000010" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000011" state="7e57f1c5-0000-4000-8000-001700000011" revision="7e57f1c5-0000-4000-8000-001800000011" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000014" state="7e57f1c5-0000-4000-8000-001700000014" revision="7e57f1c5-0000-4000-8000-001800000014" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000015" state="7e57f1c5-0000-4000-8000-001700000015" revision="7e57f1c5-0000-4000-8000-001800000015" />
+        </connections>
+        <annotations>
+          <annotation id="7e57f1c5-0000-4000-8000-001a00000003" role="Comment" units="diagram-unit">
+            <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+              <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+            </origin>
+            <text>Keep sensing away from switching nodes.</text>
+            <target kind="Canvas" />
+            <position x="40" y="300" />
+            <strokes />
+          </annotation>
+        </annotations>
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000001" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000003" block="7e57f1c5-0000-4000-8000-001100000003" state="7e57f1c5-0000-4000-8000-001200000003" name="CPU" requirements="7e57f1c5-0000-4000-8000-001400000003">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children>
+        <child block="7e57f1c5-0000-4000-8000-001100000008" state="7e57f1c5-0000-4000-8000-001200000008" revision="7e57f1c5-0000-4000-8000-001300000008" />
+        <child block="7e57f1c5-0000-4000-8000-001100000009" state="7e57f1c5-0000-4000-8000-001200000009" revision="7e57f1c5-0000-4000-8000-001300000009" />
+      </children>
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000005" name="Power">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000006" name="Telemetry">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections>
+          <connection connection="7e57f1c5-0000-4000-8000-001600000018" state="7e57f1c5-0000-4000-8000-001700000018" revision="7e57f1c5-0000-4000-8000-001800000018" />
+          <connection connection="7e57f1c5-0000-4000-8000-001600000019" state="7e57f1c5-0000-4000-8000-001700000019" revision="7e57f1c5-0000-4000-8000-001800000019" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000001a" state="7e57f1c5-0000-4000-8000-00170000001a" revision="7e57f1c5-0000-4000-8000-00180000001a" />
+          <connection connection="7e57f1c5-0000-4000-8000-00160000001d" state="7e57f1c5-0000-4000-8000-00170000001d" revision="7e57f1c5-0000-4000-8000-00180000001d" />
+        </connections>
+        <annotations>
+          <annotation id="7e57f1c5-0000-4000-8000-001a00000004" role="Comment" units="diagram-unit">
+            <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+              <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+            </origin>
+            <text>Compare memory-interface implementations.</text>
+            <target kind="Canvas" />
+            <position x="40" y="300" />
+            <strokes />
+          </annotation>
+          <annotation id="7e57f1c5-0000-4000-8000-001a00000005" role="Comment" units="diagram-unit">
+            <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+              <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+            </origin>
+            <text>Keep pin choices open for placement.</text>
+            <target kind="Connection" ref="7e57f1c5-0000-4000-8000-00160000001d" />
+            <strokes />
+          </annotation>
+        </annotations>
+      </local-diagram>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000004" block="7e57f1c5-0000-4000-8000-001100000004" state="7e57f1c5-0000-4000-8000-001200000004" name="DC-DC" requirements="7e57f1c5-0000-4000-8000-001400000004">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000007" name="Input">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000008" name="Output">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000009" name="Sense">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000002" />
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000003" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000005" block="7e57f1c5-0000-4000-8000-001100000005" state="7e57f1c5-0000-4000-8000-001200000005" name="LDO" requirements="7e57f1c5-0000-4000-8000-001400000005">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000a" name="Input">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000b" name="Output">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000c" name="Fault">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000004" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000006" block="7e57f1c5-0000-4000-8000-001100000006" state="7e57f1c5-0000-4000-8000-001200000006" name="Telemetry ADC" requirements="7e57f1c5-0000-4000-8000-001400000006">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000d" name="Rail A sense">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000e" name="Rail B sense">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-00150000000f" name="Measurements">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000005" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000007" block="7e57f1c5-0000-4000-8000-001100000007" state="7e57f1c5-0000-4000-8000-001200000007" name="Telemetry MCU" requirements="7e57f1c5-0000-4000-8000-001400000007">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000010" name="Measurements">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000011" name="Fault">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000012" name="Telemetry">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000006" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000008" block="7e57f1c5-0000-4000-8000-001100000008" state="7e57f1c5-0000-4000-8000-001200000008" name="Processor" requirements="7e57f1c5-0000-4000-8000-001400000008">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000013" name="Power">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000014" name="Telemetry">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000015" name="Memory">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000007" />
+      </component-bindings>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001300000009" block="7e57f1c5-0000-4000-8000-001100000009" state="7e57f1c5-0000-4000-8000-001200000009" name="Memory" requirements="7e57f1c5-0000-4000-8000-001400000009">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <children />
+      <local-diagram>
+        <interfaces>
+          <interface id="7e57f1c5-0000-4000-8000-001500000016" name="Power">
+            <intent></intent>
+          </interface>
+          <interface id="7e57f1c5-0000-4000-8000-001500000017" name="Data">
+            <intent></intent>
+          </interface>
+        </interfaces>
+        <connections />
+      </local-diagram>
+      <component-bindings>
+        <component design="7e57f1c5-0000-4000-8000-000100000002" circuit="7e57f1c5-0000-4000-8000-000200000001" id="7e57f1c5-0000-4000-8000-000700000008" />
+      </component-bindings>
+    </revision>
+  </revisions>
+  <requirement-histories>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000001" design-state="7e57f1c5-0000-4000-8000-001200000001" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000001">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000002" design-state="7e57f1c5-0000-4000-8000-001200000002" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000002">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general>Supply CPU power and report rail status.</general>
+      <schematic>Separate power conversion and telemetry.</schematic>
+      <routing>Keep high-current paths away from sensing.</routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000003" design-state="7e57f1c5-0000-4000-8000-001200000003" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000003">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000004" design-state="7e57f1c5-0000-4000-8000-001200000004" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000004">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000005" design-state="7e57f1c5-0000-4000-8000-001200000005" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000005">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000006" design-state="7e57f1c5-0000-4000-8000-001200000006" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000006">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000007" design-state="7e57f1c5-0000-4000-8000-001200000007" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000007">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000008" design-state="7e57f1c5-0000-4000-8000-001200000008" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000008">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001100000009" design-state="7e57f1c5-0000-4000-8000-001200000009" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001400000009">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+  </requirement-histories>
+  <connection-archives>
+    <connection-archive version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner-block="7e57f1c5-0000-4000-8000-001100000001" xmlns="urn:kicad:automation:connection-archive:1">
+  <states>
+    <state id="7e57f1c5-0000-4000-8000-001700000001" connection="7e57f1c5-0000-4000-8000-001600000001" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000001" />
+    <state id="7e57f1c5-0000-4000-8000-001700000002" connection="7e57f1c5-0000-4000-8000-001600000002" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000002" />
+    <state id="7e57f1c5-0000-4000-8000-001700000003" connection="7e57f1c5-0000-4000-8000-001600000003" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000003" />
+    <state id="7e57f1c5-0000-4000-8000-001700000004" connection="7e57f1c5-0000-4000-8000-001600000004" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000004" />
+    <state id="7e57f1c5-0000-4000-8000-001700000005" connection="7e57f1c5-0000-4000-8000-001600000005" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000005" />
+    <state id="7e57f1c5-0000-4000-8000-001700000006" connection="7e57f1c5-0000-4000-8000-001600000006" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000006" />
+    <state id="7e57f1c5-0000-4000-8000-001700000007" connection="7e57f1c5-0000-4000-8000-001600000007" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000007" />
+    <state id="7e57f1c5-0000-4000-8000-001700000008" connection="7e57f1c5-0000-4000-8000-001600000008" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000008" />
+  </states>
+  <revisions>
+    <revision id="7e57f1c5-0000-4000-8000-001800000001" connection="7e57f1c5-0000-4000-8000-001600000001" state="7e57f1c5-0000-4000-8000-001700000001" name="DC input" kind="Interface" requirements="7e57f1c5-0000-4000-8000-001900000001">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000001" interface="7e57f1c5-0000-4000-8000-001500000001">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000002">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000002" connection="7e57f1c5-0000-4000-8000-001600000002" state="7e57f1c5-0000-4000-8000-001700000002" name="Power" kind="Interface" requirements="7e57f1c5-0000-4000-8000-001900000002">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-001600000003" state="7e57f1c5-0000-4000-8000-001700000003" revision="7e57f1c5-0000-4000-8000-001800000003" />
+        <member connection="7e57f1c5-0000-4000-8000-001600000004" state="7e57f1c5-0000-4000-8000-001700000004" revision="7e57f1c5-0000-4000-8000-001800000004" />
+        <member connection="7e57f1c5-0000-4000-8000-001600000005" state="7e57f1c5-0000-4000-8000-001700000005" revision="7e57f1c5-0000-4000-8000-001800000005" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000003" connection="7e57f1c5-0000-4000-8000-001600000003" state="7e57f1c5-0000-4000-8000-001700000003" name="Rail A" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000003">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000004" connection="7e57f1c5-0000-4000-8000-001600000004" state="7e57f1c5-0000-4000-8000-001700000004" name="Rail B" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000004">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000005" connection="7e57f1c5-0000-4000-8000-001600000005" state="7e57f1c5-0000-4000-8000-001700000005" name="Return" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000005">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000006" connection="7e57f1c5-0000-4000-8000-001600000006" state="7e57f1c5-0000-4000-8000-001700000006" name="Telemetry" kind="Interface" requirements="7e57f1c5-0000-4000-8000-001900000006">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-001600000007" state="7e57f1c5-0000-4000-8000-001700000007" revision="7e57f1c5-0000-4000-8000-001800000007" />
+        <member connection="7e57f1c5-0000-4000-8000-001600000008" state="7e57f1c5-0000-4000-8000-001700000008" revision="7e57f1c5-0000-4000-8000-001800000008" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000007" connection="7e57f1c5-0000-4000-8000-001600000007" state="7e57f1c5-0000-4000-8000-001700000007" name="MCU to CPU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000007">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000008" connection="7e57f1c5-0000-4000-8000-001600000008" state="7e57f1c5-0000-4000-8000-001700000008" name="CPU to MCU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000008">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+  </revisions>
+  <requirement-histories>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000001" design-state="7e57f1c5-0000-4000-8000-001700000001" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000001">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000002" design-state="7e57f1c5-0000-4000-8000-001700000002" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000002">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000003" design-state="7e57f1c5-0000-4000-8000-001700000003" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000003">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000004" design-state="7e57f1c5-0000-4000-8000-001700000004" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000004">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000005" design-state="7e57f1c5-0000-4000-8000-001700000005" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000005">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000006" design-state="7e57f1c5-0000-4000-8000-001700000006" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000006">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000007" design-state="7e57f1c5-0000-4000-8000-001700000007" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000007">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000008" design-state="7e57f1c5-0000-4000-8000-001700000008" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000008">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+  </requirement-histories>
+</connection-archive>
+    <connection-archive version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner-block="7e57f1c5-0000-4000-8000-001100000002" xmlns="urn:kicad:automation:connection-archive:1">
+  <states>
+    <state id="7e57f1c5-0000-4000-8000-001700000009" connection="7e57f1c5-0000-4000-8000-001600000009" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000009" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000a" connection="7e57f1c5-0000-4000-8000-00160000000a" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000a" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000b" connection="7e57f1c5-0000-4000-8000-00160000000b" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000b" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000c" connection="7e57f1c5-0000-4000-8000-00160000000c" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000c" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000d" connection="7e57f1c5-0000-4000-8000-00160000000d" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000d" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000e" connection="7e57f1c5-0000-4000-8000-00160000000e" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000e" />
+    <state id="7e57f1c5-0000-4000-8000-00170000000f" connection="7e57f1c5-0000-4000-8000-00160000000f" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000000f" />
+    <state id="7e57f1c5-0000-4000-8000-001700000010" connection="7e57f1c5-0000-4000-8000-001600000010" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000010" />
+    <state id="7e57f1c5-0000-4000-8000-001700000011" connection="7e57f1c5-0000-4000-8000-001600000011" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000011" />
+    <state id="7e57f1c5-0000-4000-8000-001700000012" connection="7e57f1c5-0000-4000-8000-001600000012" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000012" />
+    <state id="7e57f1c5-0000-4000-8000-001700000013" connection="7e57f1c5-0000-4000-8000-001600000013" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000013" />
+    <state id="7e57f1c5-0000-4000-8000-001700000014" connection="7e57f1c5-0000-4000-8000-001600000014" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000014" />
+    <state id="7e57f1c5-0000-4000-8000-001700000015" connection="7e57f1c5-0000-4000-8000-001600000015" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000015" />
+    <state id="7e57f1c5-0000-4000-8000-001700000016" connection="7e57f1c5-0000-4000-8000-001600000016" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000016" />
+    <state id="7e57f1c5-0000-4000-8000-001700000017" connection="7e57f1c5-0000-4000-8000-001600000017" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000017" />
+  </states>
+  <revisions>
+    <revision id="7e57f1c5-0000-4000-8000-001800000009" connection="7e57f1c5-0000-4000-8000-001600000009" state="7e57f1c5-0000-4000-8000-001700000009" name="DC input" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000009">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000002">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000001" pin="1">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000007">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000002" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000a" connection="7e57f1c5-0000-4000-8000-00160000000a" state="7e57f1c5-0000-4000-8000-00170000000a" name="Rail A" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000000a">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000008">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000003" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000b" connection="7e57f1c5-0000-4000-8000-00160000000b" state="7e57f1c5-0000-4000-8000-00170000000b" name="LDO supply" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000000b">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000008">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000003" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000005" interface="7e57f1c5-0000-4000-8000-00150000000a">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000004" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000c" connection="7e57f1c5-0000-4000-8000-00160000000c" state="7e57f1c5-0000-4000-8000-00170000000c" name="Rail B" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000000c">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000005" interface="7e57f1c5-0000-4000-8000-00150000000b">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000004" pin="1">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000003">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000d" connection="7e57f1c5-0000-4000-8000-00160000000d" state="7e57f1c5-0000-4000-8000-00170000000d" name="Rail A sense" kind="SignalGroup" requirements="7e57f1c5-0000-4000-8000-00190000000d">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000009">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000d">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-00160000000e" state="7e57f1c5-0000-4000-8000-00170000000e" revision="7e57f1c5-0000-4000-8000-00180000000e" />
+        <member connection="7e57f1c5-0000-4000-8000-00160000000f" state="7e57f1c5-0000-4000-8000-00170000000f" revision="7e57f1c5-0000-4000-8000-00180000000f" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000e" connection="7e57f1c5-0000-4000-8000-00160000000e" state="7e57f1c5-0000-4000-8000-00170000000e" name="Sense+" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000000e">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000009">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000002" pin="1">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000d">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000005" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000000f" connection="7e57f1c5-0000-4000-8000-00160000000f" state="7e57f1c5-0000-4000-8000-00170000000f" name="Sense-" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000000f">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000004" interface="7e57f1c5-0000-4000-8000-001500000009">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000003" pin="2">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000d">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000005" pin="5">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000010" connection="7e57f1c5-0000-4000-8000-001600000010" state="7e57f1c5-0000-4000-8000-001700000010" name="Rail B sense" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000010">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000005" interface="7e57f1c5-0000-4000-8000-00150000000b">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000004" pin="1">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000e">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000005" pin="8">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000011" connection="7e57f1c5-0000-4000-8000-001600000011" state="7e57f1c5-0000-4000-8000-001700000011" name="Measurements" kind="Interface" requirements="7e57f1c5-0000-4000-8000-001900000011">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000f">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000010">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-001600000012" state="7e57f1c5-0000-4000-8000-001700000012" revision="7e57f1c5-0000-4000-8000-001800000012" />
+        <member connection="7e57f1c5-0000-4000-8000-001600000013" state="7e57f1c5-0000-4000-8000-001700000013" revision="7e57f1c5-0000-4000-8000-001800000013" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000012" connection="7e57f1c5-0000-4000-8000-001600000012" state="7e57f1c5-0000-4000-8000-001700000012" name="I2C SCL" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000012">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000f">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000005" pin="6">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000010">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000006" pin="5">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000013" connection="7e57f1c5-0000-4000-8000-001600000013" state="7e57f1c5-0000-4000-8000-001700000013" name="I2C SDA" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000013">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000006" interface="7e57f1c5-0000-4000-8000-00150000000f">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000005" pin="7">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000010">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000006" pin="6">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000014" connection="7e57f1c5-0000-4000-8000-001600000014" state="7e57f1c5-0000-4000-8000-001700000014" name="Fault" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000014">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000005" interface="7e57f1c5-0000-4000-8000-00150000000c">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000004" pin="8">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000011">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000006" pin="4">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000015" connection="7e57f1c5-0000-4000-8000-001600000015" state="7e57f1c5-0000-4000-8000-001700000015" name="Telemetry" kind="Interface" requirements="7e57f1c5-0000-4000-8000-001900000015">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000012">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-001600000016" state="7e57f1c5-0000-4000-8000-001700000016" revision="7e57f1c5-0000-4000-8000-001800000016" />
+        <member connection="7e57f1c5-0000-4000-8000-001600000017" state="7e57f1c5-0000-4000-8000-001700000017" revision="7e57f1c5-0000-4000-8000-001800000017" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000016" connection="7e57f1c5-0000-4000-8000-001600000016" state="7e57f1c5-0000-4000-8000-001700000016" name="MCU to CPU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000016">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000012">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000006" pin="8">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000017" connection="7e57f1c5-0000-4000-8000-001600000017" state="7e57f1c5-0000-4000-8000-001700000017" name="CPU to MCU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000017">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000007" interface="7e57f1c5-0000-4000-8000-001500000012">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000006" pin="1">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000002" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000002" interface="7e57f1c5-0000-4000-8000-001500000004">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+  </revisions>
+  <requirement-histories>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000009" design-state="7e57f1c5-0000-4000-8000-001700000009" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000009">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000a" design-state="7e57f1c5-0000-4000-8000-00170000000a" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000a">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000b" design-state="7e57f1c5-0000-4000-8000-00170000000b" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000b">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000c" design-state="7e57f1c5-0000-4000-8000-00170000000c" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000c">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000d" design-state="7e57f1c5-0000-4000-8000-00170000000d" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000d">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000e" design-state="7e57f1c5-0000-4000-8000-00170000000e" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000e">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000000f" design-state="7e57f1c5-0000-4000-8000-00170000000f" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000000f">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000010" design-state="7e57f1c5-0000-4000-8000-001700000010" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000010">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000011" design-state="7e57f1c5-0000-4000-8000-001700000011" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000011">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000012" design-state="7e57f1c5-0000-4000-8000-001700000012" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000012">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000013" design-state="7e57f1c5-0000-4000-8000-001700000013" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000013">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000014" design-state="7e57f1c5-0000-4000-8000-001700000014" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000014">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000015" design-state="7e57f1c5-0000-4000-8000-001700000015" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000015">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000016" design-state="7e57f1c5-0000-4000-8000-001700000016" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000016">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000017" design-state="7e57f1c5-0000-4000-8000-001700000017" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000017">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+  </requirement-histories>
+</connection-archive>
+    <connection-archive version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner-block="7e57f1c5-0000-4000-8000-001100000003" xmlns="urn:kicad:automation:connection-archive:1">
+  <states>
+    <state id="7e57f1c5-0000-4000-8000-001700000018" connection="7e57f1c5-0000-4000-8000-001600000018" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000018" />
+    <state id="7e57f1c5-0000-4000-8000-001700000019" connection="7e57f1c5-0000-4000-8000-001600000019" name="Initial interface" head="7e57f1c5-0000-4000-8000-001800000019" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001a" connection="7e57f1c5-0000-4000-8000-00160000001a" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001a" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001b" connection="7e57f1c5-0000-4000-8000-00160000001b" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001b" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001c" connection="7e57f1c5-0000-4000-8000-00160000001c" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001c" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001d" connection="7e57f1c5-0000-4000-8000-00160000001d" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001d" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001e" connection="7e57f1c5-0000-4000-8000-00160000001e" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001e" />
+    <state id="7e57f1c5-0000-4000-8000-00170000001f" connection="7e57f1c5-0000-4000-8000-00160000001f" name="Initial interface" head="7e57f1c5-0000-4000-8000-00180000001f" />
+  </states>
+  <revisions>
+    <revision id="7e57f1c5-0000-4000-8000-001800000018" connection="7e57f1c5-0000-4000-8000-001600000018" state="7e57f1c5-0000-4000-8000-001700000018" name="Rail A" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000018">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000013">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000007" pin="3">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-001800000019" connection="7e57f1c5-0000-4000-8000-001600000019" state="7e57f1c5-0000-4000-8000-001700000019" name="Rail B" kind="Signal" requirements="7e57f1c5-0000-4000-8000-001900000019">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000005">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000009" interface="7e57f1c5-0000-4000-8000-001500000016">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000008" pin="8">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001a" connection="7e57f1c5-0000-4000-8000-00160000001a" state="7e57f1c5-0000-4000-8000-00170000001a" name="Supply status / control" kind="Interface" requirements="7e57f1c5-0000-4000-8000-00190000001a">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000014">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-00160000001b" state="7e57f1c5-0000-4000-8000-00170000001b" revision="7e57f1c5-0000-4000-8000-00180000001b" />
+        <member connection="7e57f1c5-0000-4000-8000-00160000001c" state="7e57f1c5-0000-4000-8000-00170000001c" revision="7e57f1c5-0000-4000-8000-00180000001c" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001b" connection="7e57f1c5-0000-4000-8000-00160000001b" state="7e57f1c5-0000-4000-8000-00170000001b" name="MCU to CPU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000001b">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000014">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000007" pin="74">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001c" connection="7e57f1c5-0000-4000-8000-00160000001c" state="7e57f1c5-0000-4000-8000-00170000001c" name="CPU to MCU" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000001c">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000003" interface="7e57f1c5-0000-4000-8000-001500000006">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000014">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000007" pin="73">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001d" connection="7e57f1c5-0000-4000-8000-00160000001d" state="7e57f1c5-0000-4000-8000-00170000001d" name="Memory interface" kind="Interface" requirements="7e57f1c5-0000-4000-8000-00190000001d">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000015">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Interface" block="7e57f1c5-0000-4000-8000-001100000009" interface="7e57f1c5-0000-4000-8000-001500000017">
+          <intent></intent>
+          <candidates />
+        </endpoint>
+      </endpoints>
+      <members>
+        <member connection="7e57f1c5-0000-4000-8000-00160000001e" state="7e57f1c5-0000-4000-8000-00170000001e" revision="7e57f1c5-0000-4000-8000-00180000001e" />
+        <member connection="7e57f1c5-0000-4000-8000-00160000001f" state="7e57f1c5-0000-4000-8000-00170000001f" revision="7e57f1c5-0000-4000-8000-00180000001f" />
+      </members>
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001e" connection="7e57f1c5-0000-4000-8000-00160000001e" state="7e57f1c5-0000-4000-8000-00170000001e" name="I2C SCL" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000001e">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000015">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000007" pin="161">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000009" interface="7e57f1c5-0000-4000-8000-001500000017">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000008" pin="6">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+    <revision id="7e57f1c5-0000-4000-8000-00180000001f" connection="7e57f1c5-0000-4000-8000-00160000001f" state="7e57f1c5-0000-4000-8000-00170000001f" name="I2C SDA" kind="Signal" requirements="7e57f1c5-0000-4000-8000-00190000001f">
+      <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+        <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+      </origin>
+      <endpoints>
+        <endpoint kind="Compatible" block="7e57f1c5-0000-4000-8000-001100000008" interface="7e57f1c5-0000-4000-8000-001500000015">
+          <intent></intent>
+          <selector role="I2C SDA" protocol="I2C">
+            <function>I2C_SDA</function>
+          </selector>
+          <candidates />
+        </endpoint>
+        <endpoint kind="Pin" block="7e57f1c5-0000-4000-8000-001100000009" interface="7e57f1c5-0000-4000-8000-001500000017">
+          <intent></intent>
+          <candidates />
+          <chosen-pin design="7e57f1c5-0000-4000-8000-000100000002" component="7e57f1c5-0000-4000-8000-000700000008" pin="5">
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000001" />
+            <sheet instance="7e57f1c5-0000-4000-8000-000500000003" />
+          </chosen-pin>
+        </endpoint>
+      </endpoints>
+      <members />
+    </revision>
+  </revisions>
+  <requirement-histories>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000018" design-state="7e57f1c5-0000-4000-8000-001700000018" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000018">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-001600000019" design-state="7e57f1c5-0000-4000-8000-001700000019" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-001900000019">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001a" design-state="7e57f1c5-0000-4000-8000-00170000001a" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001a">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001b" design-state="7e57f1c5-0000-4000-8000-00170000001b" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001b">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001c" design-state="7e57f1c5-0000-4000-8000-00170000001c" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001c">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001d" design-state="7e57f1c5-0000-4000-8000-00170000001d" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001d">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general>Provide memory access; choose a compatible interface.</general>
+      <schematic>Keep interface signals grouped and readable.</schematic>
+      <routing>Leave pin assignment open until placement.</routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001e" design-state="7e57f1c5-0000-4000-8000-00170000001e" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001e">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+    <requirement-history version="1" document="7e57f1c5-0000-4000-8000-001000000001" owner="7e57f1c5-0000-4000-8000-00160000001f" design-state="7e57f1c5-0000-4000-8000-00170000001f" xmlns="urn:kicad:automation:requirement-history:1">
+  <revision id="7e57f1c5-0000-4000-8000-00190000001f">
+    <origin actor-kind="User" actor="PSU-CPU fixture" at="2026-09-23T00:00:00.0000000+00:00">
+      <summary>Frozen PSU-CPU acceptance fixture v1</summary>
+    </origin>
+    <requirements>
+      <general></general>
+      <schematic></schematic>
+      <routing></routing>
+    </requirements>
+  </revision>
+</requirement-history>
+  </requirement-histories>
+</connection-archive>
+  </connection-archives>
+</recursive-block-graph>

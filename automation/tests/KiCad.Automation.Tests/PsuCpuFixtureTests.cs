@@ -3,9 +3,12 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Google.Protobuf;
+using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Any = Google.Protobuf.WellKnownTypes.Any;
 using P = KiCad.Automation.Protocol.Diagrams;
 
 namespace KiCad.Automation.Tests;
@@ -119,13 +122,18 @@ public sealed class PsuCpuFixtureTests
     [TestMethod]
     public void CheckedInFilesEqualTheBuilderOutput()
     {
+        // The fixture-contracts check retains this directory, so it always holds this run's receipt
+        // and, on drift, the builder's replacement for each drifted file.
+        string generated = OutputDirectory("generated");
         var drift = new List<string>();
         foreach (var (name, built) in PsuCpuFixtureBuilder.Files(PsuCpuFixture.Parts()))
         {
             string path = PsuCpuFixture.PathOf(name);
             if (File.Exists(path) && File.ReadAllText(path) == built) continue;
-            WriteGenerated(name, built); drift.Add(name);
+            File.WriteAllText(Path.Combine(generated, name), built, new UTF8Encoding(false)); drift.Add(name);
         }
+        File.WriteAllText(Path.Combine(generated, "builder-drift.txt"), $"PSU-CPU fixture version {PsuCpuFixture.Version} builder drift: "
+            + (drift.Count == 0 ? "none" : string.Join(", ", drift)) + "\n", new UTF8Encoding(false));
         Assert.IsEmpty(drift, "psu_cpu_fixture_builder_drift: " + string.Join(", ", drift));
         Assert.AreEqual(PsuCpuFixture.ReadText("hardware.xml"), HardwareRepositoryXml.Write(PsuCpuFixture.Hardware()));
     }
@@ -489,6 +497,182 @@ public sealed class PsuCpuFixtureTests
     }
 
     [TestMethod]
+    public void SymbolCaptureTakesTheFilePinIdentitiesOrReportsTheContractCode()
+    {
+        string file = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
+        var pins = PsuCpuFixtureBuilder.LibraryPins(file);
+        // A complete capture: whatever identities the editor reported, every pin gets the file's K21 identity.
+        var captured = PsuCpuFixture.CapturePartSymbols(Capture(pins));
+        CollectionAssert.AreEqual(PsuCpuFixture.Parts().Select(p => (p.Id, p.CacheKey, p.Library, p.Entry, 1)).ToArray(),
+            captured.Select(s => (s.PartId, s.Symbol.CacheKey, s.LibraryId.LibraryNickname, s.LibraryId.EntryName, s.BodyStyle)).ToArray());
+        Assert.IsEmpty(PsuCpuFixture.CapturedPinIdentityIssues(captured, file));
+
+        // Must-catch: nothing captured, not exactly the eight cache keys, or no lib_symbols list at all.
+        Code(Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixture.CapturePartSymbols(new())), "psu_cpu_symbol_capture_incomplete");
+        Code(Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixture.CapturePartSymbols(
+            Capture(pins.Where(p => p.CacheKey != "pic_programmer:24C16")))), "psu_cpu_symbol_capture_incomplete");
+        Code(Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixtureBuilder.LibraryPins("(foo)")), "psu_cpu_symbol_capture_incomplete");
+
+        // Must-catch for the seed journey's pin check: identities that no longer name the file's pins.
+        List<string> Issues(IEnumerable<PsuCpuFixtureBuilder.LibraryPin> reported) =>
+            PsuCpuFixture.CapturedPinIdentityIssues(PsuCpuFixture.CapturePartSymbols(Capture(reported)), file);
+        void Reports(List<string> issues, params string[] expected)
+        {
+            foreach (string issue in expected) Assert.IsTrue(issues.Contains(issue), string.Join("; ", issues));
+        }
+        var first = pins.First(p => p.CacheKey == "Library:F28P659DK8PTPQ1");
+        var lost = Issues(pins.Where(p => p != first));
+        Reports(lost, $"Library:F28P659DK8PTPQ1 unit {first.Unit} style {first.Style} pin {first.Number} was not captured");
+        Assert.IsTrue(lost.Any(i => i.Contains(" has identity ", StringComparison.Ordinal)), "Later identities shift: " + string.Join("; ", lost));
+        Reports(Issues(pins.Select(p => p.Style == 0 ? p with { Style = 1 } : p)),
+            "pic_programmer:24C16 unit 0 style 1 pin 4 is not in lib_symbols.kicad_sexpr", "pic_programmer:24C16 unit 0 style 0 pin 4 was not captured");
+        Reports(Issues(pins.Append(pins[0])), $"{pins[0].CacheKey} unit {pins[0].Unit} style {pins[0].Style} pin {pins[0].Number} is captured twice");
+
+        var swapped = captured.Select(s => s with { Symbol = s.Symbol.Clone() }).ToArray();
+        var connector = swapped.Single(s => s.Symbol.CacheKey == "Connector_Generic:Conn_01x02").Symbol.Definition.Items
+            .Where(i => i.Item.Is(SchematicPin.Descriptor)).ToArray();
+        var (one, two) = (connector[0].Item.Unpack<SchematicPin>(), connector[1].Item.Unpack<SchematicPin>());
+        (one.Id, two.Id) = (two.Id, one.Id);
+        (connector[0].Item, connector[1].Item) = (Any.Pack(one), Any.Pack(two));
+        var exchanged = PsuCpuFixture.CapturedPinIdentityIssues(swapped, file);
+        Assert.HasCount(2, exchanged);
+        Assert.IsTrue(exchanged.All(i => i.StartsWith("Connector_Generic:Conn_01x02 unit 1 style 1 pin ", StringComparison.Ordinal)
+            && i.Contains(" has identity ", StringComparison.Ordinal)), string.Join("; ", exchanged));
+
+        const string Repeated = "(lib_symbols (symbol \"A:B\" (symbol \"B_1_1\" (pin passive line (name \"x\") (number \"1\") (uuid \"u1\"))"
+            + " (pin passive line (name \"y\") (number \"1\") (uuid \"u2\")))))";
+        Reports(PsuCpuFixture.CapturedPinIdentityIssues([], Repeated), "A:B unit 1 style 1 pin 1 occurs twice in lib_symbols.kicad_sexpr",
+            "A:B unit 1 style 1 pin 1 was not captured");
+    }
+
+    [TestMethod]
+    public void SeedHierarchyCheckAcceptsExactlyTheSeedOrReportsTheContractCode()
+    {
+        Guid root = Guid.NewGuid();
+        string At(params int[] symbols) => string.Join('/', symbols.Select(n => PsuCpuIds.Id(0x20, n).ToString("D")).Prepend(root.ToString("D")));
+        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root));
+        Assert.IsEmpty(PsuCpuFixture.SeedHierarchyIssues(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root));
+        PsuCpuFixture.RequireSeedHierarchy(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root);
+
+        void Mismatch(SchematicHierarchyData data, PsuCpuSeed seed, params string[] expected)
+        {
+            var error = Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixture.RequireSeedHierarchy(data, seed, root));
+            Code(error, "psu_cpu_seed_hierarchy_mismatch");
+            foreach (string issue in expected) Assert.IsTrue(error.Message.Contains(issue, StringComparison.Ordinal), error.Message);
+        }
+        Mismatch(new(), PsuCpuSeed.Sheets, "0 screens instead of 4", $"ROOT is not loaded at {At()}", $"CPU_POWER is not loaded at {At(3, 4)}");
+        Mismatch(new(), PsuCpuSeed.RootOnly, "0 screens instead of 1", $"ROOT is not loaded at {At()}");
+        var paper = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        paper.Instances.Single(s => s.Metadata.ScreenId.Value == PsuCpuIds.Id(0x20, 6).ToString("D")).Metadata.Page.PageSize = PageSize.PsA4;
+        Mismatch(paper, PsuCpuSeed.Sheets, "CPU paper differs");
+        Mismatch(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, "4 screens instead of 1");
+        Mismatch(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, "1 screens instead of 4", $"PSU is not loaded at {At(2)}");
+        Mismatch(SeedHierarchy(Guid.NewGuid(), PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, $"ROOT is not loaded at {At()}");
+        var screen = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        screen.Instances.Single(s => s.Metadata.ScreenId.Value == PsuCpuIds.Id(0x20, 7).ToString("D")).Metadata.ScreenId.Value = Guid.NewGuid().ToString("D");
+        Mismatch(screen, PsuCpuSeed.Sheets, "CPU_POWER screen identity differs");
+        var pinned = SeedHierarchy(root, PsuCpuSeed.Sheets);
+        var psu = pinned.Instances[0].Items[0].Unpack<SheetSymbol>();
+        psu.Pins.Add(new SheetPin { Id = new() { Value = Guid.NewGuid().ToString("D") } });
+        pinned.Instances[0].Items[0] = Any.Pack(psu);
+        Mismatch(pinned, PsuCpuSeed.Sheets, "PSU sheet symbol differs");
+    }
+
+    [TestMethod]
+    public async Task BaselineResolvesOnlyTheSeededSheetsOrReportsTheContractCode()
+    {
+        Guid root = Guid.NewGuid();
+        var token = CancellationToken.None;
+        var sheets = PsuCpuFixture.Baseline(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, root, token);
+        Assert.AreEqual(EngineeringDesignXml.Write(PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly), []), EngineeringDesignXml.Write(sheets.Engineering, []));
+        CollectionAssert.AreEqual(Enumerable.Range(1, 4).Select(n => (PsuCpuIds.Id(0x05, n), string.Join('/', PsuCpuFixture.NativePath(n, root)))).ToArray(),
+            sheets.SheetBindings.Select(b => (b.SheetInstanceId, string.Join('/', b.NativePath))).ToArray());
+        Assert.IsTrue(sheets.SymbolBindings.Count == 0 && sheets.PartSymbols is null);
+        var rootOnly = PsuCpuFixture.Baseline(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, root, token);
+        Assert.AreEqual((PsuCpuIds.Id(0x05, 1), root), (rootOnly.SheetBindings.Single().SheetInstanceId, rootOnly.SheetBindings.Single().NativePath.Single()));
+
+        void Unresolved(SchematicHierarchyData native, PsuCpuSeed seed, Guid instance, string expected)
+        {
+            var error = Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixture.Baseline(native, seed, instance, token));
+            Code(error, "psu_cpu_baseline_unresolved");
+            Assert.IsTrue(error.Message.Contains(expected, StringComparison.Ordinal), error.Message);
+        }
+        Unresolved(new() { Document = SeedHierarchy(root, PsuCpuSeed.Sheets).Document }, PsuCpuSeed.Sheets, root, "native_missing_root");
+        Unresolved(SeedHierarchy(root, PsuCpuSeed.RootOnly), PsuCpuSeed.Sheets, root, "missing_native_sheet");
+        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.RootOnly, root, "unmapped_native_sheet");
+        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.Sheets, Guid.NewGuid(), "missing_native_sheet");
+        Unresolved(SeedHierarchy(root, PsuCpuSeed.Sheets), PsuCpuSeed.None, root, "Seed None has no native baseline");
+
+        // Seed None prepares no baseline, so neither a desired design nor recovery state can be made from it.
+        var none = new PsuCpuNativeContext("unused", new(), root, PsuCpuSeed.None, [], null,
+            "hardware.xml", "system.blocks.xml", "design.xml", "flat-structure.engineering.xml");
+        Code(Assert.ThrowsExactly<AssertFailedException>(() => PsuCpuFixture.Desired(none, PsuCpuStage.Complete)), "psu_cpu_baseline_unresolved");
+        Code(await Assert.ThrowsExactlyAsync<AssertFailedException>(() => PsuCpuFixture.InitializeRecoveryAsync(null!, none, "unused", token)),
+            "psu_cpu_baseline_unresolved");
+
+        // With a baseline, Desired keeps its native side and declares exactly the stage's part symbols.
+        var symbols = PsuCpuFixture.CapturePartSymbols(Capture(PsuCpuFixtureBuilder.LibraryPins(PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr"))));
+        var prepared = none with { Seed = PsuCpuSeed.Sheets, Baseline = sheets, PartSymbols = symbols };
+        var desired = PsuCpuFixture.Desired(prepared, PsuCpuStage.PsuComponents);
+        Assert.AreEqual(EngineeringDesignXml.Write(PsuCpuFixture.Engineering(PsuCpuStage.PsuComponents), []), EngineeringDesignXml.Write(desired.Engineering, []));
+        Assert.IsTrue(ReferenceEquals(sheets.Schematic, desired.Schematic) && ReferenceEquals(sheets.SheetBindings, desired.SheetBindings));
+        CollectionAssert.AreEqual(Enumerable.Range(1, 6).Select(n => PsuCpuIds.Id(0x03, n)).ToArray(), desired.PartSymbols!.Select(s => s.PartId).ToArray());
+        Assert.IsNull(PsuCpuFixture.Desired(prepared, PsuCpuStage.SheetsOnly).PartSymbols);
+    }
+
+    /// <summary>A native-shaped S0 capture holding the given definition pins with the unit and body style
+    /// the editor reports, in reverse file order and with identities the editor allocated.</summary>
+    private static SchematicHierarchyData Capture(IEnumerable<PsuCpuFixtureBuilder.LibraryPin> pins)
+    {
+        var screen = new SchematicScreenData();
+        foreach (var symbol in Enumerable.Reverse(pins.ToArray()).GroupBy(p => p.CacheKey, StringComparer.Ordinal))
+        {
+            var definition = new SchematicSymbol();
+            foreach (var pin in symbol)
+                definition.Items.Add(new SchematicSymbolChild
+                {
+                    Item = Any.Pack(new SchematicPin { Id = new() { Value = Guid.NewGuid().ToString("D") }, Number = pin.Number, Name = pin.Name }),
+                    Unit = new() { Unit = pin.Unit }, BodyStyle = new() { Style = pin.Style }
+                });
+            screen.CachedSymbols.Add(new SchematicCachedSymbol { CacheKey = symbol.Key, Definition = definition });
+        }
+        var data = new SchematicHierarchyData();
+        data.Instances.Add(screen);
+        return data;
+    }
+
+    /// <summary>The loaded S1 "Sheets" (or S2 "RootOnly") hierarchy exactly as contract section 1.6.2
+    /// declares it, below the native-created root instance.</summary>
+    private static SchematicHierarchyData SeedHierarchy(Guid root, PsuCpuSeed seed)
+    {
+        KIID Id(Guid id) => new() { Value = id.ToString("D") };
+        KIID Native(int n) => Id(PsuCpuIds.Id(0x20, n));
+        var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new(), Project = new() { Name = "fixture", Path = "/fixture" } };
+        document.SheetPath.Path.Add(Id(root));
+        var data = new SchematicHierarchyData { Document = document.Clone() };
+        SchematicScreenData Screen(KIID[] path, int screen, PageSize paper)
+        {
+            var target = document.Clone(); target.SheetPath.Path.Clear(); target.SheetPath.Path.Add(path);
+            var result = new SchematicScreenData { Metadata = new() { Document = target, ScreenId = Native(screen), Page = new() { PageSize = paper } } };
+            data.Instances.Add(result);
+            return result;
+        }
+        SchematicField Field(string text) => new() { Text = new() { Text_ = text, Attributes = new() { Multiline = true } } };
+        void Sheet(SchematicScreenData parent, int symbol, int child, string name, string file, string page) =>
+            parent.Items.Add(Any.Pack(new SheetSymbol { Id = Native(symbol), ChildScreenId = Native(child), Path = parent.Metadata.Document.SheetPath.Clone(),
+                NameField = Field(name), FilenameField = Field(file), PageNumber = page }));
+        var top = Screen([Id(root)], 1, PageSize.PsA4);
+        if (seed == PsuCpuSeed.RootOnly) return data;
+        Sheet(top, 2, 5, "PSU", "psu.kicad_sch", "2");
+        Sheet(top, 3, 6, "CPU", "cpu.kicad_sch", "3");
+        Screen([Id(root), Native(2)], 5, PageSize.PsA4);
+        var cpu = Screen([Id(root), Native(3)], 6, PageSize.PsA3);
+        Sheet(cpu, 4, 7, "CPU_POWER", "cpu_power.kicad_sch", "4");
+        Screen([Id(root), Native(3), Native(4)], 7, PageSize.PsA4);
+        return data;
+    }
+
+    [TestMethod]
     public void LibrarySymbolsHoldTheEightDefinitionsWithNormalizedPinIdentities()
     {
         string text = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
@@ -563,38 +747,104 @@ public sealed class PsuCpuFixtureTests
         }
     }
 
-    /// <summary>Checks that lib_symbols.kicad_sexpr is what this fork's eeschema saves for the
-    /// pinned sources (identities eeschema allocates for legacy graphics aside) and that loading
-    /// and saving the frozen list again changes nothing. Writes a replacement on drift.</summary>
+    // Both kicad-cli checks borrow the "NativeSession" category only as an exclusion marker. The
+    // general managed pass (the automation graph's unit check) and this fixture's fixture-contracts
+    // check filter on TestCategory!=NativeSession and build no kicad-cli, so without the marker they
+    // would run these tests and fail on the missing binary. Giving them their own exclusion would mean
+    // changing parent-held filters that this freeze keeps as they were. The tests start no native
+    // editor session; each runs only where its own category is selected: PsuCpuFixtureNative in the
+    // psu-cpu-fixture graph and PsuCpuFixtureWriterDrift in the psu-cpu-fixture-writer-drift graph.
+
+    /// <summary>GATING (psu-cpu-fixture, symbol-normalization). This fork's eeschema must still read the
+    /// pinned sources to exactly the frozen definition pins (symbol, unit, body style, number, name and
+    /// K21 identity), and loading and saving the frozen list must keep every one of them. Nothing else
+    /// is compared, so a change in how eeschema writes other tokens does not block the lanes; the
+    /// byte-for-byte comparison is the non-gating LibrarySymbolsAreByteForByteThisForksEeschemaOutput.
+    /// On a pin difference the eeschema reading is written to automation/artifacts/psu-cpu-fixture/native.</summary>
     [TestMethod, TestCategory("NativeSession"), TestCategory("PsuCpuFixtureNative")]
-    public async Task LibrarySymbolsAreThisForksEeschemaNormalizationOfThePinnedSources()
+    public async Task LibrarySymbolPinsAreThisForksEeschemaReadingOfThePinnedSources()
     {
-        Assert.IsTrue(OperatingSystem.IsLinux(), "The normalization evidence is Linux evidence.");
-        string root = PsuCpuFixture.RepositoryRoot;
-        string cli = Path.Combine(root, "automation", "artifacts", "native", "kicad", "kicad-cli");
-        Assert.IsTrue(File.Exists(cli), "Build kicad-cli and the eeschema kiface first.");
-        var blobs = PsuCpuFixture.Manifest.GetProperty("symbols").EnumerateArray()
-            .ToDictionary(s => s.GetProperty("cacheKey").GetString()!, s => s.GetProperty("gitBlob").GetString()!);
+        string cli = EeschemaCli();
+        string evidence = OutputDirectory("native");
         string work = Directory.CreateTempSubdirectory("psu-cpu-symbols-").FullName;
         try
         {
+            string frozen = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
+            var failures = new List<string>();
             string normalized = PsuCpuFixtureBuilder.NormalizePinIdentities(
-                await SaveWithEeschema(cli, work, "pinned-sources", PsuCpuFixtureBuilder.RawLibrarySymbols(root, blobs)));
-            string path = PsuCpuFixture.PathOf("lib_symbols.kicad_sexpr");
-            string frozen = File.Exists(path) ? await File.ReadAllTextAsync(path) : "";
-            if (PsuCpuFixtureBuilder.WithoutAllocatedIdentities(normalized) != PsuCpuFixtureBuilder.WithoutAllocatedIdentities(frozen))
+                await SaveWithEeschema(cli, work, evidence, "pinned-sources", PinnedSourceSymbols()));
+            if (PinDifferences(frozen, normalized) is { Count: > 0 } read)
             {
-                WriteGenerated("lib_symbols.kicad_sexpr", normalized);
-                Assert.Fail("psu_cpu_fixture_builder_drift: lib_symbols.kicad_sexpr is not this fork's normalization of the pinned sources.");
+                await File.WriteAllTextAsync(Path.Combine(evidence, "lib_symbols.kicad_sexpr"), normalized, new UTF8Encoding(false));
+                failures.Add("the pinned sources no longer read as the frozen pins: " + string.Join(", ", read));
             }
-            frozen = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
-            Assert.AreEqual(frozen, await SaveWithEeschema(cli, work, "fixed-point", frozen),
-                "Loading and saving the frozen definitions again must not change them.");
+            if (PinDifferences(frozen, await SaveWithEeschema(cli, work, evidence, "fixed-point", frozen)) is { Count: > 0 } kept)
+                failures.Add("loading and saving the frozen definitions changes their pins: " + string.Join(", ", kept));
+            if (failures.Count > 0) throw PsuCpuFixture.Failure("psu_cpu_fixture_builder_drift", string.Join("; ", failures));
         }
         finally { Directory.Delete(work, true); }
     }
 
-    private static async Task<string> SaveWithEeschema(string cli, string work, string name, string libSymbols)
+    /// <summary>NON-GATING (graph psu-cpu-fixture-writer-drift, which no other graph requires).
+    /// lib_symbols.kicad_sexpr must be byte for byte what this fork's eeschema writes for the pinned
+    /// sources (identities eeschema allocates for legacy graphics aside), and loading and saving it
+    /// must reproduce it exactly. A failure here while the gating pin check passes means only that the
+    /// symbol writer changed, for example after a schematic file-format bump. It does not block the
+    /// lanes: the parent takes it as the trigger for a version-2 re-freeze, starting from the
+    /// replacement written to automation/artifacts/psu-cpu-fixture/writer-drift.</summary>
+    [TestMethod, TestCategory("NativeSession"), TestCategory("PsuCpuFixtureWriterDrift")]
+    public async Task LibrarySymbolsAreByteForByteThisForksEeschemaOutput()
+    {
+        string cli = EeschemaCli();
+        string evidence = OutputDirectory("writer-drift");
+        string work = Directory.CreateTempSubdirectory("psu-cpu-symbols-").FullName;
+        try
+        {
+            string frozen = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
+            var failures = new List<string>();
+            string normalized = PsuCpuFixtureBuilder.NormalizePinIdentities(
+                await SaveWithEeschema(cli, work, evidence, "pinned-sources", PinnedSourceSymbols()));
+            if (PsuCpuFixtureBuilder.WithoutAllocatedIdentities(normalized) != PsuCpuFixtureBuilder.WithoutAllocatedIdentities(frozen))
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, "lib_symbols.kicad_sexpr"), normalized, new UTF8Encoding(false));
+                failures.Add("lib_symbols.kicad_sexpr is no longer byte for byte this fork's normalization of the pinned sources");
+            }
+            if (await SaveWithEeschema(cli, work, evidence, "fixed-point", frozen) != frozen)
+                failures.Add("loading and saving the frozen definitions changes their bytes");
+            if (failures.Count > 0)
+                throw PsuCpuFixture.Failure("psu_cpu_fixture_builder_drift", string.Join("; ", failures)
+                    + ". The symbol writer changed: the lanes are not blocked, and the parent re-freezes the fixture as version 2.");
+        }
+        finally { Directory.Delete(work, true); }
+    }
+
+    private static string EeschemaCli()
+    {
+        Assert.IsTrue(OperatingSystem.IsLinux(), "The normalization evidence is Linux evidence.");
+        string cli = Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "artifacts", "native", "kicad", "kicad-cli");
+        Assert.IsTrue(File.Exists(cli), "Build kicad-cli and the eeschema kiface first.");
+        return cli;
+    }
+
+    /// <summary>The eight definitions copied verbatim from their sources at the blobs fixture.json pins.</summary>
+    private static string PinnedSourceSymbols() => PsuCpuFixtureBuilder.RawLibrarySymbols(PsuCpuFixture.RepositoryRoot,
+        PsuCpuFixture.Manifest.GetProperty("symbols").EnumerateArray()
+            .ToDictionary(s => s.GetProperty("cacheKey").GetString()!, s => s.GetProperty("gitBlob").GetString()!));
+
+    /// <summary>Definition pins that differ between two lib_symbols lists, compared only by symbol, unit,
+    /// body style, number, name and identity (at most ten from each side); empty when they agree.</summary>
+    private static List<string> PinDifferences(string expected, string actual)
+    {
+        static string[] Pins(string text) => [.. PsuCpuFixtureBuilder.LibraryPins(text)
+            .Select(p => $"{p.CacheKey} unit {p.Unit} style {p.Style} pin {p.Number} \"{p.Name}\" {p.Id}")];
+        string[] frozen = Pins(expected), observed = Pins(actual);
+        if (frozen.SequenceEqual(observed)) return [];
+        List<string> differences = [.. frozen.Except(observed).Take(10).Select(p => "lost " + p),
+            .. observed.Except(frozen).Take(10).Select(p => "gained " + p)];
+        return differences.Count > 0 ? differences : [$"the pin order or count differs ({frozen.Length} frozen, {observed.Length} observed)"];
+    }
+
+    private static async Task<string> SaveWithEeschema(string cli, string work, string evidence, string name, string libSymbols)
     {
         string directory = Directory.CreateDirectory(Path.Combine(work, name)).FullName;
         string schematic = Path.Combine(directory, "fixture.kicad_sch");
@@ -610,7 +860,6 @@ public sealed class PsuCpuFixtureTests
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         try { await process.WaitForExitAsync(deadline.Token); }
         catch (OperationCanceledException) { process.Kill(true); throw; }
-        string evidence = Directory.CreateDirectory(Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "artifacts", "psu-cpu-fixture", "native")).FullName;
         await File.WriteAllTextAsync(Path.Combine(evidence, name + ".log"), await output + await error);
         Assert.AreEqual(0, process.ExitCode, await error);
         string saved = await File.ReadAllTextAsync(schematic);
@@ -621,10 +870,13 @@ public sealed class PsuCpuFixtureTests
     private static void Code(Exception error, string code) =>
         Assert.IsTrue(error.Message.StartsWith(code + ":", StringComparison.Ordinal), error.Message);
 
-    private static void WriteGenerated(string name, string text)
+    /// <summary>A test-owned directory under automation/artifacts/psu-cpu-fixture, emptied first so that a
+    /// governed check retains only what this run wrote. Each directory has exactly one writing test.</summary>
+    private static string OutputDirectory(string name)
     {
-        string directory = Directory.CreateDirectory(Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "artifacts", "psu-cpu-fixture", "generated")).FullName;
-        File.WriteAllText(Path.Combine(directory, name), text, new UTF8Encoding(false));
+        string directory = Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "artifacts", "psu-cpu-fixture", name);
+        if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        return Directory.CreateDirectory(directory).FullName;
     }
 
     /// <summary>Every placed pin with its reference and native sheet: a unit's pins lie on its

@@ -278,17 +278,11 @@ internal static class PsuCpuFixture
         foreach (var (name, content) in SeedFiles(seed, rootInstance))
             await System.IO.File.WriteAllTextAsync(File(name), content, token);
         (root, var loaded) = await ReloadAsync(client, root, schematic, token);
-        var hierarchyIssues = SeedHierarchyIssues(loaded.Data, seed, rootInstance);
-        if (hierarchyIssues.Count > 0) throw Failure("psu_cpu_seed_hierarchy_mismatch", string.Join("; ", hierarchyIssues));
+        RequireSeedHierarchy(loaded.Data, seed, rootInstance);
 
         var state = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
             new() { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
-        int[] sheets = seed == PsuCpuSeed.Sheets ? [1, 2, 3, 4] : [1];
-        var baseline = new SchematicDesign(Engineering(seed == PsuCpuSeed.Sheets ? PsuCpuStage.SheetsOnly : PsuCpuStage.RootOnly),
-            state.Electrical.Hierarchy.Data, [.. sheets.Select(n => new SchematicSheetBinding(PsuCpuIds.Id(0x05, n), NativePath(n, rootInstance)))], [], null);
-        var report = SchematicDesignBindings.Inspect(baseline, [], token);
-        if (!report.IdentitiesResolved)
-            throw Failure("psu_cpu_baseline_unresolved", string.Join("; ", report.Issues.Select(i => $"{i.Code} {i.ModelId} {i.NativePath}")));
+        var baseline = Baseline(state.Electrical.Hierarchy.Data, seed, rootInstance, token);
         await System.IO.File.WriteAllTextAsync(File("design.xml"), SchematicDesignXml.Write(baseline, []), token);
         var context = new PsuCpuNativeContext(projectDirectory, root, rootInstance, seed, partSymbols, baseline,
             File("hardware.xml"), File("system.blocks.xml"), File("design.xml"), File("flat-structure.engineering.xml"));
@@ -310,6 +304,12 @@ internal static class PsuCpuFixture
             emptyRoot = context.Root;
             if (seed == PsuCpuSeed.None) { Assert.IsNull(context.Baseline); Assert.IsEmpty(context.PartSymbols); continue; }
             Assert.HasCount(8, context.PartSymbols);
+            // Every captured K21 identity must name the same pin as lib_symbols.kicad_sexpr, so lanes can
+            // use the file's pin identities against native captures.
+            var pinIssues = CapturedPinIdentityIssues(context.PartSymbols, ReadText("lib_symbols.kicad_sexpr"));
+            if (pinIssues.Count > 0)
+                throw Failure("psu_cpu_symbol_capture_incomplete", string.Join("; ", pinIssues.Take(20))
+                    + (pinIssues.Count > 20 ? $"; and {pinIssues.Count - 20} more" : ""));
             records.Add(await System.IO.File.ReadAllBytesAsync(Path.Combine(directory, "psu-cpu-part-symbols.xml"), token));
             var stored = SchematicDesignXml.Read(await System.IO.File.ReadAllTextAsync(context.DesignPath, token), []);
             Assert.AreEqual(SchematicDesignXml.Write(context.Baseline!, []), SchematicDesignXml.Write(stored, []));
@@ -479,7 +479,7 @@ internal static class PsuCpuFixture
 
     /// <summary>Exactly the eight cache keys of lib_symbols.kicad_sexpr, with definition-pin UUIDs
     /// normalized to K21:k in (cache key; unit; body style; pin number) order.</summary>
-    private static SchematicPartSymbol[] CapturePartSymbols(SchematicHierarchyData data)
+    internal static SchematicPartSymbol[] CapturePartSymbols(SchematicHierarchyData data)
     {
         var cached = data.Instances.SelectMany(s => s.CachedSymbols).GroupBy(s => s.CacheKey, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.First().Clone(), StringComparer.Ordinal);
@@ -499,7 +499,63 @@ internal static class PsuCpuFixture
             new LibraryIdentifier { LibraryNickname = p.Library, EntryName = p.Entry }, cached[p.CacheKey], BodyStyle: 1))];
     }
 
-    private static List<string> SeedHierarchyIssues(SchematicHierarchyData data, PsuCpuSeed seed, Guid rootInstance)
+    /// <summary>Differences between captured definition-pin identities and lib_symbols.kicad_sexpr.
+    /// A pin is named by (cache key, unit, body style, number), read exactly as CapturePartSymbols
+    /// reads it; that tuple is unique in fixture version 1. CapturePartSymbols numbers K21 in the same
+    /// order as PsuCpuFixtureBuilder.NormalizePinIdentities, so an empty result means the capture holds
+    /// exactly the file's pins and each captured K21 identity names the same pin as the file.</summary>
+    internal static List<string> CapturedPinIdentityIssues(IReadOnlyList<SchematicPartSymbol> captured, string libSymbols)
+    {
+        var issues = new List<string>();
+        static string Name((string CacheKey, int Unit, int Style, string Number) pin) =>
+            $"{pin.CacheKey} unit {pin.Unit} style {pin.Style} pin {pin.Number}";
+        var expected = new Dictionary<(string CacheKey, int Unit, int Style, string Number), string>();
+        foreach (var pin in PsuCpuFixtureBuilder.LibraryPins(libSymbols))
+            if (!expected.TryAdd((pin.CacheKey, pin.Unit, pin.Style, pin.Number), pin.Id))
+                issues.Add($"{Name((pin.CacheKey, pin.Unit, pin.Style, pin.Number))} occurs twice in lib_symbols.kicad_sexpr");
+        var seen = new HashSet<(string CacheKey, int Unit, int Style, string Number)>();
+        foreach (var symbol in captured)
+            foreach (var child in symbol.Symbol?.Definition?.Items.AsEnumerable() ?? [])
+            {
+                if (child.Item?.Is(SchematicPin.Descriptor) != true) continue;
+                var pin = child.Item.Unpack<SchematicPin>();
+                var key = (symbol.Symbol!.CacheKey, child.Unit?.Unit ?? 0, child.BodyStyle?.Style ?? 0, pin.Number);
+                if (!seen.Add(key)) issues.Add($"{Name(key)} is captured twice");
+                else if (!expected.TryGetValue(key, out string? id)) issues.Add($"{Name(key)} is not in lib_symbols.kicad_sexpr");
+                else if (pin.Id?.Value != id) issues.Add($"{Name(key)} has identity {pin.Id?.Value}, not {id}");
+            }
+        foreach (var key in expected.Keys.Where(k => !seen.Contains(k))) issues.Add($"{Name(key)} was not captured");
+        return issues;
+    }
+
+    /// <summary>psu_cpu_seed_hierarchy_mismatch unless the loaded screens, paths, papers and sheet
+    /// symbols are exactly the seed's (contract section 1.6.2).</summary>
+    internal static void RequireSeedHierarchy(SchematicHierarchyData data, PsuCpuSeed seed, Guid rootInstance)
+    {
+        var issues = SeedHierarchyIssues(data, seed, rootInstance);
+        if (issues.Count > 0) throw Failure("psu_cpu_seed_hierarchy_mismatch", string.Join("; ", issues));
+    }
+
+    /// <summary>The seed's baseline: the SheetsOnly (S1) or RootOnly (S2) stage of E1 over the captured
+    /// native hierarchy, with each seeded model sheet bound to its native path. Any identity that does
+    /// not resolve is psu_cpu_baseline_unresolved; seed None has no baseline.</summary>
+    internal static SchematicDesign Baseline(SchematicHierarchyData native, PsuCpuSeed seed, Guid rootInstance, CancellationToken token)
+    {
+        var (stage, sheets) = seed switch
+        {
+            PsuCpuSeed.Sheets => (PsuCpuStage.SheetsOnly, new[] { 1, 2, 3, 4 }),
+            PsuCpuSeed.RootOnly => (PsuCpuStage.RootOnly, new[] { 1 }),
+            _ => throw Failure("psu_cpu_baseline_unresolved", $"Seed {seed} has no native baseline.")
+        };
+        var baseline = new SchematicDesign(Engineering(stage), native,
+            [.. sheets.Select(n => new SchematicSheetBinding(PsuCpuIds.Id(0x05, n), NativePath(n, rootInstance)))], [], null);
+        var report = SchematicDesignBindings.Inspect(baseline, [], token);
+        if (!report.IdentitiesResolved)
+            throw Failure("psu_cpu_baseline_unresolved", string.Join("; ", report.Issues.Select(i => $"{i.Code} {i.ModelId} {i.NativePath}")));
+        return baseline;
+    }
+
+    internal static List<string> SeedHierarchyIssues(SchematicHierarchyData data, PsuCpuSeed seed, Guid rootInstance)
     {
         var issues = new List<string>();
         var expected = expectedNative.Value.Sheets.Where(s => seed == PsuCpuSeed.Sheets || s.Parent is null).ToArray();

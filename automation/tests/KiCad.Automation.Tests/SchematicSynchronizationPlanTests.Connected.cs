@@ -72,7 +72,13 @@ public sealed partial class SchematicSynchronizationPlanTests
             {
                 var schematic = d.Schematic.Clone(); schematic.Instances[0].Metadata.TitleBlock.Title = "XML title";
                 return WithCircuit(d, Additive) with { Schematic = schematic };
-            })
+            }),
+            ("a reparented sheet instance", d => WithCircuit(d, c =>
+            {
+                var children = c.SheetInstances.Where(s => s.ParentId is not null).ToArray();
+                return Additive(c) with { SheetInstances = c.SheetInstances.Select(s => s.Id == children[1].Id ? s with { ParentId = children[0].Id } : s).ToArray() };
+            })),
+            ("a new sheet definition", d => WithCircuit(d, c => Additive(c) with { Sheets = [.. c.Sheets, new(Guid.NewGuid(), "Spare", [])] }))
         })
         {
             var design = edit(state.Baseline);
@@ -95,6 +101,29 @@ public sealed partial class SchematicSynchronizationPlanTests
     }
 
     [TestMethod]
+    public void DrawingAnotherUnitOfAnExistingComponentIsNotAConnectedAddition()
+    {
+        // Must-catch for §4.1 step 2: the saved design draws only unit 1 of U2, and the XML adds U2's unit-2
+        // occurrence and connects its pin 7. That pin counts as drawn in the desired circuit, but the change
+        // adds an occurrence to an existing owner, which creation refuses (symbol_owner_requires_resolution)
+        // and CN-1 does not cover, so it must stay on the general path instead of being admitted.
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit;
+        Guid u1 = circuit.Components[0].Id, u2 = circuit.Components[1].Id, signal = Guid.NewGuid();
+        var unit2 = circuit.Symbols.Single(s => s.ComponentId == u2 && s.Unit == 2);
+        var bindings = state.Baseline.SymbolBindings.Where(b => b.SymbolOccurrenceId != unit2.Id).ToArray();
+        var saved = state with { Baseline = WithCircuit(state.Baseline, c => c with { Symbols = c.Symbols.Where(s => s.Id != unit2.Id).ToArray() })
+            with { SymbolBindings = bindings } };
+        var drawnUnit = WithCircuit(state.Baseline, c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "7"), new(u2, "7")])] })
+            with { SymbolBindings = bindings };
+        Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, ClassifyConnected(saved, drawnUnit).Kind, "a new unit of an existing component");
+        // False-positive guard: the same connection over units the saved design already draws is admitted.
+        var drawn = WithCircuit(state.Baseline, c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "7"), new(u2, "7")])] });
+        var admitted = ClassifyConnected(state, drawn);
+        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, admitted.Kind, admitted.ErrorCode + " " + admitted.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { signal }, admitted.ChangedNetIds.ToArray());
+    }
+
+    [TestMethod]
     public void XmlDisconnectionIsRefusedOnlyWhileTheEditorStillShowsTheBaseline()
     {
         var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var vcc = circuit.Nets.Single();
@@ -114,10 +143,13 @@ public sealed partial class SchematicSynchronizationPlanTests
             StringAssert.Contains(rejected.ErrorMessage!, "pin " + Reference(lost) + " from net 'VCC'", problem);
             Assert.IsEmpty(rejected.ChangedNetIds, problem); Assert.IsEmpty(rejected.AddedComponentIds, problem);
             RequireConnectionGate(saved, desired, problem);
+            // Today's general path prepares the XML disconnection and leaves it to native connectivity validation.
             var plan = SchematicSynchronizationPlanner.Plan(saved);
             Assert.IsNull(plan.Connections, problem);
-            Assert.IsFalse(plan.ErrorCode is SchematicConnectionErrors.XmlDisconnectionUnsupported
-                or SchematicConnectionErrors.ConnectedAdditionUnavailable, problem + ": " + plan.ErrorCode);
+            Assert.IsNull(plan.ErrorCode, problem + ": " + plan.ErrorCode + " " + plan.ErrorMessage);
+            Assert.IsTrue(plan.CanPrepare, problem);
+            Assert.IsTrue(plan.NativeConnectivityValidationRequired, problem);
+            Assert.IsFalse(plan.ObservedConnectivity!.ConnectivityEquivalent, "The general path still defers the unrealized disconnection: " + problem);
             // When the editor no longer shows the baseline, the general path may merge a native disconnection.
             var unstable = SchematicNetReconciliationTests.NativeGroups(saved, [vcc.Pins[0]], [vcc.Pins[1]]);
             Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, ClassifyConnected(unstable, desired).Kind, problem);
@@ -161,6 +193,8 @@ public sealed partial class SchematicSynchronizationPlanTests
         {
             ("missing observation", saved with { ObservedElectrical = null }, desired, "missing_electrical_observation"),
             ("pending hierarchy choice", saved with { HierarchyResolution = new("token", new Dictionary<string, SchematicConflictChoice>(), "epoch", 1) },
+                desired, SchematicConnectionErrors.CreationRequiresStableNativeHierarchy),
+            ("pending ownership choice", saved with { OwnershipResolution = new(new string('a', 64), Guid.NewGuid(), new string('b', 64)) },
                 desired, SchematicConnectionErrors.CreationRequiresStableNativeHierarchy),
             ("changed bindings", saved, bindingChange, SchematicConnectionErrors.CreationBindingsChanged),
             ("desired native hierarchy edit", saved, desired with { Schematic = titled }, SchematicConnectionErrors.CreationRequiresStableNativeHierarchy),
@@ -228,6 +262,17 @@ public sealed partial class SchematicSynchronizationPlanTests
         var deleted = ClassifyConnected(connectedState, Connected(realized, complete.Nets.Where(n => n.Name != "MEM_SCL").ToArray()));
         Assert.AreEqual(SchematicConnectedAdditionKind.Rejected, deleted.Kind);
         StringAssert.Contains(deleted.ErrorMessage!, "pin U5.161 from net 'MEM_SCL'");
+        // Removing a component, even with its connected pins, is not an XML disconnection to refuse: the
+        // shape check leaves it to the general path on this stable editor.
+        var memory = realized.Engineering.Circuit.Components.Single(c => c.Id == u6);
+        var removed = ClassifyConnected(connectedState, WithCircuit(realized, c => c with
+        {
+            Components = c.Components.Where(x => x.Id != u6).ToArray(), Symbols = c.Symbols.Where(s => s.ComponentId != u6).ToArray(),
+            Sheets = c.Sheets.Select(s => s with { Components = s.Components.Where(d => d.Id != memory.DefinitionId).ToArray() }).ToArray(),
+            Nets = c.Nets.Select(n => n with { Pins = n.Pins.Where(p => p.ComponentId != u6).ToArray() }).ToArray()
+        }));
+        Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, removed.Kind, removed.ErrorCode + " " + removed.ErrorMessage);
+        Assert.IsNull(removed.ErrorCode);
         var used = complete.Nets.SelectMany(n => n.Pins).ToHashSet();
         var processor = realized.Engineering.Circuit.Parts.Single(p => p.Id == realized.Engineering.Circuit.Sheets
             .SelectMany(s => s.Components).Single(d => d.Id == u5.DefinitionId).PartId);

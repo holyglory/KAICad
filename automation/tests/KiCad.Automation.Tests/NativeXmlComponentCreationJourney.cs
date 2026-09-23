@@ -500,6 +500,10 @@ public sealed partial class NativeSessionTests
             var nativeBefore = await Capture();
             byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
             var planned = store.Save(probe, current.RevisionToken);
+            // The planner's own result for the saved record is what the public tool must report unchanged.
+            var expected = SchematicSynchronizationPlanner.Plan(store.Read()!.State, token);
+            Assert.IsTrue(expected.CanPrepare, expected.ErrorCode + ": " + expected.ErrorMessage);
+            Assert.IsNull(expected.Connections);
             JsonElement plan;
             await using (var gateHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo(),
                 Path.Combine(evidence, instanceId + "-creation-host"), Path.Combine(evidence, instanceId + "-connection-gate-host.log"), token))
@@ -511,15 +515,35 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-gate-plan.json"), plan.GetRawText(), token);
             var planContent = plan.GetProperty("structuredContent");
             string? planCode = planContent.GetProperty("errorCode").GetString();
-            Assert.IsFalse(planCode is SchematicConnectionErrors.XmlDisconnectionUnsupported
-                or SchematicConnectionErrors.ConnectedAdditionUnavailable, plan.GetRawText());
+            // Today's general path: a preparable candidate with no native operations whose new connection
+            // is left to post-apply native connectivity validation, exactly as the planner computes it.
+            RequireToolSuccess(plan);
+            Assert.IsTrue(planContent.GetProperty("canPrepare").GetBoolean(), plan.GetRawText());
+            Assert.AreEqual(JsonValueKind.Null, planContent.GetProperty("errorCode").ValueKind, plan.GetRawText());
+            Assert.AreEqual(JsonValueKind.Null, planContent.GetProperty("errorMessage").ValueKind, plan.GetRawText());
+            Assert.AreEqual(0, planContent.GetProperty("nativeOperationsJson").GetArrayLength(), plan.GetRawText());
+            Assert.IsTrue(planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), plan.GetRawText());
+            Assert.IsFalse(planContent.GetProperty("observedConnectivity").GetProperty("ConnectivityEquivalent").GetBoolean(),
+                "The unrealized connection must still show as a native difference.");
+            Assert.AreEqual(expected.CanPrepare, planContent.GetProperty("canPrepare").GetBoolean());
+            Assert.AreEqual(expected.ErrorCode, planCode);
+            Assert.AreEqual(expected.CandidateXml, planContent.GetProperty("candidateDesignXml").GetString(),
+                "The public plan must publish exactly the planner's general-path candidate.");
+            CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
+                planContent.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray());
+            Assert.AreEqual(expected.NativeConnectivityValidationRequired, planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean());
+            Assert.AreEqual(expected.ObservedConnectivity!.ConnectivityEquivalent,
+                planContent.GetProperty("observedConnectivity").GetProperty("ConnectivityEquivalent").GetBoolean());
             Assert.AreEqual(nativeBefore, await Capture(), "Planning a gated connected addition must not change the native document.");
             Assert.AreEqual(planned.RevisionToken, store.Read()!.RevisionToken, "Planning must not advance recovery.");
             CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning must not publish XML.");
             store.Save(current.State, planned.RevisionToken);
             return new { nativeCapabilities = session.Capabilities.ToArray(), classification = real.Kind.ToString(),
                 classificationIfAdvertised = withCapability.Kind.ToString(), changedNets = withCapability.ChangedNetIds,
-                publicPlanCanPrepare = planContent.GetProperty("canPrepare").GetBoolean(), publicPlanErrorCode = planCode };
+                publicPlanCanPrepare = planContent.GetProperty("canPrepare").GetBoolean(), publicPlanErrorCode = planCode,
+                publicPlanNativeOperations = planContent.GetProperty("nativeOperationsJson").GetArrayLength(),
+                publicPlanNativeConnectivityValidationRequired = planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
+                publicPlanMatchesPlanner = true };
         }
 
         async Task RequireAgreement(int count, bool afterReload = false)

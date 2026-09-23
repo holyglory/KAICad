@@ -2,10 +2,101 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Google.Protobuf.Reflection;
+using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
+using KiCad.Automation.Protocol;
+using DocumentRevision = KiCad.Automation.Model.DocumentRevision;
 
 namespace KiCad.Automation.Native;
+
+// The wiring planner's building blocks (cn1-wiring-intent.md §6.1 and §6.7): the drawing policy taken
+// from the project's grid and text size, axis-aligned stub geometry, and the deterministic identities
+// of generated connection items and measurement probes. Lane 2A owns this file.
+
+/// <summary>The drawing policy for generated connection items (cn1-wiring-intent.md §6.1). Every
+/// distance comes from the project's own connection grid and default text size, never from a
+/// guessed constant: stubs are whole grid multiples, and clearances, page inset, sheet-pin pitch
+/// and the label orientation tolerance are derived from that grid.</summary>
+public sealed record SchematicConnectionPolicy(long GridNm, long ClearanceNm, long TextSizeNm, long PageInsetNm,
+    long SheetPinPitchNm, long LabelBackToleranceNm)
+{
+    /// <summary>Stub lengths, in connection-grid multiples, tried in this order (§6.3 f).</summary>
+    public static readonly int[] StubMultiples = [2, 3, 4, 6, 8];
+
+    /// <summary>Derive the policy from a captured hierarchy (§6.1). Every sheet instance must report the
+    /// same connection grid, and it must be positive and a whole number of the native 100 nm unit. The
+    /// default text size is the project's setting as the first captured instance reports it, and it must
+    /// be positive. Otherwise the editor did not supply what realization needs and this fails with
+    /// <c>realization_grid_unavailable</c> before anything is generated. A grid whose derived page inset
+    /// (twice the grid) cannot be represented is treated as unavailable too.</summary>
+    public static SchematicConnectionPolicy FromSnapshot(SchematicHierarchyData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (data.Instances.Count == 0) throw Unavailable("The captured schematic has no sheet instance.");
+        SchematicFormattingSettings? first = null;
+        foreach (var screen in data.Instances)
+        {
+            var formatting = screen.Metadata?.Formatting
+                ?? throw Unavailable("A sheet instance does not report the project's connection grid.");
+            first ??= formatting;
+            if (formatting.ConnectionGridNm != first.ConnectionGridNm)
+                throw Unavailable("Sheet instances disagree on the project's connection grid.");
+        }
+        long grid = first!.ConnectionGridNm, text = first.DefaultTextSizeNm;
+        if (grid <= 0 || grid % 100 != 0 || grid > long.MaxValue / 2)
+            throw Unavailable("The project's connection grid must be a positive whole number of 100 nm.");
+        if (text <= 0)
+            throw Unavailable("The project's default text size must be positive.");
+        return new(grid, grid / 2 / 100 * 100, text, 2 * grid, 2 * grid, grid / 2);
+    }
+
+    private static AutomationException Unavailable(string message) =>
+        new(SchematicConnectionErrors.RealizationGridUnavailable, message);
+}
+
+/// <summary>Axis-aligned stub geometry for generated connections (cn1-wiring-intent.md §6.1). A stub
+/// leaves a pin away from its body; its label faces the same way, matching the native label shapes
+/// and sheet-pin sides in §0.</summary>
+public static class SchematicConnectionGeometry
+{
+    /// <summary>The unit vector pointing from the pin's connection point away from the symbol body,
+    /// the reverse of the measured <c>body_direction</c>. Anything but one of the four axis
+    /// directions fails with <c>realization_pin_geometry_mismatch</c>.</summary>
+    public static (int Dx, int Dy) Outward(SchematicPinAnchor pin)
+    {
+        ArgumentNullException.ThrowIfNull(pin);
+        if (!IsAxisUnit(pin.BodyDirectionX, pin.BodyDirectionY))
+            throw Mismatch("A measured pin must point along exactly one schematic axis.");
+        return (-pin.BodyDirectionX, -pin.BodyDirectionY);
+    }
+
+    /// <summary>The end of a stub of <paramref name="length"/> nanometres leaving
+    /// <paramref name="anchor"/> in the <paramref name="outward"/> direction.</summary>
+    public static Vector2 StubEnd(Vector2 anchor, (int Dx, int Dy) outward, long length)
+    {
+        ArgumentNullException.ThrowIfNull(anchor);
+        if (!IsAxisUnit(outward.Dx, outward.Dy)) throw Mismatch("A stub must leave its pin along exactly one schematic axis.");
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(length);
+        return new() { XNm = checked(anchor.XNm + outward.Dx * length), YNm = checked(anchor.YNm + outward.Dy * length) };
+    }
+
+    /// <summary>The label spin style for a stub leaving in <paramref name="outward"/>:
+    /// (1,0) right, (-1,0) left, (0,-1) up and (0,1) bottom, in schematic coordinates where y grows down.</summary>
+    public static SchematicLabelSpinStyle Spin((int Dx, int Dy) outward) => outward switch
+    {
+        (1, 0) => SchematicLabelSpinStyle.SlssRight,
+        (-1, 0) => SchematicLabelSpinStyle.SlssLeft,
+        (0, -1) => SchematicLabelSpinStyle.SlssUp,
+        (0, 1) => SchematicLabelSpinStyle.SlssBottom,
+        _ => throw Mismatch("A label must face along exactly one schematic axis.")
+    };
+
+    private static bool IsAxisUnit(int dx, int dy) => (Math.Abs((long)dx) + Math.Abs((long)dy)) == 1;
+
+    private static AutomationException Mismatch(string message) =>
+        new(SchematicConnectionErrors.RealizationPinGeometryMismatch, message);
+}
 
 /// <summary>What a generated connection item is for (cn1-wiring-intent.md §6.7 and §6.8).</summary>
 public enum GeneratedConnectionRole { StubWire = 1, StubLabel = 2, AnchorLabel = 3, SheetPin = 4, SheetPinWire = 5, SheetPinLabel = 6, RouteWire = 7, Junction = 8 }
@@ -59,8 +150,11 @@ public static class SchematicConnectionIdentity
 
     /// <summary>The ID of a measurement-only prototype: a label prototype, or with
     /// <paramref name="symbolId"/> and <paramref name="rotation"/> a rotated symbol probe. Probe IDs are
-    /// measured but never committed. <paramref name="kind"/> is the probed item's protobuf message type;
-    /// spin and shape enter as their protobuf enum numbers.</summary>
+    /// measured but never committed. §6.7 does not spell out how the kind, spin and shape are written
+    /// into the material, so this build fixes it: <paramref name="kind"/> enters as the probed item's
+    /// full protobuf message name (for example <c>kiapi.schematic.types.LocalLabel</c>), and spin and
+    /// shape as their protobuf enum numbers, which stay stable when enum names change. Changing this
+    /// encoding requires a new namespace (§14).</summary>
     public static Guid Probe(DocumentRevision checkpointRevision, Guid screenId, MessageDescriptor kind, string text,
         SchematicLabelSpinStyle spin, SchematicLabelShape shape, Guid? symbolId = null, int? rotation = null)
     {

@@ -25,6 +25,10 @@ public sealed class SchematicWiringPlannerTests
             SchematicConnectionPolicy.FromSnapshot(Snapshot((1_300, 500))));
         Assert.AreEqual(new SchematicConnectionPolicy(100, 0, 100, 200, 200, 50), SchematicConnectionPolicy.FromSnapshot(Snapshot((100, 100))));
         CollectionAssert.AreEqual(new[] { 2, 3, 4, 6, 8 }, SchematicConnectionPolicy.StubMultiples);
+        // §6.1 asks only the grid to agree across instances and only a positive text size: the project's
+        // text size is taken as the first instance reports it, and it need not be a whole 100 nm.
+        Assert.AreEqual(1_270_000, SchematicConnectionPolicy.FromSnapshot(Snapshot((1_270_000, 1_270_000), (1_270_000, 1_524_000))).TextSizeNm);
+        Assert.AreEqual(1_270_050, SchematicConnectionPolicy.FromSnapshot(Snapshot((1_270_000, 1_270_050))).TextSizeNm);
 
         var noFormatting = Snapshot((1_270_000, 1_270_000), (1_270_000, 1_270_000));
         noFormatting.Instances[1].Metadata.Formatting = null;
@@ -33,12 +37,11 @@ public sealed class SchematicWiringPlannerTests
             ("no sheet instance", new SchematicHierarchyData()),
             ("an instance without formatting (older peer)", noFormatting),
             ("instances disagree on the grid", Snapshot((1_270_000, 1_270_000), (2_540_000, 1_270_000))),
-            ("instances disagree on the text size", Snapshot((1_270_000, 1_270_000), (1_270_000, 1_524_000))),
             ("zero grid", Snapshot((0, 1_270_000))),
             ("negative grid", Snapshot((-1_270_000, 1_270_000))),
             ("grid off the 100 nm unit", Snapshot((1_270_050, 1_270_000))),
             ("zero text size", Snapshot((1_270_000, 0))),
-            ("text size off the 100 nm unit", Snapshot((1_270_000, 1_270_050))),
+            ("negative text size", Snapshot((1_270_000, -1_270_000))),
             ("grid too large to double", Snapshot((long.MaxValue / 100 * 100, 1_270_000)))
         })
             Assert.AreEqual(SchematicConnectionErrors.RealizationGridUnavailable,

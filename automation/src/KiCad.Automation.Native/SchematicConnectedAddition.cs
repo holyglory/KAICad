@@ -131,6 +131,9 @@ public static class SchematicConnectedAddition
 
     // §4.1 step 2. Existing components, occurrences, sheet-definition components, parts, sheet
     // instances, bindings and native hierarchy are unchanged; new parts are validated by creation.
+    // A new occurrence must belong to a new component: drawing another unit of an existing component
+    // is an ownership change (creation refuses it with symbol_owner_requires_resolution), not an
+    // added connection, so it stays on the general path even when XML also connects that unit's pins.
     private static bool SameShape(DesignRecoveryState state, SchematicDesign desired, CancellationToken token)
     {
         var baseline = state.Baseline.Engineering.Circuit;
@@ -141,6 +144,9 @@ public static class SchematicConnectedAddition
         var symbols = new Dictionary<Guid, SymbolOccurrence>();
         if (wanted.Symbols.Any(s => !symbols.TryAdd(s.Id, s))) return false;
         if (baseline.Symbols.Any(s => !symbols.TryGetValue(s.Id, out var next) || !s.Equals(next))) return false;
+        var existingComponents = baseline.Components.Select(c => c.Id).ToHashSet();
+        var existingSymbols = baseline.Symbols.Select(s => s.Id).ToHashSet();
+        if (wanted.Symbols.Any(s => !existingSymbols.Contains(s.Id) && existingComponents.Contains(s.ComponentId))) return false;
         var sheets = new Dictionary<Guid, SheetDefinition>();
         if (wanted.Sheets.Any(s => !sheets.TryAdd(s.Id, s))) return false;
         if (baseline.Sheets.Any(sheet => !sheets.TryGetValue(sheet.Id, out var next)

@@ -21,6 +21,17 @@ public sealed class SyncHarnessProcessTests
         return start;
     }
 
+    internal static ProcessStartInfo ProductionStartInfo()
+    {
+        DirectoryInfo? root = new(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "KiCad.Automation.slnx"))) root = root.Parent;
+        if (root is null) throw new InvalidOperationException("The compiled automation checkout is required.");
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        var start = new ProcessStartInfo("dotnet");
+        start.ArgumentList.Add(Path.Combine(root.FullName, "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll"));
+        return start;
+    }
+
     [TestMethod]
     public async Task QualificationHostUsesRealStdioAndTheServiceValidationBoundary()
     {

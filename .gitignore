@@ -160,3 +160,6 @@ qa/data/**/*.spice
 
 # Local governed run projections and cold logs are not source files.
 /.devcoordinator/
+
+# Local Serena language-server caches (per-checkout tool state)
+.serena/

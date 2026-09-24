@@ -27,6 +27,7 @@ class wxTextCtrl;
 class wxToolBar;
 class wxScrolledWindow;
 class wxChoice;
+class wxRadioButton;
 class wxSizer;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
 class PANEL_DIAGRAM_HISTORY;
@@ -121,7 +122,9 @@ private:
     void editComment();
     void fillComments();
     void revealField( int aField );
-    void chooseRequirement();
+    /// The one quiet add-detail action (owner decision n98a3f3c41084f0ed): a requirement box or a
+    /// component-choice facet that has no value yet.
+    void chooseDetail();
     void save();
     void decline();
     void history( int aField );
@@ -137,6 +140,33 @@ private:
     void closeDiagramHistory();
     void undo( bool aRedo );
     void close( wxCloseEvent& aEvent );
+
+    // Component choices (Round A4, owner decision n0b2a908b00e78823): chips on blocks, the inspector's
+    // facet overview and one facet's detail. Edits change the level draft only.
+    const kiapi::automation::diagrams::v1::BlockDefinitionData* selectedDefinition() const;
+    /// Stores one facet of the selected block in the level draft; nullptr clears it (unspecified).
+    void storeFacet( int aFacet, const kiapi::automation::diagrams::v1::DefinitionTextChoiceData* aChoice );
+    void fillFacets( bool aAvailable );
+    void fillFacetForm();
+    void showFacetFields();
+    void openFacet( int aFacet, bool aFocusState );
+    void closeFacet( bool aFocusRow );
+    void facetStateChanged();
+    void facetEdited();
+    void clearFacet();
+    void reviewFacets( const std::string& aBlockId );
+    bool facetFromForm( kiapi::automation::diagrams::v1::DefinitionTextChoiceData& aChoice, wxString& aProblem ) const;
+    bool facetHasFocus() const;
+    /// The detail's controls, in tab order.
+    std::vector<wxWindow*> facetControls() const;
+    int facetState() const;
+    int facetStrength() const;
+    void setFacetState( int aState );
+    void setFacetStrength( int aStrength );
+    wxFont chipFont() const;
+    wxColour linkColour() const;
+    /// The chips of each drawn block of the viewed level, in canvas pixels.
+    std::vector<std::pair<std::string, RECURSIVE_DIAGRAM::BLOCK_CHIPS>> drawnChips() const;
 
     // Drawing tools (Round A1: toolbar strip and canvas-edge palette).
     void setTool( TOOL aTool );
@@ -228,7 +258,27 @@ private:
     wxTextCtrl* m_comments;
     wxStaticText* m_commentTargetStatus;
     wxChoice* m_commentChoice;
-    wxButton* m_addRequirement;
+    wxButton* m_addDetail;
+    wxStaticText* m_facetHeading;
+    std::array<RECURSIVE_DIAGRAM::FACET_ROW*, RECURSIVE_DIAGRAM::FACETS> m_facetRows;
+    wxSizer* m_facetDetail;
+    wxButton* m_facetBack;
+    wxStaticText* m_facetTitle;
+    /// One-click choices (Chosen, Candidate, Unknown) and (Information, Preference, Requirement).
+    std::array<wxRadioButton*, 3> m_facetStates;
+    wxStaticText* m_facetValueLabel;
+    wxTextCtrl* m_facetValue;
+    wxTextCtrl* m_facetCandidates;
+    wxTextCtrl* m_facetReason;
+    std::array<wxRadioButton*, 3> m_facetStrengths;
+    wxButton* m_facetClear;
+    wxStaticText* m_facetNotice;
+    /// The facet whose detail is open (-1 for none) and the block it belongs to.
+    int m_facet = -1;
+    std::string m_facetOwner;
+    /// The detail holds an entry that is not in the draft because it cannot be kept yet, and why.
+    bool m_facetTouched = false;
+    wxString m_facetProblem;
     std::vector<std::string> m_commentIds;
     std::string m_commentId;
     bool m_newComment = false;

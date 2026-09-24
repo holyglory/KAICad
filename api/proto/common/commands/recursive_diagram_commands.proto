@@ -144,6 +144,38 @@ message RecursiveDiagramEditorState {
   string status_text = 210;
   // Whether a pointer drag on the canvas (a move, resize, port or note drag) is still in progress.
   bool dragging = 211;
+  // Round A4 (owner decision n0b2a908b00e78823): what each block of the viewed level shows of its
+  // component choices on the canvas, as drawn. A caption-only block has no entry.
+  repeated DiagramCanvasBlockChips block_chips = 212;
+  // The facets the inspector's facet overview lists for the selected block, in facet order:
+  // "purpose", "type", "manufacturer", "family", "model", "orderable-part" or "package".
+  // Only facets that have a value are listed.
+  repeated string shown_facets = 213;
+  // The facet whose detail the inspector shows, or "" when only the overview is shown.
+  string facet_editor = 214;
+  // Why the facet detail's entry cannot be kept yet, as shown beside it; "" when it can.
+  string facet_notice = 215;
+}
+
+// One component-choice chip on a block, relative to the editor window, in pixels.
+message DiagramCanvasFacetChip {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (chosen) or DCSD_CANDIDATES (candidate).
+  DefinitionChoiceStateData state = 2;
+  // The chip text as drawn, for example "Type: linear regulator".
+  string text = 3;
+  DiagramControlRect rect = 4;
+}
+
+// The chips a block shows on the canvas and its Review facets link.
+message DiagramCanvasBlockChips {
+  string block_id = 1;
+  repeated DiagramCanvasFacetChip chips = 2;
+  // Chips that did not fit the block; a "+N more" chip stands for them when it fits.
+  uint32 hidden_chips = 3;
+  // The Review facets link as drawn; shown is false when the block is too small for it.
+  DiagramControlRect review_facets = 4;
 }
 
 // One rendered control relative to the editor window, in pixels. active is the

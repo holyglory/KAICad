@@ -14,6 +14,7 @@
 
 class wxAnyButton;
 class wxButton;
+class wxDC;
 class wxToggleButton;
 
 /** Drawing surface pieces of one per-level diagram: exact presentation decimals, the resolved
@@ -54,6 +55,81 @@ struct NODE
     int version = 0;
     bool isNew = false;
     std::vector<BOUNDARY> interfaces;
+    /// Its component choices as the draft holds them (Round A4).
+    D::BlockDefinitionData definition;
+};
+
+// ---- Component choices (Round A4, owner decision n0b2a908b00e78823) ------------------------------
+// The seven independent text facets of a block's definition (decision na7aa99408263431e). A facet
+// "has a value" once its state is anything but unspecified; only those are shown anywhere.
+
+constexpr int FACETS = 7;
+/// The observation name of a facet: "purpose", "type", "manufacturer", "family", "model",
+/// "orderable-part" or "package".
+const char* FacetName( int aFacet );
+wxString FacetLabel( int aFacet );
+/// The facet's choice, or nullptr when the definition does not record it.
+const D::DefinitionTextChoiceData* Facet( const D::BlockDefinitionData& aDefinition, int aFacet );
+D::DefinitionTextChoiceData* MutableFacet( D::BlockDefinitionData* aDefinition, int aFacet );
+void ClearFacet( D::BlockDefinitionData* aDefinition, int aFacet );
+/// Whether the facet has a value (any state but unspecified).
+bool HasValue( const D::DefinitionTextChoiceData* aChoice );
+/// Whether the definition records nothing at all (no facet and no knowledge class).
+bool EmptyDefinition( const D::BlockDefinitionData& aDefinition );
+/// The value text of a choice: the chosen value, the candidates joined by aJoin, or "Unknown".
+wxString ChoiceValue( const D::DefinitionTextChoiceData& aChoice, const wxString& aJoin );
+
+/// One chip drawn on a block, in canvas pixels.
+struct CHIP
+{
+    int facet = 0;
+    D::DefinitionChoiceStateData state = D::DCSD_UNSPECIFIED;
+    wxString text;
+    wxRect rect;
+};
+
+/// What a block shows below its caption: one chip per chosen or candidate facet as far as they fit,
+/// a "+N more" chip for the rest, and the Review facets link. A caption-only block shows none of it.
+struct BLOCK_CHIPS
+{
+    bool shown = false;
+    std::vector<CHIP> chips;
+    unsigned hidden = 0;
+    std::optional<wxRect> more;
+    std::optional<wxRect> link;
+    /// When no chip fits below the caption (a small or zoomed-out block), the hidden chips' state marks
+    /// beside the caption, so the block still shows that it has choices.
+    std::vector<std::pair<D::DefinitionChoiceStateData, wxRect>> marks;
+};
+
+/// Lays out a block's chips inside aBox, the block's content area in canvas pixels, with aSmall, the chip font.
+/// aCaptionRight is where the block's caption text ends.
+BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, int aCaptionRight );
+/// Draws the chips and link LayoutChips placed.
+void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool aDark,
+                const wxColour& aForeground, const wxColour& aLink );
+/// The state mark shared by chips and the inspector: a check for chosen, a ring for a candidate and a
+/// grey dot for unknown.
+void DrawChoiceMark( wxDC& aDC, const wxRect& aBox, D::DefinitionChoiceStateData aState, bool aDark );
+
+/** One row of the inspector's facet overview: the facet's name and its value with its state mark.
+ * Pressing it (click, Enter or Space) opens that facet's detail. */
+class FACET_ROW : public wxWindow
+{
+public:
+    FACET_ROW( wxWindow* aParent, int aFacet, std::function<void( int )> aOpen );
+    void SetChoice( const D::DefinitionTextChoiceData& aChoice, bool aOpen );
+    int FacetIndex() const { return m_facet; }
+    bool AcceptsFocus() const override { return IsShown() && IsEnabled(); }
+
+private:
+    void paint();
+
+    int m_facet;
+    std::function<void( int )> m_open;
+    D::DefinitionChoiceStateData m_state = D::DCSD_UNSPECIFIED;
+    wxString m_value;
+    bool m_isOpen = false, m_hover = false;
 };
 
 /// A root connection as the level draft shows it.

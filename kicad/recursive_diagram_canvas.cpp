@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <wx/button.h>
+#include <wx/control.h>
 #include <wx/dc.h>
+#include <wx/dcbuffer.h>
 #include <wx/dcclient.h>
 #include <wx/menu.h>
 #include <wx/textctrl.h>
@@ -327,6 +329,294 @@ void LEVEL_LAYOUT::Report( D::ResolvedDiagramLayoutData* out ) const
     out->set_dormant_entries( m_dormant );
 }
 
+const char* FacetName( int facet )
+{
+    static const char* NAMES[FACETS] = { "purpose", "type", "manufacturer", "family", "model", "orderable-part", "package" };
+    return facet >= 0 && facet < FACETS ? NAMES[facet] : "";
+}
+
+wxString FacetLabel( int facet )
+{
+    switch( facet )
+    {
+    case 0: return _( "Purpose" );
+    case 1: return _( "Type" );
+    case 2: return _( "Manufacturer" );
+    case 3: return _( "Family" );
+    case 4: return _( "Model" );
+    case 5: return _( "Orderable part" );
+    default: return _( "Package" );
+    }
+}
+
+const D::DefinitionTextChoiceData* Facet( const D::BlockDefinitionData& definition, int facet )
+{
+    switch( facet )
+    {
+    case 0: return definition.has_purpose() ? &definition.purpose() : nullptr;
+    case 1: return definition.has_type() ? &definition.type() : nullptr;
+    case 2: return definition.has_manufacturer() ? &definition.manufacturer() : nullptr;
+    case 3: return definition.has_family() ? &definition.family() : nullptr;
+    case 4: return definition.has_model() ? &definition.model() : nullptr;
+    case 5: return definition.has_orderable_part() ? &definition.orderable_part() : nullptr;
+    case 6: return definition.has_package() ? &definition.package() : nullptr;
+    default: return nullptr;
+    }
+}
+
+D::DefinitionTextChoiceData* MutableFacet( D::BlockDefinitionData* definition, int facet )
+{
+    switch( facet )
+    {
+    case 0: return definition->mutable_purpose();
+    case 1: return definition->mutable_type();
+    case 2: return definition->mutable_manufacturer();
+    case 3: return definition->mutable_family();
+    case 4: return definition->mutable_model();
+    case 5: return definition->mutable_orderable_part();
+    default: return definition->mutable_package();
+    }
+}
+
+void ClearFacet( D::BlockDefinitionData* definition, int facet )
+{
+    switch( facet )
+    {
+    case 0: definition->clear_purpose(); break;
+    case 1: definition->clear_type(); break;
+    case 2: definition->clear_manufacturer(); break;
+    case 3: definition->clear_family(); break;
+    case 4: definition->clear_model(); break;
+    case 5: definition->clear_orderable_part(); break;
+    default: definition->clear_package(); break;
+    }
+}
+
+bool HasValue( const D::DefinitionTextChoiceData* choice )
+{
+    return choice && choice->state() != D::DCSD_UNSPECIFIED;
+}
+
+bool EmptyDefinition( const D::BlockDefinitionData& definition )
+{
+    for( int facet = 0; facet < FACETS; ++facet ) if( Facet( definition, facet ) ) return false;
+    return !definition.has_knowledge_class();
+}
+
+wxString ChoiceValue( const D::DefinitionTextChoiceData& choice, const wxString& join )
+{
+    if( choice.state() == D::DCSD_UNKNOWN ) return _( "Unknown" );
+    wxString result;
+    for( const auto& value : choice.values() ) { if( !result.empty() ) result += join; result += Text( value ); }
+    return result;
+}
+
+namespace
+{
+bool darkBackground( const wxColour& colour ) { return colour.Red() + colour.Green() + colour.Blue() < 384; }
+wxColour markColour( D::DefinitionChoiceStateData state, bool dark )
+{
+    if( state == D::DCSD_SELECTED ) return dark ? wxColour( 102, 187, 106 ) : wxColour( 46, 125, 50 );
+    if( state == D::DCSD_CANDIDATES ) return dark ? wxColour( 255, 202, 40 ) : wxColour( 176, 128, 0 );
+    return dark ? wxColour( 158, 158, 158 ) : wxColour( 117, 117, 117 );
+}
+wxColour chipFill( D::DefinitionChoiceStateData state, bool dark )
+{
+    if( state == D::DCSD_SELECTED ) return dark ? wxColour( 30, 58, 34 ) : wxColour( 232, 245, 233 );
+    if( state == D::DCSD_CANDIDATES ) return dark ? wxColour( 66, 54, 18 ) : wxColour( 255, 248, 220 );
+    return dark ? wxColour( 58, 58, 58 ) : wxColour( 242, 242, 242 );
+}
+}
+
+void DrawChoiceMark( wxDC& dc, const wxRect& box, D::DefinitionChoiceStateData state, bool dark )
+{
+    wxColour colour = markColour( state, dark );
+    int diameter = std::min( box.width, box.height ), radius = diameter / 2;
+    wxPoint centre( box.x + box.width / 2, box.y + box.height / 2 );
+    if( state == D::DCSD_SELECTED )
+    {
+        dc.SetPen( wxPen( colour, 1 ) ); dc.SetBrush( wxBrush( colour ) ); dc.DrawCircle( centre, radius );
+        // A white check mark inside the filled circle.
+        dc.SetPen( wxPen( *wxWHITE, std::max( 2, diameter / 7 ) ) );
+        dc.DrawLine( centre.x - radius / 2, centre.y, centre.x - radius / 8, centre.y + radius / 3 );
+        dc.DrawLine( centre.x - radius / 8, centre.y + radius / 3, centre.x + radius / 2, centre.y - radius / 3 );
+    }
+    else if( state == D::DCSD_CANDIDATES )
+    {
+        dc.SetPen( wxPen( colour, std::max( 2, diameter / 6 ) ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.DrawCircle( centre, std::max( 1, radius - 1 ) );
+    }
+    else
+    {
+        dc.SetPen( wxPen( colour, 1 ) ); dc.SetBrush( wxBrush( colour ) ); dc.DrawCircle( centre, std::max( 1, radius - 1 ) );
+    }
+}
+
+BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wxFont& small, int captionRight )
+{
+    BLOCK_CHIPS result;
+    std::vector<int> chosen;
+    for( int facet = 0; facet < FACETS; ++facet )
+    {
+        const auto* choice = Facet( node.definition, facet );
+        result.shown |= HasValue( choice );
+        if( choice && ( choice->state() == D::DCSD_SELECTED || choice->state() == D::DCSD_CANDIDATES ) && choice->values_size() )
+            chosen.push_back( facet );
+    }
+    if( !result.shown ) return result;
+    dc.SetFont( small );
+    // Below the caption: one chip per row, and the Review facets link at the bottom of the block.
+    // aBox is the block's content area: the caption sits at its top (24 to about 46 pixels down).
+    const int height = dc.GetCharHeight() + 6, gap = 3, left = box.x + 10, width = box.width - 20, top = box.y + 50;
+    const int mark = height - 9, textLeft = 6 + mark + 6;
+    int bottom = box.GetBottom() - 1;
+    wxSize linkSize = dc.GetTextExtent( _( "Review facets" ) );
+    if( linkSize.x <= width && bottom - linkSize.y >= top )
+    { result.link = wxRect( left, bottom - linkSize.y, linkSize.x, linkSize.y ); bottom = result.link->y - gap; }
+    int rows = bottom - top >= height ? ( bottom - top + gap ) / ( height + gap ) : 0;
+    size_t shown = std::min<size_t>( chosen.size(), static_cast<size_t>( std::max( 0, rows ) ) );
+    auto moreText = []( size_t count ) { return wxString::Format( _( "+%u more" ), static_cast<unsigned>( count ) ); };
+    int moreWidth = 0; bool ownRow = false;
+    if( shown < chosen.size() )
+    {
+        moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16;
+        // "+N more" shares the last row when a chip can keep some text beside it; otherwise it takes that row.
+        if( shown > 0 && moreWidth + gap + textLeft + 40 > width )
+        { --shown; ownRow = true; moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16; }
+    }
+    for( size_t i = 0; i < shown; ++i )
+    {
+        const auto& choice = *Facet( node.definition, chosen[i] );
+        bool shareRow = i + 1 == shown && shown < chosen.size() && !ownRow;
+        int available = shareRow ? width - moreWidth - gap : width;
+        wxString text = FacetLabel( chosen[i] ) + wxS( ": " ) + ChoiceValue( choice, wxS( " / " ) );
+        text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, std::max( 0, available - textLeft - 6 ) );
+        int chipWidth = std::min( available, textLeft + dc.GetTextExtent( text ).x + 8 );
+        result.chips.push_back( { chosen[i], choice.state(), text, wxRect( left, top + static_cast<int>( i ) * ( height + gap ), chipWidth, height ) } );
+    }
+    result.hidden = static_cast<unsigned>( chosen.size() - result.chips.size() );
+    if( result.hidden && moreWidth <= width )
+    {
+        if( !result.chips.empty() && !ownRow )
+            result.more = wxRect( result.chips.back().rect.GetRight() + 1 + gap, result.chips.back().rect.y, moreWidth, height );
+        else if( rows > 0 )
+            result.more = wxRect( left, top + static_cast<int>( result.chips.size() ) * ( height + gap ), moreWidth, height );
+    }
+    if( result.chips.empty() && !result.more && !chosen.empty() )
+    {
+        // Too small for a chip: the choices' state marks follow the caption where they fit.
+        const int size = std::max( 6, std::min( 12, mark ) ), step = size + 3;
+        int x = box.GetRight() - static_cast<int>( chosen.size() ) * step;
+        if( x >= std::max( captionRight + 6, left ) && box.y + 29 + size <= box.GetBottom() )
+            for( size_t i = 0; i < chosen.size(); ++i )
+                result.marks.emplace_back( Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, box.y + 29, size, size ) );
+    }
+    return result;
+}
+
+void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool dark, const wxColour& foreground, const wxColour& link )
+{
+    if( !chips.shown ) return;
+    dc.SetFont( small );
+    for( const auto& chip : chips.chips )
+    {
+        dc.SetPen( wxPen( markColour( chip.state, dark ), 1 ) ); dc.SetBrush( wxBrush( chipFill( chip.state, dark ) ) );
+        dc.DrawRoundedRectangle( chip.rect, 4 );
+        int mark = chip.rect.height - 9;
+        DrawChoiceMark( dc, wxRect( chip.rect.x + 6, chip.rect.y + ( chip.rect.height - mark ) / 2, mark, mark ), chip.state, dark );
+        dc.SetTextForeground( foreground );
+        dc.DrawText( chip.text, chip.rect.x + 6 + mark + 6, chip.rect.y + ( chip.rect.height - dc.GetCharHeight() ) / 2 );
+    }
+    if( chips.more )
+    {
+        dc.SetPen( wxPen( markColour( D::DCSD_UNKNOWN, dark ), 1 ) ); dc.SetBrush( wxBrush( chipFill( D::DCSD_UNKNOWN, dark ) ) );
+        dc.DrawRoundedRectangle( *chips.more, 4 ); dc.SetTextForeground( foreground );
+        dc.DrawText( wxString::Format( _( "+%u more" ), chips.hidden ), chips.more->x + 8, chips.more->y + ( chips.more->height - dc.GetCharHeight() ) / 2 );
+    }
+    for( const auto& [state, rect] : chips.marks ) DrawChoiceMark( dc, rect, state, dark );
+    if( chips.link )
+    {
+        wxFont underlined = small; underlined.SetUnderlined( true ); dc.SetFont( underlined ); dc.SetTextForeground( link );
+        dc.DrawText( _( "Review facets" ), chips.link->GetTopLeft() );
+        dc.SetFont( small );
+    }
+    dc.SetTextForeground( foreground );
+}
+
+FACET_ROW::FACET_ROW( wxWindow* parent, int facet, std::function<void( int )> open ) :
+        wxWindow( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS | wxFULL_REPAINT_ON_RESIZE ),
+        m_facet( facet ), m_open( std::move( open ) )
+{
+    static const char* NAMES[FACETS] = { "Purpose", "Type", "Manufacturer", "Family", "Model", "OrderablePart", "Package" };
+    SetName( wxString( "RecursiveFacetRow" ) + NAMES[std::clamp( facet, 0, FACETS - 1 )] );
+    SetBackgroundStyle( wxBG_STYLE_PAINT );
+    SetMinSize( FromDIP( wxSize( 200, 28 ) ) );
+    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
+    Bind( wxEVT_LEFT_DOWN, [this]( wxMouseEvent& ) { SetFocus(); if( m_open ) m_open( m_facet ); } );
+    Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& ) { m_hover = true; Refresh(); } );
+    Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& ) { m_hover = false; Refresh(); } );
+    Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
+    Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
+    Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
+          {
+              int key = event.GetKeyCode();
+              if( !event.HasAnyModifiers() && ( key == WXK_RETURN || key == WXK_NUMPAD_ENTER || key == WXK_SPACE ) )
+              { if( m_open ) m_open( m_facet ); return; }
+              if( key == WXK_TAB ) { Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
+              event.Skip();
+          } );
+}
+
+void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open )
+{
+    wxString value = ChoiceValue( choice, wxS( ", " ) );
+    if( choice.state() == D::DCSD_CANDIDATES )
+        value += choice.values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" );
+    if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
+    m_value = value; m_state = choice.state(); m_isOpen = open;
+    SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
+    Refresh();
+}
+
+void FACET_ROW::paint()
+{
+    wxAutoBufferedPaintDC dc( this );
+    wxColour background = GetParent()->GetBackgroundColour();
+    wxColour foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+    wxColour muted = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    bool dark = darkBackground( background );
+    wxRect area( GetClientSize() );
+    dc.SetBackground( wxBrush( background ) ); dc.Clear();
+    if( m_isOpen || m_hover )
+    {
+        dc.SetPen( *wxTRANSPARENT_PEN );
+        dc.SetBrush( wxBrush( m_isOpen ? accent.ChangeLightness( dark ? 60 : 180 ) : background.ChangeLightness( dark ? 115 : 95 ) ) );
+        dc.DrawRectangle( area );
+    }
+    // A thin rule below each row, as the sketch's table.
+    dc.SetPen( wxPen( background.ChangeLightness( dark ? 135 : 85 ), 1 ) );
+    dc.DrawLine( area.x, area.GetBottom(), area.GetRight() + 1, area.GetBottom() );
+    dc.SetFont( GetFont() );
+    // The label column fits the longest facet name, so every row's value starts at the same place.
+    int text = ( area.height - dc.GetCharHeight() ) / 2, labelWidth = FromDIP( 90 );
+    for( int facet = 0; facet < FACETS; ++facet ) labelWidth = std::max( labelWidth, dc.GetTextExtent( FacetLabel( facet ) ).x + FromDIP( 20 ) );
+    dc.SetTextForeground( m_isOpen ? foreground : muted.ChangeLightness( dark ? 130 : 70 ) );
+    dc.DrawText( wxControl::Ellipsize( FacetLabel( m_facet ), dc, wxELLIPSIZE_END, labelWidth - FromDIP( 12 ) ), FromDIP( 6 ), text );
+    int mark = std::min( FromDIP( 14 ), area.height - FromDIP( 10 ) );
+    DrawChoiceMark( dc, wxRect( labelWidth, ( area.height - mark ) / 2, mark, mark ), m_state, dark );
+    wxString chevron = wxS( "›" ); int chevronWidth = dc.GetTextExtent( chevron ).x;
+    int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 14 );
+    dc.SetTextForeground( foreground );
+    dc.DrawText( wxControl::Ellipsize( m_value, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
+    dc.SetTextForeground( muted ); dc.DrawText( chevron, area.width - chevronWidth - FromDIP( 8 ), text );
+    if( HasFocus() )
+    {
+        dc.SetPen( wxPen( accent, 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.DrawRectangle( area.Deflate( 1 ) );
+    }
+}
+
 const char* ToolName( TOOL tool )
 {
     switch( tool )
@@ -539,16 +829,18 @@ R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool wit
     {
         if( const auto* added = draft ? newChild( child.block_id() ) : nullptr )
         {
-            R::NODE node{ added->selection().block_id(), added->name(), 0, true, {} };
+            R::NODE node{ added->selection().block_id(), added->name(), 0, true, {}, {} };
             for( const auto& port : added->interfaces() ) node.interfaces.push_back( { port.id(), port.name() } );
+            node.definition = added->definition();
             nodes.push_back( std::move( node ) ); continue;
         }
         const REVISION* saved = revision( child ); if( !saved ) continue;
         const DRAFT* edited = nullptr;
         if( draft ) for( const auto& item : m_level.child_drafts() ) if( item.baseline().block_id() == child.block_id() ) edited = &item;
-        R::NODE node{ child.block_id(), edited ? edited->name() : saved->name(), version( *saved ), false, {} };
+        R::NODE node{ child.block_id(), edited ? edited->name() : saved->name(), version( *saved ), false, {}, {} };
         for( const auto& port : edited ? edited->local_diagram().interfaces() : saved->local_diagram().interfaces() )
             node.interfaces.push_back( { port.id(), port.name() } );
+        node.definition = edited ? edited->definition() : saved->definition();
         nodes.push_back( std::move( node ) );
     }
     std::vector<R::LINK> links;
@@ -988,10 +1280,17 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         wxRect box = toScreen( drawn.Rect( node.id ) ); bool selected = node.id == m_selected && m_connectionId.empty();
         dc.SetPen( wxPen( selected ? accent : muted, selected ? 2 : 1 ) );
         dc.SetBrush( wxBrush( selected ? accent.ChangeLightness( dark ? 60 : 175 ) : background.ChangeLightness( dark ? 120 : 97 ) ) ); dc.DrawRectangle( box );
-        dc.SetClippingRegion( box.Deflate( 8 ) ); dc.SetFont( GetFont().Bold().Larger() );
-        dc.DrawText( Text( node.name ), box.x + 10, box.y + 24 ); dc.SetFont( GetFont() );
-        // A drawn block is only its caption until more is defined (owner decision n98a3f3c41084f0ed).
-        if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), box.x + 10, box.y + 58 );
+        // The block's content sits inside an 8-pixel margin; the outline and its handles stay on the block's edges.
+        wxRect inner = wxRect( box ).Deflate( 8 );
+        dc.SetClippingRegion( inner ); dc.SetFont( GetFont().Bold().Larger() );
+        dc.DrawText( Text( node.name ), inner.x + 10, inner.y + 24 );
+        int captionRight = inner.x + 10 + dc.GetTextExtent( Text( node.name ) ).x; dc.SetFont( GetFont() );
+        // A block shows a chip for each chosen or candidate component choice once it has any (Round A4, owner
+        // decision n0b2a908b00e78823); until then it is only its caption (owner decision n98a3f3c41084f0ed).
+        auto chips = R::LayoutChips( dc, node, inner, chipFont(), captionRight );
+        if( chips.shown ) R::DrawChips( dc, chips, chipFont(), dark, foreground, linkColour() );
+        else if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), inner.x + 10, inner.y + 58 );
+        dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
         dc.DestroyClippingRegion();
         if( selected && drawingAvailable() && m_tool == TOOL::SELECT && m_portId.empty() )
         {
@@ -1185,6 +1484,9 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
         m_drag = DRAG::PORT; m_dragStart = point; m_dragBefore = m_level; m_dragMoved = false;
         if( !m_canvas->HasCapture() ) m_canvas->CaptureMouse(); return;
     }
+    // Round A4: a block's Review facets link opens its facet detail in the inspector.
+    for( const auto& [block, chips] : drawnChips() )
+        if( chips.link && chips.link->Contains( point ) ) { reviewFacets( block ); return; }
     if( auto block = blockAt( drawn, point ); !block.empty() )
     {
         if( event.LeftDClick() )
@@ -1205,6 +1507,12 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
     m_pointer = event.GetPosition();
     if( m_tool == TOOL::CONNECT && m_connectFrom && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
+    if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && !m_historyPreview )
+    {
+        bool link = false;
+        for( const auto& [block, chips] : drawnChips() ) link |= chips.link && chips.link->Contains( m_pointer );
+        m_canvas->SetCursor( wxCursor( link ? wxCURSOR_HAND : wxCURSOR_ARROW ) );
+    }
     if( m_drag == DRAG::NONE || !event.Dragging() || m_process ) return;
     wxPoint delta = m_pointer - m_dragStart;
     if( !m_dragMoved && std::abs( delta.x ) + std::abs( delta.y ) < FromDIP( 4 ) ) return;

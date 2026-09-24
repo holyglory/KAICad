@@ -40,8 +40,9 @@ public sealed partial class NativeSessionTests
             var attach = await client.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
                 { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
             Assert.IsFalse(attach.IsError == true);
-            // Session-wide checks (tool list, diagram creation, schema 2 opening and the drawing tools) run in the first
-            // project of each themed session; the second project repeats the core editor journey for instance isolation.
+            // Session-wide checks (tool list, diagram creation, schema 2 opening, the drawing tools and component choices) run in
+            // the first project of each themed session; the second project repeats the editor journey up to the compact window
+            // to prove instance isolation.
             bool sessionWide = FirstInSession(evidence, "recursive-editor-session-checks");
             if (sessionWide) await VerifyFlatEditorRetired(client, native, instanceId, evidence, token);
             // Creating a new system diagram next to this session's project through the same production MCP server and
@@ -224,6 +225,8 @@ public sealed partial class NativeSessionTests
             }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
+            // Round A4: the root's partial definition an agent recorded is listed by facet, only where a facet has a value.
+            CollectionAssert.AreEqual(new[] { "purpose", "type", "model", "package" }, initial.ShownFacets.ToArray());
             Assert.AreEqual(openingBytes, await File.ReadAllTextAsync(source, token));
             async Task ObserveViews(string label, bool dirty, BlockSelection? history = null)
             {
@@ -604,6 +607,23 @@ public sealed partial class NativeSessionTests
             string expandedCapture = Path.Combine(evidence, instanceId + "-recursive-expanded.png");
             await CaptureRecursive(display, expandedCapture, token);
             await VerifyExpandedCanvasContent(expandedCapture, token);
+            if (!sessionWide)
+            {
+                // The second project proves that a second KiCad instance's editor is independent: its own MCP attachment,
+                // file, window, observations, navigation, edits, saves, field history, comments, conflict dialog,
+                // implementation preview and compact window all ran above. The implementation management, whole-diagram
+                // history, agent tool and proposal steps below do not depend on the instance, so they run once per session in
+                // the first project; this keeps the native-UI check inside its limit on a shared host.
+                Key("w", control: true);
+                using (var isolationClosed = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    isolationClosed.CancelAfter(TimeSpan.FromSeconds(15));
+                    while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, isolationClosed.Token);
+                }
+                if (interactionFailures.Count != 0)
+                    throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
+                return;
+            }
             string beforeManagement = await File.ReadAllTextAsync(source, token);
             var beforeManagementGraph = RecursiveBlockGraphXml.Read(beforeManagement);
             var sourceCpu = beforeManagementGraph.Inspect(beforeManagementGraph.SelectedRoot).Children[1];
@@ -1631,7 +1651,9 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(0U, state.ResolvedCanvasChildren);
         CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(created.Path, token), "Opening never writes.");
         Assert.IsEmpty(state.ShownRequirementFields, "A caption-only root shows no empty requirement boxes.");
+        Assert.IsEmpty(state.ShownFacets, "A caption-only root lists no component choices.");
         await VerifyDrawingTools(client, native, processId, display, created, instanceId, evidence, token);
+        await VerifyBlockChoices(client, native, processId, display, created, instanceId, evidence, token);
     }
 
     /// <summary>The first project of a native session runs the session-wide checks; later projects skip them.</summary>
@@ -1732,7 +1754,7 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(Tool(start, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
         Assert.IsTrue(start.PaletteShown); Assert.AreEqual(2U, start.StoredSchemaVersion); Assert.IsTrue(start.SourceWritable);
         Assert.AreEqual(root, start.LevelDraft.Scope.Baseline.BlockId);
-        Assert.IsTrue(Find(start, "RecursiveAddRequirement").Shown, "One quiet way to add a requirement.");
+        Assert.IsTrue(Find(start, "RecursiveAddDetail").Shown, "One quiet way to add a requirement or a component choice.");
         Assert.IsFalse(Find(start, "RecursiveToolDelete").Enabled, "Nothing is selected that can be removed.");
         await Capture("empty");
 
@@ -1917,9 +1939,9 @@ public sealed partial class NativeSessionTests
         await Wait("renamed", s => s.LevelDraft.NewChildren[1].Name == "CPU module");
         Key("z", control: true); await Wait("rename-undone", s => s.LevelDraft.NewChildren[1].Name == "CPU");
 
-        // The inspector grows with definition: one quiet Add requirement, then the chosen box only.
+        // The inspector grows with definition: one quiet Add detail, then the chosen box only.
         await At(psuX, psuY); await Wait("psu-reselected", s => s.Draft.Baseline.BlockId == psu && s.ShownRequirementFields.Count == 0);
-        await Press("RecursiveAddRequirement");
+        await Press("RecursiveAddDetail");
         using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
         {
             menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
@@ -2110,6 +2132,293 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
         }
         finally { if (writableMode is { } mode && !OperatingSystem.IsWindows()) File.SetUnixFileMode(created.Path, mode); }
+    }
+
+    /// <summary>Round A4 option 3 (owner decision n0b2a908b00e78823) through the rendered editor, on the level the drawing journey
+    /// saved. A caption-only block shows no chips. The one quiet Add detail action gives a facet its first value; each chosen or
+    /// candidate facet becomes a chip on its block with a Review facets link; the inspector's facet overview lists only facets
+    /// that have a value (owner decision n98a3f3c41084f0ed); one facet's detail edits its state, value, reason and strength,
+    /// returns it to unknown or clears it; an entry that cannot be kept is refused with a notice and never saved. Save, Decline,
+    /// undo, a compact window and a reopen keep the same choices, and a chosen name never adds ports, component bindings or a
+    /// physical allocation (decision na7aa99408263431e).</summary>
+    private static async Task VerifyBlockChoices(McpClient client, NativeClient native, int processId, string display, CreatedDiagram created,
+        string instanceId, string evidence, CancellationToken token)
+    {
+        const string title = "Structural diagram";
+        var document = new P.ReadRecursiveDiagramEditor { DocumentId = created.DocumentId };
+        Task<P.RecursiveDiagramEditorState> Read() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(document, token);
+        async Task<P.RecursiveDiagramEditorState> Wait(string step, Func<P.RecursiveDiagramEditorState, bool> condition)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            P.RecursiveDiagramEditorState current = new();
+            try
+            {
+                while (true)
+                {
+                    current = await Read();
+                    if (!current.Busy && !current.Dragging && condition(current)) return current;
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-timeout-" + step + ".json"), SchematicJson.Formatter.Format(current), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The component-choice step '" + step + "' did not reach its expected state; its state and screen are retained.");
+            }
+        }
+        void Key(string key, bool control = false, bool alt = false) => NativeKeyboard.SchematicShortcut(display, processId, key, title, control, false, altKey: alt);
+        void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+        void Click(int x, int y) => NativeKeyboard.SchematicShortcut(display, processId, "click", title, false, true, clickFromLeft: x, clickFromTop: y);
+        P.DiagramControlRect Find(P.RecursiveDiagramEditorState at, string name) => at.Controls.Single(c => c.Name == name);
+        async Task Press(string name)
+        {
+            // The inspector re-lays out after the detail opens or closes; press a control only where two readings agree.
+            var at = await Read(); var control = Find(at, name);
+            using (var settle = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                settle.CancelAfter(TimeSpan.FromSeconds(5));
+                while (true)
+                {
+                    await Task.Delay(120, settle.Token);
+                    var again = await Read(); var moved = Find(again, name);
+                    if (moved.Equals(control) && Find(again, "RecursiveInspector").Equals(Find(at, "RecursiveInspector"))) break;
+                    at = again; control = moved;
+                }
+            }
+            Assert.IsTrue(control.Shown && control.Enabled, name + " must be shown and enabled before it is pressed.");
+            if (name.StartsWith("RecursiveFacet", StringComparison.Ordinal) || name == "RecursiveAddDetail")
+            {
+                var inspector = Find(at, "RecursiveInspector");
+                int x = control.X + control.Width / 2, y = control.Y + control.Height / 2;
+                Assert.IsTrue(x >= inspector.X && x < inspector.X + inspector.Width && y >= inspector.Y && y < inspector.Y + inspector.Height,
+                    name + " must be scrolled into the inspector's view before it is pressed.");
+            }
+            Click(control.X + control.Width / 2, control.Y + control.Height / 2);
+        }
+        async Task Popup()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            try
+            {
+                do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+                while (count == 0);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-timeout-popup.json"), SchematicJson.Formatter.Format(await Read()), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-timeout-popup.png"), token);
+                throw new AssertFailedException("The pressed control did not open its list; the state and screen are retained.");
+            }
+        }
+        // The Add detail menu lists hidden requirement boxes first, then the facets without a value.
+        async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
+        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
+        async Task Closed()
+        {
+            using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        async Task<P.RecursiveDiagramEditorState> Open(string step)
+        {
+            var opened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
+            Assert.IsFalse(opened.IsError == true, "The saved diagram opens again.");
+            return await Wait(step, s => s.Ready && s.Rendered);
+        }
+        async Task SelectBlock(string step, string block)
+        {
+            var at = await Read();
+            var rect = at.LevelDraft.Scope.LocalDiagram.Presentation.Blocks.Single(b => b.BlockId == block).Rect;
+            double Units(string value) => double.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+            // Just below the caption on the left: inside the block, clear of its chips, link, ports and handles.
+            double x = Units(rect.X) + 30, y = Units(rect.Y) + Math.Min(Units(rect.Height) / 3, 36);
+            Click((int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale), (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale));
+            await Wait(step, s => s.Draft.Baseline.BlockId == block && s.ConnectionDraft is null && s.SelectedInterfaceId == "");
+        }
+        P.DiagramCanvasBlockChips? Chips(P.RecursiveDiagramEditorState at, string block) => at.BlockChips.SingleOrDefault(b => b.BlockId == block);
+        string[] ChipTexts(P.RecursiveDiagramEditorState at, string block) => Chips(at, block)?.Chips.Select(c => c.Text).ToArray() ?? [];
+        P.DefinitionTextChoiceData? Facet(P.RecursiveDiagramEditorState at, Func<P.BlockDefinitionData, P.DefinitionTextChoiceData?> facet) =>
+            at.Draft.Definition is { } definition ? facet(definition) : null;
+
+        var start = await Open("start");
+        var level = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var children = level.Inspect(level.SelectedRoot).Children;
+        string psu = children[0].BlockId.ToString("D"), cpu = children[1].BlockId.ToString("D");
+        Assert.IsEmpty(start.BlockChips, "Caption-only blocks show no chips and no Review facets link.");
+        await SelectBlock("psu-selected", psu);
+        var psuSelected = await Read();
+        Assert.IsEmpty(psuSelected.ShownFacets, "A block without component choices lists none.");
+        Assert.IsFalse(Find(psuSelected, "RecursiveFacetRowType").Shown); Assert.IsFalse(Find(psuSelected, "RecursiveFacetStateChosen").Shown);
+        Assert.IsTrue(Find(psuSelected, "RecursiveAddDetail").Shown, "One quiet way to add a detail.");
+
+        // Add detail > Type opens the detail ready for a first chosen value. Escape cancels without a change. The PSU already
+        // shows its General requirement, so the menu reads Schematic, Routing, then Purpose, Type, ...
+        await AddDetail("Home", "Down", "Down", "Down");
+        var typeOpen = await Wait("type-open", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
+        Assert.IsFalse(typeOpen.Dirty); Assert.IsEmpty(typeOpen.ShownFacets);
+        Assert.IsFalse(Find(typeOpen, "RecursiveFacetClear").Shown, "A facet without a value has nothing to clear.");
+        await Capture("add-facet");
+        Key("Escape");
+        var cancelled = await Wait("type-cancelled", s => s.FacetEditor == "");
+        Assert.IsFalse(cancelled.Dirty); Assert.IsNull(cancelled.Draft.Definition, "A cancelled first value stores nothing.");
+        await AddDetail("Home", "Down", "Down", "Down");
+        await Wait("type-reopened", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
+        Type("linear regulator");
+        var typed = await Wait("type-typed", s => Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulator"]) == true && s.Dirty);
+        Assert.AreEqual(P.DefinitionChoiceStateData.DcsdSelected, typed.Draft.Definition.Type.State);
+        Assert.AreEqual(KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsInformation, typed.Draft.Definition.Type.Strength);
+        // Enter keeps the value and returns to the overview; the block now shows a chosen chip and the Review facets link.
+        Key("Return");
+        var typeKept = await Wait("type-kept", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowType");
+        CollectionAssert.AreEqual(new[] { "type" }, typeKept.ShownFacets.ToArray());
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(typeKept, psu));
+        Assert.AreEqual(P.DefinitionChoiceStateData.DcsdSelected, Chips(typeKept, psu)!.Chips[0].State);
+        Assert.IsTrue(Chips(typeKept, psu)!.ReviewFacets.Shown, "A block with choices offers Review facets.");
+        Assert.IsNull(Chips(typeKept, cpu), "The CPU is still only its caption.");
+        // Enter on an overview row opens that facet's detail; Escape returns to the overview.
+        Key("Return"); await Wait("type-row-enter", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateChosen");
+        Key("Escape"); await Wait("type-row-escape", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowType");
+
+        // Package: a chosen value with a preference, then a candidate. Switching carries the value into the candidate list. An
+        // emptied list cannot be kept: the draft keeps the last entry that could, and Save refuses with the notice.
+        await AddDetail("End");
+        await Wait("package-open", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetValue");
+        Type("SOT-23-5");
+        await Wait("package-chosen", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdSelected } c && c.Values.SequenceEqual(["SOT-23-5"]));
+        await Press("RecursiveFacetStrengthPreference");
+        await Wait("package-preference", s => Facet(s, d => d.Package)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
+        await Press("RecursiveFacetStateCandidate");
+        await Wait("package-candidate", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
+            && c.Values.SequenceEqual(["SOT-23-5"]) && c.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference
+            && s.FocusedControl == "RecursiveFacetCandidates");
+        Key("a", control: true); Key("BackSpace");
+        const string listCandidates = "List the candidates, one per line.";
+        var emptyList = await Wait("package-candidates-empty", s => s.FacetNotice == listCandidates);
+        CollectionAssert.AreEqual(new[] { "SOT-23-5" }, emptyList.Draft.Definition.Package.Values.ToArray(), "Nothing is stored until the entry can be kept.");
+        ulong saves = emptyList.CompletedSaveCount; string unsaved = await File.ReadAllTextAsync(created.Path, token);
+        Key("s", control: true);
+        var refused = await Wait("package-save-refused", s => s.Notice == listCandidates && s.FacetEditor == "package");
+        Assert.AreEqual(saves, refused.CompletedSaveCount, "Nothing was sent to save."); Assert.IsTrue(refused.Dirty);
+        Assert.AreEqual(unsaved, await File.ReadAllTextAsync(created.Path, token));
+        Type("SOT-23-5");
+        await Wait("package-candidate-again", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
+            && c.Values.SequenceEqual(["SOT-23-5"]) && s.FacetNotice == "" && s.Notice == "");
+
+        // Manufacturer returns to unknown with its reason; an unknown facet is listed but has no chip.
+        await AddDetail("Home", "Down", "Down", "Down");
+        await Wait("manufacturer-open", s => s.FacetEditor == "manufacturer" && s.FocusedControl == "RecursiveFacetValue");
+        await Press("RecursiveFacetStateUnknown");
+        await Wait("manufacturer-needs-reason", s => s.FacetNotice == "Say why this is unknown." && s.FocusedControl == "RecursiveFacetReason");
+        Type("No preference recorded.");
+        var unknown = await Wait("manufacturer-unknown", s => Facet(s, d => d.Manufacturer) is { State: P.DefinitionChoiceStateData.DcsdUnknown } c
+            && c.UnknownReason == "No preference recorded.");
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "package" }, unknown.ShownFacets.ToArray(), "Only facets with a value are listed.");
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(unknown, psu));
+        CollectionAssert.AreEqual(new[] { P.DefinitionChoiceStateData.DcsdSelected, P.DefinitionChoiceStateData.DcsdCandidates },
+            Chips(unknown, psu)!.Chips.Select(c => c.State).ToArray(), "Chosen and candidate chips are told apart.");
+        Assert.AreEqual(0U, Chips(unknown, psu)!.HiddenChips);
+        await Capture("detail");
+        await Press("RecursiveFacetBack");
+        await Wait("manufacturer-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowManufacturer");
+
+        // The CPU stays caption-only. Review facets on the PSU selects it and opens its first facet's detail.
+        await SelectBlock("cpu-selected", cpu);
+        var cpuSelected = await Read();
+        Assert.IsEmpty(cpuSelected.ShownFacets); Assert.IsNull(Chips(cpuSelected, cpu));
+        var link = Chips(cpuSelected, psu)!.ReviewFacets;
+        Assert.IsTrue(link.Shown && link.Enabled);
+        Click(link.X + link.Width / 2, link.Y + link.Height / 2);
+        await Wait("review-facets", s => s.Draft.Baseline.BlockId == psu && s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateChosen");
+
+        // Type returns to unknown (its chip goes), then back to chosen: a chosen state needs its value typed again.
+        await Press("RecursiveFacetStateUnknown");
+        await Wait("type-needs-reason", s => s.FacetNotice == "Say why this is unknown." && s.FocusedControl == "RecursiveFacetReason");
+        Type("Compare regulator types first.");
+        var typeUnknown = await Wait("type-unknown", s => Facet(s, d => d.Type) is { State: P.DefinitionChoiceStateData.DcsdUnknown } c
+            && c.UnknownReason == "Compare regulator types first.");
+        CollectionAssert.AreEqual(new[] { "Package: SOT-23-5" }, ChipTexts(typeUnknown, psu));
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "package" }, typeUnknown.ShownFacets.ToArray());
+        await Press("RecursiveFacetBack"); await Wait("type-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowType");
+        Key("Return"); await Wait("type-reopened-unknown", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateUnknown");
+        await Press("RecursiveFacetStateChosen");
+        await Wait("type-needs-value", s => s.FacetNotice == "Type the chosen value, or choose another state." && s.FocusedControl == "RecursiveFacetValue");
+        Type("linear regulator");
+        var chosenAgain = await Wait("type-chosen-again", s => Facet(s, d => d.Type) is { State: P.DefinitionChoiceStateData.DcsdSelected } c
+            && c.Values.SequenceEqual(["linear regulator"]) && s.FacetNotice == "");
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(chosenAgain, psu));
+
+        // Clear facet returns Package to unspecified: its row and chip go. Undo brings it back.
+        await Press("RecursiveFacetRowPackage");
+        await Wait("package-row", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetStateCandidate");
+        await Press("RecursiveFacetClear");
+        var cleared = await Wait("package-cleared", s => s.FacetEditor == "" && Facet(s, d => d.Package) is null);
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer" }, cleared.ShownFacets.ToArray());
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
+        Key("z", control: true);
+        await Wait("package-restored", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
+            && c.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
+
+        // Save stores the choices in the PSU's next revision and nothing else about it.
+        ulong beforeSave = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var saved = await Wait("saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
+        Assert.AreEqual("", saved.ErrorMessage);
+        string savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var graph = RecursiveBlockGraphXml.Read(savedXml);
+        var top = graph.Inspect(graph.SelectedRoot);
+        var psuSaved = graph.Inspect(top.Children[0]); var cpuSaved = graph.Inspect(top.Children[1]);
+        var definition = psuSaved.Definition!;
+        Assert.IsTrue(definition.SameContents(new BlockDefinition(
+            Type: new(DefinitionChoiceState.Selected, ["linear regulator"], GuidanceStrength.Information, "", [], VerificationState.Unverified),
+            Manufacturer: new(DefinitionChoiceState.Unknown, [], GuidanceStrength.Information, "", [], VerificationState.Unverified, "No preference recorded."),
+            Package: new(DefinitionChoiceState.Candidates, ["SOT-23-5"], GuidanceStrength.Preference, "", [], VerificationState.Unverified))),
+            "The saved choices are exactly the chosen type, the unknown manufacturer and the candidate package.");
+        Assert.AreEqual("Rail", psuSaved.LocalDiagram.Interfaces.Single().Name, "A chosen name adds no ports.");
+        Assert.IsNull(psuSaved.ComponentBindings, "A chosen name realizes no component.");
+        Assert.IsNull(psuSaved.PhysicalAllocation, "A chosen name allocates no footprint or board.");
+        Assert.AreEqual("Supply the CPU.", graph.Requirements(psuSaved.Selection).Requirements.General);
+        Assert.IsNull(cpuSaved.Definition, "The CPU is still only its caption.");
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(saved, psu), "The saved level shows the same chips.");
+        await Capture("saved");
+
+        // Decline discards a later change and writes nothing.
+        await Press("RecursiveFacetRowType");
+        await Wait("type-detail", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateChosen");
+        await Press("RecursiveFacetStrengthRequirement");
+        await Wait("type-requirement", s => s.Dirty && Facet(s, d => d.Type)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsRequirement);
+        Key("d", alt: true);
+        await Wait("declined", s => !s.Dirty && s.FacetEditor == ""
+            && Facet(s, d => d.Type)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsInformation);
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // A compact window re-fits the level. Chips that no longer fit a smaller block are counted, never drawn clipped.
+        ulong beforeCompact = (await Read()).ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
+        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800);
+        var compactChips = Chips(compact, psu)!;
+        Assert.AreEqual(2, compactChips.Chips.Count + (int)compactChips.HiddenChips, "Every chip is drawn or counted.");
+        Assert.IsTrue(compactChips.Chips.All(c => c.Rect.Shown), "Drawn chips lie inside the canvas.");
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-compact.json"), SchematicJson.Formatter.Format(compact), token);
+        await Capture("compact");
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
+        await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
+
+        // Close and reopen: the saved choices come back on the canvas and in the inspector.
+        Key("w", control: true); await Closed();
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
+        var reopened = await Open("reopened");
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(reopened, psu));
+        Assert.IsNull(Chips(reopened, cpu));
+        await SelectBlock("psu-reopened", psu);
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "package" }, (await Read()).ShownFacets.ToArray());
+        await Press("RecursiveFacetRowManufacturer");
+        var manufacturer = await Wait("manufacturer-reopened", s => s.FacetEditor == "manufacturer");
+        Assert.AreEqual("No preference recorded.", manufacturer.Draft.Definition.Manufacturer.UnknownReason);
+        Assert.IsFalse(manufacturer.Dirty, "Opening a facet's detail changes nothing.");
+        await Capture("reopened");
+        Key("w", control: true); await Closed();
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)

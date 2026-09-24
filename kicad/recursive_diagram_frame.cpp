@@ -24,6 +24,7 @@
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/panel.h>
+#include <wx/radiobut.h>
 #include <wx/scrolwin.h>
 #include <wx/settings.h>
 #include <wx/sizer.h>
@@ -36,6 +37,7 @@
 #include <wx/tglbtn.h>
 #include <wx/toolbar.h>
 #include <wx/weakref.h>
+#include <wx/wrapsizer.h>
 
 namespace D = kiapi::automation::diagrams::v1;
 namespace R = RECURSIVE_DIAGRAM;
@@ -130,8 +132,68 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* inspector = new wxPanel( m_inspectorBook ); auto* properties = new wxBoxSizer( wxVERTICAL );
     auto* side = new wxBoxSizer( wxVERTICAL );
     auto* scroll = new wxScrolledWindow( inspector ); scroll->SetScrollRate( 0, FromDIP( 12 ) );
-    m_inspectorScroll = scroll;
+    m_inspectorScroll = scroll; scroll->SetName( "RecursiveInspector" );
     auto* fields = new wxBoxSizer( wxVERTICAL );
+    // Round A4 option 3 (owner decision n0b2a908b00e78823): the facet overview lists only the facets that have a
+    // value, and one facet's detail edits its state, value, reason and strength. Built first so it leads the
+    // scrolled inspector and its tab order.
+    m_facetHeading = new wxStaticText( scroll, wxID_ANY, _( "Facet overview" ) );
+    m_facetHeading->SetFont( GetFont().Bold() ); fields->Add( m_facetHeading, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        m_facetRows[facet] = new R::FACET_ROW( scroll, facet, [this]( int chosen ) { openFacet( chosen, true ); } );
+        fields->Add( m_facetRows[facet], 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
+    }
+    m_facetDetail = new wxBoxSizer( wxVERTICAL );
+    m_facetBack = new wxButton( scroll, wxID_ANY, wxS( "↑ " ) + _( "Back to facet overview" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_facetBack->SetName( "RecursiveFacetBack" );
+    m_facetBack->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { closeFacet( true ); } );
+    m_facetDetail->Add( m_facetBack, 0, wxTOP | wxBOTTOM, FromDIP( 6 ) );
+    m_facetTitle = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetTitle->SetFont( GetFont().Bold() );
+    m_facetTitle->SetName( "RecursiveFacetTitle" ); m_facetDetail->Add( m_facetTitle, 0, wxBOTTOM, FromDIP( 8 ) );
+    // State and strength are small fixed sets, so each is a row of one-click choices under its label.
+    auto label = [&]( const wxString& text )
+    {
+        auto* item = new wxStaticText( scroll, wxID_ANY, text );
+        m_facetDetail->Add( item, 0, wxTOP, FromDIP( 6 ) ); return item;
+    };
+    auto choices = [&]( std::array<wxRadioButton*, 3>& buttons, const std::array<wxString, 3>& labels, const char* name,
+                        const std::array<const char*, 3>& names )
+    {
+        auto* row = new wxWrapSizer( wxHORIZONTAL );
+        for( int i = 0; i < 3; ++i )
+        {
+            buttons[i] = new wxRadioButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, i == 0 ? wxRB_GROUP : 0 );
+            buttons[i]->SetName( wxString( name ) + names[i] ); row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
+            if( i < 2 ) row->AddSpacer( FromDIP( 6 ) );
+        }
+        m_facetDetail->Add( row, 0, wxEXPAND );
+    };
+    label( _( "State" ) );
+    choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState", { "Chosen", "Candidate", "Unknown" } );
+    m_facetValueLabel = label( _( "Value" ) );
+    m_facetValue = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
+    m_facetValue->SetName( "RecursiveFacetValue" ); m_facetDetail->Add( m_facetValue, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    m_facetCandidates = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    m_facetCandidates->SetName( "RecursiveFacetCandidates" ); m_facetCandidates->SetHint( _( "One per line" ) );
+    m_facetDetail->Add( m_facetCandidates, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    m_facetReason = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    m_facetReason->SetName( "RecursiveFacetReason" ); m_facetDetail->Add( m_facetReason, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    label( _( "Strength" ) );
+    choices( m_facetStrengths, { _( "Information" ), _( "Preference" ), _( "Requirement" ) }, "RecursiveFacetStrength",
+             { "Information", "Preference", "Requirement" } );
+    m_facetNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetNotice->SetName( "RecursiveFacetNotice" );
+    m_facetDetail->Add( m_facetNotice, 0, wxEXPAND | wxTOP, FromDIP( 6 ) );
+    m_facetClear = new wxButton( scroll, wxID_ANY, _( "Clear facet" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_facetClear->SetName( "RecursiveFacetClear" ); m_facetDetail->Add( m_facetClear, 0, wxTOP, FromDIP( 6 ) );
+    m_facetClear->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { clearFacet(); } );
+    for( auto* button : m_facetStates ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetStateChanged(); } );
+    for( auto* button : m_facetStrengths ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetEdited(); } );
+    for( auto* entry : { m_facetValue, m_facetCandidates, m_facetReason } )
+        entry->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) facetEdited(); } );
+    // Enter keeps a typed value and returns to the overview.
+    m_facetValue->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { if( m_facetProblem.empty() ) closeFacet( true ); } );
+    fields->Add( m_facetDetail, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* header = new wxPanel( inspector ); auto* heading = new wxBoxSizer( wxVERTICAL );
     m_owner = new wxStaticText( header, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
     m_owner->SetName( "RecursiveOwnerCaption" );
@@ -164,10 +226,11 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
         m_history[i]->Bind( wxEVT_BUTTON, [this, i]( wxCommandEvent& ) { history( i ); } );
     }
-    m_addRequirement = new wxButton( scroll, wxID_ANY, _( "Add requirement…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-    m_addRequirement->SetName( "RecursiveAddRequirement" );
-    m_addRequirement->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseRequirement(); } );
-    fields->Add( m_addRequirement, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    // The one quiet add-detail action (owner decision n98a3f3c41084f0ed): a requirement box or a facet's first value.
+    m_addDetail = new wxButton( scroll, wxID_ANY, _( "Add detail…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_addDetail->SetName( "RecursiveAddDetail" );
+    m_addDetail->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseDetail(); } );
+    fields->Add( m_addDetail, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
     commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
@@ -255,6 +318,11 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
             event.Skip(); return;
         }
         if( event.GetKeyCode() == WXK_ESCAPE && m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
+        // Escape in a facet's detail returns to the overview and drops an entry that could not be kept.
+        if( event.GetKeyCode() == WXK_ESCAPE && m_facet >= 0 && facetHasFocus() ) { closeFacet( true ); return; }
+        // Tab moves between the detail's controls in order, the multi-line entries included.
+        if( event.GetKeyCode() == WXK_TAB && !event.ControlDown() && !event.AltDown() && m_facet >= 0 && facetHasFocus() )
+        { wxWindow::FindFocus()->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'H' ) { openDiagramHistory(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'I' ) { chooseImplementation(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'R' ) { reloadSaved(); return; }
@@ -368,6 +436,7 @@ RECURSIVE_DIAGRAM_FRAME::LINK_DRAFT RECURSIVE_DIAGRAM_FRAME::connectionDraftFor(
 void RECURSIVE_DIAGRAM_FRAME::resetLevel()
 {
     m_level.Clear(); m_undo.clear(); m_redo.clear(); m_revealed.clear(); m_lastEffects.Clear();
+    m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear();
     if( const REVISION* scope = current() ) *m_level.mutable_scope() = draftFor( *scope );
     m_savedLevel = m_level;
 }
@@ -936,7 +1005,11 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
         m_fields[i]->Enable( available ); m_fields[i]->ChangeValue( Text( field( current_, i ) ) );
         m_history[i]->Show( shown && !isNew ); m_history[i]->Enable( available );
     }
-    m_addRequirement->Show( m_ready && anyHidden ); m_addRequirement->Enable( available );
+    fillFacets( available );
+    bool facetsLeft = false;
+    if( m_ready && !link ) if( const auto* definition = selectedDefinition() )
+        for( int facet = 0; facet < R::FACETS; ++facet ) facetsLeft |= facet != m_facet && !R::HasValue( R::Facet( *definition, facet ) );
+    m_addDetail->Show( m_ready && ( anyHidden || facetsLeft ) ); m_addDetail->Enable( available );
     m_openDiagram->Enable( available && child && !isNew );
     bool writable = m_document.source_writable() || !m_ready;
     m_save->Enable( available && m_dirty && writable ); m_decline->Enable( available && m_dirty );
@@ -984,6 +1057,8 @@ void RECURSIVE_DIAGRAM_FRAME::select( const std::string& requested )
     for( const auto& child : m_level.scope().children() ) present |= child.block_id() == id;
     if( !present ) id = m_level.scope().baseline().block_id();
     if( m_selected == id && m_connectionId.empty() && m_portId.empty() ) return;
+    // Another element's properties start at the top of the inspector, with its caption and component choices.
+    if( m_selected != id || !m_connectionId.empty() ) m_inspectorScroll->Scroll( 0, 0 );
     m_selected = id; m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_newComment = false;
     ++m_viewRevision; refresh();
 }
@@ -993,6 +1068,7 @@ void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
     bool present = false;
     for( const auto& root : m_level.scope().local_diagram().connections() ) present |= root.connection_id() == id;
     if( !present || ( !newConnection( id ) && !savedConnection( id ) ) ) return;
+    m_inspectorScroll->Scroll( 0, 0 );
     m_selected = m_level.scope().baseline().block_id(); m_connectionId = id; m_portOwner.clear(); m_portId.clear();
     m_commentId.clear(); m_newComment = false; ++m_viewRevision; refresh();
 }
@@ -1148,19 +1224,319 @@ void RECURSIVE_DIAGRAM_FRAME::revealField( int which )
     m_revealed[key][which] = true;
     refresh(); m_fields[which]->SetFocus();
 }
-void RECURSIVE_DIAGRAM_FRAME::chooseRequirement()
+void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen ) return;
-    wxMenu menu; const int first = wxWindow::NewControlId( 3 );
+    wxMenu menu; const int reserved = 3 + R::FACETS, first = wxWindow::NewControlId( reserved );
     for( int i = 0; i < 3; ++i ) if( !m_fields[i]->IsShown() )
     {
         menu.Append( first + i, FIELD_LABELS[i] );
         menu.Bind( wxEVT_MENU, [this, i]( wxCommandEvent& ) { revealField( i ); }, first + i );
     }
-    wxPoint position = ScreenToClient( m_addRequirement->ClientToScreen( wxPoint( 0, m_addRequirement->GetSize().y ) ) );
+    // A block's facets that have no value yet; choosing one opens its detail to give it a first value.
+    if( m_connectionId.empty() ) if( const auto* definition = selectedDefinition() )
+    {
+        bool separated = menu.GetMenuItemCount() == 0;
+        for( int facet = 0; facet < R::FACETS; ++facet )
+        {
+            if( facet == m_facet || R::HasValue( R::Facet( *definition, facet ) ) ) continue;
+            if( !separated ) { menu.AppendSeparator(); separated = true; }
+            menu.Append( first + 3 + facet, R::FacetLabel( facet ) );
+            menu.Bind( wxEVT_MENU, [this, facet]( wxCommandEvent& ) { openFacet( facet, false ); }, first + 3 + facet );
+        }
+    }
+    wxPoint position = ScreenToClient( m_addDetail->ClientToScreen( wxPoint( 0, m_addDetail->GetSize().y ) ) );
     PopupMenu( &menu, position );
-    wxWindow::UnreserveControlId( first, 3 );
+    wxWindow::UnreserveControlId( first, reserved );
 }
+// ---- Component choices (Round A4) -----------------------------------------------------------
+// Owner decisions n0b2a908b00e78823 and n98a3f3c41084f0ed: a block shows a chip for each chosen or candidate
+// facet; the inspector lists only the facets that have a value; one facet's detail edits its state, value,
+// reason and strength; a facet can return to unknown or be cleared. A chosen name never creates pins, a
+// footprint or a native component (decision na7aa99408263431e): only the definition in the draft changes.
+
+const D::BlockDefinitionData* RECURSIVE_DIAGRAM_FRAME::selectedDefinition() const
+{
+    if( !m_ready || !m_connectionId.empty() || !current() ) return nullptr;
+    if( const auto* added = newChild( m_selected ) ) return &added->definition();
+    if( const auto* draft = selectedBlockDraft() ) return &draft->definition();
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+        if( const REVISION* saved = revision( child ) ) return &saved->definition();
+    return nullptr;
+}
+void RECURSIVE_DIAGRAM_FRAME::storeFacet( int facet, const D::DefinitionTextChoiceData* choice )
+{
+    auto store = []( auto* owner, int which, const D::DefinitionTextChoiceData* value )
+    {
+        if( value ) { *R::MutableFacet( owner->mutable_definition(), which ) = *value; return; }
+        if( !owner->has_definition() ) return;
+        R::ClearFacet( owner->mutable_definition(), which );
+        // A definition that records nothing is no definition, as the saved block had none.
+        if( R::EmptyDefinition( owner->definition() ) ) owner->clear_definition();
+    };
+    if( auto* added = newChild( m_selected ) ) store( added, facet, choice );
+    else if( DRAFT* draft = editBlock( true ) ) store( draft, facet, choice );
+}
+bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice, wxString& problem ) const
+{
+    const auto* definition = selectedDefinition();
+    const auto* base = definition && m_facet >= 0 ? R::Facet( *definition, m_facet ) : nullptr;
+    int state = facetState(), strength = facetStrength();
+    choice.Clear();
+    choice.set_strength( static_cast<kiapi::automation::structure::v1::StructuralGuidanceStrength>( strength ) );
+    // Conditions and sources recorded with the facet stay with it.
+    if( base ) { choice.set_applicability( base->applicability() ); *choice.mutable_sources() = base->sources(); }
+    if( state == 0 )
+    {
+        wxString value = m_facetValue->GetValue().Strip( wxString::both );
+        if( value.empty() ) { problem = _( "Type the chosen value, or choose another state." ); return false; }
+        choice.set_state( D::DCSD_SELECTED ); choice.add_values( R::Utf8( value ) );
+    }
+    else if( state == 1 )
+    {
+        choice.set_state( D::DCSD_CANDIDATES );
+        wxArrayString lines = wxSplit( m_facetCandidates->GetValue(), '\n', '\0' );
+        for( auto line : lines )
+        {
+            line = line.Strip( wxString::both ); std::string value = R::Utf8( line );
+            if( !value.empty() && std::find( choice.values().begin(), choice.values().end(), value ) == choice.values().end() ) choice.add_values( value );
+        }
+        if( choice.values().empty() ) { problem = _( "List the candidates, one per line." ); return false; }
+    }
+    else
+    {
+        wxString reason = m_facetReason->GetValue().Strip( wxString::both );
+        if( reason.empty() ) { problem = _( "Say why this is unknown." ); return false; }
+        choice.set_state( D::DCSD_UNKNOWN ); choice.set_unknown_reason( R::Utf8( reason ) );
+    }
+    // A changed state or value is no longer the one that was verified.
+    bool same = base && base->state() == choice.state() && base->values().size() == choice.values().size()
+                && std::equal( base->values().begin(), base->values().end(), choice.values().begin() );
+    choice.set_verification( same ? base->verification() : kiapi::automation::structure::v1::SV_UNVERIFIED );
+    problem.clear(); return true;
+}
+void RECURSIVE_DIAGRAM_FRAME::fillFacetForm()
+{
+    // The detail shows the draft's facet, or a first chosen value for a facet that has none yet.
+    const auto* definition = selectedDefinition();
+    const auto* choice = definition && m_facet >= 0 ? R::Facet( *definition, m_facet ) : nullptr;
+    if( !R::HasValue( choice ) ) return;
+    bool wasUpdating = m_updating; m_updating = true;
+    int state = choice->state() == D::DCSD_SELECTED ? 0 : choice->state() == D::DCSD_CANDIDATES ? 1 : 2;
+    setFacetState( state ); setFacetStrength( static_cast<int>( choice->strength() ) );
+    auto set = []( wxTextCtrl* control, const wxString& value ) { if( control->GetValue() != value ) control->ChangeValue( value ); };
+    if( state == 0 ) set( m_facetValue, R::ChoiceValue( *choice, wxS( "\n" ) ) );
+    if( state == 1 ) set( m_facetCandidates, R::ChoiceValue( *choice, wxS( "\n" ) ) );
+    if( state == 2 ) set( m_facetReason, R::Text( choice->unknown_reason() ) );
+    m_updating = wasUpdating;
+}
+void RECURSIVE_DIAGRAM_FRAME::showFacetFields()
+{
+    bool open = m_facet >= 0; int state = facetState();
+    m_facetValue->Show( open && state == 0 ); m_facetCandidates->Show( open && state == 1 ); m_facetReason->Show( open && state == 2 );
+    m_facetValueLabel->SetLabel( state == 1 ? _( "Candidates" ) : state == 2 ? _( "Reason" ) : _( "Value" ) );
+}
+void RECURSIVE_DIAGRAM_FRAME::fillFacets( bool available )
+{
+    const auto* definition = selectedDefinition();
+    // The detail belongs to one block: selecting anything else closes it and drops an entry that could not be kept.
+    if( m_facet >= 0 && ( !definition || m_selected != m_facetOwner ) )
+    { m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear(); }
+    bool any = false;
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        const auto* choice = definition ? R::Facet( *definition, facet ) : nullptr;
+        bool shown = R::HasValue( choice );
+        if( shown ) m_facetRows[facet]->SetChoice( *choice, facet == m_facet );
+        if( m_facetRows[facet]->IsShown() != shown ) m_facetRows[facet]->Show( shown );
+        m_facetRows[facet]->Enable( available ); any |= shown;
+    }
+    m_facetHeading->Show( any );
+    bool open = m_facet >= 0;
+    m_facetDetail->ShowItems( open );
+    if( open )
+    {
+        if( !m_facetTouched ) fillFacetForm();
+        m_facetTitle->SetLabel( R::FacetLabel( m_facet ) );
+        const auto* choice = R::Facet( *definition, m_facet );
+        m_facetClear->Show( R::HasValue( choice ) );
+        m_facetNotice->SetLabel( m_facetProblem ); m_facetNotice->Show( !m_facetProblem.empty() );
+        bool dark = [&] { wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ); return window.Red() + window.Green() + window.Blue() < 384; }();
+        m_facetNotice->SetForegroundColour( dark ? wxColour( 255, 145, 135 ) : wxColour( 176, 0, 32 ) );
+        m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
+    }
+    showFacetFields();
+    for( wxWindow* control : facetControls() ) control->Enable( available );
+}
+void RECURSIVE_DIAGRAM_FRAME::openFacet( int facet, bool focusState )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || !m_connectionId.empty() || facet < 0 || facet >= R::FACETS || !selectedDefinition() ) return;
+    finishCaption( false );
+    m_facet = facet; m_facetOwner = m_selected; m_facetTouched = false; m_facetProblem.clear();
+    const auto* choice = R::Facet( *selectedDefinition(), facet );
+    bool wasUpdating = m_updating; m_updating = true;
+    // A facet without a value opens ready for its first chosen value.
+    m_facetValue->ChangeValue( wxEmptyString ); m_facetCandidates->ChangeValue( wxEmptyString ); m_facetReason->ChangeValue( wxEmptyString );
+    setFacetState( 0 ); setFacetStrength( 0 );
+    m_updating = wasUpdating;
+    ++m_viewRevision; refresh();
+    // Focus moves once the click or menu that opened the detail has finished with it.
+    bool state = focusState && R::HasValue( choice );
+    CallAfter( [this, facet, state]
+               {
+                   if( m_closing || m_facet != facet ) return;
+                   if( state ) m_facetStates[facetState()]->SetFocus();
+                   else if( m_facetValue->IsShown() ) m_facetValue->SetFocus();
+                   else if( m_facetCandidates->IsShown() ) m_facetCandidates->SetFocus();
+                   else m_facetReason->SetFocus();
+               } );
+}
+void RECURSIVE_DIAGRAM_FRAME::closeFacet( bool focusRow )
+{
+    if( m_facet < 0 ) return;
+    int facet = m_facet;
+    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) m_notice.clear();
+    m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear();
+    ++m_viewRevision; refresh();
+    if( !focusRow ) return;
+    if( m_facetRows[facet]->IsShown() ) m_facetRows[facet]->SetFocus();
+    else if( m_addDetail->IsShown() ) m_addDetail->SetFocus();
+    else m_canvas->SetFocus();
+}
+bool RECURSIVE_DIAGRAM_FRAME::facetHasFocus() const
+{
+    wxWindow* focus = wxWindow::FindFocus();
+    for( wxWindow* control : facetControls() ) if( focus == control ) return true;
+    return false;
+}
+std::vector<wxWindow*> RECURSIVE_DIAGRAM_FRAME::facetControls() const
+{
+    std::vector<wxWindow*> controls{ m_facetBack };
+    controls.insert( controls.end(), m_facetStates.begin(), m_facetStates.end() );
+    controls.insert( controls.end(), { m_facetValue, m_facetCandidates, m_facetReason } );
+    controls.insert( controls.end(), m_facetStrengths.begin(), m_facetStrengths.end() );
+    controls.push_back( m_facetClear );
+    return controls;
+}
+int RECURSIVE_DIAGRAM_FRAME::facetState() const
+{
+    for( int i = 0; i < 3; ++i ) if( m_facetStates[i]->GetValue() ) return i;
+    return 0;
+}
+int RECURSIVE_DIAGRAM_FRAME::facetStrength() const
+{
+    for( int i = 0; i < 3; ++i ) if( m_facetStrengths[i]->GetValue() ) return i;
+    return 0;
+}
+void RECURSIVE_DIAGRAM_FRAME::setFacetState( int state )
+{
+    if( state >= 0 && state < 3 && !m_facetStates[state]->GetValue() ) m_facetStates[state]->SetValue( true );
+}
+void RECURSIVE_DIAGRAM_FRAME::setFacetStrength( int strength )
+{
+    if( strength >= 0 && strength < 3 && !m_facetStrengths[strength]->GetValue() ) m_facetStrengths[strength]->SetValue( true );
+}
+void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()
+{
+    if( m_facet < 0 ) return;
+    int state = facetState();
+    bool wasUpdating = m_updating; m_updating = true;
+    // Switching between chosen and candidate carries the value across; an unknown facet needs its own reason.
+    wxString value = m_facetValue->GetValue().Strip( wxString::both ), candidates = m_facetCandidates->GetValue().Strip( wxString::both );
+    if( state == 1 && candidates.empty() ) m_facetCandidates->ChangeValue( value );
+    if( state == 0 && value.empty() ) m_facetValue->ChangeValue( candidates.BeforeFirst( '\n' ).Strip( wxString::both ) );
+    m_updating = wasUpdating;
+    showFacetFields(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    facetEdited();
+    // Focus moves to the entry the state asks for once the drop-down list has closed and returned focus.
+    CallAfter( [this, state]
+               {
+                   if( m_closing || m_facet < 0 || facetState() != state ) return;
+                   if( state == 0 ) m_facetValue->SetFocus(); else if( state == 1 ) m_facetCandidates->SetFocus(); else m_facetReason->SetFocus();
+               } );
+}
+void RECURSIVE_DIAGRAM_FRAME::facetEdited()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_facet < 0 || !selectedDefinition() ) return;
+    D::DefinitionTextChoiceData choice; wxString problem;
+    if( !facetFromForm( choice, problem ) )
+    {
+        // Nothing is stored until the entry can be kept; the detail says what is missing.
+        m_facetTouched = true; m_facetProblem = problem;
+        m_facetNotice->SetLabel( problem ); m_facetNotice->Show();
+        m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
+        m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision; return;
+    }
+    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) { m_notice.clear(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); }
+    m_facetTouched = false; m_facetProblem.clear();
+    if( m_facetNotice->IsShown() ) { m_facetNotice->Hide(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); }
+    const auto* existing = R::Facet( *selectedDefinition(), m_facet );
+    if( existing && existing->SerializeAsString() == choice.SerializeAsString() ) return;
+    LEVEL before = m_level;
+    storeFacet( m_facet, &choice );
+    if( before.SerializeAsString() == m_level.SerializeAsString() ) return;
+    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
+    // Like requirement text, do not refill the detail while typing: it would move the caret.
+    bool wasUpdating = m_updating; m_updating = true;
+    const auto* definition = selectedDefinition(); bool any = false;
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        const auto* item = R::Facet( *definition, facet ); bool shown = R::HasValue( item );
+        if( shown ) m_facetRows[facet]->SetChoice( *item, facet == m_facet );
+        if( m_facetRows[facet]->IsShown() != shown ) m_facetRows[facet]->Show( shown );
+        any |= shown;
+    }
+    m_facetHeading->Show( any ); m_facetClear->Show( true );
+    m_updating = wasUpdating;
+    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
+    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_rendered = false; m_canvas->Refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::clearFacet()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_facet < 0 || !selectedDefinition() ) return;
+    if( !R::HasValue( R::Facet( *selectedDefinition(), m_facet ) ) ) { closeFacet( true ); return; }
+    pushUndo(); storeFacet( m_facet, nullptr );
+    m_dirty = hasChanges(); closeFacet( false ); changed();
+    if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_canvas->SetFocus();
+}
+void RECURSIVE_DIAGRAM_FRAME::reviewFacets( const std::string& block )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview ) return;
+    finishCaption( false ); select( block );
+    if( m_selected != block ) return;
+    if( const auto* definition = selectedDefinition() )
+        for( int facet = 0; facet < R::FACETS; ++facet )
+            if( R::HasValue( R::Facet( *definition, facet ) ) ) { openFacet( facet, true ); return; }
+}
+wxFont RECURSIVE_DIAGRAM_FRAME::chipFont() const
+{
+    wxFont small = GetFont(); small.SetPointSize( std::max( 8, small.GetPointSize() - 2 ) ); return small;
+}
+wxColour RECURSIVE_DIAGRAM_FRAME::linkColour() const
+{
+    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    return accent.ChangeLightness( window.Red() + window.Green() + window.Blue() < 384 ? 170 : 62 );
+}
+std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::drawnChips() const
+{
+    std::vector<std::pair<std::string, R::BLOCK_CHIPS>> result;
+    if( !m_ready || !current() ) return result;
+    auto drawn = layout( current(), !m_historyPreview );
+    wxClientDC dc( m_canvas ); wxFont small = chipFont(), caption = GetFont().Bold().Larger();
+    for( const auto& node : drawn.Nodes() )
+    {
+        wxRect inner = wxRect( toScreen( drawn.Rect( node.id ) ) ).Deflate( 8 );
+        dc.SetFont( caption ); int captionRight = inner.x + 10 + dc.GetTextExtent( Text( node.name ) ).x;
+        auto chips = R::LayoutChips( dc, node, inner, small, captionRight );
+        if( chips.shown ) result.emplace_back( node.id, std::move( chips ) );
+    }
+    return result;
+}
+
 void RECURSIVE_DIAGRAM_FRAME::edit()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen ) return;
@@ -1252,6 +1628,14 @@ void RECURSIVE_DIAGRAM_FRAME::save()
     // A caption being typed is part of the draft. A blank one cannot be kept, so nothing is saved and the
     // caption editor stays open with its notice.
     if( m_captionKind ) { finishCaption( true ); if( m_captionKind ) return; }
+    // A facet entry that cannot be kept yet is part of what the person is doing: nothing is saved and the
+    // detail stays open with its notice, as for a blank caption.
+    if( m_facet >= 0 && m_facetTouched && !m_facetProblem.empty() )
+    {
+        m_notice = Utf8( m_facetProblem ); refresh();
+        if( m_facetValue->IsShown() ) m_facetValue->SetFocus(); else if( m_facetCandidates->IsShown() ) m_facetCandidates->SetFocus(); else m_facetReason->SetFocus();
+        return;
+    }
     if( !m_dirty ) return;
     if( !m_document.source_writable() )
     { m_errorCode = "diagram_file_read_only"; m_error = "This diagram file is read-only; changes cannot be saved."; refresh(); return; }
@@ -1439,6 +1823,12 @@ void RECURSIVE_DIAGRAM_FRAME::undo( bool redo )
     for( const auto& child : m_level.scope().children() ) block |= child.block_id() == m_selected;
     if( !block ) { m_selected = m_level.scope().baseline().block_id(); m_portOwner.clear(); m_portId.clear(); }
     m_notice.clear(); m_lastEffects.Clear();
+    if( m_facet >= 0 )
+    {
+        const auto* definition = selectedDefinition();
+        m_facetTouched = false; m_facetProblem.clear();
+        if( !definition || !R::HasValue( R::Facet( *definition, m_facet ) ) ) { m_facet = -1; m_facetOwner.clear(); }
+    }
     m_dirty = hasChanges(); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::close( wxCloseEvent& event )
@@ -1586,6 +1976,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             mirror->set_baseline_requirement_revision_id( added->requirement_revision_id() );
             mirror->mutable_baseline_fields(); *mirror->mutable_fields() = added->fields();
             *mirror->mutable_local_diagram()->mutable_interfaces() = added->interfaces();
+            if( added->has_definition() ) *mirror->mutable_definition() = added->definition();
         }
         else if( const auto* draft = m_connectionId.empty() ? selectedBlockDraft() : &m_level.scope() ) *result.mutable_draft() = *draft;
         else for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
@@ -1624,6 +2015,30 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_notice( m_notice );
     if( auto* status = GetStatusBar() ) result.set_status_text( Utf8( status->GetStatusText() ) );
     result.set_dragging( m_drag != DRAG::NONE );
+    // Round A4: chips and Review facets links as drawn, the facet overview and the open detail.
+    {
+        wxPoint origin = m_canvas->GetScreenPosition() - GetScreenPosition();
+        wxRect visible( wxPoint( 0, 0 ), m_canvas->GetClientSize() );
+        bool usable = m_ready && !m_process && !m_diagramHistoryOpen && !m_historyPreview;
+        auto place = [&]( D::DiagramControlRect* out, const std::string& name, const wxRect& rect, bool enabled )
+        {
+            out->set_name( name ); out->set_x( origin.x + rect.x ); out->set_y( origin.y + rect.y );
+            out->set_width( rect.width ); out->set_height( rect.height ); out->set_shown( visible.Contains( rect ) ); out->set_enabled( enabled );
+        };
+        for( const auto& [block, chips] : drawnChips() )
+        {
+            auto* row = result.add_block_chips(); row->set_block_id( block ); row->set_hidden_chips( chips.hidden );
+            for( const auto& chip : chips.chips )
+            {
+                auto* item = row->add_chips(); item->set_facet( R::FacetName( chip.facet ) ); item->set_state( chip.state );
+                item->set_text( Utf8( chip.text ) ); place( item->mutable_rect(), "DiagramFacetChip", chip.rect, false );
+            }
+            if( chips.link ) place( row->mutable_review_facets(), "DiagramReviewFacets", *chips.link, usable );
+        }
+        for( int facet = 0; facet < R::FACETS; ++facet ) if( m_facetRows[facet]->IsShown() ) result.add_shown_facets( R::FacetName( facet ) );
+        result.set_facet_editor( m_facet >= 0 ? R::FacetName( m_facet ) : "" );
+        result.set_facet_notice( Utf8( m_facetProblem ) );
+    }
     for( const auto& [block, view] : m_views )
     { auto* row = result.add_level_viewports(); row->set_block_id( block ); row->set_origin_x( view.origin.m_x ); row->set_origin_y( view.origin.m_y ); row->set_scale( view.scale ); }
     if( auto* canvas = current() )
@@ -1665,16 +2080,20 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
     };
-    std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete, m_endpoints, m_comments };
+    std::vector<wxWindow*> windows{ m_caption, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete, m_endpoints, m_comments,
+                                    m_inspectorScroll };
     for( auto& [tool, button] : m_strip ) windows.push_back( button );
     for( auto* child : m_palette->GetChildren() ) windows.push_back( child );
     for( int i = 0; i < 3; ++i ) { windows.push_back( m_fields[i] ); windows.push_back( m_history[i] ); }
+    for( auto* row : m_facetRows ) windows.push_back( row );
+    for( wxWindow* detail : facetControls() ) windows.push_back( detail );
     for( auto* item : windows )
     {
         if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
         auto* toggle = dynamic_cast<wxToggleButton*>( item );
+        auto* radio = dynamic_cast<wxRadioButton*>( item );
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
-                 toggle && toggle->GetValue() );
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ) );
     }
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( Utf8( focused->GetName() ) );

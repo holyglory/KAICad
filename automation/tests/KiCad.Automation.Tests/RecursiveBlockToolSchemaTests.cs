@@ -45,5 +45,15 @@ public sealed class RecursiveBlockToolSchemaTests
         var record = JsonSerializer.Deserialize<InterfaceRealization>(
             "{\"interfaceId\":\"" + Guid.NewGuid() + "\",\"state\":0,\"unresolvedReason\":\"Not stated yet.\"}", options)!;
         record.Validate(); Assert.IsEmpty(record.TargetList);
+        // An agent's proposal carries the level it refines with its drawn layout and notes (the native connection-details journey
+        // publishes one); the whole local diagram comes back exactly.
+        Guid block = Guid.NewGuid(), port = Guid.NewGuid(), link = Guid.NewGuid();
+        var drawn = new BlockLocalDiagram([new(port, "DC input", "")], [new(link, Guid.NewGuid(), Guid.NewGuid())],
+            [new(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Feed the CPU from the rail.", new(DiagramAnnotationTargetKind.Connection, link), null, [],
+                RecursiveBlockFixture.Origin())],
+            new DiagramPresentationView([new(block, new(140, 130, 240, 140))], [new(Guid.NewGuid(), port, DiagramPortSide.Left, 110)],
+                [new(link, 1, [new(510, 250), new(510, 275)])], new(100, 90, 780, 310)), default);
+        var back = JsonSerializer.Deserialize<BlockLocalDiagram>(JsonSerializer.Serialize(drawn, options), options)!;
+        Assert.IsTrue(drawn.SameContents(back), "A drawn level survives the agent's JSON exactly.");
     }
 }

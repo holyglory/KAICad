@@ -152,6 +152,8 @@ struct LINK
     std::string id, name;
     bool isNew = false;
     std::vector<D::DiagramEndpointBindingData> endpoints;
+    /// Its direction detail (Round A3); the canvas draws arrowheads for it.
+    D::DiagramConnectionDirection direction = D::DCDR_UNSPECIFIED;
 };
 
 /// A port anchor as drawn: stored (PLACED) or from the deterministic fallback (FALLBACK).

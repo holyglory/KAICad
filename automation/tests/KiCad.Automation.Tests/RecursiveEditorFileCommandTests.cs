@@ -1219,6 +1219,138 @@ public sealed class RecursiveEditorFileCommandTests
         static P.RequirementFieldsData Fields(DiagramRequirements value) => new() { General = value.General, Schematic = value.Schematic, Routing = value.Routing };
     }
 
+    // ---- Connection signals (Round A3, owner decision nf53af9d74841b7d3) ----
+    // The native journey (VerifyConnectionDetails) adds and removes signals through the rendered inspector; this test drives the
+    // same compiled helper with the drafts the editor never sends, to prove each member-list rule fails closed without writing.
+
+    [TestMethod]
+    public async Task ConnectionSignalsSaveAsMembersAndSavedSignalsLeaveThroughTheRemovalCascade()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-signals-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, original);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"]; var powerLink = f.Links["System/Power"];
+            var archive = graph.Connections(system.BlockId);
+            ImmutableArray<DiagramEndpointBinding> ends = [DiagramEndpointBinding.Unknown(psu.BlockId), DiagramEndpointBinding.Unknown(cpu.BlockId)];
+            static ConnectionSelection Fresh() => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            NewConnectionOccurrence Signal(string name, Guid parent, ImmutableArray<DiagramEndpointBinding> at) => new(Fresh(), Guid.NewGuid(), "Initial", name,
+                DiagramConnectionKind.Signal, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, at, DiagramRequirements.Empty, null, parent);
+            // Drawn in one level draft: I2C with its signals SDA and SCL and three more details, and the saved Power gaining GND.
+            var i2c = Fresh();
+            var drawnI2c = new NewConnectionOccurrence(i2c, Guid.NewGuid(), "Initial", "I2C", DiagramConnectionKind.Interface, DiagramDomain.Data,
+                DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null);
+            var sda = Signal("SDA", i2c.ConnectionId, ends); var scl = Signal("SCL", i2c.ConnectionId, ends);
+            var gnd = Signal("GND", powerLink.ConnectionId, archive.Inspect(powerLink).Endpoints);
+            var power = archive.StartDraft(powerLink) with { Members = [gnd.Selection], Direction = DiagramConnectionDirection.FromFirst, Domain = DiagramDomain.Power };
+            var level = graph.StartLevelDraft(system);
+            level = level with
+            {
+                Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(i2c) } },
+                ConnectionDrafts = [power], NewConnections = [drawnI2c, sda, scl, gnd]
+            };
+            // Each malformed member list is refused and leaves the file unchanged.
+            var refusals = new List<(string Name, RecursiveLevelDraft Draft, string Code)>
+            {
+                ("a signal that is also a root", level with { Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with {
+                    Connections = level.Scope.LocalDiagram.Connections.Add(sda.Selection) } } }, "invalid_level_draft"),
+                ("a signal of a connection not on this level", level with { NewConnections = [drawnI2c, sda, scl, gnd with { MemberOf = Guid.NewGuid() }] },
+                    "invalid_level_draft"),
+                ("a signal of a saved connection the draft does not edit", level with { ConnectionDrafts = [] }, "invalid_level_draft"),
+                ("a signal of another signal", level with { NewConnections = [drawnI2c, sda, scl with { MemberOf = sda.Selection.ConnectionId }, gnd] }, "invalid_level_draft"),
+                ("a signal the connection does not list", level with { ConnectionDrafts = [power with { Members = [] }] }, "connection_member_edit_requires_member_path"),
+                ("a signal listed twice", level with { ConnectionDrafts = [power with { Members = [gnd.Selection, gnd.Selection] }] },
+                    "connection_member_edit_requires_member_path"),
+                ("a single signal with signals", level with { NewConnections = [drawnI2c with { Kind = DiagramConnectionKind.Signal }, sda, scl, gnd] },
+                    "invalid_diagram_connection_archive"),
+            };
+            foreach (var (name, draft, code) in refusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            var saved = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], level));
+            Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            Assert.HasCount(5, saved.SaveSummary.CreatedConnectionRevisions, "I2C, SDA, SCL, GND and the Power successor.");
+            string savedXml = await File.ReadAllTextAsync(path); var stored = RecursiveBlockGraphXml.Read(savedXml);
+            Assert.AreEqual(savedXml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(saved.Document.Graph)));
+            var top = stored.Inspect(stored.SelectedRoot); var links = stored.Connections(system.BlockId);
+            var i2cSaved = links.Inspect(top.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL" }, i2cSaved.Members.Select(m => links.Inspect(m).Name).ToArray(), "The signals keep the order they were added in.");
+            Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Members.IsEmpty));
+            Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Endpoints.Length == ends.Length
+                && links.Inspect(m).Endpoints.Zip(ends).All(e => e.First.SameDefinition(e.Second))), "A signal runs between its connection's ends.");
+            Assert.AreEqual((DiagramConnectionKind.Interface, DiagramDomain.Data, DiagramConnectionDirection.FromFirst), (i2cSaved.Kind, i2cSaved.Domain, i2cSaved.Direction));
+            Assert.IsFalse(top.LocalDiagram.Connections.Any(c => c.ConnectionId == sda.Selection.ConnectionId), "A signal is never a connection of the level itself.");
+            var powerSaved = top.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId);
+            Assert.AreNotEqual(powerLink, powerSaved);
+            Assert.AreEqual(gnd.Selection, links.Inspect(powerSaved).Members.Single());
+            Assert.AreEqual((DiagramDomain.Power, DiagramConnectionDirection.FromFirst), (links.Inspect(powerSaved).Domain, links.Inspect(powerSaved).Direction));
+            Assert.IsTrue(links.Inspect(powerLink).Members.IsEmpty, "The earlier Power revision keeps its history unchanged.");
+
+            // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
+            var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",
+                new(DiagramAnnotationTargetKind.Connection, gnd.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+            var current = stored.StartLevelDraft(stored.SelectedRoot);
+            current = current with { Scope = current.Scope with { Diagram = current.Scope.LocalDiagram with {
+                Annotations = current.Scope.LocalDiagram.Notes.Add(note) } } };
+            var removed = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: powerLink.ConnectionId, members: [gnd.Selection.ConnectionId]));
+            Assert.IsTrue(removed.Success, removed.ErrorMessage);
+            CollectionAssert.AreEquivalent(new[] { (P.LevelEditEffectKind.LeekConnectionRemoved, "GND"),
+                (P.LevelEditEffectKind.LeekAnnotationUnresolved, "Target removed from this diagram level.") },
+                removed.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray());
+            var withoutGnd = RecursiveBlockCodec.Decode(removed.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutGnd.ConnectionDrafts.Single(d => d.Baseline.ConnectionId == powerLink.ConnectionId).Members.IsEmpty);
+            Assert.AreEqual(powerSaved, withoutGnd.Scope.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId), "Power itself stays.");
+            Assert.IsNotNull(withoutGnd.Scope.LocalDiagram.Notes.Single().Target.UnresolvedReason);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Preparing a removal never writes.");
+            var afterRemoval = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], withoutGnd));
+            Assert.IsTrue(afterRemoval.Success, afterRemoval.ErrorMessage);
+            var removedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var removedLinks = removedGraph.Connections(system.BlockId);
+            var powerNow = removedLinks.Inspect(removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId));
+            Assert.IsTrue(powerNow.Members.IsEmpty); Assert.AreEqual(DiagramDomain.Power, powerNow.Domain, "Only the signal left.");
+            Assert.AreEqual("GND", removedLinks.Inspect(gnd.Selection).Name, "The removed signal's saved revision stays in history.");
+
+            // A signal drawn in a draft simply goes; removing its connection takes its drawn signals with it.
+            var later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var i2cNow = removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId);
+            var intLine = Signal("INT", i2c.ConnectionId, ends);
+            var i2cDraft = removedLinks.StartDraft(i2cNow); i2cDraft = i2cDraft with { Members = i2cDraft.Members.Add(intLine.Selection) };
+            later = later with { ConnectionDrafts = [i2cDraft], NewConnections = [intLine] };
+            string token = afterRemoval.SourceToken;
+            var dropped = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [intLine.Selection.ConnectionId]));
+            Assert.IsTrue(dropped.Success, dropped.ErrorMessage);
+            var droppedDraft = RecursiveBlockCodec.Decode(dropped.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsEmpty(droppedDraft.NewConnections);
+            CollectionAssert.AreEqual(removedLinks.Inspect(i2cNow).Members.ToArray(), droppedDraft.ConnectionDrafts.Single().Members.ToArray(),
+                "Only the drawn signal left the connection's member list.");
+            var gone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnection, connection: i2c.ConnectionId));
+            Assert.IsTrue(gone.Success, gone.ErrorMessage);
+            Assert.IsEmpty(RecursiveBlockCodec.Decode(gone.LevelEdit.Draft, graph.DocumentId).NewConnections, "The drawn signal goes with its connection.");
+            // Removals that name no signal of that connection, or the same one twice, or signals on another kind of removal, fail closed.
+            foreach (var (members, kind, code) in new (Guid[] Members, P.LevelEditCommandKind Kind, string Code)[]
+            {
+                ([Guid.NewGuid()], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId, sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnection, "invalid_level_draft"),
+            })
+            {
+                var refused = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later, kind,
+                    connection: i2c.ConnectionId, members: members));
+                Assert.IsFalse(refused.Success, code); Assert.AreEqual(code, refused.ErrorCode);
+            }
+            Assert.AreEqual(await File.ReadAllTextAsync(path), RecursiveBlockGraphXml.Write(removedGraph));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static P.RecursiveFileRequest SaveLevelRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft)
     {
@@ -1237,7 +1369,7 @@ public sealed class RecursiveEditorFileCommandTests
 
     private static P.RecursiveFileRequest LevelEditRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft, P.LevelEditCommandKind kind, Guid? block = null, Guid? connection = null,
-        Guid? boundary = null, bool detach = false)
+        Guid? boundary = null, bool detach = false, IEnumerable<Guid>? members = null)
     {
         var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; request.ExpectedSourceToken = token;
         request.LevelEdit = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft), Kind = kind, DetachConnections = detach,
@@ -1246,6 +1378,7 @@ public sealed class RecursiveEditorFileCommandTests
         if (block is { } owner) request.LevelEdit.BlockId = owner.ToString("D");
         if (connection is { } link) request.LevelEdit.ConnectionId = link.ToString("D");
         if (boundary is { } port) request.LevelEdit.InterfaceId = port.ToString("D");
+        request.LevelEdit.MemberIds.Add((members ?? []).Select(m => m.ToString("D")));
         return request;
     }
 

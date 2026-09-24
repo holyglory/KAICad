@@ -30,6 +30,7 @@ class wxChoice;
 class wxRadioButton;
 class wxSplitterWindow;
 class wxSizer;
+class wxStaticLine;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
 class PANEL_DIAGRAM_HISTORY;
 class wxSimplebook;
@@ -126,9 +127,9 @@ private:
     /// Add requirement…: a requirement box that is not shown yet (owner decision n98a3f3c41084f0ed hides
     /// empty requirement boxes until someone adds one).
     void chooseRequirement();
-    /// Add detail…: a component-choice facet of the selected block that has no value yet (Round A4, owner
-    /// decision n0b2a908b00e78823). It sits beside Add requirement…, as the owner's A3 decision
-    /// nf53af9d74841b7d3 pairs "Add detail" and "Add requirement" so blocks and connections grow the same way.
+    /// + Add detail: for a block, a component-choice facet that has no value yet (Round A4, owner decision
+    /// n0b2a908b00e78823); for a connection, a connection detail it does not have yet (Round A3, owner decision
+    /// nf53af9d74841b7d3, which pairs "+ Add detail" with "+ Add requirement" so blocks and connections grow the same way).
     void chooseDetail();
     void save();
     void decline();
@@ -176,6 +177,42 @@ private:
     wxColour linkColour() const;
     /// The chips of each drawn block of the viewed level, in canvas pixels.
     std::vector<std::pair<std::string, RECURSIVE_DIAGRAM::BLOCK_CHIPS>> drawnChips() const;
+
+    // Connection details (Round A3, owner decision nf53af9d74841b7d3): a connection shows its title, an editable caption,
+    // + Add detail, + Add requirement and Comments, and only the details it has. Add detail adds exactly one detail as its
+    // own removable row (signals, direction, domain or type, the kinds the format-2 model stores); removing the row returns
+    // the connection to its earlier state. Edits change the level draft only, with undo and redo.
+    enum class DETAIL { SIGNALS, DIRECTION, DOMAIN, TYPE };
+    static constexpr int DETAILS = 4;
+    struct SIGNAL { std::string id, name; bool drawn = false; kiapi::automation::diagrams::v1::DiagramConnectionKind kind = {}; };
+    struct LINK_DETAILS
+    {
+        kiapi::automation::diagrams::v1::DiagramConnectionKind kind = kiapi::automation::diagrams::v1::DCK_ABSTRACT;
+        kiapi::automation::diagrams::v1::DiagramDomain domain = kiapi::automation::diagrams::v1::DD_UNSPECIFIED;
+        kiapi::automation::diagrams::v1::DiagramConnectionDirection direction = kiapi::automation::diagrams::v1::DCDR_UNSPECIFIED;
+        std::vector<kiapi::automation::diagrams::v1::DiagramEndpointBindingData> endpoints;
+        std::vector<SIGNAL> signals;
+    };
+    /// The selected connection's details as the level draft holds them; false when no connection is selected.
+    bool linkDetails( LINK_DETAILS& aOut ) const;
+    static bool HasDetail( const LINK_DETAILS& aDetails, DETAIL aDetail );
+    bool detailShown( const LINK_DETAILS& aDetails, DETAIL aDetail ) const;
+    /// Changes the selected connection's kind, domain or direction in the level draft, as one undo step.
+    void setLinkValue( DETAIL aDetail, int aValue );
+    void revealDetail( DETAIL aDetail );
+    void removeDetail( DETAIL aDetail );
+    void addSignal();
+    void removeSignals( const std::vector<std::string>& aIds );
+    /// Returns each end that says more than its block or port (a pin, candidates, a selector or intent) to that block or port.
+    void removeEndpointDetails();
+    void captionEdited();
+    void fillConnection( bool aAvailable );
+    wxString endpointName( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint ) const;
+    /// Whether an endpoint says more than the block or port it is drawn on (a pin, candidates, a selector or intent).
+    static bool EndpointDefined( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint );
+    /// The arrowheads each drawn connection shows for its direction, in canvas pixels: tip and the point it comes from.
+    struct ARROW { std::string connection; unsigned endpoint = 0; wxPoint tip, from; };
+    std::vector<ARROW> drawnArrows() const;
 
     // Drawing tools (Round A1: toolbar strip and canvas-edge palette).
     void setTool( TOOL aTool );
@@ -262,7 +299,8 @@ private:
     wxStaticText* m_owner;
     wxStaticText* m_savedVersion;
     wxStaticText* m_endpointHeading;
-    wxTextCtrl* m_endpoints;
+    /// What the selected connection's ends say beyond their block or port, as read-only lines.
+    wxStaticText* m_endpoints;
     wxScrolledWindow* m_inspectorScroll;
     wxSplitterWindow* m_splitter;
     wxTextCtrl* m_comments;
@@ -270,6 +308,26 @@ private:
     wxChoice* m_commentChoice;
     wxButton* m_addRequirement;
     wxButton* m_addDetail;
+    wxStaticLine* m_addSeparator;
+    // Round A3: the connection's caption and detail rows.
+    wxStaticText* m_captionLabel;
+    wxTextCtrl* m_connectionCaption;
+    wxStaticText* m_captionNotice;
+    std::array<wxSizer*, DETAILS> m_detailRows;
+    std::array<wxButton*, DETAILS> m_detailRemove;
+    wxButton* m_endpointRemove;
+    struct SIGNAL_LINE { wxStaticText* name; wxButton* remove; wxSizer* row; };
+    std::vector<SIGNAL_LINE> m_signalLines;
+    wxSizer* m_signalList;
+    wxTextCtrl* m_signalEntry;
+    wxStaticText* m_signalNotice;
+    std::array<wxToggleButton*, 3> m_directionChoices;
+    std::array<wxToggleButton*, 5> m_domainChoices;
+    std::array<wxToggleButton*, 4> m_typeChoices;
+    /// Why the caption or the new signal cannot be kept, as shown beside it.
+    wxString m_captionProblem, m_signalProblem;
+    /// Detail rows a person added on a connection that has no value for them yet (like m_revealed for requirements).
+    std::map<std::string, std::array<bool, DETAILS>> m_revealedDetails;
     wxStaticText* m_facetHeading;
     std::array<RECURSIVE_DIAGRAM::FACET_ROW*, RECURSIVE_DIAGRAM::FACETS> m_facetRows;
     wxSizer* m_facetDetail;

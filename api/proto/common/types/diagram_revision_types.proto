@@ -734,6 +734,10 @@ message NewConnectionData {
   RequirementFieldsData fields = 9;
   InterconnectRealizationData realization = 10;
   // -- lane 2B (200-299) --
+  // Round A3 (owner decision nf53af9d74841b7d3): a signal drawn into a connection of this level. It names
+  // that root connection (a connection drawn in this draft, or one this draft edits and lists it among its
+  // members); it is a member of that connection and never a root of its own. Unset for a root connection.
+  optional string member_of = 200;
   // -- end lane 2B --
 }
 message LevelDraftData {
@@ -785,6 +789,9 @@ enum LevelEditCommandKind {
   LECK_REMOVE_CONNECTION = 2;
   LECK_REMOVE_INTERFACE = 3;
   // -- lane 2B (200-299) --
+  // Removes signals (members) of one connection of the level: connection_id names the connection and
+  // member_ids the signals; notes and realizations on them are cascaded as for a removed connection.
+  LECK_REMOVE_CONNECTION_MEMBERS = 200;
   // -- end lane 2B --
 }
 message LevelEditCommandData {
@@ -798,6 +805,8 @@ message LevelEditCommandData {
   bool detach_connections = 8;
   DiagramRevisionOriginData origin = 9;
   // -- lane 2B (200-299) --
+  // The signals LECK_REMOVE_CONNECTION_MEMBERS removes; empty for every other removal.
+  repeated string member_ids = 200;
   // -- end lane 2B --
 }
 enum LevelEditEffectKind {

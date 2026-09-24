@@ -17,7 +17,8 @@ public static partial class RecursiveBlockCodec
                 c.Definition is { } definition ? Decode(definition) : null))],
             [.. data.NewConnections.Select(c => new M.NewConnectionOccurrence(Selection(Need(c.Selection)), GuidValue(c.RequirementRevisionId),
                 c.ImplementationName, c.Name, Defined((M.DiagramConnectionKind)((int)c.Kind - 1)), Domain(c.Domain), Direction(c.Direction),
-                [.. c.Endpoints.Select(Decode)], Fields(Need(c.Fields)), c.Realization is { } realization ? Realization(realization) : null))]);
+                [.. c.Endpoints.Select(Decode)], Fields(Need(c.Fields)), c.Realization is { } realization ? Realization(realization) : null,
+                c.HasMemberOf ? GuidValue(c.MemberOf) : null))]);
     }
 
     public static P.LevelDraftData Encode(M.RecursiveLevelDraft draft)
@@ -40,6 +41,7 @@ public static partial class RecursiveBlockCodec
                 Domain = (P.DiagramDomain)c.Domain, Direction = (P.DiagramConnectionDirection)c.Direction, Fields = Fields(c.Requirements) };
             row.Endpoints.Add(c.Endpoints.Select(Encode));
             if (c.Realization is { } realization) row.Realization = Realization(realization);
+            if (c.MemberOf is { } parent) row.MemberOf = Id(parent);
             return row;
         }));
         return data;
@@ -70,11 +72,18 @@ public static partial class RecursiveBlockCodec
         Decode(P.LevelEditCommandData data, Guid documentId)
     {
         Known(data, P.LevelEditCommandData.Parser);
-        if (data.Kind == P.LevelEditCommandKind.LeckUnspecified || !System.Enum.IsDefined((M.LevelEditCommandKind)((int)data.Kind - 1)))
-            throw Invalid("Choose a supported removal: a child block, a connection or an interface.");
-        var command = new M.LevelEditCommand((M.LevelEditCommandKind)((int)data.Kind - 1), data.HasBlockId ? GuidValue(data.BlockId) : null,
+        var kind = data.Kind switch
+        {
+            P.LevelEditCommandKind.LeckRemoveChild => M.LevelEditCommandKind.RemoveChild,
+            P.LevelEditCommandKind.LeckRemoveConnection => M.LevelEditCommandKind.RemoveConnection,
+            P.LevelEditCommandKind.LeckRemoveInterface => M.LevelEditCommandKind.RemoveInterface,
+            // Lane 2B band (Round A3): signals of one connection.
+            P.LevelEditCommandKind.LeckRemoveConnectionMembers => M.LevelEditCommandKind.RemoveConnectionMembers,
+            _ => throw Invalid("Choose a supported removal: a child block, a connection, an interface or signals of a connection.")
+        };
+        var command = new M.LevelEditCommand(kind, data.HasBlockId ? GuidValue(data.BlockId) : null,
             data.HasConnectionId ? GuidValue(data.ConnectionId) : null, data.HasInterfaceId ? GuidValue(data.InterfaceId) : null,
-            data.DetachConnections, Origin(Need(data.Origin)));
+            data.DetachConnections, Origin(Need(data.Origin)), [.. data.MemberIds.Select(GuidValue)]);
         return (Selection(Need(data.ExpectedRoot)), [.. data.BlockPath.Select(Selection)], Decode(Need(data.Draft), documentId), command);
     }
 

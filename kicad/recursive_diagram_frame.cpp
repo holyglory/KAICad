@@ -31,6 +31,7 @@
 #include <wx/simplebook.h>
 #include <wx/splitter.h>
 #include <wx/stattext.h>
+#include <wx/statline.h>
 #include <wx/statusbr.h>
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
@@ -51,6 +52,18 @@ namespace
 enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE, DIAGRAM_HISTORY, VIEW_PALETTE };
 bool same( const D::BlockSelectionData& a, const D::BlockSelectionData& b )
 { return a.block_id() == b.block_id() && a.state_id() == b.state_id() && a.revision_id() == b.revision_id(); }
+bool sameConnection( const D::ConnectionSelectionData& a, const D::ConnectionSelectionData& b )
+{ return a.connection_id() == b.connection_id() && a.state_id() == b.state_id() && a.revision_id() == b.revision_id(); }
+/// The one-click values of a connection's direction, domain and type rows (Round A3), in display order.
+constexpr std::array<D::DiagramConnectionDirection, 3> DIRECTIONS = { D::DCDR_FROM_FIRST, D::DCDR_TO_FIRST, D::DCDR_BIDIRECTIONAL };
+constexpr std::array<D::DiagramDomain, 5> DOMAINS = { D::DD_POWER, D::DD_DATA, D::DD_CONTROL, D::DD_ANALOG, D::DD_MECHANICAL };
+constexpr std::array<D::DiagramConnectionKind, 4> KINDS = { D::DCK_INTERFACE, D::DCK_SIGNAL_GROUP, D::DCK_DIFFERENTIAL_PAIR, D::DCK_SIGNAL };
+const char* const DETAIL_NAMES[] = { "signals", "direction", "domain", "type" };
+wxString detailLabel( int which )
+{
+    static const wxString labels[] = { _( "Signals" ), _( "Direction" ), _( "Domain" ), _( "Type" ) };
+    return labels[which];
+}
 std::string field( const D::RequirementFieldsData& fields, int which )
 { return which == 0 ? fields.general() : which == 1 ? fields.schematic() : fields.routing(); }
 void setField( D::RequirementFieldsData* fields, int which, const std::string& value )
@@ -207,17 +220,100 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_owner = new wxStaticText( header, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
     m_owner->SetName( "RecursiveOwnerCaption" );
     m_owner->SetFont( GetFont().Bold().Larger() ); heading->Add( m_owner, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
-    m_savedVersion = new wxStaticText( header, wxID_ANY, wxEmptyString );
+    m_savedVersion = new wxStaticText( header, wxID_ANY, wxEmptyString ); m_savedVersion->SetName( "RecursiveSavedVersion" );
     heading->Add( m_savedVersion, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     m_openDiagram = new wxButton( header, wxID_ANY, _( "Open diagram" ) ); m_openDiagram->SetName( "RecursiveOpenDiagram" );
     heading->Add( m_openDiagram, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     header->SetSizer( heading ); properties->Add( header, 0, wxEXPAND );
+    // Round A3 option 1 (owner decision nf53af9d74841b7d3): a selected connection shows its caption in an editable field and
+    // then only the details it has, each as its own row that can be removed again. Built here so they follow the block's
+    // component choices in the scrolled inspector and its tab order.
+    auto* captionColumn = new wxBoxSizer( wxVERTICAL );
+    m_captionLabel = new wxStaticText( scroll, wxID_ANY, _( "Caption" ) );
+    captionColumn->Add( m_captionLabel, 0, wxBOTTOM, FromDIP( 4 ) );
+    m_connectionCaption = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString );
+    m_connectionCaption->SetName( "RecursiveConnectionCaption" ); captionColumn->Add( m_connectionCaption, 0, wxEXPAND );
+    m_captionNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_captionNotice->SetName( "RecursiveCaptionNotice" );
+    captionColumn->Add( m_captionNotice, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    fields->Add( captionColumn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    m_connectionCaption->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) captionEdited(); } );
+    // One row per detail: its name with a quiet remove button, then its value.
+    auto detailRow = [&]( DETAIL detail, const char* name )
+    {
+        auto* row = new wxBoxSizer( wxVERTICAL ); auto* title = new wxBoxSizer( wxHORIZONTAL );
+        title->Add( new wxStaticText( scroll, wxID_ANY, detailLabel( static_cast<int>( detail ) ) ), 1, wxALIGN_CENTER_VERTICAL );
+        auto* remove = new wxButton( scroll, wxID_ANY, wxS( "\u00d7" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+        remove->SetName( wxString( "RecursiveDetailRemove" ) + name );
+        remove->SetToolTip( wxString::Format( _( "Remove %s" ), detailLabel( static_cast<int>( detail ) ).Lower() ) );
+        remove->Bind( wxEVT_BUTTON, [this, detail]( wxCommandEvent& ) { removeDetail( detail ); } );
+        title->Add( remove, 0, wxALIGN_CENTER_VERTICAL ); row->Add( title, 0, wxEXPAND );
+        m_detailRows[static_cast<int>( detail )] = row; m_detailRemove[static_cast<int>( detail )] = remove;
+        fields->Add( row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+        return row;
+    };
+    // Small fixed sets are one-click choices; none is chosen until the person chooses one.
+    auto oneClick = [&]( wxSizer* row, wxToggleButton** buttons, int count, const char* prefix, const char* const* names,
+                         const wxString* labels, DETAIL detail, const int* values )
+    {
+        auto* wrap = new wxWrapSizer( wxHORIZONTAL );
+        for( int i = 0; i < count; ++i )
+        {
+            buttons[i] = new wxToggleButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
+            buttons[i]->SetName( wxString( prefix ) + names[i] );
+            int value = values[i];
+            buttons[i]->Bind( wxEVT_TOGGLEBUTTON, [this, detail, value]( wxCommandEvent& ) { if( !m_updating ) setLinkValue( detail, value ); } );
+            wrap->Add( buttons[i], 0, wxTOP | wxRIGHT, FromDIP( 4 ) );
+        }
+        row->Add( wrap, 0, wxEXPAND );
+    };
+    auto* signalRow = detailRow( DETAIL::SIGNALS, "Signals" );
+    m_signalList = new wxBoxSizer( wxVERTICAL ); signalRow->Add( m_signalList, 0, wxEXPAND );
+    m_signalEntry = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
+    m_signalEntry->SetName( "RecursiveSignalEntry" ); m_signalEntry->SetHint( _( "Add a signal" ) );
+    signalRow->Add( m_signalEntry, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    m_signalEntry->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { addSignal(); } );
+    m_signalEntry->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating && !m_signalProblem.empty() ) { m_signalProblem.clear(); refresh(); } } );
+    m_signalNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_signalNotice->SetName( "RecursiveSignalNotice" );
+    signalRow->Add( m_signalNotice, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    {
+        const char* names[] = { "FromFirst", "ToFirst", "Both" };
+        const wxString labels[] = { wxS( "\u2192" ), wxS( "\u2190" ), _( "Both ways" ) };
+        int values[] = { DIRECTIONS[0], DIRECTIONS[1], DIRECTIONS[2] };
+        oneClick( detailRow( DETAIL::DIRECTION, "Direction" ), m_directionChoices.data(), 3, "RecursiveDirection", names, labels, DETAIL::DIRECTION, values );
+    }
+    {
+        const char* names[] = { "Power", "Data", "Control", "Analog", "Mechanical" };
+        const wxString labels[] = { _( "Power" ), _( "Data" ), _( "Control" ), _( "Analog" ), _( "Mechanical" ) };
+        int values[] = { DOMAINS[0], DOMAINS[1], DOMAINS[2], DOMAINS[3], DOMAINS[4] };
+        oneClick( detailRow( DETAIL::DOMAIN, "Domain" ), m_domainChoices.data(), 5, "RecursiveDomain", names, labels, DETAIL::DOMAIN, values );
+    }
+    {
+        const char* names[] = { "Interface", "SignalGroup", "DifferentialPair", "Signal" };
+        const wxString labels[] = { _( "Interface" ), _( "Signal group" ), _( "Differential pair" ), _( "Signal" ) };
+        int values[] = { KINDS[0], KINDS[1], KINDS[2], KINDS[3] };
+        oneClick( detailRow( DETAIL::TYPE, "Type" ), m_typeChoices.data(), 4, "RecursiveType", names, labels, DETAIL::TYPE, values );
+    }
+    // What an agent or a later realization states about an end beyond its block or port (pins, candidates, a selector or
+    // intent) is shown as read-only text; a drawn end is already on the canvas.
+    auto* endpointRow = new wxBoxSizer( wxVERTICAL ); auto* endpointTitle = new wxBoxSizer( wxHORIZONTAL );
     m_endpointHeading = new wxStaticText( scroll, wxID_ANY, _( "Endpoints" ) );
-    fields->Add( m_endpointHeading, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
-    m_endpoints = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
-            FromDIP( wxSize( 320, 125 ) ), wxTE_MULTILINE | wxTE_READONLY );
-    m_endpoints->SetName( "RecursiveConnectionEndpoints" );
-    fields->Add( m_endpoints, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    endpointTitle->Add( m_endpointHeading, 1, wxALIGN_CENTER_VERTICAL );
+    m_endpointRemove = new wxButton( scroll, wxID_ANY, wxS( "\u00d7" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_endpointRemove->SetName( "RecursiveDetailRemoveEndpoints" ); m_endpointRemove->SetToolTip( _( "Remove endpoint details" ) );
+    m_endpointRemove->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeEndpointDetails(); } );
+    endpointTitle->Add( m_endpointRemove, 0, wxALIGN_CENTER_VERTICAL ); endpointRow->Add( endpointTitle, 0, wxEXPAND );
+    m_endpoints = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_endpoints->SetName( "RecursiveConnectionEndpoints" );
+    endpointRow->Add( m_endpoints, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP( 4 ) );
+    fields->Add( endpointRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    // The two quiet add actions of the approved inspector: + Add detail gives a block's component choice its first value
+    // (Round A4) or adds one connection detail (Round A3); + Add requirement shows a requirement box that is hidden until
+    // someone adds it (owner decision n98a3f3c41084f0ed). Blocks and connections grow the same way.
+    m_addDetail = new wxButton( scroll, wxID_ANY, wxS( "+  " ) + _( "Add detail" ), wxDefaultPosition, wxDefaultSize, wxBU_LEFT );
+    m_addDetail->SetName( "RecursiveAddDetail" );
+    m_addDetail->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseDetail(); } );
+    fields->Add( m_addDetail, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    m_addSeparator = new wxStaticLine( scroll ); m_addSeparator->SetName( "staticLine" );
+    fields->Add( m_addSeparator, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     for( int i = 0; i < 3; ++i )
     {
         // Each requirement appears only once it has text or the user adds it (owner decision n98a3f3c41084f0ed).
@@ -235,20 +331,10 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
         m_history[i]->Bind( wxEVT_BUTTON, [this, i]( wxCommandEvent& ) { history( i ); } );
     }
-    // Two quiet add actions in one row. Add requirement… shows a requirement box that is hidden until someone adds it
-    // (owner decision n98a3f3c41084f0ed). Add detail… gives a block's component-choice facet its first value (Round A4,
-    // owner decision n0b2a908b00e78823); the owner's A3 decision nf53af9d74841b7d3 pairs Add detail with Add requirement
-    // so blocks and connections grow the same way.
-    auto* addRow = new wxBoxSizer( wxHORIZONTAL );
-    m_addRequirement = new wxButton( scroll, wxID_ANY, _( "Add requirement…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_addRequirement = new wxButton( scroll, wxID_ANY, wxS( "+  " ) + _( "Add requirement" ), wxDefaultPosition, wxDefaultSize, wxBU_LEFT );
     m_addRequirement->SetName( "RecursiveAddRequirement" );
     m_addRequirement->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseRequirement(); } );
-    addRow->Add( m_addRequirement, 0, wxRIGHT, FromDIP( 12 ) );
-    m_addDetail = new wxButton( scroll, wxID_ANY, _( "Add detail…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-    m_addDetail->SetName( "RecursiveAddDetail" );
-    m_addDetail->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseDetail(); } );
-    addRow->Add( m_addDetail, 0 );
-    fields->Add( addRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    fields->Add( m_addRequirement, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
     commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
@@ -342,6 +428,11 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
             event.Skip(); return;
         }
         if( event.GetKeyCode() == WXK_ESCAPE && m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
+        // Escape in the new-signal entry clears it; in a blank connection caption it brings back the last caption.
+        if( event.GetKeyCode() == WXK_ESCAPE && wxWindow::FindFocus() == m_signalEntry )
+        { m_signalEntry->ChangeValue( wxEmptyString ); m_signalProblem.clear(); refresh(); m_signalEntry->SetFocus(); return; }
+        if( event.GetKeyCode() == WXK_ESCAPE && wxWindow::FindFocus() == m_connectionCaption && !m_captionProblem.empty() )
+        { m_captionProblem.clear(); m_notice.clear(); refresh(); m_connectionCaption->SetFocus(); m_connectionCaption->SelectAll(); return; }
         // Escape in a facet's detail returns to the overview and drops an entry that could not be kept.
         if( event.GetKeyCode() == WXK_ESCAPE && m_facet >= 0 && facetHasFocus() ) { closeFacet( true ); return; }
         // Tab moves between the detail's controls in order, the multi-line entries included.
@@ -459,7 +550,8 @@ RECURSIVE_DIAGRAM_FRAME::LINK_DRAFT RECURSIVE_DIAGRAM_FRAME::connectionDraftFor(
 }
 void RECURSIVE_DIAGRAM_FRAME::resetLevel()
 {
-    m_level.Clear(); m_undo.clear(); m_redo.clear(); m_revealed.clear(); m_lastEffects.Clear();
+    m_level.Clear(); m_undo.clear(); m_redo.clear(); m_revealed.clear(); m_revealedDetails.clear(); m_lastEffects.Clear();
+    m_captionProblem.clear(); m_signalProblem.clear();
     m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear();
     if( const REVISION* scope = current() ) *m_level.mutable_scope() = draftFor( *scope );
     m_savedLevel = m_level;
@@ -808,6 +900,12 @@ void RECURSIVE_DIAGRAM_FRAME::levelResult( const D::RecursiveFileResult& result 
     if( unresolved ) summary += wxString::Format( _( " %d comments no longer have a target." ), unresolved );
     if( realizations ) summary += wxString::Format( _( " %d realizations need review." ), realizations );
     m_notice = Utf8( summary );
+    if( sent.kind() == D::LECK_REMOVE_CONNECTION_MEMBERS )
+    {
+        // Removing signals keeps their connection selected with its other details (Round A3).
+        changed(); if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_canvas->SetFocus();
+        return;
+    }
     m_selected = m_level.scope().baseline().block_id(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear();
     changed(); m_canvas->SetFocus();
 }
@@ -962,8 +1060,9 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     updateImplementationLabel();
     m_implementation->Enable( available );
     m_diagramHistory->Enable( m_ready && !m_process && !m_diagramHistoryOpen );
-    m_owner->SetLabel( m_ready ? Text( selectedName() ) : wxString() );
-    m_owner->SetToolTip( m_owner->GetLabel() );
+    // A connection's title names what it is; its caption is the editable field below (Round A3).
+    m_owner->SetLabel( !m_ready ? wxString() : link ? _( "Connection" ) : Text( selectedName() ) );
+    m_owner->SetToolTip( m_ready ? Text( selectedName() ) : wxString() );
     // Grow with definition: a block or connection drawn in this draft shows only its caption.
     m_savedVersion->SetLabel( wxString() );
     const REVISION* selected = nullptr;
@@ -991,33 +1090,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_savedVersion->Show( !m_savedVersion->GetLabel().empty() );
     bool child = !link && m_ready && current() && m_selected != current()->selection().block_id();
     m_openDiagram->Show( child && !isNew );
-    m_endpointHeading->Show( savedLink != nullptr ); m_endpoints->Show( savedLink != nullptr );
-    wxString endpoints;
-    if( savedLink && current() )
-    {
-        const LINK_DRAFT* draft = connectionDraft( m_connectionId );
-        const auto& items = draft ? draft->endpoints() : savedLink->endpoints();
-        for( const auto& item : items )
-        {
-            const REVISION* owner = item.block_id() == current()->selection().block_id() ? current() : nullptr;
-            for( const auto& pinned : current()->children() ) if( pinned.block_id() == item.block_id() ) owner = revision( pinned );
-            if( !endpoints.empty() ) endpoints += wxS( "\n\n" );
-            endpoints += owner ? Text( owner->name() ) : _( "Unavailable endpoint" ); endpoints += wxS( "\n" );
-            switch( item.kind() )
-            {
-            case D::DEK_UNRESOLVED: endpoints += _( "Endpoint unresolved." ); break;
-            case D::DEK_COMPATIBLE: endpoints += _( "Compatible endpoint unresolved." ); break;
-            case D::DEK_CANDIDATES: endpoints += wxString::Format( _( "Pin not selected (%d candidates)." ), item.candidates_size() ); break;
-            case D::DEK_PIN: endpoints += wxString::Format( _( "Selected pin: %s" ), Text( item.pin().pin() ) ); break;
-            case D::DEK_INTERFACE:
-                if( owner ) for( const auto& boundary : owner->local_diagram().interfaces() )
-                    if( boundary.id() == item.interface_id() ) endpoints += wxString::Format( _( "Interface: %s" ), Text( boundary.name() ) );
-                break;
-            default: endpoints += _( "Endpoint type unavailable." ); break;
-            }
-        }
-    }
-    m_endpoints->ChangeValue( endpoints );
+    fillConnection( available );
     auto current_ = selectedFields(), saved = savedFields();
     std::string key = link ? m_connectionId : m_selected;
     bool anyHidden = false;
@@ -1030,11 +1103,20 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
         m_history[i]->Show( shown && !isNew ); m_history[i]->Enable( available );
     }
     fillFacets( available );
-    bool facetsLeft = false;
+    bool detailsLeft = false, anyDetail = m_facetHeading->IsShown();
     if( m_ready && !link ) if( const auto* definition = selectedDefinition() )
-        for( int facet = 0; facet < R::FACETS; ++facet ) facetsLeft |= facet != m_facet && !R::HasValue( R::Facet( *definition, facet ) );
+        for( int facet = 0; facet < R::FACETS; ++facet ) detailsLeft |= facet != m_facet && !R::HasValue( R::Facet( *definition, facet ) );
+    if( LINK_DETAILS details; m_ready && link && linkDetails( details ) )
+        for( int which = 0; which < DETAILS; ++which )
+        {
+            bool shown = detailShown( details, static_cast<DETAIL>( which ) );
+            anyDetail |= shown;
+            detailsLeft |= !shown && !( which == static_cast<int>( DETAIL::SIGNALS ) && details.kind == D::DCK_SIGNAL );
+        }
     m_addRequirement->Show( m_ready && anyHidden ); m_addRequirement->Enable( available );
-    m_addDetail->Show( m_ready && facetsLeft ); m_addDetail->Enable( available );
+    // A connection's details are edited in its level draft, never in a read-only history preview.
+    m_addDetail->Show( m_ready && detailsLeft ); m_addDetail->Enable( available && !( link && m_historyPreview ) );
+    m_addSeparator->Show( m_ready && ( detailsLeft || anyDetail ) );
     m_openDiagram->Enable( available && child && !isNew );
     bool writable = m_document.source_writable() || !m_ready;
     m_save->Enable( available && m_dirty && writable ); m_decline->Enable( available && m_dirty );
@@ -1085,6 +1167,7 @@ void RECURSIVE_DIAGRAM_FRAME::select( const std::string& requested )
     // Another element's properties start at the top of the inspector, with its caption and component choices.
     if( m_selected != id || !m_connectionId.empty() ) m_inspectorScroll->Scroll( 0, 0 );
     m_selected = id; m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_newComment = false;
+    m_captionProblem.clear(); m_signalProblem.clear(); m_signalEntry->ChangeValue( wxEmptyString );
     ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
@@ -1095,7 +1178,10 @@ void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
     if( !present || ( !newConnection( id ) && !savedConnection( id ) ) ) return;
     m_inspectorScroll->Scroll( 0, 0 );
     m_selected = m_level.scope().baseline().block_id(); m_connectionId = id; m_portOwner.clear(); m_portId.clear();
-    m_commentId.clear(); m_newComment = false; ++m_viewRevision; refresh();
+    m_commentId.clear(); m_newComment = false;
+    if( m_notice == Utf8( m_captionProblem ) ) m_notice.clear();
+    m_captionProblem.clear(); m_signalProblem.clear(); m_signalEntry->ChangeValue( wxEmptyString );
+    ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::selectPort( const std::string& owner, const std::string& id )
 {
@@ -1264,7 +1350,25 @@ void RECURSIVE_DIAGRAM_FRAME::chooseRequirement()
 }
 void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
 {
-    if( !m_ready || m_process || m_diagramHistoryOpen || !m_connectionId.empty() ) return;
+    if( !m_ready || m_process || m_diagramHistoryOpen ) return;
+    if( !m_connectionId.empty() )
+    {
+        if( m_historyPreview ) return;
+        // A connection offers only the details it does not have yet, in a fixed order (Round A3).
+        LINK_DETAILS details; if( !linkDetails( details ) ) return;
+        wxMenu menu; const int first = wxWindow::NewControlId( DETAILS );
+        for( int which = 0; which < DETAILS; ++which )
+        {
+            auto detail = static_cast<DETAIL>( which );
+            if( detailShown( details, detail ) || ( detail == DETAIL::SIGNALS && details.kind == D::DCK_SIGNAL ) ) continue;
+            menu.Append( first + which, detailLabel( which ) );
+            menu.Bind( wxEVT_MENU, [this, detail]( wxCommandEvent& ) { revealDetail( detail ); }, first + which );
+        }
+        wxPoint position = ScreenToClient( m_addDetail->ClientToScreen( wxPoint( 0, m_addDetail->GetSize().y ) ) );
+        PopupMenu( &menu, position );
+        wxWindow::UnreserveControlId( first, DETAILS );
+        return;
+    }
     const auto* definition = selectedDefinition();
     if( !definition ) return;
     // The block's facets that have no value yet; choosing one opens its detail to give it a first value.
@@ -1279,6 +1383,368 @@ void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
     PopupMenu( &menu, position );
     wxWindow::UnreserveControlId( first, R::FACETS );
 }
+// ---- Connection details (Round A3) ----------------------------------------------------------
+// Owner decisions nf53af9d74841b7d3 and n98a3f3c41084f0ed: a connection is first only its caption. Add detail offers the
+// details the format-2 model stores that it does not have yet: its signals (members), direction, domain and type. Each one
+// becomes its own row, and removing the row returns the connection to how it was without it. Details an agent wrote into
+// the file show the same way once the editor reads the file. Every edit changes the level draft only.
+
+bool RECURSIVE_DIAGRAM_FRAME::linkDetails( LINK_DETAILS& out ) const
+{
+    out = {};
+    if( !m_ready || m_connectionId.empty() || !current() ) return false;
+    const std::string& id = m_connectionId;
+    std::vector<const D::NewConnectionData*> drawn;
+    for( const auto& added : m_level.new_connections() ) if( added.has_member_of() && added.member_of() == id ) drawn.push_back( &added );
+    if( const auto* added = newConnection( id ); added && !added->has_member_of() )
+    {
+        out.kind = added->kind(); out.domain = added->domain(); out.direction = added->direction();
+        out.endpoints.assign( added->endpoints().begin(), added->endpoints().end() );
+        for( const auto* signal : drawn ) out.signals.push_back( { signal->selection().connection_id(), signal->name(), true, signal->kind() } );
+        return true;
+    }
+    const LINK_DRAFT* draft = connectionDraft( id );
+    const D::ConnectionRevisionData* saved = savedConnection( id );
+    if( !draft && !saved ) return false;
+    out.kind = draft ? draft->kind() : saved->kind(); out.domain = draft ? draft->domain() : saved->domain();
+    out.direction = draft ? draft->direction() : saved->direction();
+    const auto& endpoints = draft ? draft->endpoints() : saved->endpoints();
+    out.endpoints.assign( endpoints.begin(), endpoints.end() );
+    const D::ConnectionArchiveData* archive = nullptr;
+    for( const auto& item : m_document.graph().connection_archives() ) if( item.owner_block_id() == current()->selection().block_id() ) archive = &item;
+    for( const auto& member : draft ? draft->members() : saved->members() )
+    {
+        auto added = std::find_if( drawn.begin(), drawn.end(), [&]( const auto* signal ) { return sameConnection( signal->selection(), member ); } );
+        if( added != drawn.end() ) { out.signals.push_back( { member.connection_id(), ( *added )->name(), true, ( *added )->kind() } ); continue; }
+        const D::ConnectionRevisionData* item = nullptr;
+        if( archive ) for( const auto& row : archive->revisions() ) if( sameConnection( row.selection(), member ) ) item = &row;
+        out.signals.push_back( { member.connection_id(), item ? item->name() : member.connection_id(), false, item ? item->kind() : D::DCK_UNKNOWN } );
+    }
+    return true;
+}
+bool RECURSIVE_DIAGRAM_FRAME::HasDetail( const LINK_DETAILS& details, DETAIL detail )
+{
+    switch( detail )
+    {
+    case DETAIL::SIGNALS: return !details.signals.empty();
+    case DETAIL::DIRECTION: return details.direction != D::DCDR_UNSPECIFIED;
+    case DETAIL::DOMAIN: return details.domain != D::DD_UNSPECIFIED;
+    default: return details.kind != D::DCK_ABSTRACT && details.kind != D::DCK_UNKNOWN;
+    }
+}
+bool RECURSIVE_DIAGRAM_FRAME::detailShown( const LINK_DETAILS& details, DETAIL detail ) const
+{
+    if( HasDetail( details, detail ) ) return true;
+    auto revealed = m_revealedDetails.find( m_connectionId );
+    return revealed != m_revealedDetails.end() && revealed->second[static_cast<int>( detail )];
+}
+bool RECURSIVE_DIAGRAM_FRAME::EndpointDefined( const D::DiagramEndpointBindingData& endpoint )
+{
+    return endpoint.kind() == D::DEK_PIN || endpoint.kind() == D::DEK_CANDIDATES || endpoint.kind() == D::DEK_COMPATIBLE
+           || !endpoint.intent().empty();
+}
+wxString RECURSIVE_DIAGRAM_FRAME::endpointName( const D::DiagramEndpointBindingData& endpoint ) const
+{
+    // An end on the level's own boundary is named by its port; an end on a block by the block, and its port when it has one.
+    const std::string& scope = m_level.scope().baseline().block_id();
+    auto portName = [&]( const google::protobuf::RepeatedPtrField<D::DiagramBoundaryInterfaceData>& ports ) -> wxString
+    {
+        if( !endpoint.has_interface_id() ) return wxString();
+        for( const auto& port : ports ) if( port.id() == endpoint.interface_id() ) return Text( port.name() );
+        return wxString();
+    };
+    if( endpoint.block_id() == scope )
+    {
+        wxString port = portName( m_level.scope().local_diagram().interfaces() );
+        return port.empty() ? Text( m_level.scope().name() ) : port;
+    }
+    wxString block, port;
+    if( const auto* added = newChild( endpoint.block_id() ) ) { block = Text( added->name() ); port = portName( added->interfaces() ); }
+    else
+    {
+        for( const auto& child : m_level.child_drafts() ) if( child.baseline().block_id() == endpoint.block_id() )
+        { block = Text( child.name() ); port = portName( child.local_diagram().interfaces() ); }
+        if( block.empty() ) for( const auto& child : m_level.scope().children() ) if( child.block_id() == endpoint.block_id() )
+            if( const REVISION* saved = revision( child ) ) { block = Text( saved->name() ); port = portName( saved->local_diagram().interfaces() ); }
+    }
+    if( block.empty() ) return _( "Unavailable end" );
+    return port.empty() ? block : block + wxS( " \u00b7 " ) + port;
+}
+void RECURSIVE_DIAGRAM_FRAME::setLinkValue( DETAIL detail, int value )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    LINK_DETAILS details; if( !linkDetails( details ) ) return;
+    int now = detail == DETAIL::DIRECTION ? static_cast<int>( details.direction ) : detail == DETAIL::DOMAIN ? static_cast<int>( details.domain )
+                                                                                                          : static_cast<int>( details.kind );
+    // A choice that is already made stays made; the remove button takes a detail away.
+    if( now == value || detail == DETAIL::SIGNALS ) { refresh(); return; }
+    // The model's own rules: a single signal has no signals of its own, and a pair has exactly two signals.
+    if( detail == DETAIL::TYPE && ( ( value == D::DCK_SIGNAL && !details.signals.empty() ) || ( value == D::DCK_DIFFERENTIAL_PAIR
+            && ( details.signals.size() != 2 || std::any_of( details.signals.begin(), details.signals.end(), []( const SIGNAL& s ) { return s.kind != D::DCK_SIGNAL; } ) ) ) ) )
+    { refresh(); return; }
+    pushUndo();
+    auto apply = [&]( auto* link )
+    {
+        if( detail == DETAIL::DIRECTION ) link->set_direction( static_cast<D::DiagramConnectionDirection>( value ) );
+        else if( detail == DETAIL::DOMAIN ) link->set_domain( static_cast<D::DiagramDomain>( value ) );
+        else link->set_kind( static_cast<D::DiagramConnectionKind>( value ) );
+    };
+    if( auto* added = newConnection( m_connectionId ) ) apply( added ); else if( auto* draft = editConnection( true ) ) apply( draft );
+    m_notice.clear(); m_lastEffects.Clear(); changed();
+}
+void RECURSIVE_DIAGRAM_FRAME::revealDetail( DETAIL detail )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    auto& shown = m_revealedDetails[m_connectionId];
+    shown[static_cast<int>( detail )] = true;
+    ++m_viewRevision; refresh();
+    // Focus moves into the new row once the menu that added it has closed.
+    CallAfter( [this, detail]
+               {
+                   if( m_closing ) return;
+                   if( detail == DETAIL::SIGNALS ) { if( m_signalEntry->IsShown() ) m_signalEntry->SetFocus(); }
+                   else if( detail == DETAIL::DIRECTION ) m_directionChoices[0]->SetFocus();
+                   else if( detail == DETAIL::DOMAIN ) m_domainChoices[0]->SetFocus();
+                   else m_typeChoices[0]->SetFocus();
+               } );
+}
+void RECURSIVE_DIAGRAM_FRAME::removeDetail( DETAIL detail )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    LINK_DETAILS details; if( !linkDetails( details ) ) return;
+    m_revealedDetails[m_connectionId][static_cast<int>( detail )] = false;
+    if( detail == DETAIL::SIGNALS ) { m_signalEntry->ChangeValue( wxEmptyString ); m_signalProblem.clear(); }
+    if( !HasDetail( details, detail ) ) { ++m_viewRevision; refresh(); }
+    else if( detail == DETAIL::SIGNALS )
+    {
+        std::vector<std::string> ids;
+        for( const auto& signal : details.signals ) ids.push_back( signal.id );
+        removeSignals( ids );
+    }
+    else setLinkValue( detail, detail == DETAIL::TYPE ? static_cast<int>( D::DCK_ABSTRACT ) : 0 );
+    if( !m_process ) { if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_connectionCaption->SetFocus(); }
+}
+void RECURSIVE_DIAGRAM_FRAME::addSignal()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    LINK_DETAILS details; if( !linkDetails( details ) ) return;
+    wxString name = m_signalEntry->GetValue().Strip( wxString::both );
+    if( name.empty() || details.kind == D::DCK_SIGNAL || details.kind == D::DCK_DIFFERENTIAL_PAIR ) return;
+    for( const auto& signal : details.signals ) if( Text( signal.name ) == name )
+    {
+        m_signalProblem = wxString::Format( _( "%s is already a signal of this connection." ), wxS( "\u201c" ) + name + wxS( "\u201d" ) );
+        ++m_viewRevision; refresh(); m_signalEntry->SetFocus(); return;
+    }
+    // A new signal runs between the same ends as its connection and starts as its name only.
+    pushUndo();
+    D::NewConnectionData signal;
+    signal.mutable_selection()->set_connection_id( FreshId() ); signal.mutable_selection()->set_state_id( FreshId() );
+    signal.mutable_selection()->set_revision_id( FreshId() ); signal.set_requirement_revision_id( FreshId() );
+    signal.set_implementation_name( "Initial" ); signal.set_name( Utf8( name ) ); signal.set_kind( D::DCK_SIGNAL ); signal.mutable_fields();
+    for( const auto& endpoint : details.endpoints ) *signal.add_endpoints() = endpoint;
+    signal.set_member_of( m_connectionId );
+    if( !newConnection( m_connectionId ) ) if( auto* draft = editConnection( true ) ) *draft->add_members() = signal.selection();
+    *m_level.add_new_connections() = std::move( signal );
+    m_signalProblem.clear(); m_notice.clear(); m_lastEffects.Clear();
+    bool wasUpdating = m_updating; m_updating = true; m_signalEntry->ChangeValue( wxEmptyString ); m_updating = wasUpdating;
+    changed(); m_signalEntry->SetFocus();
+}
+void RECURSIVE_DIAGRAM_FRAME::removeSignals( const std::vector<std::string>& ids )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() || ids.empty() ) return;
+    LINK_DETAILS details; if( !linkDetails( details ) ) return;
+    // A pair keeps exactly two signals; its type changes first.
+    if( details.kind == D::DCK_DIFFERENTIAL_PAIR ) return;
+    auto listed = [&]( const std::string& id ) { return std::find( ids.begin(), ids.end(), id ) != ids.end(); };
+    bool saved = std::any_of( details.signals.begin(), details.signals.end(), [&]( const SIGNAL& s ) { return listed( s.id ) && !s.drawn; } );
+    if( !saved )
+    {
+        // Signals drawn in this draft simply go.
+        pushUndo();
+        auto* added = m_level.mutable_new_connections();
+        for( int n = added->size() - 1; n >= 0; --n )
+            if( added->Get( n ).has_member_of() && added->Get( n ).member_of() == m_connectionId && listed( added->Get( n ).selection().connection_id() ) )
+                added->DeleteSubrange( n, 1 );
+        if( auto* draft = editConnection( false ) )
+            for( int n = draft->members_size() - 1; n >= 0; --n ) if( listed( draft->members( n ).connection_id() ) ) draft->mutable_members()->DeleteSubrange( n, 1 );
+        m_notice.clear(); m_lastEffects.Clear(); changed(); return;
+    }
+    // A saved signal leaves through the companion's one removal cascade (contract rbg-v2 section 4.7): notes and
+    // realizations on it are shown as effects, and Undo restores everything.
+    std::vector<SELECTION> path; if( !findPath( m_level.scope().baseline().block_id(), path ) ) return;
+    m_removalBefore = m_level;
+    REQUEST request; request.set_action( D::RFA_PREPARE_LEVEL_EDIT ); request.set_expected_source_token( m_document.source_token() );
+    auto* edit = request.mutable_level_edit(); *edit->mutable_expected_root() = m_document.graph().selected_root();
+    for( const auto& step : path ) *edit->add_block_path() = step;
+    *edit->mutable_draft() = m_level; edit->set_kind( D::LECK_REMOVE_CONNECTION_MEMBERS ); edit->set_connection_id( m_connectionId );
+    for( const auto& id : ids ) edit->add_member_ids( id );
+    EditorOrigin( edit->mutable_origin(), "Remove signals" );
+    execute( std::move( request ) );
+}
+void RECURSIVE_DIAGRAM_FRAME::removeEndpointDetails()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    LINK_DETAILS details; if( !linkDetails( details ) ) return;
+    if( std::none_of( details.endpoints.begin(), details.endpoints.end(), EndpointDefined ) ) return;
+    // Each end keeps the block or port it is drawn on; what was stated beyond that goes.
+    auto plain = []( google::protobuf::RepeatedPtrField<D::DiagramEndpointBindingData>* endpoints )
+    {
+        for( auto& endpoint : *endpoints )
+        {
+            if( !EndpointDefined( endpoint ) ) continue;
+            D::DiagramEndpointBindingData drawn; drawn.set_block_id( endpoint.block_id() );
+            if( endpoint.has_interface_id() ) { drawn.set_kind( D::DEK_INTERFACE ); drawn.set_interface_id( endpoint.interface_id() ); }
+            else drawn.set_kind( D::DEK_UNRESOLVED );
+            endpoint = std::move( drawn );
+        }
+    };
+    pushUndo();
+    if( auto* added = newConnection( m_connectionId ) ) plain( added->mutable_endpoints() );
+    else if( auto* draft = editConnection( true ) ) plain( draft->mutable_endpoints() );
+    m_notice.clear(); m_lastEffects.Clear(); changed();
+    if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_connectionCaption->SetFocus();
+}
+void RECURSIVE_DIAGRAM_FRAME::captionEdited()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
+    wxString value = m_connectionCaption->GetValue().Strip( wxString::both );
+    auto notice = [this]( const wxString& problem )
+    {
+        m_captionProblem = problem; m_captionNotice->SetLabel( problem ); m_captionNotice->Show( !problem.empty() );
+        m_captionNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
+        m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision;
+    };
+    // A connection is at least its caption: a blank one is not stored, and Save explains why.
+    if( value.empty() ) { notice( _( "Type a caption for this connection." ) ); return; }
+    if( !m_captionProblem.empty() ) { if( m_notice == Utf8( m_captionProblem ) ) m_notice.clear(); notice( wxString() ); }
+    std::string caption = Utf8( value );
+    if( caption == selectedName() ) return;
+    LEVEL before = m_level;
+    if( auto* added = newConnection( m_connectionId ) ) added->set_name( caption );
+    else if( auto* draft = editConnection( true ) ) draft->set_name( caption );
+    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
+    // Like requirement text, the field is not refilled while typing; the canvas shows the new caption.
+    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
+    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_rendered = false; m_canvas->Refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::fillConnection( bool available )
+{
+    LINK_DETAILS details; bool link = linkDetails( details );
+    bool editable = available && !m_historyPreview;
+    bool wasUpdating = m_updating; m_updating = true;
+    m_captionLabel->Show( link ); m_connectionCaption->Show( link );
+    if( link && m_captionProblem.empty() && m_connectionCaption->GetValue() != Text( selectedName() ) ) m_connectionCaption->ChangeValue( Text( selectedName() ) );
+    m_connectionCaption->Enable( editable );
+    bool dark = [&] { wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ); return window.Red() + window.Green() + window.Blue() < 384; }();
+    wxColour problem = dark ? wxColour( 255, 145, 135 ) : wxColour( 176, 0, 32 );
+    int wrap = std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) );
+    m_captionNotice->SetForegroundColour( problem ); m_captionNotice->SetLabel( m_captionProblem );
+    m_captionNotice->Show( link && !m_captionProblem.empty() ); m_captionNotice->Wrap( wrap );
+    for( int which = 0; which < DETAILS; ++which )
+    {
+        bool shown = link && detailShown( details, static_cast<DETAIL>( which ) );
+        if( m_detailRows[which]->AreAnyItemsShown() != shown ) m_detailRows[which]->ShowItems( shown );
+        m_detailRemove[which]->Enable( editable );
+    }
+    // Signals: one line per signal with its own remove button, then the entry for the next one.
+    bool pair = details.kind == D::DCK_DIFFERENTIAL_PAIR;
+    wxString pairTip = _( "A differential pair keeps exactly two signals; choose another type first." );
+    bool signalsShown = link && detailShown( details, DETAIL::SIGNALS );
+    auto* scroll = m_inspectorScroll;
+    while( m_signalLines.size() < details.signals.size() )
+    {
+        size_t index = m_signalLines.size();
+        auto* row = new wxBoxSizer( wxHORIZONTAL );
+        auto* name = new wxStaticText( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
+        name->SetName( wxString::Format( "RecursiveSignal%zu", index ) );
+        auto* remove = new wxButton( scroll, wxID_ANY, wxS( "\u00d7" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+        remove->SetName( wxString::Format( "RecursiveSignalRemove%zu", index ) );
+        remove->Bind( wxEVT_BUTTON, [this, index]( wxCommandEvent& )
+                      {
+                          LINK_DETAILS now;
+                          if( linkDetails( now ) && index < now.signals.size() ) removeSignals( { now.signals[index].id } );
+                      } );
+        row->Add( name, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP( 10 ) ); row->Add( remove, 0, wxALIGN_CENTER_VERTICAL );
+        m_signalList->Add( row, 0, wxEXPAND );
+        // The lines keep the row's tab order: its remove button, each signal's remove button, then the entry.
+        remove->MoveAfterInTabOrder( index ? m_signalLines.back().remove : m_detailRemove[static_cast<int>( DETAIL::SIGNALS )] );
+        m_signalEntry->MoveAfterInTabOrder( remove );
+        m_signalLines.push_back( { name, remove, row } );
+    }
+    for( size_t i = 0; i < m_signalLines.size(); ++i )
+    {
+        bool shown = signalsShown && i < details.signals.size();
+        m_signalLines[i].name->Show( shown ); m_signalLines[i].remove->Show( shown );
+        if( !shown ) continue;
+        wxString value = Text( details.signals[i].name );
+        if( m_signalLines[i].name->GetLabelText() != value ) m_signalLines[i].name->SetLabelText( value );
+        m_signalLines[i].name->SetToolTip( value );
+        m_signalLines[i].remove->SetToolTip( pair ? pairTip : wxString::Format( _( "Remove signal %s" ), value ) );
+        m_signalLines[i].remove->Enable( editable && !pair );
+    }
+    m_signalEntry->Show( signalsShown ); m_signalEntry->Enable( editable && !pair );
+    m_signalEntry->SetToolTip( pair ? pairTip : _( "Type a signal name and press Enter." ) );
+    m_signalNotice->SetForegroundColour( problem ); m_signalNotice->SetLabel( m_signalProblem );
+    m_signalNotice->Show( signalsShown && !m_signalProblem.empty() ); m_signalNotice->Wrap( wrap );
+    m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->Enable( editable && !( pair && !details.signals.empty() ) );
+    m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->SetToolTip( pair && !details.signals.empty() ? pairTip : _( "Remove signals" ) );
+    // Direction is stated between the connection's own ends: from its first end to the others, the reverse, or both ways.
+    if( details.endpoints.size() >= 2 )
+    {
+        wxString first = endpointName( details.endpoints[0] );
+        wxString others = details.endpoints.size() == 2 ? endpointName( details.endpoints[1] ) : _( "the others" );
+        wxString labels[] = { first + wxS( " \u2192 " ) + others, others + wxS( " \u2192 " ) + first, _( "Both ways" ) };
+        for( int i = 0; i < 3; ++i ) if( m_directionChoices[i]->GetLabel() != labels[i] )
+        { m_directionChoices[i]->SetLabel( labels[i] ); m_directionChoices[i]->SetToolTip( labels[i] ); m_directionChoices[i]->InvalidateBestSize(); }
+    }
+    for( int i = 0; i < 3; ++i ) { m_directionChoices[i]->SetValue( details.direction == DIRECTIONS[i] ); m_directionChoices[i]->Enable( editable ); }
+    for( int i = 0; i < 5; ++i ) { m_domainChoices[i]->SetValue( details.domain == DOMAINS[i] ); m_domainChoices[i]->Enable( editable ); }
+    bool signalMembers = std::all_of( details.signals.begin(), details.signals.end(), []( const SIGNAL& s ) { return s.kind == D::DCK_SIGNAL; } );
+    for( int i = 0; i < 4; ++i )
+    {
+        bool allowed = KINDS[i] == D::DCK_SIGNAL ? details.signals.empty()
+                     : KINDS[i] == D::DCK_DIFFERENTIAL_PAIR ? details.signals.size() == 2 && signalMembers : true;
+        m_typeChoices[i]->SetValue( details.kind == KINDS[i] );
+        m_typeChoices[i]->Enable( editable && ( allowed || details.kind == KINDS[i] ) );
+        m_typeChoices[i]->SetToolTip( KINDS[i] == D::DCK_SIGNAL && !allowed ? _( "A single signal has no signals of its own; remove its signals first." )
+                                    : KINDS[i] == D::DCK_DIFFERENTIAL_PAIR && !allowed ? _( "A differential pair has exactly two signals." )
+                                    : m_typeChoices[i]->GetLabel() );
+    }
+    // What an end says beyond its block or port, one line per end that says more.
+    wxString endpoints;
+    for( const auto& endpoint : details.endpoints ) if( EndpointDefined( endpoint ) )
+    {
+        wxString line = endpointName( endpoint ) + wxS( ": " );
+        switch( endpoint.kind() )
+        {
+        case D::DEK_PIN: line += wxString::Format( _( "pin %s" ), Text( endpoint.pin().pin() ) ); break;
+        case D::DEK_CANDIDATES: line += wxString::Format( _( "%d candidate pins" ), endpoint.candidates_size() ); break;
+        case D::DEK_COMPATIBLE:
+        {
+            wxString parts;
+            auto part = [&]( const std::string& value ) { if( value.empty() ) return; if( !parts.empty() ) parts += wxS( ", " ); parts += Text( value ); };
+            part( endpoint.selector().role() ); part( endpoint.selector().protocol() );
+            for( const auto& function : endpoint.selector().required_functions() ) part( function );
+            line += parts.empty() ? _( "a compatible pin" ) : wxString::Format( _( "a pin for %s" ), parts );
+            break;
+        }
+        default: line = endpointName( endpoint ); break;
+        }
+        if( !endpoint.intent().empty() ) line += wxS( " \u2014 " ) + Text( endpoint.intent() );
+        if( !endpoints.empty() ) endpoints += wxS( "\n" );
+        endpoints += line;
+    }
+    m_endpointHeading->Show( link && !endpoints.empty() ); m_endpoints->Show( link && !endpoints.empty() );
+    m_endpointRemove->Show( link && !endpoints.empty() ); m_endpointRemove->Enable( editable );
+    // Text a person or agent wrote is shown as written, never as mnemonics.
+    if( m_endpoints->GetLabelText() != endpoints ) m_endpoints->SetLabelText( endpoints );
+    m_endpoints->Wrap( wrap );
+    m_updating = wasUpdating;
+}
+
 // ---- Component choices (Round A4) -----------------------------------------------------------
 // Owner decisions n0b2a908b00e78823 and n98a3f3c41084f0ed: a block shows a chip for each chosen or candidate
 // facet; the inspector lists only the facets that have a value; one facet's detail edits its state, value,
@@ -1684,6 +2150,15 @@ void RECURSIVE_DIAGRAM_FRAME::save()
         if( m_facetValue->IsShown() ) m_facetValue->SetFocus(); else if( m_facetCandidates->IsShown() ) m_facetCandidates->SetFocus(); else m_facetReason->SetFocus();
         return;
     }
+    // A blank connection caption is not kept (Round A3): nothing is saved and the caption field says why.
+    if( !m_connectionId.empty() && !m_captionProblem.empty() )
+    { m_notice = Utf8( m_captionProblem ); refresh(); m_connectionCaption->SetFocus(); return; }
+    // A signal typed but not yet added is part of what the person is doing: it is added first, or the save waits.
+    if( !m_connectionId.empty() && m_signalEntry->IsShown() && !m_signalEntry->GetValue().Strip( wxString::both ).empty() )
+    {
+        addSignal();
+        if( !m_signalProblem.empty() ) { m_notice = Utf8( m_signalProblem ); refresh(); m_signalEntry->SetFocus(); return; }
+    }
     if( !m_dirty ) return;
     if( !m_document.source_writable() )
     { m_errorCode = "diagram_file_read_only"; m_error = "This diagram file is read-only; changes cannot be saved."; refresh(); return; }
@@ -1870,7 +2345,7 @@ void RECURSIVE_DIAGRAM_FRAME::undo( bool redo )
     bool block = m_selected == m_level.scope().baseline().block_id();
     for( const auto& child : m_level.scope().children() ) block |= child.block_id() == m_selected;
     if( !block ) { m_selected = m_level.scope().baseline().block_id(); m_portOwner.clear(); m_portId.clear(); }
-    m_notice.clear(); m_lastEffects.Clear();
+    m_notice.clear(); m_lastEffects.Clear(); m_captionProblem.clear(); m_signalProblem.clear();
     if( m_facet >= 0 )
     {
         const auto* definition = selectedDefinition();
@@ -2037,6 +2512,8 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 mirror->set_kind( added->kind() ); *mirror->mutable_endpoints() = added->endpoints();
                 mirror->set_baseline_requirement_revision_id( added->requirement_revision_id() ); mirror->mutable_baseline_fields();
                 *mirror->mutable_fields() = added->fields(); mirror->set_domain( added->domain() ); mirror->set_direction( added->direction() );
+                for( const auto& signal : m_level.new_connections() )
+                    if( signal.has_member_of() && signal.member_of() == m_connectionId ) *mirror->add_members() = signal.selection();
             }
             else if( const auto* draft = connectionDraft( m_connectionId ) ) *result.mutable_connection_draft() = *draft;
             else if( const auto* saved = savedConnection( m_connectionId ) ) *result.mutable_connection_draft() = connectionDraftFor( *saved );
@@ -2093,6 +2570,24 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         for( int facet = 0; facet < R::FACETS; ++facet ) if( m_facetRows[facet]->IsShown() ) result.add_shown_facets( R::FacetName( facet ) );
         result.set_facet_editor( m_facet >= 0 ? R::FacetName( m_facet ) : "" );
         result.set_facet_notice( Utf8( m_facetProblem ) );
+        // Round A3: the selected connection's detail rows and signals as shown, and each connection's arrowheads as drawn.
+        for( int which = 0; which < DETAILS; ++which ) if( m_ready && m_detailRows[which]->AreAnyItemsShown() ) result.add_shown_connection_details( DETAIL_NAMES[which] );
+        if( m_ready && m_endpoints->IsShown() ) result.add_shown_connection_details( "endpoints" );
+        for( const auto& line : m_signalLines ) if( line.name->IsShown() ) result.add_shown_signals( Utf8( line.name->GetLabelText() ) );
+        result.set_connection_notice( Utf8( !m_captionProblem.empty() ? m_captionProblem : m_signalProblem ) );
+        std::map<std::string, D::DiagramCanvasConnectionMarks*> marks;
+        for( const auto& arrow : drawnArrows() )
+        {
+            auto*& mark = marks[arrow.connection];
+            if( !mark ) { mark = result.add_connection_marks(); mark->set_connection_id( arrow.connection ); }
+            if( std::find( mark->arrow_endpoints().begin(), mark->arrow_endpoints().end(), arrow.endpoint ) == mark->arrow_endpoints().end() )
+                mark->add_arrow_endpoints( arrow.endpoint );
+            wxRect box( wxPoint( std::min( arrow.tip.x, arrow.from.x ), std::min( arrow.tip.y, arrow.from.y ) ),
+                        wxPoint( std::max( arrow.tip.x, arrow.from.x ), std::max( arrow.tip.y, arrow.from.y ) ) );
+            box.Inflate( FromDIP( 5 ) );
+            place( mark->add_arrows(), "DiagramArrow", box, false );
+        }
+        for( auto& [id, mark] : marks ) std::sort( mark->mutable_arrow_endpoints()->begin(), mark->mutable_arrow_endpoints()->end() );
     }
     for( const auto& [block, view] : m_views )
     { auto* row = result.add_level_viewports(); row->set_block_id( block ); row->set_origin_x( view.origin.m_x ); row->set_origin_y( view.origin.m_y ); row->set_scale( view.scale ); }
@@ -2137,7 +2632,13 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         row->set_label( Utf8( label ) );
     };
     std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete,
-                                    m_endpoints, m_comments, m_inspectorScroll };
+                                    m_endpoints, m_comments, m_inspectorScroll, m_connectionCaption, m_signalEntry, m_savedVersion };
+    windows.insert( windows.end(), m_detailRemove.begin(), m_detailRemove.end() );
+    windows.push_back( m_endpointRemove );
+    windows.insert( windows.end(), m_directionChoices.begin(), m_directionChoices.end() );
+    windows.insert( windows.end(), m_domainChoices.begin(), m_domainChoices.end() );
+    windows.insert( windows.end(), m_typeChoices.begin(), m_typeChoices.end() );
+    for( const auto& line : m_signalLines ) { windows.push_back( line.name ); windows.push_back( line.remove ); }
     for( auto& [tool, button] : m_strip ) windows.push_back( button );
     for( auto* child : m_palette->GetChildren() ) windows.push_back( child );
     for( int i = 0; i < 3; ++i ) { windows.push_back( m_fields[i] ); windows.push_back( m_history[i] ); }
@@ -2148,9 +2649,13 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
         auto* toggle = dynamic_cast<wxToggleButton*>( item );
         auto* radio = dynamic_cast<wxRadioButton*>( item );
-        bool labelled = radio || dynamic_cast<wxAnyButton*>( item );
+        bool labelled = radio || dynamic_cast<wxAnyButton*>( item ) || item == m_owner || dynamic_cast<wxStaticText*>( item );
+        // The connection's caption field and new-signal entry report the text they show (Round A3).
+        auto* text = dynamic_cast<wxStaticText*>( item );
+        wxString label = item == m_connectionCaption ? m_connectionCaption->GetValue() : item == m_signalEntry ? m_signalEntry->GetValue()
+                       : text ? text->GetLabelText() : labelled ? item->GetLabel() : wxString();
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
-                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), labelled ? item->GetLabel() : wxString() );
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label );
     }
     // The splitter's sash between the canvas and the inspector, which widens or narrows the inspector.
     if( m_splitter->IsSplit() )

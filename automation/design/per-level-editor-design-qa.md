@@ -2,7 +2,7 @@
 
 final result: blocked
 
-This record covers two items of the per-level diagram editor: the drawing tools (Round A1, item a1-drawing-tools) and component choices on blocks (Round A4, item a4-block-chips). Both work end to end in the light and dark themes and in a compact window, and the reviewed captures follow the chosen sketches closely enough to use. The overall result stays blocked because the formal design audit (`product-design:audit` with `design-qa`) is not available in this session, so no formal audit has run (see each item's "Limits of this review"). These comparisons do not replace it, and neither item can be handed off as finished until that audit runs or the owner accepts this result.
+This record covers three items of the per-level diagram editor: the drawing tools (Round A1, item a1-drawing-tools), component choices on blocks (Round A4, item a4-block-chips) and the connection inspector that grows with the design (Round A3, item a3-connection-inspector). All three work end to end in the light and dark themes and in a compact window, and the reviewed captures follow the chosen sketches closely enough to use. The overall result stays blocked because the formal design audit (`product-design:audit` with `design-qa`) is not available in this session, so no formal audit has run (see each item's "Limits of this review"). These comparisons do not replace it, and no item can be handed off as finished until that audit runs or the owner accepts this result.
 
 ## Round A1 — drawing tools (item a1-drawing-tools)
 
@@ -200,7 +200,7 @@ Step-linked captures (the same step names exist for both themes):
 
 For each theme the journey proves the following through the real window:
 
-- **Caption-only.** A caption-only block has no chips and no Review facets link, and its inspector lists no facet. It offers Add requirement… and Add detail… side by side; a connection offers only Add requirement… (drawing journey).
+- **Caption-only.** A caption-only block has no chips and no Review facets link, and its inspector lists no facet. It offers Add requirement… and Add detail… side by side; a connection offers only Add requirement… (drawing journey). Since the A3 item both offer "+ Add detail" and "+ Add requirement", stacked as in the A3 sketch (see the A3 section).
 - **Add detail.** The Add detail menu lists only the block's facets without a value (Add requirement… keeps the hidden requirement boxes, as in A1). Choosing Type opens its detail ready for a first chosen value. Escape cancels without a change. Typing "linear regulator" stores a chosen value, Enter keeps it and returns to the overview with focus on its row, and the PSU shows the chip "Type: linear regulator" and Review facets. Enter on the row opens the detail again, and Escape returns.
 - **Candidate and strength.** Package takes "SOT-23-5" as a chosen value, then Preference, then Candidate: the value moves into the candidate list. Emptying the list shows "List the candidates, one per line.", keeps the last entry that could be stored, and Ctrl+S refuses with the same notice, sends nothing and writes nothing. Typing the candidate again clears the notice.
 - **Unknown.** Manufacturer becomes Unknown: "Say why this is unknown." until a reason is typed. An unknown facet is listed but has no chip; chosen and candidate chips are told apart by their state.
@@ -254,4 +254,97 @@ The formal `product-design:audit` and `design-qa` skills are not available in th
 - [x] Save, Decline, undo of a cleared facet, close and reopen.
 - [x] P2 findings repaired and rechecked in the repaired captures (label column, compact marks, handles, two chip rows), and the review's findings repaired and asserted (compact visibility from the observation, Add requirement restored beside Add detail, one strength row).
 - [ ] The second instance's full editor journey (needs the parent's native-UI limit change; see "Time limit").
+- [ ] Formal design audit (skills unavailable, so the final result stays blocked).
+
+## Round A3 — connection inspector that grows with the design (item a3-connection-inspector)
+
+### What is compared
+
+A connection in the diagram starts as an abstraction, often only a caption such as "I2C" or "Power". Selecting a connection now shows its title ("Connection"), an editable Caption field, "+ Add detail", "+ Add requirement", Comments and Decline/Save, and nothing else until more is defined. "+ Add detail" offers only the details the connection does not have yet, chosen from what the format-2 model already stores for a connection: its signals (the connection's members), its direction, its domain and its type. Choosing one adds exactly that detail as its own row with a quiet remove button (×). Removing the row returns the connection to how it was without that detail. "+ Add requirement" adds one requirement box. Details an agent writes into the file show the same way, and so does what an agent states about an end (for example its intent or pin), which also gets a remove button. A direction also shows on the canvas as arrowheads.
+
+The owner chose option 1 of the second A3 round (decision nf53af9d74841b7d3, which applies the grow-with-definition rule n98a3f3c41084f0ed): `/mnt/build-storage/codex/kicad/design-rounds/round-a/A3-r2/option-1.png` (Coordinator sketch `sd44465992aa73168`, SHA-256 `7a6fba3076725bed6e730f936b13e92a50d4b310b5dc4cb2f99a36ffdbdd2982`, generated with the model recorded in its `generation-record.verified.json`). The decision's note asks the block inspector to use the same "+ Add detail" / "+ Add requirement" pair, so blocks and connections grow the same way. The block inspector now shows the pair stacked as in the sketch ("+ Add detail" under the component choices, a thin rule, the requirement boxes, then "+ Add requirement"), where the A4 item had put "Add requirement…" and "Add detail…" side by side.
+
+The sketch is a 1536 × 1024 full-window scene of an early PSU level: a connection just drawn from "Telemetry MCU" to a port on the level boundary and captioned "I2C" is selected. The captures are real KiCad editor windows at 1536 × 1024 (1100 × 760 in the compact step) inside a 1600 × 1150 virtual display. They show the "Fixture board" level the drawing and component-choice journeys saved. In the matching capture a connection has just been drawn from the PSU to the "DC input" port on the level boundary and captioned "Supply input". The diagram content therefore differs on purpose. The comparison covers the inspector (title, caption, add actions, detail rows, requirement box, Comments, Save/Decline) and the direction arrowheads. No browser, CSS or device scaling is involved.
+
+### Evidence
+
+The rendered journey is `VerifyConnectionDetails` in `automation/tests/KiCad.Automation.Tests/NativeRecursiveEditorJourney.cs`. It runs in `NativeRecursiveEditor` for the light and dark themes, right after the component-choice journey, on the level that journey saved. It drives the real window with pointer and keyboard input and chooses where to click from the editor's reported control rectangles and the connection paths the editor reports through `kicad_diagram_observe`. After each step it reads the editor state, and it reads the saved file back through the model. The agent's part goes through the production MCP server over STDIO: `kicad_diagram_refinement_input_record`, `kicad_diagram_proposal_publish` and `kicad_diagram_proposal_select`.
+
+The member-list rules the editor never sends (a signal that is also a root, a signal of a connection that is not on the level or not edited in the draft, a signal of a signal, a connection that does not list its new signal or lists it twice, a single signal with signals, and removals that name no signal, the same signal twice or signals on another kind of removal) are refused by the compiled companion without writing, in `RecursiveEditorFileCommandTests.ConnectionSignalsSaveAsMembersAndSavedSignalsLeaveThroughTheRemovalCascade`. That test also proves a saved signal's removal cascade (a note on it becomes unresolved) and the save of a connection drawn with its signals.
+
+#### Comparison run: `t20260924T085651Z-0c64a8`
+
+All five development checks passed on a source that differs from the final commit only in this document and in one line that keeps a block's add actions enabled during a history preview, as they were before this item (build 10 s, contracts 91 s, native protocol 25 s, native UI 497.9 s against its 900 s limit, PSU/CPU canvas 11 s; each themed recursive-editor session took 3 min 46 s, both projects included). The run's source SHA-256 is `d1de106c7999708e2ac384e1abbc490b6497fc17868525edac8b92fc8092fdc1` and its native-UI manifest is `d7905d30d5309e3a0d63ecc3169f860b5d7076b90f0d094de023073813d4c952`. Hash-verified captures are materialized at `/mnt/build-storage/codex/kicad/evidence/connection-details-0c64a8/editor-light/` (instance `29aec2d0-de61-4b34-9dec-8a94e8aaf8a3`) and `…/editor-dark/` (instance `6626b594-3452-414e-9143-8197cc7b60a5`); their SHA-256 list is `SHA256SUMS-details` (itself `5d40a7cc2a31f57798f9dc5094e96c87f36dfe39cba68a7350772b2a78e217f3`). The sketch was opened together with the light and dark `new-connection`, `selected`, `all-details`, `agent-details` and `compact` captures and the light `direction-row`, `signals` and `reopened` captures.
+
+Earlier runs of the same journey: `t20260924T082530Z-76c9b0` and `t20260924T083902Z-5b57f1` passed all five checks (the second added the newly drawn connection, the sketch's own state), and `t20260924T085145Z-9cf12c` was cancelled by replacement when the repairs below were ready. Their captures showed three problems, repaired before `0c64a8`:
+
+- **P2, an agent's end detail could not be removed.** What an agent stated about an end was shown in a read-only box without a remove button, so it did not appear "the same way" as other details. The Endpoints row now has its own remove button, which returns each end to the block or port it is drawn on.
+- **P3, Endpoints row.** Its name sat 8 pixels left of the other row names, and a one-line value filled a large read-only box that looked editable. It is now aligned and shown as plain text.
+- **P3, arrowheads at a shared end.** Where Power and Rail feed end at the same CPU anchor, the unselected connection's arrowhead covered the selected one's. The selected connection's arrowheads are now drawn last.
+
+Step-linked captures (the same step names exist for both themes):
+
+| Step | Capture | What it shows |
+|---|---|---|
+| New connection | `…-details-new-connection.png` | The sketch's state. "Supply input", just drawn from the PSU to the "DC input" port, is selected. The inspector shows "Connection", the Caption field, "+ Add detail", a thin rule, "+ Add requirement", Comments and Decline/Save, and nothing else. |
+| Saved connection | `…-details-selected.png` | Power, a saved caption-only connection, shows the same controls plus its saved version line ("Selected connection: v1"). |
+| Direction row | `…-details-direction-row.png` | "+ Add detail > Direction" added one row with no choice made. Its choices name the connection's own ends: "PSU → CPU", "CPU → PSU" and "Both ways". The General requirement box added through "+ Add requirement" holds typed text. |
+| Signals | `…-details-signals.png` | VBUS and GND, each with its own remove button, then the "Add a signal" entry. "Both ways" is chosen, and Power shows an arrowhead at each end. |
+| All details | `…-details-all-details.png` | Signals, Direction, Domain (Power) and Type (Signal group). "+ Add detail" has gone because nothing is left to add, and "Signal" is unavailable because Power has signals. |
+| Saved | `…-details-saved.png` | After Save, the same rows come back from the saved revision. |
+| Agent's details | `…-details-agent-details.png` | After the agent's proposal and Reload saved diagram, Rail feed shows the agent's signal VIN, direction, domain and "PSU · Rail — Regulated 3.3 V" as its Endpoints row, each with a remove button, like the person's own details. |
+| Compact | `…-details-compact.png` | At 1100 × 760 the rows keep every choice inside the inspector without overlap, and a direction choice still works. |
+| Reopened | `…-details-reopened.png` | After close and reopen, Power's four rows, its two signals and its General requirement come back from the file. |
+
+### Interaction coverage
+
+For each theme the journey proves the following through the real window:
+
+- **New connection.** The Connect tool draws "Supply input" from the PSU to the "DC input" port on the level boundary. The inspector shows only the title, the Caption field (holding the caption), "+ Add detail", "+ Add requirement" and Comments. No detail row, requirement box, end list, field History, Open diagram or version line is shown, and no choice is offered up front.
+- **Signals on a new connection.** "+ Add detail > Signals" adds the row with focus in its entry. "VIN" and "RTN", each followed by Enter, become two members drawn for the connection in this draft, and the direction a person could choose would read "PSU → DC input".
+- **Saved connection.** Power shows the same controls plus "Selected connection: v1".
+- **Add requirement.** "+ Add requirement > General requirements" adds one box with focus; typed text goes into Power's draft.
+- **Caption.** Typing replaces the caption in the draft and on the canvas. A blank caption is not stored and shows "Type a caption for this connection."; Ctrl+S refuses with the same notice, sends nothing and writes nothing; Escape brings the last caption back.
+- **Add detail and remove.** The menu offers only the details the connection does not have, in the order Signals, Direction, Domain, Type. "Direction" adds exactly one row with no choice made, and its remove button takes the row away again with nothing changed. Chosen again, "PSU → CPU" stores the direction and draws an arrowhead into the CPU end; "Both ways" draws one at each end. Ctrl+Z and Ctrl+Y undo and redo the choice.
+- **Signals on a saved connection.** VBUS and GND are added with Enter. A repeated "GND" is refused with "“GND” is already a signal of this connection."; Escape clears the entry. A signal's own remove button takes only that signal away, and Ctrl+Z brings it back.
+- **Type and domain.** With two signals, "Signal" is unavailable and "Differential pair" is available; "Signal group" is chosen. "Power" is chosen as the domain, after which "+ Add detail" has nothing left to offer and is hidden. The Domain row's remove button takes only the domain away; Ctrl+Z brings it back.
+- **Save.** Ctrl+S writes one level revision. "Supply input" is stored with its signals VIN and RTN as members; Power's successor has kind Signal group, the Power domain, direction Both ways, the General requirement and its signals VBUS and GND as members. Each signal is its own connection of kind Signal running between its connection's ends, and signals are never connections of the level itself.
+- **Decline.** A later direction change is discarded by Alt+D and the file stays byte-identical.
+- **Removing a saved signal.** VBUS's remove button goes through the companion's removal cascade: the status bar says "Removed “VBUS”.", Power stays selected with its other details, and Ctrl+Z restores it without a write.
+- **Agent's details.** An agent records an input, publishes a proposal that gives Rail feed a direction, the Power domain, a VIN signal and the intent "Regulated 3.3 V" on its first end, and chooses it, all through MCP. After Reload saved diagram (Ctrl+R) Rail feed shows those details as the same rows, with the same arrowhead. The Endpoints row's remove button returns the first end to its drawn port; the Signals row's remove button takes VIN away through the removal cascade; the Domain row's remove button takes the domain away. Save keeps only the agent's direction, keeps the comment on Rail feed and keeps the agent's revision with VIN in history.
+- **Compact window.** At 1100 × 760 all twelve choices of Power's Direction, Domain and Type rows lie inside the inspector's width without overlap, the caption is in view, and "PSU → CPU" still changes the direction (then Ctrl+Z).
+- **Close and reopen.** Ctrl+W writes nothing. Reopening shows Power's four rows with the same choices, its two signals and its General requirement; Rail feed shows only its direction; "Supply input" shows its signals VIN and RTN. Selecting connections changes nothing.
+
+Controls pressed through the real window: the Connect tool, "+ Add detail" (Signals, Direction, Domain and Type), "+ Add requirement", the Caption field, the "Add a signal" entry (Enter and Escape), a signal's remove button (on a drawn and on a saved signal), the three direction choices, the Power domain choice, the Signal group type choice, and the remove buttons of the Direction, Domain, Signals and Endpoints rows.
+
+### Findings
+
+The new-connection capture matches the sketch's inspector: the "Connection" title, the Caption field, "+ Add detail", the rule, "+ Add requirement", Comments and Decline/Save, with nothing else. Remaining findings are P3 polish:
+
+- **P3, choice rows wrap.** At the default inspector width "Both ways" wraps under the two named directions, "Mechanical" under the other domains and "Differential pair" and "Signal" under the other types. Nothing is clipped or overlaps (asserted in the compact window). The domain and type names have no shorter form that keeps their meaning.
+- **P3, two kinds of ×.** The Signals row's remove button and each signal's own remove button look the same; their tooltips say "Remove signals" and "Remove signal VBUS".
+- **P3, shared end.** Power and Rail feed end at the same CPU anchor (rule F2, recorded in the A1 section), so their arrowheads there coincide. The selected connection's arrowheads are drawn last, so its own is visible.
+- **P3, dark highlight.** As recorded for A1, the selected connection's dark-blue highlight is less prominent in the dark theme.
+
+### Differences from the sketch
+
+- **History beside the title.** The sketch shows a History link beside "Connection". The decision lists the connection's controls without it. Each requirement box keeps its own History button once it is shown, and the whole-diagram History stays in the path row.
+- **Saved version line.** A saved connection shows "Selected connection: vN" under the title, as a saved block shows "Selected design: vN". The sketch shows a connection drawn in the current draft, which has no saved version, and the editor shows no line for it either.
+- **Rows the sketch does not show.** The sketch shows only the first state. The rows are one-click choices (toggle buttons, none chosen until the person chooses), the signal list with its entry, and the read-only Endpoints text, each under its name with a remove button at the right.
+- **Canvas.** The sketch's dotted grid and coloured connections (red power rails, blue data links) are not part of this item, as recorded for A1; the domain shows in the inspector only. A direction shows as arrowheads, as on the sketch's directed connections. A connection to a port on the level boundary is not captioned on the canvas, because the port already names it (existing rule).
+- **Icons.** Toolbar icons still show "?" on the test display (see the A1 section).
+
+### Limits of this review
+
+The formal `product-design:audit` and `design-qa` skills are not available in this session, so the recorded final result stays blocked; the integration owner runs the formal audit. This comparison opened the sketch and the captures side by side. The editor shows details an agent wrote once it reads the changed file (Reload saved diagram, opening, or the automatic comparison after a save against a newer file); it does not watch the file while open, as for every other agent change. A signal is renamed by removing it and adding the new name; a signal's own details (its direction or pins) are edited through its member path, which has no inspector yet. Realization details of a connection (Round B) are not shown.
+
+### Checklist
+
+- [x] The chosen sketch identified by path, sketch id and hash.
+- [x] Implementation identified by runs, manifest and instances; captures preserved with hashes.
+- [x] Light and dark captures for every step, including the compact window and the reopened level.
+- [x] Every new control pressed through the real window (listed above), and "+ Add requirement" on a connection.
+- [x] Cancel and remove paths: a row removed before a choice, a detail removed after one (with undo), a drawn and a saved signal removed, an agent's end detail, signal and domain removed, a blank caption refused (Save refused, Escape restores), a repeated signal refused, Escape in the entry, Decline.
+- [x] An agent-added detail arriving through the file, over MCP.
+- [x] Save, close and reopen.
 - [ ] Formal design audit (skills unavailable, so the final result stays blocked).

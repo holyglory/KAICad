@@ -855,13 +855,17 @@ R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool wit
     for( const auto& root : local.connections() )
     {
         if( const auto* added = draft ? newConnection( root.connection_id() ) : nullptr )
-        { links.push_back( { root.connection_id(), added->name(), true, { added->endpoints().begin(), added->endpoints().end() } } ); continue; }
+        {
+            links.push_back( { root.connection_id(), added->name(), true, { added->endpoints().begin(), added->endpoints().end() }, added->direction() } );
+            continue;
+        }
         const LINK_DRAFT* edited = draft ? connectionDraft( root.connection_id() ) : nullptr;
         for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
             for( const auto& item : archive.revisions() ) if( sameLink( item.selection(), root ) )
             {
                 const auto& endpoints = edited ? edited->endpoints() : item.endpoints();
-                links.push_back( { root.connection_id(), edited ? edited->name() : item.name(), false, { endpoints.begin(), endpoints.end() } } );
+                links.push_back( { root.connection_id(), edited ? edited->name() : item.name(), false, { endpoints.begin(), endpoints.end() },
+                                   edited ? edited->direction() : item.direction() } );
             }
     }
     return R::LEVEL_LAYOUT( scope->selection().block_id(), std::move( own ), std::move( nodes ), std::move( links ),
@@ -1030,6 +1034,42 @@ std::string RECURSIVE_DIAGRAM_FRAME::connectionAt( const R::LEVEL_LAYOUT& drawn,
             }
         }
     return nearest;
+}
+std::vector<RECURSIVE_DIAGRAM_FRAME::ARROW> RECURSIVE_DIAGRAM_FRAME::drawnArrows() const
+{
+    // FromFirst points every leg into its far end, ToFirst into the first end, Bidirectional both ways. The arrowhead sits
+    // on the last (or first) drawn segment of the leg, its tip on the end's anchor.
+    std::vector<ARROW> result;
+    if( !m_ready || !current() ) return result;
+    auto drawn = layout( current(), !m_historyPreview );
+    int size = FromDIP( 11 );
+    auto head = [&]( const std::string& id, unsigned endpoint, const std::vector<wxPoint>& points, bool atEnd )
+    {
+        wxPoint tip = atEnd ? points.back() : points.front();
+        // The nearest point of the leg that is not the tip gives the arrow's direction.
+        for( size_t k = 1; k < points.size(); ++k )
+        {
+            wxPoint other = atEnd ? points[points.size() - 1 - k] : points[k];
+            double dx = tip.x - other.x, dy = tip.y - other.y, length = std::hypot( dx, dy );
+            if( length < 1 ) continue;
+            double scale = std::min( 1.0, size / length );
+            result.push_back( { id, endpoint, tip, wxPoint( static_cast<int>( std::lround( tip.x - dx * scale ) ), static_cast<int>( std::lround( tip.y - dy * scale ) ) ) } );
+            return;
+        }
+    };
+    for( const auto& link : drawn.Links() )
+    {
+        if( link.direction == D::DCDR_UNSPECIFIED ) continue;
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            std::vector<wxPoint> points;
+            for( const auto& point : drawn.Route( link, i ) ) points.push_back( toScreen( point ) );
+            if( points.size() < 2 ) continue;
+            if( link.direction == D::DCDR_FROM_FIRST || link.direction == D::DCDR_BIDIRECTIONAL ) head( link.id, static_cast<unsigned>( i ), points, true );
+            if( link.direction == D::DCDR_TO_FIRST || link.direction == D::DCDR_BIDIRECTIONAL ) head( link.id, 0, points, false );
+        }
+    }
+    return result;
 }
 int RECURSIVE_DIAGRAM_FRAME::handleAt( const wxPoint& point ) const
 {
@@ -1282,6 +1322,21 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
                 dc.DrawText( caption, at );
             }
         }
+    }
+    // A connection's direction detail shows as arrowheads into the ends it points to (Round A3). The selected
+    // connection's arrowheads are drawn last, so an end two connections share shows the selected one.
+    auto arrows = drawnArrows();
+    std::stable_partition( arrows.begin(), arrows.end(), [this]( const ARROW& arrow ) { return arrow.connection != m_connectionId; } );
+    for( const auto& arrow : arrows )
+    {
+        bool highlighted = arrow.connection == m_connectionId;
+        wxColour colour = highlighted ? accent : muted;
+        double dx = arrow.tip.x - arrow.from.x, dy = arrow.tip.y - arrow.from.y, length = std::hypot( dx, dy );
+        if( length < 1 ) continue;
+        double half = FromDIP( 5 ) / length;
+        wxPoint points[] = { arrow.tip, wxPoint( static_cast<int>( std::lround( arrow.from.x - dy * half ) ), static_cast<int>( std::lround( arrow.from.y + dx * half ) ) ),
+                             wxPoint( static_cast<int>( std::lround( arrow.from.x + dy * half ) ), static_cast<int>( std::lround( arrow.from.y - dx * half ) ) ) };
+        dc.SetPen( wxPen( colour, 1 ) ); dc.SetBrush( wxBrush( colour ) ); dc.DrawPolygon( 3, points );
     }
     for( const auto& node : drawn.Nodes() )
     {

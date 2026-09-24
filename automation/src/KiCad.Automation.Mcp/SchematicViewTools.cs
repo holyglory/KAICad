@@ -260,14 +260,20 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_check_presentation", ReadOnly = true),
-     Description("Check current-sheet native geometry for page overflow, image bounds, font-size policy, reference visibility and more than two unrelated signal crossings. Supply explicit minimum/maximum text height in millimetres. Returns object-linked findings and repair targets. Partial coverage: full glyph clipping/occlusion, independent sheet contexts and complete revision tracking remain unfinished; missing wire bindings are reported. Never interpret this partial report as a complete verification pass.")]
+     Description("Find presentation problems an AI or person must repair: page overflow, cropped images, text outside the font-size policy, text painted upside down or top to bottom, hidden, empty or unannotated reference designators, overlapping symbol bodies, labels and field text, and signals crossing unrelated wiring more than twice. Supply explicit minimum/maximum text height in millimetres. By default checks the sheet KiCad displays (documentJson must name it). With includeSubsheets=true, checks the sheet instance documentJson names and every loaded sheet instance below it (the whole hierarchy from the root sheet), each measured offscreen at its own instance with its own references and painted field glyphs, without changing the design or the displayed sheet; overlapToleranceMm (default 0.5) is the overlap depth allowed where objects are meant to touch, such as a label on a pin end. Every finding names its sheet path and sheet name, the document revision, the affected object IDs, the measured value and the threshold; repair targets name each field by its owner and field name. Coverage stays partial: text crossed by wires, pin names, graphics or the drawing-sheet frame and title block, and complete revision tracking, are not measured, so never read a report without findings as a complete verification pass.")]
     public Task<CallToolResult> CheckPresentation(string instanceId, string documentJson,
-        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken) =>
+        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken,
+        bool includeSubsheets = false, decimal overlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm) =>
         Execute(async () =>
         {
-            var check = await NativePresentationChecks.CheckAsync(registry.Client(instanceId), ParseDocument(documentJson),
-                new(minimumTextHeightMm, maximumTextHeightMm), cancellationToken);
-            var result = JsonSerializer.SerializeToElement(new { instanceId, check },
+            var policy = new PresentationPolicy(minimumTextHeightMm, maximumTextHeightMm,
+                OverlapToleranceMm: overlapToleranceMm);
+            var client = registry.Client(instanceId);
+            var document = ParseDocument(documentJson);
+            var check = includeSubsheets
+                ? await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, cancellationToken)
+                : await NativePresentationChecks.CheckAsync(client, document, policy, cancellationToken);
+            var result = JsonSerializer.SerializeToElement(new { instanceId, includeSubsheets, check },
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     Converters = { new JsonStringEnumConverter() } });
             return new CallToolResult

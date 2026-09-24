@@ -162,6 +162,149 @@ public sealed class PresentationVerificationTests
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid), Policy).Clear);
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid with { Wires = [first, second with { Start = new(30, 20) }] }), Policy).Clear);
     }
+    // Pure geometry of the overlap, reading-direction and annotation rules. The live PSU/CPU journey
+    // (NativeXmlComponentCreationJourney, VerifyPsuCpuPresentationFindings) proves them on KiCad's own
+    // measurements; these cases pin the exact thresholds and the intentional patterns that must stay quiet,
+    // which a native seed cannot vary finely (touching within the tolerance, a field on its own body).
+    private static long Mm(decimal millimetres) => (long)(millimetres * 1_000_000m);
+    private static PresentationBounds Box(decimal left, decimal top, decimal right, decimal bottom) => new(Mm(left), Mm(top), Mm(right), Mm(bottom));
+    private sealed record Layout(PresentationObject U1, PresentationObject U1Reference, PresentationObject U1Value,
+        PresentationObject U2, PresentationObject Label, PresentationObject LabelField, PresentationObject Sheet,
+        PresentationObject SheetName)
+    {
+        public IReadOnlyList<PresentationObject> All => [U1, U1Reference, U1Value, U2, Label, LabelField, Sheet, SheetName];
+    }
+    private static Layout CleanLayout()
+    {
+        Guid u1 = Guid.NewGuid(), label = Guid.NewGuid(), sheet = Guid.NewGuid();
+        PresentationObject Field(Guid owner, PresentationBounds glyphs, string text, bool reference = false) => new(Guid.NewGuid(),
+            reference ? PresentationObjectKind.ReferenceDesignator : PresentationObjectKind.Text, glyphs, true, 1.27m, text,
+            Role: PresentationRole.Field, OwnerId: owner, ReadingAngleDegrees: 0);
+        return new(
+            new(u1, PresentationObjectKind.Graphic, Box(10, 10, 30, 30), true, Role: PresentationRole.Symbol),
+            Field(u1, Box(12, 5, 16, 7), "U1", reference: true),
+            // A value the library draws inside its own body is intentional.
+            Field(u1, Box(15, 18, 25, 20), "LM2595S-ADJ"),
+            new(Guid.NewGuid(), PresentationObjectKind.Graphic, Box(40, 10, 60, 30), true, Role: PresentationRole.Symbol),
+            // A label anchored on U1's pin end at x = 30 mm reaches 0.2 mm back over the pin: touching, not overlapping.
+            new(label, PresentationObjectKind.Text, Box(29.8m, 18.6m, 36, 20.4m), true, 1.27m, "VIN", Role: PresentationRole.Label,
+                ReadingAngleDegrees: 0),
+            Field(label, Box(31, 18.8m, 34, 20.2m), "[2]"),
+            new(sheet, PresentationObjectKind.Graphic, Box(70, 10, 100, 40), true, Role: PresentationRole.Sheet),
+            Field(sheet, Box(70, 7, 80, 9.5m), "PSU"));
+    }
+    private static PresentationReport VerifyLayout(IEnumerable<PresentationObject> objects, PresentationPolicy? policy = null,
+        IReadOnlyList<Guid>? required = null) =>
+        PresentationVerifier.Verify(Snapshot(new PresentationSheet([Guid.NewGuid()], Box(0, 0, 297, 210), [.. objects], required ?? [], [], [], "/PSU/")),
+            policy ?? Policy);
+
+    [TestMethod]
+    public void OverlapRulesCatchCoveredBodiesLabelsAndFieldsWithDepthAndTolerance()
+    {
+        var clean = CleanLayout();
+        var quiet = VerifyLayout(clean.All, required: [clean.U1Reference.Id]);
+        Assert.IsTrue(quiet.Clear, string.Join("; ", quiet.Findings.Select(f => f.Rule + " " + f.Measured)));
+
+        PresentationFinding Single(IEnumerable<PresentationObject> objects, string rule, PresentationPolicy? policy = null)
+        {
+            var findings = VerifyLayout(objects, policy).Findings;
+            Assert.HasCount(1, findings, string.Join("; ", findings.Select(f => f.Rule)));
+            Assert.AreEqual(rule, findings[0].Rule);
+            return findings[0];
+        }
+        void Pair(PresentationFinding finding, PresentationObject first, PresentationObject second) =>
+            CollectionAssert.AreEquivalent(new[] { first.Id, second.Id }, finding.ObjectIds.ToArray());
+
+        // U2 slid 11 mm left: its body covers U1's right edge by 1 mm over the full 20 mm height.
+        var u2 = clean.U2 with { FullBounds = Box(29, 10, 49, 30) };
+        var bodies = Single([clean.U1, clean.U1Reference, clean.U1Value, u2, clean.Sheet, clean.SheetName], "body_overlap");
+        Pair(bodies, clean.U1, u2);
+        Assert.AreEqual(1m, bodies.Measured); Assert.AreEqual(0.5m, bodies.Limit);
+        Assert.AreEqual(Box(29, 10, 30, 30), bodies.Bounds);
+        Assert.AreEqual(PresentationSeverity.Error, bodies.Severity);
+        Assert.AreEqual("/PSU/", bodies.SheetName);
+        Assert.AreEqual(new DocumentRevision("fixture-epoch", 5), bodies.Revision);
+
+        // A label turned back over its own symbol reaches 2 mm into U1's body.
+        var label = Single(clean.All.Select(o => o == clean.Label ? o with { FullBounds = Box(28, 18.6m, 36, 20.4m) } : o), "label_overlap");
+        Pair(label, clean.U1, clean.Label);
+        Assert.AreEqual(1.8m, label.Measured);
+
+        // U1's reference dragged onto U2, and U1's value dragged onto U1's own reference.
+        var covered = Single(clean.All.Select(o => o == clean.U1Reference ? o with { FullBounds = Box(41, 12, 45, 14) } : o), "field_overlap");
+        Pair(covered, clean.U1Reference, clean.U2);
+        Assert.AreEqual(2m, covered.Measured);
+        var stacked = Single(clean.All.Select(o => o == clean.U1Value ? o with { FullBounds = Box(12.5m, 5.5m, 20, 7.5m) } : o), "field_overlap");
+        Pair(stacked, clean.U1Reference, clean.U1Value);
+        Assert.AreEqual(1.5m, stacked.Measured);
+        Assert.AreEqual(Box(12.5m, 5.5m, 16, 7), stacked.Bounds);
+
+        // The tolerance is inclusive; one hundred micrometres more is an overlap. A zero tolerance reports the touching label.
+        Assert.IsTrue(VerifyLayout(clean.All.Select(o => o == clean.Label ? o with { FullBounds = Box(29.5m, 18.6m, 36, 20.4m) } : o)).Clear);
+        Assert.AreEqual(0.6m, Single(clean.All.Select(o => o == clean.Label ? o with { FullBounds = Box(29.4m, 18.6m, 36, 20.4m) } : o),
+            "label_overlap").Measured);
+        var strict = Single(clean.All, "label_overlap", Policy with { OverlapToleranceMm = 0 });
+        Assert.AreEqual(0.2m, strict.Measured); Assert.AreEqual(0m, strict.Limit);
+
+        // Hidden or empty field text paints nothing, and boxes that only touch share no area.
+        foreach (var quietField in new[] { clean.U1Reference with { FullBounds = Box(41, 12, 45, 14), Visible = false },
+            clean.U1Reference with { FullBounds = Box(41, 12, 45, 14), Text = "" } })
+            Assert.IsTrue(VerifyLayout(clean.All.Select(o => o == clean.U1Reference ? quietField : o)).Clear);
+        Assert.IsTrue(VerifyLayout(clean.All.Select(o => o == clean.U2 ? o with { FullBounds = Box(30, 10, 50, 30) } : o)
+            .Where(o => o != clean.Label && o != clean.LabelField)).Clear);
+        Assert.ThrowsExactly<AutomationException>(() => VerifyLayout([clean.U1Reference with { OwnerId = null }]));
+    }
+
+    [TestMethod]
+    public void UpsideDownOrTopToBottomTextAndUnannotatedDesignatorsAreCaught()
+    {
+        var clean = CleanLayout();
+        foreach (var (angle, rule) in new (decimal, string?)[] { (0, null), (90, null), (359.9995m, null), (180, "upside down"),
+            (270, "top to bottom"), (-90, "top to bottom"), (135, "upside down") })
+        {
+            var report = VerifyLayout(clean.All.Select(o => o == clean.U1Value ? o with { ReadingAngleDegrees = angle } : o));
+            if (rule is null) { Assert.IsTrue(report.Clear, angle.ToString()); continue; }
+            var finding = report.Findings.Single();
+            Assert.AreEqual("text_orientation", finding.Rule);
+            CollectionAssert.AreEqual(new[] { clean.U1Value.Id }, finding.ObjectIds.ToArray());
+            Assert.AreEqual(angle < 0 ? angle + 360 : angle, finding.Measured);
+            Assert.AreEqual(90m, finding.Limit);
+            StringAssert.Contains(finding.Message, rule);
+        }
+        Assert.IsTrue(VerifyLayout(clean.All.Select(o => o == clean.U1Value ? o with { ReadingAngleDegrees = 180, Visible = false } : o)).Clear);
+
+        foreach (var (text, unannotated) in new[] { ("R?", true), ("U?A", true), ("U1", false), ("U5A", false) })
+        {
+            var report = VerifyLayout(clean.All.Select(o => o == clean.U1Reference ? o with { Text = text } : o), required: [clean.U1Reference.Id]);
+            Assert.AreEqual(unannotated, report.Findings.Any(f => f.Rule == "designator_unannotated" && f.ObjectIds.Single() == clean.U1Reference.Id), text);
+            Assert.AreEqual(unannotated ? 1 : 0, report.Findings.Count, text);
+        }
+        // A power symbol's hidden '#PWR' reference is not a required designator.
+        var power = clean.U1Reference with { Id = Guid.NewGuid(), Text = "#PWR01", Visible = false, FullBounds = Box(100, 100, 104, 102) };
+        Assert.IsTrue(VerifyLayout([.. clean.All, power], required: [clean.U1Reference.Id]).Clear);
+        Assert.AreEqual("designator_not_visible", VerifyLayout([.. clean.All, power], required: [power.Id]).Findings.Single().Rule);
+    }
+
+    [TestMethod]
+    public void OverflowFindingsMeasureTheDistanceBeyondThePageForEverySheetInstance()
+    {
+        var clean = CleanLayout();
+        var moved = clean.U1 with { FullBounds = Box(-5, 10, 15, 30) };
+        var objects = clean.All.Select(o => o == clean.U1 ? moved : o).ToArray();
+        Guid first = Guid.NewGuid(), second = Guid.NewGuid();
+        var report = PresentationVerifier.Verify(Snapshot(
+            new PresentationSheet([first], Box(0, 0, 297, 210), objects, [], [], [], "/"),
+            new PresentationSheet([first, second], Box(0, 0, 297, 210), clean.All, [], [], [], "/PSU/")), Policy);
+        var overflow = report.Findings.Single();
+        Assert.AreEqual("page_overflow", overflow.Rule);
+        Assert.AreEqual(5m, overflow.Measured); Assert.AreEqual(0m, overflow.Limit);
+        Assert.AreEqual(first.ToString("D"), overflow.SheetPath); Assert.AreEqual("/", overflow.SheetName);
+        CollectionAssert.AreEqual(new[] { first.ToString("D"), first.ToString("D") + "/" + second.ToString("D") },
+            report.Sheets!.Select(s => s.SheetPath).ToArray());
+        CollectionAssert.AreEqual(new[] { "/", "/PSU/" }, report.Sheets!.Select(s => s.SheetName).ToArray());
+        Assert.AreEqual(objects.Length, report.Sheets![0].Objects);
+    }
+
     // Isolated geometry of NativePresentationChecks.CheckSymbolPlacementAsync. The live PSU/CPU creation
     // journey exercises it only on a clean layout; the layout planner never produces the must-catch cases,
     // so they are proven here.

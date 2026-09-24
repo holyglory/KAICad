@@ -5,7 +5,9 @@ using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Native;
 
-public sealed record PresentationRepairTarget(Guid ObjectId, Guid? OwnerId, string? FieldName);
+// SheetPath names the sheet instance of a hierarchy check (GUIDs joined by '/'); field runtime
+// identities are not persistent, so repair a field through its owner and field name on that sheet.
+public sealed record PresentationRepairTarget(Guid ObjectId, Guid? OwnerId, string? FieldName, string? SheetPath = null);
 public sealed record NativePresentationCheck(PresentationReport Report,
     IReadOnlyList<PresentationRepairTarget> RepairTargets, IReadOnlyList<string> Limitations);
 
@@ -71,6 +73,7 @@ public static class NativePresentationChecks
         return issues;
     }
 
+    /// <summary>Check the sheet KiCad displays, from the facts of the displayed sheet only.</summary>
     public static async Task<NativePresentationCheck> CheckAsync(NativeClient client, DocumentSpecifier document,
         PresentationPolicy policy, CancellationToken cancellationToken = default)
     {
@@ -78,9 +81,82 @@ public static class NativePresentationChecks
             new() { Document = document }, cancellationToken);
         if (!facts.Document.Equals(document) || facts.Document.SheetPath is null || facts.Document.SheetPath.Path.Count == 0)
             throw Invalid("Native presentation facts identify another or missing sheet.");
+        var targets = new List<PresentationRepairTarget>();
+        var sheet = Sheet(facts, perInstance: false, targets);
+        var revision = new KiCad.Automation.Model.DocumentRevision(facts.Revision.Epoch, facts.Revision.Sequence);
+        // The native extraction deliberately reports missing capabilities.
+        var snapshot = new PresentationSnapshot(Identity(facts.Document.SheetPath.Path[0]), revision,
+            facts.CoverageComplete && facts.Limitations.Count == 0, [sheet]);
+        return new(PresentationVerifier.Verify(snapshot, policy), targets, facts.Limitations.ToArray());
+    }
+
+    /// <summary>Check the sheet instance <paramref name="document"/> names and every loaded sheet instance below it
+    /// (the whole hierarchy for the root sheet), each measured by KiCad offscreen at its own instance: its own
+    /// references, units and field text, painted field glyphs and native nets. Every sheet is measured at one
+    /// document revision, which each finding names; KiCad refuses the measurement if the design changes meanwhile.
+    /// Neither the design nor the displayed sheet changes.</summary>
+    public static async Task<NativePresentationCheck> CheckHierarchyAsync(NativeClient client, DocumentSpecifier document,
+        PresentationPolicy policy, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(document);
+        if (document.SheetPath is null || document.SheetPath.Path.Count == 0)
+            throw Invalid("An explicit sheet-instance path is required.");
+        var hierarchy = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(
+            new() { Document = document.Clone() }, cancellationToken);
+        if (hierarchy.Revision is null || string.IsNullOrWhiteSpace(hierarchy.Revision.Epoch) || hierarchy.Data is null)
+            throw Invalid("The native hierarchy has no identified revision.");
+        var prefix = document.SheetPath.Path.Select(id => id.Value).ToArray();
+        var instances = hierarchy.Data.Instances.Select(s => s.Metadata?.Document)
+            .Where(d => d?.SheetPath is not null && d.SheetPath.Path.Count >= prefix.Length
+                && d.SheetPath.Path.Take(prefix.Length).Select(id => id.Value).SequenceEqual(prefix))
+            .Select(d => d!).ToArray();
+        if (!instances.Any(d => d.SheetPath.Path.Count == prefix.Length))
+            throw new AutomationException("presentation_sheet_not_loaded", "The requested sheet instance is not loaded in KiCad.");
+        var sheets = new List<PresentationSheet>();
+        var targets = new List<PresentationRepairTarget>();
+        var limitations = new List<string>();
+        foreach (var instance in instances.OrderBy(d => d.SheetPath.Path.Count)
+                     .ThenBy(d => string.Join('/', d.SheetPath.Path.Select(id => id.Value)), StringComparer.Ordinal))
+        {
+            SchematicPlacementGeometry measured;
+            try
+            {
+                measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                {
+                    Document = instance.Clone(), ExpectedRevision = hierarchy.Revision.Clone(), IncludePresentation = true
+                }, cancellationToken);
+            }
+            catch (NativeApiException error) when (error.Message.Contains("revision", StringComparison.OrdinalIgnoreCase)
+                || error.Message.Contains("changed", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new AutomationException("presentation_revision_changed",
+                    "The design changed while its sheets were measured; check again. " + error.Message);
+            }
+            var facts = measured.Presentation;
+            if (facts is null || !facts.Document.Equals(instance) || !measured.Revision.Equals(hierarchy.Revision)
+                || !facts.Revision.Equals(hierarchy.Revision))
+                throw Invalid("Native presentation facts identify another sheet or revision, or this KiCad build cannot measure them.");
+            sheets.Add(Sheet(facts, perInstance: true, targets));
+            limitations.AddRange(facts.Limitations.Where(l => !limitations.Contains(l, StringComparer.Ordinal)));
+        }
+        var revision = new KiCad.Automation.Model.DocumentRevision(hierarchy.Revision.Epoch, hierarchy.Revision.Sequence);
+        var snapshot = new PresentationSnapshot(Identity(document.SheetPath.Path[0]), revision,
+            limitations.Count == 0 && sheets.Count > 0, sheets);
+        return new(PresentationVerifier.Verify(snapshot, policy), targets, limitations);
+    }
+
+    // Facts from ReadSchematicPresentationFacts (the displayed sheet) predate the per-instance fields: every
+    // reference designator is required and no object has a role, glyphs or reading direction. Per-instance
+    // facts must carry them.
+    private static PresentationSheet Sheet(SchematicPresentationFacts facts, bool perInstance, List<PresentationRepairTarget> targets)
+    {
+        if (facts.Document?.SheetPath is null || facts.Document.SheetPath.Path.Count == 0)
+            throw Invalid("Native presentation facts identify no sheet instance.");
+        var path = facts.Document.SheetPath.Path.Select(Identity).ToArray();
+        string key = string.Join('/', path.Select(id => id.ToString("D")));
         var objects = new List<PresentationObject>();
         var references = new List<Guid>();
-        var targets = new List<PresentationRepairTarget>();
         foreach (var fact in facts.Objects)
         {
             var kind = fact.Kind switch
@@ -91,25 +167,36 @@ public static class NativePresentationChecks
                 SchematicPresentationObject.Types.Kind.ReferenceDesignator => PresentationObjectKind.ReferenceDesignator,
                 _ => throw Invalid("Unsupported native presentation object kind.")
             };
+            var role = fact.PresentationRole switch
+            {
+                "" when !perInstance => PresentationRole.Other,
+                "other" => PresentationRole.Other,
+                "symbol" => PresentationRole.Symbol,
+                "sheet" => PresentationRole.Sheet,
+                "label" => PresentationRole.Label,
+                "field" => PresentationRole.Field,
+                "sheet_pin" => PresentationRole.SheetPin,
+                "text" => PresentationRole.Text,
+                _ => throw Invalid($"Unsupported native presentation role '{fact.PresentationRole}'.")
+            };
             Guid id = Identity(fact.Id);
-            objects.Add(new(id, kind, Bounds(fact.Bounds), fact.Visible,
+            Guid? owner = fact.OwnerId is null ? null : Identity(fact.OwnerId);
+            objects.Add(new(id, kind, fact.GlyphBounds is null ? Bounds(fact.Bounds) : Bounds(fact.GlyphBounds), fact.Visible,
                 fact.HasTextHeightNm ? fact.TextHeightNm / 1_000_000m : null, fact.Text,
-                TextBounds: fact.TextBounds is null ? null : Bounds(fact.TextBounds)));
-            if (kind == PresentationObjectKind.ReferenceDesignator) references.Add(id);
-            targets.Add(new(id, fact.OwnerId is null ? null : Identity(fact.OwnerId),
-                string.IsNullOrEmpty(fact.FieldName) ? null : fact.FieldName));
+                TextBounds: fact.TextBounds is null ? null : Bounds(fact.TextBounds), Role: role, OwnerId: owner,
+                ReadingAngleDegrees: fact.HasReadingAngleDegrees ? Degrees(fact.ReadingAngleDegrees) : null));
+            if (kind == PresentationObjectKind.ReferenceDesignator && (!perInstance || fact.DesignatorRequired)) references.Add(id);
+            targets.Add(new(id, owner, string.IsNullOrEmpty(fact.FieldName) ? null : fact.FieldName, perInstance ? key : null));
         }
-        var sheet = new PresentationSheet(facts.Document.SheetPath.Path.Select(Identity).ToArray(),
-            Bounds(facts.PageBounds), objects, references,
+        return new(path, Bounds(facts.PageBounds), objects, references,
             facts.Wires.Select(w => new PresentationWire(Identity(w.Id), w.SignalKey,
                 new(w.Start.XNm, w.Start.YNm), new(w.End.XNm, w.End.YNm))).ToArray(),
-            facts.Junctions.Select(p => new PresentationPoint(p.XNm, p.YNm)).ToArray());
-        var revision = new KiCad.Automation.Model.DocumentRevision(facts.Revision.Epoch, facts.Revision.Sequence);
-        // The native extraction deliberately reports missing capabilities.
-        var snapshot = new PresentationSnapshot(Identity(facts.Document.SheetPath.Path[0]), revision,
-            facts.CoverageComplete && facts.Limitations.Count == 0, [sheet]);
-        return new(PresentationVerifier.Verify(snapshot, policy), targets, facts.Limitations.ToArray());
+            facts.Junctions.Select(p => new PresentationPoint(p.XNm, p.YNm)).ToArray(),
+            perInstance && !string.IsNullOrEmpty(facts.SheetName) ? facts.SheetName : null);
     }
+
+    private static decimal Degrees(double value) => double.IsFinite(value) && Math.Abs(value) <= 3600
+        ? Math.Round((decimal)value, 3) : throw Invalid("Native reading direction is not a finite angle.");
 
     private static PresentationBounds Bounds(Box2? box)
     {

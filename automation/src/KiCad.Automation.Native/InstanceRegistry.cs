@@ -13,9 +13,10 @@ public sealed record InstanceRecord(string InstanceId, string ProjectPath, strin
 public sealed partial class InstanceRegistry(INativeTransport transport, string stateDirectory,
     Action<ProcessStartInfo>? configureProcess = null)
 {
-    private sealed record Connection(InstanceRecord Record, NativeClient Client);
-    // One immutable slot keeps the record and its epoch-pinned client together
-    // when an explicitly verified replacement is adopted.
+    private sealed record Connection(InstanceRecord Record, NativeClient Client, AutomationSession Handshake);
+    // One immutable slot keeps the record, its epoch-pinned client and the handshake that
+    // verified it together, so an explicitly verified replacement or a reattachment replaces
+    // all three at once.
     private readonly ConcurrentDictionary<string, Connection> connections = new(StringComparer.Ordinal);
     private readonly HashSet<string> startingProjects = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim changes = new(1, 1);
@@ -28,6 +29,15 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
     public InstanceRecord Get(string instanceId) => Find(instanceId).Record;
 
     public NativeClient Client(string instanceId) => Find(instanceId).Client;
+
+    /// <summary>The handshake this server recorded when it last verified the instance: at attach,
+    /// start, reattach or an adopted replacement, each of which replaces the previous one. Reading it
+    /// never contacts KiCad, so offline planning can classify exactly as apply does (CN-1 I10;
+    /// decision n39ac0ccc5c9270f2). Null when the instance is not attached to this server; a saved
+    /// registration from an earlier server is not a handshake until it is reattached. Every read is
+    /// a copy.</summary>
+    public AutomationSession? AttachedHandshake(string instanceId) =>
+        connections.TryGetValue(instanceId, out var connection) ? connection.Handshake.Clone() : null;
 
     private Connection Find(string instanceId) => connections.TryGetValue(instanceId, out var connection)
         ? connection : throw new AutomationException("unknown_instance", "The instance ID is not attached to this server.");
@@ -210,7 +220,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 throw new AutomationException("instance_changed", "A saved identity requires explicit verified replacement, not ordinary attachment.");
             if (record.ProcessId is null) record = record with { ProcessId = saved.ProcessId };
         }
-        var connection = new Connection(record, existing?.Client ?? client);
+        // A repeated attachment keeps the shared serialized client but records this handshake.
+        var connection = new Connection(record, existing?.Client ?? client, session.Clone());
         await WriteRecordAsync(record, cancellationToken);
         connections[record.InstanceId] = connection;
         return record;

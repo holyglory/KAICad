@@ -13,7 +13,13 @@ public sealed partial class NativeSessionTests
     {
         string directory = Directory.CreateDirectory(Path.Combine(temporary, "interrupted-start")).FullName;
         string project = Path.Combine(directory, "recover.kicad_pro");
-        await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}", token);
+        // The project declares its root sheet, which holds two unconnected probes for the recorded-handshake
+        // planning step at the end. KiCad reads the declaration once, when it loads the project at startup.
+        string rootId = Guid.NewGuid().ToString("D");
+        await File.WriteAllTextAsync(project, $$$"""
+            {"meta":{"version":3},"schematic":{"top_level_sheets":[{"uuid":"{{{rootId}}}","name":"recover","filename":"recover.kicad_sch"}]}}
+            """, token);
+        await File.WriteAllTextAsync(Path.ChangeExtension(project, ".kicad_sch"), UnconnectedProbePair(rootId, "recover"), token);
         string state = Path.Combine(directory, "registry");
         var barrier = new StartupHandshakeBarrier();
         var registry = new InstanceRegistry(barrier, state, start =>
@@ -89,6 +95,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(0, third.List().Count);
             Assert.AreEqual(attached.InstanceId, (await third.SavedSessionsAsync(token)).Single().InstanceId);
             Assert.AreEqual(attached.Epoch, (await third.ReattachAsync(attached.InstanceId, token)).Epoch);
+            await VerifyRecordedHandshakePlanning(recovered.Client(attached.InstanceId), state,
+                Path.ChangeExtension(project, ".kicad_sch"), evidence, token);
         }
         finally
         {

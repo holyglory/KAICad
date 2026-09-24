@@ -14,6 +14,9 @@ public sealed record AutomaticDesignStatus(ulong Sequence, AutomaticDesignPhase 
 internal interface IAutomaticDesignDriver : IAsyncDisposable
 {
     DesignRecoveryStore Store { get; }
+    /// <summary>The recorded instance's handshake, taken when the driver attached. Planning uses it
+    /// to classify exactly as apply does (decision n39ac0ccc5c9270f2); null behaves as today.</summary>
+    KiCad.Automation.Protocol.AutomationSession? Session { get; }
     Task<AutomaticDesignInput> ReceiveAsync(CancellationToken token);
     Task<StoredDesignRecovery> RefreshAsync(AutomaticDesignInput input, CancellationToken token);
     Task<SchematicSynchronizationExecution> ApplyAsync(StoredDesignRecovery saved, Guid operationId,
@@ -166,7 +169,8 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                         }
                         if (saved.RevisionToken == settledRevision)
                         { Publish(AutomaticDesignPhase.Watching, saved.RevisionToken, Inspect().OperationId, false, null, null); continue; }
-                        var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(driver.Store, saved, stopping.Token);
+                        var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(driver.Store, saved,
+                            driver.Session, stopping.Token);
                         if (!plan.CanPrepare) throw Error(plan.ErrorCode ?? "design_sync_conflict", plan.ErrorMessage ?? "Resolve the saved design conflicts before resuming.");
                         operation = Guid.NewGuid();
                         Publish(AutomaticDesignPhase.Applying, saved.RevisionToken, operation, false, null, null);

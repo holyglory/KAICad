@@ -348,6 +348,34 @@ add_test( NAME qa_schematic_formatting
     COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SchematicFormatting --log_level=test_suite )
 setup_qa_env( qa_schematic_formatting )
 
+# How API requests and replies map onto schematic items, labels and their fields included.
+add_test( NAME qa_api_sch_proto
+    COMMAND $<TARGET_FILE:qa_eeschema> --run_test=ApiSchProto --log_level=test_suite )
+setup_qa_env( qa_api_sch_proto )
+
+# Change tracking as eeschema links it: the source oracle and the tracked change itself. The cost
+# measurement on the largest demo stays opt-in, as its disabled() decorator intends; the native
+# event journey runs it by name.
+add_test( NAME qa_sch_change_tracking
+    COMMAND $<TARGET_FILE:qa_eeschema>
+        --run_test=SchChangeTracking:SchTrackedChange:!SchTrackedChange/MeasuresTrackingCostOnTheLargestDemo
+        --log_level=test_suite )
+setup_qa_env( qa_sch_change_tracking )
+
+# Pin geometry facts (lane 2A) live in test_sch_variant_pin_mapping.cpp, which was registered before
+# it had any cases. The ctest is registered as soon as that file declares test cases, so a renamed or
+# missing suite then fails rather than dropping out; configuration re-runs whenever the file changes.
+set_property( DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+              ${CMAKE_CURRENT_SOURCE_DIR}/test_sch_variant_pin_mapping.cpp )
+file( STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/test_sch_variant_pin_mapping.cpp QA_SCH_VARIANT_PIN_MAPPING_CASES
+      REGEX "BOOST_(AUTO|FIXTURE|DATA)_TEST_CASE" )
+
+if( QA_SCH_VARIANT_PIN_MAPPING_CASES )
+    add_test( NAME qa_sch_pin_geometry_facts
+        COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SchematicPinGeometryFacts --log_level=test_suite )
+    setup_qa_env( qa_sch_pin_geometry_facts )
+endif()
+
 setup_qa_env( qa_eeschema )
 
 # Focused native save/load acceptance without rebuilding every eeschema test.
@@ -361,6 +389,9 @@ add_executable( qa_symbol_graphic_identity
     test_sch_parity_netlist.cpp
     test_module.cpp
     test_sch_commit.cpp
+    # The change-tracking oracle and its eeschema-linked tracked-change checks; native-foundation
+    # builds and runs this target, so the eeschema-linked part runs there as well.
+    test_sch_change_tracking.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp

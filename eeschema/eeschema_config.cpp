@@ -35,6 +35,7 @@
 #include <sch_painter.h>
 #include <connection_graph.h>
 #include <schematic.h>
+#include <api/api_sch_state_groups.h>
 #include <schematic_text_var_adapter.h>
 #include <text_var_dependency.h>
 #include <widgets/hierarchy_pane.h>
@@ -125,23 +126,16 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
 
     std::map<wxString, std::vector<wxString>> oldAliases = Prj().GetProjectFile().m_BusAliases;
 
-    auto captureSettings = [&]() -> std::optional<nlohmann::json>
-    {
-        try
-        {
-            auto state = Prj().GetProjectFile().CaptureCurrentState();
-            // SaveProject maintains file metadata; it is not an engineering edit.
-            state.erase( "meta" );
-            return state;
-        }
-        catch( const std::exception& error )
-        {
-            wxLogTrace( traceSettings, "Unable to capture schematic setup settings: %s", error.what() );
-            return std::nullopt;
-        }
-    };
-    const auto beforeSettings = captureSettings();
-    const uint64_t beforeRevision = Schematic().ChangeJournal().Sequence();
+    // Setup edits the project settings and, through its own commit, the schematic-wide data
+    // saved with the first top-level sheet (embedded files, net chains) and library caches;
+    // a pushed commit is already a revision.  Outside the commit only the project settings
+    // change, and the refresh below reaches other sheets (connectivity clean-up) only when
+    // the bus aliases, themselves project settings, changed.  So the project settings and
+    // the first top-level sheet are compared, never the whole design, which on a large
+    // design would cost seconds before the dialog even opens.  A cancelled or unchanged
+    // Setup records nothing and leaves the document unmodified.
+    SCH_TRACKED_CHANGE change( Schematic(), "Edit Schematic Setup", { Schematic().RootScreen() },
+                               SCH_TRACKED_CHANGE::Mark( Schematic() ) );
 
     DIALOG_SCHEMATIC_SETUP dlg( this );
 
@@ -154,24 +148,6 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
 
     if( dlg.ShowModal() == wxID_OK )
     {
-        const auto afterSettings = captureSettings();
-        const bool settingsChanged = !beforeSettings || !afterSettings || *beforeSettings != *afterSettings;
-        if( beforeSettings && afterSettings && settingsChanged )
-        {
-            size_t reported = 0;
-            for( const auto& change : nlohmann::json::diff( *beforeSettings, *afterSettings ) )
-            {
-                // Trace identities only, never project values or document text.
-                wxLogTrace( traceSettings, "Schematic setup changed setting: %s",
-                            change.at( "path" ).get<std::string>() );
-                if( ++reported == 16 )
-                    break;
-            }
-        }
-        // Mark document as modified so that project settings can be saved as part of doc save
-        if( settingsChanged )
-            OnModify();
-
         Kiway().CommonSettingsChanged( TEXTVARS_CHANGED );
 
         Prj().IncrementTextVarsTicker();
@@ -214,9 +190,10 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
         RefreshOperatingPointDisplay();
         GetCanvas()->Refresh();
 
-        if( settingsChanged && Schematic().ChangeJournal().Sequence() == beforeRevision )
-            Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                "Edit Schematic Setup" );
+        // Recorded once, unless the dialog's own commit already recorded it; the document is
+        // marked modified so the changed settings are saved with it.
+        if( change.Complete() )
+            OnModify();
     }
 }
 

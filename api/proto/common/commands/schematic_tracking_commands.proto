@@ -2,3 +2,38 @@
 syntax = "proto3";
 package kiapi.automation.v1;
 option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/types/base_types.proto";
+import "schematic/schematic_rules.proto";
+
+// Reads the live ERC markers of one open schematic: the violations the last check computed and
+// the markers that carry saved exclusions. Read-only. Markers are diagnostics, not saved design
+// content; the saved exclusions are the ones SchematicErcSettings reports.
+message SchematicTrackingReadErcMarkers
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+message SchematicTrackingErcMarker
+{
+  // The live marker's identity. A marker rebuilt by undo keeps the identity it had.
+  kiapi.common.types.KIID id = 1;
+
+  // The exact marker references: equal to the exclusion's marker when the marker is excluded.
+  kiapi.schematic.ErcMarker marker = 2;
+
+  bool excluded = 3;
+  string comment = 4;
+
+  // The severity the ERC dialog lists it under: RS_EXCLUSION when excluded.
+  kiapi.common.types.RuleSeverity severity = 5;
+
+  // The first sheet instance that shows the marker's screen.
+  kiapi.common.types.SheetPath sheet = 6;
+}
+
+message SchematicTrackingErcMarkers
+{
+  // Every live marker of every loaded screen, ordered by marker references, then identity.
+  repeated SchematicTrackingErcMarker markers = 1;
+}

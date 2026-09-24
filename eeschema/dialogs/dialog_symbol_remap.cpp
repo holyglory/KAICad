@@ -22,6 +22,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <api/api_sch_state_groups.h>
 #include <macros.h>
 #include <pgm_base.h>
 #include <kiface_base.h>
@@ -95,6 +96,11 @@ void DIALOG_SYMBOL_REMAP::OnRemapSymbols( wxCommandEvent& aEvent )
     if( !backupProject( m_messagePanel->Reporter() ) )
         return;
 
+    // Rescue and remapping edit symbol links, the rescue cache and the project's legacy
+    // library list directly, so the whole remap is compared with the persisted schematic and
+    // project state and becomes one revision only when something actually changed.
+    SCH_TRACKED_CHANGE change( parent->Schematic(), "Remap Symbols" );
+
     // Ignore the never show rescue setting for one last rescue of legacy symbol
     // libraries before remapping to the symbol library table.  This ensures the
     // best remapping results.
@@ -114,7 +120,6 @@ void DIALOG_SYMBOL_REMAP::OnRemapSymbols( wxCommandEvent& aEvent )
         parent->ClearUndoORRedoList( EDA_BASE_FRAME::UNDO_LIST, 1 );
         parent->SyncView();
         parent->GetCanvas()->Refresh();
-        parent->OnModify();
     }
 
     // The schematic is fully loaded, any legacy library symbols have been rescued.  Now
@@ -140,6 +145,9 @@ void DIALOG_SYMBOL_REMAP::OnRemapSymbols( wxCommandEvent& aEvent )
     // Reload the cache symbol library.
     Prj().SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, nullptr );
     PROJECT_SCH::LegacySchLibs( &Prj() );
+
+    if( change.Complete() )
+        parent->OnModify();
 
     Raise();
     m_remapped = true;

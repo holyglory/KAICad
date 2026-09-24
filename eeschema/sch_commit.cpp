@@ -34,6 +34,9 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <sch_embedded_files_undo.h>
 #include <sch_page_settings_undo.h>
+#include <refdes_tracker.h>
+#include <schematic_settings.h>
+#include <api/api_sch_state_groups.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <connection_graph.h>
 
@@ -73,6 +76,118 @@ SCH_COMMIT::~SCH_COMMIT()
 bool SCH_COMMIT::Empty() const
 {
     return COMMIT::Empty() && !m_embeddedFilesUndo && !m_pageSettingsUndo && !m_libraryCacheChanged;
+}
+
+
+bool SCH_COMMIT::PersistsChange( SCHEMATIC& aSchematic ) const
+{
+    // Staged settings, library caches, embedded files and ERC markers keep no item copy to
+    // compare.  Owners stage them only to change them.
+    if( m_embeddedFilesUndo || m_pageSettingsUndo || m_libraryCacheChanged || !m_libraryCacheUndo.empty()
+            || !m_ercMarkers.empty() )
+    {
+        return true;
+    }
+
+    // Designators handed out since the reference inventory was kept are saved with the project.
+    if( m_referenceInventoryKept )
+    {
+        const std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+        const std::vector<std::string> now = live ? live->GetAllocatedReferences() : std::vector<std::string>();
+        const std::vector<std::string> kept =
+                m_referenceInventory ? m_referenceInventory->GetAllocatedReferences() : std::vector<std::string>();
+
+        if( now != kept )
+            return true;
+    }
+
+    for( const COMMIT_LINE& entry : m_entries )
+    {
+        if( ( entry.m_type & CHT_TYPE ) != CHT_MODIFY || !entry.m_copy || !entry.m_item->IsSCH_ITEM() )
+            return true;
+
+        const std::string before =
+                SCH_STATE_GROUPS::PersistedItem( aSchematic, static_cast<SCH_ITEM*>( entry.m_copy ) );
+
+        if( before.empty()
+                || before != SCH_STATE_GROUPS::PersistedItem( aSchematic, static_cast<SCH_ITEM*>( entry.m_item ) ) )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+void SCH_COMMIT::Abandon()
+{
+    for( COMMIT_LINE& entry : m_entries )
+        delete entry.m_copy;
+
+    m_entries.clear();
+    clear();
+    m_ercMarkers.clear();
+    m_embeddedFilesUndo.reset();
+    m_pageSettingsUndo.reset();
+    m_libraryCacheScopes.clear();
+    m_libraryCacheUndo.clear();
+    m_libraryCacheChanged = false;
+    m_connectivitySettingsChanged = false;
+    m_netSettingsChanged = false;
+    m_referenceInventoryKept = false;
+    m_referenceInventory.reset();
+}
+
+
+std::unique_ptr<REFDES_TRACKER> SCH_COMMIT::CopyReferenceInventory( SCHEMATIC& aSchematic )
+{
+    const std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+
+    if( !live )
+        return nullptr;
+
+    auto copy = std::make_unique<REFDES_TRACKER>();
+    copy->CopyAllocatedFrom( *live );
+    return copy;
+}
+
+
+void SCH_COMMIT::RestoreReferenceInventory( SCHEMATIC& aSchematic, const REFDES_TRACKER* aKept )
+{
+    std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+
+    if( aKept )
+    {
+        if( !live )
+            live = std::make_shared<REFDES_TRACKER>();
+
+        live->CopyAllocatedFrom( *aKept );
+    }
+    else if( live )
+    {
+        live->Clear();
+    }
+}
+
+
+void SCH_COMMIT::KeepReferenceInventory()
+{
+    SCH_EDIT_FRAME* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    if( frame )
+        KeepReferenceInventory( frame->Schematic() );
+}
+
+
+void SCH_COMMIT::KeepReferenceInventory( SCHEMATIC& aSchematic )
+{
+    // A symbol editor commit hands out no schematic designators.
+    if( m_isLibEditor || m_referenceInventoryKept )
+        return;
+
+    m_referenceInventoryKept = true;
+    m_referenceInventory = CopyReferenceInventory( aSchematic );
 }
 
 
@@ -183,6 +298,7 @@ void SCH_COMMIT::SetPageSettings( SCH_SCREEN* aScreen, const PAGE_INFO& aPage,
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     DS_DATA_MODEL::GetTheInstance().SetPageLayout( aPreparedLayout.ToUTF8() );
     aScreen->SetPageSettings( aPage );
     BASE_SCREEN::m_DrawingSheetFileName = aDrawingSheet;
@@ -200,6 +316,7 @@ void SCH_COMMIT::SetTitleBlock( SCH_SCREEN* aScreen, const TITLE_BLOCK& aTitle )
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     aScreen->SetTitleBlock( aTitle );
     aScreen->SetContentModified();
 }
@@ -444,6 +561,9 @@ bool SCH_COMMIT::SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::str
     if( SCH_ERC_SETTINGS::Capture( schematic ).SerializeAsString() == aPrepared.canonical.SerializeAsString() )
         return true;
 
+    // Changes the markers in place. History restores the exclusions by sort key and deletes
+    // the markers created here by identity; it never keeps a marker pointer, because the ERC
+    // dialog and Run ERC delete markers outside any commit.
     std::map<std::string, SCH_ERC_SETTINGS::EXCLUSION*> desired;
     for( auto& exclusion : aPrepared.exclusions ) desired.emplace( exclusion.key, &exclusion );
     std::vector<std::pair<SCH_SCREEN*, SCH_MARKER*>> markers;
@@ -466,13 +586,12 @@ bool SCH_COMMIT::SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::str
             markers.emplace_back( screen, marker );
         }
     }
-    if( !m_pageSettingsUndo )
+    if( !StageErcEdit() )
     {
-        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
-        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+        aFailure = "ERC replacement requires a schematic editor";
+        return false;
     }
-    m_pageSettingsUndo->IncludeErcPolicy();
-    m_ercAddedMarkers.reserve( m_ercAddedMarkers.size() + aPrepared.exclusions.size() );
+    SCH_ERC_HISTORY::STATE& history = m_pageSettingsUndo->ErcMarkers();
     for( const auto& [screen, marker] : markers )
     {
         const std::string key = ERC_EXCLUSION::FromMarker( *marker ).GetSortKey();
@@ -481,8 +600,8 @@ bool SCH_COMMIT::SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::str
         const wxString comment = excluded ? wxString::FromUTF8( found->second->comment ) : wxString();
         if( marker->IsExcluded() != excluded || marker->GetComment() != comment )
         {
-            Modify( marker, screen );
             marker->SetExcluded( excluded, comment );
+            if( screen == frame->GetScreen() ) frame->GetCanvas()->GetView()->Update( marker );
         }
         if( excluded ) found->second->marker.reset(); // existing native marker retains its UUID
     }
@@ -490,16 +609,244 @@ bool SCH_COMMIT::SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::str
     {
         if( !exclusion.marker ) continue;
         exclusion.marker->SetExcluded( true, wxString::FromUTF8( exclusion.comment ) );
-        SCH_MARKER* marker = exclusion.marker.get();
-        m_ercAddedMarkers.push_back( std::move( exclusion.marker ) );
-        // Stage ownership before insertion, so rollback never loses a prepared marker.
-        Added( marker, exclusion.screen );
-        exclusion.screen->Append( marker );
-        if( exclusion.screen == frame->GetScreen() ) frame->GetCanvas()->GetView()->Add( marker );
+        // Undo deletes this marker by identity; Revert does as well.
+        history.created.insert( exclusion.marker->m_Uuid );
+        frame->AddToScreen( exclusion.marker.release(), exclusion.screen );
     }
     SCH_ERC_SETTINGS::RestorePolicy( schematic.ErcSettings(), aPrepared.canonical );
     frame->RefreshErcDialog();
     return true;
+}
+
+
+bool SCH_COMMIT::StageErcEdit()
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    if( !frame || m_isLibEditor )
+        return false;
+
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+
+    m_pageSettingsUndo->IncludeErcPolicy();
+    m_pageSettingsUndo->IncludeErcMarkers();
+    return true;
+}
+
+
+bool SCH_COMMIT::ErcEditChanged() const
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    return frame && m_pageSettingsUndo && m_pageSettingsUndo->ErcChanged( frame->Schematic() );
+}
+
+
+std::map<std::string, wxString> SCH_ERC_HISTORY::CaptureExclusions( SCHEMATIC& aSchematic )
+{
+    std::map<std::string, wxString> exclusions;
+    std::set<SCH_SCREEN*>           seen;
+
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+
+        if( !screen || !seen.insert( screen ).second )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            auto* marker = static_cast<SCH_MARKER*>( item );
+
+            if( marker->IsExcluded() )
+                exclusions.emplace( ERC_EXCLUSION::FromMarker( *marker ).GetSortKey(), marker->GetComment() );
+        }
+    }
+
+    return exclusions;
+}
+
+
+SCH_ERC_HISTORY::RECORD SCH_ERC_HISTORY::Record( const SCH_MARKER& aMarker, const SCH_SCREEN& aScreen )
+{
+    RECORD record;
+    record.uuid = aMarker.m_Uuid;
+    record.screen = aScreen.GetUuid();
+    record.marker = ERC_EXCLUSION::FromMarker( aMarker ).GetSortKey();
+    record.excluded = aMarker.IsExcluded();
+    record.comment = aMarker.GetComment();
+
+    // Keep a violation-specific message; the rule's default text follows the language.
+    if( std::shared_ptr<RC_ITEM> item = aMarker.GetRCItem();
+        item && item->GetErrorMessage( false ) != item->GetErrorText( false ) )
+    {
+        record.message = item->GetErrorMessage( false );
+    }
+
+    return record;
+}
+
+
+bool SCH_ERC_HISTORY::Restore( SCH_EDIT_FRAME* aFrame, const STATE& aState, STATE* aOpposite )
+{
+    SCHEMATIC&          schematic = aFrame->Schematic();
+    const SCH_SHEET_LIST hierarchy = schematic.Hierarchy();
+    SCH_SELECTION_TOOL* selTool = aFrame->GetToolManager()->GetTool<SCH_SELECTION_TOOL>();
+    std::vector<SCH_SCREEN*> screens;
+    bool                changed = false;
+
+    for( const SCH_SHEET_PATH& path : hierarchy )
+    {
+        if( SCH_SCREEN* screen = path.LastScreen();
+            screen && std::find( screens.begin(), screens.end(), screen ) == screens.end() )
+        {
+            screens.push_back( screen );
+        }
+    }
+
+    auto liveMarkers = [&]()
+    {
+        std::vector<std::pair<SCH_SCREEN*, SCH_MARKER*>> markers;
+
+        for( SCH_SCREEN* screen : screens )
+        {
+            for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+                markers.emplace_back( screen, static_cast<SCH_MARKER*>( item ) );
+        }
+
+        return markers;
+    };
+
+    // Markers the undone change created leave again.  A marker that Run ERC or the ERC dialog
+    // already deleted is simply absent: identities, never pointers, are looked up here.
+    for( const auto& [screen, marker] : liveMarkers() )
+    {
+        if( !aState.created.count( marker->m_Uuid ) )
+            continue;
+
+        if( aOpposite )
+            aOpposite->removed.push_back( Record( *marker, *screen ) );
+
+        if( marker->IsSelected() && selTool )
+            selTool->RemoveItemFromSel( marker, true /* quiet mode */ );
+
+        aFrame->RemoveFromScreen( marker, screen );
+        delete marker;
+        changed = true;
+    }
+
+    auto add = [&]( std::unique_ptr<SCH_MARKER> aMarker, SCH_SCREEN* aScreen )
+    {
+        // A marker whose sheet path names no loaded screen stays out rather than moving to
+        // another sheet; its exclusion no longer applies to this schematic.
+        if( !aScreen )
+        {
+            wxLogTrace( wxT( "KICAD_SCH_TRACKING" ),
+                        wxS( "An ERC marker's sheet has no loaded screen; it is not restored" ) );
+            return;
+        }
+
+        const KIID uuid = aMarker->m_Uuid;
+        aFrame->AddToScreen( aMarker.release(), aScreen );
+
+        if( aOpposite )
+            aOpposite->created.insert( uuid );
+
+        changed = true;
+    };
+
+    // Markers it removed or rewrote return with their identity, unless that marker or a marker
+    // for the same violation (a later Run ERC computes new ones) is still present.
+    std::set<KIID>        present;
+    std::set<std::string> violations;
+
+    for( const auto& [screen, marker] : liveMarkers() )
+    {
+        present.insert( marker->m_Uuid );
+        violations.insert( ERC_EXCLUSION::FromMarker( *marker ).GetSortKey() );
+    }
+
+    for( const RECORD& record : aState.removed )
+    {
+        kiapi::schematic::ErcMarker data;
+
+        if( present.count( record.uuid ) || violations.count( record.marker )
+                || !data.ParseFromString( record.marker ) )
+        {
+            continue;
+        }
+
+        std::unique_ptr<SCH_MARKER> marker( SCH_MARKER::FromProto( data, hierarchy ) );
+
+        if( !marker )
+            continue;
+
+        const_cast<KIID&>( marker->m_Uuid ) = record.uuid;
+        marker->SetExcluded( record.excluded, record.comment );
+
+        if( !record.message.IsEmpty() )
+            marker->GetRCItem()->SetErrorMessage( record.message );
+
+        SCH_SCREEN* screen = nullptr;
+
+        for( SCH_SCREEN* candidate : screens )
+        {
+            if( candidate->GetUuid() == record.screen )
+                screen = candidate;
+        }
+
+        present.insert( record.uuid );
+        violations.insert( record.marker );
+        add( std::move( marker ), screen ? screen : SCH_ERC_SETTINGS::OwnerScreen( data, hierarchy, schematic ) );
+    }
+
+    // Exactly the saved exclusions are excluded, each on every marker with its sort key.
+    std::set<std::string> resolved;
+
+    for( const auto& [screen, marker] : liveMarkers() )
+    {
+        const auto     found = aState.exclusions.find( ERC_EXCLUSION::FromMarker( *marker ).GetSortKey() );
+        const bool     excluded = found != aState.exclusions.end();
+        const wxString comment = excluded ? found->second : wxString();
+
+        if( excluded )
+            resolved.insert( found->first );
+
+        if( marker->IsExcluded() != excluded || marker->GetComment() != comment )
+        {
+            marker->SetExcluded( excluded, comment );
+
+            if( screen == aFrame->GetScreen() )
+                aFrame->GetCanvas()->GetView()->Update( marker );
+
+            changed = true;
+        }
+    }
+
+    // An exclusion whose marker is gone gets a marker again, as loading the project does.
+    for( const auto& [key, comment] : aState.exclusions )
+    {
+        kiapi::schematic::ErcMarker data;
+
+        if( resolved.count( key ) || !data.ParseFromString( key ) )
+            continue;
+
+        std::unique_ptr<SCH_MARKER> marker( SCH_MARKER::FromProto( data, hierarchy ) );
+
+        if( !marker )
+        {
+            wxLogTrace( wxT( "KICAD_SCH_TRACKING" ), wxS( "An ERC exclusion no longer resolves in this schematic" ) );
+            continue;
+        }
+
+        marker->SetExcluded( true, comment );
+        add( std::move( marker ), SCH_ERC_SETTINGS::OwnerScreen( data, hierarchy, schematic ) );
+    }
+
+    return changed;
 }
 
 bool SCH_COMMIT::StageNetChainEdit( const std::set<SCH_SYMBOL*>& aSymbols )
@@ -562,6 +909,7 @@ void SCH_COMMIT::SetRootInstance( SCH_SHEET* aSheet, const std::optional<wxStrin
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     SCH_SHEET_INSTANCE record;
     if( aSheet->HasRootInstance() )
         record = aSheet->GetRootInstance();
@@ -580,6 +928,10 @@ COMMIT& SCH_COMMIT::Stage( EDA_ITEM *aItem, CHANGE_TYPE aChangeType, BASE_SCREEN
                            RECURSE_MODE aRecurse )
 {
     wxCHECK( aItem, *this );
+
+    // ERC markers never become undo entries: see stageErcMarker().
+    if( aItem->Type() == SCH_MARKER_T && stageErcMarker( static_cast<SCH_MARKER*>( aItem ), aChangeType, aScreen ) )
+        return *this;
 
     // A removal supersedes the earlier modify entry. Automation wire cleanup
     // may have removed an already-moved wire from its screen; retain the original
@@ -643,6 +995,148 @@ COMMIT& SCH_COMMIT::Stage( std::vector<EDA_ITEM*> &container, CHANGE_TYPE aChang
         Stage( item, aChangeType, aScreen );
 
     return *this;
+}
+
+
+/// Run ERC, Delete Marker and Delete All Markers delete ERC markers outside any commit, so an
+/// undo entry holding a marker pointer could later touch freed memory.  A staged marker is
+/// therefore applied or reverted by this commit itself, and history keeps what it was as a
+/// detached record (SCH_ERC_HISTORY): Undo rebuilds it and Redo deletes it by identity.
+bool SCH_COMMIT::stageErcMarker( SCH_MARKER* aMarker, int aChangeType, BASE_SCREEN* aScreen )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    if( !frame || m_isLibEditor || !StageErcEdit() )
+        return false;
+
+    SCH_SCREEN* screen = aScreen ? dynamic_cast<SCH_SCREEN*>( aScreen ) : frame->GetScreen();
+
+    if( !screen )
+        return false;
+
+    SCH_ERC_HISTORY::STATE& history = m_pageSettingsUndo->ErcMarkers();
+    const int               type = aChangeType & CHT_TYPE;
+    auto                    staged = std::find_if( m_ercMarkers.begin(), m_ercMarkers.end(),
+                                                   [&]( const STAGED_MARKER& aStaged )
+                                                   {
+                                                       return aStaged.marker == aMarker;
+                                                   } );
+
+    if( staged != m_ercMarkers.end() )
+    {
+        // A later modification belongs to the first staging; only a removal supersedes it.
+        if( type == CHT_REMOVE && staged->type != CHT_REMOVE )
+        {
+            // A marker added by this commit never existed before it.
+            if( staged->type == CHT_ADD )
+                history.created.erase( aMarker->m_Uuid );
+
+            staged->type = CHT_REMOVE;
+        }
+
+        return true;
+    }
+
+    STAGED_MARKER entry{ aMarker, screen, type, type == CHT_ADD, nullptr };
+
+    if( type == CHT_ADD )
+    {
+        history.created.insert( aMarker->m_Uuid );
+    }
+    else
+    {
+        history.removed.push_back( SCH_ERC_HISTORY::Record( *aMarker, *screen ) );
+
+        if( type == CHT_MODIFY )
+        {
+            // The edited marker is replaced by its record when this change is undone.
+            history.created.insert( aMarker->m_Uuid );
+            entry.image.reset( static_cast<SCH_MARKER*>( aMarker->Clone() ) );
+        }
+    }
+
+    m_ercMarkers.push_back( std::move( entry ) );
+    return true;
+}
+
+
+void SCH_COMMIT::pushErcMarkers()
+{
+    auto*               frame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
+
+    for( STAGED_MARKER& staged : m_ercMarkers )
+    {
+        const bool listed = staged.screen->CheckIfOnDrawList( staged.marker );
+
+        if( staged.type == CHT_REMOVE )
+        {
+            if( staged.marker->IsSelected() && selTool )
+                selTool->RemoveItemFromSel( staged.marker, true /* quiet mode */ );
+
+            if( listed )
+                frame->RemoveFromScreen( staged.marker, staged.screen );
+
+            delete staged.marker;
+        }
+        else if( staged.type == CHT_ADD && !listed )
+        {
+            frame->AddToScreen( staged.marker, staged.screen );
+        }
+        else if( staged.screen == frame->GetScreen() )
+        {
+            frame->GetCanvas()->GetView()->Update( staged.marker );
+        }
+    }
+
+    if( !m_ercMarkers.empty() )
+        frame->RefreshErcDialog();
+
+    m_ercMarkers.clear();
+}
+
+
+void SCH_COMMIT::revertErcMarkers()
+{
+    auto* frame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    if( m_ercMarkers.empty() || !frame )
+        return;
+
+    SCH_ERC_HISTORY::STATE& history = m_pageSettingsUndo->ErcMarkers();
+
+    for( auto it = m_ercMarkers.rbegin(); it != m_ercMarkers.rend(); ++it )
+    {
+        STAGED_MARKER& staged = *it;
+        const bool     listed = staged.screen->CheckIfOnDrawList( staged.marker );
+
+        // The live markers are reverted in place here, so history must not rebuild them.
+        history.created.erase( staged.marker->m_Uuid );
+        std::erase_if( history.removed, [&]( const SCH_ERC_HISTORY::RECORD& aRecord )
+                       {
+                           return aRecord.uuid == staged.marker->m_Uuid;
+                       } );
+
+        if( staged.added )
+        {
+            if( listed )
+                frame->RemoveFromScreen( staged.marker, staged.screen );
+
+            delete staged.marker;
+            continue;
+        }
+
+        if( staged.image )
+            staged.marker->SwapItemData( staged.image.get() );
+
+        if( !listed )
+            frame->AddToScreen( staged.marker, staged.screen );
+        else if( staged.screen == frame->GetScreen() )
+            frame->GetCanvas()->GetView()->Update( staged.marker );
+    }
+
+    m_ercMarkers.clear();
+    frame->RefreshErcDialog();
 }
 
 
@@ -1028,10 +1522,18 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         for( const auto& [screen, undo] : m_libraryCacheUndo )
             undoList.PushItem( ITEM_PICKER( screen, undo.get(), UNDO_REDO::LIBRARY_CACHE ) );
     }
+    if( frame )
+        pushErcMarkers();
+
     if( m_pageSettingsUndo && frame )
     {
-        schematic->RefreshHierarchy();
-        frame->UpdateHierarchyNavigator();
+        // ERC settings and markers change no sheet, page or title.
+        if( !m_pageSettingsUndo->IncludesOnlyErc() )
+        {
+            schematic->RefreshHierarchy();
+            frame->UpdateHierarchyNavigator();
+        }
+
         // Page/title/layout changes are outside the item update list. Invalidate
         // their cached drawing content just as the standalone settings command
         // does, before any subsequent observation requests a render.
@@ -1082,6 +1584,10 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
 
 void SCH_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 {
+    // Designators handed out for pushed items stay handed out, as they always have.
+    m_referenceInventoryKept = false;
+    m_referenceInventory.reset();
+
     if( Empty() )
     {
         m_libraryCacheScopes.clear();
@@ -1105,8 +1611,7 @@ void SCH_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
     m_embeddedFilesUndo.reset();
     m_pageSettingsUndo.reset();
-    for( auto& marker : m_ercAddedMarkers ) marker.release();
-    m_ercAddedMarkers.clear();
+    m_ercMarkers.clear();
     m_libraryCacheScopes.clear();
     m_libraryCacheUndo.clear();
     m_libraryCacheChanged = false;
@@ -1194,6 +1699,17 @@ void SCH_COMMIT::Revert()
     SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
     SCH_SHEET_LIST      sheets;
 
+    // Nothing this commit annotated is placed any more, so the designators handed out since
+    // the reference inventory was kept are returned, whether or not anything else was staged.
+    if( m_referenceInventoryKept )
+    {
+        if( frame )
+            RestoreReferenceInventory( frame->Schematic(), m_referenceInventory.get() );
+
+        m_referenceInventoryKept = false;
+        m_referenceInventory.reset();
+    }
+
     if( Empty() && m_libraryCacheUndo.empty() )
         return;
 
@@ -1202,6 +1718,11 @@ void SCH_COMMIT::Revert()
         revertLibEdit();
         return;
     }
+
+    // An unchanged ERC dialog edit restores nothing but ERC settings and markers.
+    const bool ercOnly = COMMIT::Empty() && !m_embeddedFilesUndo && m_libraryCacheUndo.empty() && frame
+                         && m_pageSettingsUndo && m_pageSettingsUndo->IncludesOnlyErc()
+                         && !m_connectivitySettingsChanged && !m_netSettingsChanged;
 
     if( m_embeddedFilesUndo && frame )
     {
@@ -1358,7 +1879,15 @@ void SCH_COMMIT::Revert()
     if( selTool )
         selTool->RebuildSelection();
 
-    if( m_pageSettingsUndo && frame )
+    if( frame )
+        revertErcMarkers();
+
+    if( m_pageSettingsUndo && frame && ercOnly )
+    {
+        m_pageSettingsUndo->RestoreErc( frame );
+        m_pageSettingsUndo.reset();
+    }
+    else if( m_pageSettingsUndo && frame )
     {
         m_pageSettingsUndo->RestoreAll( frame, true );
         m_pageSettingsUndo.reset();
@@ -1366,9 +1895,9 @@ void SCH_COMMIT::Revert()
         frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
     }
 
-    m_ercAddedMarkers.clear();
+    m_ercMarkers.clear();
 
-    if( frame )
+    if( frame && !ercOnly )
         frame->RecalculateConnections( nullptr, m_connectivitySettingsChanged ? GLOBAL_CLEANUP : NO_CLEANUP );
 
     if( m_netSettingsChanged && frame )

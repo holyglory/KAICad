@@ -79,7 +79,21 @@ public static class CheckedSchematicContract
         if (result.Status is CheckedSchematicBatchStatus.CsbsRejected or CheckedSchematicBatchStatus.CsbsIndeterminate
             && string.IsNullOrEmpty(result.ErrorCode))
             throw Invalid("A failed or indeterminate checked receipt must explain its failure.");
+        // CN-1 §8.2: a pin-partition proof exists only for a batch that asserted one, and a
+        // post-condition refusal is only credible as an unchanged rejection of such a batch.
+        bool asserted = Asserts(request.Batch);
+        if (result.Status == CheckedSchematicBatchStatus.CsbsCompleted && (result.Result?.ConnectivityAssertionVerified ?? false) != asserted)
+            throw Invalid(asserted ? "A completed asserted batch must carry the native connectivity proof."
+                : "A completed batch cannot claim a connectivity proof it did not request.");
+        if (result.ErrorCode == SchematicConnectionErrors.ConnectivityPostconditionFailed
+            && (result.Status != CheckedSchematicBatchStatus.CsbsRejected || !asserted || result.ObservedAfter is null
+                || !result.ErrorMessage.StartsWith(SchematicConnectionErrors.ConnectivityPostconditionFailed + ":", StringComparison.Ordinal)))
+            throw Invalid("Only an unchanged rejection of an asserted batch can report a failed connectivity post-condition.");
     }
+
+    /// <summary>Whether <paramref name="batch"/> carries a CN-1 pin-partition assertion.</summary>
+    public static bool Asserts(ApplySchematicItemBatch? batch) =>
+        batch?.Operations.Any(operation => operation.OperationCase == SchematicItemOperation.OperationOneofCase.AssertConnectivity) == true;
 
     internal static bool FileCoverage(DocumentLifecycleState state)
     {

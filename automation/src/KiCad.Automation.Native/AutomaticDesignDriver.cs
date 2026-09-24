@@ -19,11 +19,12 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     private readonly Task fileReader;
     private int disposed;
     public DesignRecoveryStore Store { get; }
+    public AutomationSession? Session { get; }
 
     private AutomaticDesignDriver(DesignRecoveryStore store, NativeClient client, string designPath, Guid instanceId,
-        NativeEventSubscription native, DesignFileSubscription file, IReadOnlyList<FileStream> leases)
+        AutomationSession session, NativeEventSubscription native, DesignFileSubscription file, IReadOnlyList<FileStream> leases)
     {
-        Store = store; this.client = client; this.designPath = designPath; this.instanceId = instanceId;
+        Store = store; this.client = client; this.designPath = designPath; this.instanceId = instanceId; Session = session;
         this.native = native; this.file = file; this.leases = leases;
         nativeReader = Task.Run(ReadNativeAsync); fileReader = Task.Run(ReadFileAsync);
     }
@@ -69,7 +70,7 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
                 catch (IOException) { throw Error("automatic_sync_ownership_conflict", "Another automatic worker owns this design, document or recovery record."); }
             }
             if (store.Read()?.RevisionToken != saved.RevisionToken) throw Error("design_recovery_changed", "Recovery changed while acquiring automatic ownership.");
-            return new(store, client, designPath, saved.State.InstanceId, source, file, leases);
+            return new(store, client, designPath, saved.State.InstanceId, session.Clone(), source, file, leases);
         }
         catch { foreach (var lease in leases) lease.Dispose(); file?.Dispose(); source.Dispose(); throw; }
     }

@@ -7,6 +7,7 @@ using Kiapi.Common;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
+using Protocol = KiCad.Automation.Protocol;
 using Session = KiCad.Automation.Protocol.AutomationSession;
 
 namespace KiCad.Automation.Tests;
@@ -153,9 +154,12 @@ public sealed class AutomaticDesignSynchronizationTests
     // worker and apply each hand planning the recorded instance's handshake, so a connection-only XML revision
     // is classified identically by all three once KiCad advertises schematic.connection-realization.v1, and
     // exactly as today without such a handshake. This drives the real preview tool, worker and executor entry
-    // points with a scripted handshake: no KiCad build advertises the capability yet (CN-1 §8.3 waits for lane
-    // 2A's measurement fields), so no rendered journey can reach the admitted branch. The native journeys keep
-    // covering the unchanged path.
+    // points with a scripted handshake: no KiCad build advertises the capability yet (CN-1 §8.3), so no rendered
+    // journey can reach the advertised branch. Every expectation for it is derived from the planner's own
+    // reference plan, so the check holds for whichever planner is built in: one that refuses the connection
+    // before KiCad is touched, or lane 2A's, which plans a realization that apply measures in the captured
+    // checkpoint before anything is journaled or sent (CN-1 §9.1). The native journeys keep covering the
+    // unchanged path.
     [TestMethod]
     public async Task PreviewWorkerAndApplyClassifyAConnectionOnlyRevisionFromTheSameHandshake()
     {
@@ -163,6 +167,20 @@ public sealed class AutomaticDesignSynchronizationTests
         try
         {
             var state = SchematicSynchronizationPlanTests.Fixture();
+            // An editor checkpoint apply can accept: one exact native revision, and every sheet reporting the
+            // project's connection grid that realization draws on (CN-1 §6.1). The saved baseline, the observation
+            // and both electrical checkpoints carry the same settings, so no side sees a formatting change.
+            string nativeEpoch = Guid.NewGuid().ToString("D"), processEpoch = Guid.NewGuid().ToString("D");
+            var schematic = state.Baseline.Schematic.Clone();
+            foreach (var screen in schematic.Instances) screen.Metadata.Formatting = SchematicFormattingTests.Formatting();
+            var nativeRevision = new Protocol.DocumentRevision { Epoch = nativeEpoch, Sequence = state.NativeRevision.Sequence };
+            var baselineElectrical = state.BaselineElectrical!.Clone();
+            baselineElectrical.Hierarchy.Data = schematic.Clone(); baselineElectrical.Hierarchy.Revision = nativeRevision.Clone();
+            var observedElectrical = state.ObservedElectrical!.Clone();
+            observedElectrical.Hierarchy.Data = schematic.Clone(); observedElectrical.Hierarchy.Revision = nativeRevision.Clone();
+            state = state with { Baseline = state.Baseline with { Schematic = schematic }, Observed = schematic.Clone(),
+                NativeRevision = new(nativeEpoch, nativeRevision.Sequence), BaselineElectrical = baselineElectrical,
+                ObservedElectrical = observedElectrical };
             var circuit = state.Baseline.Engineering.Circuit;
             Guid u1 = circuit.Components[0].Id, u2 = circuit.Components[1].Id;
             var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with
@@ -171,7 +189,7 @@ public sealed class AutomaticDesignSynchronizationTests
             state = state with { DesiredFileBytes = desired };
             Session Handshake(Guid instance, bool realization)
             {
-                var session = new Session { ProtocolVersion = 1, InstanceId = instance.ToString("D"), Epoch = "process-epoch" };
+                var session = new Session { ProtocolVersion = 1, InstanceId = instance.ToString("D"), Epoch = processEpoch };
                 session.Capabilities.Add("session.info");
                 if (realization) session.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
                 return session;
@@ -197,48 +215,104 @@ public sealed class AutomaticDesignSynchronizationTests
                     new DesignRecoveryStore(recovery).Read()!.RevisionToken, default);
                 return JsonSerializer.SerializeToElement(result.StructuredContent);
             }
-            async Task<(AutomaticDesignStatus Status, int Applies)> Worker(Session? session)
+            // The worker is held inside apply, so the phase it applies in is observed rather than inferred.
+            async Task<(AutomaticDesignStatus First, AutomaticDesignStatus? WhileApplying, AutomaticDesignStatus Settled, int Applies)> Worker(Session? session)
             {
-                using var driver = new Driver(new DesignRecoveryStore(Recovery())) { Session = session };
+                using var driver = new Driver(new DesignRecoveryStore(Recovery())) { Session = session,
+                    ApplyEntered = new(TaskCreationOptions.RunContinuationsAsynchronously),
+                    ApplyGate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
                 await using var sync = new AutomaticDesignSynchronization(driver);
-                var status = await Until(sync, s => s.Phase is AutomaticDesignPhase.Watching or AutomaticDesignPhase.Paused);
-                return (status, driver.Applies);
+                var first = await Until(sync, s => s.Phase is AutomaticDesignPhase.Applying or AutomaticDesignPhase.Paused);
+                AutomaticDesignStatus? applying = null;
+                if (first.Phase == AutomaticDesignPhase.Applying)
+                {
+                    await driver.ApplyEntered!.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    applying = sync.Inspect();
+                    Assert.AreEqual(driver.LastOperation, applying.OperationId, "The worker applies the operation it announced.");
+                    driver.ApplyGate!.TrySetResult();
+                }
+                var settled = await Until(sync, s => s.Phase is AutomaticDesignPhase.Watching or AutomaticDesignPhase.Paused);
+                return (first, applying, settled, driver.Applies);
             }
-            async Task<(string? Code, IReadOnlyList<string> Requests)> Apply(Session live)
+            // Apply against a scripted editor that answers its handshake and, when asked to, the checkpoint
+            // capture; every other request is refused. Journaled reports whether apply wrote its recovery journal.
+            async Task<(string? Code, IReadOnlyList<string> Requests, bool Journaled)> Apply(Session live, bool answerCapture)
             {
                 var store = new DesignRecoveryStore(Recovery());
+                string before = store.Read()!.RevisionToken;
                 string designPath = Path.Combine(Path.GetDirectoryName(store.StatePath)!, "design.xml");
                 await File.WriteAllBytesAsync(designPath, desired);
-                var transport = new HandshakeOnlyTransport(live);
+                var checkpoint = new Protocol.CheckedSchematicState
+                {
+                    Electrical = observedElectrical.Clone(),
+                    State = new() { Document = state.Baseline.Schematic.Document.Clone(), ProcessEpoch = live.Epoch,
+                        NativeIdentity = Guid.NewGuid().ToString("D"), Revision = nativeRevision.Clone(),
+                        Scope = Protocol.DocumentLifecycleScope.DlsSchematicHierarchy, ProjectSettingsIncluded = true,
+                        StateSha256 = new string('a', 64) }
+                };
+                string nativeFile = Path.Combine(Path.GetDirectoryName(store.StatePath)!, "fixture.kicad_sch");
+                checkpoint.State.NativeFiles.Add(nativeFile);
+                checkpoint.State.FileBaselines.Add(new Protocol.NativeFileBaselineState { Path = nativeFile, BaselinePath = nativeFile,
+                    BaselineKnown = true, BaselineExists = true, BaselineSha256 = new string('b', 64), BaselineBytes = 1,
+                    CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('b', 64), CurrentBytes = 1,
+                    Status = Protocol.NativeFileBaselineStatus.NfbsUnchanged });
+                var editor = new ScriptedEditor(live, answerCapture ? checkpoint : null);
+                string? code = null;
                 try
                 {
-                    await SchematicSynchronizationExecutor.ApplyAsync(store, new NativeClient(transport, "ipc:///handshake-fixture.sock", live.Epoch),
-                        designPath, store.Read()!.RevisionToken, Guid.NewGuid());
-                    Assert.Fail("The handshake-only fixture cannot complete an application.");
+                    await SchematicSynchronizationExecutor.ApplyAsync(store, new NativeClient(editor, "ipc:///handshake-fixture.sock", live.Epoch),
+                        designPath, before, Guid.NewGuid());
+                    Assert.Fail("The scripted editor cannot complete an application.");
                 }
-                catch (AutomationException error) { return (error.Code, transport.Requests); }
+                catch (AutomationException error) { code = error.Code; }
                 catch (NativeApiException) { }
-                return (null, transport.Requests);
+                return (code, editor.Requests, store.Read()!.RevisionToken != before);
             }
+            string handshakeRequest = Protocol.GetAutomationSession.Descriptor.FullName;
+            string captureRequest = Protocol.ReadCheckedSchematicState.Descriptor.FullName;
+            string measurementRequest = Protocol.MeasureSchematicPlacement.Descriptor.FullName;
 
-            // With the capability: all three take the planner's connection-realization branch. Lane 2A's intent
-            // builder is not delivered yet, so each stops at the planner's own CN-1 code before any native change.
+            // With the capability all three follow the planner's reference plan for this handshake.
             var reference = SchematicSynchronizationPlanner.Plan(state, advertising);
-            Assert.IsFalse(reference.CanPrepare);
             Assert.IsTrue(SchematicSynchronizationPlanner.Plan(state).CanPrepare, "Without a handshake the general path prepares it.");
-            string? code = reference.ErrorCode;
-            Assert.IsNotNull(code);
+            Assert.IsTrue(reference.CanPrepare || reference.ErrorCode is not null, "A refused plan names its reason.");
+            Assert.IsTrue(!reference.CanPrepare || reference.NativeConnectionRealizationRequired,
+                "An admitted connection-only revision either stops at its planning code or plans a native realization (CN-1 §4.3).");
             var preview = await Preview(advertising);
-            Assert.IsFalse(preview.GetProperty("canPrepare").GetBoolean());
-            Assert.AreEqual(code, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
+            Assert.AreEqual(reference.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+            Assert.AreEqual(reference.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
             var automatic = await Worker(advertising);
-            Assert.AreEqual(AutomaticDesignPhase.Paused, automatic.Status.Phase);
-            Assert.AreEqual(code, automatic.Status.ErrorCode);
-            Assert.AreEqual(0, automatic.Applies, "The worker must not hand an unrealizable plan to apply.");
-            var applied = await Apply(advertising);
-            Assert.AreEqual(code, applied.Code);
-            CollectionAssert.AreEqual(new[] { "kiapi.automation.v1.GetAutomationSession" }, applied.Requests.ToArray(),
-                "Apply refuses after its handshake, before capturing or changing the editor.");
+            if (reference.CanPrepare)
+            {
+                Assert.AreEqual(AutomaticDesignPhase.Applying, automatic.First.Phase, automatic.First.ErrorCode);
+                Assert.AreEqual(AutomaticDesignPhase.Applying, automatic.WhileApplying?.Phase);
+                Assert.AreEqual(AutomaticDesignPhase.Watching, automatic.Settled.Phase, automatic.Settled.ErrorCode);
+                Assert.AreEqual(1, automatic.Applies, "The worker hands the realization plan to apply exactly once.");
+            }
+            else
+            {
+                Assert.AreEqual(AutomaticDesignPhase.Paused, automatic.First.Phase);
+                Assert.AreEqual(reference.ErrorCode, automatic.First.ErrorCode);
+                Assert.AreEqual(0, automatic.Applies, "The worker must not hand an unrealizable plan to apply.");
+            }
+            var applied = await Apply(advertising, answerCapture: true);
+            Assert.AreEqual(handshakeRequest, applied.Requests.FirstOrDefault(), "Apply starts with its own handshake.");
+            Assert.IsFalse(applied.Journaled, "Nothing is journaled before the editor has been measured.");
+            if (!reference.CanPrepare)
+            {
+                Assert.AreEqual(reference.ErrorCode, applied.Code);
+                CollectionAssert.AreEqual(new[] { handshakeRequest }, applied.Requests.ToArray(),
+                    "Apply refuses after its handshake, before capturing or changing the editor.");
+            }
+            else
+            {
+                // CN-1 §9.1: the checkpoint is captured and checked first, then the realization measures it. The
+                // scripted editor refuses the measurement, so nothing is journaled, applied or saved.
+                CollectionAssert.AreEqual(new[] { handshakeRequest, captureRequest }, applied.Requests.Take(2).ToArray(), string.Join(", ", applied.Requests));
+                Assert.AreEqual(measurementRequest, applied.Requests.ElementAtOrDefault(2),
+                    "After the capture the realization measures the checkpoint, not the general path: " + string.Join(", ", applied.Requests));
+                Assert.IsTrue(applied.Requests.Skip(2).All(r => r == measurementRequest), string.Join(", ", applied.Requests));
+            }
 
             // Without it (no attachment, today's editor, or another instance's handshake): today's general plan.
             var unchanged = await Preview(null);
@@ -251,13 +325,21 @@ public sealed class AutomaticDesignSynchronizationTests
             foreach (var session in new Session?[] { null, Handshake(state.InstanceId, realization: false), Handshake(Guid.NewGuid(), realization: true) })
             {
                 var general = await Worker(session);
-                Assert.AreEqual(AutomaticDesignPhase.Watching, general.Status.Phase, general.Status.ErrorCode);
+                Assert.AreEqual(AutomaticDesignPhase.Applying, general.WhileApplying?.Phase, general.First.ErrorCode);
+                Assert.AreEqual(AutomaticDesignPhase.Watching, general.Settled.Phase, general.Settled.ErrorCode);
                 Assert.AreEqual(1, general.Applies);
             }
-            var today = await Apply(Handshake(state.InstanceId, realization: false));
+            var today = await Apply(Handshake(state.InstanceId, realization: false), answerCapture: false);
             Assert.IsNull(today.Code);
-            CollectionAssert.AreEqual(new[] { "kiapi.automation.v1.GetAutomationSession", "kiapi.automation.v1.ReadCheckedSchematicState" },
+            Assert.IsFalse(today.Journaled);
+            CollectionAssert.AreEqual(new[] { handshakeRequest, captureRequest },
                 today.Requests.ToArray(), "Without the capability apply plans the general path and goes on to capture the editor.");
+            // The scripted checkpoint is one apply accepts: on the general path it passes every staleness and file
+            // check and is journaled, and today's editor is never measured for a realization.
+            var accepted = await Apply(Handshake(state.InstanceId, realization: false), answerCapture: true);
+            CollectionAssert.AreEqual(new[] { handshakeRequest, captureRequest }, accepted.Requests.Take(2).ToArray(), string.Join(", ", accepted.Requests));
+            Assert.IsTrue(accepted.Journaled, accepted.Code + ": " + string.Join(", ", accepted.Requests));
+            CollectionAssert.DoesNotContain(accepted.Requests.ToArray(), measurementRequest);
             Assert.AreEqual(0, offline.Requests, "The preview never contacts KiCad.");
         }
         finally { Directory.Delete(directory, true); }
@@ -273,17 +355,20 @@ public sealed class AutomaticDesignSynchronizationTests
         }
     }
 
-    private sealed class HandshakeOnlyTransport(Session session) : INativeTransport
+    /// <summary>An editor that answers only its handshake and, when given one, the checked checkpoint capture.
+    /// Every other request is refused and recorded by its full message name.</summary>
+    private sealed class ScriptedEditor(Session session, Protocol.CheckedSchematicState? checkpoint) : INativeTransport
     {
         internal List<string> Requests { get; } = [];
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var message = ApiRequest.Parser.ParseFrom(request).Message;
             Requests.Add(message.TypeUrl[(message.TypeUrl.LastIndexOf('/') + 1)..]);
-            bool handshake = message.Is(KiCad.Automation.Protocol.GetAutomationSession.Descriptor);
+            IMessage? reply = message.Is(Protocol.GetAutomationSession.Descriptor) ? session
+                : checkpoint is not null && message.Is(Protocol.ReadCheckedSchematicState.Descriptor) ? checkpoint.Clone() : null;
             var response = new ApiResponse { Header = new() { KicadToken = session.Epoch },
-                Status = new() { Status = handshake ? (ApiStatusCode)1 : (ApiStatusCode)3, ErrorMessage = handshake ? "" : "Handshake-only fixture" } };
-            if (handshake) response.Message = Any.Pack(session);
+                Status = new() { Status = reply is null ? (ApiStatusCode)3 : (ApiStatusCode)1, ErrorMessage = reply is null ? "Refused by the scripted editor" : "" } };
+            if (reply is not null) response.Message = Any.Pack(reply);
             return Task.FromResult(response.ToByteArray());
         }
     }
@@ -316,6 +401,9 @@ public sealed class AutomaticDesignSynchronizationTests
         internal Exception? ApplyError;
         internal Exception? RefreshError;
         internal bool Disposed;
+        // Set when apply is entered; while the gate is closed apply stays in progress.
+        internal TaskCompletionSource? ApplyEntered { get; init; }
+        internal TaskCompletionSource? ApplyGate { get; init; }
         internal Driver(DesignRecoveryStore? store = null)
         {
             if (store is not null) { Store = store; return; }
@@ -332,9 +420,13 @@ public sealed class AutomaticDesignSynchronizationTests
         public Task<SchematicSynchronizationExecution> ApplyAsync(StoredDesignRecovery saved, Guid operationId, string requestRevisionToken, CancellationToken token)
         {
             token.ThrowIfCancellationRequested(); Applies++; LastOperation = operationId; LastRequest = requestRevisionToken;
-            if (ApplyError is { } error) return Task.FromException<SchematicSynchronizationExecution>(error);
-            return Task.FromResult(new SchematicSynchronizationExecution(saved.RevisionToken, new string('a', 64), saved.State.NativeRevision,
-                false, false, true, null, PublicationId: operationId));
+            ApplyEntered?.TrySetResult();
+            return ApplyGate is { } gate ? Held(gate.Task) : Result();
+            async Task<SchematicSynchronizationExecution> Held(Task open) { await open.WaitAsync(token); return await Result(); }
+            Task<SchematicSynchronizationExecution> Result() => ApplyError is { } error
+                ? Task.FromException<SchematicSynchronizationExecution>(error)
+                : Task.FromResult(new SchematicSynchronizationExecution(saved.RevisionToken, new string('a', 64), saved.State.NativeRevision,
+                    false, false, true, null, PublicationId: operationId));
         }
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
         public void Dispose() { if (directory is not null) Directory.Delete(directory, true); }

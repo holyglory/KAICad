@@ -194,6 +194,7 @@ public sealed partial class NativeSessionTests
         }
         Task<SchematicChangeJournal> Journal() => client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(new() { Document = document }, token);
         Task<DocumentLifecycleState> Lifecycle() => client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, token);
+        async Task<string> Title() => (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title;
         async Task History(string key)
         {
             var before = (await Lifecycle()).Revision;
@@ -332,15 +333,18 @@ public sealed partial class NativeSessionTests
         Assert.IsLessThanOrEqualTo(2048, split.ErrorMessage.Length);
         Assert.IsNull(split.Result);
         Assert.AreEqual(marked.State, split.ObservedBefore); Assert.AreEqual(marked.State, split.ObservedAfter);
-        Assert.AreEqual(marked, await Observe(), "A refused realization leaves every native object, revision and digest unchanged.");
+        var afterSplit = await Observe();
+        Assert.AreEqual(marked, afterSplit, "A refused realization leaves every native object, revision and digest unchanged.");
         var afterRefusal = await Journal();
         Assert.AreEqual(journal.DocumentEpoch, afterRefusal.DocumentEpoch);
         Assert.AreEqual(journal.Sequence, afterRefusal.Sequence, "A refused realization records no journal entry.");
         // The marker is still the newest undo step: the refusal added none.
         await History("z");
-        Assert.AreEqual(titleBefore.Title, (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string refusalUndoTitle = await Title();
+        Assert.AreEqual(titleBefore.Title, refusalUndoTitle);
         await History("y");
-        Assert.AreEqual("Connectivity assertion marker", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string refusalRedoTitle = await Title();
+        Assert.AreEqual("Connectivity assertion marker", refusalRedoTitle);
 
         // The exact result commits once, with the native proof, as one undo step.
         var ready = await Observe();
@@ -368,14 +372,17 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(ready.Electrical.Hierarchy.Data.Equals(undone.Electrical.Hierarchy.Data),
             "One native undo removes every created symbol and label stub of the realization.");
         CollectionAssert.AreEqual(Canonical(baseline), Canonical(Groups(undone)));
-        Assert.AreEqual("Connectivity assertion marker", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string undoneTitle = await Title();
+        Assert.AreEqual("Connectivity assertion marker", undoneTitle);
         await History("y");
         var redone = await Observe();
         Assert.IsTrue(realized.Electrical.Hierarchy.Data.Equals(redone.Electrical.Hierarchy.Data), "Redo restores the whole realization.");
         CollectionAssert.AreEqual(Canonical(expectedGroups), Canonical(Groups(redone)));
         await History("z"); await History("z");
-        Assert.AreEqual(titleBefore.Title, (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
-        CollectionAssert.AreEqual(Canonical(baseline), Canonical(Groups(await Observe())));
+        string restoredTitle = await Title();
+        Assert.AreEqual(titleBefore.Title, restoredTitle);
+        var restored = await Observe();
+        CollectionAssert.AreEqual(Canonical(baseline), Canonical(Groups(restored)));
 
         // CN-1 §6.8 across the fixture's shared child screen (Channel A and B), planned by the
         // production hierarchy delta: both existing sheet symbols gain a SheetPin by update (the
@@ -493,7 +500,7 @@ public sealed partial class NativeSessionTests
             "Each shared-screen item is created once for both sheet instances.");
         Assert.IsTrue(planned.All(o => o.Create is not null || o.Update is not null || o.ReplaceLibraryCache is not null));
         var sharedJournal = await Journal();
-        async Task RequireRefusal(CheckedSchematicBatchReceipt refusal, bool isError, string code, string message)
+        async Task<(bool Unchanged, object Evidence)> RequireRefusal(CheckedSchematicBatchReceipt refusal, bool isError, string code, string message)
         {
             Assert.IsTrue(isError, "A refused post-condition is not success.");
             Assert.AreEqual(CheckedSchematicBatchStatus.CsbsRejected, refusal.Status, refusal.ErrorMessage);
@@ -502,31 +509,38 @@ public sealed partial class NativeSessionTests
             Assert.IsNull(refusal.Result);
             Assert.AreEqual(shared.State, refusal.ObservedBefore); Assert.AreEqual(shared.State, refusal.ObservedAfter);
             // KiCad still answers, and every native object, revision and digest is unchanged.
-            Assert.AreEqual(shared, await Observe(), "A refused hierarchical realization leaves the document untouched.");
+            var observed = await Observe();
+            Assert.AreEqual(shared, observed, "A refused hierarchical realization leaves the document untouched.");
             var journalAfter = await Journal();
             Assert.AreEqual(sharedJournal.DocumentEpoch, journalAfter.DocumentEpoch);
             Assert.AreEqual(sharedJournal.Sequence, journalAfter.Sequence, "A refused realization records no journal entry.");
+            bool documentUnchanged = shared.Equals(observed);
+            bool journalUnchanged = sharedJournal.DocumentEpoch == journalAfter.DocumentEpoch && sharedJournal.Sequence == journalAfter.Sequence;
+            return (documentUnchanged && journalUnchanged, new { code, documentUnchanged, journalUnchanged,
+                journalSequenceBefore = sharedJournal.Sequence, journalSequenceAfter = journalAfter.Sequence });
         }
 
         // Fail closed: sheet creation cannot share a batch with an assertion (CN-1 §1), refused before staging.
         var (sheetCreation, sheetCreationError) = await Apply(SharedRequest(correct, hierarchicalExpectation, createSheet: true));
-        await RequireRefusal(sheetCreation, sheetCreationError, "native_batch_rejected",
+        var sheetCreationCheck = await RequireRefusal(sheetCreation, sheetCreationError, "native_batch_rejected",
             "Atomic operation 0 rejected: A connectivity assertion cannot evaluate a batch that creates sheets");
         // Must-catch: one key per sheet instance. The GlobalLabel on the shared screen joins both
         // instances of the child probe, so treating them as one instance is an unexpected join.
         var (perInstance, perInstanceError) = await Apply(SharedRequest(correct, perInstanceExpectation));
-        await RequireRefusal(perInstance, perInstanceError, SchematicConnectionErrors.ConnectivityPostconditionFailed,
+        var perInstanceCheck = await RequireRefusal(perInstance, perInstanceError, SchematicConnectionErrors.ConnectivityPostconditionFailed,
             $"connectivity_postcondition_failed: expected=4 mismatches=3 first=unexpected_join:{bGlobalKey}");
         // Must-catch: a stray stub joins the untouched labelled net the assertion does not mention.
         var (strayJoin, strayJoinError) = await Apply(SharedRequest(Desired(true), hierarchicalExpectation));
-        await RequireRefusal(strayJoin, strayJoinError, SchematicConnectionErrors.ConnectivityPostconditionFailed,
+        var strayJoinCheck = await RequireRefusal(strayJoin, strayJoinError, SchematicConnectionErrors.ConnectivityPostconditionFailed,
             "connectivity_postcondition_failed: expected=3 mismatches=2 first=unaffected_group_changed:"
             + string.Join(',', untouched.Order(StringComparer.Ordinal)));
         // The marker is still the newest undo step: none of the refusals added one.
         await History("z");
-        Assert.AreEqual(titleBefore.Title, (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string sharedRefusalUndoTitle = await Title();
+        Assert.AreEqual(titleBefore.Title, sharedRefusalUndoTitle);
         await History("y");
-        Assert.AreEqual("Hierarchical assertion marker", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string sharedRefusalRedoTitle = await Title();
+        Assert.AreEqual("Hierarchical assertion marker", sharedRefusalRedoTitle);
 
         // The exact hierarchical result commits once, with the native proof, as one undo step.
         var sharedReady = await Observe();
@@ -566,28 +580,55 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(shared.Electrical.Hierarchy.Data.Equals(hierarchicalUndone.Electrical.Hierarchy.Data),
             "One native undo restores the exact pre-batch hierarchy, sheet symbols and child caches included.");
         CollectionAssert.AreEqual(Canonical(sharedBaseline), Canonical(Groups(hierarchicalUndone)));
-        Assert.AreEqual("Hierarchical assertion marker", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
+        string hierarchicalUndoneTitle = await Title();
+        Assert.AreEqual("Hierarchical assertion marker", hierarchicalUndoneTitle);
         await History("y");
         var hierarchicalRedone = await Observe();
         Assert.IsTrue(hierarchicalRealized.Electrical.Hierarchy.Data.Equals(hierarchicalRedone.Electrical.Hierarchy.Data),
             "Redo re-applies the whole hierarchical realization.");
         CollectionAssert.AreEqual(Canonical(hierarchicalGroups), Canonical(Groups(hierarchicalRedone)));
         await History("z"); await History("z");
-        Assert.AreEqual(titleBefore.Title, (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token)).Title);
-        CollectionAssert.AreEqual(Canonical(baseline), Canonical(Groups(await Observe())));
+        string hierarchicalRestoredTitle = await Title();
+        Assert.AreEqual(titleBefore.Title, hierarchicalRestoredTitle);
+        var hierarchicalRestored = await Observe();
+        CollectionAssert.AreEqual(Canonical(baseline), Canonical(Groups(hierarchicalRestored)));
 
         static JsonElement Json(IMessage message) => JsonDocument.Parse(SchematicJson.Formatter.Format(message)).RootElement;
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connectivity-assertion.json"), JsonSerializer.Serialize(new
         {
             instanceId, request = Json(passingRequest), refused = Json(split), misplaced = Json(misplaced), completed = Json(passed),
             before = Canonical(baseline), after = Canonical(Groups(realized)),
-            refusalLeftNoRevisionJournalOrUndo = true, oneUndoStep = true,
+            // Each value below is measured in this run: the refused batch left the document and its change journal
+            // unchanged and added no undo step (one undo still removes the marker title); one undo removed the whole
+            // realization (the hierarchy equals the pre-batch one and the marker is still set); redo re-applied it;
+            // undoing the marker restored the original title.
+            refusal = new { documentUnchanged = marked.Equals(afterSplit),
+                journalSequenceBefore = journal.Sequence, journalSequenceAfter = afterRefusal.Sequence,
+                journalUnchanged = journal.DocumentEpoch == afterRefusal.DocumentEpoch && journal.Sequence == afterRefusal.Sequence,
+                titleAfterUndo = refusalUndoTitle, titleAfterRedo = refusalRedoTitle },
+            refusalLeftNoRevisionJournalOrUndo = marked.Equals(afterSplit)
+                && journal.DocumentEpoch == afterRefusal.DocumentEpoch && journal.Sequence == afterRefusal.Sequence
+                && refusalUndoTitle == titleBefore.Title && refusalRedoTitle == "Connectivity assertion marker",
+            oneUndoStep = ready.Electrical.Hierarchy.Data.Equals(undone.Electrical.Hierarchy.Data)
+                && Canonical(baseline).SequenceEqual(Canonical(Groups(undone))) && undoneTitle == "Connectivity assertion marker",
+            redoReapplied = realized.Electrical.Hierarchy.Data.Equals(redone.Electrical.Hierarchy.Data)
+                && Canonical(expectedGroups).SequenceEqual(Canonical(Groups(redone))),
+            titleRestored = restoredTitle == titleBefore.Title && Canonical(baseline).SequenceEqual(Canonical(Groups(restored))),
             hierarchical = new
             {
                 instanceKeys = channelDocuments.Select(PathKey).ToArray(), request = Json(hierarchicalRequest),
                 sheetCreationRefused = Json(sheetCreation), perInstanceRefused = Json(perInstance), strayJoinRefused = Json(strayJoin),
                 completed = Json(connected), before = Canonical(sharedBaseline), after = Canonical(Groups(hierarchicalRealized)),
-                refusalsLeftNoRevisionJournalOrUndo = true, oneUndoStep = true, redoReapplied = true
+                refusals = new[] { sheetCreationCheck.Evidence, perInstanceCheck.Evidence, strayJoinCheck.Evidence },
+                refusalsLeftNoRevisionJournalOrUndo = sheetCreationCheck.Unchanged && perInstanceCheck.Unchanged && strayJoinCheck.Unchanged
+                    && sharedRefusalUndoTitle == titleBefore.Title && sharedRefusalRedoTitle == "Hierarchical assertion marker",
+                oneUndoStep = shared.Electrical.Hierarchy.Data.Equals(hierarchicalUndone.Electrical.Hierarchy.Data)
+                    && Canonical(sharedBaseline).SequenceEqual(Canonical(Groups(hierarchicalUndone)))
+                    && hierarchicalUndoneTitle == "Hierarchical assertion marker",
+                redoReapplied = hierarchicalRealized.Electrical.Hierarchy.Data.Equals(hierarchicalRedone.Electrical.Hierarchy.Data)
+                    && Canonical(hierarchicalGroups).SequenceEqual(Canonical(Groups(hierarchicalRedone))),
+                titleRestored = hierarchicalRestoredTitle == titleBefore.Title
+                    && Canonical(baseline).SequenceEqual(Canonical(Groups(hierarchicalRestored)))
             },
             nativeCapabilities, capabilityAdvertised
         }), token);

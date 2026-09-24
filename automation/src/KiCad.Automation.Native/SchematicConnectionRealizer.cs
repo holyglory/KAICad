@@ -346,9 +346,12 @@ public static class SchematicConnectionRealizer
             // in front of the pin must be clear of its own symbol (a CN-1 clarification requested from the integration
             // owner); anything that symbol draws further in front of the pin refuses it. Every other symbol, including
             // one with a pin stacked on the anchor, must be clear of the whole label, as §6.4 rule 6 states.
+            // KiCad measures a symbol as one rectangle around its body, pins and visible fields, so a field far from the
+            // body (for example one dragged away) puts everything between them inside the symbol's own bounds.
             bool ownPinSymbol = variant == Variant.AnchorLabel && id == owner;
             if (r is { } labelBox && (ownPinSymbol ? Beyond(labelBox, a, outward, PinTargetReachNm) : labelBox).InteriorMeets(bounds))
                 return ownPinSymbol ? "the label overlaps symbol " + id.ToString("D") + " more than the pin target in front of the pin"
+                    : id == owner ? "the label overlaps the bounds KiCad measures for its own symbol " + id.ToString("D") + ", which take in all of that symbol's visible fields"
                     : "the label overlaps item " + id.ToString("D");
         }
         foreach (var envelope in screen.Envelopes)
@@ -484,6 +487,8 @@ public static class SchematicConnectionRealizer
         private readonly SortedSet<string> limitations = new(StringComparer.Ordinal);
         private readonly Dictionary<Guid, Screen> screens = [];
         private readonly KiCad.Automation.Protocol.DocumentRevision revision = checkpoint.State?.Revision ?? new();
+        // Why the last stub, join stub or anchor label that was tried was refused, for the refusal a person reads.
+        private string? lastRefusal;
 
         public async Task<SchematicConnectionRealization> ExecuteAsync()
         {
@@ -873,6 +878,7 @@ public static class SchematicConnectionRealizer
 
         private void Join(Screen screen, IslandState island)
         {
+            var refused = new List<string>();
             foreach (var pin in island.Island.JoinCandidates)
             {
                 var anchor = AnchorOf(screen.Views[0], pin);
@@ -896,9 +902,11 @@ public static class SchematicConnectionRealizer
                     island.Joined = true;
                     return;
                 }
+                refused.Add("pin " + Describe(pin) + ": " + lastRefusal);
             }
             throw Error(SchematicConnectionErrors.RealizationNoJoinAnchor, "Net '" + NetName(island) + "' must name its existing connection on sheet "
-                + island.Island.SheetPathKey + ", but no existing pin of it has room for a label. Make room next to one of its pins in the schematic editor.");
+                + island.Island.SheetPathKey + ", but no existing pin of it has room for a label (a label on " + string.Join("; ", refused)
+                + "). Make room next to one of its pins in the schematic editor.");
         }
 
         private void MemberStub(Screen screen, IslandState island, ConnectionMember member)
@@ -927,7 +935,7 @@ public static class SchematicConnectionRealizer
                     KindFor(island), out var stub))
                 throw Error(SchematicConnectionErrors.RealizationNoFreeStub, "Pin " + Describe(member.Pin) + " of net '" + NetName(island)
                     + "' has no free room for a connection stub and label on sheet " + island.Island.SheetPathKey
-                    + ". Move the symbol or clear the space next to that pin.");
+                    + " (at the longest stub length tried, " + lastRefusal + "). Move the symbol or clear the space next to that pin.");
             Accept(screen, island, stub, GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel,
                 SchematicConnectionIdentity.PinAnchorKey(member.Pin.PlacedPinId), member.Pin.PlacedPinId, null);
         }
@@ -961,7 +969,7 @@ public static class SchematicConnectionRealizer
         // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier).
         private bool Admit(Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward, Box? r, Guid? ownPin, Guid owner,
             Guid? carrierPin, Guid? carrierSymbol, Variant variant) =>
-            Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant) is null;
+            (lastRefusal = Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant)) is null;
 
         // §6.5: which side of sheet symbol K a new pin goes on, and that side's x.
         private (SheetSide Side, long X) Side(Screen screen, IslandState island, SheetSymbol sheet)
@@ -1135,9 +1143,9 @@ public static class SchematicConnectionRealizer
         }
 
         // I6 before the assertion is added: the batch may create only the planned symbols and the generated items, each
-        // once, give existing sheet symbols exactly their generated sheet pins, and extend library caches only for new
-        // symbols. Anything else would change an existing item, which native connectivity cannot reveal and the
-        // resolution would find only after KiCad had committed it.
+        // once, give existing sheet symbols exactly their generated sheet pins, and extend a sheet's library cache only by
+        // the definitions of symbols created on that sheet. Anything else would change an existing item, which native
+        // connectivity cannot reveal and the resolution would find only after KiCad had committed it.
         private void RequireOnlyPlannedEdits(IReadOnlyList<SchematicItemOperation> operations)
         {
             var expected = generated.Where(g => g.Role != GeneratedConnectionRole.SheetPin).Select(g => g.Id).Concat(created).ToHashSet();
@@ -1188,7 +1196,8 @@ public static class SchematicConnectionRealizer
         }
 
         // A library cache may be replaced only on a sheet that receives a new symbol, once, and only by adding the
-        // definitions new symbols bring: every definition KiCad already holds on that sheet stays exactly as it is
+        // definitions that new symbols on that sheet use: every added key must be the library cache key of a symbol
+        // created on that sheet (CacheKeyOf), and every definition KiCad already holds there stays exactly as it is
         // (compared as KiCad keeps it, ignoring only the order of its drawn children).
         private void RequireCacheExtension(SchematicItemOperation operation, HashSet<Guid> replaced)
         {
@@ -1198,9 +1207,9 @@ public static class SchematicConnectionRealizer
                 || !TryId(state.ScreenId, out var screenId) || screenId != Id(screen.Metadata.ScreenId) || !replaced.Add(screenId))
                 throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace a library cache that is not "
                     + "exactly one checkpoint sheet's (sheet " + path + ").");
-            bool receivesSymbol = desired.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
-                .Any(i => TryId(i.Unpack<SchematicSymbolInstance>().Id, out var id) && created.Contains(id));
-            if (!receivesSymbol)
+            var newSymbolKeys = desired.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Where(s => TryId(s.Id, out var id) && created.Contains(id)).Select(CacheKeyOf).ToHashSet(StringComparer.Ordinal);
+            if (newSymbolKeys.Count == 0)
                 throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace the library cache of sheet "
                     + path + ", which receives no new symbol.");
             var replacement = new Dictionary<string, SchematicCachedSymbol>(StringComparer.Ordinal);
@@ -1212,7 +1221,21 @@ public static class SchematicConnectionRealizer
                 if (!replacement.TryGetValue(kept.CacheKey, out var after) || !SchematicLibraryCacheEquivalence.Equal(kept, after))
                     throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would "
                         + (after is null ? "drop" : "change") + " the library definition '" + kept.CacheKey + "' KiCad already holds on sheet " + path
-                        + "; only definitions for new symbols may be added.");
+                        + "; only the definitions of new symbols on that sheet may be added.");
+            var held = screen.CachedSymbols.Select(c => c.CacheKey).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in replacement.Keys.Where(k => !held.Contains(k)).Order(StringComparer.Ordinal))
+                if (!newSymbolKeys.Contains(key))
+                    throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would add the library definition '"
+                        + key + "' to sheet " + path + ", which no new symbol on that sheet uses; only the definitions of new symbols on that sheet may be added.");
+        }
+
+        // The key a placed symbol's definition has in its sheet's library cache, as KiCad names it
+        // (SCH_SYMBOL::GetSchSymbolLibraryName): its cache alias when it has one, otherwise its library identifier.
+        private static string CacheKeyOf(SchematicSymbolInstance symbol)
+        {
+            if (symbol.LibName.Length != 0) return symbol.LibName;
+            var library = symbol.LibraryId ?? symbol.Definition?.Id;
+            return library is null ? "" : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
         }
 
         // ---- helpers ----

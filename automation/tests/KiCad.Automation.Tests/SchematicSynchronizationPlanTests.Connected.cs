@@ -328,6 +328,24 @@ public sealed partial class SchematicSynchronizationPlanTests
             Assert.AreEqual(code, refused.ErrorCode, problem + ": " + refused.ErrorMessage);
             Assert.IsNull(refused.Candidate, problem); Assert.IsEmpty(refused.NativeOperations, problem);
         }
+        // A saved sheet holding a symbol whose library definition KiCad cannot resolve (captured, as KiCad captures it,
+        // with no definition of its own) cannot be matched with the design, so the refusal names that symbol and what to
+        // restore. The live creation journey proves the same on a real editor; this pins the wording's precision: a
+        // baseline that disagrees for any other reason keeps the general reason and names no symbol.
+        var (unresolved, unresolvedDesired) = WithUnresolvedSymbol(saved, desired, "X9");
+        var named = PrepareConnected(unresolved, unresolvedDesired, admitted);
+        Assert.AreEqual(SchematicConnectionErrors.UnalignedElectricalBaseline, named.ErrorCode, named.ErrorMessage);
+        Assert.AreEqual("The saved baseline must agree with its native pin partition. KiCad cannot resolve the library definition of symbol "
+            + "X9 ('Unavailable:Unresolved'), so its pins cannot be matched with the design and no XML connection can be added. Restore the "
+            + "missing library, or rescue or replace that symbol in the schematic editor, then save the XML again.", named.ErrorMessage);
+        Assert.IsNull(named.Candidate); Assert.IsNull(named.Connections);
+        // The whole planner reaches the same refusal from the saved XML, which carries such a symbol unchanged.
+        var unresolvedSaved = unresolved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(unresolvedDesired, unresolved.KnowledgeLibraries)) };
+        var planned = SchematicSynchronizationPlanner.Plan(unresolvedSaved, ConnectedSession(unresolvedSaved.InstanceId, realization: true));
+        Assert.AreEqual(SchematicConnectionErrors.UnalignedElectricalBaseline, planned.ErrorCode, planned.ErrorMessage);
+        Assert.AreEqual(named.ErrorMessage, planned.ErrorMessage);
+        var general =PrepareConnected(saved with { BaselineElectrical = foreign }, desired, admitted);
+        Assert.AreEqual("The saved baseline must agree with its native pin partition.", general.ErrorMessage, "No unresolved symbol is named.");
 
         // Hierarchy merge refusals pass through with the merge's own result, as PrepareCreation reports them
         // (§4.4 step 1): competing XML and native edits of one sheet are a conflict, and an invalid XML
@@ -998,6 +1016,35 @@ public sealed partial class SchematicSynchronizationPlanTests
         var design = WithCircuit(state.Baseline, edit);
         var saved = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, state.KnowledgeLibraries)) };
         return (saved, DesignRecoveryStore.ReadDesired(saved));
+    }
+
+    // The saved record and the desired design with one more symbol on the root sheet whose library definition KiCad cannot
+    // resolve: captured, as KiCad captures such a symbol, with its library identity and fields but no definition of its
+    // own (no unit and no pins), on the saved, observed and desired sheets and in both electrical checkpoints. The design
+    // does not own it.
+    private static (DesignRecoveryState State, SchematicDesign Desired) WithUnresolvedSymbol(DesignRecoveryState state, SchematicDesign desired,
+        string reference)
+    {
+        var library = new Kiapi.Common.Types.LibraryIdentifier { LibraryNickname = "Unavailable", EntryName = "Unresolved" };
+        void Add(SchematicHierarchyData data)
+        {
+            var root = data.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+            root.Items.Add(Any.Pack(new SchematicSymbolInstance
+            {
+                Id = new() { Value = "7e57f1c5-0000-4000-8000-00000000c0de" }, Path = root.Metadata.Document.SheetPath.Clone(),
+                Position = new() { XNm = 266_700_000, YNm = 25_400_000 }, LibraryId = library.Clone(), Definition = new() { Id = library.Clone() },
+                Unit = new() { Unit = 1 }, SeparatePinIdentities = true,
+                ReferenceField = new() { Name = "Reference", Text = new() { Text_ = reference, Attributes = new() { Multiline = true } } },
+                ValueField = new() { Name = "Value", Text = new() { Text_ = "Unresolved", Attributes = new() { Multiline = true } } }
+            }));
+        }
+        var baseline = state.Baseline.Schematic.Clone(); Add(baseline);
+        var observed = state.Observed.Clone(); Add(observed);
+        var baselineElectrical = state.BaselineElectrical!.Clone(); Add(baselineElectrical.Hierarchy.Data);
+        var observedElectrical = state.ObservedElectrical!.Clone(); Add(observedElectrical.Hierarchy.Data);
+        var wanted = desired.Schematic.Clone(); Add(wanted);
+        return (state with { Baseline = state.Baseline with { Schematic = baseline }, Observed = observed,
+            BaselineElectrical = baselineElectrical, ObservedElectrical = observedElectrical }, desired with { Schematic = wanted });
     }
 
     private static SchematicDesign WithCircuit(SchematicDesign design, Func<Circuit, Circuit> edit) =>

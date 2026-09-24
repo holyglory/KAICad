@@ -140,10 +140,15 @@ public sealed partial class NativeSessionTests
         // cut off the second. Per-action deadlines remain unchanged.
         // Component creation measured 251-294s on 2026-09-23 (one run cut off at
         // 300s after every assertion passed), so it joins the heavy group.
-        int aggregateSeconds = journey == NativeJourney.Foundation ? 600
-            : journey == NativeJourney.CheckedBatch ? 420
+        // These are containment ceilings, not performance claims. With four lanes
+        // sharing the host (p95 CPU about 98%), passing runs reached 585/600s
+        // (foundation), 387/420s (checked batch) and 245/300s (net settings), and
+        // six runs on 2026-09-23 failed only on the ceiling. All ceilings are 1.5x
+        // their idle-host sizing; per-action deadlines are unchanged.
+        int aggregateSeconds = journey == NativeJourney.Foundation ? 900
+            : journey == NativeJourney.CheckedBatch ? 630
             : journey is NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
-                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 600 : 300;
+                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 900 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)

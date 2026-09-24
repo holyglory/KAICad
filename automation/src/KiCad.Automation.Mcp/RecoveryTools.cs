@@ -13,14 +13,28 @@ public interface IExecutionCheckpoint
     Task WaitAsync(string reached, CancellationToken token);
 }
 
+/// <summary>The handshake each attached KiCad instance returned when it was attached. Reading it never
+/// contacts KiCad, so a preview stays offline (CN-1 I10; decision n39ac0ccc5c9270f2).</summary>
+public interface IAttachedHandshakes
+{
+    KiCad.Automation.Protocol.AutomationSession? Handshake(string instanceId);
+}
+
+/// <summary>Adapts a registry lookup of the handshake recorded at attach. Every read is a copy.</summary>
+public sealed class AttachedHandshakes(Func<string, KiCad.Automation.Protocol.AutomationSession?> recorded) : IAttachedHandshakes
+{
+    public KiCad.Automation.Protocol.AutomationSession? Handshake(string instanceId) => recorded(instanceId)?.Clone();
+}
+
 [McpServerToolType]
 public sealed class RecoveryTools
 {
     private readonly InstanceRegistry? registry;
     private readonly IExecutionCheckpoint? checkpoint;
+    private readonly IAttachedHandshakes? handshakes;
     public RecoveryTools() { }
-    public RecoveryTools(InstanceRegistry registry, IExecutionCheckpoint? checkpoint = null)
-    { this.registry = registry; this.checkpoint = checkpoint; }
+    public RecoveryTools(InstanceRegistry registry, IExecutionCheckpoint? checkpoint = null, IAttachedHandshakes? handshakes = null)
+    { this.registry = registry; this.checkpoint = checkpoint; this.handshakes = handshakes; }
 
     [McpServerTool(Name = "kicad_design_sync_apply", ReadOnly = false),
      Description("Apply a prepared XML synchronization candidate to one explicit native KiCad instance, then publish the native files and XML through the revision-safe journal. Requires the exact recovery token, absolute XML destination and caller-stable operation ID. Replays an identical completed operation from its receipt; stale instances, changed files, conflicts and interrupted phases remain explicit recovery results. Native connectivity validation, dirty-session preservation and retained prior XML are returned separately. This is not an automatic AI request and does not run from Save/Decline.")]
@@ -112,7 +126,10 @@ public sealed class RecoveryTools
         var (store, saved) = Read(instanceId, recoveryPath);
         if (saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before planning.");
-        var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, saved, cancellationToken);
+        // The preview classifies exactly as apply and the automatic worker do, from the handshake the
+        // recorded instance gave at attach. No handshake (for example no attachment) keeps today's plan.
+        var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, saved,
+            handshakes?.Handshake(saved.State.InstanceId.ToString("D")), cancellationToken);
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,

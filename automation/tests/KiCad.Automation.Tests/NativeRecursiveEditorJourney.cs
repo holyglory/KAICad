@@ -1362,7 +1362,6 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    /// <summary>The diagram <see cref="VerifyDiagramCreationOverMcp"/> created, for opening it in the editor.</summary>
     /// <summary>Flat structural diagrams are discarded, not converted (owner decision n9af098253fec71da), so the per-level
     /// editor is the only diagram editor. The production MCP server attached to this live session advertises no flat editor
     /// tool and no conversion tool, and the live project manager has no handler for the flat editor's native commands. The
@@ -1402,6 +1401,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("The explicitly identified recursive diagram is not open", perLevel.Status.ErrorMessage);
     }
 
+    /// <summary>The diagram <see cref="VerifyDiagramCreationOverMcp"/> created, for opening it in the editor.</summary>
     private sealed record CreatedDiagram(string RepositoryRoot, string Path, string DocumentId, string SourceToken, BlockSelection Root, string Caption);
 
     /// <summary>Creating a new system diagram next to the live session's project through the production MCP server

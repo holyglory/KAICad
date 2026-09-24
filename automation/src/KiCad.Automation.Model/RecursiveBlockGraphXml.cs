@@ -89,12 +89,13 @@ public static partial class RecursiveBlockGraphXml
                 throw new AutomationException("diagram_schema_too_new",
                     $"This diagram uses recursive-block-graph schema {version}; this build reads versions 1 and 2. Nothing was changed.");
             if (version == 0) throw Invalid("Use the supported recursive block graph root and namespace.");
-            new XDocument(root).Validate(Schema.Value, null);
             var format = new Format(version);
-            // Legacy flat diagrams are discarded, never converted (owner decision n9af098253fec71da), so no
-            // build writes a conversion receipt; a file claiming one is refused rather than silently dropped.
+            // Legacy flat diagrams are discarded, never converted (owner decision n9af098253fec71da): no build writes a
+            // conversion receipt and schema 2 no longer declares one. A file still claiming one is refused, never silently
+            // dropped, and is named before schema validation so the refusal says why.
             if (root.Element(format.Ns + "migration") is not null)
                 throw Invalid("This diagram carries a flat-diagram conversion receipt; flat diagrams are not converted, so this file is not supported and nothing was changed.");
+            new XDocument(root).Validate(Schema.Value, null);
             return (format.Read(root), version);
         }
         catch (Exception error) when (error is XmlException or XmlSchemaException or FormatException or OverflowException)

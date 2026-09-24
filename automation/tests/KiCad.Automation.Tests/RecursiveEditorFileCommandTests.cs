@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Google.Protobuf;
 using KiCad.Automation.Mcp;
@@ -359,30 +360,30 @@ public sealed class RecursiveEditorFileCommandTests
             string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
             await File.WriteAllTextAsync(path, xml);
             var read = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
-            var loaded = await Run(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var loaded = await Run(JsonFormatter.Default.Format(read)); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
             var rebase = read.Clone(); rebase.Action = P.RecursiveFileAction.RfaRebaseRequirements; rebase.ExpectedSourceToken = loaded.SourceToken;
             rebase.Rebase = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)) };
-            var compared = await Run(rebase); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
-            var probes = new List<(string Name, P.RecursiveFileRequest Request)>();
-            var old = read.Clone(); old.SchemaVersion = 1; probes.Add(("schema 1 read", old));
-            var oldRebase = rebase.Clone(); oldRebase.SchemaVersion = 1; probes.Add(("schema 1 rebase", oldRebase));
-            // Flat-diagram conversion is never implemented (owner decision n9af098253fec71da).
-            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram })
-            { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe)); }
-            var migrate = read.Clone(); migrate.Migrate = new(); probes.Add(("migrate", migrate));
-            foreach (var (name, probe) in probes)
+            var compared = await Run(JsonFormatter.Default.Format(rebase)); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
+            var probes = new List<(string Name, string Json)>();
+            var old = read.Clone(); old.SchemaVersion = 1; probes.Add(("schema 1 read", JsonFormatter.Default.Format(old)));
+            var oldRebase = rebase.Clone(); oldRebase.SchemaVersion = 1; probes.Add(("schema 1 rebase", JsonFormatter.Default.Format(oldRebase)));
+            // The retired flat-diagram conversion (owner decision n9af098253fec71da), as an earlier client wrote it: this build's
+            // protocol can no longer express it, so it arrives as reserved names and numbers.
+            foreach (var action in RetiredConversionActions) probes.Add((action.ToJsonString(), WithRetired(read, action)));
+            probes.Add(("migrate", WithRetired(read, migrate: new JsonObject())));
+            foreach (var (name, json) in probes)
             {
-                var rejected = await Run(probe);
+                var rejected = await Run(json);
                 Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
             }
             Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
         }
         finally { Directory.Delete(root, true); }
 
-        static async Task<P.RecursiveFileResult> Run(P.RecursiveFileRequest request)
+        static async Task<P.RecursiveFileResult> Run(string json)
         {
             using var response = new StringWriter();
-            await RecursiveFileCommand.RunAsync(new StringReader(JsonFormatter.Default.Format(request)), response, CancellationToken.None);
+            await RecursiveFileCommand.RunAsync(new StringReader(json), response, CancellationToken.None);
             return P.RecursiveFileResult.Parser.ParseJson(response.ToString());
         }
     }
@@ -901,12 +902,29 @@ public sealed class RecursiveEditorFileCommandTests
             var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
             string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            // Flat-diagram conversion (actions 17 and 18 and its migrate payload) was retired unimplemented: legacy flat diagrams are
+            // discarded, not converted (owner decision n9af098253fec71da). An earlier client's request names reserved entries and is
+            // refused through the compiled helper before any file access, saying the entry was retired.
+            var retired = new List<(string Name, string Json)>();
+            foreach (var action in RetiredConversionActions) retired.Add((action.ToJsonString(), WithRetired(read, action)));
+            retired.Add(("migrate payload on a read", WithRetired(read, migrate: new JsonObject())));
+            var conversion = read.Clone(); conversion.DocumentId = "";
+            retired.Add(("complete conversion request", WithRetired(conversion, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!,
+                RetiredConversionPayload(Path.Combine(root, "flat.engineering.xml"), new string('a', 64)))));
+            foreach (var (name, json) in retired)
+            {
+                var (rejected, _) = await InvokeJson(json);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
+                StringAssert.Contains(rejected.ErrorMessage, "was retired from the recursive diagram protocol", name);
+                Assert.IsNull(rejected.Document, name);
+            }
+            // Precision: an unknown name that was never declared is refused the same way (strict unknown-field rejection,
+            // contract rbg-v2 section 2.3) without being called retired.
+            var future = JsonNode.Parse(JsonFormatter.Default.Format(read))!.AsObject(); future["action"] = "RFA_OPEN_CANVAS";
+            var (unknown, _) = await InvokeJson(future.ToJsonString());
+            Assert.AreEqual("unsupported_diagram_file_request", unknown.ErrorCode, unknown.ErrorMessage);
+            Assert.IsFalse(unknown.ErrorMessage.Contains("retired", StringComparison.Ordinal), unknown.ErrorMessage);
             var probes = new List<(string Name, P.RecursiveFileRequest Request, string Code)>();
-            // Flat-diagram conversion (17, 18 and its payload) is never implemented: legacy flat diagrams are discarded,
-            // not converted (owner decision n9af098253fec71da).
-            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram })
-            { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe, "unsupported_diagram_file_request")); }
-            { var probe = read.Clone(); probe.Migrate = new(); probes.Add(("migrate", probe, "unsupported_diagram_file_request")); }
             // The level actions (11-13) accept only their own payloads (contract rbg-v2 section 7).
             foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
             {
@@ -927,10 +945,6 @@ public sealed class RecursiveEditorFileCommandTests
             var malformedToken = read.Clone(); malformedToken.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; malformedToken.LevelEdit = new();
             malformedToken.ExpectedSourceToken = "not-a-file-token";
             probes.Add(("removal with a malformed token", malformedToken, "ambiguous_diagram_file_request"));
-            var conversion = read.Clone(); conversion.DocumentId = ""; conversion.Action = P.RecursiveFileAction.RfaMigrateFlatDiagram;
-            conversion.Migrate = new() { OperationId = Guid.NewGuid().ToString("D"), FlatSourcePath = Path.Combine(root, "flat.engineering.xml"),
-                RootName = "System", ImplementationName = "Initial" };
-            probes.Add(("complete conversion request", conversion, "unsupported_diagram_file_request"));
             // Create and discover (actions 16 and 19) are implemented (RecursiveDiagramCreationTests); they name no existing
             // document, so a document identity, and their payloads on any other action, are ambiguous (section 7).
             foreach (var action in new[] { P.RecursiveFileAction.RfaCreateDiagram, P.RecursiveFileAction.RfaDiscoverDiagrams })
@@ -1424,7 +1438,35 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     /// <summary>Runs one request through the production helper process (<c>kicad-mcp --diagram-file</c>).</summary>
-    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request)
+    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request) =>
+        (await InvokeJson(JsonFormatter.Default.Format(request))).Result;
+
+    /// <summary>The retired flat-diagram conversion actions (reserved 17 and 18) as an earlier client wrote them: by name, as
+    /// protobuf JSON prints enum values, and by number.</summary>
+    internal static readonly JsonNode[] RetiredConversionActions =
+        [JsonValue.Create("RFA_PREPARE_MIGRATION")!, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!, JsonValue.Create(17), JsonValue.Create(18)];
+
+    /// <summary>The request as JSON with the retired action and/or migrate payload an earlier build could send.</summary>
+    internal static string WithRetired(P.RecursiveFileRequest request, JsonNode? action = null, JsonObject? migrate = null)
+    {
+        var json = JsonNode.Parse(JsonFormatter.Default.Format(request))!.AsObject();
+        if (action is not null) json["action"] = action.DeepClone();
+        if (migrate is not null) json["migrate"] = migrate;
+        return json.ToJsonString();
+    }
+
+    /// <summary>A complete payload of the retired conversion request (the removed MigrateFlatDiagramData).</summary>
+    internal static JsonObject RetiredConversionPayload(string flatSourcePath, string flatSourceToken) => new()
+    {
+        ["operationId"] = Guid.NewGuid().ToString("D"), ["flatSourcePath"] = flatSourcePath, ["expectedFlatSourceToken"] = flatSourceToken,
+        ["rootName"] = "System", ["implementationName"] = "Initial",
+        ["origin"] = new JsonObject { ["kind"] = "DAK_IMPORT", ["actor"] = "Earlier project manager", ["recordedAt"] = "2026-09-23T00:00:00Z",
+            ["summary"] = "Convert the flat structural diagram" },
+    };
+
+    /// <summary>Runs the compiled helper (<c>kicad-mcp --diagram-file</c>, the process the native editor starts) on raw request
+    /// JSON and returns its parsed result and the exact JSON it wrote.</summary>
+    internal static async Task<(P.RecursiveFileResult Result, string Json)> InvokeJson(string json)
     {
         string? root = null;
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -1441,11 +1483,12 @@ public sealed class RecursiveEditorFileCommandTests
         {
             var diagnostics = process.StandardError.ReadToEndAsync(timeout.Token);
             var response = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            await process.StandardInput.WriteAsync(JsonFormatter.Default.Format(request)); process.StandardInput.Close();
+            await process.StandardInput.WriteAsync(json); process.StandardInput.Close();
             await process.WaitForExitAsync(timeout.Token);
-            var result = P.RecursiveFileResult.Parser.ParseJson(await response);
+            string written = await response;
+            var result = P.RecursiveFileResult.Parser.ParseJson(written);
             Assert.AreEqual(result.Success ? 0 : 1, process.ExitCode, await diagnostics);
-            return result;
+            return (result, written);
         }
         finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
     }

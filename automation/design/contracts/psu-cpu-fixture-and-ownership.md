@@ -776,3 +776,22 @@ Error codes (the message prefix of the `AssertFailedException` raised by the loa
 - The same bands apply to new values in shared enums and to new members of existing `oneof`s.
 - Marker lines: `// -- lane 2X (NNN-MMM) --` and `// -- end lane 2X --`. Messages a lane adds to a shared file go between `// == lane 2X messages ==` and `// == end ==` at the end of the file.
 - New enum types and messages use lane prefixes, because C++ enum values share package scope.
+
+## Erratum 2026-09-24: flat-diagram conversion retired
+
+Owner decision `n9af098253fec71da`: legacy flat structural diagrams are discarded, not converted. This erratum (integration
+grant for item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`) overrides the earlier sections; the full protocol list is in
+the matching erratum of `cn2-recursive-diagram-v2.md`.
+
+- **§1.8 and §1.9.** `flat-structure.engineering.xml`, `expected-migration.json` and `PsuCpuExpectedMigration` stay frozen
+  fixture data (version 1 is immutable), but nothing converts them. The `StructuralMigration` harness row
+  (`FlatStructureConvertsOnceIntoARootBlock`, `native-structural-migration`) is retired and is not built.
+- **§2.4 lane 2B.** Retired flat-editor and conversion files, removed or never created: `StructuralMigration.cs`,
+  `StructuralEditorCodec.cs`, `StructuralEditorFiles.cs`, `StructuralEditorTools.cs`, `StructuralFileCommand.cs`,
+  `kicad/structural_editor_control.{h,cpp}`, `kicad/structural_editor_frame.{h,cpp}`, `kicad/structural_editor_admission.h`,
+  `api/proto/common/commands/structural_commands.proto`, `NativeStructuralEditorJourney.cs`,
+  `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs`, `NativeStructuralMigrationJourney.cs` and
+  `StructuralMigrationTests.cs`. `RecursiveEditorTools.cs` gains `kicad_diagram_create` only, never `kicad_diagram_migrate`.
+- **§3.** The retired conversion numbers in `diagram_revision_types.proto` are reserved (including frozen numbers below 100)
+  and are never reused. `SharedProtoBandTests` records them and no longer grants lane 2B the `StructuralMigration` type
+  prefix or the `SMG_` value prefix.

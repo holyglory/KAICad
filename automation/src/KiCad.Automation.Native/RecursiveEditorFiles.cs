@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Text;
+using System.Text.Json;
 using Google.Protobuf;
 using KiCad.Automation.Model;
 using P = KiCad.Automation.Protocol.Diagrams;
@@ -12,14 +14,28 @@ namespace KiCad.Automation.Native;
 /// any file access. Every changed write stores schema 2 (R4).</summary>
 public static class RecursiveEditorFiles
 {
+    /// <summary>Reads one helper request from the protobuf JSON that the native editor, the project manager or a script
+    /// sends to <c>kicad-mcp --diagram-file</c>. Strict unknown-field rejection (contract rbg-v2 section 2.3) covers names
+    /// too: a field or enum value this build does not declare, including one the protocol retired and reserves, is refused
+    /// as <c>unsupported_diagram_file_request</c> before any file access. Malformed JSON text stays an ordinary command error.</summary>
+    public static P.RecursiveFileRequest ParseRequest(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+        try { return P.RecursiveFileRequest.Parser.ParseJson(json); }
+        catch (InvalidProtocolBufferException error)
+        {
+            throw RetiredName(json) is { } retired ? Retired($"'{retired}'")
+                : Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields or values. "
+                    + error.Message);
+        }
+    }
+
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        // Flat-diagram conversion (actions 17 and 18 and the migrate payload) is never implemented: legacy flat
-        // diagrams are discarded, not converted (owner decision n9af098253fec71da). It fails closed here, before
-        // any file access, exactly like the unknown values it was before the declaration.
+        // A retired action (the flat-diagram conversion's 17 and 18) is refused first, naming why, before any file access.
+        if (request is not null && IsRetired(request.Action)) throw Retired($"Diagram file action {(int)request.Action}");
         if (request is null || !RecursiveBlockCodec.IsSupportedSchema(request.SchemaVersion) || !Enum.IsDefined(request.Action)
-            || !Implemented(request.Action) || request.Migrate is not null
             || RecursiveBlockCodec.CarriesFieldBeyondSchema(request, request.SchemaVersion)
             || !request.Equals(P.RecursiveFileRequest.Parser.ParseJson(JsonFormatter.Default.Format(request))))
             throw Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields.");
@@ -177,8 +193,53 @@ public static class RecursiveEditorFiles
         return result;
     }
 
-    private static bool Implemented(P.RecursiveFileAction action) =>
-        action is not (P.RecursiveFileAction.RfaPrepareMigration or P.RecursiveFileAction.RfaMigrateFlatDiagram);
+    // What the protocol retired and reserves, read from the descriptors so diagram_revision_types.proto stays the only
+    // record. Today that is the flat-diagram conversion: actions 17 and 18 and the migrate payload, retired unimplemented
+    // because legacy flat diagrams are discarded, not converted (owner decision n9af098253fec71da).
+    private static readonly Google.Protobuf.Reflection.FieldDescriptor ActionField =
+        P.RecursiveFileRequest.Descriptor.FindFieldByNumber(P.RecursiveFileRequest.ActionFieldNumber);
+    private static readonly Google.Protobuf.Reflection.DescriptorProto RequestShape = P.RecursiveFileRequest.Descriptor.ToProto();
+    private static readonly Google.Protobuf.Reflection.EnumDescriptorProto ActionShape = ActionField.EnumType.ToProto();
+
+    private static bool IsRetired(P.RecursiveFileAction action) =>
+        ActionShape.ReservedRange.Any(range => (int)action >= range.Start && (int)action <= range.End); // Enum ranges are inclusive.
+
+    /// <summary>The retired request field or action value an unparsable request names, if any.</summary>
+    private static string? RetiredName(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (RequestShape.ReservedName.FirstOrDefault(name => property.NameEquals(name) || property.NameEquals(JsonName(name))) is { } field)
+                    return field;
+                if ((property.NameEquals(ActionField.JsonName) || property.NameEquals(ActionField.Name)) && property.Value.ValueKind == JsonValueKind.String
+                    && ActionShape.ReservedName.Contains(property.Value.GetString()!))
+                    return property.Value.GetString();
+            }
+        }
+        catch (JsonException) { }
+        return null;
+    }
+
+    // The protobuf JSON name of a field name: underscores dropped, each following letter upper-cased.
+    private static string JsonName(string name)
+    {
+        var json = new StringBuilder(name.Length);
+        bool upper = false;
+        foreach (char c in name)
+        {
+            if (c == '_') { upper = true; continue; }
+            json.Append(upper ? char.ToUpperInvariant(c) : c); upper = false;
+        }
+        return json.ToString();
+    }
+
+    private static AutomationException Retired(string what) => Invalid("unsupported_diagram_file_request",
+        what + " was retired from the recursive diagram protocol (legacy flat diagrams are discarded, not converted), so this build does not "
+        + "support it. Nothing was read or changed.");
 
     /// <summary>Actions 11-13 (contract rbg-v2 section 7): a removal is prepared against the exact observed
     /// file and never writes; a level save writes only when something changed; a level rebase compares the

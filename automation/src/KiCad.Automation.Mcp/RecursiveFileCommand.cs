@@ -15,7 +15,7 @@ public static class RecursiveFileCommand
         try
         {
             string json = await input.ReadToEndAsync(token);
-            result = await RecursiveEditorFiles.ExecuteAsync(RecursiveFileRequest.Parser.ParseJson(json), token);
+            result = await RecursiveEditorFiles.ExecuteAsync(RecursiveEditorFiles.ParseRequest(json), token);
         }
         catch (OperationCanceledException)
         { result = new() { ErrorCode = "cancelled", ErrorMessage = "The diagram read was cancelled; no saved or draft content was changed." }; }

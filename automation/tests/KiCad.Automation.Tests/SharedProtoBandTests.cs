@@ -48,7 +48,8 @@ public sealed partial class SharedProtoBandTests
     private static readonly Dictionary<string, (int First, string[] Types, string[] Values)> Lanes = new()
     {
         ["2A"] = (100, ["SchematicWiring", "SchematicRealization", "InterfaceRealizationDerivation", "PinVariant"], ["SWR_", "SRZ_", "IRD_"]),
-        ["2B"] = (200, ["DiagramCanvas", "DiagramLayout", "StructuralMigration", "DiagramCreate"], ["DCV_", "DLY_", "SMG_"]),
+        // Flat-diagram conversion is retired (owner decision n9af098253fec71da), so 2B has no StructuralMigration types or SMG_ values.
+        ["2B"] = (200, ["DiagramCanvas", "DiagramLayout", "DiagramCreate"], ["DCV_", "DLY_"]),
         ["2C"] = (300, ["SchematicTracking", "SchematicRebuild", "NativeOwnership", "SchematicStateGroup", "DesignAutoSync"],
             ["STK_", "SRB_", "NOW_", "DAS_"]),
         ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash"], ["ICP_", "NCP_", "CXR_"]),
@@ -142,6 +143,16 @@ public sealed partial class SharedProtoBandTests
             ("lane block removed", automation, text => Replace(text, BlockC + "// == end ==\n", ""), "lane 2C message block is missing"),
             ("shared file imports a lane file", automation, text => Insert(text, "import \"board/board_types.proto\";\n",
                 "import \"common/commands/schematic_tracking_commands.proto\";\n"), "imports lane file"),
+            // The retired flat-diagram conversion stays retired: its reserved numbers cannot be declared again, and lane 2B
+            // no longer owns a conversion type prefix.
+            ("retired conversion payload revived", revisions, text => Replace(text, "  reserved 23;\n", "  MigrateFlatDiagramData migrate = 23;\n"),
+                "RecursiveFileRequest changes its frozen numbered declarations"),
+            ("retired conversion actions revived", revisions, text => Replace(text, "  reserved 17, 18;\n",
+                "  RFA_PREPARE_MIGRATION = 17;\n  RFA_MIGRATE_FLAT_DIAGRAM = 18;\n"), "RecursiveFileAction changes its frozen numbered declarations"),
+            ("retired conversion receipt revived", revisions, text => Replace(text, "  reserved 11;\n", "  bytes migration = 11;\n"),
+                "RecursiveBlockGraphData changes its frozen numbered declarations"),
+            ("2B conversion message after the retirement", revisions, text => Insert(text, "// == lane 2B messages ==\n",
+                "message StructuralMigrationPlan { string id = 1; }\n"), "name prefix"),
         };
         var failures = new List<string>();
         foreach (var (name, file, edit, expected) in cases)
@@ -349,7 +360,8 @@ public sealed partial class SharedProtoBandTests
 
     // Frozen at the Phase 2 freeze: "declaration maximum-number-outside-markers digest open-lanes", where the digest
     // is the first 16 hex digits of SHA-256 over the "name=number" pairs outside the lane marker pairs, sorted by
-    // number then name and joined by newlines ("reserved" names a reserved number).
+    // number then name and joined by newlines ("reserved" names a reserved number). Re-frozen 2026-09-24 for the retired
+    // flat-diagram conversion (owner decision n9af098253fec71da): its fields and actions are reserved and its types removed.
     private const string DiagramRevisionTypes = """
         BlockSelectionData 3 1c280b99c9aba270
         RequirementFieldsData 3 dd04bbc8c79cf717
@@ -385,12 +397,12 @@ public sealed partial class SharedProtoBandTests
         BlockPhysicalAllocationData 3 59f92b77fd94ed83
         DiagramRefinementAttachmentData 7 23aeb30684b7f23b
         DiagramRefinementInputData 8 647fe819a0119460
-        RecursiveBlockGraphData 11 7d75ff3ea2ac93fe 2A 2B 2C
+        RecursiveBlockGraphData 11 03f73900fece145b 2A 2B 2C
         BlockProposalIssueKindData 2 e482192887b345a3
         BlockProposalIssueData 5 a6315f19dd4c6b8a
         BlockProposalRecordData 7 4dd51372dc0ad396
         RecursiveEditorDocument 7 93e4b9a593f865d3 2B 2C
-        RecursiveFileAction 19 5ed57e2fe8b13266 2B
+        RecursiveFileAction 19 9e1cb45ecbc48464 2B
         ImplementationActionKind 5 0a33da0d6922ed39
         ManageImplementationData 9 255a22e4b49c59f4
         ConnectionDraftData 13 3ebcd852d2ac8c65 2A 2B
@@ -402,8 +414,8 @@ public sealed partial class SharedProtoBandTests
         RequirementMergeData 9 ea8a03db4bf36358
         BlockDraftData 12 e43ce6a48e525625 2B 2C
         SaveBlockDraftData 7 f39345ff13085d6a 2B 2C
-        RecursiveFileRequest 24 1cc046058534517b 2B
-        RecursiveFileResult 20 e7ae047d4454c741 2B
+        RecursiveFileRequest 24 ebdc22185ffb335e 2B
+        RecursiveFileResult 20 56875ad844afa203 2B
         DiagramBoundaryInterfaceData 5 0d2ac2bfcb73d8c3 2A 2B
         BlockLocalDiagramData 5 804cbf12d7a56e7d 2A 2B
         DiagramAnnotationRole 2 c920eb13132515d9
@@ -457,23 +469,10 @@ public sealed partial class SharedProtoBandTests
         ReparentBlockData 8 944f700a8bd1e25c 2B
         ReparentPreviewData 3 9d6682e0e908886c 2B
         CreateDiagramData 5 57df190488a5807a 2B
-        MigrateFlatDiagramData 8 60ed7aba17e0ec03 2B
         DiscoverDiagramsData 1 e6180ee3463d6a7d 2B
         DiscoveredDiagramStatus 5 e00feb17ce88577e
-        DiscoveredDiagramData 11 589cb53abd9ab12a 2B
-        FlatDiagramStatus 4 069511b08660ff33
-        DiscoveredFlatDiagramData 13 265f592dbac5c515 2B
-        DiagramDiscoveryData 9 64ef0d0ce73f27ce 2B
-        MigrationItemKind 16 4079167303aad14f 2B
-        MigrationOutcome 3 d225cfc417a66000
-        MigrationTargetKind 13 92c497f3fff71f7d 2B
-        MigrationReason 13 45a8a06824475a02 2B
-        MigrationSourceEnvelope 2 b75e743ad7c317bb
-        RetainedGuidanceKind 3 878141bfd78fdfbd
-        MigrationItemData 9 f2df3fd55addd974 2B
-        RetainedGuidanceData 11 1bfa444aa6f610ed 2B
-        DiagramMigrationReceiptData 18 55106feda5c1a2bf 2B
-        MigrationResultData 9 5b720ce978c05d4e 2B
+        DiscoveredDiagramData 11 5dbf57da2a1e4c59 2B
+        DiagramDiscoveryData 9 8557a8a3fb146220 2B
         """;
 
     private const string AutomationCommands = """

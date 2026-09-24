@@ -932,3 +932,36 @@ The joins run 1–2, 2–3, 3–4 and 4–5.
 - Retiring `kicad_structure_open` and `STRUCTURAL_EDITOR_FRAME` after the conversion journey passes.
 - A notice on the first v1 upgrade (if the owner wants it). Turning attached connections into boundary interfaces during reparent.
 - The `automation.diagram.v2` capability advertisement, owned by plan lane 2D (p20d75a441d50afdc).
+
+## Erratum 2026-09-24: flat-diagram conversion retired
+
+Owner decision `n9af098253fec71da`: legacy flat structural diagrams are discarded, not converted. The converter was never
+shipped and the flat editor is already removed, so the conversion is retired from the frozen seam (integration grant for
+item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`). The earlier sections stay as history; this erratum overrides them.
+
+- **Proto (`diagram_revision_types.proto`, frozen part below 100 included).** Reserved by number and by name, never to be
+  reused: `RecursiveFileAction` 17 `RFA_PREPARE_MIGRATION` and 18 `RFA_MIGRATE_FLAT_DIAGRAM`; `RecursiveFileRequest.migrate`
+  23; `RecursiveFileResult.migration` 17; `RecursiveBlockGraphData.migration` 11; `DiscoveredDiagramData`
+  `migrated_from_structure_id` 7 and `migrated_from_path` 8; `DiagramDiscoveryData.flat_diagrams` 4. Removed types:
+  `MigrateFlatDiagramData`, `FlatDiagramStatus`, `DiscoveredFlatDiagramData`, `MigrationItemKind`, `MigrationOutcome`,
+  `MigrationTargetKind`, `MigrationReason`, `MigrationSourceEnvelope`, `RetainedGuidanceKind`, `MigrationItemData`,
+  `RetainedGuidanceData`, `DiagramMigrationReceiptData`, `MigrationResultData`. `SharedProtoBandTests` is re-frozen in the
+  same commit, and lane 2B no longer owns the `StructuralMigration` type prefix or the `SMG_` value prefix.
+- **XML (`recursive-block-graph-v2.xsd`).** The `<migration>` receipt and its types (`migration-*`,
+  `retained-guidance-kind`, `statement-role`, `guidance-strength`, `sha256`) are removed. A file that still carries a
+  receipt is refused with `invalid_recursive_block_graph_xml`, naming the receipt, and nothing is changed.
+- **Helper (§7).** A request naming a retired action (by name or number) or the `migrate` payload is refused with
+  `unsupported_diagram_file_request` before any file access, and the message says the entry was retired. Any other JSON
+  field or enum name this build does not declare gets the same code (strict unknown-field rejection, §2.3), no longer the
+  generic `diagram_file_error`.
+- **Superseded text.** The flat-conversion ideas of §0 and its rows 6 and 10, the p57f63bd870523b16 row of §1, R2 and R3 (receipt,
+  prepare-migration), the §3 migration factor, G4 in §4.5, §4.12, the `<migration>` element of §5, "the graph gains
+  `migration`" in §6, actions 17 and 18 and the migration inputs and flat discovery rows of §7, `kicad_diagram_migrate` in
+  §8, steps 4 and 7 of §9.3, the receipt and migrate codes of §11, and the §13 item that waited for a conversion journey.
+- **Retired flat-editor files** (removed, not converted): `kicad/structural_editor_frame.{h,cpp}`,
+  `kicad/structural_editor_control.{h,cpp}`, `kicad/structural_editor_admission.h`,
+  `api/proto/common/commands/structural_commands.proto`, `StructuralEditorCodec.cs`, `StructuralEditorFiles.cs`,
+  `StructuralEditorTools.cs` (the `kicad_structure_*` tools), `StructuralFileCommand.cs`,
+  `NativeStructuralEditorJourney.cs`, `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs` and
+  `NativeStructuralMigrationJourney.cs`. Never created: `StructuralMigration.cs`, `StructuralMigrationTests.cs` and the
+  `kicad_diagram_migrate` tool.

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using ModelContextProtocol.Client;
@@ -10,11 +11,483 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
-    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9).
-    // Lane 2B replaces this body when it delivers the journey.
-    private static Task VerifyPsuCpuDiagramCanvas(NativeClient client, PsuCpuNativeContext context, int processId,
+    /// <summary>Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.5 and §1.9) through the rendered per-level
+    /// editor. An agent opens the fixture's schema 1 system.blocks.xml through the production MCP server. The person walks System,
+    /// PSU and CPU; each level draws the legacy fallback grid (contract rbg-v2 section 9.2 F1) and writes nothing. On the CPU level a
+    /// first drawn block is declined and the file stays the fixture's bytes. A move is undone and redone; the first layout edit stores
+    /// every unplaced block where it was drawn in the same undo step (F1a). The Processor is resized with its handle, a caption-only
+    /// block and a caption-only connection are drawn with the Round A1 tools (owner decisions n9f7cf92f32090daf, n98a3f3c41084f0ed),
+    /// and a component choice chip is set on the fixture's Memory block (Round A4, n0b2a908b00e78823). Save stores schema 2 with
+    /// every fixture fact and identity kept and exactly the drawn layout; a later edit is declined; and the level reopens from its
+    /// stored presentation view exactly while the other levels keep drawing their fallback grid.</summary>
+    private static async Task VerifyPsuCpuDiagramCanvas(NativeClient native, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
-        => throw new AssertInconclusiveException("Phase 2 lane 2B has not delivered this journey");
+    {
+        const string title = "Structural diagram";
+        static string S(Guid id) => id.ToString("D");
+        // Fixture identities (contract section 1.2): blocks K11, states K12, revisions K13.
+        var fixture = PsuCpuFixture.Graph();
+        var system = fixture.SelectedRoot; var systemRevision = fixture.Inspect(system);
+        var psu = systemRevision.Children[0]; var cpu = systemRevision.Children[1];
+        var psuRevision = fixture.Inspect(psu); var cpuRevision = fixture.Inspect(cpu);
+        var processor = cpuRevision.Children[0]; var memory = cpuRevision.Children[1];
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 1), PsuCpuIds.Id(0x12, 1), PsuCpuIds.Id(0x13, 1)), (system.BlockId, system.StateId, system.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 2), PsuCpuIds.Id(0x13, 2)), (psu.BlockId, psu.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 3), PsuCpuIds.Id(0x13, 3)), (cpu.BlockId, cpu.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 8), PsuCpuIds.Id(0x13, 8)), (processor.BlockId, processor.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 9), PsuCpuIds.Id(0x13, 9)), (memory.BlockId, memory.RevisionId));
+        string documentId = S(fixture.DocumentId), processorId = S(processor.BlockId), memoryId = S(memory.BlockId);
+        byte[] fixtureBytes = await File.ReadAllBytesAsync(Path.Combine(PsuCpuFixture.Directory, "system.blocks.xml"), token);
+        CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "The journey starts from the frozen schema 1 fixture file.");
+
+        var document = new P.ReadRecursiveDiagramEditor { DocumentId = documentId };
+        Task<P.RecursiveDiagramEditorState> Read() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(document, token);
+        async Task<P.RecursiveDiagramEditorState> Wait(string step, Func<P.RecursiveDiagramEditorState, bool> condition)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            P.RecursiveDiagramEditorState current = new();
+            try
+            {
+                while (true)
+                {
+                    current = await Read();
+                    // A step is complete once the editor is idle and any pointer drag has been released.
+                    if (!current.Busy && !current.Dragging && condition(current)) return current;
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-timeout-" + step + ".json"), SchematicJson.Formatter.Format(current), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The PSU/CPU canvas step '" + step + "' did not reach its expected state; its state and screen are retained.");
+            }
+        }
+        void Key(string key, bool control = false, bool alt = false) => NativeKeyboard.SchematicShortcut(display, processId, key, title, control, false, altKey: alt);
+        void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+        void Click(int x, int y) => NativeKeyboard.SchematicShortcut(display, processId, "click", title, false, true, clickFromLeft: x, clickFromTop: y);
+        P.DiagramControlRect Find(P.RecursiveDiagramEditorState at, string name) => at.Controls.Single(c => c.Name == name);
+        // A diagram point as a window pixel. The point must be drawn inside the canvas and right of the canvas-edge palette, so the
+        // press lands on the diagram element under it and nowhere else.
+        (int X, int Y) Pixel(P.RecursiveDiagramEditorState at, double x, double y)
+        {
+            int px = (int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale);
+            int py = (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale);
+            int paletteRight = at.Controls.Where(c => c.Name.StartsWith("DiagramPalette", StringComparison.Ordinal) && c.Shown)
+                .Select(c => c.X + c.Width).DefaultIfEmpty(at.CanvasWindowX).Max();
+            Assert.IsTrue(px > paletteRight && px < at.CanvasWindowX + (int)at.CanvasPixelWidth && py > at.CanvasWindowY
+                && py < at.CanvasWindowY + (int)at.CanvasPixelHeight, $"Diagram point ({x}, {y}) must be drawn inside the canvas, right of the palette.");
+            return (px, py);
+        }
+        async Task At(double x, double y) { var (px, py) = Pixel(await Read(), x, y); Click(px, py); }
+        async Task Drag(double x, double y, double toX, double toY)
+        {
+            var at = await Read(); var from = Pixel(at, x, y); var to = Pixel(at, toX, toY);
+            NativeKeyboard.SchematicShortcut(display, processId, "drag", title, false, true, clickFromLeft: from.X, clickFromTop: from.Y, dragToLeft: to.X, dragToTop: to.Y);
+        }
+        async Task Press(string name)
+        {
+            // The inspector re-lays out after a selection or a facet detail changes; press a control only where two readings agree.
+            var at = await Read(); var control = Find(at, name);
+            using (var settle = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                settle.CancelAfter(TimeSpan.FromSeconds(5));
+                while (true)
+                {
+                    await Task.Delay(120, settle.Token);
+                    var moved = Find(await Read(), name);
+                    if (moved.Equals(control)) break;
+                    control = moved;
+                }
+            }
+            Assert.IsTrue(control.Shown && control.Enabled, name + " must be shown and enabled before it is pressed.");
+            Click(control.X + control.Width / 2, control.Y + control.Height / 2);
+        }
+        async Task Popup()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+            while (count == 0);
+        }
+        bool Tool(P.RecursiveDiagramEditorState at, string tool, string strip, string palette) => at.CanvasTool == tool && Find(at, strip).Active && Find(at, palette).Active;
+        static P.DiagramPresentationViewData? View(P.RecursiveDiagramEditorState at) => at.LevelDraft?.Scope?.LocalDiagram?.Presentation;
+        static string[] Placed(P.RecursiveDiagramEditorState at) => View(at)?.Blocks.Select(b => b.BlockId).ToArray() ?? [];
+        static (string X, string Y, string W, string H) Rect(P.RecursiveDiagramEditorState at, string block) =>
+            View(at)?.Blocks.SingleOrDefault(b => b.BlockId == block)?.Rect is { } r ? (r.X, r.Y, r.Width, r.Height) : ("", "", "", "");
+        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-" + name + ".png"), token);
+        Task Retain(string name, P.RecursiveDiagramEditorState at) =>
+            File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+        async Task Closed()
+        {
+            using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        // The level as the fixture stores it: its exact revision, children, connections, ports and notes, no stored layout, nothing new.
+        void Level(P.RecursiveDiagramEditorState at, string step, BlockSelection scope, RecursiveBlockRevision revision)
+        {
+            Assert.AreEqual("", at.ErrorCode, step + ": the level opens without an error.");
+            Assert.AreEqual(S(scope.RevisionId), at.DiagramPath[^1].RevisionId, step + ": the level shown is the fixture's exact revision.");
+            Assert.AreEqual(S(scope.RevisionId), at.LevelDraft.Scope.Baseline.RevisionId);
+            CollectionAssert.AreEqual(revision.Children.Select(c => S(c.BlockId) + "/" + S(c.RevisionId)).ToArray(),
+                at.LevelDraft.Scope.Children.Select(c => c.BlockId + "/" + c.RevisionId).ToArray(), step + ": the children are the fixture's exact revisions.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + "/" + S(c.RevisionId)).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Connections.Select(c => c.ConnectionId + "/" + c.RevisionId).ToArray(), step + ": the connections are the fixture's.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select(i => S(i.Id) + " " + i.Name).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Interfaces.Select(i => i.Id + " " + i.Name).ToArray(), step + ": the boundary ports are the fixture's.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Notes.Select(n => S(n.Id)).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Annotations.Select(n => n.Id).ToArray(), step + ": the notes are the fixture's.");
+            Assert.IsEmpty(Placed(at), step + ": a schema 1 level has no stored layout.");
+            Assert.IsFalse(at.Dirty, step + ": viewing and navigating change nothing.");
+            Assert.IsEmpty(at.LevelDraft.NewChildren); Assert.IsEmpty(at.LevelDraft.NewConnections); Assert.IsEmpty(at.LevelDraft.ChildDrafts);
+            // Each canvas note is drawn with its lines broken between words, so its shown lines read back as its text
+            // ("Keep sensing away from sw" / "itching nodes." once split a word that fitted the next line).
+            var canvasNotes = revision.LocalDiagram.Notes.Where(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas).ToArray();
+            CollectionAssert.AreEqual(canvasNotes.Select(n => S(n.Id)).ToArray(), at.CanvasNotes.Select(n => n.AnnotationId).ToArray(),
+                step + ": every canvas note is drawn.");
+            foreach (var (note, drawn) in canvasNotes.Zip(at.CanvasNotes))
+            {
+                Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
+                Assert.AreEqual(note.Text, string.Join(" ", drawn.Lines), step + ": the note's lines break between words.");
+            }
+        }
+
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        string stateRoot = Directory.CreateTempSubdirectory("kicad-psu-cpu-canvas-mcp-").FullName;
+        try
+        {
+            await using var mcp = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = "dotnet", Arguments = [Path.Combine(FindRoot(), "automation", "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll")],
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = stateRoot }
+            }), cancellationToken: token);
+            var attach = await mcp.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
+                { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
+            Assert.IsFalse(attach.IsError == true, "The MCP server attaches to this project's KiCad instance.");
+            async Task<P.RecursiveDiagramEditorState> Open(string step)
+            {
+                var opened = await mcp.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                    ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId }, cancellationToken: token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + step + "-open.json"), JsonSerializer.Serialize(opened), token);
+                Assert.IsFalse(opened.IsError == true, "The PSU/CPU diagram opens in the native per-level editor; the response is retained.");
+                return await Wait(step, s => s.Ready && s.Rendered && s.DiagramPath.Count == 1);
+            }
+            // The layout the editor actually drew for the viewed level (contract rbg-v2 section 9.2), as an agent observes it.
+            async Task<JsonElement> Observe(string label)
+            {
+                var at = await Read();
+                var observed = await mcp.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+                {
+                    ["instanceId"] = instanceId, ["documentId"] = documentId, ["expectedSourceToken"] = at.SourceToken,
+                    ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "level", pixelWidth = 800, pixelHeight = 600 } }
+                }, cancellationToken: token);
+                if (observed.IsError == true)
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation-error.json"), JsonSerializer.Serialize(observed), token);
+                Assert.IsFalse(observed.IsError == true, "The " + label + " level can be observed; the response is retained.");
+                var view = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation.json"), view.GetRawText(), token);
+                return view.GetProperty("resolvedLayout");
+            }
+            static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
+            static string Box(JsonElement rect) => string.Join(",", new[] { "x", "y", "width", "height" }.Select(p => rect.GetProperty(p).GetString()));
+            // Every block drawn where it is expected, in the level's child order, with where its position came from.
+            void Drawn(JsonElement layout, string step, params (Guid Block, string Rect, string Source)[] expected)
+            {
+                CollectionAssert.AreEqual(expected.Select(e => S(e.Block) + " " + e.Rect + " " + e.Source).ToArray(), layout.GetProperty("blocks").EnumerateArray()
+                    .Select(b => b.GetProperty("blockId").GetString() + " " + Box(b.GetProperty("rect")) + " " + b.GetProperty("source").GetString()).ToArray(),
+                    step + ": the blocks are drawn exactly where expected.");
+                Assert.AreEqual(0U, layout.GetProperty("dormantEntries").GetUInt32(), step + ": nothing stored is left undrawn.");
+            }
+            // Unplaced boundary ports sit at (40, 90 + 85k) on the left (rule F3), and the frame is computed, not stored.
+            void FallbackBoundary(JsonElement layout, string step, BlockSelection scope, RecursiveBlockRevision revision)
+            {
+                CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select((p, k) => S(p.Id) + " DPS_LEFT 40," + (90 + 85 * k) + " RPS_FALLBACK").ToArray(),
+                    layout.GetProperty("ports").EnumerateArray().Where(p => p.GetProperty("blockId").GetString() == S(scope.BlockId))
+                        .Select(p => p.GetProperty("interfaceId").GetString() + " " + p.GetProperty("side").GetString() + " " + Point(p.GetProperty("anchor"))
+                            + " " + p.GetProperty("source").GetString()).ToArray(), step + ": the boundary ports use the fallback column.");
+                Assert.AreEqual("RPS_FALLBACK", layout.GetProperty("frameSource").GetString(), step + ": no frame is stored.");
+            }
+            string[] Routes(JsonElement layout) => layout.GetProperty("routes").EnumerateArray()
+                .Select(r => r.GetProperty("connectionId").GetString() + " " + r.GetProperty("source").GetString()).ToArray();
+
+            // An agent opens the fixture's schema 1 file. The System level draws its two blocks on the legacy grid; opening writes nothing.
+            var opened = await Open("open");
+            Level(opened, "system", system, systemRevision);
+            Assert.AreEqual(1U, opened.StoredSchemaVersion, "The fixture file is schema 1."); Assert.IsTrue(opened.SourceWritable);
+            var systemLayout = await Observe("system");
+            Drawn(systemLayout, "system", (psu.BlockId, "140,110,240,145", "RPS_FALLBACK"), (cpu.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(systemLayout, "system", system, systemRevision);
+            CollectionAssert.AreEqual(systemRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(systemLayout));
+            await Capture("system");
+
+            // System -> PSU: the four PSU blocks on the two-column grid, every connection on its computed path.
+            Key("Escape"); Key("Right");
+            await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Return");
+            var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
+            Level(psuLevel, "psu", psu, psuRevision);
+            var psuLayout = await Observe("psu");
+            var psuChildren = psuRevision.Children;
+            Drawn(psuLayout, "psu", (psuChildren[0].BlockId, "140,110,240,145", "RPS_FALLBACK"), (psuChildren[1].BlockId, "510,110,240,145", "RPS_FALLBACK"),
+                (psuChildren[2].BlockId, "140,360,240,145", "RPS_FALLBACK"), (psuChildren[3].BlockId, "510,360,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(psuLayout, "psu", psu, psuRevision);
+            CollectionAssert.AreEqual(psuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(psuLayout));
+            await Capture("psu");
+
+            // PSU -> System (Backspace keeps the PSU selected, as the level was left) -> CPU.
+            Key("BackSpace");
+            await Wait("system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Right");
+            await Wait("cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
+            Key("Return");
+            var cpuLevel = await Wait("cpu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(cpu.BlockId));
+            Level(cpuLevel, "cpu", cpu, cpuRevision);
+            Assert.AreEqual(S(system.RevisionId), cpuLevel.DiagramPath[0].RevisionId);
+            var cpuLayout = await Observe("cpu");
+            Drawn(cpuLayout, "cpu", (processor.BlockId, "140,110,240,145", "RPS_FALLBACK"), (memory.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(cpuLayout, "cpu", cpu, cpuRevision);
+            CollectionAssert.AreEqual(cpuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(cpuLayout));
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Opening and navigating never write.");
+            await Retain("cpu", cpuLevel); await Capture("cpu");
+
+            // Decline: a first drawn block stores the two unplaced blocks where they are drawn (F1a) and itself where it was put;
+            // Decline discards all of it and the file stays the fixture's schema 1 bytes.
+            await Press("DiagramPaletteAddBlock");
+            await Wait("palette-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+            await At(630, 430); await Wait("declined-caption", s => s.CaptionEditor == "block");
+            Type("Clock"); Key("Return");
+            var drafted = await Wait("declined-block-added", s => s.LevelDraft.NewChildren.Count == 1 && s.CaptionEditor == "" && s.Dirty);
+            string draftedId = drafted.LevelDraft.NewChildren[0].Selection.BlockId;
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, draftedId }, Placed(drafted), "The first layout edit keeps every block where it was drawn.");
+            Assert.AreEqual(("140", "110", "240", "145"), Rect(drafted, processorId)); Assert.AreEqual(("510", "110", "240", "145"), Rect(drafted, memoryId));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(drafted, draftedId), "A new block is placed where the person clicked.");
+            await Capture("before-decline");
+            ulong saves = drafted.CompletedSaveCount;
+            await Press("RecursiveDecline");
+            var declined = await Wait("declined", s => !s.Dirty && s.LevelDraft.NewChildren.Count == 0);
+            Assert.IsEmpty(Placed(declined), "Decline removes the stored positions with the drawn block.");
+            Assert.AreEqual(saves, declined.CompletedSaveCount, "Decline sends nothing to save.");
+            Assert.AreEqual(1U, declined.StoredSchemaVersion);
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Decline writes nothing.");
+
+            // Undo: moving the Memory stores both unplaced blocks in the same step, so one Undo returns the level to no stored layout.
+            await Drag(630, 182.5, 710, 222.5);
+            var moved = await Wait("memory-moved", s => s.Dirty && Rect(s, memoryId) == ("590", "150", "240", "145"));
+            Assert.AreEqual(memoryId, moved.Draft.Baseline.BlockId, "Dragging a block selects and moves it.");
+            CollectionAssert.AreEqual(new[] { processorId, memoryId }, Placed(moved));
+            Assert.AreEqual(("140", "110", "240", "145"), Rect(moved, processorId), "The Processor stays where it was drawn.");
+            Key("z", control: true);
+            var undone = await Wait("move-undone", s => !s.Dirty && Placed(s).Length == 0);
+            Assert.AreEqual("", undone.ErrorCode);
+            Key("y", control: true);
+            await Wait("move-redone", s => s.Dirty && Rect(s, memoryId) == ("590", "150", "240", "145") && Rect(s, processorId) == ("140", "110", "240", "145"));
+            await Capture("moved");
+
+            // Resize the Processor with its lower-right handle; the palette's Undo and Ctrl+Y undo and redo it.
+            await At(260, 182.5);
+            await Wait("processor-selected", s => s.Draft.Baseline.BlockId == processorId && s.ConnectionDraft is null);
+            await Drag(380, 255, 420, 285);
+            await Wait("processor-resized", s => Rect(s, processorId) == ("140", "110", "280", "175"));
+            await Press("DiagramPaletteUndo");
+            await Wait("resize-undone", s => Rect(s, processorId) == ("140", "110", "240", "145") && Rect(s, memoryId) == ("590", "150", "240", "145"));
+            Key("y", control: true);
+            var resized = await Wait("resize-redone", s => Rect(s, processorId) == ("140", "110", "280", "175"));
+            Assert.AreEqual(("590", "150", "240", "145"), Rect(resized, memoryId), "Resizing moves nothing else.");
+            await Capture("resized");
+
+            // The toolbar strip's Add block draws a caption-only block where the person clicks.
+            await Press("RecursiveToolAddBlock");
+            await Wait("strip-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+            await At(630, 430); await Wait("clock-caption", s => s.CaptionEditor == "block");
+            Type("Clock"); Key("Return");
+            var clockAdded = await Wait("clock-added", s => s.LevelDraft.NewChildren.Count == 1 && s.CaptionEditor == "" && s.Dirty);
+            var clockDraft = clockAdded.LevelDraft.NewChildren[0]; string clockId = clockDraft.Selection.BlockId;
+            Assert.AreEqual("Clock", clockDraft.Name); Assert.IsEmpty(clockDraft.Interfaces);
+            Assert.AreEqual(("", "", ""), (clockDraft.Fields?.General ?? "", clockDraft.Fields?.Schematic ?? "", clockDraft.Fields?.Routing ?? ""));
+            Assert.AreEqual("Clock", clockAdded.Draft.Name, "The new block is selected in the inspector.");
+            Assert.IsEmpty(clockAdded.ShownRequirementFields, "A new block shows only its caption."); Assert.IsEmpty(clockAdded.ShownFacets);
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, clockId }, Placed(clockAdded));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(clockAdded, clockId));
+            CollectionAssert.AreEqual(new[] { S(processor.BlockId), S(memory.BlockId), clockId }, clockAdded.LevelDraft.Scope.Children.Select(c => c.BlockId).ToArray());
+
+            // The palette's Connect draws a caption-only connection from the Clock to the Processor.
+            await Press("DiagramPaletteConnect");
+            await Wait("palette-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At(630, 430); await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+            await At(280, 197.5); await Wait("connection-caption", s => s.CaptionEditor == "connection");
+            Type("Clock feed"); Key("Return");
+            var connected = await Wait("connected", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+            var feedDraft = connected.LevelDraft.NewConnections[0]; string feedId = feedDraft.Selection.ConnectionId;
+            Assert.AreEqual("Clock feed", feedDraft.Name); Assert.AreEqual("Clock feed", connected.ConnectionDraft.Name, "The new connection is selected.");
+            CollectionAssert.AreEqual(new[] { (P.DiagramEndpointKind.DekUnresolved, clockId), (P.DiagramEndpointKind.DekUnresolved, processorId) },
+                feedDraft.Endpoints.Select(e => (e.Kind, e.BlockId)).ToArray());
+            Assert.IsEmpty(connected.ShownRequirementFields, "A new connection shows only its caption.");
+            Assert.IsEmpty(connected.ShownConnectionDetails, "A new connection shows no details yet.");
+            Assert.IsEmpty(View(connected)!.Routes, "The Clock feed's computed path runs along no other connection, so no route is stored.");
+            await Capture("connected");
+
+            // Round A4: a component choice chip on the fixture's Memory block. Add detail > Type gives it a first chosen value.
+            var (memoryX, memoryY) = (590 + 30, 150 + 36);
+            await Press("DiagramPaletteSelect"); await Wait("palette-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+            await At(memoryX, memoryY);
+            var memorySelected = await Wait("memory-selected", s => s.Draft.Baseline.BlockId == memoryId && s.ConnectionDraft is null && s.SelectedInterfaceId == "");
+            Assert.IsEmpty(memorySelected.ShownFacets, "The fixture's Memory has no component choices yet.");
+            Assert.IsNull(memorySelected.BlockChips.SingleOrDefault(b => b.BlockId == memoryId), "A block without choices shows no chips.");
+            await Press("RecursiveAddDetail"); await Popup(); Key("Home"); Key("Down"); Key("Return");
+            await Wait("type-open", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
+            Type("EEPROM");
+            await Wait("type-typed", s => s.Draft.Definition?.Type is { } type && type.Values.SequenceEqual(["EEPROM"]));
+            Key("Return");
+            var chosen = await Wait("type-kept", s => s.FacetEditor == "" && s.ShownFacets.SequenceEqual(["type"]));
+            var chips = chosen.BlockChips.Single(b => b.BlockId == memoryId);
+            CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, chips.Chips.Select(c => c.Text).ToArray(), "The Memory shows its chosen type as a chip.");
+            Assert.AreEqual(P.DefinitionChoiceStateData.DcsdSelected, chips.Chips[0].State);
+            Assert.IsTrue(chips.Chips[0].Rect.Shown, "The chip is drawn inside the canvas.");
+            Assert.IsNull(chosen.BlockChips.SingleOrDefault(b => b.BlockId == clockId), "The Clock is still only its caption.");
+            CollectionAssert.AreEqual(new[] { memoryId }, chosen.LevelDraft.ChildDrafts.Select(d => d.Baseline.BlockId).ToArray(), "Only the Memory's own definition changed.");
+            await Retain("before-save", chosen); await Capture("chip");
+
+            // Save stores everything in one save: schema 2, the drawn layout on the CPU level, and the Memory's choice.
+            saves = chosen.CompletedSaveCount;
+            await Press("RecursiveSave");
+            var saved = await Wait("saved", s => s.CompletedSaveCount > saves && !s.Dirty);
+            Assert.AreEqual("", saved.ErrorCode); Assert.AreEqual("", saved.ErrorMessage);
+            Assert.AreEqual(2U, saved.StoredSchemaVersion, "The first changed save stores schema 2 (contract rbg-v2 R4).");
+            await Retain("saved", saved); await Capture("saved");
+            string savedXml = await File.ReadAllTextAsync(context.BlocksPath, token);
+            var (stored, storedVersion) = RecursiveBlockGraphXml.ReadVersioned(savedXml);
+            Assert.AreEqual(2, storedVersion);
+            Assert.AreEqual(fixture.DocumentId, stored.DocumentId);
+
+            // Identities: System and CPU gain one revision each on top of the fixture's; the PSU and the Processor keep theirs.
+            var storedSystemSelection = stored.SelectedRoot; var storedSystem = stored.Inspect(storedSystemSelection);
+            Assert.AreEqual((system.BlockId, system.StateId), (storedSystemSelection.BlockId, storedSystemSelection.StateId));
+            Assert.AreEqual(system.RevisionId, storedSystem.ParentRevisionId, "System's new revision follows the fixture's.");
+            Assert.AreEqual(systemRevision.RequirementRevisionId, storedSystem.RequirementRevisionId);
+            Assert.HasCount(2, storedSystem.Children); Assert.AreEqual(psu, storedSystem.Children[0], "The PSU keeps its exact fixture revision.");
+            Assert.IsTrue(storedSystem.LocalDiagram.Layout.IsEmpty, "The System level still has no stored layout.");
+            var storedCpuSelection = storedSystem.Children[1]; var storedCpu = stored.Inspect(storedCpuSelection);
+            Assert.AreEqual((cpu.BlockId, cpu.StateId), (storedCpuSelection.BlockId, storedCpuSelection.StateId));
+            Assert.AreEqual(cpu.RevisionId, storedCpu.ParentRevisionId, "The CPU's new revision follows the fixture's.");
+            Assert.AreEqual(cpuRevision.Name, storedCpu.Name);
+            Assert.AreEqual(cpuRevision.RequirementRevisionId, storedCpu.RequirementRevisionId, "Unchanged requirements keep their fixture revision.");
+            CollectionAssert.AreEqual(new[] { S(system.BlockId) + "/" + S(storedSystemSelection.RevisionId), S(cpu.BlockId) + "/" + S(storedCpuSelection.RevisionId) },
+                saved.DiagramPath.Select(p => p.BlockId + "/" + p.RevisionId).ToArray(), "The editor now shows the saved revisions.");
+            Assert.HasCount(3, storedCpu.Children);
+            Assert.AreEqual(processor, storedCpu.Children[0], "The Processor keeps its exact fixture revision; only its position is the CPU level's.");
+            var storedMemorySelection = storedCpu.Children[1]; var storedMemory = stored.Inspect(storedMemorySelection); var memoryRevision = fixture.Inspect(memory);
+            Assert.AreEqual((memory.BlockId, memory.StateId, memory.RevisionId), (storedMemorySelection.BlockId, storedMemorySelection.StateId, storedMemory.ParentRevisionId));
+            Assert.AreEqual(memoryRevision.Name, storedMemory.Name);
+            Assert.AreEqual(memoryRevision.RequirementRevisionId, storedMemory.RequirementRevisionId);
+            Assert.IsTrue(memoryRevision.LocalDiagram.SameContents(storedMemory.LocalDiagram), "The Memory keeps its ports.");
+            Assert.IsTrue(memoryRevision.EffectiveComponentBindings.SameContents(storedMemory.EffectiveComponentBindings), "The Memory keeps its U6 binding.");
+            Assert.IsNull(memoryRevision.PhysicalAllocation); Assert.IsNull(storedMemory.PhysicalAllocation, "A chosen type adds no physical allocation.");
+            var memoryType = storedMemory.EffectiveDefinition.Get(BlockDefinitionFacet.Type);
+            Assert.AreEqual(DefinitionChoiceState.Selected, memoryType.State, "The chip's choice is saved as chosen.");
+            CollectionAssert.AreEqual(new[] { "EEPROM" }, memoryType.Values.ToArray());
+            foreach (var facet in Enum.GetValues<BlockDefinitionFacet>().Where(f => f != BlockDefinitionFacet.Type))
+                Assert.AreEqual(DefinitionChoiceState.Unspecified, storedMemory.EffectiveDefinition.Get(facet).State, facet + " stays unstated.");
+            var storedClockSelection = storedCpu.Children[2]; var storedClock = stored.Inspect(storedClockSelection);
+            Assert.AreEqual(clockId, S(storedClockSelection.BlockId), "The drawn block keeps the identity it was drawn with.");
+            Assert.IsFalse(fixture.States.Any(s => s.BlockId == storedClockSelection.BlockId), "The drawn block has a new identity.");
+            Assert.AreEqual("Clock", storedClock.Name); Assert.IsNull(storedClock.ParentRevisionId); Assert.IsEmpty(storedClock.Children);
+            Assert.IsNull(storedClock.Diagram, "A caption-only block stores no diagram.");
+            Assert.IsTrue(storedClock.EffectiveDefinition.SameContents(BlockDefinition.Empty), "A caption-only block stores no component choices.");
+            Assert.IsNull(storedClock.ComponentBindings); Assert.IsNull(storedClock.PhysicalAllocation);
+            Assert.AreEqual(DiagramRequirements.Empty, stored.Requirements(storedClockSelection).Requirements, "A caption-only block stores no requirements.");
+            Assert.AreEqual(fixture.Requirements(cpu).Requirements, stored.Requirements(storedCpuSelection).Requirements);
+            var archive = stored.Connections(cpu.BlockId);
+            CollectionAssert.AreEqual(cpuRevision.LocalDiagram.Connections.ToArray(), storedCpu.LocalDiagram.Connections.Take(4).ToArray(),
+                "The CPU level's fixture connections keep their exact revisions.");
+            Assert.HasCount(5, storedCpu.LocalDiagram.Connections);
+            var storedFeed = archive.Inspect(storedCpu.LocalDiagram.Connections[4]);
+            Assert.AreEqual(feedId, S(storedFeed.Selection.ConnectionId), "The drawn connection keeps the identity it was drawn with.");
+            Assert.AreEqual(("Clock feed", DiagramConnectionKind.Abstract), (storedFeed.Name, storedFeed.Kind));
+            Assert.IsNull(storedFeed.ParentRevisionId); Assert.IsEmpty(storedFeed.Members);
+            CollectionAssert.AreEqual(new[] { (DiagramEndpointKind.Unresolved, storedClockSelection.BlockId, (Guid?)null), (DiagramEndpointKind.Unresolved, processor.BlockId, (Guid?)null) },
+                storedFeed.Endpoints.Select(e => (e.Kind, e.BlockId, e.InterfaceId)).ToArray(), "The connection joins the Clock and the Processor, both still unresolved.");
+            Assert.AreEqual(DiagramRequirements.Empty, archive.Requirements(storedFeed.Selection).Requirements, "A caption-only connection stores no requirements.");
+
+            // The CPU level's layout is exactly what was drawn, in drawing order; no port, route or frame was placed.
+            var layout = storedCpu.LocalDiagram.Layout;
+            CollectionAssert.AreEqual(new[] {
+                    new DiagramBlockPlacement(processor.BlockId, new DiagramRect(140, 110, 280, 175)),
+                    new DiagramBlockPlacement(memory.BlockId, new DiagramRect(590, 150, 240, 145)),
+                    new DiagramBlockPlacement(storedClockSelection.BlockId, new DiagramRect(510, 360, 240, 140)) },
+                layout.BlockPlacements.ToArray(), "The saved presentation view holds exactly the drawn positions and sizes.");
+            Assert.IsEmpty(layout.PortPlacements); Assert.IsEmpty(layout.ConnectionRoutes); Assert.IsNull(layout.Frame);
+            Assert.IsTrue(stored.Inspect(psu).LocalDiagram.Layout.IsEmpty, "The PSU level still has no stored layout.");
+
+            // Every other fixture fact is kept exactly: each fixture revision (block, connection and requirement) is written unchanged,
+            // and each fixture state is unchanged except that System, CPU and Memory now point at their new revisions.
+            var before = XDocument.Parse(RecursiveBlockGraphXml.Write(fixture)); var after = XDocument.Parse(savedXml);
+            static Dictionary<string, XElement> Index(XDocument xml, string name) => xml.Descendants()
+                .Where(e => e.Name.LocalName == name && e.Attribute("id") is not null).ToDictionary(e => e.Attribute("id")!.Value, StringComparer.Ordinal);
+            var afterRevisions = Index(after, "revision"); var afterStates = Index(after, "state");
+            foreach (var (id, element) in Index(before, "revision"))
+                Assert.IsTrue(afterRevisions.TryGetValue(id, out var kept) && XNode.DeepEquals(element, kept), "Fixture revision " + id + " is kept exactly.");
+            var heads = new Dictionary<string, Guid> { [S(system.StateId)] = storedSystemSelection.RevisionId,
+                [S(cpu.StateId)] = storedCpuSelection.RevisionId, [S(memory.StateId)] = storedMemorySelection.RevisionId };
+            foreach (var (id, element) in Index(before, "state"))
+            {
+                var expected = new XElement(element);
+                if (heads.TryGetValue(id, out var head)) expected.SetAttributeValue("head", S(head));
+                Assert.IsTrue(afterStates.TryGetValue(id, out var kept) && XNode.DeepEquals(expected, kept), "Fixture state " + id + " is kept.");
+            }
+            Assert.HasCount(fixture.Revisions.Length + 4, stored.Revisions, "Only System, CPU, Memory and the Clock gained a revision.");
+            Assert.HasCount(fixture.States.Length + 1, stored.States);
+            Assert.HasCount(fixture.Connections(cpu.BlockId).Revisions.Length + 1, archive.Revisions, "Only the Clock feed was added to the CPU level.");
+            XElement Local(XDocument xml, Guid revision, string part) => xml.Descendants().Single(e => e.Name.LocalName == "revision" && e.Attribute("id")?.Value == S(revision))
+                .Descendants().Single(e => e.Name.LocalName == part && e.Parent?.Name.LocalName == "local-diagram");
+            foreach (string part in new[] { "interfaces", "annotations" })
+                Assert.IsTrue(XNode.DeepEquals(Local(before, cpu.RevisionId, part), Local(after, storedCpuSelection.RevisionId, part)),
+                    "The CPU level keeps its fixture " + part + ".");
+
+            // A later move is declined: nothing is written.
+            await Drag(630, 430, 630, 470);
+            await Wait("clock-moved", s => s.Dirty && Rect(s, clockId) == ("510", "400", "240", "140"));
+            Key("d", alt: true);
+            var declinedLater = await Wait("later-declined", s => !s.Dirty && Rect(s, clockId) == ("510", "360", "240", "140"));
+            Assert.AreEqual(saved.CompletedSaveCount, declinedLater.CompletedSaveCount);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Decline after a save writes nothing.");
+
+            // Close and reopen from the file. The System level still draws its fallback grid; the CPU level draws exactly the stored
+            // presentation view; the Clock feed follows its ends on the computed path (rule F4); the chip is back.
+            Key("w", control: true); await Closed();
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Closing a clean window writes nothing.");
+            var reopened = await Open("reopen");
+            Assert.IsFalse(reopened.Dirty); Assert.AreEqual(2U, reopened.StoredSchemaVersion); Assert.AreEqual(saved.SourceToken, reopened.SourceToken);
+            Assert.AreEqual(S(storedSystemSelection.RevisionId), reopened.DiagramPath.Single().RevisionId);
+            Assert.IsEmpty(Placed(reopened));
+            var reopenedSystem = await Observe("reopened-system");
+            Drawn(reopenedSystem, "reopened system", (psu.BlockId, "140,110,240,145", "RPS_FALLBACK"), (cpu.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            Key("Escape"); Key("Right"); await Wait("reopened-psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Right"); await Wait("reopened-cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
+            Key("Return");
+            var reopenedCpu = await Wait("reopened-cpu", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].RevisionId == S(storedCpuSelection.RevisionId));
+            Assert.IsFalse(reopenedCpu.Dirty);
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, clockId }, Placed(reopenedCpu), "The stored presentation view is the level's layout.");
+            Assert.AreEqual(("140", "110", "280", "175"), Rect(reopenedCpu, processorId));
+            Assert.AreEqual(("590", "150", "240", "145"), Rect(reopenedCpu, memoryId));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(reopenedCpu, clockId));
+            var reopenedLayout = await Observe("reopened-cpu");
+            Drawn(reopenedLayout, "reopened cpu", (processor.BlockId, "140,110,280,175", "RPS_PLACED"), (memory.BlockId, "590,150,240,145", "RPS_PLACED"),
+                (storedClockSelection.BlockId, "510,360,240,140", "RPS_PLACED"));
+            FallbackBoundary(reopenedLayout, "reopened cpu", cpu, cpuRevision);
+            CollectionAssert.AreEqual(storedCpu.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(reopenedLayout));
+            // The Clock's end faces the Processor from its left edge at mid-height; the Processor's end, with no port named, sits on its
+            // right edge below its three ports (rule F2); the middle leg runs half-way between (F4).
+            var feedPath = reopenedLayout.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == feedId);
+            CollectionAssert.AreEqual(new[] { "510,430", "465,430", "465,285", "420,285" }, feedPath.GetProperty("points").EnumerateArray().Select(Point).ToArray(),
+                "The Clock feed is drawn from the stored positions.");
+            var reopenedChips = reopenedCpu.BlockChips.Single(b => b.BlockId == memoryId);
+            CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, reopenedChips.Chips.Select(c => c.Text).ToArray(), "The Memory's chip is back.");
+            Assert.IsNull(reopenedCpu.BlockChips.SingleOrDefault(b => b.BlockId == clockId));
+            await Retain("reopened", reopenedCpu); await Capture("reopened");
+            Key("w", control: true); await Closed();
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening and closing write nothing.");
+        }
+        finally { Directory.Delete(stateRoot, true); }
+    }
 
     private static async Task VerifyRecursiveEditor(NativeClient native, int processId, string display,
         string evidence, string instanceId, CancellationToken token)
@@ -1641,6 +2114,7 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(state.ShownFacets, "A caption-only root lists no component choices.");
         await VerifyDrawingTools(client, native, processId, display, created, instanceId, evidence, token);
         await VerifyBlockChoices(client, native, processId, display, created, instanceId, evidence, token);
+        await VerifyConnectionDetails(client, native, processId, display, created, instanceId, evidence, token);
     }
 
     /// <summary>The first project of a native session runs the session-wide checks; later projects skip them.</summary>
@@ -1875,6 +2349,34 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(portMoved.LevelDraft.Scope.LocalDiagram.Presentation.Routes.Any(r => r.ConnectionId == power.Selection.ConnectionId));
         await At(500, 262);
         await Wait("feed-near-cpu", s => s.ConnectionDraft?.Baseline.ConnectionId == feed.Selection.ConnectionId && s.SelectedInterfaceId == "");
+        // The nearest connection on screen wins. Rail feed's channel (x 500) meets the last leg the two share into the CPU (y 275,
+        // x 500 to 560); Power's own last leg starts at x 470 on that line. A press 3 pixels above Power's leg and 5 pixels left of
+        // Rail feed's channel selects Power; the mirror press, 3 pixels from the channel and 5 from Power, selects Rail feed.
+        (int X, int Y) Pixel(P.RecursiveDiagramEditorState at, double x, double y) =>
+            (at.CanvasWindowX + (int)Math.Round((x - at.CanvasOriginX) * at.CanvasScale, MidpointRounding.AwayFromZero),
+             at.CanvasWindowY + (int)Math.Round((y - at.CanvasOriginY) * at.CanvasScale, MidpointRounding.AwayFromZero));
+        var probe = await Read();
+        var channelFoot = Pixel(probe, 500, 275);
+        Assert.IsTrue(channelFoot.X - Pixel(probe, 470, 275).X >= 12, "Power's own vertical leg is well away from the probe presses.");
+        Click(channelFoot.X - 5, channelFoot.Y - 3);
+        await Wait("nearest-power", s => s.ConnectionDraft?.Baseline.ConnectionId == power.Selection.ConnectionId);
+        Click(channelFoot.X - 3, channelFoot.Y - 5);
+        await Wait("nearest-feed", s => s.ConnectionDraft?.Baseline.ConnectionId == feed.Selection.ConnectionId);
+        // On the shared leg both connections are equally near: the press keeps whichever is selected. The editor counts every
+        // canvas press, so an unchanged selection is a handled press, not one still on its way.
+        var sharedLeg = Pixel(probe, 540, 275);
+        foreach (var (stays, step) in new[] { (feed.Selection.ConnectionId, "shared-keeps-feed"), (power.Selection.ConnectionId, "shared-keeps-power") })
+        {
+            if ((await Read()).ConnectionDraft?.Baseline.ConnectionId != stays)
+            {
+                Click(channelFoot.X - 5, channelFoot.Y - 3);
+                await Wait(step + "-selected", s => s.ConnectionDraft?.Baseline.ConnectionId == stays);
+            }
+            ulong presses = (await Read()).CanvasPresses;
+            Click(sharedLeg.X, sharedLeg.Y);
+            var tie = await Wait(step, s => s.CanvasPresses > presses);
+            Assert.AreEqual(stays, tie.ConnectionDraft?.Baseline.ConnectionId, "A press on the shared leg keeps the selected connection selected.");
+        }
 
         // Removing: the connection (Delete key), the CPU block (toolbar Delete), the used port (palette Delete, asked first).
         await ClickRoute(power.Selection.ConnectionId); await Wait("power-selected", s => s.ConnectionDraft?.Baseline.ConnectionId == power.Selection.ConnectionId);
@@ -1945,7 +2447,9 @@ public sealed partial class NativeSessionTests
         await ClickRoute(feed.Selection.ConnectionId);
         var feedSelected = await Wait("feed-selected", s => s.ConnectionDraft?.Name == "Rail feed" && s.ShownRequirementFields.Count == 0);
         Assert.IsTrue(Find(feedSelected, "RecursiveAddRequirement").Shown, "A connection offers Add requirement.");
-        Assert.IsFalse(Find(feedSelected, "RecursiveAddDetail").Shown, "A connection has no component choices to add.");
+        // Owner decision nf53af9d74841b7d3 (Round A3) pairs + Add detail with + Add requirement on a connection too;
+        // VerifyConnectionDetails drives it.
+        Assert.IsTrue(Find(feedSelected, "RecursiveAddDetail").Shown, "A connection offers + Add detail beside + Add requirement.");
         Key("4", control: true); Type("Feed the CPU from the rail.");
         await Wait("feed-comment", s => s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatConnection
             && n.TargetId == feed.Selection.ConnectionId && n.Text == "Feed the CPU from the rail."));
@@ -1994,13 +2498,15 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("Feed the CPU from the rail.", top.LocalDiagram.Notes.Single().Text);
         await Capture("saved");
 
-        // A save made against an older file rebases (contract rbg-v2 section 9.1): another editor moved the PSU up while this
-        // draft moved it down and right. The draft's position is kept with a non-modal notice and the automatic save stores it.
+        // A save made against an older file rebases (contract rbg-v2 section 9.1): another editor moved the PSU up and the CPU up
+        // and left while this draft moved the PSU down and right. The draft's PSU position is kept with a non-modal notice, the
+        // other editor's CPU position is merged in, and the automatic save stores both.
         await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
         await Wait("psu-moved-here", s => s.Dirty && Placement(s, psu).X == "160");
         var elsewhere = graph.StartDraft(graph.SelectedRoot); var elsewhereView = elsewhere.LocalDiagram.Layout;
         elsewhere = elsewhere with { Diagram = elsewhere.LocalDiagram with { Presentation = elsewhereView with { Blocks = [.. elsewhereView.Blocks.Select(b =>
-            b.BlockId.ToString("D") == psu ? b with { Rect = b.Rect with { Y = 110 } } : b)] } } };
+            b.BlockId.ToString("D") == psu ? b with { Rect = b.Rect with { Y = 110 } }
+            : b.BlockId.ToString("D") == cpu ? b with { Rect = b.Rect with { X = 540, Y = 150 } } : b)] } } };
         var movedElsewhere = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], elsewhere, Guid.NewGuid(), Guid.NewGuid(), [],
             RecursiveBlockFixture.Origin("Another agent")).Graph;
         await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(movedElsewhere), token);
@@ -2013,8 +2519,97 @@ public sealed partial class NativeSessionTests
         savedXml = await File.ReadAllTextAsync(created.Path, token); saved = rebased;
         var rebasedGraph = RecursiveBlockGraphXml.Read(savedXml); var rebasedLayout = rebasedGraph.Inspect(rebasedGraph.SelectedRoot).LocalDiagram.Layout;
         Assert.AreEqual(new DiagramRect(160, 150, 240, 140), rebasedLayout.Blocks.Single(b => b.BlockId.ToString("D") == psu).Rect, "The draft's position was saved.");
-        CollectionAssert.AreEqual(new[] { new DiagramPoint(510, 250), new DiagramPoint(510, 275) }, rebasedLayout.ConnectionRoutes.Single().Points.ToArray(),
-            "Rail feed's route followed the PSU.");
+        Assert.AreEqual(new DiagramRect(540, 150, 280, 170), rebasedLayout.Blocks.Single(b => b.BlockId.ToString("D") == cpu).Rect,
+            "The other editor's CPU position was merged in.");
+        // Rail feed's channel was 30 units right of the middle between its ends. Its ends are now the PSU's Rail port (400, 250),
+        // moved here, and the CPU's left edge (540, 235), moved by the other editor, so the route runs level from each end to its
+        // channel at x 500 = (400 + 540) / 2 + 30. Before the fix the merged route kept the CPU's old height, 275.
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(500, 250), new DiagramPoint(500, 235) }, rebasedLayout.ConnectionRoutes.Single().Points.ToArray(),
+            "Rail feed's route followed the PSU moved here and the CPU moved elsewhere before the automatic save.");
+        async Task<DiagramPoint[]> Resolved(string connection) => (await Route(await Read(), connection)).GetProperty("points").EnumerateArray()
+            .Select(p => new DiagramPoint(decimal.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                decimal.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+        var rebasedPath = await Resolved(feed.Selection.ConnectionId);
+        var rebasedRoute = rebasedLayout.ConnectionRoutes.Single().Points;
+        Assert.AreEqual((rebasedPath[0].Y, rebasedPath[^1].Y), (rebasedRoute[0].Y, rebasedRoute[1].Y),
+            "The saved route's heights are the heights of the ends the editor resolves, so every leg is level or upright.");
+        Assert.HasCount(4, rebasedPath);
+
+        // A route an agent locked stays exactly as stored when its ends move; an unlocked route an earlier writer left out of line
+        // (here with the ends' old heights, so its legs run diagonally) is put back in line by moving one of its ends.
+        async Task<P.RecursiveDiagramEditorState> AgentRoute(string step, bool locked, params DiagramPoint[] waypoints)
+        {
+            var current = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+            var agentDraft = current.StartDraft(current.SelectedRoot); var agentView = agentDraft.LocalDiagram.Layout;
+            agentDraft = agentDraft with { Diagram = agentDraft.LocalDiagram with { Presentation = agentView with { Routes = [.. agentView.ConnectionRoutes
+                .Select(r => r with { Waypoints = [.. waypoints], Locked = locked })] } } };
+            var written = current.SaveDraft(current.SelectedRoot, [current.SelectedRoot], agentDraft, Guid.NewGuid(), Guid.NewGuid(), [],
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(written), token);
+            Key("r", control: true);
+            return await Wait(step, s => !s.Dirty && s.LevelDraft.Scope.Baseline.RevisionId == written.SelectedRoot.RevisionId.ToString("D"));
+        }
+        (string, string, string, string) Waypoints(P.RecursiveDiagramEditorState at)
+        {
+            var route = at.LevelDraft.Scope.LocalDiagram.Presentation.Routes.Single();
+            return (route.Waypoints[0].X + "," + route.Waypoints[0].Y, route.Waypoints[1].X + "," + route.Waypoints[1].Y, route.Locked ? "locked" : "unlocked", route.ConnectionId);
+        }
+        var (cpuNowX, cpuNowY) = (680.0, 235.0);
+        await AgentRoute("route-locked", true, new DiagramPoint(500, 250), new DiagramPoint(500, 235));
+        await Drag(cpuNowX, cpuNowY, cpuNowX, cpuNowY + 20);
+        var lockedMoved = await Wait("locked-route-kept", s => s.Dirty && Placement(s, cpu).Y == "170");
+        Assert.AreEqual(("500,250", "500,235", "locked", feed.Selection.ConnectionId), Waypoints(lockedMoved), "A locked route is kept exactly as stored.");
+        Key("d", alt: true); await Wait("locked-declined", s => !s.Dirty && Placement(s, cpu).Y == "150");
+        await AgentRoute("route-stale", false, new DiagramPoint(500, 230), new DiagramPoint(500, 275));
+        var stalePath = await Resolved(feed.Selection.ConnectionId);
+        Assert.IsTrue(stalePath[0].Y != stalePath[1].Y && stalePath[2].Y != stalePath[3].Y, "The stored route arrives out of line with both of its ends.");
+        await Drag(cpuNowX, cpuNowY, cpuNowX, cpuNowY + 20);
+        var repaired = await Wait("stale-route-repaired", s => s.Dirty && Placement(s, cpu).Y == "170");
+        Assert.AreEqual(("500,250", "500,255", "unlocked", feed.Selection.ConnectionId), Waypoints(repaired),
+            "Moving the CPU puts the route back in line with both ends: the PSU's Rail port at 250 and the CPU's edge at 170 + 85.");
+        ulong beforeRepairSave = repaired.CompletedSaveCount;
+        Key("s", control: true);
+        saved = await Wait("repaired-saved", s => s.CompletedSaveCount > beforeRepairSave && !s.Dirty);
+        Assert.AreEqual("", saved.ErrorCode);
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var repairedGraph = RecursiveBlockGraphXml.Read(savedXml); var repairedLayout = repairedGraph.Inspect(repairedGraph.SelectedRoot).LocalDiagram.Layout;
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(500, 250), new DiagramPoint(500, 255) }, repairedLayout.ConnectionRoutes.Single().Points.ToArray());
+        var repairedPath = await Resolved(feed.Selection.ConnectionId);
+        Assert.AreEqual((repairedPath[0].Y, repairedPath[^1].Y), (repairedLayout.ConnectionRoutes.Single().Points[0].Y, repairedLayout.ConnectionRoutes.Single().Points[1].Y),
+            "The repaired route's heights are the resolved heights of its ends.");
+
+        // A rebase keeps another writer's route as that writer drew it (contract rbg-v2 section 4.8: only one side changed it, so
+        // take that side). This draft only comments on the CPU. Meanwhile another editor moved the CPU 40 right and, as this editor
+        // does on a move, moved Rail feed's channel with it: from x 500, 30 right of the middle (400 + 540) / 2, to x 520, 30 right
+        // of the new middle (400 + 580) / 2. The automatic save keeps x 520; shifting that channel again by the move would store x 540.
+        await At(cpuNowX, cpuNowY + 20);
+        await Wait("cpu-selected-for-comment", s => s.Draft.Baseline.BlockId == cpu && s.ConnectionDraft is null && !s.Dirty);
+        Key("4", control: true); Type("Keep the CPU cool.");
+        await Wait("cpu-comment", s => s.Dirty && s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetId == cpu && n.Text == "Keep the CPU cool."));
+        var routeWriter = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var routeDraft = routeWriter.StartDraft(routeWriter.SelectedRoot); var routeView = routeDraft.LocalDiagram.Layout;
+        routeDraft = routeDraft with { Diagram = routeDraft.LocalDiagram with { Presentation = routeView with {
+            Blocks = [.. routeView.Blocks.Select(b => b.BlockId.ToString("D") == cpu ? b with { Rect = b.Rect with { X = 580 } } : b)],
+            Routes = [.. routeView.ConnectionRoutes.Select(r => r with { Waypoints = [new DiagramPoint(520, 250), new DiagramPoint(520, 255)] })] } } };
+        var routeWritten = routeWriter.SaveDraft(routeWriter.SelectedRoot, [routeWriter.SelectedRoot], routeDraft, Guid.NewGuid(), Guid.NewGuid(), [],
+            RecursiveBlockFixture.Origin("Another editor")).Graph;
+        await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(routeWritten), token);
+        ulong beforeRouteRebase = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var routeRebased = await Wait("route-rebased", s => s.CompletedSaveCount >= beforeRouteRebase + 2 && !s.Dirty);
+        Assert.AreEqual("", routeRebased.ErrorCode);
+        Assert.AreNotEqual(keptNotice, routeRebased.Notice, "Nothing both sides moved, so no position was kept over the saved design.");
+        Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving"), "A change on each side never asks.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token); saved = routeRebased;
+        var routeGraph = RecursiveBlockGraphXml.Read(savedXml); var routeTop = routeGraph.Inspect(routeGraph.SelectedRoot);
+        Assert.AreEqual(new DiagramRect(580, 170, 280, 170), routeTop.LocalDiagram.Layout.Blocks.Single(b => b.BlockId.ToString("D") == cpu).Rect,
+            "The other editor's CPU position was merged in.");
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(520, 250), new DiagramPoint(520, 255) }, routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points.ToArray(),
+            "Rail feed keeps the channel the other editor drew; only a route this draft drew keeps its offset when its ends move.");
+        Assert.AreEqual("Keep the CPU cool.", routeTop.LocalDiagram.Notes.Single(n => n.Target.TargetId?.ToString("D") == cpu).Text, "This draft's comment was saved.");
+        var mergedPath = await Resolved(feed.Selection.ConnectionId);
+        Assert.AreEqual((mergedPath[0].Y, mergedPath[^1].Y), (routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points[0].Y,
+            routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points[1].Y), "The kept route still runs level from each of its ends.");
 
         // Decline discards a later layout edit and writes nothing.
         await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
@@ -2036,9 +2631,27 @@ public sealed partial class NativeSessionTests
                     && top + Units(b.Rect.Height) * at.CanvasScale <= at.CanvasPixelHeight;
             });
         }
+        // The level frame and the names of its boundary ports, as the editor reports them drawn, are right of the palette and
+        // inside the canvas too ("DC input" once sat half under the palette while every block was in view).
+        bool FrameInView(P.RecursiveDiagramEditorState at)
+        {
+            int paletteRight = at.Controls.Where(c => c.Name.StartsWith("DiagramPalette", StringComparison.Ordinal) && c.Shown).Select(c => c.X + c.Width)
+                .DefaultIfEmpty(at.CanvasWindowX).Max();
+            bool Clear(P.DiagramControlRect? rect) => rect is { Shown: true } && rect.X >= paletteRight && rect.Width > 0;
+            return Clear(at.LevelFrame) && at.BoundaryPortNames.Count == at.LevelDraft.Scope.LocalDiagram.Interfaces.Count
+                && at.BoundaryPortNames.All(Clear);
+        }
+        void AssertFrameInView(P.RecursiveDiagramEditorState at, string step)
+        {
+            Assert.IsNotNull(at.LevelFrame, step + ": the level's stored frame is reported as drawn.");
+            CollectionAssert.AreEqual(at.LevelDraft.Scope.LocalDiagram.Interfaces.Select(i => i.Name).ToArray(), at.BoundaryPortNames.Select(n => n.Label).ToArray(),
+                step + ": every boundary port's name is reported as drawn.");
+            Assert.IsTrue(FrameInView(at), step + ": the frame and every boundary port name lie inside the canvas, right of the palette.");
+        }
         ulong beforeCompact = (await Read()).ViewRevision;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
-        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800 && BlocksInView(s));
+        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800 && BlocksInView(s) && FrameInView(s));
+        AssertFrameInView(compact, "compact");
         Assert.HasCount(2, compact.LevelDraft.Scope.LocalDiagram.Presentation.Blocks);
         var palette = Find(compact, "DiagramPaletteUndo");
         Assert.IsTrue(palette.Shown && palette.Y + palette.Height <= compact.CanvasWindowY + (int)compact.CanvasPixelHeight, "The palette fits the compact canvas.");
@@ -2066,7 +2679,8 @@ public sealed partial class NativeSessionTests
         Key("p"); await Wait("palette-shown", s => s.PaletteShown && Find(s, "DiagramPaletteSelect").Shown);
         _ = hidden;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
-        await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900 && BlocksInView(s));
+        var expanded = await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900 && BlocksInView(s) && FrameInView(s));
+        AssertFrameInView(expanded, "expanded");
 
         // Close, make the saved file read-only and reopen it. The level comes back exactly as saved, from its stored layout, and
         // a read-only file opens for viewing and editing but not saving (contract rbg-v2 section 9.1): Save stays unavailable
@@ -2093,7 +2707,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(saved.SourceToken, again.SourceToken);
             var storedPath = await Route(again, top.LocalDiagram.Connections[1].ConnectionId.ToString("D"));
             Assert.AreEqual("RPS_PLACED", storedPath.GetProperty("source").GetString(), "Rail feed comes back on its stored route.");
-            CollectionAssert.AreEqual(new[] { "400,250", "510,250", "510,275", "560,275" }, storedPath.GetProperty("points").EnumerateArray()
+            CollectionAssert.AreEqual(new[] { "400,250", "520,250", "520,255", "580,255" }, storedPath.GetProperty("points").EnumerateArray()
                 .Select(p => p.GetProperty("x").GetString() + "," + p.GetProperty("y").GetString()).ToArray());
             var reopenedView = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), token)).RootElement
                 .GetProperty("resolvedLayout");
@@ -2113,6 +2727,40 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(Find(lockedDraft, "RecursiveSave").Enabled, "Save stays unavailable for a read-only file.");
                 Assert.IsTrue(Find(lockedDraft, "RecursiveDecline").Enabled);
                 Assert.AreEqual(readOnlyStatus, lockedDraft.StatusText, "The status bar explains why Save is unavailable.");
+                // Typing keeps that explanation: a comment typed on the moved PSU changes the draft, and the status bar still says why
+                // Save is unavailable (every change to the draft shows the same status line).
+                Key("4", control: true); Type("Check the rail current.");
+                var typedReadOnly = await Wait("read-only-typed", s => s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetId == psu
+                    && n.Text == "Check the rail current."));
+                Assert.AreEqual(readOnlyStatus, typedReadOnly.StatusText, "Typing keeps the read-only explanation in the status bar.");
+                Assert.IsFalse(Find(typedReadOnly, "RecursiveSave").Enabled, "Save stays unavailable after typing.");
+                // The same holds for the other typing paths: a requirement, a connection caption and a component choice.
+                void StillReadOnly(P.RecursiveDiagramEditorState at, string what)
+                {
+                    Assert.AreEqual(readOnlyStatus, at.StatusText, "Typing " + what + " keeps the read-only explanation in the status bar.");
+                    Assert.IsFalse(Find(at, "RecursiveSave").Enabled, "Save stays unavailable after typing " + what + ".");
+                }
+                await Press("RecursiveRequirements0"); await Wait("read-only-requirement-focused", s => s.FocusedControl == "RecursiveRequirements0");
+                Key("End"); Type(" Now");
+                StillReadOnly(await Wait("read-only-requirement-typed", s => s.Draft.Fields.General == "Supply the CPU. Now"), "a requirement");
+                await ClickRoute(feed.Selection.ConnectionId); await Wait("read-only-feed-selected", s => s.ConnectionDraft?.Name == "Rail feed");
+                await Press("RecursiveConnectionCaption"); await Wait("read-only-caption-focused", s => s.FocusedControl == "RecursiveConnectionCaption");
+                Key("End"); Type("s");
+                StillReadOnly(await Wait("read-only-caption-typed", s => s.ConnectionDraft?.Name == "Rail feeds"), "a connection caption");
+                var (movedX, movedY) = Centre(await Read(), psu);
+                await At(movedX, movedY); await Wait("read-only-psu-selected", s => s.Draft.Baseline.BlockId == psu && s.ConnectionDraft is null);
+                await Press("RecursiveAddDetail");
+                using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+                    do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+                    while (count == 0);
+                }
+                Key("Home"); Key("Return");
+                await Wait("read-only-purpose-open", s => s.FacetEditor == "purpose" && s.FocusedControl == "RecursiveFacetValue");
+                Type("Power");
+                StillReadOnly(await Wait("read-only-purpose-typed", s => s.Draft.Definition?.Purpose is { } purpose && purpose.Values.SequenceEqual(["Power"])),
+                    "a component choice");
                 Key("s", control: true);
                 var lockedSave = await Wait("read-only-save", s => s.ErrorCode == "diagram_file_read_only");
                 Assert.IsTrue(lockedSave.Dirty); Assert.AreEqual(lockedDraft.CompletedSaveCount, lockedSave.CompletedSaveCount, "Nothing was sent to save.");
@@ -2274,10 +2922,23 @@ public sealed partial class NativeSessionTests
             var caption = block.Caption;
             Assert.IsTrue(caption.Shown && caption.Width > 0, step + ": the block's caption is drawn inside the canvas.");
             Assert.IsTrue(block.Chips.All(c => c.Rect.Shown), step + ": drawn chips lie inside the canvas.");
+            // A chip is never squeezed to nothing: it keeps its state mark (chip height - 9 pixels, with 6-pixel margins) and at least
+            // 40 pixels of text with an 8-pixel margin, so it is at least its height + 51 pixels wide. A row the port names make
+            // narrower than that holds no chip, and its facet goes behind "+N more".
+            foreach (var chip in block.Chips)
+                Assert.IsTrue(chip.Rect.Width >= chip.Rect.Height + 51 && chip.Text.Length > 0,
+                    step + ": the " + chip.Facet + " chip is " + chip.Rect.Width + " pixels wide, too narrow to show its text.");
             var withoutChip = expected.Where(e => !block.Chips.Any(c => c.Facet == e.Facet && c.State == e.State)).ToArray();
             Assert.AreEqual((uint)withoutChip.Length, block.HiddenChips, step + ": the hidden count is exactly the choices without a chip.");
             Assert.AreEqual(expected.Length - withoutChip.Length, block.Chips.Count, step + ": no chip is drawn for anything else.");
             bool more = block.More is { Shown: true };
+            // The names of the block's ports drawn inside its edge stay readable: no chip, "+N more", mark or link covers one.
+            static bool Apart(P.DiagramControlRect a, P.DiagramControlRect b) =>
+                a.X + a.Width <= b.X || b.X + b.Width <= a.X || a.Y + a.Height <= b.Y || b.Y + b.Height <= a.Y;
+            var drawnParts = block.Chips.Select(c => c.Rect).Concat(block.Marks.Select(m => m.Rect))
+                .Concat(new[] { block.More, block.ReviewFacets }.Where(r => r is not null)).ToArray();
+            foreach (var name in block.PortNames)
+                Assert.IsTrue(drawnParts.All(part => Apart(part, name)), step + ": the chips keep clear of a port name drawn inside the block.");
             if (block.Marks.Count != 0)
                 Assert.IsTrue(block.Chips.Count == 0 && block.More is null, step + ": marks stand in for chips only when no chip fits.");
             foreach (var (facet, state) in withoutChip)
@@ -2434,7 +3095,39 @@ public sealed partial class NativeSessionTests
         await Wait("package-restored", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
             && c.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
 
-        // Save stores the choices in the PSU's next revision and nothing else about it.
+        // A third choice: Family takes the candidate "TLV755P" (Add detail now reads Purpose, Family, ...). The block has room for
+        // two chips, so as many chips as fit are drawn and the rest is one "+N more" chip; the facet overview still lists every facet.
+        await AddDetail("Home", "Down");
+        await Wait("family-open", s => s.FacetEditor == "family" && s.FocusedControl == "RecursiveFacetValue");
+        Type("TLV755P");
+        await Wait("family-chosen", s => Facet(s, d => d.Family) is { State: P.DefinitionChoiceStateData.DcsdSelected } c && c.Values.SequenceEqual(["TLV755P"]));
+        await Press("RecursiveFacetStateCandidate");
+        await Wait("family-candidate", s => Facet(s, d => d.Family) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
+            && c.Values.SequenceEqual(["TLV755P"]) && s.FocusedControl == "RecursiveFacetCandidates");
+        await Press("RecursiveFacetBack");
+        var familyAdded = await Wait("family-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowFamily");
+        (string, P.DefinitionChoiceStateData)[] three = [("type", P.DefinitionChoiceStateData.DcsdSelected), ("family", P.DefinitionChoiceStateData.DcsdCandidates),
+            ("package", P.DefinitionChoiceStateData.DcsdCandidates)];
+        void VerifyMore(P.RecursiveDiagramEditorState at, string step)
+        {
+            var chips = Chips(at, psu) ?? throw new AssertFailedException(step + ": the PSU reports its chips.");
+            CollectionAssert.AreEqual(new[] { "type", "family" }, chips.Chips.Select(c => c.Facet).ToArray(), step + ": two chips fit the block, in facet order.");
+            Assert.AreEqual("Type: linear regulator", chips.Chips[0].Text, step + ": the first chip keeps its whole text.");
+            StringAssert.StartsWith(chips.Chips[1].Text, "Family: ", step + ": the second chip names its facet.");
+            Assert.IsTrue(chips.More is { Shown: true }, step + ": the rest is shown as one \"+N more\" chip.");
+            Assert.AreEqual(1U, chips.HiddenChips, step + ": Package is the one choice behind \"+1 more\".");
+            Assert.IsEmpty(chips.Marks, step + ": no state marks while chips fit.");
+            Assert.HasCount(1, chips.PortNames, step + ": the PSU names its Rail port inside its edge, and the chips keep clear of it.");
+            VerifyChoicesVisible(at, step, psu, three);
+        }
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "family", "package" }, familyAdded.ShownFacets.ToArray(),
+            "The overview lists every facet with a value, including Package behind \"+1 more\".");
+        VerifyMore(familyAdded, "more");
+        await Capture("more");
+
+        // Save stores the choices in exactly one new revision of the PSU and nothing else about it; the CPU keeps its revision.
+        var beforeChoices = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var psuBefore = beforeChoices.Inspect(beforeChoices.SelectedRoot).Children[0]; var cpuBefore = beforeChoices.Inspect(beforeChoices.SelectedRoot).Children[1];
         ulong beforeSave = (await Read()).CompletedSaveCount;
         Key("s", control: true);
         var saved = await Wait("saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
@@ -2443,20 +3136,49 @@ public sealed partial class NativeSessionTests
         var graph = RecursiveBlockGraphXml.Read(savedXml);
         var top = graph.Inspect(graph.SelectedRoot);
         var psuSaved = graph.Inspect(top.Children[0]); var cpuSaved = graph.Inspect(top.Children[1]);
+        Assert.AreEqual(cpuBefore, top.Children[1], "The CPU keeps its saved revision.");
+        CollectionAssert.AreEqual(beforeChoices.History(psuBefore.StateId).Select(r => r.Selection.RevisionId).ToArray(),
+            graph.History(psuBefore.StateId).Select(r => r.Selection.RevisionId).Where(id => id != top.Children[0].RevisionId).ToArray(),
+            "Every earlier PSU revision is kept.");
+        Assert.AreEqual(beforeChoices.History(psuBefore.StateId).Length + 1, graph.History(psuBefore.StateId).Length, "Save adds exactly one PSU revision.");
+        Assert.AreEqual((psuBefore.BlockId, psuBefore.StateId), (top.Children[0].BlockId, top.Children[0].StateId));
+        Assert.AreEqual((Guid?)psuBefore.RevisionId, psuSaved.ParentRevisionId, "The new PSU revision follows the one the choices were made on.");
         var definition = psuSaved.Definition!;
         Assert.IsTrue(definition.SameContents(new BlockDefinition(
             Type: new(DefinitionChoiceState.Selected, ["linear regulator"], GuidanceStrength.Information, "", [], VerificationState.Unverified),
             Manufacturer: new(DefinitionChoiceState.Unknown, [], GuidanceStrength.Information, "", [], VerificationState.Unverified, "No preference recorded."),
+            Family: new(DefinitionChoiceState.Candidates, ["TLV755P"], GuidanceStrength.Information, "", [], VerificationState.Unverified),
             Package: new(DefinitionChoiceState.Candidates, ["SOT-23-5"], GuidanceStrength.Preference, "", [], VerificationState.Unverified))),
-            "The saved choices are exactly the chosen type, the unknown manufacturer and the candidate package.");
+            "The saved choices are exactly the chosen type, the unknown manufacturer, the candidate family and the candidate package.");
         Assert.AreEqual("Rail", psuSaved.LocalDiagram.Interfaces.Single().Name, "A chosen name adds no ports.");
         Assert.IsNull(psuSaved.ComponentBindings, "A chosen name realizes no component.");
         Assert.IsNull(psuSaved.PhysicalAllocation, "A chosen name allocates no footprint or board.");
         Assert.AreEqual("Supply the CPU.", graph.Requirements(psuSaved.Selection).Requirements.General);
         Assert.IsNull(cpuSaved.Definition, "The CPU is still only its caption.");
-        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(saved, psu), "The saved level shows the same chips.");
-        VerifyChoicesVisible(saved, "saved", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
+        VerifyMore(saved, "saved");
         await Capture("saved");
+
+        // While the whole-diagram history is open the canvas takes no presses, and a previewed past revision is read only: the PSU
+        // keeps its chips, but the Review facets link, which would do nothing, is not drawn, before Preview as well as during it. The
+        // history opens on the saved revision; Down and Up inspect it again before Preview.
+        Key("h", control: true);
+        var historyOpen = await Wait("history-open", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D")
+            && s.Rendered);
+        var historyOpenChips = Chips(historyOpen, psu) ?? throw new AssertFailedException("history-open: the PSU still shows its chips.");
+        CollectionAssert.AreEqual(new[] { "type", "family" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
+        Assert.IsNull(historyOpenChips.ReviewFacets, "history-open: no Review facets link while the history is open.");
+        Key("Down"); await Wait("history-older", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId != graph.SelectedRoot.RevisionId.ToString("D"));
+        Key("Up"); await Wait("history-saved", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D"));
+        Key("p", alt: true);
+        var preview = await Wait("history-preview", s => s.DiagramHistory?.Preview?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D") && s.Rendered);
+        var previewChips = Chips(preview, psu) ?? throw new AssertFailedException("history-preview: the previewed PSU still shows its chips.");
+        CollectionAssert.AreEqual(new[] { "type", "family" }, previewChips.Chips.Select(c => c.Facet).ToArray(), "history-preview: the same chips.");
+        Assert.IsNull(previewChips.ReviewFacets, "history-preview: no Review facets link in a read-only preview.");
+        await Capture("history-preview");
+        Key("c", alt: true); await Wait("history-preview-closed", s => s.DiagramHistory is { Preview: null });
+        Key("Escape"); var historyClosed = await Wait("history-closed", s => s.DiagramHistory is null);
+        Assert.IsTrue(Chips(historyClosed, psu)!.ReviewFacets is { Shown: true, Enabled: true }, "Back in the level, Review facets is offered again.");
+        Assert.IsFalse(historyClosed.Dirty); Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Browsing history writes nothing.");
 
         // Decline discards a later change and writes nothing.
         await Press("RecursiveFacetRowType");
@@ -2474,8 +3196,16 @@ public sealed partial class NativeSessionTests
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
         var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-compact.json"), SchematicJson.Formatter.Format(compact), token);
-        VerifyChoicesVisible(compact, "compact", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
+        VerifyChoicesVisible(compact, "compact", psu, three);
         await Capture("compact");
+        // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
+        // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
+        ulong beforeBetween = compact.ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1300, resizeHeight: 880);
+        var between = await Wait("between", s => s.Rendered && s.ViewRevision > beforeBetween && s.CanvasPixelWidth > compact.CanvasPixelWidth);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-between.json"), SchematicJson.Formatter.Format(between), token);
+        VerifyChoicesVisible(between, "between", psu, three);
+        await Capture("between");
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
         await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
 
@@ -2483,16 +3213,626 @@ public sealed partial class NativeSessionTests
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
         var reopened = await Open("reopened");
-        CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(reopened, psu));
-        VerifyChoicesVisible(reopened, "reopened", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
+        VerifyMore(reopened, "reopened");
         Assert.IsNull(Chips(reopened, cpu));
         await SelectBlock("psu-reopened", psu);
-        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "package" }, (await Read()).ShownFacets.ToArray());
+        CollectionAssert.AreEqual(new[] { "type", "manufacturer", "family", "package" }, (await Read()).ShownFacets.ToArray());
         await Press("RecursiveFacetRowManufacturer");
         var manufacturer = await Wait("manufacturer-reopened", s => s.FacetEditor == "manufacturer");
         Assert.AreEqual("No preference recorded.", manufacturer.Draft.Definition.Manufacturer.UnknownReason);
         Assert.IsFalse(manufacturer.Dirty, "Opening a facet's detail changes nothing.");
         await Capture("reopened");
+        Key("w", control: true); await Closed();
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // Sources, a condition and a verification recorded with a facet describe that exact choice. Another agent records them for
+        // the PSU's Type. A strength change keeps them; a new value drops them, because the inspector does not show them and the
+        // person could not see that they no longer fit. The saved revision says exactly that.
+        var recorded = RecursiveBlockGraphXml.Read(savedXml); var recordedPsu = recorded.Inspect(recorded.SelectedRoot).Children[0];
+        var agentDraft = recorded.StartDraft(recordedPsu);
+        var sourced = agentDraft.Definition! with { Type = agentDraft.Definition!.Type! with { Applicability = "For the 3.3 V rail",
+            Sources = [new SourceReference("regulator-datasheet", "r3", 12, null, null)], Verification = VerificationState.Verified } };
+        recorded = recorded.SaveDraft(recorded.SelectedRoot, [recorded.SelectedRoot, recordedPsu], agentDraft with { Definition = sourced },
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin("Another agent")).Graph;
+        await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(recorded), token);
+        (string, int, KiCad.Automation.Protocol.Structural.StructuralVerification) Provenance(P.RecursiveDiagramEditorState at) =>
+            Facet(at, d => d.Type) is { } type ? (type.Applicability, type.Sources.Count, type.Verification) : ("(no type)", -1, default);
+        await Open("sourced-opened");
+        await SelectBlock("psu-sourced", psu);
+        await Press("RecursiveFacetRowType");
+        var sourcedType = await Wait("type-sourced", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateChosen");
+        Assert.AreEqual(("For the 3.3 V rail", 1, KiCad.Automation.Protocol.Structural.StructuralVerification.SvVerified), Provenance(sourcedType),
+            "The agent's source, condition and verification arrive with the facet.");
+        // A keystroke that is taken back is no new statement: typing one letter drops the provenance, and Backspace, which
+        // returns the value to the saved one, brings the saved source, condition and verification back and leaves nothing to save.
+        await Press("RecursiveFacetValue"); await Wait("type-sourced-value-focused", s => s.FocusedControl == "RecursiveFacetValue");
+        Key("End"); Type("s");
+        var oneLetter = await Wait("type-sourced-letter", s => s.Dirty && Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulators"]) == true);
+        Assert.AreEqual(("", 0, KiCad.Automation.Protocol.Structural.StructuralVerification.SvUnverified), Provenance(oneLetter),
+            "A new value keeps none of the old value's source, condition or verification.");
+        Key("BackSpace");
+        var takenBack = await Wait("type-sourced-taken-back", s => Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulator"]) == true);
+        Assert.AreEqual(("For the 3.3 V rail", 1, KiCad.Automation.Protocol.Structural.StructuralVerification.SvVerified), Provenance(takenBack),
+            "Typing the saved value back restores the saved source, condition and verification.");
+        Assert.IsFalse(takenBack.Dirty, "A keystroke taken back leaves nothing to save.");
+        Assert.IsFalse(Find(takenBack, "RecursiveSave").Enabled, "Save is unavailable again.");
+        await Press("RecursiveFacetStrengthPreference");
+        var strengthOnly = await Wait("type-sourced-preference", s => s.Dirty
+            && Facet(s, d => d.Type)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
+        Assert.AreEqual(("For the 3.3 V rail", 1, KiCad.Automation.Protocol.Structural.StructuralVerification.SvVerified), Provenance(strengthOnly),
+            "A strength change keeps the facet's source, condition and verification.");
+        await Press("RecursiveFacetValue"); await Wait("type-value-focused", s => s.FocusedControl == "RecursiveFacetValue");
+        Key("a", control: true); Type("LDO regulator");
+        var newValue = await Wait("type-new-value", s => Facet(s, d => d.Type)?.Values.SequenceEqual(["LDO regulator"]) == true);
+        Assert.AreEqual(("", 0, KiCad.Automation.Protocol.Structural.StructuralVerification.SvUnverified), Provenance(newValue),
+            "A new value keeps none of the source, condition or verification recorded for the old one.");
+        ulong beforeSourcedSave = newValue.CompletedSaveCount;
+        Key("s", control: true);
+        await Wait("sourced-saved", s => s.CompletedSaveCount > beforeSourcedSave && !s.Dirty);
+        var edited = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var editedPsu = edited.Inspect(edited.Inspect(edited.SelectedRoot).Children[0]);
+        Assert.IsTrue(editedPsu.Definition!.Type!.SameContents(new(DefinitionChoiceState.Selected, ["LDO regulator"], GuidanceStrength.Preference, "", [],
+            VerificationState.Unverified)), "The saved Type is the new value with its strength and nothing recorded for the old value.");
+        Assert.IsTrue(editedPsu.Definition.Package!.SameContents(definition.Package!), "The other facets are unchanged.");
+        Key("w", control: true); await Closed();
+    }
+
+    /// <summary>Round A3 option 1 (owner decision nf53af9d74841b7d3, kept sketch sd44465992aa73168) through the rendered editor, on the
+    /// level the drawing and component-choice journeys saved. Selecting a connection shows its title, an editable Caption field,
+    /// + Add detail, + Add requirement and Comments, and nothing else until more is defined (owner decision n98a3f3c41084f0ed).
+    /// + Add detail offers only the details the connection does not have yet (its signals, direction, domain and type, which the
+    /// format-2 model stores); choosing one adds exactly that detail as its own row, and removing the row returns the connection to
+    /// how it was. Signals become the connection's members. Details an agent writes through MCP (a proposal it publishes and
+    /// chooses) show the same way once the editor reads the changed file. Save, Decline, undo and redo, a compact window and a
+    /// reopen keep them; a blank caption and a repeated signal are refused and nothing is written.</summary>
+    private static async Task VerifyConnectionDetails(McpClient client, NativeClient native, int processId, string display, CreatedDiagram created,
+        string instanceId, string evidence, CancellationToken token)
+    {
+        const string title = "Structural diagram";
+        var document = new P.ReadRecursiveDiagramEditor { DocumentId = created.DocumentId };
+        Task<P.RecursiveDiagramEditorState> Read() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(document, token);
+        async Task<P.RecursiveDiagramEditorState> Wait(string step, Func<P.RecursiveDiagramEditorState, bool> condition)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            P.RecursiveDiagramEditorState current = new();
+            try
+            {
+                while (true)
+                {
+                    current = await Read();
+                    if (!current.Busy && !current.Dragging && condition(current)) return current;
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-timeout-" + step + ".json"), SchematicJson.Formatter.Format(current), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The connection-detail step '" + step + "' did not reach its expected state; its state and screen are retained.");
+            }
+        }
+        void Key(string key, bool control = false, bool alt = false) => NativeKeyboard.SchematicShortcut(display, processId, key, title, control, false, altKey: alt);
+        void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+        void Click(int x, int y) => NativeKeyboard.SchematicShortcut(display, processId, "click", title, false, true, clickFromLeft: x, clickFromTop: y);
+        P.DiagramControlRect Find(P.RecursiveDiagramEditorState at, string name) => at.Controls.Single(c => c.Name == name);
+        bool Inside(P.DiagramControlRect inner, P.DiagramControlRect outer) => inner.X >= outer.X && inner.X + inner.Width <= outer.X + outer.Width
+            && inner.Y >= outer.Y && inner.Y + inner.Height <= outer.Y + outer.Height;
+        async Task Press(string name, bool inInspector = true)
+        {
+            // The inspector re-lays out when a row appears or goes; press a control only where two readings agree, and only
+            // once it is inside the inspector's visible area.
+            var at = await Read(); var control = Find(at, name);
+            using (var settle = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                settle.CancelAfter(TimeSpan.FromSeconds(5));
+                while (true)
+                {
+                    await Task.Delay(120, settle.Token);
+                    var again = await Read(); var moved = Find(again, name);
+                    if (moved.Equals(control) && Find(again, "RecursiveInspector").Equals(Find(at, "RecursiveInspector"))) break;
+                    at = again; control = moved;
+                }
+            }
+            Assert.IsTrue(control.Shown && control.Enabled, name + " must be shown and enabled before it is pressed.");
+            var inspector = Find(at, "RecursiveInspector");
+            int x = control.X + control.Width / 2, y = control.Y + control.Height / 2;
+            Assert.IsTrue(!inInspector || x >= inspector.X && x < inspector.X + inspector.Width && y >= inspector.Y && y < inspector.Y + inspector.Height,
+                name + " must be inside the inspector's view before it is pressed.");
+            Click(x, y);
+        }
+        async Task Popup()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            try
+            {
+                do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+                while (count == 0);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-timeout-popup.json"), SchematicJson.Formatter.Format(await Read()), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-timeout-popup.png"), token);
+                throw new AssertFailedException("The pressed control did not open its list; the state and screen are retained.");
+            }
+        }
+        async Task PopupClosed()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 1;
+            try
+            {
+                do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count != 0) await Task.Delay(50, menu.Token); }
+                while (count != 0);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-timeout-popup-closed.png"), token);
+                throw new AssertFailedException("The open list did not close; the screen is retained.");
+            }
+        }
+        // + Add detail lists only the details the connection does not have yet, in the order signals, direction, domain, type.
+        async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
+        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
+        async Task Closed()
+        {
+            using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        async Task<P.RecursiveDiagramEditorState> Open(string step)
+        {
+            var opened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
+            Assert.IsFalse(opened.IsError == true, "The saved diagram opens again.");
+            return await Wait(step, s => s.Ready && s.Rendered);
+        }
+        (int X, int Y) Screen(P.RecursiveDiagramEditorState at, double x, double y) =>
+            ((int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale), (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale));
+        async Task At(double x, double y) { var (px, py) = Screen(await Read(), x, y); Click(px, py); }
+        // A connection is selected by a click on the middle of the longest leg the editor reports it drew.
+        async Task SelectConnection(string step, string connection)
+        {
+            var at = await Wait(step + "-idle", s => s.Rendered);
+            var observed = await client.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentId"] = created.DocumentId, ["expectedSourceToken"] = at.SourceToken,
+                ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "canvas", pixelWidth = 800, pixelHeight = 600 } }
+            }, cancellationToken: token);
+            Assert.IsFalse(observed.IsError == true, "The level can be observed.");
+            var route = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0]
+                .GetProperty("resolvedLayout").GetProperty("routes").EnumerateArray().First(r => r.GetProperty("connectionId").GetString() == connection);
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            int longest = 1;
+            for (int i = 2; i < points.Length; ++i)
+                if (Math.Abs(points[i].Item1 - points[i - 1].Item1) + Math.Abs(points[i].Item2 - points[i - 1].Item2)
+                    > Math.Abs(points[longest].Item1 - points[longest - 1].Item1) + Math.Abs(points[longest].Item2 - points[longest - 1].Item2)) longest = i;
+            var (px, py) = Screen(at, (points[longest - 1].Item1 + points[longest].Item1) / 2, (points[longest - 1].Item2 + points[longest].Item2) / 2);
+            Click(px, py);
+            await Wait(step, s => s.ConnectionDraft?.Baseline.ConnectionId == connection && s.SelectedInterfaceId == "");
+        }
+        async Task ClickBlankCanvas(string step, string scope)
+        {
+            var at = await Read(); Click(at.CanvasWindowX + (int)at.CanvasPixelWidth - 30, at.CanvasWindowY + (int)at.CanvasPixelHeight - 30);
+            await Wait(step, s => s.ConnectionDraft is null && s.Draft.Baseline.BlockId == scope);
+        }
+        string[] Details(P.RecursiveDiagramEditorState at) => [.. at.ShownConnectionDetails];
+        string[] Signals(P.RecursiveDiagramEditorState at) => [.. at.ShownSignals];
+        string[] Active(P.RecursiveDiagramEditorState at, string prefix) =>
+            [.. at.Controls.Where(c => c.Name.StartsWith(prefix, StringComparison.Ordinal) && c.Active).Select(c => c.Name[prefix.Length..])];
+        uint[] Arrows(P.RecursiveDiagramEditorState at, string connection) =>
+            [.. at.ConnectionMarks.SingleOrDefault(m => m.ConnectionId == connection)?.ArrowEndpoints ?? []];
+        // Only the caption, + Add detail, + Add requirement and Comments; no detail row, requirement box, end list or field history.
+        void CaptionOnly(P.RecursiveDiagramEditorState at, string step)
+        {
+            Assert.AreEqual("Connection", Find(at, "RecursiveOwnerCaption").Label, step + ": the inspector's title names what is selected.");
+            Assert.IsTrue(Find(at, "RecursiveConnectionCaption").Shown && Find(at, "RecursiveConnectionCaption").Enabled, step + ": the caption is editable.");
+            Assert.AreEqual(at.ConnectionDraft.Name, Find(at, "RecursiveConnectionCaption").Label, step + ": the caption field shows the connection's caption.");
+            Assert.IsEmpty(at.ShownConnectionDetails, step + ": no detail row until one is defined.");
+            Assert.IsEmpty(at.ShownRequirementFields, step + ": no empty requirement box.");
+            Assert.IsTrue(Find(at, "RecursiveAddDetail").Shown && Find(at, "RecursiveAddRequirement").Shown, step + ": + Add detail and + Add requirement.");
+            Assert.IsTrue(Find(at, "RecursiveComments").Shown, step + ": Comments.");
+            Assert.IsFalse(Find(at, "RecursiveConnectionEndpoints").Shown, step + ": a drawn end is on the canvas, not repeated in the inspector.");
+            foreach (var name in new[] { "RecursiveDetailRemoveSignals", "RecursiveDetailRemoveDirection", "RecursiveDetailRemoveDomain", "RecursiveDetailRemoveType",
+                         "RecursiveDetailRemoveEndpoints", "RecursiveSignalEntry", "RecursiveFieldHistory0", "RecursiveOpenDiagram" })
+                Assert.IsFalse(Find(at, name).Shown, step + ": " + name + " is not shown.");
+            Assert.IsFalse(at.Controls.Any(c => (c.Name.StartsWith("RecursiveDirection", StringComparison.Ordinal) || c.Name.StartsWith("RecursiveDomain", StringComparison.Ordinal)
+                || c.Name.StartsWith("RecursiveType", StringComparison.Ordinal)) && c.Shown), step + ": no choice is offered up front.");
+        }
+
+        var start = await Open("start");
+        var level = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var top = level.Inspect(level.SelectedRoot);
+        string root = level.SelectedRoot.BlockId.ToString("D");
+        var levelLinks = level.Connections(level.SelectedRoot.BlockId);
+        string power = top.LocalDiagram.Connections.Single(c => levelLinks.Inspect(c).Name == "Power").ConnectionId.ToString("D");
+        string feed = top.LocalDiagram.Connections.Single(c => levelLinks.Inspect(c).Name == "Rail feed").ConnectionId.ToString("D");
+        string psuName = level.Inspect(top.Children[0]).Name, cpuName = level.Inspect(top.Children[1]).Name;
+
+        // The kept sketch's state: a connection just drawn from a block to a port on the level's boundary and captioned is
+        // selected, and the inspector shows only its title, caption, + Add detail, + Add requirement and Comments.
+        var layout = top.LocalDiagram.Layout; var frame = layout.Frame!;
+        var boundary = top.LocalDiagram.Interfaces.Single(); var port = layout.Ports.Single(p => p.InterfaceId == boundary.Id);
+        (double X, double Y) anchor = port.Side switch
+        {
+            DiagramPortSide.Right => ((double)(frame.X + frame.Width), (double)(frame.Y + port.Offset)),
+            DiagramPortSide.Top => ((double)(frame.X + port.Offset), (double)frame.Y),
+            DiagramPortSide.Bottom => ((double)(frame.X + port.Offset), (double)(frame.Y + frame.Height)),
+            _ => ((double)frame.X, (double)(frame.Y + port.Offset))
+        };
+        var psuRect = layout.Blocks.Single(b => b.BlockId == top.Children[0].BlockId).Rect;
+        await Press("RecursiveToolConnect", inInspector: false);
+        await Wait("connect-tool", s => s.CanvasTool == "connect");
+        await At((double)(psuRect.X + psuRect.Width / 2), (double)(psuRect.Y + psuRect.Height / 2));
+        await Wait("connect-from-psu", s => s.CanvasHint == "Click a port to finish connection");
+        await At(anchor.X, anchor.Y); await Wait("new-caption", s => s.CaptionEditor == "connection");
+        Type("Supply input"); Key("Return");
+        var drawn = await Wait("new-connection", s => s.CaptionEditor == "" && s.LevelDraft.NewConnections.Count == 1 && s.ConnectionDraft?.Name == "Supply input");
+        string supply = drawn.LevelDraft.NewConnections[0].Selection.ConnectionId;
+        CaptionOnly(drawn, "new-connection");
+        Assert.IsFalse(Find(drawn, "RecursiveSavedVersion").Shown, "A connection drawn in this draft has no saved version yet.");
+        await Capture("new-connection");
+        // Escape closes + Add detail without adding anything.
+        await Press("RecursiveAddDetail"); await Popup(); Key("Escape"); await PopupClosed();
+        var menuCancelled = await Wait("add-detail-cancelled", s => Details(s).Length == 0);
+        CaptionOnly(menuCancelled, "add-detail-cancelled");
+        Assert.AreEqual(drawn.LevelDraft, menuCancelled.LevelDraft, "Escape in + Add detail changes nothing.");
+        // An empty Signals row, with a name typed but not entered, goes when the connection becomes a single signal: a single signal
+        // has no signals, so + Add detail stops offering them. Removing the Type row makes it abstract again, and removing the
+        // Direction row returns it to its caption.
+        await AddDetail("Home");
+        await Wait("empty-signals-row", s => Details(s).SequenceEqual(["signals"]) && s.FocusedControl == "RecursiveSignalEntry");
+        Type("SENSE");
+        await Wait("signal-name-typed", s => Find(s, "RecursiveSignalEntry").Label == "SENSE");
+        await AddDetail("Home", "Down", "Down");
+        var newType = await Wait("new-type-row", s => Details(s).SequenceEqual(["signals", "type"]));
+        Assert.IsEmpty(Active(newType, "RecursiveType"), "No type is chosen for the person.");
+        Assert.IsTrue(Find(newType, "RecursiveTypeSignal").Enabled, "A connection without signals may be a single signal.");
+        Assert.IsFalse(Find(newType, "RecursiveTypeDifferentialPair").Enabled, "A pair needs exactly two signals.");
+        await Press("RecursiveTypeSignal");
+        var single = await Wait("new-type-signal", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckSignal && Details(s).SequenceEqual(["type"]));
+        Assert.IsFalse(Find(single, "RecursiveSignalEntry").Shown, "A single signal shows no entry for signals of its own.");
+        Assert.AreEqual("", Find(single, "RecursiveSignalEntry").Label, "The name that was typed but not entered is gone.");
+        Assert.IsFalse(single.LevelDraft.NewConnections.Any(c => c.HasMemberOf), "The typed name never became a signal.");
+        await AddDetail("Home");
+        await Wait("single-signal-direction", s => Details(s).SequenceEqual(["direction", "type"]));
+        await Press("RecursiveDetailRemoveType");
+        var typeRemoved = await Wait("new-type-removed", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckAbstract && Details(s).SequenceEqual(["direction"]));
+        Assert.IsFalse(Find(typeRemoved, "RecursiveSignalEntry").Shown, "The empty Signals row does not come back by itself.");
+        await Press("RecursiveDetailRemoveDirection");
+        CaptionOnly(await Wait("new-back-to-caption", s => Details(s).Length == 0), "new-back-to-caption");
+        // + Add detail > Signals gives the new connection its first signals: members drawn for it in this draft.
+        await AddDetail("Home");
+        await Wait("new-signals-row", s => Details(s).SequenceEqual(["signals"]) && s.FocusedControl == "RecursiveSignalEntry");
+        Type("VIN"); Key("Return"); Type("RTN"); Key("Return");
+        var newSignals = await Wait("new-signals", s => Signals(s).SequenceEqual(["VIN", "RTN"]));
+        var drawnForSupply = newSignals.LevelDraft.NewConnections.Where(c => c.HasMemberOf && c.MemberOf == supply).ToArray();
+        CollectionAssert.AreEqual(new[] { "VIN", "RTN" }, drawnForSupply.Select(c => c.Name).ToArray());
+        CollectionAssert.AreEqual(drawnForSupply.Select(c => c.Selection.ConnectionId).ToArray(), newSignals.ConnectionDraft.Members.Select(m => m.ConnectionId).ToArray());
+        Assert.AreEqual(psuName + " \u2192 " + boundary.Name, Find(newSignals, "RecursiveDirectionFromFirst").Label, "A direction would read from the block to the port.");
+        // With exactly two single signals the connection may be a differential pair; a pair keeps its two signals, so their remove
+        // buttons, the Signals row's remove button and the entry are unavailable until another type is chosen.
+        await AddDetail("Home", "Down", "Down");
+        var pairRow = await Wait("new-pair-row", s => Details(s).SequenceEqual(["signals", "type"]));
+        Assert.IsFalse(Find(pairRow, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
+        await Press("RecursiveTypeDifferentialPair");
+        var pair = await Wait("new-pair", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckDifferentialPair
+            && Active(s, "RecursiveType").SequenceEqual(["DifferentialPair"]));
+        foreach (var name in new[] { "RecursiveSignalRemove0", "RecursiveSignalRemove1", "RecursiveSignalEntry", "RecursiveDetailRemoveSignals" })
+            Assert.IsTrue(Find(pair, name).Shown && !Find(pair, name).Enabled, name + " is shown but unavailable for a differential pair.");
+        Assert.IsTrue(Signals(pair).SequenceEqual(["VIN", "RTN"]));
+        await Capture("pair");
+
+        // A saved connection likewise shows only what it has: here, its caption and its saved version.
+        await SelectConnection("power-selected", power);
+        var selected = await Read();
+        CaptionOnly(selected, "power-selected");
+        Assert.AreEqual("Selected connection: v1", Find(selected, "RecursiveSavedVersion").Label);
+        Assert.IsEmpty(Arrows(selected, power), "A connection without a direction has no arrowhead.");
+        await Capture("selected");
+
+        // + Add requirement adds one requirement box, here General, with focus.
+        await Press("RecursiveAddRequirement"); await Popup(); Key("Home"); Key("Return");
+        await Wait("general-revealed", s => s.ShownRequirementFields.SequenceEqual(new[] { P.RequirementFieldKind.RfkGeneral }) && s.FocusedControl == "RecursiveRequirements0");
+        Type("Keep the return path short.");
+        await Wait("general-typed", s => s.ConnectionDraft.Fields.General == "Keep the return path short." && s.Dirty);
+
+        // The caption is edited in place. A blank caption is refused: the draft keeps the last caption, Save refuses with the notice
+        // and writes nothing, and Escape brings the caption back.
+        const string blankCaption = "Type a caption for this connection.";
+        await Press("RecursiveConnectionCaption"); Key("a", control: true); Type("Supply");
+        await Wait("caption-typed", s => s.ConnectionDraft.Name == "Supply" && s.FocusedControl == "RecursiveConnectionCaption");
+        Key("a", control: true); Key("BackSpace");
+        var blank = await Wait("caption-blank", s => s.ConnectionNotice == blankCaption);
+        Assert.AreEqual("Supply", blank.ConnectionDraft.Name, "A blank caption is not stored.");
+        ulong saves = blank.CompletedSaveCount; string unsaved = await File.ReadAllTextAsync(created.Path, token);
+        Key("s", control: true);
+        var refused = await Wait("caption-save-refused", s => s.Notice == blankCaption && s.FocusedControl == "RecursiveConnectionCaption");
+        Assert.AreEqual(saves, refused.CompletedSaveCount, "Nothing was sent to save."); Assert.IsTrue(refused.Dirty);
+        Assert.AreEqual(unsaved, await File.ReadAllTextAsync(created.Path, token));
+        Key("Escape");
+        await Wait("caption-restored", s => s.ConnectionNotice == "" && s.Notice == "" && Find(s, "RecursiveConnectionCaption").Label == "Supply");
+        Key("a", control: true); Type("Power");
+        await Wait("caption-power", s => s.ConnectionDraft.Name == "Power" && Find(s, "RecursiveConnectionCaption").Label == "Power");
+
+        // + Add detail > Direction adds exactly a direction row, with no choice made yet; removing it returns to the caption-only
+        // connection. Then the direction is chosen: the canvas shows an arrowhead into the end it points to. Undo and redo follow.
+        await AddDetail("Home", "Down");
+        var direction = await Wait("direction-row", s => Details(s).SequenceEqual(["direction"]) && s.FocusedControl == "RecursiveDirectionFromFirst");
+        Assert.IsEmpty(Active(direction, "RecursiveDirection"), "No direction is chosen for the person.");
+        Assert.AreEqual(P.DiagramConnectionDirection.DcdrUnspecified, direction.ConnectionDraft.Direction);
+        Assert.AreEqual(psuName + " → " + cpuName, Find(direction, "RecursiveDirectionFromFirst").Label, "The direction names the connection's own ends.");
+        Assert.AreEqual(cpuName + " → " + psuName, Find(direction, "RecursiveDirectionToFirst").Label);
+        Assert.AreEqual("Both ways", Find(direction, "RecursiveDirectionBoth").Label);
+        await Capture("direction-row");
+        await Press("RecursiveDetailRemoveDirection");
+        var directionGone = await Wait("direction-row-removed", s => Details(s).Length == 0 && s.FocusedControl == "RecursiveAddDetail");
+        Assert.AreEqual(P.DiagramConnectionDirection.DcdrUnspecified, directionGone.ConnectionDraft.Direction);
+        await AddDetail("Home", "Down");
+        await Wait("direction-row-again", s => Details(s).SequenceEqual(["direction"]));
+        await Press("RecursiveDirectionFromFirst");
+        var fromFirst = await Wait("direction-from-first", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst
+            && Active(s, "RecursiveDirection").SequenceEqual(["FromFirst"]));
+        CollectionAssert.AreEqual(new uint[] { 1 }, Arrows(fromFirst, power), "One arrowhead points into the CPU end.");
+        Assert.IsTrue(fromFirst.ConnectionMarks.Single(m => m.ConnectionId == power).Arrows.All(a => a.Shown), "The arrowhead is drawn inside the canvas.");
+        await Press("RecursiveDirectionToFirst");
+        var toFirst = await Wait("direction-to-first", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrToFirst
+            && Active(s, "RecursiveDirection").SequenceEqual(["ToFirst"]));
+        CollectionAssert.AreEqual(new uint[] { 0 }, Arrows(toFirst, power), "The reverse direction shows one arrowhead, into the PSU end only.");
+        Assert.IsTrue(toFirst.ConnectionMarks.Single(m => m.ConnectionId == power).Arrows.All(a => a.Shown));
+        await Press("RecursiveDirectionBoth");
+        var both = await Wait("direction-both", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
+        CollectionAssert.AreEqual(new uint[] { 0, 1 }, Arrows(both, power), "Both ways shows an arrowhead at each end.");
+        Key("z", control: true); await Wait("direction-undone", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrToFirst);
+        Key("y", control: true); await Wait("direction-redone", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
+
+        // + Add detail > Signals: each typed name and Enter adds one signal; a repeated name is refused with a notice; Escape clears
+        // the entry; a signal's own remove button takes only that signal away, and Undo brings it back.
+        await AddDetail("Home");
+        await Wait("signals-row", s => Details(s).SequenceEqual(["signals", "direction"]) && s.FocusedControl == "RecursiveSignalEntry");
+        Type("VBUS"); Key("Return");
+        await Wait("signal-vbus", s => Signals(s).SequenceEqual(["VBUS"]) && Find(s, "RecursiveSignalEntry").Label == "");
+        Type("GND"); Key("Return");
+        var twoSignals = await Wait("signal-gnd", s => Signals(s).SequenceEqual(["VBUS", "GND"]));
+        var drawnSignals = twoSignals.LevelDraft.NewConnections.Where(c => c.HasMemberOf && c.MemberOf == power).ToArray();
+        CollectionAssert.AreEqual(new[] { "VBUS", "GND" }, drawnSignals.Select(c => c.Name).ToArray(), "Each signal is a member drawn for this connection.");
+        Assert.IsTrue(drawnSignals.All(c => c.Kind == P.DiagramConnectionKind.DckSignal));
+        CollectionAssert.AreEqual(drawnSignals.Select(c => c.Selection.ConnectionId).ToArray(), twoSignals.ConnectionDraft.Members.Select(m => m.ConnectionId).ToArray());
+        Type("GND"); Key("Return");
+        await Wait("signal-repeated", s => s.ConnectionNotice == "“GND” is already a signal of this connection." && Signals(s).Length == 2);
+        Key("Escape");
+        await Wait("signal-entry-cleared", s => s.ConnectionNotice == "" && Find(s, "RecursiveSignalEntry").Label == "" && s.FocusedControl == "RecursiveSignalEntry");
+        await Press("RecursiveSignalRemove0");
+        await Wait("signal-removed", s => Signals(s).SequenceEqual(["GND"]));
+        Key("z", control: true); await Wait("signal-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]));
+        await Capture("signals");
+
+        // + Add detail > Type: a connection with signals cannot be a single signal; with exactly two signals it may be a pair.
+        await AddDetail("Home", "Down");
+        var type = await Wait("type-row", s => Details(s).SequenceEqual(["signals", "direction", "type"]));
+        Assert.IsFalse(Find(type, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
+        Assert.IsTrue(Find(type, "RecursiveTypeDifferentialPair").Enabled, "Two signals may form a differential pair.");
+        await Press("RecursiveTypeInterface");
+        await Wait("type-interface", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckInterface && Active(s, "RecursiveType").SequenceEqual(["Interface"]));
+        await Press("RecursiveTypeSignalGroup");
+        await Wait("type-group", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckSignalGroup && Active(s, "RecursiveType").SequenceEqual(["SignalGroup"]));
+        // + Add detail > Domain, the last detail it does not have; + Add detail then has nothing left to offer.
+        await AddDetail("Home");
+        var domainRow = await Wait("domain-row", s => Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
+        Assert.IsEmpty(Active(domainRow, "RecursiveDomain"), "No domain is chosen for the person.");
+        // Each domain choice stores its domain; one choice is shown as chosen at a time.
+        foreach (var (domainName, domainValue) in new[] { ("Data", P.DiagramDomain.DdData), ("Control", P.DiagramDomain.DdControl),
+                     ("Analog", P.DiagramDomain.DdAnalog), ("Mechanical", P.DiagramDomain.DdMechanical) })
+        {
+            await Press("RecursiveDomain" + domainName);
+            await Wait("domain-" + domainName.ToLowerInvariant(), s => s.ConnectionDraft.Domain == domainValue
+                && Active(s, "RecursiveDomain").SequenceEqual([domainName]));
+        }
+        await Press("RecursiveDomainPower");
+        var all = await Wait("domain-power", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdPower && !Find(s, "RecursiveAddDetail").Shown);
+        Assert.IsTrue(Find(all, "RecursiveAddRequirement").Shown, "+ Add requirement stays for the two requirement boxes not shown yet.");
+        await Capture("all-details");
+        // Removing a row takes exactly that detail away; Undo brings it back.
+        await Press("RecursiveDetailRemoveDomain");
+        await Wait("domain-removed", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified && Details(s).SequenceEqual(["signals", "direction", "type"])
+            && Find(s, "RecursiveAddDetail").Shown);
+        Key("z", control: true);
+        await Wait("domain-restored", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdPower && Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
+
+        // Save writes one level revision with Power's successor holding exactly these details and its two signals as members.
+        ulong beforeSave = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var saved = await Wait("saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
+        Assert.AreEqual("", saved.ErrorMessage);
+        string savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var graph = RecursiveBlockGraphXml.Read(savedXml); var savedTop = graph.Inspect(graph.SelectedRoot); var links = graph.Connections(graph.SelectedRoot.BlockId);
+        var powerSaved = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == power));
+        Assert.AreEqual(("Power", DiagramConnectionKind.SignalGroup, DiagramDomain.Power, DiagramConnectionDirection.Bidirectional),
+            (powerSaved.Name, powerSaved.Kind, powerSaved.Domain, powerSaved.Direction));
+        CollectionAssert.AreEqual(new[] { "VBUS", "GND" }, powerSaved.Members.Select(m => links.Inspect(m).Name).ToArray());
+        Assert.IsTrue(powerSaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Endpoints.Length == powerSaved.Endpoints.Length
+            && links.Inspect(m).Endpoints.Zip(powerSaved.Endpoints).All(e => e.First.SameDefinition(e.Second))), "A signal runs between its connection's ends.");
+        Assert.AreEqual("Keep the return path short.", links.Requirements(powerSaved.Selection).Requirements.General);
+        var feedSaved = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed));
+        Assert.AreEqual((DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, 0),
+            (feedSaved.Kind, feedSaved.Domain, feedSaved.Direction, feedSaved.Members.Length), "Rail feed is still only its caption.");
+        var supplySaved = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == supply));
+        Assert.AreEqual(("Supply input", DiagramConnectionKind.DifferentialPair), (supplySaved.Name, supplySaved.Kind),
+            "The drawn connection is its caption, its signals and its type.");
+        CollectionAssert.AreEqual(new[] { "VIN", "RTN" }, supplySaved.Members.Select(m => links.Inspect(m).Name).ToArray());
+        Assert.IsTrue(supplySaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Endpoints.Length == 2
+            && links.Inspect(m).Endpoints.Zip(supplySaved.Endpoints).All(e => e.First.SameDefinition(e.Second))), "The pair's signals run between its drawn ends.");
+        Assert.AreEqual((DiagramEndpointKind.Interface, boundary.Id), (supplySaved.Endpoints[1].Kind, supplySaved.Endpoints[1].InterfaceId));
+        Assert.AreEqual(3, savedTop.LocalDiagram.Connections.Length, "Signals are members, never connections of the level itself.");
+        await Capture("saved");
+
+        // Decline discards a later change and writes nothing.
+        await Press("RecursiveDirectionFromFirst");
+        await Wait("direction-changed", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
+        Key("d", alt: true);
+        await Wait("declined", s => !s.Dirty && s.ConnectionDraft?.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+        // A saved signal leaves through the companion's removal cascade and the status bar names it; Undo restores it.
+        await Press("RecursiveSignalRemove0");
+        var vbusRemoved = await Wait("saved-signal-removed", s => Signals(s).SequenceEqual(["GND"]) && s.Dirty);
+        Assert.AreEqual(("VBUS", P.LevelEditEffectKind.LeekConnectionRemoved), (vbusRemoved.LastEffects.Single().Detail, vbusRemoved.LastEffects.Single().Kind));
+        StringAssert.Contains(vbusRemoved.StatusText, "VBUS");
+        Assert.AreEqual(power, vbusRemoved.ConnectionDraft.Baseline.ConnectionId, "Power stays selected with its other details.");
+        Key("z", control: true); await Wait("saved-signal-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && !s.Dirty);
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // An agent refines Rail feed through MCP: it records its input, publishes a proposal giving Rail feed a direction, the power
+        // domain, a VIN signal and what its first end carries, and chooses it. The editor shows those details the same way once it
+        // reads the changed file.
+        string savedToken = saved.SourceToken;
+        var feedSelection = savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed);
+        var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = created.RepositoryRoot,
+            ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId, ["expectedInstanceEpoch"] = native.Epoch };
+        var input = new DiagramRefinementInput(Guid.NewGuid(), graph.DocumentId, savedToken, [graph.SelectedRoot], [feedSelection],
+            "Refine Rail feed into its supply signal.", RecursiveBlockFixture.Origin("Agent console"), []);
+        var recorded = await client.CallToolAsync("kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+        { ["expectedSourceToken"] = savedToken, ["input"] = JsonSerializer.SerializeToElement(input, new JsonSerializerOptions(JsonSerializerDefaults.Web)) },
+            cancellationToken: token);
+        if (recorded.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-input-error.json"), JsonSerializer.Serialize(recorded), token);
+        Assert.IsFalse(recorded.IsError == true, "The agent's input is recorded.");
+        string inputToken = JsonSerializer.SerializeToElement(recorded).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
+        var candidate = new BlockSelection(graph.SelectedRoot.BlockId, Guid.NewGuid(), Guid.NewGuid());
+        var refined = new ConnectionSelection(feedSelection.ConnectionId, Guid.NewGuid(), Guid.NewGuid());
+        var vin = new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        var proposal = new BlockProposal(Guid.NewGuid(), input.Id, [graph.SelectedRoot], candidate,
+            [new ProposedBlock(candidate, graph.SelectedRoot, "Agent proposal", savedTop.Name, Guid.NewGuid(), graph.Requirements(graph.SelectedRoot).Requirements,
+                savedTop.Children, savedTop.LocalDiagram with { Connections = [.. savedTop.LocalDiagram.Connections.Select(c => c == feedSelection ? refined : c)] },
+                Definition: savedTop.Definition, ComponentBindings: savedTop.ComponentBindings, ForkRevisionId: Guid.NewGuid(),
+                ForkRequirementRevisionId: Guid.NewGuid(), PhysicalAllocation: savedTop.PhysicalAllocation)],
+            [new ProposedConnection(graph.SelectedRoot.BlockId, refined, feedSelection, "Agent proposal", feedSaved.Name, feedSaved.Kind, Guid.NewGuid(),
+                links.Requirements(feedSelection).Requirements, feedSaved.Endpoints.SetItem(0, feedSaved.Endpoints[0] with { Intent = "Regulated 3.3 V" }),
+                [vin], Guid.NewGuid(), Guid.NewGuid(), DiagramDomain.Power, DiagramConnectionDirection.FromFirst),
+             new ProposedConnection(graph.SelectedRoot.BlockId, vin, null, "Agent proposal", "VIN", DiagramConnectionKind.Signal, Guid.NewGuid(),
+                DiagramRequirements.Empty, feedSaved.Endpoints, [])],
+            [], RecursiveBlockFixture.Origin("Agent console"));
+        var published = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+        {
+            ["expectedSourceToken"] = inputToken, ["operationId"] = Guid.NewGuid(),
+            ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+        }, cancellationToken: token);
+        if (published.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-proposal-error.json"), JsonSerializer.Serialize(published), token);
+        Assert.IsFalse(published.IsError == true, "The agent's proposal is published.");
+        string publishedToken = JsonSerializer.SerializeToElement(published).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
+        var chosen = await client.CallToolAsync("kicad_diagram_proposal_select", new Dictionary<string, object?>(arguments)
+        {
+            ["expectedSourceToken"] = publishedToken, ["proposalId"] = proposal.Id, ["expectedRoot"] = graph.SelectedRoot,
+            ["currentPath"] = new[] { graph.SelectedRoot }, ["ancestorRevisionIds"] = Array.Empty<Guid>(), ["operationId"] = Guid.NewGuid(),
+            ["actor"] = "Agent console"
+        }, cancellationToken: token);
+        if (chosen.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-select-error.json"), JsonSerializer.Serialize(chosen), token);
+        Assert.IsFalse(chosen.IsError == true, "The agent chooses its proposal.");
+        string agentToken = JsonSerializer.SerializeToElement(chosen).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
+        Key("r", control: true);
+        await Wait("agent-reloaded", s => s.Ready && !s.Dirty && s.SourceToken == agentToken);
+        await SelectConnection("agent-feed-selected", feed);
+        var agent = await Wait("agent-details", s => Details(s).SequenceEqual(["signals", "direction", "domain", "endpoints"]) && Signals(s).SequenceEqual(["VIN"]));
+        Assert.IsTrue(Active(agent, "RecursiveDirection").SequenceEqual(["FromFirst"]) && Active(agent, "RecursiveDomain").SequenceEqual(["Power"]),
+            "The agent's direction and domain show as chosen, like the person's own.");
+        CollectionAssert.AreEqual(new uint[] { 1 }, Arrows(agent, feed));
+        Assert.AreEqual(psuName + " \u00b7 Rail \u2014 Regulated 3.3 V", Find(agent, "RecursiveConnectionEndpoints").Label,
+            "What the agent stated about the first end is shown beside that end's block and port.");
+        Assert.IsTrue(Find(agent, "RecursiveAddDetail").Shown, "Rail feed can still gain a type.");
+        await Capture("agent-details");
+        // A signal the person adds to Rail feed runs between the block and port each end is drawn on: what the agent stated about
+        // Rail feed's first end is not copied into it.
+        await Press("RecursiveSignalEntry"); Type("SENSE"); Key("Return");
+        var sense = await Wait("agent-signal-added", s => Signals(s).SequenceEqual(["VIN", "SENSE"]));
+        var senseDrawn = sense.LevelDraft.NewConnections.Single(c => c.HasMemberOf && c.MemberOf == feed);
+        Assert.AreEqual("Regulated 3.3 V", sense.ConnectionDraft.Endpoints[0].Intent, "Rail feed's own end still says what the agent stated.");
+        static bool Plain(P.DiagramEndpointBindingData end) => end.Intent == "" && end.Pin is null && end.Selector is null && end.Candidates.Count == 0
+            && end.Kind == (end.HasInterfaceId ? P.DiagramEndpointKind.DekInterface : P.DiagramEndpointKind.DekUnresolved);
+        static (string, string) DrawnOn(P.DiagramEndpointBindingData end) => (end.BlockId, end.HasInterfaceId ? end.InterfaceId : "");
+        Assert.IsTrue(senseDrawn.Endpoints.All(Plain), "The new signal's ends carry no pin, selector, candidates or intent.");
+        CollectionAssert.AreEqual(sense.ConnectionDraft.Endpoints.Select(DrawnOn).ToArray(), senseDrawn.Endpoints.Select(DrawnOn).ToArray(),
+            "The new signal is drawn on its connection's blocks and ports.");
+        // The agent's details are removed like the person's own: its end detail (the drawn signal's ends stay as drawn), then its
+        // domain. Save keeps both signals; then the Signals row's remove button takes both saved signals away through the removal
+        // cascade.
+        await Press("RecursiveDetailRemoveEndpoints");
+        var endsRemoved = await Wait("agent-endpoints-removed", s => Details(s).SequenceEqual(["signals", "direction", "domain"])
+            && s.ConnectionDraft.Endpoints[0].Intent == "" && s.ConnectionDraft.Endpoints[0].Kind == P.DiagramEndpointKind.DekInterface && s.Dirty);
+        Assert.IsTrue(endsRemoved.LevelDraft.NewConnections.Single(c => c.HasMemberOf && c.MemberOf == feed).Endpoints.All(Plain));
+        await Press("RecursiveDetailRemoveDomain");
+        await Wait("agent-domain-removed", s => Details(s).SequenceEqual(["signals", "direction"]) && s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified);
+        beforeSave = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var agentSaved = await Wait("agent-saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
+        Assert.AreEqual("", agentSaved.ErrorMessage);
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        graph = RecursiveBlockGraphXml.Read(savedXml); savedTop = graph.Inspect(graph.SelectedRoot); links = graph.Connections(graph.SelectedRoot.BlockId);
+        Assert.AreEqual(candidate.StateId, graph.SelectedRoot.StateId, "The saved level is the implementation the agent's proposal became.");
+        var feedNow = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed));
+        Assert.AreEqual((DiagramConnectionDirection.FromFirst, DiagramDomain.Unspecified), (feedNow.Direction, feedNow.Domain));
+        CollectionAssert.AreEqual(new[] { "VIN", "SENSE" }, feedNow.Members.Select(m => links.Inspect(m).Name).ToArray());
+        var senseSaved = links.Inspect(feedNow.Members[1]);
+        Assert.IsTrue(senseSaved.Endpoints.All(e => e.Intent == "" && e.Pin is null && e.Selector is null && e.Candidates.IsEmpty)
+            && senseSaved.Endpoints.Zip(feedNow.Endpoints).All(e => e.First.SameDefinition(e.Second)), "The saved signal runs between Rail feed's drawn ends only.");
+        Assert.IsTrue(feedNow.Endpoints[0].SameDefinition(feedSaved.Endpoints[0]), "Rail feed's first end is its drawn port again.");
+        await Press("RecursiveDetailRemoveSignals");
+        var signalsRemoved = await Wait("agent-signals-removed", s => Details(s).SequenceEqual(["direction"]) && s.Dirty);
+        CollectionAssert.AreEquivalent(new[] { (P.LevelEditEffectKind.LeekConnectionRemoved, "VIN"), (P.LevelEditEffectKind.LeekConnectionRemoved, "SENSE") },
+            signalsRemoved.LastEffects.Select(e => (e.Kind, e.Detail)).ToArray(), "Both saved signals leave through the removal cascade.");
+        beforeSave = signalsRemoved.CompletedSaveCount;
+        Key("s", control: true);
+        agentSaved = await Wait("agent-signals-saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
+        Assert.AreEqual("", agentSaved.ErrorMessage);
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        graph = RecursiveBlockGraphXml.Read(savedXml); savedTop = graph.Inspect(graph.SelectedRoot); links = graph.Connections(graph.SelectedRoot.BlockId);
+        feedNow = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed));
+        Assert.AreEqual((DiagramConnectionDirection.FromFirst, DiagramDomain.Unspecified, 0), (feedNow.Direction, feedNow.Domain, feedNow.Members.Length),
+            "Only the agent's direction stays.");
+        Assert.AreEqual("VIN", links.Inspect(vin).Name, "The agent's revision with its signal stays in history.");
+        Assert.AreEqual("Feed the CPU from the rail.", savedTop.LocalDiagram.Notes.Single(n => n.Target.TargetId?.ToString("D") == feed).Text,
+            "The comment on Rail feed is untouched.");
+        Assert.AreEqual(2, links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == power)).Members.Length);
+
+        // A compact window keeps every detail row usable: no choice is clipped or overlaps another, and one still works.
+        ulong beforeCompact = (await Read()).ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
+        await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800);
+        await ClickBlankCanvas("compact-level", savedTop.Selection.BlockId.ToString("D"));
+        await SelectConnection("compact-power", power);
+        var compact = await Wait("compact-details", s => Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-compact.json"), SchematicJson.Formatter.Format(compact), token);
+        var compactInspector = Find(compact, "RecursiveInspector");
+        var choices = compact.Controls.Where(c => c.Shown && (c.Name.StartsWith("RecursiveDirection", StringComparison.Ordinal)
+            || c.Name.StartsWith("RecursiveDomain", StringComparison.Ordinal) || c.Name.StartsWith("RecursiveType", StringComparison.Ordinal))).ToArray();
+        Assert.HasCount(12, choices, "Every choice of the four rows is shown.");
+        Assert.IsTrue(choices.All(c => c.X >= compactInspector.X && c.X + c.Width <= compactInspector.X + compactInspector.Width), "No choice is clipped at the side.");
+        for (int i = 0; i < choices.Length; ++i)
+            for (int j = i + 1; j < choices.Length; ++j)
+                Assert.IsFalse(choices[i].X < choices[j].X + choices[j].Width && choices[j].X < choices[i].X + choices[i].Width
+                    && choices[i].Y < choices[j].Y + choices[j].Height && choices[j].Y < choices[i].Y + choices[i].Height, choices[i].Name + " overlaps " + choices[j].Name);
+        Assert.IsTrue(Inside(Find(compact, "RecursiveConnectionCaption"), compactInspector), "The caption is in view.");
+        await Press("RecursiveDirectionFromFirst");
+        await Wait("compact-direction", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
+        await Capture("compact");
+        Key("z", control: true); await Wait("compact-undone", s => !s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
+        await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
+
+        // Close and reopen: both connections come back from the file with the same rows.
+        Key("w", control: true); await Closed();
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
+        await Open("reopened");
+        await SelectConnection("reopened-power", power);
+        var reopened = await Wait("reopened-details", s => Details(s).SequenceEqual(["signals", "direction", "domain", "type"])
+            && Signals(s).SequenceEqual(["VBUS", "GND"]) && s.ShownRequirementFields.SequenceEqual(new[] { P.RequirementFieldKind.RfkGeneral }));
+        Assert.IsTrue(Active(reopened, "RecursiveDirection").SequenceEqual(["Both"]) && Active(reopened, "RecursiveDomain").SequenceEqual(["Power"])
+            && Active(reopened, "RecursiveType").SequenceEqual(["SignalGroup"]));
+        Assert.AreEqual("Connection", Find(reopened, "RecursiveOwnerCaption").Label);
+        await Capture("reopened");
+        await SelectConnection("reopened-feed", feed);
+        var feedReopened = await Wait("reopened-feed-details", s => Details(s).SequenceEqual(["direction"]));
+        await SelectConnection("reopened-supply", supply);
+        var supplyReopened = await Wait("reopened-supply-details", s => Details(s).SequenceEqual(["signals", "type"]) && Signals(s).SequenceEqual(["VIN", "RTN"])
+            && Active(s, "RecursiveType").SequenceEqual(["DifferentialPair"]));
+        Assert.IsFalse(Find(supplyReopened, "RecursiveSignalRemove0").Enabled || Find(supplyReopened, "RecursiveSignalEntry").Enabled,
+            "The saved pair keeps its two signals.");
+        Assert.IsFalse(feedReopened.Dirty || supplyReopened.Dirty, "Selecting connections changes nothing.");
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
     }

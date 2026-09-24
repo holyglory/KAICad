@@ -7,10 +7,13 @@ namespace KiCad.Automation.Model;
 public sealed record NewBlockOccurrence(BlockSelection Selection, Guid RequirementRevisionId, string ImplementationName, string Name,
     DiagramRequirements Requirements, ImmutableArray<DiagramBoundaryInterface> Interfaces, BlockDefinition? Definition);
 
-/// <summary>A connection drawn into a diagram level before its first save; it starts as a caption.</summary>
+/// <summary>A connection drawn into a diagram level before its first save; it starts as a caption. MemberOf names the
+/// root connection of the level this one is a signal of (Round A3, owner decision nf53af9d74841b7d3): a root drawn in the
+/// same draft, or a saved root the draft edits and lists it among its members. A signal is never a root of its own.</summary>
 public sealed record NewConnectionOccurrence(ConnectionSelection Selection, Guid RequirementRevisionId, string ImplementationName,
     string Name, DiagramConnectionKind Kind, DiagramDomain Domain, DiagramConnectionDirection Direction,
-    ImmutableArray<DiagramEndpointBinding> Endpoints, DiagramRequirements Requirements, InterconnectRealization? Realization);
+    ImmutableArray<DiagramEndpointBinding> Endpoints, DiagramRequirements Requirements, InterconnectRealization? Realization,
+    Guid? MemberOf = null);
 
 /// <summary>One Save/Decline scope per diagram level (contract rbg-v2 section 4.6): the level itself,
 /// edits of its direct children and root connections, and the blocks and connections drawn into it.</summary>
@@ -77,6 +80,7 @@ public sealed partial class RecursiveBlockGraph
                 throw Level("Each new block appears exactly once among the level's children.");
         }
         var addedConnections = new HashSet<Guid>();
+        var editedRoots = draft.ConnectionDrafts.Where(d => d?.Baseline is not null).Select(d => d.Baseline.ConnectionId).ToHashSet();
         foreach (var link in draft.NewConnections)
         {
             if (link?.Selection is not { } selection || link.Requirements is null || link.Endpoints.IsDefault || !addedConnections.Add(selection.ConnectionId))
@@ -87,7 +91,16 @@ public sealed partial class RecursiveBlockGraph
                 throw Level("A new connection uses a supported kind, domain and direction.");
             Fresh(selection.ConnectionId); Fresh(selection.StateId); Fresh(selection.RevisionId); Fresh(link.RequirementRevisionId);
             foreach (var segment in link.Realization?.SegmentList ?? []) Fresh(segment.Id);
-            if (scope.LocalDiagram.Connections.Count(c => c == selection) != 1)
+            if (link.MemberOf is { } parent)
+            {
+                // A new signal belongs to exactly one root connection of this level: one drawn in this draft, or a saved
+                // one this draft edits (its connection draft then lists the signal, checked with L3 below).
+                bool drawnRoot = draft.NewConnections.Any(c => c?.Selection?.ConnectionId == parent && c.MemberOf is null);
+                if (parent == selection.ConnectionId || !(drawnRoot || editedRoots.Contains(parent))
+                    || !scope.LocalDiagram.Connections.Any(c => c.ConnectionId == parent) || scope.LocalDiagram.Connections.Contains(selection))
+                    throw Level("A new signal belongs to one connection of this level and is not a connection of its own.");
+            }
+            else if (scope.LocalDiagram.Connections.Count(c => c == selection) != 1)
                 throw Level("Each new connection appears exactly once among the level's connections.");
         }
         // L2: edits of direct children stay on their boundary; their interiors belong to their own level.
@@ -105,7 +118,7 @@ public sealed partial class RecursiveBlockGraph
                 throw new AutomationException("child_interior_edit_not_allowed",
                     "Edit a child's own diagram in its level; from here only its caption, requirements, interfaces, definition, components and physical allocation can change.");
         }
-        // L3: edits of root connections keep their member hierarchy.
+        // L3: edits of root connections keep their saved signals (or drop some) and add only the signals drawn for them.
         var connectionDrafts = new Dictionary<Guid, DiagramConnectionDraft>();
         foreach (var link in draft.ConnectionDrafts)
         {
@@ -115,8 +128,10 @@ public sealed partial class RecursiveBlockGraph
             if (!link.DiagramAnnotations.IsDefault)
                 throw Level("Notes belong to the level draft, not to a connection draft.");
             var saved = Connections(level).Inspect(link.Baseline);
-            if (link.Members.IsDefault || !link.Members.SequenceEqual(saved.Members))
-                throw new AutomationException("connection_member_edit_requires_member_path", "Edit a connection's members through their own member path.");
+            var drawn = draft.NewConnections.Where(c => c.MemberOf == link.Baseline.ConnectionId).Select(c => c.Selection).ToImmutableArray();
+            if (link.Members.IsDefault || !KeepsThenAdds(link.Members, saved.Members, drawn))
+                throw new AutomationException("connection_member_edit_requires_member_path",
+                    "A connection keeps its saved signals in order, may drop some and adds only the signals drawn for it; edit a signal itself through its own member path.");
         }
         // L5: exactly one identity pair per child and connection draft.
         if (!ids.Children.Keys.ToHashSet().SetEquals(childDrafts.Keys) || !ids.Connections.Keys.ToHashSet().SetEquals(connectionDrafts.Keys))
@@ -184,8 +199,11 @@ public sealed partial class RecursiveBlockGraph
                 foreach (var link in draft.NewConnections)
                 {
                     var selection = link.Selection;
+                    // A connection drawn in this draft lists the signals drawn for it, in the order they were added.
+                    ImmutableArray<ConnectionSelection> members = link.MemberOf is null
+                        ? [.. draft.NewConnections.Where(c => c.MemberOf == selection.ConnectionId).Select(c => c.Selection)] : [];
                     states.Add(new(selection.StateId, selection.ConnectionId, link.ImplementationName, selection.RevisionId));
-                    revisions.Add(new(selection, null, link.Name, link.Kind, link.Endpoints, link.RequirementRevisionId, [], origin,
+                    revisions.Add(new(selection, null, link.Name, link.Kind, link.Endpoints, link.RequirementRevisionId, members, origin,
                         link.Domain, link.Direction, link.Realization));
                     histories.Add(new(new(DocumentId, selection.ConnectionId, selection.StateId), [new(link.RequirementRevisionId, null, link.Requirements, origin, [])]));
                     createdConnections.Add(selection);
@@ -235,6 +253,24 @@ public sealed partial class RecursiveBlockGraph
             && child.LocalDiagram.Notes.Zip(saved.LocalDiagram.Notes).All(n => n.First.SameContents(n.Second))
             && DiagramPresentationView.Same(child.LocalDiagram.Presentation, saved.LocalDiagram.Presentation)
             && InterfaceRealization.Same(child.LocalDiagram.Realizations, expected);
+    }
+
+    /// <summary>L3 for signals: the draft's members are the saved members it keeps, in their saved order, followed by
+    /// exactly the signals drawn for this connection in this draft. Dropping a saved signal is a removal the editor
+    /// prepares with <see cref="LevelEditCommandKind.RemoveConnectionMembers"/>, which cascades notes and realizations.</summary>
+    private static bool KeepsThenAdds(ImmutableArray<ConnectionSelection> members, ImmutableArray<ConnectionSelection> saved,
+        ImmutableArray<ConnectionSelection> drawn)
+    {
+        int kept = members.Length - drawn.Length;
+        if (kept < 0 || !members.Skip(kept).SequenceEqual(drawn)) return false;
+        int next = 0;
+        for (int i = 0; i < kept; ++i)
+        {
+            while (next < saved.Length && saved[next] != members[i]) ++next;
+            if (next == saved.Length) return false;
+            ++next;
+        }
+        return true;
     }
 
     private static DiagramRequirementResolution[]? For(IReadOnlyCollection<DiagramRequirementResolution>? resolutions,

@@ -2578,6 +2578,20 @@ public sealed partial class NativeSessionTests
                 throw new AssertFailedException("The pressed control did not open its list; the state and screen are retained.");
             }
         }
+        async Task PopupClosed()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 1;
+            try
+            {
+                do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count != 0) await Task.Delay(50, menu.Token); }
+                while (count != 0);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-timeout-popup-closed.png"), token);
+                throw new AssertFailedException("The open list did not close; the screen is retained.");
+            }
+        }
         // + Add detail lists only the details the connection does not have yet, in the order signals, direction, domain, type.
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
         Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
@@ -2679,6 +2693,35 @@ public sealed partial class NativeSessionTests
         CaptionOnly(drawn, "new-connection");
         Assert.IsFalse(Find(drawn, "RecursiveSavedVersion").Shown, "A connection drawn in this draft has no saved version yet.");
         await Capture("new-connection");
+        // Escape closes + Add detail without adding anything.
+        await Press("RecursiveAddDetail"); await Popup(); Key("Escape"); await PopupClosed();
+        var menuCancelled = await Wait("add-detail-cancelled", s => Details(s).Length == 0);
+        CaptionOnly(menuCancelled, "add-detail-cancelled");
+        Assert.AreEqual(drawn.LevelDraft, menuCancelled.LevelDraft, "Escape in + Add detail changes nothing.");
+        // An empty Signals row, with a name typed but not entered, goes when the connection becomes a single signal: a single signal
+        // has no signals, so + Add detail stops offering them. Removing the Type row makes it abstract again, and removing the
+        // Direction row returns it to its caption.
+        await AddDetail("Home");
+        await Wait("empty-signals-row", s => Details(s).SequenceEqual(["signals"]) && s.FocusedControl == "RecursiveSignalEntry");
+        Type("SENSE");
+        await Wait("signal-name-typed", s => Find(s, "RecursiveSignalEntry").Label == "SENSE");
+        await AddDetail("Home", "Down", "Down");
+        var newType = await Wait("new-type-row", s => Details(s).SequenceEqual(["signals", "type"]));
+        Assert.IsEmpty(Active(newType, "RecursiveType"), "No type is chosen for the person.");
+        Assert.IsTrue(Find(newType, "RecursiveTypeSignal").Enabled, "A connection without signals may be a single signal.");
+        Assert.IsFalse(Find(newType, "RecursiveTypeDifferentialPair").Enabled, "A pair needs exactly two signals.");
+        await Press("RecursiveTypeSignal");
+        var single = await Wait("new-type-signal", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckSignal && Details(s).SequenceEqual(["type"]));
+        Assert.IsFalse(Find(single, "RecursiveSignalEntry").Shown, "A single signal shows no entry for signals of its own.");
+        Assert.AreEqual("", Find(single, "RecursiveSignalEntry").Label, "The name that was typed but not entered is gone.");
+        Assert.IsFalse(single.LevelDraft.NewConnections.Any(c => c.HasMemberOf), "The typed name never became a signal.");
+        await AddDetail("Home");
+        await Wait("single-signal-direction", s => Details(s).SequenceEqual(["direction", "type"]));
+        await Press("RecursiveDetailRemoveType");
+        var typeRemoved = await Wait("new-type-removed", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckAbstract && Details(s).SequenceEqual(["direction"]));
+        Assert.IsFalse(Find(typeRemoved, "RecursiveSignalEntry").Shown, "The empty Signals row does not come back by itself.");
+        await Press("RecursiveDetailRemoveDirection");
+        CaptionOnly(await Wait("new-back-to-caption", s => Details(s).Length == 0), "new-back-to-caption");
         // + Add detail > Signals gives the new connection its first signals: members drawn for it in this draft.
         await AddDetail("Home");
         await Wait("new-signals-row", s => Details(s).SequenceEqual(["signals"]) && s.FocusedControl == "RecursiveSignalEntry");
@@ -2688,6 +2731,18 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(new[] { "VIN", "RTN" }, drawnForSupply.Select(c => c.Name).ToArray());
         CollectionAssert.AreEqual(drawnForSupply.Select(c => c.Selection.ConnectionId).ToArray(), newSignals.ConnectionDraft.Members.Select(m => m.ConnectionId).ToArray());
         Assert.AreEqual(psuName + " \u2192 " + boundary.Name, Find(newSignals, "RecursiveDirectionFromFirst").Label, "A direction would read from the block to the port.");
+        // With exactly two single signals the connection may be a differential pair; a pair keeps its two signals, so their remove
+        // buttons, the Signals row's remove button and the entry are unavailable until another type is chosen.
+        await AddDetail("Home", "Down", "Down");
+        var pairRow = await Wait("new-pair-row", s => Details(s).SequenceEqual(["signals", "type"]));
+        Assert.IsFalse(Find(pairRow, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
+        await Press("RecursiveTypeDifferentialPair");
+        var pair = await Wait("new-pair", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckDifferentialPair
+            && Active(s, "RecursiveType").SequenceEqual(["DifferentialPair"]));
+        foreach (var name in new[] { "RecursiveSignalRemove0", "RecursiveSignalRemove1", "RecursiveSignalEntry", "RecursiveDetailRemoveSignals" })
+            Assert.IsTrue(Find(pair, name).Shown && !Find(pair, name).Enabled, name + " is shown but unavailable for a differential pair.");
+        Assert.IsTrue(Signals(pair).SequenceEqual(["VIN", "RTN"]));
+        await Capture("pair");
 
         // A saved connection likewise shows only what it has: here, its caption and its saved version.
         await SelectConnection("power-selected", power);
@@ -2741,10 +2796,15 @@ public sealed partial class NativeSessionTests
             && Active(s, "RecursiveDirection").SequenceEqual(["FromFirst"]));
         CollectionAssert.AreEqual(new uint[] { 1 }, Arrows(fromFirst, power), "One arrowhead points into the CPU end.");
         Assert.IsTrue(fromFirst.ConnectionMarks.Single(m => m.ConnectionId == power).Arrows.All(a => a.Shown), "The arrowhead is drawn inside the canvas.");
+        await Press("RecursiveDirectionToFirst");
+        var toFirst = await Wait("direction-to-first", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrToFirst
+            && Active(s, "RecursiveDirection").SequenceEqual(["ToFirst"]));
+        CollectionAssert.AreEqual(new uint[] { 0 }, Arrows(toFirst, power), "The reverse direction shows one arrowhead, into the PSU end only.");
+        Assert.IsTrue(toFirst.ConnectionMarks.Single(m => m.ConnectionId == power).Arrows.All(a => a.Shown));
         await Press("RecursiveDirectionBoth");
         var both = await Wait("direction-both", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         CollectionAssert.AreEqual(new uint[] { 0, 1 }, Arrows(both, power), "Both ways shows an arrowhead at each end.");
-        Key("z", control: true); await Wait("direction-undone", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
+        Key("z", control: true); await Wait("direction-undone", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrToFirst);
         Key("y", control: true); await Wait("direction-redone", s => s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
 
         // + Add detail > Signals: each typed name and Enter adds one signal; a repeated name is refused with a notice; Escape clears
@@ -2773,11 +2833,22 @@ public sealed partial class NativeSessionTests
         var type = await Wait("type-row", s => Details(s).SequenceEqual(["signals", "direction", "type"]));
         Assert.IsFalse(Find(type, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
         Assert.IsTrue(Find(type, "RecursiveTypeDifferentialPair").Enabled, "Two signals may form a differential pair.");
+        await Press("RecursiveTypeInterface");
+        await Wait("type-interface", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckInterface && Active(s, "RecursiveType").SequenceEqual(["Interface"]));
         await Press("RecursiveTypeSignalGroup");
         await Wait("type-group", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckSignalGroup && Active(s, "RecursiveType").SequenceEqual(["SignalGroup"]));
         // + Add detail > Domain, the last detail it does not have; + Add detail then has nothing left to offer.
         await AddDetail("Home");
-        await Wait("domain-row", s => Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
+        var domainRow = await Wait("domain-row", s => Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
+        Assert.IsEmpty(Active(domainRow, "RecursiveDomain"), "No domain is chosen for the person.");
+        // Each domain choice stores its domain; one choice is shown as chosen at a time.
+        foreach (var (domainName, domainValue) in new[] { ("Data", P.DiagramDomain.DdData), ("Control", P.DiagramDomain.DdControl),
+                     ("Analog", P.DiagramDomain.DdAnalog), ("Mechanical", P.DiagramDomain.DdMechanical) })
+        {
+            await Press("RecursiveDomain" + domainName);
+            await Wait("domain-" + domainName.ToLowerInvariant(), s => s.ConnectionDraft.Domain == domainValue
+                && Active(s, "RecursiveDomain").SequenceEqual([domainName]));
+        }
         await Press("RecursiveDomainPower");
         var all = await Wait("domain-power", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdPower && !Find(s, "RecursiveAddDetail").Shown);
         Assert.IsTrue(Find(all, "RecursiveAddRequirement").Shown, "+ Add requirement stays for the two requirement boxes not shown yet.");
@@ -2807,8 +2878,11 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual((DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, 0),
             (feedSaved.Kind, feedSaved.Domain, feedSaved.Direction, feedSaved.Members.Length), "Rail feed is still only its caption.");
         var supplySaved = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == supply));
-        Assert.AreEqual(("Supply input", DiagramConnectionKind.Abstract), (supplySaved.Name, supplySaved.Kind), "The drawn connection is its caption and its signals.");
+        Assert.AreEqual(("Supply input", DiagramConnectionKind.DifferentialPair), (supplySaved.Name, supplySaved.Kind),
+            "The drawn connection is its caption, its signals and its type.");
         CollectionAssert.AreEqual(new[] { "VIN", "RTN" }, supplySaved.Members.Select(m => links.Inspect(m).Name).ToArray());
+        Assert.IsTrue(supplySaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Endpoints.Length == 2
+            && links.Inspect(m).Endpoints.Zip(supplySaved.Endpoints).All(e => e.First.SameDefinition(e.Second))), "The pair's signals run between its drawn ends.");
         Assert.AreEqual((DiagramEndpointKind.Interface, boundary.Id), (supplySaved.Endpoints[1].Kind, supplySaved.Endpoints[1].InterfaceId));
         Assert.AreEqual(3, savedTop.LocalDiagram.Connections.Length, "Signals are members, never connections of the level itself.");
         await Capture("saved");
@@ -2885,16 +2959,27 @@ public sealed partial class NativeSessionTests
             "What the agent stated about the first end is shown beside that end's block and port.");
         Assert.IsTrue(Find(agent, "RecursiveAddDetail").Shown, "Rail feed can still gain a type.");
         await Capture("agent-details");
-        // The agent's details are removed like the person's own: its end detail, then its signal (a saved signal leaves through the
-        // removal cascade), then its domain.
+        // A signal the person adds to Rail feed runs between the block and port each end is drawn on: what the agent stated about
+        // Rail feed's first end is not copied into it.
+        await Press("RecursiveSignalEntry"); Type("SENSE"); Key("Return");
+        var sense = await Wait("agent-signal-added", s => Signals(s).SequenceEqual(["VIN", "SENSE"]));
+        var senseDrawn = sense.LevelDraft.NewConnections.Single(c => c.HasMemberOf && c.MemberOf == feed);
+        Assert.AreEqual("Regulated 3.3 V", sense.ConnectionDraft.Endpoints[0].Intent, "Rail feed's own end still says what the agent stated.");
+        static bool Plain(P.DiagramEndpointBindingData end) => end.Intent == "" && end.Pin is null && end.Selector is null && end.Candidates.Count == 0
+            && end.Kind == (end.HasInterfaceId ? P.DiagramEndpointKind.DekInterface : P.DiagramEndpointKind.DekUnresolved);
+        static (string, string) DrawnOn(P.DiagramEndpointBindingData end) => (end.BlockId, end.HasInterfaceId ? end.InterfaceId : "");
+        Assert.IsTrue(senseDrawn.Endpoints.All(Plain), "The new signal's ends carry no pin, selector, candidates or intent.");
+        CollectionAssert.AreEqual(sense.ConnectionDraft.Endpoints.Select(DrawnOn).ToArray(), senseDrawn.Endpoints.Select(DrawnOn).ToArray(),
+            "The new signal is drawn on its connection's blocks and ports.");
+        // The agent's details are removed like the person's own: its end detail (the drawn signal's ends stay as drawn), then its
+        // domain. Save keeps both signals; then the Signals row's remove button takes both saved signals away through the removal
+        // cascade.
         await Press("RecursiveDetailRemoveEndpoints");
-        await Wait("agent-endpoints-removed", s => Details(s).SequenceEqual(["signals", "direction", "domain"])
+        var endsRemoved = await Wait("agent-endpoints-removed", s => Details(s).SequenceEqual(["signals", "direction", "domain"])
             && s.ConnectionDraft.Endpoints[0].Intent == "" && s.ConnectionDraft.Endpoints[0].Kind == P.DiagramEndpointKind.DekInterface && s.Dirty);
-        await Press("RecursiveDetailRemoveSignals");
-        var vinRemoved = await Wait("agent-signals-removed", s => Details(s).SequenceEqual(["direction", "domain"]) && s.Dirty);
-        Assert.AreEqual("VIN", vinRemoved.LastEffects.Single().Detail);
+        Assert.IsTrue(endsRemoved.LevelDraft.NewConnections.Single(c => c.HasMemberOf && c.MemberOf == feed).Endpoints.All(Plain));
         await Press("RecursiveDetailRemoveDomain");
-        await Wait("agent-domain-removed", s => Details(s).SequenceEqual(["direction"]) && s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified);
+        await Wait("agent-domain-removed", s => Details(s).SequenceEqual(["signals", "direction"]) && s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified);
         beforeSave = (await Read()).CompletedSaveCount;
         Key("s", control: true);
         var agentSaved = await Wait("agent-saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
@@ -2903,9 +2988,25 @@ public sealed partial class NativeSessionTests
         graph = RecursiveBlockGraphXml.Read(savedXml); savedTop = graph.Inspect(graph.SelectedRoot); links = graph.Connections(graph.SelectedRoot.BlockId);
         Assert.AreEqual(candidate.StateId, graph.SelectedRoot.StateId, "The saved level is the implementation the agent's proposal became.");
         var feedNow = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed));
+        Assert.AreEqual((DiagramConnectionDirection.FromFirst, DiagramDomain.Unspecified), (feedNow.Direction, feedNow.Domain));
+        CollectionAssert.AreEqual(new[] { "VIN", "SENSE" }, feedNow.Members.Select(m => links.Inspect(m).Name).ToArray());
+        var senseSaved = links.Inspect(feedNow.Members[1]);
+        Assert.IsTrue(senseSaved.Endpoints.All(e => e.Intent == "" && e.Pin is null && e.Selector is null && e.Candidates.IsEmpty)
+            && senseSaved.Endpoints.Zip(feedNow.Endpoints).All(e => e.First.SameDefinition(e.Second)), "The saved signal runs between Rail feed's drawn ends only.");
+        Assert.IsTrue(feedNow.Endpoints[0].SameDefinition(feedSaved.Endpoints[0]), "Rail feed's first end is its drawn port again.");
+        await Press("RecursiveDetailRemoveSignals");
+        var signalsRemoved = await Wait("agent-signals-removed", s => Details(s).SequenceEqual(["direction"]) && s.Dirty);
+        CollectionAssert.AreEquivalent(new[] { (P.LevelEditEffectKind.LeekConnectionRemoved, "VIN"), (P.LevelEditEffectKind.LeekConnectionRemoved, "SENSE") },
+            signalsRemoved.LastEffects.Select(e => (e.Kind, e.Detail)).ToArray(), "Both saved signals leave through the removal cascade.");
+        beforeSave = signalsRemoved.CompletedSaveCount;
+        Key("s", control: true);
+        agentSaved = await Wait("agent-signals-saved", s => s.CompletedSaveCount > beforeSave && !s.Dirty);
+        Assert.AreEqual("", agentSaved.ErrorMessage);
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        graph = RecursiveBlockGraphXml.Read(savedXml); savedTop = graph.Inspect(graph.SelectedRoot); links = graph.Connections(graph.SelectedRoot.BlockId);
+        feedNow = links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == feed));
         Assert.AreEqual((DiagramConnectionDirection.FromFirst, DiagramDomain.Unspecified, 0), (feedNow.Direction, feedNow.Domain, feedNow.Members.Length),
             "Only the agent's direction stays.");
-        Assert.IsTrue(feedNow.Endpoints[0].SameDefinition(feedSaved.Endpoints[0]), "Rail feed's first end is its drawn port again.");
         Assert.AreEqual("VIN", links.Inspect(vin).Name, "The agent's revision with its signal stays in history.");
         Assert.AreEqual("Feed the CPU from the rail.", savedTop.LocalDiagram.Notes.Single(n => n.Target.TargetId?.ToString("D") == feed).Text,
             "The comment on Rail feed is untouched.");
@@ -2950,7 +3051,10 @@ public sealed partial class NativeSessionTests
         await SelectConnection("reopened-feed", feed);
         var feedReopened = await Wait("reopened-feed-details", s => Details(s).SequenceEqual(["direction"]));
         await SelectConnection("reopened-supply", supply);
-        var supplyReopened = await Wait("reopened-supply-details", s => Details(s).SequenceEqual(["signals"]) && Signals(s).SequenceEqual(["VIN", "RTN"]));
+        var supplyReopened = await Wait("reopened-supply-details", s => Details(s).SequenceEqual(["signals", "type"]) && Signals(s).SequenceEqual(["VIN", "RTN"])
+            && Active(s, "RecursiveType").SequenceEqual(["DifferentialPair"]));
+        Assert.IsFalse(Find(supplyReopened, "RecursiveSignalRemove0").Enabled || Find(supplyReopened, "RecursiveSignalEntry").Enabled,
+            "The saved pair keeps its two signals.");
         Assert.IsFalse(feedReopened.Dirty || supplyReopened.Dirty, "Selecting connections changes nothing.");
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));

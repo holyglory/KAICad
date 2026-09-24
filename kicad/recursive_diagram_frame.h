@@ -203,13 +203,17 @@ private:
     void removeDetail( DETAIL aDetail );
     void addSignal();
     void removeSignals( const std::vector<std::string>& aIds );
-    /// Returns each end that says more than its block or port (a pin, candidates, a selector or intent) to that block or port.
+    /// Returns each end that says more than its block or port (a pin, candidates, a selector or intent) to that block or port,
+    /// on the connection and on the signals drawn for it in this draft.
     void removeEndpointDetails();
     void captionEdited();
     void fillConnection( bool aAvailable );
     wxString endpointName( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint ) const;
     /// Whether an endpoint says more than the block or port it is drawn on (a pin, candidates, a selector or intent).
     static bool EndpointDefined( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint );
+    /// The end as drawn: the block or port it is on, and nothing stated beyond that.
+    static kiapi::automation::diagrams::v1::DiagramEndpointBindingData PlainEndpoint(
+            const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint );
     /// The arrowheads each drawn connection shows for its direction, in canvas pixels: tip and the point it comes from.
     struct ARROW { std::string connection; unsigned endpoint = 0; wxPoint tip, from; };
     std::vector<ARROW> drawnArrows() const;

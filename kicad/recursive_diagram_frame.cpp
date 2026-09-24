@@ -1435,6 +1435,9 @@ bool RECURSIVE_DIAGRAM_FRAME::HasDetail( const LINK_DETAILS& details, DETAIL det
 bool RECURSIVE_DIAGRAM_FRAME::detailShown( const LINK_DETAILS& details, DETAIL detail ) const
 {
     if( HasDetail( details, detail ) ) return true;
+    // A single signal has no signals of its own, so an empty Signals row does not apply to it (whether it became a signal
+    // here, through undo or redo, or in the file).
+    if( detail == DETAIL::SIGNALS && details.kind == D::DCK_SIGNAL ) return false;
     auto revealed = m_revealedDetails.find( m_connectionId );
     return revealed != m_revealedDetails.end() && revealed->second[static_cast<int>( detail )];
 }
@@ -1442,6 +1445,13 @@ bool RECURSIVE_DIAGRAM_FRAME::EndpointDefined( const D::DiagramEndpointBindingDa
 {
     return endpoint.kind() == D::DEK_PIN || endpoint.kind() == D::DEK_CANDIDATES || endpoint.kind() == D::DEK_COMPATIBLE
            || !endpoint.intent().empty();
+}
+D::DiagramEndpointBindingData RECURSIVE_DIAGRAM_FRAME::PlainEndpoint( const D::DiagramEndpointBindingData& endpoint )
+{
+    D::DiagramEndpointBindingData drawn; drawn.set_block_id( endpoint.block_id() );
+    if( endpoint.has_interface_id() ) { drawn.set_kind( D::DEK_INTERFACE ); drawn.set_interface_id( endpoint.interface_id() ); }
+    else drawn.set_kind( D::DEK_UNRESOLVED );
+    return drawn;
 }
 wxString RECURSIVE_DIAGRAM_FRAME::endpointName( const D::DiagramEndpointBindingData& endpoint ) const
 {
@@ -1483,6 +1493,13 @@ void RECURSIVE_DIAGRAM_FRAME::setLinkValue( DETAIL detail, int value )
             && ( details.signals.size() != 2 || std::any_of( details.signals.begin(), details.signals.end(), []( const SIGNAL& s ) { return s.kind != D::DCK_SIGNAL; } ) ) ) ) )
     { refresh(); return; }
     pushUndo();
+    if( detail == DETAIL::TYPE && value == D::DCK_SIGNAL )
+    {
+        // The empty Signals row the person added goes with anything typed into it: a single signal has no signals.
+        m_revealedDetails[m_connectionId][static_cast<int>( DETAIL::SIGNALS )] = false;
+        bool wasUpdating = m_updating; m_updating = true; m_signalEntry->ChangeValue( wxEmptyString ); m_updating = wasUpdating;
+        m_signalProblem.clear();
+    }
     auto apply = [&]( auto* link )
     {
         if( detail == DETAIL::DIRECTION ) link->set_direction( static_cast<D::DiagramConnectionDirection>( value ) );
@@ -1535,13 +1552,14 @@ void RECURSIVE_DIAGRAM_FRAME::addSignal()
         m_signalProblem = wxString::Format( _( "%s is already a signal of this connection." ), wxS( "\u201c" ) + name + wxS( "\u201d" ) );
         ++m_viewRevision; refresh(); m_signalEntry->SetFocus(); return;
     }
-    // A new signal runs between the same ends as its connection and starts as its name only.
+    // A new signal runs between the blocks and ports its connection is drawn on and starts as its name only: a pin, candidates,
+    // a selector or intent stated for the connection's ends were never stated for this signal.
     pushUndo();
     D::NewConnectionData signal;
     signal.mutable_selection()->set_connection_id( FreshId() ); signal.mutable_selection()->set_state_id( FreshId() );
     signal.mutable_selection()->set_revision_id( FreshId() ); signal.set_requirement_revision_id( FreshId() );
     signal.set_implementation_name( "Initial" ); signal.set_name( Utf8( name ) ); signal.set_kind( D::DCK_SIGNAL ); signal.mutable_fields();
-    for( const auto& endpoint : details.endpoints ) *signal.add_endpoints() = endpoint;
+    for( const auto& endpoint : details.endpoints ) *signal.add_endpoints() = PlainEndpoint( endpoint );
     signal.set_member_of( m_connectionId );
     if( !newConnection( m_connectionId ) ) if( auto* draft = editConnection( true ) ) *draft->add_members() = signal.selection();
     *m_level.add_new_connections() = std::move( signal );
@@ -1586,21 +1604,17 @@ void RECURSIVE_DIAGRAM_FRAME::removeEndpointDetails()
     if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
     LINK_DETAILS details; if( !linkDetails( details ) ) return;
     if( std::none_of( details.endpoints.begin(), details.endpoints.end(), EndpointDefined ) ) return;
-    // Each end keeps the block or port it is drawn on; what was stated beyond that goes.
+    // Each end keeps the block or port it is drawn on; what was stated beyond that goes, on the connection and on the signals
+    // drawn for it in this draft. A saved signal's own ends change only through its member path.
     auto plain = []( google::protobuf::RepeatedPtrField<D::DiagramEndpointBindingData>* endpoints )
     {
-        for( auto& endpoint : *endpoints )
-        {
-            if( !EndpointDefined( endpoint ) ) continue;
-            D::DiagramEndpointBindingData drawn; drawn.set_block_id( endpoint.block_id() );
-            if( endpoint.has_interface_id() ) { drawn.set_kind( D::DEK_INTERFACE ); drawn.set_interface_id( endpoint.interface_id() ); }
-            else drawn.set_kind( D::DEK_UNRESOLVED );
-            endpoint = std::move( drawn );
-        }
+        for( auto& endpoint : *endpoints ) if( EndpointDefined( endpoint ) ) endpoint = PlainEndpoint( endpoint );
     };
     pushUndo();
     if( auto* added = newConnection( m_connectionId ) ) plain( added->mutable_endpoints() );
     else if( auto* draft = editConnection( true ) ) plain( draft->mutable_endpoints() );
+    for( auto& signal : *m_level.mutable_new_connections() )
+        if( signal.has_member_of() && signal.member_of() == m_connectionId ) plain( signal.mutable_endpoints() );
     m_notice.clear(); m_lastEffects.Clear(); changed();
     if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_connectionCaption->SetFocus();
 }

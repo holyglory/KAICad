@@ -1238,17 +1238,20 @@ public sealed class RecursiveEditorFileCommandTests
             static ConnectionSelection Fresh() => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
             NewConnectionOccurrence Signal(string name, Guid parent, ImmutableArray<DiagramEndpointBinding> at) => new(Fresh(), Guid.NewGuid(), "Initial", name,
                 DiagramConnectionKind.Signal, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, at, DiagramRequirements.Empty, null, parent);
-            // Drawn in one level draft: I2C with its signals SDA and SCL and three more details, and the saved Power gaining GND.
-            var i2c = Fresh();
+            // Drawn in one level draft: I2C with its signals SDA and SCL and three more details, and the saved Power gaining GND. The
+            // level also gains a Debug port on its boundary, where an agent's SCL ends instead of the CPU.
+            var i2c = Fresh(); var debug = Guid.NewGuid();
             var drawnI2c = new NewConnectionOccurrence(i2c, Guid.NewGuid(), "Initial", "I2C", DiagramConnectionKind.Interface, DiagramDomain.Data,
                 DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null);
-            var sda = Signal("SDA", i2c.ConnectionId, ends); var scl = Signal("SCL", i2c.ConnectionId, ends);
+            var sda = Signal("SDA", i2c.ConnectionId, ends);
+            var scl = Signal("SCL", i2c.ConnectionId, [ends[0], new(DiagramEndpointKind.Interface, system.BlockId, debug, "", null, [], null)]);
             var gnd = Signal("GND", powerLink.ConnectionId, archive.Inspect(powerLink).Endpoints);
             var power = archive.StartDraft(powerLink) with { Members = [gnd.Selection], Direction = DiagramConnectionDirection.FromFirst, Domain = DiagramDomain.Power };
             var level = graph.StartLevelDraft(system);
             level = level with
             {
-                Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(i2c) } },
+                Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(i2c),
+                    Interfaces = level.Scope.LocalDiagram.Interfaces.Add(new(debug, "Debug", "Test-only boundary port.")) } },
                 ConnectionDrafts = [power], NewConnections = [drawnI2c, sda, scl, gnd]
             };
             // Each malformed member list is refused and leaves the file unchanged.
@@ -1281,8 +1284,9 @@ public sealed class RecursiveEditorFileCommandTests
             var i2cSaved = links.Inspect(top.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
             CollectionAssert.AreEqual(new[] { "SDA", "SCL" }, i2cSaved.Members.Select(m => links.Inspect(m).Name).ToArray(), "The signals keep the order they were added in.");
             Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Members.IsEmpty));
-            Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Endpoints.Length == ends.Length
-                && links.Inspect(m).Endpoints.Zip(ends).All(e => e.First.SameDefinition(e.Second))), "A signal runs between its connection's ends.");
+            Assert.IsTrue(links.Inspect(i2cSaved.Members[0]).Endpoints.Length == ends.Length
+                && links.Inspect(i2cSaved.Members[0]).Endpoints.Zip(ends).All(e => e.First.SameDefinition(e.Second)), "SDA runs between its connection's ends.");
+            Assert.AreEqual(debug, links.Inspect(i2cSaved.Members[1]).Endpoints[1].InterfaceId, "SCL ends on the level's Debug port.");
             Assert.AreEqual((DiagramConnectionKind.Interface, DiagramDomain.Data, DiagramConnectionDirection.FromFirst), (i2cSaved.Kind, i2cSaved.Domain, i2cSaved.Direction));
             Assert.IsFalse(top.LocalDiagram.Connections.Any(c => c.ConnectionId == sda.Selection.ConnectionId), "A signal is never a connection of the level itself.");
             var powerSaved = top.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId);
@@ -1333,6 +1337,36 @@ public sealed class RecursiveEditorFileCommandTests
                 P.LevelEditCommandKind.LeckRemoveConnection, connection: i2c.ConnectionId));
             Assert.IsTrue(gone.Success, gone.ErrorMessage);
             Assert.IsEmpty(RecursiveBlockCodec.Decode(gone.LevelEdit.Draft, graph.DocumentId).NewConnections, "The drawn signal goes with its connection.");
+            // Removals read the signals the draft keeps, one list for what a connection touches and for what goes with it. While I2C
+            // keeps SCL, removing the Debug port is refused until I2C is detached, and detaching takes I2C with it. Once SCL has left I2C
+            // in the draft, Debug goes alone, I2C stays with SDA, and the level saves.
+            var fresh = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var inUse = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsFalse(inUse.Success); Assert.AreEqual("boundary_interface_in_use", inUse.ErrorCode);
+            var detached = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug, detach: true));
+            Assert.IsTrue(detached.Success, detached.ErrorMessage);
+            Assert.IsTrue(detached.LevelEdit.Effects.Any(e => (e.Kind, e.Detail) == (P.LevelEditEffectKind.LeekConnectionRemoved, "I2C")), "Detaching takes I2C with SCL.");
+            var sclLeft = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [scl.Selection.ConnectionId]));
+            Assert.IsTrue(sclLeft.Success, sclLeft.ErrorMessage);
+            var debugAlone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot],
+                RecursiveBlockCodec.Decode(sclLeft.LevelEdit.Draft, graph.DocumentId), P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsTrue(debugAlone.Success, debugAlone.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { (P.LevelEditEffectKind.LeekInterfaceRemoved, "Debug") },
+                debugAlone.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray(), "Only the port goes; no connection uses it any more.");
+            var withoutDebug = RecursiveBlockCodec.Decode(debugAlone.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutDebug.Scope.LocalDiagram.Connections.Any(c => c.ConnectionId == i2c.ConnectionId), "I2C stays.");
+            var debugSaved = await Invoke(SaveLevelRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], withoutDebug));
+            Assert.IsTrue(debugSaved.Success, debugSaved.ErrorMessage);
+            var debugGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var debugLinks = debugGraph.Connections(system.BlockId);
+            var debugTop = debugGraph.Inspect(debugGraph.SelectedRoot);
+            Assert.IsFalse(debugTop.LocalDiagram.Interfaces.Any(i => i.Id == debug));
+            CollectionAssert.AreEqual(new[] { "SDA" }, debugLinks.Inspect(debugTop.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId))
+                .Members.Select(m => debugLinks.Inspect(m).Name).ToArray());
+            token = debugSaved.SourceToken; removedGraph = debugGraph;
+            later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
             // Removals that name no signal of that connection, or the same one twice, or signals on another kind of removal, fail closed.
             foreach (var (members, kind, code) in new (Guid[] Members, P.LevelEditCommandKind Kind, string Code)[]
             {

@@ -1,16 +1,34 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace KiCad.Automation.Model;
 
 /// <summary>RemoveConnectionMembers (a lane 2B addition, proto LECK_REMOVE_CONNECTION_MEMBERS = 200) removes signals of
-/// one connection of the level (Round A3, owner decision nf53af9d74841b7d3).</summary>
-public enum LevelEditCommandKind { RemoveChild, RemoveConnection, RemoveInterface, RemoveConnectionMembers }
+/// one connection of the level (Round A3, owner decision nf53af9d74841b7d3). Its value keeps the contract's rule
+/// C# = proto - 1 (rbg-v2 section 2.5) across the gap of the lane band.</summary>
+public enum LevelEditCommandKind { RemoveChild, RemoveConnection, RemoveInterface, RemoveConnectionMembers = 199 }
 
 /// <summary>A removal inside one level draft (contract rbg-v2 section 4.7). BlockId names the removed
 /// child, or the owner of the removed interface (the level itself or one of its children). MemberIds names
-/// the signals RemoveConnectionMembers removes from ConnectionId; every other removal leaves it empty.</summary>
+/// the signals RemoveConnectionMembers removes from ConnectionId; every other removal leaves it empty.
+/// The member list follows the record rules of rbg-v2 section 2.5: it has no default in the primary
+/// constructor, the six-value constructor keeps existing callers, and an omitted list reads as empty.</summary>
+[method: JsonConstructor]
 public sealed record LevelEditCommand(LevelEditCommandKind Kind, Guid? BlockId, Guid? ConnectionId, Guid? InterfaceId,
-    bool DetachConnections, RequirementRevisionOrigin Origin, ImmutableArray<Guid> MemberIds = default);
+    bool DetachConnections, RequirementRevisionOrigin Origin, ImmutableArray<Guid> MemberIds)
+{
+    public LevelEditCommand(LevelEditCommandKind Kind, Guid? BlockId, Guid? ConnectionId, Guid? InterfaceId, bool DetachConnections,
+        RequirementRevisionOrigin Origin) : this(Kind, BlockId, ConnectionId, InterfaceId, DetachConnections, Origin, []) { }
+
+    /// <summary>The signals this removal names; an omitted list is empty.</summary>
+    [JsonIgnore] public ImmutableArray<Guid> MemberIdList => MemberIds.IsDefault ? [] : MemberIds;
+
+    /// <summary>Record equality compares the member list by reference; this compares its contents in order.</summary>
+    public bool SameContents(LevelEditCommand? other) => other is not null && Kind == other.Kind && BlockId == other.BlockId
+        && ConnectionId == other.ConnectionId && InterfaceId == other.InterfaceId && DetachConnections == other.DetachConnections
+        && (Origin is null ? other.Origin is null : other.Origin is not null && DiagramRequirementHistory.SameOrigin(Origin, other.Origin))
+        && MemberIdList.SequenceEqual(other.MemberIdList);
+}
 
 /// <summary>The one implementation of the removal cascade for level drafts (contract rbg-v2 section 4.7).
 /// It never writes: it returns the changed draft and every effect so the editor can show them and undo
@@ -32,7 +50,7 @@ public static class RecursiveLevelEdits
             if (!graph.Inspect(path[i]).Children.Contains(path[i + 1]))
                 throw RecursiveBlockGraph.Level("The level path is not part of the selected design.");
         _ = graph.Inspect(draft.Scope.Baseline);
-        if (command.Kind != LevelEditCommandKind.RemoveConnectionMembers && !command.MemberIds.IsDefaultOrEmpty)
+        if (command.Kind != LevelEditCommandKind.RemoveConnectionMembers && !command.MemberIdList.IsEmpty)
             throw RecursiveBlockGraph.Level("Only a removal of signals names signals.");
         var level = new Level(graph, draft);
         switch (command.Kind)
@@ -51,10 +69,10 @@ public static class RecursiveLevelEdits
                 break;
             case LevelEditCommandKind.RemoveConnectionMembers:
                 if (command.ConnectionId is not { } parent || command.BlockId is not null || command.InterfaceId is not null || command.DetachConnections
-                    || command.MemberIds.IsDefaultOrEmpty || command.MemberIds.Distinct().Count() != command.MemberIds.Length
+                    || command.MemberIdList.IsEmpty || command.MemberIdList.Distinct().Count() != command.MemberIdList.Length
                     || !draft.Scope.LocalDiagram.Connections.Any(c => c.ConnectionId == parent))
                     throw Missing("Name a connection of this diagram level and each of its signals to remove once.");
-                level.RemoveMembers(parent, command.MemberIds, command.Origin);
+                level.RemoveMembers(parent, command.MemberIdList, command.Origin);
                 break;
             default:
                 if (command.BlockId is not { } owner || command.InterfaceId is not { } boundary || command.ConnectionId is not null)
@@ -94,30 +112,32 @@ public static class RecursiveLevelEdits
         /// <summary>The signals drawn for this root in this draft (Round A3).</summary>
         private IEnumerable<NewConnectionOccurrence> Drawn(ConnectionSelection root) => _newConnections.Where(c => c.MemberOf == root.ConnectionId);
 
-        /// <summary>The current endpoints of a root connection and all of its members as this draft sees them.</summary>
-        private IEnumerable<(Guid Connection, DiagramEndpointBinding Endpoint)> Endpoints(ConnectionSelection root)
+        /// <summary>The tree of a root connection as this draft sees it, with each connection's current endpoints: the root (as drawn
+        /// or edited in this draft), the saved signals the draft keeps with their own saved members, and the signals drawn for it.
+        /// A saved signal the draft dropped is no longer part of it. Both the endpoint check of a removal and the set of removed
+        /// connections read this one list, so they always agree.</summary>
+        private List<(Guid Connection, ImmutableArray<DiagramEndpointBinding> Endpoints)> Members(ConnectionSelection root)
         {
-            var drawn = Drawn(root).SelectMany(c => c.Endpoints.Select(e => (c.Selection.ConnectionId, e))).ToList();
-            if (_newConnections.FirstOrDefault(c => c.Selection == root) is { } added)
-                return added.Endpoints.Select(e => (root.ConnectionId, e)).Concat(drawn);
-            if (_archive is null) return drawn;
-            var edited = _connectionDrafts.FirstOrDefault(c => c.Baseline == root);
-            return _archive.Walk([root]).SelectMany(member =>
-                (member == root && edited is not null ? edited.Endpoints : _archive.Inspect(member).Endpoints).Select(e => (member.ConnectionId, e)))
-                .Concat(drawn);
+            var tree = new List<(Guid, ImmutableArray<DiagramEndpointBinding>)>();
+            if (_newConnections.FirstOrDefault(c => c.Selection == root) is { } added) tree.Add((root.ConnectionId, added.Endpoints));
+            else if (_archive is not null)
+            {
+                var edited = _connectionDrafts.FirstOrDefault(c => c.Baseline == root);
+                tree.Add((root.ConnectionId, edited?.Endpoints ?? _archive.Inspect(root).Endpoints));
+                var kept = (edited?.Members ?? _archive.Inspect(root).Members).Where(m => _archive.Revisions.Any(r => r.Selection == m));
+                tree.AddRange(_archive.Walk([.. kept]).Select(member => (member.ConnectionId, _archive.Inspect(member).Endpoints)));
+            }
+            else tree.Add((root.ConnectionId, []));
+            tree.AddRange(Drawn(root).Select(c => (c.Selection.ConnectionId, c.Endpoints)));
+            return tree;
         }
 
-        /// <summary>Every connection identity in the tree of this root (the root, its saved members and the signals drawn for it).</summary>
-        private IEnumerable<Guid> Tree(ConnectionSelection root)
-        {
-            var drawn = Drawn(root).Select(c => c.Selection.ConnectionId);
-            if (_newConnections.Any(c => c.Selection == root) || _archive is null) return drawn.Prepend(root.ConnectionId).ToList();
-            var edited = _connectionDrafts.FirstOrDefault(c => c.Baseline == root);
-            var saved = edited is null ? _archive.Walk([root]).Select(c => c.ConnectionId)
-                : edited.Members.Where(m => _archive.Revisions.Any(r => r.Selection == m)).SelectMany(m => _archive.Walk([m])).Select(c => c.ConnectionId)
-                    .Prepend(root.ConnectionId);
-            return saved.Concat(drawn).Distinct().ToList();
-        }
+        /// <summary>The current endpoints of a root connection and all of its members as this draft sees them.</summary>
+        private IEnumerable<(Guid Connection, DiagramEndpointBinding Endpoint)> Endpoints(ConnectionSelection root) =>
+            Members(root).SelectMany(m => m.Endpoints.Select(e => (m.Connection, e)));
+
+        /// <summary>Every connection identity in the tree of this root (the root, the saved signals it keeps and the signals drawn for it).</summary>
+        private IEnumerable<Guid> Tree(ConnectionSelection root) => Members(root).Select(m => m.Connection).Distinct().ToList();
 
         private string ConnectionName(ConnectionSelection root) =>
             _newConnections.FirstOrDefault(c => c.Selection == root)?.Name ?? _connectionDrafts.FirstOrDefault(c => c.Baseline == root)?.Name

@@ -72,15 +72,10 @@ public static partial class RecursiveBlockCodec
         Decode(P.LevelEditCommandData data, Guid documentId)
     {
         Known(data, P.LevelEditCommandData.Parser);
-        var kind = data.Kind switch
-        {
-            P.LevelEditCommandKind.LeckRemoveChild => M.LevelEditCommandKind.RemoveChild,
-            P.LevelEditCommandKind.LeckRemoveConnection => M.LevelEditCommandKind.RemoveConnection,
-            P.LevelEditCommandKind.LeckRemoveInterface => M.LevelEditCommandKind.RemoveInterface,
-            // Lane 2B band (Round A3): signals of one connection.
-            P.LevelEditCommandKind.LeckRemoveConnectionMembers => M.LevelEditCommandKind.RemoveConnectionMembers,
-            _ => throw Invalid("Choose a supported removal: a child block, a connection, an interface or signals of a connection.")
-        };
+        // C# = proto - 1 (rbg-v2 section 2.5), including LECK_REMOVE_CONNECTION_MEMBERS = 200 in the lane 2B band.
+        var kind = (M.LevelEditCommandKind)((int)data.Kind - 1);
+        if (data.Kind == P.LevelEditCommandKind.LeckUnspecified || !System.Enum.IsDefined(kind))
+            throw Invalid("Choose a supported removal: a child block, a connection, an interface or signals of a connection.");
         var command = new M.LevelEditCommand(kind, data.HasBlockId ? GuidValue(data.BlockId) : null,
             data.HasConnectionId ? GuidValue(data.ConnectionId) : null, data.HasInterfaceId ? GuidValue(data.InterfaceId) : null,
             data.DetachConnections, Origin(Need(data.Origin)), [.. data.MemberIds.Select(GuidValue)]);

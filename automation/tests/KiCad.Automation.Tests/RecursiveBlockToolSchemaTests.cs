@@ -55,5 +55,20 @@ public sealed class RecursiveBlockToolSchemaTests
                 [new(link, 1, [new(510, 250), new(510, 275)])], new(100, 90, 780, 310)), default);
         var back = JsonSerializer.Deserialize<BlockLocalDiagram>(JsonSerializer.Serialize(drawn, options), options)!;
         Assert.IsTrue(drawn.SameContents(back), "A drawn level survives the agent's JSON exactly.");
+        // The level-edit command gained a signal list (Round A3); the level-edit tools deferred in rbg-v2 section 13 will take it
+        // as a parameter, so it follows the same rules now: it describes itself, an omitted list reads as empty, the old six-value
+        // constructor still builds it, and its contents compare in order.
+        string command = McpServerTool.Create((LevelEditCommand edit) => true).ProtocolTool.InputSchema.GetRawText();
+        StringAssert.Contains(command, "\"memberIds\"");
+        var origin = RecursiveBlockFixture.Origin();
+        var removal = new LevelEditCommand(LevelEditCommandKind.RemoveConnection, null, link, null, false, origin);
+        Assert.IsTrue(removal.SameContents(JsonSerializer.Deserialize<LevelEditCommand>(JsonSerializer.Serialize(removal, options), options)));
+        var omittedMembers = JsonSerializer.Deserialize<LevelEditCommand>(JsonSerializer.Serialize(removal, options).Replace(",\"memberIds\":[]", ""), options)!;
+        Assert.IsTrue(omittedMembers.MemberIds.IsDefault); Assert.IsEmpty(omittedMembers.MemberIdList); Assert.IsTrue(removal.SameContents(omittedMembers));
+        Guid first = Guid.NewGuid(), second = Guid.NewGuid();
+        var signals = new LevelEditCommand(LevelEditCommandKind.RemoveConnectionMembers, null, link, null, false, origin, [first, second]);
+        Assert.IsTrue(signals.SameContents(signals with { MemberIds = [first, second] }), "The same signals in the same order are the same removal.");
+        Assert.IsFalse(signals.SameContents(signals with { MemberIds = [second, first] }));
+        Assert.IsFalse(signals.SameContents(removal));
     }
 }

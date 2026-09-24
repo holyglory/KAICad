@@ -877,18 +877,23 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 for( EDA_ITEM* item : screen->Items() )
                     item->SetFlags( SKIP_STRUCT );
 
-                // Loading the file changes more than the placed items: when the file repeats an
-                // identity the design already uses, whichever duplicate comes later in sheet
-                // order gets a new UUID, and on a sheet below this one that is the existing
-                // item.  Reverting the placement below removes the placed items (and cached
-                // library definitions only they used) and returns the designators annotating
-                // them handed out, but not such a renumbering, which can be on any sheet, so the
-                // whole saved state is compared around the import.  A kept
-                // placement is recorded by its commit; a cancelled one is recorded only if it
-                // still left a saved change.
+                // Loading the file changes more than the placed items, which the placement
+                // commit stages and a cancel reverts (returning the designators annotating them
+                // handed out).  Outside that commit it can change only: the identity of an
+                // existing item on any sheet (when the file repeats an identity the design
+                // already uses, whichever duplicate comes later in sheet order gets a new UUID,
+                // and on a sheet below this one that is the existing item); this screen's cached
+                // library definitions (merged, and an equal one refreshed in place); the
+                // schematic-wide embedded files, embedded fonts flag and net chains the file
+                // carries; and the project's bus aliases and reference inventory.  Those parts
+                // are compared exactly as they are saved, without writing the whole design; the
+                // file's child sheets get screens of their own, which leave with their placed
+                // sheet.  A kept placement is recorded by its commit; a cancelled or refused one
+                // is recorded only if it still left a saved change.
                 SCH_TRACKED_CHANGE change( m_frame->Schematic(), placingDesignBlock
                                                                  ? "Add Design Block"
-                                                                 : "Import Schematic Sheet Content" );
+                                                                 : "Import Schematic Sheet Content",
+                                           SCH_PERSISTED_PARTS::SheetImport( sheetPath.LastScreen() ) );
 
                 if( !m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath, sheetFileName, true,
                                                  placingDesignBlock ) )

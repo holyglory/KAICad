@@ -6,6 +6,7 @@
 
 #include <api/document_change_journal.h>
 #include <erc/erc_exclusion.h>
+#include <io/kicad/kicad_io_utils.h>
 #include <nlohmann/json.hpp>
 #include <project.h>
 #include <project/project_file.h>
@@ -247,6 +248,165 @@ std::vector<std::string> SCH_STATE_GROUPS::ChangedGroups( const SCH_STATE_GROUPS
 }
 
 
+SCH_PERSISTED_PARTS SCH_PERSISTED_PARTS::PageSettings()
+{
+    SCH_PERSISTED_PARTS parts;
+    parts.pages = true;
+    parts.schematicWide = true;
+    return parts;
+}
+
+
+SCH_PERSISTED_PARTS SCH_PERSISTED_PARTS::SheetImport( const SCH_SCREEN* aScreen )
+{
+    if( !aScreen )
+        throw std::invalid_argument( "A sheet import is tracked on the screen it loads into" );
+
+    SCH_PERSISTED_PARTS parts;
+    parts.identities = true;
+    parts.schematicWide = true;
+    parts.libraryCaches = { aScreen };
+    return parts;
+}
+
+
+SCH_PERSISTED_PARTS_STATE SCH_PERSISTED_PARTS_STATE::Capture( SCHEMATIC& aSchematic,
+                                                              const SCH_PERSISTED_PARTS& aParts )
+{
+    if( !aSchematic.IsValid() )
+        throw std::runtime_error( "The schematic is not loaded" );
+
+    const auto                started = std::chrono::steady_clock::now();
+    SCH_PERSISTED_PARTS_STATE result;
+    size_t                    cachesFound = 0;
+
+    auto keep = [&]( const std::string& aName, std::string aText )
+    {
+        result.m_bytes += aText.size();
+        result.m_texts.emplace( aName, std::move( aText ) );
+    };
+
+    // Every screen is taken once, keyed by its identity, as the whole-state capture takes it.
+    for( const auto& [id, sheet] : writtenScreens( aSchematic ) )
+    {
+        SCH_SCREEN* screen = sheet->GetScreen();
+
+        if( aParts.pages )
+        {
+            // SCH_IO_KICAD_SEXPR::Format writes exactly these two, one after the other.
+            STRING_FORMATTER out;
+            screen->GetPageSettings().Format( &out );
+            screen->GetTitleBlock().Format( &out );
+            keep( "page:" + id, out.GetString() );
+        }
+
+        if( aParts.identities )
+        {
+            // Markers are not saved; every other item on the screen is, under its identity.
+            std::vector<KIID>& identities = result.m_identities[id];
+
+            for( SCH_ITEM* item : screen->Items() )
+            {
+                if( item->Type() != SCH_MARKER_T )
+                    identities.push_back( item->m_Uuid );
+            }
+
+            std::sort( identities.begin(), identities.end() );
+            result.m_bytes += identities.size() * sizeof( KIID );
+        }
+
+        if( std::find( aParts.libraryCaches.begin(), aParts.libraryCaches.end(), screen )
+                != aParts.libraryCaches.end() )
+        {
+            // As SCH_IO_KICAD_SEXPR::Format saves the screen's cache library.
+            STRING_FORMATTER out;
+            out.Print( "(lib_symbols" );
+
+            for( const auto& [libItemName, libSymbol] : screen->GetLibSymbols() )
+                SCH_IO_KICAD_SEXPR_LIB_CACHE::SaveSymbol( libSymbol, out, libItemName, true, true );
+
+            out.Print( ")" );
+            keep( "lib_symbols:" + id, out.GetString() );
+            ++cachesFound;
+        }
+    }
+
+    // Restricting the capture to a screen that is not loaded would compare nothing.
+    if( cachesFound != aParts.libraryCaches.size() )
+        throw std::runtime_error( "A tracked library cache is not part of the schematic" );
+
+    if( aParts.schematicWide )
+    {
+        // As the first top-level sheet saves them: the embedded fonts flag and embedded files
+        // follow its items.  Its net chains are written from these definitions; whether a chain
+        // is committed in the live connection graph is not saved.
+        STRING_FORMATTER out;
+        KICAD_FORMAT::FormatBool( &out, "embedded_fonts", aSchematic.GetAreFontsEmbedded() );
+
+        if( !aSchematic.GetEmbeddedFiles()->IsEmpty() )
+            aSchematic.WriteEmbeddedFiles( out, true );
+
+        keep( "schematic-wide", out.GetString() );
+
+        std::map<wxString, CONNECTION_GRAPH::NET_CHAIN_DEFINITION> chains;
+
+        if( CONNECTION_GRAPH* graph = aSchematic.ConnectionGraph() )
+            chains = graph->GetNetChainDefinitions();
+
+        for( auto& [name, definition] : chains )
+            definition.committed = false;
+
+        result.m_netChains = std::move( chains );
+    }
+
+    keep( "project-settings", persistedProjectSettings( aSchematic ).dump() );
+
+    wxLogTrace( traceSchTracking, wxS( "Captured %zu persisted part(s) and %zu identity list(s), %llu bytes, in %lld us" ),
+                result.m_texts.size(), result.m_identities.size(), static_cast<unsigned long long>( result.m_bytes ),
+                static_cast<long long>( std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - started ).count() ) );
+
+    return result;
+}
+
+
+bool SCH_PERSISTED_PARTS_STATE::operator==( const SCH_PERSISTED_PARTS_STATE& aOther ) const
+{
+    return m_texts == aOther.m_texts && m_identities == aOther.m_identities && m_netChains == aOther.m_netChains;
+}
+
+
+std::vector<std::string> SCH_PERSISTED_PARTS_STATE::ChangedParts( const SCH_PERSISTED_PARTS_STATE& aAfter ) const
+{
+    std::vector<std::string> changed;
+
+    auto compare = [&]( const auto& aBefore, const auto& aAfterParts, const std::string& aPrefix )
+    {
+        for( const auto& [name, value] : aBefore )
+        {
+            auto it = aAfterParts.find( name );
+
+            if( it == aAfterParts.end() || it->second != value )
+                changed.push_back( aPrefix + name );
+        }
+
+        for( const auto& [name, value] : aAfterParts )
+        {
+            if( !aBefore.count( name ) )
+                changed.push_back( aPrefix + name );
+        }
+    };
+
+    compare( m_texts, aAfter.m_texts, "" );
+    compare( m_identities, aAfter.m_identities, "identities:" );
+
+    if( m_netChains != aAfter.m_netChains )
+        changed.push_back( "net-chains" );
+
+    return changed;
+}
+
+
 SCH_TRACKED_CHANGE::MARK SCH_TRACKED_CHANGE::Mark( const SCHEMATIC& aSchematic )
 {
     return { aSchematic.ChangeJournal().Epoch(), aSchematic.ChangeJournal().Sequence() };
@@ -270,6 +430,27 @@ SCH_TRACKED_CHANGE::SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDesc
         m_start( Mark( aSchematic ) )
 {
     // Nothing is captured: the commit keeps a copy of every item it stages.
+}
+
+
+SCH_TRACKED_CHANGE::SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription,
+                                        SCH_PERSISTED_PARTS aParts ) :
+        m_schematic( aSchematic ),
+        m_description( std::move( aDescription ) ),
+        m_parts( std::move( aParts ) ),
+        m_start( Mark( aSchematic ) )
+{
+    // Naming no part would compare only the project settings; an owner states what it reaches.
+    if( !m_parts->pages && !m_parts->schematicWide && !m_parts->identities && m_parts->libraryCaches.empty() )
+        throw std::invalid_argument( "A part-restricted tracked change needs its parts" );
+
+    if( std::find( m_parts->libraryCaches.begin(), m_parts->libraryCaches.end(), nullptr )
+            != m_parts->libraryCaches.end() )
+    {
+        throw std::invalid_argument( "A tracked library cache needs its screen" );
+    }
+
+    m_partsBefore = captureParts();
 }
 
 
@@ -332,6 +513,21 @@ std::optional<SCH_STATE_GROUPS> SCH_TRACKED_CHANGE::capture() const
 }
 
 
+std::optional<SCH_PERSISTED_PARTS_STATE> SCH_TRACKED_CHANGE::captureParts() const
+{
+    try
+    {
+        return SCH_PERSISTED_PARTS_STATE::Capture( m_schematic, *m_parts );
+    }
+    catch( const std::exception& error )
+    {
+        wxLogTrace( traceSchTracking, wxS( "Unable to capture persisted parts for '%s': %s" ),
+                    m_description, error.what() );
+        return std::nullopt;
+    }
+}
+
+
 bool SCH_TRACKED_CHANGE::replaced() const
 {
     return m_schematic.ChangeJournal().Epoch() != m_start.epoch;
@@ -370,6 +566,24 @@ bool SCH_TRACKED_CHANGE::changedSinceStart()
                         m_description, error.what() );
             return true;
         }
+    }
+
+    // Parts: compare only the named parts and the project settings.
+    if( m_parts )
+    {
+        std::optional<SCH_PERSISTED_PARTS_STATE> afterParts = captureParts();
+
+        // A part that cannot be written is conservatively treated as changed.
+        if( !m_partsBefore || !afterParts )
+            return true;
+
+        if( *m_partsBefore == *afterParts )
+            return false;
+
+        for( const std::string& part : m_partsBefore->ChangedParts( *afterParts ) )
+            wxLogTrace( traceSchTracking, wxS( "'%s' changed persisted part %s" ), m_description, part );
+
+        return true;
     }
 
     std::optional<SCH_STATE_GROUPS> after = capture();

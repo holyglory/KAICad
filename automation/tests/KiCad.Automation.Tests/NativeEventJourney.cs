@@ -294,11 +294,14 @@ public sealed partial class NativeSessionTests
         samples.Sort();
         string cost = $"Lifecycle read over {clean.NativeFiles.Count - 1} screen file(s) and the project settings "
             + $"(one whole-state capture plus the request round trip, Debug build): median {samples[samples.Count / 2]:F1} ms, "
-            + $"min {samples[0]:F1} ms, max {samples[^1]:F1} ms. A whole-state tracker (Page Settings, Import Sheet "
-            + "and design block placement, and the other whole-state owners) captures twice per action, a cancelled "
-            + "one included; Schematic Setup and the simulation settings capture the project settings and the first "
-            + "top-level sheet twice; Symbol Properties, undoable Sheet Properties, Annotate and the simulator tuner "
-            + "compare only their staged items (Annotate also the kept reference inventory).";
+            + $"min {samples[0]:F1} ms, max {samples[^1]:F1} ms. A whole-state tracker (the owners whose reach no "
+            + "narrower comparison covers) captures twice per action, a cancelled one included; Page Settings compares "
+            + "every screen's paper and title block, the schematic-wide data and the project settings; Import Sheet and "
+            + "design block placement compare every screen's item identities, the target screen's library cache, the "
+            + "schematic-wide data and the project settings; Schematic Setup and the simulation settings capture the "
+            + "project settings and the first top-level sheet twice; Symbol Properties, undoable Sheet Properties, "
+            + "Annotate and the simulator tuner compare only their staged items (Annotate also the kept reference "
+            + "inventory).";
         Console.WriteLine("Native tracking cost: " + cost);
         await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-capture-cost.txt"), cost + Environment.NewLine, token);
 
@@ -1191,10 +1194,12 @@ public sealed partial class NativeSessionTests
     /// <summary>
     /// Runs the native test binary's measurement of what tracking compares on the largest demo
     /// design (vme-wren): one whole-state capture, the largest single screen, the project
-    /// settings with the first top-level sheet, and a staged comparison of the symbol with the
-    /// largest library definition.  It runs on its own, after the rendered steps; the host's
-    /// load around it is kept with its output as evidence, because the governed host is shared.
-    /// The staged comparison must stay far below the whole-state capture.
+    /// settings with the first top-level sheet, a staged comparison of the symbol with the
+    /// largest library definition, and per action the comparison Page Settings and a cancelled
+    /// sheet import made before (the whole saved state, twice) and make now (only the persisted
+    /// parts each can reach).  It runs on its own, after the rendered steps; the host's load
+    /// around it is kept with its output as evidence, because the governed host is shared.  The
+    /// staged comparison and both actions' comparisons must stay far below the whole-state cost.
     /// </summary>
     private static async Task MeasureTrackingCostOnLargestDemo(string evidence, string instanceId, CancellationToken token)
     {
@@ -1247,10 +1252,16 @@ public sealed partial class NativeSessionTests
             double whole = Median("whole_state_capture_ms"), staged = Median("staged_symbol_compare_ms");
             double settingsAndFirst = Median("settings_and_first_sheet_capture_ms");
             Median("largest_screen_capture_ms");
+            double pageBefore = Median("page_settings_whole_state_compare_ms"), pageAfter = Median("page_settings_compare_ms");
+            double importBefore = Median("sheet_import_whole_state_compare_ms"), importAfter = Median("sheet_import_compare_ms");
             Console.WriteLine($"Native tracking cost on vme-wren: whole-state capture {whole:F1} ms, project settings and "
                 + $"first sheet {settingsAndFirst:F1} ms, staged symbol comparison {staged:F1} ms.");
+            Console.WriteLine($"Per action on vme-wren: Page Settings compared the saved design in {pageBefore:F1} ms before "
+                + $"and {pageAfter:F1} ms now; a cancelled sheet import in {importBefore:F1} ms before and {importAfter:F1} ms now.");
             Assert.IsLessThan(whole / 10, staged, "A staged comparison must stay far below a whole-state capture.");
             Assert.IsLessThan(whole, settingsAndFirst, "The project settings and first sheet must cost less than the whole design.");
+            Assert.IsLessThan(pageBefore / 10, pageAfter, "Page Settings must compare far less than the whole design twice.");
+            Assert.IsLessThan(importBefore / 10, importAfter, "A sheet import must compare far less than the whole design twice.");
         }
         finally
         {

@@ -503,11 +503,14 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
     // clears Redo, which must survive opening and cancelling this dialog.
     auto undoItem = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( m_frame );
 
-    // The dialog writes the page, title blocks of every exported sheet, the drawing sheet and
-    // its embedded files straight into the design, outside any commit, so the whole saved
-    // state is compared around it.  Only a real change becomes a revision, an undo entry and
-    // a modified document; an unchanged OK leaves all three alone.
-    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Page Settings" );
+    // The dialog writes straight into the design, outside any commit, but only the paper and
+    // title block of the current screen and of every screen it exports them to, the drawing
+    // sheet file name (a project setting) and the embedded drawing sheet (schematic embedded
+    // files, which choosing a file adds to even before OK).  It writes no item or library cache,
+    // so those parts are compared exactly as they are saved, without writing the whole design
+    // twice.  Only a real change becomes a revision, an undo entry and a modified document; an
+    // unchanged OK leaves all three alone.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Page Settings", SCH_PERSISTED_PARTS::PageSettings() );
 
     DIALOG_EESCHEMA_PAGE_SETTINGS dlg( m_frame, m_frame->Schematic().GetEmbeddedFiles(),
                                        VECTOR2I( MAX_PAGE_SIZE_EESCHEMA_MILS, MAX_PAGE_SIZE_EESCHEMA_MILS ) );

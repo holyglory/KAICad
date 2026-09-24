@@ -17,11 +17,12 @@
 //    not count; a braces-less if at the same brace level is not distinguished);
 //  - a call to a helper that marks the document modified is not itself routed, or stages into
 //    a commit that is not pushed after it;
-//  - a SCH_TRACKED_CHANGE is declared without review, is staged or restricted to screens
-//    without a reason (or without the code its reason depends on), or compares a commit that
-//    is not declared before it (a whole-state tracker compares the same state as the lifecycle
-//    digest; a staged tracker compares only the items its commit staged and what its owner
-//    reports; a restricted tracker compares named screens and the project settings);
+//  - a SCH_TRACKED_CHANGE is declared without review, is staged or restricted to persisted
+//    parts or screens without a reason (or without the code its reason depends on), or compares
+//    a commit that is not declared before it (a whole-state tracker compares the same state as
+//    the lifecycle digest; a staged tracker compares only the items its commit staged and what
+//    its owner reports; a part-restricted tracker compares named persisted parts and the project
+//    settings; a screen-restricted tracker compares named screens and the project settings);
 //  - a schematic writer gains or loses a pinned persisted field, or a pinned writer group has
 //    no owner (the commit machinery or a reviewed direct owner);
 //  - a proven owner loses its rendered journey steps (a real OneChange and Unchanged call that
@@ -56,6 +57,9 @@
 
 #if defined( EESCHEMA )
 #include <api/api_sch_state_groups.h>
+#include <bus_alias.h>
+#include <connection_graph.h>
+#include <embedded_files.h>
 #include <lib_symbol.h>
 #include <project.h>
 #include <project/project_file.h>
@@ -288,6 +292,7 @@ struct TRACKER
     std::string variable;
     int         arguments = 0;   ///< Top-level constructor arguments.
     int         line = 0;
+    bool        parts = false;   ///< The third argument names SCH_PERSISTED_PARTS: the parts form.
     std::string commit;          ///< Staged form: the third argument, the compared commit.
     bool        commitDeclared = false;  ///< That commit is a SCH_COMMIT declared before it.
 };
@@ -954,12 +959,23 @@ inline SOURCE_SCAN scanSource( const std::string& aSource, const std::set<std::s
                         tracker.arguments = topLevelArguments( code, open );
                         tracker.line = static_cast<int>( std::count( code.begin(), code.begin() + i, '\n' ) ) + 1;
 
-                        // A staged tracker compares a commit that must outlive it: one declared
-                        // earlier in the same function (commit names are collected in order).
+                        // A three-argument tracker either compares named persisted parts (its
+                        // third argument is a SCH_PERSISTED_PARTS) or is staged: it compares a
+                        // commit that must outlive it, one declared earlier in the same function
+                        // (commit names are collected in order).
                         if( tracker.arguments == 3 )
                         {
-                            tracker.commit = topLevelArgumentTexts( code, open )[2];
-                            tracker.commitDeclared = commitVariables[function].count( tracker.commit ) > 0;
+                            const std::string third = topLevelArgumentTexts( code, open )[2];
+
+                            if( startsWith( withoutSpaces( third ), "SCH_PERSISTED_PARTS" ) )
+                            {
+                                tracker.parts = true;
+                            }
+                            else
+                            {
+                                tracker.commit = third;
+                                tracker.commitDeclared = commitVariables[function].count( tracker.commit ) > 0;
+                            }
                         }
 
                         scan.trackers.push_back( tracker );
@@ -1910,10 +1926,11 @@ inline std::vector<OWNER> reviewedOwners()
         { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::doSyncSheetsPins", "m_frame->", 1,
           DISPOSITION::ROUTED, { G_SHEET, G_TEXT }, {}, "Each synchronised pin edit is its own commit." },
         { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "m_frame->", 2, DISPOSITION::ROUTED,
-          { G_SYMBOL, G_FIELD, G_SHEET, G_INSTANCES, G_TEXT, G_LINE, G_JUNCTION, G_GROUP, G_LIB_CACHE }, {},
-          "Importing sheet content or a design block loads cached definitions and renumbers duplicated "
-          "identities outside the placement commit; a cancelled or refused placement is compared with the "
-          "whole saved state and recorded only if it left a change." },
+          { G_FORMAT, G_SYMBOL, G_FIELD, G_SHEET, G_INSTANCES, G_TEXT, G_LINE, G_JUNCTION, G_GROUP, G_LIB_CACHE,
+            G_EMBEDDED, G_PROJECT }, {},
+          "Importing sheet content or a design block loads cached definitions, schematic-wide data and bus "
+          "aliases and renumbers duplicated identities outside the placement commit; a cancelled or refused "
+          "placement compares those parts (see its tracker review) and is recorded only if it left a change." },
         { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "m_frame->", 2,
           DISPOSITION::ROUTED, { G_SYMBOL, G_FIELD, G_SHEET, G_INSTANCES, G_EMBEDDED, G_LIB_CACHE }, {},
           "Sheet Properties compares its staged sheet, whose file name field changes with a non-undoable "
@@ -1927,8 +1944,9 @@ inline std::vector<OWNER> reviewedOwners()
           "A local commit is pushed first; otherwise the swap is staged in the caller's commit." },
         { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "m_frame->", 2,
           DISPOSITION::ROUTED, { G_FORMAT, G_TITLE, G_PAGE, G_EMBEDDED, G_PROJECT }, {},
-          "Page Settings is compared with the whole saved state; only a real change becomes a revision, an "
-          "undo entry and a modified document, and a cancel restores the preview." },
+          "Page Settings compares every screen's paper and title block, the schematic-wide data and the project "
+          "settings (see its tracker review); only a real change becomes a revision, an undo entry and a "
+          "modified document, and a cancel restores the preview." },
         { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::rescueProject", "m_frame->", 1,
           DISPOSITION::ROUTED, { G_FORMAT, G_SYMBOL, G_LIB_CACHE, G_PROJECT }, {},
           "Symbol rescue is compared with the persisted schematic and project state." },
@@ -2242,34 +2260,41 @@ inline std::string identityRepairArgument( const CALL_SITE& aCall )
 
 /// A reviewed SCH_TRACKED_CHANGE declaration site.  Every tracker compares the whole persisted
 /// state (every screen and the project settings, the same groups as the lifecycle digest)
-/// unless it compares only its commit's staged items or named screens and the project
-/// settings, which needs a reason and may need evidence that the owner reports or compares
-/// what lies outside that narrower comparison.
+/// unless it compares only its commit's staged items, named persisted parts and the project
+/// settings, or named screens and the project settings, which needs a reason and may need
+/// evidence that the owner reports or compares what lies outside that narrower comparison.
 struct TRACKER_SITE
 {
     std::string           file;
     std::string           function;
     int                   wholeState;   ///< Two-argument declarations: every screen and the project.
     int                   staged;       ///< Three-argument declarations: only the named commit's items.
+    int                   parts;        ///< Three-argument SCH_PERSISTED_PARTS declarations: named parts.
     int                   screens;      ///< Four-argument declarations: named screens and the project.
-    std::string           reason;       ///< Why the staged or restricted trackers cannot miss a change.
+    std::string           reason;       ///< Why the narrower trackers cannot miss a change.
     std::vector<EVIDENCE> evidence = {}; ///< Code the reason depends on.
 };
 
 
 /// Every tracker declaration.  Whole-state trackers write the whole design twice (on the
-/// largest demo design, seconds per action in a Debug build), so they are only for edits that
-/// can reach any sheet outside a commit; an owner whose every edit is staged compares the
-/// staged items instead, and one that changes only the project settings and named screens
-/// compares those, at a cost that does not grow with the number of sheets.
+/// largest demo design, seconds per action in a Debug build), so they are only for edits whose
+/// reach outside a commit no narrower comparison covers; an owner whose every edit is staged
+/// compares the staged items instead, one whose reach outside its commits is a known set of
+/// persisted parts (pages, schematic-wide data, item identities, named library caches) compares
+/// those parts, and one that changes only the project settings and named screens compares
+/// those, at a cost that does not grow with the size of the sheets.
 inline std::vector<TRACKER_SITE> reviewedTrackers()
 {
+    const std::string STATE_PARTS = "eeschema/api/api_sch_state_groups.cpp";
+    const std::string PAGE_DIALOG = "common/dialogs/dialog_page_settings.cpp";
+    const std::string SCH_PAGE_DIALOG = "eeschema/dialogs/dialog_eeschema_page_settings.cpp";
+
     return {
-        { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 0, 1, 0,
+        { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 0, 1, 0, 0,
           "Every persisted edit is staged: the symbol and the other units it synchronises, with the symbol's "
           "own definition (embedded files and pin maps are applied after the snapshot and the definition is "
           "compared with the item), and other symbols only on a real pin-map edit." },
-        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", 0, 1, 0,
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", 0, 1, 0, 0,
           "Annotation stages every symbol it annotates before annotating it, and the commit keeps the "
           "reference inventory from before, which the staged comparison compares too, so designators handed "
           "out are seen even when every symbol compares unchanged.  Repairing duplicated identities renumbers "
@@ -2284,14 +2309,30 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
             { ANNOTATE_SOURCE, "SCH_EDIT_FRAME::AnnotateSymbols",
               "aCommit->Modify( symbol, sheet->LastScreen() ); ref.Annotate();" },
             { "eeschema/sch_commit.cpp", "SCH_COMMIT::PersistsChange", "if( m_referenceInventoryKept )" } } },
-        { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, 0, "" },
-        { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, 0, "" },
-        { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 0, 1, 0,
+        { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, 0, 0, "" },
+        { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, 0, 0, "" },
+        { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 0, 1, 0, 0,
           "A tuned value is written into the staged symbol's fields and nowhere else." },
-        { "eeschema/tools/assign_footprints.cpp", "SCH_EDITOR_CONTROL::ImportFPAssignments", 1, 0, 0, "" },
-        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::rescueProject", 1, 0, 0, "" },
-        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", 1, 0, 0, "" },
-        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", 0, 2, 0,
+        { "eeschema/tools/assign_footprints.cpp", "SCH_EDITOR_CONTROL::ImportFPAssignments", 1, 0, 0, 0, "" },
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::rescueProject", 1, 0, 0, 0, "" },
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", 0, 0, 1, 0,
+          "Page Settings writes outside any commit, but only the paper and title block of the current screen "
+          "and of each screen it exports them to, the drawing sheet file name (a project setting) and the "
+          "embedded drawing sheet, which choosing a file adds and accepting the dialog removes (schematic "
+          "embedded files).  It writes no item, identity or library cache, so the pages, the schematic-wide "
+          "data and the project settings are everything it can change; each is compared as it is saved.",
+          { { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "SCH_PERSISTED_PARTS::PageSettings()" },
+            { STATE_PARTS, "SCH_PERSISTED_PARTS::PageSettings", "parts.pages = true;" },
+            { STATE_PARTS, "SCH_PERSISTED_PARTS::PageSettings", "parts.schematicWide = true;" },
+            { PAGE_DIALOG, "DIALOG_PAGES_SETTINGS::SavePageSettings", "m_parent->SetDrawingSheetFileName( fileName );" },
+            { PAGE_DIALOG, "DIALOG_PAGES_SETTINGS::SavePageSettings", "m_parent->SetPageSettings( m_pageInfo );" },
+            { PAGE_DIALOG, "DIALOG_PAGES_SETTINGS::SavePageSettings", "m_parent->SetTitleBlock( m_tb );" },
+            { PAGE_DIALOG, "DIALOG_PAGES_SETTINGS::SavePageSettings", "m_embeddedFiles->RemoveFile( name );" },
+            { PAGE_DIALOG, "DIALOG_PAGES_SETTINGS::OnWksFileSelection", "m_embeddedFiles->AddFile( fn, true );" },
+            { SCH_PAGE_DIALOG, "DIALOG_EESCHEMA_PAGE_SETTINGS::onSavePageSettings",
+              "screen->SetPageSettings( m_pageInfo );" },
+            { SCH_PAGE_DIALOG, "DIALOG_EESCHEMA_PAGE_SETTINGS::onSavePageSettings", "screen->SetTitleBlock( tb2 );" } } },
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", 0, 2, 0, 0,
           "Sheet Properties stages its sheet and also compares the sheet's screen and that screen's file name, "
           "which a file change sets outside the commit (a rename that fails later keeps the screen's new file "
           "name while the dialog restores the field) and reports as a change outside the commit; loading the "
@@ -2303,19 +2344,41 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
           { { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "symbol->GetEditFlags() != 0" },
             { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "sheet->GetScreen() != screenBefore" },
             { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "change.ChangedOutsideCommit()" } } },
-        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", 1, 0, 0, "" },
-        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", 0, 0, 1,
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", 0, 0, 1, 0,
+          "Every placed item is staged in the placement commit, which a kept placement pushes (one revision) "
+          "and a cancel reverts, returning the designators its annotation handed out.  Outside that commit, "
+          "loading the file appends into the screen it was chosen for, merging that screen's cached library "
+          "definitions and refreshing an equal one in place; renumbers whichever duplicate of a repeated "
+          "identity comes later in sheet order, on any screen; and adds the embedded files, embedded fonts flag, "
+          "net chains and bus aliases the file carries.  The item identities of every screen, that screen's "
+          "library cache, the schematic-wide data and the project settings (bus aliases, reference inventory) "
+          "are compared as they are saved; the file's child sheets get screens of their own, which leave with "
+          "their placed sheet.",
+          { { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "SCH_PERSISTED_PARTS::SheetImport( sheetPath.LastScreen() )" },
+            { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath," },
+            { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "commit.Added( item, screen );" },
+            { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "commit.Revert();" },
+            { STATE_PARTS, "SCH_PERSISTED_PARTS::SheetImport", "parts.identities = true;" },
+            { STATE_PARTS, "SCH_PERSISTED_PARTS::SheetImport", "parts.schematicWide = true;" },
+            { STATE_PARTS, "SCH_PERSISTED_PARTS::SheetImport", "parts.libraryCaches = { aScreen };" },
+            { "eeschema/sheet.cpp", "SCH_EDIT_FRAME::LoadSheetFromFile", "aSheet->GetScreen()->Append( newScreen );" },
+            { "eeschema/sheet.cpp", "SCH_EDIT_FRAME::LoadSheetFromFile", "allProjectScreens.ReplaceDuplicateTimeStamps();" },
+            { "eeschema/sch_screen.cpp", "SCH_SCREENS::ReplaceDuplicateTimeStamps",
+              "const_cast<KIID&>( item->m_Uuid ) = KIID();" },
+            { "eeschema/sch_screen.cpp", "SCH_SCREEN::Append",
+              "*foundSymbol->GetEmbeddedFiles() = *symbol->GetLibSymbolRef()->GetEmbeddedFiles();" } } },
+        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", 0, 0, 0, 1,
           "Setup changes the project settings and, through its own commit (already a revision when pushed), the "
           "schematic-wide data saved with the first top-level sheet and library caches.  Outside the commit only "
           "the project settings change; connectivity is cleaned up across every sheet only when the bus "
           "aliases, themselves project settings, changed, which is then already a change.",
           { { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "{ Schematic().RootScreen() }" },
             { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "if( oldAliases != newAliases )" } } },
-        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", 0, 0, 1,
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", 0, 0, 0, 1,
           "The simulation settings dialog writes only the ngspice settings, which are project settings; the "
           "analysis command is workbook state and no sheet is edited.",
           { { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", "{ schematic.RootScreen() }" } } },
-        { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, 0, 0, "" },
+        { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, 0, 0, 0, "" },
     };
 }
 
@@ -2877,6 +2940,14 @@ void FRAME::Received( SCH_TRACKED_CHANGE& aChange )
     OnModify();
 }
 
+void FRAME::PartsTracked()
+{
+    SCH_TRACKED_CHANGE parts( Schematic(), "Page", SCH_PERSISTED_PARTS::PageSettings() );
+
+    if( parts.Complete() )
+        OnModify();
+}
+
 void FRAME::StagedTracker( SCH_COMMIT* aOuter )
 {
     SCH_TRACKED_CHANGE early( Schematic(), "Declared before its commit", late );
@@ -2944,10 +3015,11 @@ void WRITER::save()
             staged.push_back( &call );
     }
 
-    BOOST_REQUIRE_EQUAL( calls.size(), 11u );
+    BOOST_REQUIRE_EQUAL( calls.size(), 12u );
     BOOST_REQUIRE_EQUAL( staged.size(), 2u );
 
-    for( const char* routed : { "FRAME::Routed", "FRAME::Tracked", "FRAME::ScreenTracked", "FRAME::Received" } )
+    for( const char* routed : { "FRAME::Routed", "FRAME::Tracked", "FRAME::ScreenTracked", "FRAME::Received",
+                                "FRAME::PartsTracked" } )
         BOOST_CHECK_MESSAGE( calls.count( routed ) && scan.Routed( *calls[routed] ), routed );
 
     // A push in a sibling branch, only in a nested block or lambda, or after the call does not
@@ -2974,16 +3046,20 @@ void WRITER::save()
     for( const TRACKER& tracker : scan.trackers )
         trackers[tracker.function + " " + tracker.variable] = tracker.arguments;
 
-    BOOST_CHECK_EQUAL( trackers.size(), 5u );
+    BOOST_CHECK_EQUAL( trackers.size(), 6u );
     BOOST_CHECK_EQUAL( trackers["FRAME::Tracked change"], 2 );
     BOOST_CHECK_EQUAL( trackers["FRAME::ScreenTracked placement"], 4 );
     BOOST_CHECK_EQUAL( trackers["FRAME::RouteAfterCall change"], 2 );
     BOOST_CHECK_EQUAL( trackers["FRAME::StagedTracker staged"], 3 );
     BOOST_CHECK_EQUAL( trackers["FRAME::StagedTracker early"], 3 );
+    BOOST_CHECK_EQUAL( trackers["FRAME::PartsTracked parts"], 3 );
 
-    // A staged tracker must compare a commit declared before it, which therefore outlives it.
+    // A staged tracker must compare a commit declared before it, which therefore outlives it; a
+    // three-argument tracker naming persisted parts is the parts form and compares no commit.
     for( const TRACKER& tracker : scan.trackers )
     {
+        BOOST_CHECK_MESSAGE( tracker.parts == ( tracker.function == "FRAME::PartsTracked" ), tracker.variable );
+
         if( tracker.function != "FRAME::StagedTracker" )
             continue;
 
@@ -3269,14 +3345,14 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
     ORACLE_FIXTURE oracle;
     BOOST_REQUIRE( !oracle.root.empty() );
 
-    // Whole-state, staged and screen-restricted declarations per function.
-    std::map<std::string, std::array<int, 3>> found;
+    // Whole-state, staged, part-restricted and screen-restricted declarations per function.
+    std::map<std::string, std::array<int, 4>> found;
 
     for( const std::string& relative : oracle.OwnerFiles() )
     {
         for( const TRACKER& tracker : oracle.Scan( relative ).trackers )
         {
-            std::array<int, 3>& counts = found[relative + " | " + tracker.function];
+            std::array<int, 4>& counts = found[relative + " | " + tracker.function];
             const std::string   where = relative + " line " + std::to_string( tracker.line );
 
             BOOST_CHECK_MESSAGE( tracker.arguments >= 2 && tracker.arguments <= 4,
@@ -3284,12 +3360,16 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
 
             // The staged form compares its commit when it completes, so the commit must be a
             // SCH_COMMIT declared before the tracker and destroyed after it.
-            BOOST_CHECK_MESSAGE( tracker.arguments != 3 || tracker.commitDeclared,
+            BOOST_CHECK_MESSAGE( tracker.arguments != 3 || tracker.parts || tracker.commitDeclared,
                                  where + " stages its tracker on '" + tracker.commit
                                          + "', which is not a SCH_COMMIT declared before it." );
 
-            if( tracker.arguments >= 2 && tracker.arguments <= 4 )
-                counts[tracker.arguments - 2]++;
+            if( tracker.arguments == 2 )
+                counts[0]++;
+            else if( tracker.arguments == 3 )
+                counts[tracker.parts ? 2 : 1]++;
+            else if( tracker.arguments == 4 )
+                counts[3]++;
         }
     }
 
@@ -3298,18 +3378,19 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
     for( const TRACKER_SITE& site : reviewedTrackers() )
     {
         const std::string        key = site.file + " | " + site.function;
-        const std::array<int, 3> expected{ site.wholeState, site.staged, site.screens };
+        const std::array<int, 4> expected{ site.wholeState, site.staged, site.parts, site.screens };
         reviewed.insert( key );
 
         BOOST_CHECK_MESSAGE( found[key] == expected,
                              key + " declares " + std::to_string( found[key][0] ) + " whole-state, "
-                                     + std::to_string( found[key][1] ) + " staged and "
-                                     + std::to_string( found[key][2] ) + " screen-restricted tracker(s); the "
+                                     + std::to_string( found[key][1] ) + " staged, "
+                                     + std::to_string( found[key][2] ) + " part-restricted and "
+                                     + std::to_string( found[key][3] ) + " screen-restricted tracker(s); the "
                                      "review covers " + std::to_string( site.wholeState ) + ", "
-                                     + std::to_string( site.staged ) + " and " + std::to_string( site.screens )
-                                     + "." );
+                                     + std::to_string( site.staged ) + ", " + std::to_string( site.parts )
+                                     + " and " + std::to_string( site.screens ) + "." );
 
-        BOOST_CHECK_MESSAGE( ( site.screens == 0 && site.staged == 0 ) || !site.reason.empty(),
+        BOOST_CHECK_MESSAGE( ( site.screens == 0 && site.staged == 0 && site.parts == 0 ) || !site.reason.empty(),
                              key + " stages or restricts a tracker without a reason." );
 
         for( const EVIDENCE& evidence : site.evidence )
@@ -4000,6 +4081,190 @@ BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
 }
 
 
+/// A child sheet below the first top-level sheet, with a screen of its own, so a comparison has a
+/// screen other than the one an owner starts on.
+inline SCH_SCREEN* addChildSheet( SCHEMATIC& aSchematic, const wxString& aFileName )
+{
+    auto* sheet = new SCH_SHEET( &aSchematic );
+    auto* screen = new SCH_SCREEN( &aSchematic );
+    sheet->SetScreen( screen );
+    sheet->GetField( FIELD_T::SHEET_NAME )->SetText( wxS( "Tracked child" ) );
+    sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( aFileName );
+    screen->SetFileName( aFileName );
+    aSchematic.RootScreen()->Append( sheet );
+    aSchematic.RefreshHierarchy();
+    return screen;
+}
+
+
+/// Complete a part-restricted tracker declared with @a aParts around @a aEdit.
+template <typename EDIT>
+inline bool partsChanged( SCHEMATIC& aSchematic, const SCH_PERSISTED_PARTS& aParts, EDIT aEdit )
+{
+    SCH_TRACKED_CHANGE change( aSchematic, "Parts", aParts );
+    aEdit();
+    return change.Complete();
+}
+
+
+/**
+ * Page Settings compares every screen's paper and title block, the schematic-wide data and the
+ * project settings instead of writing the whole design.  The rendered journey (NativeEventJourney)
+ * proves a paper change, a cancel and an unchanged OK; this checks the parts the journey cannot
+ * reach through the dialog on its fixture: a title block exported to another sheet, the drawing
+ * sheet file name, an embedded drawing sheet, and that what the parts do not name (items) is not
+ * written at all.  Unit level because it pins the comparison's own coverage of each part.
+ */
+BOOST_FIXTURE_TEST_CASE( PageSettingsPartsCompareWhatTheDialogReaches, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC&                doc = *schematic;
+    SCH_SCREEN*               child = addChildSheet( doc, wxS( "tracked_child.kicad_sch" ) );
+    const SCH_PERSISTED_PARTS parts = SCH_PERSISTED_PARTS::PageSettings();
+
+    // Precision: nothing changed, nothing recorded.
+    BOOST_CHECK( !partsChanged( doc, parts, [] {} ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+
+    // Recall: a title block exported to a sheet other than the current one.
+    const TITLE_BLOCK title = child->GetTitleBlock();
+    BOOST_CHECK( partsChanged( doc, parts,
+                               [&]
+                               {
+                                   TITLE_BLOCK exported = title;
+                                   exported.SetComment( 0, wxS( "exported" ) );
+                                   child->SetTitleBlock( exported );
+                               } ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+
+    // Setting back the saved value is a change too; setting the same value is none.
+    BOOST_CHECK( partsChanged( doc, parts, [&] { child->SetTitleBlock( title ); } ) );
+    BOOST_CHECK( !partsChanged( doc, parts, [&] { child->SetTitleBlock( title ); } ) );
+
+    // Recall: the current screen's paper.
+    const PAGE_INFO paper = doc.RootScreen()->GetPageSettings();
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.RootScreen()->SetPageSettings( PAGE_INFO( PAGE_SIZE_TYPE::A3 ) ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.RootScreen()->SetPageSettings( paper ); } ) );
+
+    // Recall: the drawing sheet file name, a project setting.
+    const wxString drawingSheet = doc.Settings().m_SchDrawingSheetFileName;
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.Settings().m_SchDrawingSheetFileName = wxS( "tracked.kicad_wks" ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.Settings().m_SchDrawingSheetFileName = drawingSheet; } ) );
+
+    // Recall: choosing a drawing sheet to embed adds it to the schematic's embedded files, even
+    // when the dialog is then cancelled; accepting removes the one it replaces.
+    auto embedded = std::make_unique<EMBEDDED_FILES::EMBEDDED_FILE>();
+    embedded->name = wxS( "tracked.kicad_wks" );
+    embedded->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::WORKSHEET;
+    embedded->decompressedData = { '(', 'k', 'i', 'c', 'a', 'd', '_', 'w', 'k', 's', ')' };
+    BOOST_REQUIRE( EMBEDDED_FILES::CompressAndEncode( *embedded ) == EMBEDDED_FILES::RETURN_CODE::OK );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.GetEmbeddedFiles()->AddFile( embedded.release() ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.GetEmbeddedFiles()->RemoveFile( wxS( "tracked.kicad_wks" ) ); } ) );
+
+    // The parts name no item, so an item is never written: the owner's review in the oracle
+    // requires that Page Settings cannot make one.
+    BOOST_CHECK( !partsChanged( doc, parts,
+                                [&] { child->Append( new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "not a page part" ) ) ); } ) );
+
+    // A tracker must name the parts it compares.
+    BOOST_CHECK_THROW( partsChanged( doc, SCH_PERSISTED_PARTS(), [] {} ), std::invalid_argument );
+}
+
+
+/**
+ * Import Sheet and design block placement compare the identities of every screen's items, the
+ * library cache of the screen they load into, the schematic-wide data and the project settings.
+ * The rendered journey proves a kept placement, a cancel that left nothing (with a new library
+ * definition and a handed-out designator), and a cancel that renumbered an item on another sheet;
+ * this checks the parts the journey's fixture files cannot reach: a cached definition refreshed in
+ * place, embedded files, fonts, net chains and bus aliases a file carries, the reference
+ * inventory, and a screen that is not part of the design.
+ */
+BOOST_FIXTURE_TEST_CASE( SheetImportPartsCompareWhatLoadingReaches, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC&  doc = *schematic;
+    SCH_SCREEN* target = doc.RootScreen();
+    SCH_SCREEN* child = addChildSheet( doc, wxS( "tracked_import_child.kicad_sch" ) );
+    auto*       note = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "child note" ) );
+    child->Append( note );
+
+    LIB_SYMBOL library( wxS( "Imported" ) );
+    library.SetLibId( LIB_ID( wxS( "Automation" ), wxS( "Imported" ) ) );
+    auto* symbol = new SCH_SYMBOL;
+    symbol->SetLibId( library.GetLibId() );
+    symbol->SetLibSymbol( new LIB_SYMBOL( library ) );
+    symbol->SetSchSymbolLibraryName( wxS( "Automation:Imported" ) );
+    target->Append( symbol );
+    BOOST_REQUIRE( target->GetLibSymbols().count( wxS( "Automation:Imported" ) ) );
+
+    const SCH_PERSISTED_PARTS parts = SCH_PERSISTED_PARTS::SheetImport( target );
+
+    // Precision: nothing changed, and a placed item that the cancel removed again.
+    BOOST_CHECK( !partsChanged( doc, parts, [] {} ) );
+
+    BOOST_CHECK( !partsChanged( doc, parts,
+                                [&]
+                                {
+                                    auto* placed = new SCH_TEXT( VECTOR2I( 2540000, 0 ), wxS( "placed" ) );
+                                    target->Append( placed );
+                                    target->Remove( placed );
+                                    delete placed;
+                                } ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+
+    // Recall: an existing item on another sheet renumbered because the file repeated its identity.
+    BOOST_CHECK( partsChanged( doc, parts, [&] { const_cast<KIID&>( note->m_Uuid ) = KIID(); } ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+
+    // Recall: an item left on the screen.
+    BOOST_CHECK( partsChanged( doc, parts,
+                               [&] { target->Append( new SCH_TEXT( VECTOR2I( 5080000, 0 ), wxS( "left" ) ) ); } ) );
+
+    // Recall: an equal cached definition refreshed in place, and precision when it is put back.
+    LIB_SYMBOL* cached = target->GetLibSymbols().at( wxS( "Automation:Imported" ) );
+    const wxString value = cached->GetValueField().GetText();
+    BOOST_CHECK( partsChanged( doc, parts, [&] { cached->GetValueField().SetText( wxS( "refreshed" ) ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { cached->GetValueField().SetText( value ); } ) );
+    BOOST_CHECK( !partsChanged( doc, parts, [&] { cached->GetValueField().SetText( value ); } ) );
+
+    // Recall: the schematic-wide data a loaded file carries.
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.GetEmbeddedFiles()->SetAreFontsEmbedded( true ); } ) );
+
+    CONNECTION_GRAPH::NET_CHAIN_DEFINITION chain;
+    chain.terminals = { { wxS( "R1" ), wxS( "1" ) }, { wxS( "R2" ), wxS( "2" ) } };
+    chain.excludedNets = { wxS( "Tracked excluded net" ) };
+    BOOST_CHECK( partsChanged( doc, parts,
+                               [&] { doc.ConnectionGraph()->SetNetChainDefinitions( { { wxS( "TRACKED" ), chain } } ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.ConnectionGraph()->SetNetChainDefinitions( {} ); } ) );
+
+    // Recall: project settings the load changes, bus aliases and the reference inventory.
+    auto alias = std::make_shared<BUS_ALIAS>();
+    alias->SetName( wxS( "TRACKED" ) );
+    alias->AddMember( wxS( "A" ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.AddBusAlias( alias ); } ) );
+    BOOST_CHECK( partsChanged( doc, parts, [&] { doc.SetBusAliases( {} ); } ) );
+
+    std::shared_ptr<REFDES_TRACKER>& inventory = doc.Settings().m_refDesTracker;
+
+    if( !inventory )
+        inventory = std::make_shared<REFDES_TRACKER>();
+
+    BOOST_CHECK( partsChanged( doc, parts, [&] { inventory->Insert( "R7" ); } ) );
+    BOOST_CHECK( !partsChanged( doc, parts, [] {} ) );
+
+    // A screen that is not part of the design cannot be captured, so the comparison counts it
+    // as changed rather than comparing nothing.
+    SCH_SCREEN outside;
+    BOOST_CHECK( partsChanged( doc, SCH_PERSISTED_PARTS::SheetImport( &outside ), [] {} ) );
+    BOOST_CHECK_THROW( SCH_PERSISTED_PARTS::SheetImport( nullptr ), std::invalid_argument );
+
+    // A replaced document is not the owner's edit: nothing is recorded.
+    const uint64_t recorded = doc.ChangeJournal().Sequence();
+    BOOST_CHECK( recorded > 0 );
+    BOOST_CHECK( !partsChanged( doc, parts, [&] { doc.CreateDefaultScreens(); } ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+}
+
+
 /// A placement, paste or duplication that is cancelled returns the designators its annotation
 /// handed out: the reference inventory kept before annotating is restored.  The rendered journey
 /// proves this for a cancelled duplication; this checks the keep and restore themselves,
@@ -4310,9 +4575,11 @@ BOOST_FIXTURE_TEST_CASE( ApiGlobalLabelsKeepTheirReferenceFieldThroughSetup, TRA
 
 
 /**
- * The cost of what a tracked owner compares, on the largest demo design (vme-wren).  It is a
- * measurement, not a pass/fail check, so it runs only when asked for by name: the native
- * foundation journey runs it and keeps its output with the journey evidence.
+ * The cost of what a tracked owner compares, on the largest demo design (vme-wren), including
+ * the per-action comparison of Page Settings and of a cancelled sheet import before (the
+ * whole-state tracker they used) and after (the persisted parts they now compare).  It is a
+ * measurement, not a pass/fail check of behaviour, so it runs only when asked for by name: the
+ * native foundation journey runs it and keeps its output with the journey evidence.
  */
 BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::disabled() )
 {
@@ -4434,6 +4701,80 @@ BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::d
 
     commit.Abandon();
 
+    // Per action, before and after.  Page Settings and a cancelled or refused sheet import used to
+    // compare the whole saved state around the action (a whole-state tracker: two whole-state
+    // captures); they now compare only the persisted parts they can reach.  Both comparisons are
+    // timed around the same edit: a real title block change on the largest screen for Page
+    // Settings, which each comparison must find, and an import that left nothing into the screen
+    // with the heaviest library cache, which neither may report.
+    SCH_SCREEN* heaviestCache = nullptr;
+    int         heaviestCachePins = -1;
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy() )
+    {
+        int pins = 0;
+
+        for( const auto& [name, definition] : path.LastScreen()->GetLibSymbols() )
+            pins += definition ? definition->GetPinCount() : 0;
+
+        if( pins > heaviestCachePins )
+        {
+            heaviestCache = path.LastScreen();
+            heaviestCachePins = pins;
+        }
+    }
+
+    BOOST_REQUIRE( heaviestCache );
+    const TITLE_BLOCK savedTitle = largest->GetTitleBlock();
+    int               edits = 0;
+
+    auto pageAction = [&]( SCH_TRACKED_CHANGE& aChange )
+    {
+        TITLE_BLOCK edited = savedTitle;
+        edited.SetComment( 8, wxString::Format( wxS( "tracking cost %d" ), ++edits ) );
+        largest->SetTitleBlock( edited );
+        BOOST_CHECK( aChange.Complete() );
+    };
+
+    std::vector<double> pageWhole, pageParts, importWhole, importParts;
+
+    for( int sample = 0; sample < 3; ++sample )
+    {
+        auto started = std::chrono::steady_clock::now();
+        {
+            SCH_TRACKED_CHANGE change( *schematic, "Edit Page Settings" );
+            pageAction( change );
+        }
+        pageWhole.push_back( elapsedMs( started ) );
+
+        started = std::chrono::steady_clock::now();
+        {
+            SCH_TRACKED_CHANGE change( *schematic, "Import Schematic Sheet Content" );
+            BOOST_CHECK( !change.Complete() );
+        }
+        importWhole.push_back( elapsedMs( started ) );
+    }
+
+    for( int sample = 0; sample < 5; ++sample )
+    {
+        auto started = std::chrono::steady_clock::now();
+        {
+            SCH_TRACKED_CHANGE change( *schematic, "Edit Page Settings", SCH_PERSISTED_PARTS::PageSettings() );
+            pageAction( change );
+        }
+        pageParts.push_back( elapsedMs( started ) );
+
+        started = std::chrono::steady_clock::now();
+        {
+            SCH_TRACKED_CHANGE change( *schematic, "Import Schematic Sheet Content",
+                                       SCH_PERSISTED_PARTS::SheetImport( heaviestCache ) );
+            BOOST_CHECK( !change.Complete() );
+        }
+        importParts.push_back( elapsedMs( started ) );
+    }
+
+    largest->SetTitleBlock( savedTitle );
+
     // One line per measurement, read by the journey that keeps this output as evidence.
     std::cout << std::fixed << std::setprecision( 1 )
               << "tracking-cost design=vme-wren screens=" << captured.WrittenSheets().size()
@@ -4444,13 +4785,25 @@ BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::d
               << "tracking-cost settings_and_first_sheet_capture_ms " << timing( settingsAndFirst )
               << " items=" << first->Items().size() << "\n"
               << "tracking-cost staged_symbol_compare_ms " << timing( staged ) << " pins=" << heaviestPins
+              << "\n"
+              << "tracking-cost page_settings_whole_state_compare_ms " << timing( pageWhole )
+              << " (before: two whole-state captures)\n"
+              << "tracking-cost page_settings_compare_ms " << timing( pageParts ) << " screens="
+              << captured.WrittenSheets().size() << "\n"
+              << "tracking-cost sheet_import_whole_state_compare_ms " << timing( importWhole )
+              << " (before: two whole-state captures)\n"
+              << "tracking-cost sheet_import_compare_ms " << timing( importParts )
+              << " cache_symbols=" << heaviestCache->GetLibSymbols().size() << " cache_pins=" << heaviestCachePins
               << "\n";
     std::cout.flush();
 
     // A staged comparison is the point of the staged form: it must stay well below the capture,
-    // and so must the restricted capture of the settings and the first sheet.
+    // and so must the restricted capture of the settings and the first sheet.  Page Settings and a
+    // sheet import must now cost a small fraction of the whole-state comparison they replaced.
     BOOST_CHECK_LT( median( staged ) * 10, median( whole ) );
     BOOST_CHECK_LT( median( settingsAndFirst ), median( whole ) );
+    BOOST_CHECK_LT( median( pageParts ) * 10, median( pageWhole ) );
+    BOOST_CHECK_LT( median( importParts ) * 10, median( importWhole ) );
 }
 
 

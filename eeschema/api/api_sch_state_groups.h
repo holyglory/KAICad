@@ -5,6 +5,8 @@
 #pragma once
 
 #include <api/native_state_digest.h>
+#include <connection_graph.h>
+#include <kiid.h>
 
 #include <cstdint>
 #include <map>
@@ -79,6 +81,82 @@ private:
 
 
 /**
+ * Named parts of the persisted state, for an owner that can reach nothing else outside a commit.
+ * Each part is taken exactly as the schematic writer saves it, so comparing the parts costs what
+ * the parts cost, not what the design costs, and a part whose saved form is unchanged is never
+ * reported as changed.  The project settings are always compared (the same group, computed the
+ * same way, as the lifecycle digest).
+ */
+struct SCH_PERSISTED_PARTS
+{
+    /// Every loaded screen's paper and title block, as each screen saves them ("(paper" and
+    /// "(title_block").
+    bool pages = false;
+
+    /// What the first top-level sheet saves once for the whole schematic: the embedded fonts
+    /// flag, the embedded files and the net chains.
+    bool schematicWide = false;
+
+    /// The identity of every saved item on every loaded screen.  Renumbering an item changes its
+    /// identity in place, and an item left behind adds one; the items themselves are not written.
+    bool identities = false;
+
+    /// Screens whose cached library definitions ("(lib_symbols") are compared.
+    std::vector<const SCH_SCREEN*> libraryCaches;
+
+    /**
+     * Page Settings.  The dialog sets the current screen's paper and title block and, when asked
+     * to export them, those of every other screen; it sets the drawing sheet file name (a project
+     * setting) and adds and removes the embedded drawing sheet (schematic embedded files).  It
+     * writes no item, library cache or other screen state, so these parts are all it can change.
+     */
+    static SCH_PERSISTED_PARTS PageSettings();
+
+    /**
+     * Import Sheet and design block placement into @a aScreen.  Every placed item is staged in
+     * the placement commit, which a cancel reverts; what loading the file changes outside that
+     * commit is limited to: the identity of an existing item on any screen that a loaded item
+     * duplicates (renumbered), @a aScreen's cached library definitions (merged, and refreshed in
+     * place when equal), the schematic-wide embedded files, embedded fonts flag and net chains
+     * the loaded file carries, and the project's bus aliases and reference inventory (annotating
+     * the placed symbols).  Loaded child sheets get screens of their own that leave with their
+     * placed sheet.
+     */
+    static SCH_PERSISTED_PARTS SheetImport( const SCH_SCREEN* aScreen );
+};
+
+
+/**
+ * A snapshot of the named parts of the persisted state (SCH_PERSISTED_PARTS).  Unlike the
+ * whole-state groups it keeps each part's saved form (or item identities and net chain
+ * definitions) rather than a digest, because the parts are small and hashing would cost more
+ * than comparing them.
+ */
+class SCH_PERSISTED_PARTS_STATE
+{
+public:
+    /// Capture @a aParts of @a aSchematic.  Throws when a part cannot be written or a named
+    /// screen is not part of the schematic.
+    static SCH_PERSISTED_PARTS_STATE Capture( SCHEMATIC& aSchematic, const SCH_PERSISTED_PARTS& aParts );
+
+    bool operator==( const SCH_PERSISTED_PARTS_STATE& aOther ) const;
+    bool operator!=( const SCH_PERSISTED_PARTS_STATE& aOther ) const { return !( *this == aOther ); }
+
+    /// Names of the parts that were added, removed or changed in @a aAfter.
+    std::vector<std::string> ChangedParts( const SCH_PERSISTED_PARTS_STATE& aAfter ) const;
+
+    /// Bytes kept by the snapshot; the size of what one capture writes.
+    uint64_t Bytes() const { return m_bytes; }
+
+private:
+    std::map<std::string, std::string>       m_texts;       ///< Part name to its saved form.
+    std::map<std::string, std::vector<KIID>> m_identities;  ///< Screen identity to sorted item identities.
+    std::optional<std::map<wxString, CONNECTION_GRAPH::NET_CHAIN_DEFINITION>> m_netChains;
+    uint64_t                                 m_bytes = 0;
+};
+
+
+/**
  * One native owner that can change persisted schematic state.
  *
  * Construct it before the owner changes anything and call Complete() (or PushOrRevert())
@@ -87,15 +165,18 @@ private:
  * cancelled, rejected and unchanged operations never become revisions.  The destructor
  * completes an owner that returned early.
  *
- * Three forms, each reviewed by the change-tracking oracle by its argument count:
+ * Four forms, each reviewed by the change-tracking oracle by its argument list:
  *  - two arguments: compares the whole persisted state (every screen and the project
- *    settings).  Only for edits that can reach any sheet outside a commit, because each
- *    capture writes the whole design;
- *  - three arguments: an owner whose every persisted edit is staged in one SCH_COMMIT.
- *    Only the staged items are compared with the copies the commit saved, so the cost
- *    follows the edit, not the size of the design.  Declare it after the commit.  An edit
+ *    settings).  Only for edits whose reach outside a commit no narrower form covers, because
+ *    each capture writes the whole design;
+ *  - three arguments, a commit: an owner whose every persisted edit is staged in one
+ *    SCH_COMMIT.  Only the staged items are compared with the copies the commit saved, so the
+ *    cost follows the edit, not the size of the design.  Declare it after the commit.  An edit
  *    the owner makes outside the commit is counted only when it reports it
  *    (ChangedOutsideCommit());
+ *  - three arguments, SCH_PERSISTED_PARTS: named parts of the persisted state and the project
+ *    settings, for an owner whose reach outside its commits is exactly those parts (Page
+ *    Settings, sheet import);
  *  - four arguments: named screens and the project settings, for an owner that provably
  *    changes nothing else.
  */
@@ -120,6 +201,14 @@ public:
      * (see SCH_COMMIT::PersistsChange).  @a aCommit must outlive this tracker.
      */
     SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription, SCH_COMMIT& aCommit );
+
+    /**
+     * Track only @a aParts and the project settings from now on.  Only for an owner whose every
+     * persisted edit outside a commit lies in those parts, and whose commits either record
+     * themselves when pushed or are reverted exactly; the change-tracking oracle reviews every
+     * such use.  A part that cannot be captured counts as changed.
+     */
+    SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription, SCH_PERSISTED_PARTS aParts );
 
     /**
      * Track only @a aScreens and the project settings, as part of a user action that began
@@ -165,18 +254,21 @@ public:
     bool PushOrRevert( SCH_COMMIT& aCommit, const wxString& aMessage, int aCommitFlags = 0 );
 
 private:
-    std::optional<SCH_STATE_GROUPS> capture() const;
-    bool                            replaced() const;
-    bool                            recordedSinceStart() const;
-    bool                            changedSinceStart();
-    void                            recordIfUntracked( bool aChanged );
+    std::optional<SCH_STATE_GROUPS>          capture() const;
+    std::optional<SCH_PERSISTED_PARTS_STATE> captureParts() const;
+    bool                                     replaced() const;
+    bool                                     recordedSinceStart() const;
+    bool                                     changedSinceStart();
+    void                                     recordIfUntracked( bool aChanged );
 
-    SCHEMATIC&                      m_schematic;
-    std::string                     m_description;
-    std::vector<const SCH_SCREEN*>  m_screens;       ///< Empty: the whole persisted state.
-    SCH_COMMIT*                     m_commit = nullptr; ///< Staged form: the compared commit.
-    MARK                            m_start;
-    std::optional<SCH_STATE_GROUPS> m_before;
-    bool                            m_changedOutsideCommit = false;
-    bool                            m_complete = false;
+    SCHEMATIC&                               m_schematic;
+    std::string                              m_description;
+    std::vector<const SCH_SCREEN*>           m_screens;       ///< Empty: the whole persisted state.
+    SCH_COMMIT*                              m_commit = nullptr; ///< Staged form: the compared commit.
+    std::optional<SCH_PERSISTED_PARTS>       m_parts;         ///< Parts form: the compared parts.
+    MARK                                     m_start;
+    std::optional<SCH_STATE_GROUPS>          m_before;
+    std::optional<SCH_PERSISTED_PARTS_STATE> m_partsBefore;
+    bool                                     m_changedOutsideCommit = false;
+    bool                                     m_complete = false;
 };

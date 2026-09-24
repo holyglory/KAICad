@@ -329,9 +329,12 @@ public static class SchematicConnectedAddition
         if (receipt.Status == CheckedSchematicBatchStatus.CsbsRejected
             && receipt.ErrorCode == SchematicConnectionErrors.ConnectivityPostconditionFailed)
         {
-            // §9.3: accept only a verified rejection of exactly this batch that left KiCad unchanged.
-            if (batch is null || saved.State.PendingPublication is not null || receipt.OperationId != batch.OperationId
+            // §9.3: accept only a verified rejection of exactly this batch that left KiCad unchanged: the editor's state
+            // before and after the rejected request must both be the state the request was journaled against.
+            var guard = saved.State.PendingNativeState;
+            if (batch is null || guard is null || saved.State.PendingPublication is not null || receipt.OperationId != batch.OperationId
                 || !Equals(receipt.Document, batch.Document) || !receipt.ExpectedRequestVerified || receipt.Result is not null
+                || !Equals(receipt.ObservedBefore, guard) || !Equals(receipt.ObservedAfter, guard)
                 || !IsRealization(saved.State))
                 throw new AutomationException(SchematicConnectionErrors.InvalidRealizationRejection,
                     "KiCad reported a connection mismatch that does not prove the pending realization was left unapplied; the pending operation is kept for inspection.");

@@ -339,9 +339,17 @@ public static class SchematicConnectionRealizer
             foreach (var (island, sheet, port) in SheetPinOrder(screen, islands)) SheetPinStub(screen, island, sheet, port);
             foreach (var island in islands)
             {
-                if (island.Island.UplinkSheetSymbolId is not null && !island.UplinkLabelled)
-                    throw Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
-                        + island.Island.SheetPathKey + ", but every stub there ends on a power symbol, so none can carry it.");
+                // §6.3 (d) with (e): the island's first stub carries its hierarchical label unless that stub attaches
+                // to a same-net power symbol, which leaves no room for a label (the power pin sits on the stub's line,
+                // so every longer stub runs through it); then the next labelled stub carries it. When every stub
+                // attaches, no stub can carry it (a CN-1 clarification requested from the integration owner).
+                if (UplinkPending(island))
+                    throw island.Attached
+                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                            + island.Island.SheetPathKey + ", but every new stub there ends on one of its power symbols, so none has room for the label. "
+                            + "Move a power symbol away from the new pins in the schematic editor.")
+                        : Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The plan crosses net '" + NetName(island)
+                            + "' into its parent sheet but gives sheet " + island.Island.SheetPathKey + " nothing to carry its hierarchical label.");
                 outcomes.Add(new(island.Island.NetId, record.ScreenId, views[0].Path, ConnectionRealizationStrategy.LabelStub,
                     island.Generated.ToArray(), island.Attached, null));
                 if (island.Joined)
@@ -361,15 +369,31 @@ public static class SchematicConnectionRealizer
             ExpectedRevision = revision.Clone()
         };
 
+        // Every refusal by the editor's measurement becomes a §13 realization code; none escapes as a raw native error.
         private async Task<SchematicPlacementGeometry> Measure(MeasureSchematicPlacement request)
         {
+            string sheet = PathOf(request.Document.SheetPath);
             try { return await measure(request, token) ?? throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "The editor returned no measurement."); }
-            catch (NativeApiException error) when (error.Message.Contains("unsupported fields", StringComparison.Ordinal))
-            { throw Error(SchematicConnectionErrors.RealizationMeasurementUnsupported, "This KiCad cannot measure the generated labels: " + error.Message); }
+            catch (NativeApiException error) when (error.Message.Contains("unsupported fields", StringComparison.Ordinal)
+                || error.Status == UnhandledStatus)
+            { throw Error(SchematicConnectionErrors.RealizationMeasurementUnsupported, "This KiCad cannot measure sheet " + sheet + " for generated connections: " + error.Message); }
             catch (NativeApiException error) when (error.Message.Contains("revision", StringComparison.Ordinal)
-                || error.Message.Contains("changed during", StringComparison.Ordinal))
-            { throw Error(SchematicConnectionErrors.RealizationMeasurementStale, "The schematic changed before it could be measured: " + error.Message); }
+                || error.Message.Contains("changed during", StringComparison.Ordinal) || error.Status is BusyStatus or NotReadyStatus)
+            { throw Error(SchematicConnectionErrors.RealizationMeasurementStale, "The schematic changed or was busy before sheet " + sheet + " could be measured: " + error.Message); }
+            catch (NativeApiException error) when (error.Message.Contains("no resolved native definition", StringComparison.Ordinal))
+            {
+                // KiCad refuses to measure a sheet holding a symbol whose library definition it cannot resolve, so no
+                // pin on that sheet can be placed exactly, even when the unresolved symbol is not being connected.
+                throw Error(SchematicConnectionErrors.RealizationPinGeometryIncomplete, "KiCad cannot measure sheet " + sheet
+                    + " because a symbol there has no resolved library definition. Update or rescue that symbol in the schematic editor first: " + error.Message);
+            }
+            catch (NativeApiException error)
+            { throw Error(SchematicConnectionErrors.RealizationMeasurementUnsupported, "KiCad refused to measure sheet " + sheet + " for generated connections: " + error.Message); }
         }
+
+        // Native statuses of refusals that do not describe the measurement itself.
+        private const int NotReadyStatus = (int)Kiapi.Common.ApiStatusCode.AsNotReady, UnhandledStatus = (int)Kiapi.Common.ApiStatusCode.AsUnhandled,
+            BusyStatus = (int)Kiapi.Common.ApiStatusCode.AsBusy;
 
         private void Validate(MeasureSchematicPlacement request, SchematicPlacementGeometry measured, PathView view, Guid screenId)
         {
@@ -475,8 +499,23 @@ public static class SchematicConnectionRealizer
         }
 
         // §6.2: the pins realization draws from or confirms must be completely measured and identical on every instance.
+        // Every created symbol must report complete pins as well, even one with no connection: §6.3 (g) must prove
+        // that none of its pins lands on an existing connection point, which it cannot do for pins it cannot see.
         private void RequirePins(Screen screen, List<IslandState> islands)
         {
+            foreach (var view in screen.Views)
+            foreach (var symbol in view.Candidates.Keys.Order())
+            {
+                if (!view.Pins.TryGetValue(symbol, out var geometry))
+                    throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "The measurement of sheet " + view.Path
+                        + " has no pin geometry for new symbol " + symbol.ToString("D") + ".");
+                if (!geometry.Complete)
+                    throw Error(geometry.IncompleteReason == SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved
+                            ? SchematicConnectionErrors.RealizationVariantPinIdentityUnresolved : SchematicConnectionErrors.RealizationPinGeometryIncomplete,
+                        "KiCad cannot report exact pin positions for new symbol " + symbol.ToString("D") + " on sheet " + view.Path
+                        + ", so it cannot prove the symbol touches no existing connection"
+                        + (geometry.Limitations.Count == 0 ? "." : ": " + string.Join("; ", geometry.Limitations)));
+            }
             foreach (var island in islands)
             {
                 var pins = island.Island.Members.Select(m => m.Pin).Concat(island.Island.JoinCandidates).DistinctBy(p => (p.SymbolId, p.PlacedPinId));
@@ -574,8 +613,8 @@ public static class SchematicConnectionRealizer
                 var pinPoints = view.Pins.SelectMany(s => s.Value.Pins.Select(p => (Pin: Id(p.Id), At: Pt.Of(p.Position)))).ToArray();
                 foreach (var symbol in view.Candidates.Keys)
                 {
-                    if (!view.Pins.TryGetValue(symbol, out var geometry) || !geometry.Complete) continue;
-                    foreach (var pin in geometry.Pins)
+                    // RequirePins has proven every created symbol's pins complete on every instance path.
+                    foreach (var pin in view.Pins[symbol].Pins)
                     {
                         Pt at = Pt.Of(pin.Position);
                         Guid id = Id(pin.Id);
@@ -669,7 +708,11 @@ public static class SchematicConnectionRealizer
         // §6.3 (d): global names use global labels; the first labelled stub of an uplinking island carries the
         // hierarchical label and every other local stub a local label of the same text.
         private static ConnectionLabelKind KindFor(IslandState island) => island.Island.Scope == ConnectionScope.Global ? ConnectionLabelKind.Global
-            : island.Island.UplinkSheetSymbolId is not null && !island.UplinkLabelled ? ConnectionLabelKind.Hierarchical : ConnectionLabelKind.Local;
+            : UplinkPending(island) ? ConnectionLabelKind.Hierarchical : ConnectionLabelKind.Local;
+
+        // Whether the island crosses into its parent sheet and no generated label carries that crossing yet.
+        private static bool UplinkPending(IslandState island) =>
+            island.Island.Scope != ConnectionScope.Global && island.Island.UplinkSheetSymbolId is not null && !island.UplinkLabelled;
 
         // ---- §6.3 algorithm ----
 
@@ -691,7 +734,7 @@ public static class SchematicConnectionRealizer
                 }
                 var combo = new Combo(kind, island.Island.LabelText, SchematicConnectionGeometry.Spin(outward));
                 var envelope = screen.Prototypes[combo].Offset(a);
-                if (Admit(screen, island, a, a, envelope, pin.PlacedPinId, owner, null, null, Variant.AnchorLabel))
+                if (Admit(screen, island, a, a, outward, envelope, pin.PlacedPinId, owner, null, null, Variant.AnchorLabel))
                 {
                     Accept(screen, island, new(a, a, combo, envelope, null), null, GeneratedConnectionRole.AnchorLabel,
                         SchematicConnectionIdentity.PinAnchorKey(pin.PlacedPinId), pin.PlacedPinId, null);
@@ -707,11 +750,15 @@ public static class SchematicConnectionRealizer
         {
             var anchor = AnchorOf(screen.Views[0], member.Pin);
             var a = Pt.Of(anchor.Position);
-            // A pin stacked exactly on an already connected pin of the same island is joined by that contact.
-            if (island.Anchored.Contains(a) || island.Island.Members.Any(m => m != member && m.AlreadyConnected && At(screen, m.Pin) == a))
-                return;
+            // A pin stacked exactly on an earlier stub's pin of the same island is joined by that contact.
+            if (island.Anchored.Contains(a)) return;
+            // So is a pin stacked on an already connected pin of the same island, unless the island still needs its
+            // hierarchical label: then this pin's stub carries it, starting on the existing connection like a join stub.
+            bool stacked = island.Island.Members.Any(m => m != member && m.AlreadyConnected && At(screen, m.Pin) == a);
+            if (stacked && !UplinkPending(island)) return;
             var outward = SchematicConnectionGeometry.Outward(anchor);
-            if (!TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.Stub, KindFor(island), out var stub))
+            if (!TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, stacked ? Variant.JoinStub : Variant.Stub,
+                    KindFor(island), out var stub))
                 throw Error(SchematicConnectionErrors.RealizationNoFreeStub, "Pin " + Describe(member.Pin) + " of net '" + NetName(island)
                     + "' has no free room for a connection stub and label on sheet " + island.Island.SheetPathKey
                     + ". Move the symbol or clear the space next to that pin.");
@@ -733,21 +780,21 @@ public static class SchematicConnectionRealizer
                     .FirstOrDefault(m => At(screen, m.Pin) == e) : null;
                 if (carrier is not null)
                 {
-                    if (Admit(screen, island, a, e, null, ownPin, owner, carrier.Pin.PlacedPinId, carrier.Pin.SymbolId, variant))
+                    if (Admit(screen, island, a, e, outward, null, ownPin, owner, carrier.Pin.PlacedPinId, carrier.Pin.SymbolId, variant))
                     { stub = new(a, e, null, null, carrier.Pin.PlacedPinId); return true; }
                     continue;
                 }
                 var envelope = screen.Prototypes[combo].Offset(e);
-                if (Admit(screen, island, a, e, envelope, ownPin, owner, null, null, variant))
+                if (Admit(screen, island, a, e, outward, envelope, ownPin, owner, null, null, variant))
                 { stub = new(a, e, combo, envelope, null); return true; }
             }
             stub = null!;
             return false;
         }
 
-        // §6.4 admission of a stub from a to e with label envelope r (null when attaching to a carrier).
-        private bool Admit(Screen screen, IslandState island, Pt a, Pt e, Box? r, Guid? ownPin, Guid owner, Guid? carrierPin,
-            Guid? carrierSymbol, Variant variant)
+        // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier).
+        private bool Admit(Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward, Box? r, Guid? ownPin, Guid owner,
+            Guid? carrierPin, Guid? carrierSymbol, Variant variant)
         {
             // 1. Inside the page inset.
             if (!screen.Usable.Contains(e) || (r is { } inside && !inside.Within(screen.Usable))) return false;
@@ -794,8 +841,15 @@ public static class SchematicConnectionRealizer
                     // A join stub may start on same-island items that sit exactly at its anchor.
                     if (!(variant == Variant.JoinStub && island.Same.Contains(id) && OnlyAtStart(a, e, bounds))) return false;
                 }
-                // 6. The label overlaps no obstacle, including its own symbol.
-                if (r is { } label && label.InteriorMeets(bounds)) return false;
+                // 6. The label overlaps no obstacle, including its own symbol. An anchor label sits on its own pin's
+                // connection point. Every real label reaches a little behind its anchor (at most LabelBackToleranceNm,
+                // by the §6.2 orientation guard), and KiCad's measured bounds of the owner include the pin up to that
+                // point and anything drawn on it (live sheets show fields at the symbol origin reaching 0.38 mm past the
+                // tip). So only the part of the label more than LabelBackToleranceNm in front of the anchor must be
+                // clear of its own symbol (a CN-1 clarification requested from the integration owner).
+                if (r is { } label && (variant == Variant.AnchorLabel && id == owner ? Beyond(label, a, outward, policy.LabelBackToleranceNm) : label)
+                        .InteriorMeets(bounds))
+                    return false;
             }
             foreach (var envelope in screen.Envelopes)
             {
@@ -804,6 +858,16 @@ public static class SchematicConnectionRealizer
             }
             return true;
         }
+
+        // The part of rectangle r at least `band` in front of a along the outward direction.
+        private static Box Beyond(Box r, Pt a, (int Dx, int Dy) outward, long band) => outward switch
+        {
+            (1, 0) => r with { L = Math.Max(r.L, checked(a.X + band)) },
+            (-1, 0) => r with { R = Math.Min(r.R, checked(a.X - band)) },
+            (0, 1) => r with { T = Math.Max(r.T, checked(a.Y + band)) },
+            (0, -1) => r with { B = Math.Min(r.B, checked(a.Y - band)) },
+            _ => throw Error(SchematicConnectionErrors.RealizationPinGeometryMismatch, "A generated label faces along one schematic axis.")
+        };
 
         // Whether the stub from a to e meets the rectangle only at a.
         private static bool OnlyAtStart(Pt a, Pt e, Box box)
@@ -912,6 +976,9 @@ public static class SchematicConnectionRealizer
                 island.Generated.Add(wireId);
                 generated.Add(new(wireId, role, screen.Record.ScreenId, [island.Island.NetId], placedPin, sheetSymbol, Any.Pack(wire).TypeUrl));
             }
+            // §6.4 lists every accepted generated point as foreign. This end always lies on the wire recorded above, or
+            // is the pin's own measured anchor for an anchor label, so the segment and pin records already refuse
+            // whatever this point would; it is recorded to follow the contract's list, not as the only guard.
             screen.Points.Add(new(stub.E, PointKind.Generated, Guid.Empty, null));
             island.Anchored.Add(stub.A);
             if (stub.Carrier is not null) { island.Attached = true; return; }
@@ -951,9 +1018,7 @@ public static class SchematicConnectionRealizer
             try { operations = [.. SchematicHierarchyDelta.Plan(current, schematic, token)]; }
             catch (AutomationException error)
             { throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The generated connections cannot be expressed as native edits: " + error.Message); }
-            if (operations.Any(o => o.OperationCase is not (SchematicItemOperation.OperationOneofCase.Create
-                or SchematicItemOperation.OperationOneofCase.Update or SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache)))
-                throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections may only create items, add sheet pins and extend library caches.");
+            RequireOnlyPlannedEdits(operations);
             var assertion = new SchematicConnectivityAssertion { Version = 1 };
             foreach (var group in intent.ExpectedGroups)
             {
@@ -981,6 +1046,57 @@ public static class SchematicConnectionRealizer
                 throw Error(SchematicConnectionErrors.RealizationBatchTooLarge, "The connections would need a larger native request than KiCad accepts. Save them in smaller XML revisions.");
             limitations.Add("Milestone 1 draws label stubs only; orthogonal wiring between pins is not attempted.");
             return new(design, operations, generated, outcomes, diagnostics, [.. limitations]);
+        }
+
+        // I6 before the assertion is added: the batch may create only the planned symbols and the generated items, each
+        // once, give existing sheet symbols exactly their generated sheet pins, and extend library caches only for new
+        // symbols. Anything else would change an existing item, which native connectivity cannot reveal and the
+        // resolution would find only after KiCad had committed it.
+        private void RequireOnlyPlannedEdits(IReadOnlyList<SchematicItemOperation> operations)
+        {
+            var expected = generated.Where(g => g.Role != GeneratedConnectionRole.SheetPin).Select(g => g.Id).Concat(created).ToHashSet();
+            var createdOnce = new HashSet<Guid>();
+            var updated = new HashSet<Guid>();
+            foreach (var operation in operations)
+            {
+                switch (operation.OperationCase)
+                {
+                    case SchematicItemOperation.OperationOneofCase.Create:
+                    {
+                        var (id, item) = SchematicItemDelta.Index([operation.Create]).Single();
+                        bool planned = item is SchematicSymbolInstance ? created.Contains(id) : expected.Contains(id) && !created.Contains(id);
+                        if (!planned || !createdOnce.Add(id))
+                            throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would create item "
+                                + id.ToString("D") + ", which is neither a new symbol nor a generated connection item, or would create it twice.");
+                        break;
+                    }
+                    case SchematicItemOperation.OperationOneofCase.Update:
+                    {
+                        var (id, item) = SchematicItemDelta.Index([operation.Update]).Single();
+                        var path = operation.TargetDocument?.SheetPath is { } target ? PathOf(target) : "";
+                        var before = native.TryGetValue(path, out var screen)
+                            ? SchematicItemDelta.Index(screen.Items).GetValueOrDefault(id) as SheetSymbol : null;
+                        if (item is not SheetSymbol sheet || before is null || !sheetPins.TryGetValue(id, out var pins))
+                            throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would change existing item "
+                                + id.ToString("D") + " on sheet " + path + ", which it must never touch.");
+                        var gained = before.Clone();
+                        gained.Pins.Add(pins.Select(p => p.Clone()));
+                        // The delta carries sheet symbols without their projected variant descriptions.
+                        if (!SchematicVariantProjection.Equivalent(gained, sheet))
+                            throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would change sheet symbol "
+                                + id.ToString("D") + " on sheet " + path + " beyond adding its generated sheet pins.");
+                        updated.Add(id);
+                        break;
+                    }
+                    case SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache when created.Count != 0:
+                        break;
+                    default:
+                        throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections may only create items, add sheet pins "
+                            + "and extend library caches for new symbols, not " + operation.OperationCase + ".");
+                }
+            }
+            if (!createdOnce.SetEquals(expected) || !updated.SetEquals(sheetPins.Keys))
+                throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The native edits do not carry every new symbol and generated connection item.");
         }
 
         // ---- helpers ----

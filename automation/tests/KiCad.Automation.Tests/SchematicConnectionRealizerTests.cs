@@ -157,11 +157,17 @@ public sealed class SchematicConnectionRealizerTests
     {
         // Must-catch and guards: with the first candidate's stub room blocked but room at the pin itself, the label
         // sits on the pin; with that blocked too the next candidate is used; with no room anywhere the join fails.
+        // Labels reach as far behind their anchor as KiCad draws them, so a label on the pin lies a little over its
+        // own symbol's pin, and KiCad's bounds of the symbol may reach a little past the pin's end (the live sheets'
+        // symbols reach 381,100 nm past it). Within half a grid of the pin's end the label may lie on its own symbol,
+        // never further in front.
         var scene = Link();
         var candidates = scene.Intent.Screens.Single().Islands.Single().JoinCandidates;
         Assert.HasCount(2, candidates);
         var first = scene.PinAt(candidates[0]);
         var anchored = scene.Obstacle(new(first.X - 12 * Grid, first.Y - Grid, first.X - 4 * Grid, first.Y + Grid));
+        Assert.IsGreaterThan(0L, Geometry.MeasuredBehind[typeof(LocalLabel)]);
+        Assert.IsNull(anchored.Geometry.LabelBehind, "The label on the pin is measured with the local label's real back extent.");
         var realization = await anchored.Realize();
         var anchorLabel = realization.Generated.Single(g => g.Role == GeneratedConnectionRole.AnchorLabel);
         Assert.AreEqual(candidates[0].PlacedPinId, anchorLabel.PlacedPinId);
@@ -169,6 +175,28 @@ public sealed class SchematicConnectionRealizerTests
             SchematicConnectionIdentity.PinAnchorKey(candidates[0].PlacedPinId)), anchorLabel.Id);
         Assert.AreEqual(first.X, Generated<LocalLabel>(realization).Single(l => l.Id.Value == anchorLabel.Id.ToString("D")).Position.XNm);
         Assert.IsFalse(realization.Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId && g.Role == GeneratedConnectionRole.StubWire));
+
+        // Must-catch: the pin's own symbol reaching one grid in front of the pin (a field drawn there) leaves no room
+        // for the label on the pin, so the next candidate is joined.
+        var owner = candidates[0].SymbolId;
+        var fronted = anchored with { Geometry = anchored.Geometry.Copy() };
+        fronted.Geometry.Body[owner] = new(first.X - Grid, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
+        var next = await fronted.Realize();
+        Assert.IsFalse(next.Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId), "The label would overlap its own symbol in front of the pin.");
+        Assert.IsTrue(next.Generated.Any(g => g.PlacedPinId == candidates[1].PlacedPinId && g.Role == GeneratedConnectionRole.StubLabel));
+        // Must-catch: just beyond half a grid in front of the pin is already too far.
+        var beyond = anchored with { Geometry = anchored.Geometry.Copy() };
+        beyond.Geometry.Body[owner] = new(first.X - Policy.LabelBackToleranceNm - 100, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
+        Assert.IsFalse((await beyond.Realize()).Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId));
+        // Guards: the symbol ending exactly at the pin, reaching past it as far as the live sheets' symbols do, or
+        // reaching exactly half a grid past it, admits the label on the pin.
+        foreach (long reach in new long[] { 0, 381_100, Policy.LabelBackToleranceNm })
+        {
+            var flush = anchored with { Geometry = anchored.Geometry.Copy() };
+            flush.Geometry.Body[owner] = new(first.X - reach, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
+            Assert.AreEqual(candidates[0].PlacedPinId, (await flush.Realize()).Generated.Single(g => g.Role == GeneratedConnectionRole.AnchorLabel).PlacedPinId,
+                "Owner reaching " + reach + " nm past the pin.");
+        }
 
         var blocked = scene.Obstacle(new(first.X - 12 * Grid, first.Y - Grid, first.X - Grid / 2, first.Y + Grid));
         var second = await blocked.Realize();
@@ -233,6 +261,71 @@ public sealed class SchematicConnectionRealizerTests
     }
 
     [TestMethod]
+    public async Task NewStubsAndLabelsKeepClearOfEachOther()
+    {
+        // Two test points joined by a new net X, drawn close together: every stub and label drawn so far is an
+        // obstacle for the next one, exactly like the items that were already on the sheet.
+        var scene = Pair();
+        var island = scene.Intent.Screens.Single().Islands.Single();
+        var stubbed = island.Members.Where(m => m.RequiresStub).Select(m => m.Pin).ToArray();
+        Assert.HasCount(2, stubbed);
+        // stubbed[0] is drawn first: island members keep their planned order.
+        var (first, second) = (stubbed[0], stubbed[1]);
+        var a = new Point(150_000_000, 100_000_000);
+        // Each pin points left out of a small body to its right; `below` puts the second pin that far lower.
+        Scene Layout(long below)
+        {
+            var copy = scene with { Geometry = scene.Geometry.Copy() };
+            Lay(copy, first, a, (1, 0), new(a.X, a.Y - Grid / 4, a.X + 4 * Grid, a.Y + Grid / 4));
+            var b = new Point(a.X, a.Y + below);
+            Lay(copy, second, b, (1, 0), new(b.X, b.Y - Grid / 4, b.X + 4 * Grid, b.Y + Grid / 4));
+            return copy;
+        }
+        long Length(SchematicConnectionRealization realization, ConnectionPlacedPin pin)
+        {
+            var wire = StubOf(realization, pin.PlacedPinId);
+            return wire.Start.XNm - wire.End.XNm;
+        }
+        // Guard: one grid apart, the two labels only touch, so both keep the shortest stub.
+        var touching = await Layout(Grid).Realize();
+        Assert.AreEqual(2 * Grid, Length(touching, first)); Assert.AreEqual(2 * Grid, Length(touching, second));
+        var labels = Generated<LocalLabel>(touching).Select(scene.Geometry.LabelBox).ToArray();
+        Assert.AreEqual(labels.Max(l => l.T), labels.Min(l => l.B), "The two label envelopes share one edge.");
+        // Must-catch: three quarters of a grid apart, the second label would overlap the first one at 2 and 3 grids;
+        // its stub moves out to 4 grids, where the labels no longer overlap, while the first keeps 2 grids.
+        var overlapping = await Layout(3 * Grid / 4).Realize();
+        Assert.AreEqual(2 * Grid, Length(overlapping, first));
+        Assert.AreEqual(4 * Grid, Length(overlapping, second), "The second label must not overlap the first one.");
+
+        // Must-catch: the second pin points up from below the first stub, one grid to its left. Its 2-grid label would
+        // lie across the first stub, and every longer stub would cross that stub, so it is refused. Nothing else is in
+        // the way: the first label, both pins and the first stub's end all lie outside the second label.
+        var crossing = scene with { Geometry = scene.Geometry.Copy() };
+        Lay(crossing, first, a, (1, 0), new(a.X, a.Y - Grid / 4, a.X + 4 * Grid, a.Y + Grid / 4));
+        var up = new Point(a.X - Grid, a.Y + 3 * Grid);
+        Lay(crossing, second, up, (0, 1), new(up.X - Grid, up.Y, up.X + Grid, up.Y + 2 * Grid));
+        var refusal = await Assert.ThrowsExactlyAsync<AutomationException>(crossing.Realize);
+        Assert.AreEqual(SchematicConnectionErrors.RealizationNoFreeStub, refusal.Code, refusal.Message);
+        StringAssert.Contains(refusal.Message, "Pin " + second.Endpoint.ComponentId.ToString("D") + "." + second.Endpoint.Pin);
+        // Guard: moved two grids further left, the second pin's label clears the first stub and both are drawn.
+        var beside = scene with { Geometry = scene.Geometry.Copy() };
+        Lay(beside, first, a, (1, 0), new(a.X, a.Y - Grid / 4, a.X + 4 * Grid, a.Y + Grid / 4));
+        var clear = new Point(a.X - 6 * Grid, a.Y + 3 * Grid);
+        Lay(beside, second, clear, (0, 1), new(clear.X - Grid, clear.Y, clear.X + Grid, clear.Y + 2 * Grid));
+        var drawn = await beside.Realize();
+        Assert.AreEqual(2 * Grid, Length(drawn, first));
+        var upward = StubOf(drawn, second.PlacedPinId);
+        Assert.AreEqual(clear.Y - 2 * Grid, upward.End.YNm);
+
+        static void Lay(Scene target, ConnectionPlacedPin pin, Point at, (int Dx, int Dy) body, Rect drawn)
+        {
+            target.Geometry.Place[pin.PlacedPinId] = at;
+            target.Geometry.Direction[pin.PlacedPinId] = body;
+            target.Geometry.Body[pin.SymbolId] = drawn;
+        }
+    }
+
+    [TestMethod]
     public async Task EveryMeasurementMustAnswerExactlyWhatWasAsked()
     {
         foreach (var (problem, tamper, code) in new (string, Func<MeasureSchematicPlacement, SchematicPlacementGeometry, SchematicPlacementGeometry>, string)[]
@@ -259,6 +352,22 @@ public sealed class SchematicConnectionRealizerTests
         var older = RootAddition();
         older.Geometry.Tamper = (r, g) => r.ItemCandidates.Count != 0 ? throw new NativeApiException(3, "Placement measurement contains unsupported fields") : g;
         await RequireRefusal(older, SchematicConnectionErrors.RealizationMeasurementUnsupported, "cannot measure");
+        // Every other native refusal of the measurement becomes a realization code as well, never a raw native error.
+        foreach (var (status, message, code, detail) in new (int, string, string, string)[]
+        {
+            (3, "A symbol has no resolved native definition", SchematicConnectionErrors.RealizationPinGeometryIncomplete, "no resolved library definition"),
+            ((int)Kiapi.Common.ApiStatusCode.AsBusy, "KiCad is busy", SchematicConnectionErrors.RealizationMeasurementStale, "was busy"),
+            ((int)Kiapi.Common.ApiStatusCode.AsNotReady, "Schematic connectivity is unavailable", SchematicConnectionErrors.RealizationMeasurementStale, "was busy"),
+            ((int)Kiapi.Common.ApiStatusCode.AsUnhandled, "No handler for request", SchematicConnectionErrors.RealizationMeasurementUnsupported, "cannot measure"),
+            (3, "Unsupported native pin drawing orientation", SchematicConnectionErrors.RealizationMeasurementUnsupported, "refused to measure")
+        })
+        {
+            var refused = RootAddition();
+            refused.Geometry.Tamper = (_, _) => throw new NativeApiException(status, message);
+            await RequireRefusal(refused, code, detail, message);
+            var error = await Assert.ThrowsExactlyAsync<AutomationException>(refused.Realize);
+            StringAssert.Contains(error.Message, message, "The editor's own reason is kept.");
+        }
     }
 
     [TestMethod]
@@ -271,12 +380,26 @@ public sealed class SchematicConnectionRealizerTests
         scene.Geometry.Incomplete[member.Pin.SymbolId] = SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing;
         await RequireRefusal(scene, SchematicConnectionErrors.RealizationPinGeometryIncomplete, "cannot report exact pin positions");
         scene.Geometry.Incomplete.Clear();
-        // Guard: an unrelated symbol with incomplete pins is allowed; its whole body stays an obstacle.
+        // Guard: an unrelated existing symbol with incomplete pins is allowed; its whole body stays an obstacle.
         var unrelated = SymbolId(scene, "R9");
         Assert.IsFalse(scene.Intent.Screens.Single().Islands.SelectMany(i => i.Members).Any(m => m.Pin.SymbolId == unrelated));
-        scene.Geometry.Incomplete[unrelated] = SchematicPinGeometryIncompleteReason.SpgirDefinitionUnresolved;
-        await scene.Realize();
+        foreach (var reason in new[] { SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing, SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved })
+        {
+            scene.Geometry.Incomplete[unrelated] = reason;
+            await scene.Realize();
+        }
         scene.Geometry.Incomplete.Clear();
+        // Must-catch: a new symbol with no connection at all must still report its pins, which must be proven to touch
+        // no existing connection point; guard: reported completely, it is simply created.
+        var loose = RootAddition(loose: true);
+        var r3 = SymbolId(loose, "R3");
+        CollectionAssert.Contains(loose.Intent.CreatedSymbolIds.ToArray(), r3);
+        Assert.IsFalse(loose.Intent.Screens.SelectMany(s => s.Islands).SelectMany(i => i.Members).Any(m => m.Pin.SymbolId == r3));
+        Assert.AreEqual(2, (await loose.Realize()).Operations.Count(o => o.Create is not null && o.Create.Is(SchematicSymbolInstance.Descriptor)));
+        loose.Geometry.Incomplete[r3] = SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing;
+        await RequireRefusal(loose, SchematicConnectionErrors.RealizationPinGeometryIncomplete, "cannot prove the symbol touches no existing connection");
+        loose.Geometry.Incomplete[r3] = SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved;
+        await RequireRefusal(loose, SchematicConnectionErrors.RealizationVariantPinIdentityUnresolved, "new symbol " + r3.ToString("D"));
         // Must-catch: the editor reports a member as a power connection the plan does not expect.
         scene.Geometry.Power[member.Pin.PlacedPinId] = (SchematicPinPowerScope.SppsGlobal, "VCC");
         await RequireRefusal(scene, SchematicConnectionErrors.RealizationImplicitPowerMismatch, "global power 'VCC'");
@@ -431,6 +554,80 @@ public sealed class SchematicConnectionRealizerTests
     }
 
     [TestMethod]
+    public async Task AHierarchicalLabelGoesOnTheFirstStubWithRoomForIt()
+    {
+        // The local power symbol #LP0 names VLOC on the child sheet; the XML joins R5.1 (and R6.1) there with R1.1 on the
+        // root, so the child's island needs a hierarchical label. R5.1's shortest stub ends exactly on #LP0's pin: it
+        // attaches without a label, and the power pin on its line blocks every labelled stub from R5.1.
+        Scene Local(bool second)
+        {
+            var bench = new Bench();
+            Guid r = bench.Part("R", Passive("1"), Passive("2"));
+            Guid local = bench.Part("LOCAL", SchematicSymbolType.SstLocalPower, new BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+            Guid lp0 = bench.Component(local, "#LP0", BenchSheet.Child, value: "VLOC");
+            Guid r5 = bench.Component(r, "R5", BenchSheet.Child), r6 = bench.Component(r, "R6", BenchSheet.Child);
+            Guid r1 = bench.Component(r, "R1");
+            var vloc = new CircuitNet(Guid.NewGuid(), "VLOC", [new(lp0, "1")]);
+            PinEndpoint[] added = second ? [new(r5, "1"), new(r6, "1"), new(r1, "1")] : [new(r5, "1"), new(r1, "1")];
+            var scene = Scene.Of(bench, WithFormatting(bench.State([vloc])), design => WithNets(design, vloc with { Pins = [.. vloc.Pins, .. added] }));
+            var island = scene.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.UplinkSheetSymbolId is not null);
+            Assert.AreEqual(ConnectionScope.Local, island.Scope);
+            var carrier = island.Members.Single(m => m.Role == ConnectionMemberRole.PowerCarrier);
+            var r5Pin = island.Members.Single(m => m.Pin.Endpoint.ComponentId == r5).Pin;
+            var at = scene.PinAt(r5Pin);
+            var end = new Point(at.X - 2 * Grid, at.Y);
+            scene.Geometry.Place[carrier.Pin.PlacedPinId] = end;
+            scene.Geometry.Body[carrier.Pin.SymbolId] = new(end.X - 2 * Grid, end.Y - Grid, end.X, end.Y + Grid);
+            return scene;
+        }
+        // Guard: R6.1's stub has room, so it carries the hierarchical label while R5.1 attaches.
+        var shared = Local(second: true);
+        var realization = await shared.Realize();
+        var childScreen = shared.Bench!.ScreenId(BenchSheet.Child);
+        var hierarchical = Generated<HierarchicalLabel>(realization).Single();
+        Assert.AreEqual("VLOC", hierarchical.Text.Text_);
+        var carried = realization.Generated.Single(g => g.Id.ToString("D") == hierarchical.Id.Value);
+        Assert.AreEqual(shared.Intent.Screens.SelectMany(s => s.Islands).SelectMany(i => i.Members)
+            .Single(m => m.Pin.Endpoint.ComponentId == shared.Plan.Candidate!.Engineering.Circuit.Components.Single(c => c.Reference == "R6").Id).Pin.PlacedPinId,
+            carried.PlacedPinId);
+        Assert.IsTrue(realization.Outcomes.Single(o => o.ScreenId == childScreen).AttachedCarrier);
+        Assert.IsFalse(Generated<LocalLabel>(realization).Any(l => realization.Generated.Any(g => g.ScreenId == childScreen && g.Id.ToString("D") == l.Id.Value)),
+            "R5.1's stub carries no label of its own.");
+        // Must-catch: with R5.1 alone, its only stub attaches, so nothing on the child sheet can carry the label.
+        var alone = Local(second: false);
+        await RequireRefusal(alone, SchematicConnectionErrors.RealizationNoFreeStub, "every new stub there ends on one of its power symbols");
+    }
+
+    [TestMethod]
+    public async Task TheBatchCreatesOnlyPlannedItemsAndNeverChangesAnExistingOne()
+    {
+        // I6 is checked before the assertion is added, so KiCad never commits an edit of an existing item that only the
+        // resolution would notice afterwards. Guard: a new sheet pin is an update of its sheet symbol by exactly that pin.
+        var crossing = HierarchyCrossing();
+        var realization = await crossing.Realize();
+        var update = realization.Operations.Single(o => o.Update is not null).Update.Unpack<SheetSymbol>();
+        var before = Root(crossing.Checkpoint.Electrical.Hierarchy.Data).Items.Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>())
+            .Single(s => s.Id.Equals(update.Id));
+        Assert.AreEqual(before.Pins.Count + 1, update.Pins.Count);
+        // Must-catch: the editor's sheet symbol is not the planned one, so the update would also resize it.
+        var resized = crossing.InCheckpoint(data => EditSheet(data, crossing.Bench!.ChildSheetSymbol, s => s.Size.YNm += Grid));
+        await RequireRefusal(resized, SchematicConnectionErrors.ConnectedInternalInconsistency, "beyond adding its generated sheet pins");
+        // Must-catch: an existing symbol the editor holds elsewhere would be moved back by the batch.
+        var scene = RootAddition();
+        var moved = scene.InCheckpoint(data => EditItems(data, item => item is SchematicSymbolInstance s && s.Id.Value == SymbolId(scene, "R9").ToString("D")
+            ? Edit(s, x => x.Position.YNm += Grid) : item));
+        await RequireRefusal(moved, SchematicConnectionErrors.ConnectedInternalInconsistency, "which it must never touch");
+        // Must-catch: an item the plan holds but the editor does not would be created by the batch.
+        var missing = scene.InCheckpoint(data =>
+        {
+            var root = Root(data);
+            root.Items.RemoveAt(root.Items.ToList().FindIndex(i => i.Is(SchematicLine.Descriptor)));
+        });
+        await RequireRefusal(missing, SchematicConnectionErrors.ConnectedInternalInconsistency, "neither a new symbol nor a generated connection item");
+        Assert.IsTrue(missing.Geometry.Requests.Count != 0, "The refusal comes after measuring, before any assertion is built.");
+    }
+
+    [TestMethod]
     public async Task TheEntryPointReturnsTheRoundTrippedDesignAndStopsWithoutTheCapability()
     {
         var scene = RootAddition();
@@ -582,6 +779,21 @@ public sealed class SchematicConnectionRealizerTests
         Assert.AreEqual(SchematicConnectionErrors.InvalidRealizationRejection, Assert.ThrowsExactly<AutomationException>(() =>
             SchematicConnectedAddition.CheckReceipt(store, pending, otherOperation)).Code);
         Assert.AreEqual(pending.RevisionToken, store.Read()!.RevisionToken);
+        // Must-catch: KiCad's state after (or before) the rejected request is not the journaled state, so the receipt
+        // does not prove KiCad was left unchanged; refused with the realization code before the store is asked.
+        foreach (var (problem, edit) in new (string, Action<CheckedSchematicBatchReceipt>)[]
+        {
+            ("changed after", r => r.ObservedAfter.Revision.Sequence++),
+            ("changed before", r => r.ObservedBefore.Revision.Sequence++),
+            ("no state after", r => r.ObservedAfter = null)
+        })
+        {
+            var changed = Receipt(CheckedSchematicBatchStatus.CsbsRejected, SchematicConnectionErrors.ConnectivityPostconditionFailed);
+            edit(changed);
+            var refusal = Assert.ThrowsExactly<AutomationException>(() => SchematicConnectedAddition.CheckReceipt(store, pending, changed), problem);
+            Assert.AreEqual(SchematicConnectionErrors.InvalidRealizationRejection, refusal.Code, problem + ": " + refusal.Message);
+            Assert.AreEqual(pending.RevisionToken, store.Read()!.RevisionToken, problem);
+        }
         // The native assertion's verified rejection clears only the pending request and reports KiCad's bounded detail.
         var rejected = Receipt(CheckedSchematicBatchStatus.CsbsRejected, SchematicConnectionErrors.ConnectivityPostconditionFailed);
         var mismatch = Assert.ThrowsExactly<AutomationException>(() => SchematicConnectedAddition.CheckReceipt(store, pending, rejected));
@@ -596,7 +808,8 @@ public sealed class SchematicConnectionRealizerTests
 
     // ---- scenes ----
 
-    private static Scene RootAddition()
+    // With <paramref name="loose"/>, the revision also adds R3, a new resistor with no connection.
+    private static Scene RootAddition(bool loose = false)
     {
         var bench = new Bench();
         Guid r = bench.Part("R", Passive("1"), Passive("2"));
@@ -608,7 +821,8 @@ public sealed class SchematicConnectionRealizerTests
         var output = new CircuitNet(Guid.NewGuid(), "/OUT", []);
         var state = WithFormatting(bench.State([sig], new() { [sig.Id] = [(BenchSheet.Root, wire), (BenchSheet.Root, label)] }));
         var created = bench.Create(state.Baseline, r, "R2", BenchSheet.Root);
-        return Scene.Of(bench, state, design => WithNets(Adopt(design, created.Design), sig with { Pins = [.. sig.Pins, new(created.Component, "1")] },
+        var design = loose ? bench.Create(created.Design, r, "R3", BenchSheet.Root).Design : created.Design;
+        return Scene.Of(bench, state, revision => WithNets(Adopt(revision, design), sig with { Pins = [.. sig.Pins, new(created.Component, "1")] },
             output with { Pins = [new(created.Component, "2"), new(tp1, "1")] }));
     }
 
@@ -633,6 +847,16 @@ public sealed class SchematicConnectionRealizerTests
         var link = new CircuitNet(Guid.NewGuid(), "LINK", [new(r1, "1"), new(r2, "1")]);
         var state = WithFormatting(bench.State([link], new() { [link.Id] = [(BenchSheet.Root, wire)] }));
         return Scene.Of(bench, state, design => WithNets(design, link with { Pins = [.. link.Pins, new(tp1, "1")] }));
+    }
+
+    // Two existing test points joined by a new net X; tests lay out their pins and bodies.
+    private static Scene Pair()
+    {
+        var bench = new Bench();
+        Guid tp = bench.Part("TP", Passive("1"));
+        Guid tp1 = bench.Component(tp, "TP1"), tp2 = bench.Component(tp, "TP2");
+        var x = new CircuitNet(Guid.NewGuid(), "X", [new(tp1, "1"), new(tp2, "1")]);
+        return Scene.Of(bench, WithFormatting(bench.State([])), design => WithNets(design, x));
     }
 
     // A created two-pin part S1 whose pins can be stacked; joined, both pins are in net X with TP1.1.
@@ -774,11 +998,21 @@ public sealed class SchematicConnectionRealizerTests
     internal readonly record struct Rect(long L, long T, long R, long B);
 
     /// <summary>A deterministic stand-in for the editor's placement measurement of a checkpoint. Symbols are 8 grids
-    /// wide with every active pin on the left edge, two grids apart and pointing left; labels extend from their anchor
-    /// in the direction they face, (length + 1) × 0.75 grid long, plus one grid for a global or hierarchical shape.
-    /// Tests move pins, override power facts or reasons, size obstacles, or tamper with replies.</summary>
+    /// wide with every active pin on the left edge, two grids apart and pointing left; a symbol's bounds include its
+    /// pins, as KiCad's do. Labels extend from their anchor in the direction they face, (length + 1) × 0.75 grid long,
+    /// plus one grid for a global or hierarchical shape, one grid across, and as far behind the anchor as KiCad draws
+    /// them (<see cref="MeasuredBehind"/>). Tests move pins, redraw symbol bodies, override power facts or reasons,
+    /// size obstacles, or tamper with replies.</summary>
     internal sealed class Geometry
     {
+        /// <summary>How far KiCad draws each label kind behind its anchor with 1.27 mm text, as the NativeXmlComponentCreation
+        /// journey measures it in a live editor. The replay test holds the local and hierarchical values to the committed
+        /// recordings (automation/tests/fixtures/connection-realization).</summary>
+        public static readonly IReadOnlyDictionary<System.Type, long> MeasuredBehind = new Dictionary<System.Type, long>
+        {
+            [typeof(LocalLabel)] = 158_800, [typeof(GlobalLabel)] = 79_400, [typeof(HierarchicalLabel)] = 304_800
+        };
+
         public List<MeasureSchematicPlacement> Requests { get; private set; } = [];
         public Dictionary<Guid, Rect> Sized { get; private set; } = [];
         public Dictionary<Guid, SchematicPinGeometryIncompleteReason> Incomplete { get; private set; } = [];
@@ -787,13 +1021,16 @@ public sealed class SchematicConnectionRealizerTests
         public Dictionary<Guid, Guid> Library { get; private set; } = [];
         public Dictionary<Guid, Point> Place { get; private set; } = [];
         public Dictionary<(string Path, Guid Pin), Point> Shift { get; private set; } = [];
-        public long LabelBehind { get; set; }
+        /// <summary>A symbol's drawn body in place of the default 8-grid box; its pins still extend its bounds.</summary>
+        public Dictionary<Guid, Rect> Body { get; private set; } = [];
+        /// <summary>Overrides <see cref="MeasuredBehind"/> for every label kind.</summary>
+        public long? LabelBehind { get; set; }
         public Func<MeasureSchematicPlacement, SchematicPlacementGeometry, SchematicPlacementGeometry>? Tamper { get; set; }
 
         public Geometry Copy() => new()
         {
             Requests = [], Sized = new(Sized), Incomplete = new(Incomplete), Power = new(Power), Direction = new(Direction),
-            Library = new(Library), Place = new(Place), Shift = new(Shift), LabelBehind = LabelBehind, Tamper = Tamper
+            Library = new(Library), Place = new(Place), Shift = new(Shift), Body = new(Body), LabelBehind = LabelBehind, Tamper = Tamper
         };
 
         public Task<SchematicPlacementGeometry> Measure(Scene scene, MeasureSchematicPlacement request, CancellationToken token)
@@ -855,7 +1092,8 @@ public sealed class SchematicConnectionRealizerTests
                 {
                     var pins = Pins(path, symbol).ToArray();
                     long half = Math.Max(1, pins.Length) * Grid + Grid;
-                    var box = new Rect(symbol.Position.XNm - 4 * Grid, symbol.Position.YNm - half, symbol.Position.XNm + 4 * Grid, symbol.Position.YNm + half);
+                    var box = Body.TryGetValue(id, out var body) ? body
+                        : new Rect(symbol.Position.XNm - 4 * Grid, symbol.Position.YNm - half, symbol.Position.XNm + 4 * Grid, symbol.Position.YNm + half);
                     foreach (var pin in pins) box = new(Math.Min(box.L, pin.At.X), Math.Min(box.T, pin.At.Y), Math.Max(box.R, pin.At.X), Math.Max(box.B, pin.At.Y));
                     result.Anchor = symbol.Position.Clone(); result.Bounds = Box(box);
                     var geometry = new SchematicSymbolPinGeometry();
@@ -878,9 +1116,9 @@ public sealed class SchematicConnectionRealizerTests
                 }
                 case SchematicLine line:
                     result.Anchor = line.Start.Clone(); result.Bounds = Box(Span(Of(line.Start), Of(line.End))); return result;
-                case LocalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, 0);
-                case GlobalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid);
-                case HierarchicalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid);
+                case LocalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, 0, Behind(label));
+                case GlobalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label));
+                case HierarchicalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label));
                 case SheetSymbol sheet:
                     result.Anchor = sheet.Position.Clone();
                     result.Bounds = Box(new(sheet.Position.XNm, sheet.Position.YNm, sheet.Position.XNm + sheet.Size.XNm, sheet.Position.YNm + sheet.Size.YNm));
@@ -894,16 +1132,19 @@ public sealed class SchematicConnectionRealizerTests
             }
         }
 
-        private SchematicPlacementBounds Label(SchematicPlacementBounds result, Vector2 position, string text, SchematicLabelSpinStyle spin, long shape)
+        private long Behind(IMessage label) => LabelBehind ?? MeasuredBehind[label.GetType()];
+
+        private static SchematicPlacementBounds Label(SchematicPlacementBounds result, Vector2 position, string text, SchematicLabelSpinStyle spin,
+            long shape, long behind)
         {
             long length = (text.Length + 1) * Grid * 3 / 4 + shape, half = Grid / 2;
             var (x, y) = (position.XNm, position.YNm);
             var box = spin switch
             {
-                SchematicLabelSpinStyle.SlssLeft => new Rect(x - length, y - half, x + LabelBehind, y + half),
-                SchematicLabelSpinStyle.SlssUp => new Rect(x - half, y - length, x + half, y + LabelBehind),
-                SchematicLabelSpinStyle.SlssBottom => new Rect(x - half, y - LabelBehind, x + half, y + length),
-                _ => new Rect(x - LabelBehind, y - half, x + length, y + half)
+                SchematicLabelSpinStyle.SlssLeft => new Rect(x - length, y - half, x + behind, y + half),
+                SchematicLabelSpinStyle.SlssUp => new Rect(x - half, y - length, x + half, y + behind),
+                SchematicLabelSpinStyle.SlssBottom => new Rect(x - half, y - behind, x + half, y + length),
+                _ => new Rect(x - behind, y - half, x + length, y + half)
             };
             result.Anchor = position.Clone(); result.Bounds = Box(box);
             return result;
@@ -988,6 +1229,20 @@ public sealed class SchematicConnectionRealizerTests
             var realization = await SchematicConnectionRealizer.RealizeAsync(recording.Intent, recording.Plan.Candidate!, recording.Checkpoint,
                 (request, token) => { asked++; return replay(request, token); }, SchematicConnectionPolicy.FromSnapshot(recording.Checkpoint.Electrical.Hierarchy.Data));
             Assert.AreEqual(recording.Measurements.Count, asked, recording.Scenario + ": every recorded measurement, and no other, is asked for.");
+            // The synthetic geometry draws labels as far behind their anchor as this real editor did.
+            foreach (var (request, reply) in recording.Measurements)
+                for (int i = 0; i < request.ItemCandidates.Count; i++)
+                {
+                    var prototype = SchematicItemDelta.Index([request.ItemCandidates[i]]).Single().Value;
+                    var spin = prototype switch { LocalLabel l => l.SpinStyle, GlobalLabel l => l.SpinStyle, HierarchicalLabel l => l.SpinStyle,
+                        _ => throw new AssertFailedException("Only label prototypes are measured.") };
+                    var measured = reply.ItemCandidates[i];
+                    long l0 = measured.Bounds.Position.XNm - measured.Anchor.XNm, t0 = measured.Bounds.Position.YNm - measured.Anchor.YNm;
+                    long r0 = l0 + measured.Bounds.Size.XNm, b0 = t0 + measured.Bounds.Size.YNm;
+                    var (fx, fy) = SchematicConnectionRealizer.Facing(spin);
+                    Assert.AreEqual(Geometry.MeasuredBehind[prototype.GetType()], fx > 0 ? -l0 : fx < 0 ? r0 : fy > 0 ? -t0 : b0,
+                        recording.Scenario + ": " + prototype.GetType().Name + " " + spin);
+                }
             CollectionAssert.AreEqual(recording.Operations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
                 realization.Operations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(), recording.Scenario);
             Assert.AreEqual(recording.Generated.Count, realization.Generated.Count, recording.Scenario);

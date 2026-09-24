@@ -290,6 +290,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(relative[i], (body.Bounds.Position.XNm - body.Anchor.XNm, body.Bounds.Position.YNm - body.Anchor.YNm,
                 body.Bounds.Position.XNm + body.Bounds.Size.XNm - body.Anchor.XNm, body.Bounds.Position.YNm + body.Bounds.Size.YNm - body.Anchor.YNm));
         }
+        await VerifyAnchorLabels(client, original, symbols, revision, screen, policy, kinds, evidence, instanceId, token);
         // Symbols and prototypes measure together, sharing the request's limit and identities.
         var combined = original.Clone(); combined.ItemCandidates.Add(first.ItemCandidates);
         var both = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(combined, token);
@@ -334,6 +335,79 @@ public sealed partial class NativeSessionTests
             }
         }, "Measure at most 256 symbol and item candidates together per request");
         return (first, measured);
+    }
+
+    // A label placed on a pin itself (the anchor label that names an existing connection, cn1-wiring-intent.md §6.3 (a))
+    // on this real sheet. KiCad's bounds of a symbol include its pins up to their connection point and anything drawn
+    // there, and every label reaches a little behind its anchor, so a label of any kind on a pin always overlaps its
+    // own symbol: a rule refusing any overlap with the owning symbol could never admit it. For every symbol whose
+    // bounds end within half a grid past one of its pins (recorded as `reach`), the realizer's rule, which ignores
+    // only the part of the label within half a grid of the pin's end, finds the rest of the label clear of the symbol.
+    private static async Task VerifyAnchorLabels(NativeClient client, MeasureSchematicPlacement original, SchematicPlacementGeometry symbols,
+        KiCad.Automation.Model.DocumentRevision revision, Guid screen, SchematicConnectionPolicy policy, ConnectionLabelKind[] kinds,
+        string evidence, string instanceId, CancellationToken token)
+    {
+        static (long L, long T, long R, long B) Box(Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
+        static bool Overlap((long L, long T, long R, long B) a, (long L, long T, long R, long B) b) =>
+            a.L < a.R && a.T < a.B && b.L < b.R && b.T < b.B && a.L < b.R && b.L < a.R && a.T < b.B && b.T < a.B;
+        long band = policy.LabelBackToleranceNm;
+        var owners = new List<(SchematicPlacementBounds Owner, SchematicPinAnchor Pin, (int Dx, int Dy) Outward, long Reach)>();
+        foreach (var owner in symbols.Obstacles.Concat(symbols.Candidates).Where(o => o.SymbolPins is { Complete: true }).OrderBy(o => o.Id.Value, StringComparer.Ordinal))
+        {
+            var bounds = Box(owner.Bounds);
+            foreach (var pin in owner.SymbolPins.Pins.Where(p => p.Visible).OrderBy(p => p.Id.Value, StringComparer.Ordinal))
+            {
+                var outward = SchematicConnectionGeometry.Outward(pin);
+                long reach = outward switch
+                {
+                    (-1, 0) => pin.Position.XNm - bounds.L, (1, 0) => bounds.R - pin.Position.XNm,
+                    (0, -1) => pin.Position.YNm - bounds.T, _ => bounds.B - pin.Position.YNm
+                };
+                Assert.IsGreaterThanOrEqualTo(0L, reach, "A symbol's bounds include its visible pins up to their ends.");
+                if (reach > band) continue;
+                owners.Add((owner, pin, outward, reach));
+                break;
+            }
+        }
+        Assert.IsNotEmpty(owners, "This sheet has a symbol whose bounds end within half a grid past one of its pins.");
+        var request = original.Clone(); request.Candidates.Clear();
+        foreach (var (owner, pin, outward, _) in owners)
+        foreach (var kind in kinds)
+        {
+            var spin = SchematicConnectionGeometry.Spin(outward);
+            var shape = kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
+            // One probe identity per owning symbol: the symbol-probe form with the symbol's own (unrotated) frame.
+            var id = SchematicConnectionIdentity.Probe(revision, screen, SchematicConnectionRealizer.Descriptor(kind), "PROBE_ANCHOR", spin, shape,
+                Guid.Parse(owner.Id.Value), 0);
+            request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, id, pin.Position.Clone(), "PROBE_ANCHOR", spin, policy)));
+        }
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+        Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
+        var facts = new List<object>();
+        for (int i = 0; i < measured.ItemCandidates.Count; i++)
+        {
+            var (owner, pin, outward, reach) = owners[i / kinds.Length];
+            string what = kinds[i % kinds.Length] + " label on pin " + pin.Number + " of " + owner.Id.Value;
+            var label = Box(measured.ItemCandidates[i].Bounds);
+            var body = Box(owner.Bounds);
+            Assert.AreEqual(pin.Position, measured.ItemCandidates[i].Anchor, what);
+            long behind = outward switch { (-1, 0) => label.R - pin.Position.XNm, (1, 0) => pin.Position.XNm - label.L,
+                (0, -1) => label.B - pin.Position.YNm, _ => pin.Position.YNm - label.T };
+            Assert.IsGreaterThan(0L, behind, what + " reaches behind its anchor.");
+            Assert.IsLessThanOrEqualTo(band, behind, what);
+            Assert.IsTrue(Overlap(label, body), what + " overlaps its own symbol's bounds at the pin.");
+            var beyond = outward switch
+            {
+                (-1, 0) => (label.L, label.T, Math.Min(label.R, pin.Position.XNm - band), label.B),
+                (1, 0) => (Math.Max(label.L, pin.Position.XNm + band), label.T, label.R, label.B),
+                (0, -1) => (label.L, label.T, label.R, Math.Min(label.B, pin.Position.YNm - band)),
+                _ => (label.L, Math.Max(label.T, pin.Position.YNm + band), label.R, label.B)
+            };
+            Assert.IsFalse(Overlap(beyond, body), what + " is clear of its own symbol beyond half a grid from the pin's end.");
+            facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kinds[i % kinds.Length].ToString(), reach, behind });
+        }
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-anchor-labels-" + original.Document.SheetPath.Path[^1].Value + ".json"),
+            System.Text.Json.JsonSerializer.Serialize(facts), token);
     }
 
     // The public MCP measurement tool must return exactly the native geometry for every measured

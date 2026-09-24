@@ -17,6 +17,7 @@ public sealed partial class NativeSessionTests
         var pcbClose = await VerifyCleanDocumentClose(client, board, schematic, openTool: "kicad_pcb_open", evidence, token);
         var schematicClose = await VerifyCleanDocumentClose(client, schematic, board, openTool: "kicad_schematic_open", evidence, token);
         CollectionAssert.AreEqual(pcbClose.BothOpen, schematicClose.BothOpen, "Reopening an editor must restore the same handled requests.");
+        CollectionAssert.AreEqual(pcbClose.Features, schematicClose.Features, "Feature contracts belong to the build, not to the open editors.");
         // Every request handled with both editors open is still handled after closing one editor or
         // the other: the manager's, each editor's own and those both editors share. So losing any
         // type that only the editor left open handles would show here.
@@ -24,14 +25,18 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(pcbClose.BothOpen, union,
             "With both editors open the handshake must list exactly the requests of the PCB-only and schematic-only states together.");
         Console.WriteLine($"Handled requests of {client.Endpoint}: {pcbClose.BothOpen.Length} with both editors open, "
-            + $"{pcbClose.AfterClose.Length} with only the schematic editor, {schematicClose.AfterClose.Length} with only the PCB editor.");
+            + $"{pcbClose.AfterClose.Length} with only the schematic editor, {schematicClose.AfterClose.Length} with only the PCB editor; "
+            + $"features [{string.Join(", ", pcbClose.Features)}] in every state.");
     }
 
-    // Returns the first pass's probed handled requests with both editors open and after closing this one.
-    private static async Task<(string[] BothOpen, string[] AfterClose)> VerifyCleanDocumentClose(NativeClient client,
+    // Returns the first pass's probed handled requests with both editors open and after closing this
+    // one, and the feature contracts, which stay the same with both editors open, after the close and
+    // after the reopen in both passes.
+    private static async Task<(string[] BothOpen, string[] AfterClose, string[] Features)> VerifyCleanDocumentClose(NativeClient client,
         DocumentSpecifier document, DocumentSpecifier otherDocument, string openTool, string evidence, CancellationToken token)
     {
         (string[] BothOpen, string[] AfterClose) firstPass = (Array.Empty<string>(), Array.Empty<string>());
+        string[]? features = null;
         string statePath = Directory.CreateTempSubdirectory("kicad-close-mcp-").FullName;
         try
         {
@@ -67,10 +72,14 @@ public sealed partial class NativeSessionTests
                 try
                 {
                     // Both editors are open here. The first pass proves the list against dispatch.
+                    var bothOpenSession = await client.HandshakeAsync(token);
+                    features ??= NativeFeatureContracts.Verify(bothOpenSession);
+                    CollectionAssert.AreEqual(features, bothOpenSession.Capabilities.ToArray(),
+                        $"The feature contracts with both editors open changed before closing the {kind} editor.");
                     string[] bothOpen = pass == 0
                         ? await NativeCapabilityProbe.VerifyHandshakeAsync(client,
                             Path.Combine(evidence, $"{instanceId}-before-{kind}-close-capabilities.json"), token)
-                        : (await client.HandshakeAsync(token)).HandledRequests.ToArray();
+                        : bothOpenSession.HandledRequests.ToArray();
                     CollectionAssert.Contains(bothOpen, closedEditorType);
                     CollectionAssert.Contains(bothOpen, otherEditorType);
                     string operation = Guid.NewGuid().ToString("D");
@@ -117,10 +126,13 @@ public sealed partial class NativeSessionTests
                             client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, token));
                         Assert.AreEqual(other, await ObserveLifecycleState(client, otherDocument, token));
                     }
+                    var afterCloseSession = await client.HandshakeAsync(token);
+                    CollectionAssert.AreEqual(features, afterCloseSession.Capabilities.ToArray(),
+                        $"Closing the {kind} editor must not change the feature contracts: they belong to the build.");
                     string[] afterClose = pass == 0
                         ? await NativeCapabilityProbe.VerifyHandshakeAsync(client,
                             Path.Combine(evidence, $"{instanceId}-after-{kind}-close-capabilities.json"), token)
-                        : (await client.HandshakeAsync(token)).HandledRequests.ToArray();
+                        : afterCloseSession.HandledRequests.ToArray();
                     CollectionAssert.IsSubsetOf(afterClose, bothOpen, "Closing an editor must not add request types.");
                     CollectionAssert.DoesNotContain(afterClose, closedEditorType, "The closed editor's request types must leave the handshake.");
                     CollectionAssert.Contains(afterClose, otherEditorType, "The editor that stays open keeps its request types.");
@@ -153,12 +165,15 @@ public sealed partial class NativeSessionTests
                 string documentPath = current.NativeFiles.Single(path => Path.GetFileName(path) == filename);
                 var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, documentPath, evidence, token, toolName: openTool);
                 Assert.AreEqual(document, opened.Document);
-                CollectionAssert.AreEqual(reopenedTypes, (await client.HandshakeAsync(token)).HandledRequests.ToArray(),
+                var reopenedSession = await client.HandshakeAsync(token);
+                CollectionAssert.AreEqual(reopenedTypes, reopenedSession.HandledRequests.ToArray(),
                     "Reopening the editor must restore exactly the request types it had before closing.");
+                CollectionAssert.AreEqual(features, reopenedSession.Capabilities.ToArray(),
+                    $"Reopening the {kind} editor must not change the feature contracts: they belong to the build.");
             }
         }
         finally { Directory.Delete(statePath, true); }
-        return firstPass;
+        return (firstPass.BothOpen, firstPass.AfterClose, features!);
     }
 
     // The editor holds an unsaved edit and every document file is read-only. The save through the MCP

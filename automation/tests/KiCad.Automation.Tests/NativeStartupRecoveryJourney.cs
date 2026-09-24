@@ -78,8 +78,9 @@ public sealed partial class NativeSessionTests
                          CheckedSchematicBatch.Descriptor.FullName })
                 CollectionAssert.Contains(managerOnly, type);
             CollectionAssert.DoesNotContain(managerOnly, ReadSchematicScreenData.Descriptor.FullName);
+            // The clean-close journey proves that opening and closing editors leaves them unchanged.
             CollectionAssert.AreEqual(features, (await recovered.Client(attached.InstanceId).HandshakeAsync(token)).Capabilities.ToArray(),
-                "Feature contracts belong to the build, not to the open editors.");
+                "A repeated handshake of the same manager must name the same feature contracts.");
             Console.WriteLine($"Manager {attached.InstanceId}: features [{string.Join(", ", features)}], {managerOnly.Length} handled request types.");
             var third = new InstanceRegistry(new NngTransport(), state);
             Assert.AreEqual(0, third.List().Count);

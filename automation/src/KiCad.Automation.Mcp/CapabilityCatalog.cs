@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using KiCad.Automation.Protocol;
 using ModelContextProtocol.Server;
 
@@ -24,9 +25,9 @@ public enum KiCadVerificationLevel
 /// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
 /// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
 /// STDIO server and call the tool by name. A cited NativeSessionTests method whose journey is still
-/// an Inconclusive lane stub proves nothing and is rejected. Comments never count as calls. The
-/// call check is per class, not per method: it cannot tell which journey of NativeSessionTests
-/// makes the call.
+/// an Inconclusive lane stub proves nothing and is rejected, and so is one whose dispatch the check
+/// cannot read. Comments never count as calls. The call check is per class, not per method: it
+/// cannot tell which journey of NativeSessionTests makes the call.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute
@@ -61,7 +62,8 @@ public sealed record CapabilityLimitation(string Id, string Scope, string Summar
 
 /// <summary>
 /// The native half of the catalogue. Features are the named feature contracts of the handshake's
-/// capabilities field, each advertised only when the whole feature works. RequestCoverage says
+/// capabilities field, each advertised only when the whole feature works; an entry that is not a
+/// feature contract name is left out. RequestCoverage says
 /// whether the handshake lists handled requests: "handled-requests" when it does, and "unknown"
 /// for a KiCad built before that field, whose Requests are then null rather than guessed.
 /// </summary>
@@ -79,15 +81,15 @@ public static class CapabilityCatalog
     public static IReadOnlyList<string> Notes { get; } =
     [
         "serviceCapabilities lists every tool registered in this MCP server process, derived from the server's tool collection; availability 'registered' means the tool can be called, subject to its revision contract.",
-        "nativeFeatures lists the named feature contracts the native process advertises, for example session.info; each is advertised only when the whole feature works in that build.",
+        "nativeFeatures lists the named feature contracts the native process advertises, for example session.info; each is advertised only when the whole feature works in that build. A feature contract is a lower-case dotted name, which no protocol message type is; any other entry of the handshake's capabilities is left out rather than presented as a feature.",
         "nativeRequests lists the request types the native process dispatches to a registered handler at this moment, when nativeRequestCoverage is 'handled-requests'. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support. A KiCad built before this list existed reports nativeRequestCoverage 'unknown' and nativeRequests null: its request support is not known, not empty.",
         "verification.level names the strongest evidence in this build's test suite: mcp-native-journey, native-journey, mcp-process, in-process, or undeclared when a tool declares none.",
         "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool. trackedBy cites the KAICad completion-ledger outcomes and recorded decisions behind each one."
     ];
 
     // Unfinished outcomes that cannot be derived from code. Each names what is missing, never a
-    // registered tool, so it cannot contradict a tool's availability, and cites the open ledger
-    // outcomes and decisions that track it.
+    // registered tool, so it cannot contradict a tool's availability, and cites the ledger outcomes
+    // and decisions that track it.
     private static readonly (string Id, string Scope, string Summary, string[] TrackedBy)[] Unfinished =
     [
         ("pcb-routing-completion", "pcb-routing",
@@ -115,9 +117,19 @@ public static class CapabilityCatalog
 
     public const string HandledRequestCoverage = "handled-requests", UnknownRequestCoverage = "unknown";
 
+    // Feature contracts are lower-case dotted names (session.info, schematic.connection-realization.v1).
+    // Every protocol message type has an upper-case message name, so no request type name matches;
+    // CapabilityCatalogTests checks that over the whole protocol.
+    private static readonly Regex FeatureContractName = new(@"^[a-z][a-z0-9-]*(\.[a-z0-9-]+)+$", RegexOptions.CultureInvariant);
+
+    /// <summary>Whether a handshake capabilities entry names a feature contract rather than, for example, a request type.</summary>
+    public static bool IsFeatureContract(string name) => FeatureContractName.IsMatch(name);
+
     public static NativeCapabilityCatalog Native(AutomationSession session)
     {
-        string[] features = session.Capabilities.ToArray();
+        // Only feature contract names are published as features, so a request type name in the
+        // capabilities field is never presented as a feature.
+        string[] features = session.Capabilities.Where(IsFeatureContract).ToArray();
         // A peer that answers the handshake dispatches the handshake request itself, so an empty
         // list can only come from a KiCad built before handled_requests: coverage unknown, never
         // "handles nothing", and its feature labels are never read as handlers.

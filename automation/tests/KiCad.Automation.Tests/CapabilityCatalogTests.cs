@@ -148,6 +148,15 @@ public sealed class CapabilityCatalogTests
                     [TestMethod]
                     public Task Delivered() => RunNativeSessions(NativeJourney.Delivered);
 
+                    [TestMethod]
+                    public async Task BlockBodied()
+                    {
+                        await RunNativeSessions(NativeJourney.Foundation);
+                    }
+
+                    [TestMethod]
+                    public Task Direct(bool restore) => VerifyDirect(restore);
+
                     async Task Journey()
                     {
                         await Call("sample_attach", new { });
@@ -158,6 +167,8 @@ public sealed class CapabilityCatalogTests
                         /* await mcp!.Tool("sample_block_commented", new { }); */
                         string toolName = "sample_local";
                     }
+
+                    private async Task VerifyDirect(bool restore) => await Call("sample_direct", new { });
 
                     private static Task Create(string endpoint, CancellationToken token,
                         string toolName = "sample_default") => Task.CompletedTask;
@@ -211,7 +222,7 @@ public sealed class CapabilityCatalogTests
                 """)
         ];
         string[] tests = [native + ".Foundation", native + ".Stubbed", native + ".Defaulted", native + ".Delivered",
-            "SampleStdioTests.Run", "SampleUnitTests.Run"];
+            native + ".BlockBodied", native + ".Direct", "SampleStdioTests.Run", "SampleUnitTests.Run"];
         IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, params string[] evidence) =>
             VerificationEvidenceRules.Check(tool, level, evidence, sources, (type, method) => tests.Contains(type + "." + method));
         string foundation = native + ".Foundation";
@@ -227,6 +238,8 @@ public sealed class CapabilityCatalogTests
         Assert.IsEmpty(Check("sample_unit", KiCadVerificationLevel.InProcess, "SampleUnitTests.Run"));
         // A delivered journey of the same dispatch switch is real evidence.
         Assert.IsEmpty(Check("sample_delivered", KiCadVerificationLevel.McpNativeJourney, native + ".Delivered"));
+        // A test that hands over to a helper naming no journey and no stub is real evidence.
+        Assert.IsEmpty(Check("sample_direct", KiCadVerificationLevel.McpNativeJourney, native + ".Direct"));
 
         // Must catch: an STDIO-only call backing a native claim (the removed-journey case).
         StringAssert.Contains(Check("sample_list", KiCadVerificationLevel.McpNativeJourney, foundation, "SampleStdioTests.Run").Single(), "no NativeSessionTests journey calls it");
@@ -245,6 +258,72 @@ public sealed class CapabilityCatalogTests
             // Citing a real journey beside the stub still reports the stub.
             StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, foundation, stub).Single(), "Inconclusive lane stub");
         }
+        // A test whose body this check cannot read is rejected, even though it runs a real journey.
+        var blockBodied = Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, native + ".BlockBodied");
+        Assert.IsTrue(blockBodied.Any(p => p.Contains(native + ".BlockBodied") && p.Contains("cannot be read")), string.Join(Environment.NewLine, blockBodied));
+        Assert.IsTrue(blockBodied.Any(p => p.Contains("without citing")), string.Join(Environment.NewLine, blockBodied));
+
+        // Dispatch this check cannot read makes a journey unprovable instead of delivered. Each case
+        // is its own source set, because an unreadable dispatch rejects every journey it may reach.
+        static VerificationEvidenceRules.Source[] NativeOnly(string members) =>
+        [
+            new("SampleNativeJourney.cs", $$"""
+                public sealed partial class {{native}}
+                {
+                    [TestMethod]
+                    public Task Foundation() => RunNativeSessions(NativeJourney.Foundation);
+
+                    async Task Journey() => await Call("sample_attach", new { });
+
+                {{members}}
+
+                    private static Task VerifyStubbed(int seed)
+                        => throw new AssertInconclusiveException("Phase 2 lane 2X has not delivered this journey");
+                }
+                """)
+        ];
+        static IReadOnlyList<string> CheckIn(VerificationEvidenceRules.Source[] set, params string[] evidence) =>
+            VerificationEvidenceRules.Check("sample_attach", KiCadVerificationLevel.McpNativeJourney, evidence, set, (type, _) => type == native);
+        // A default arm leading to a stub, where no earlier switch throws for the journeys it does not
+        // name: every journey its switch does not name may reach the stub.
+        var unlimited = NativeOnly("""
+                    [TestMethod]
+                    public Task Named() => RunNativeSessions(NativeJourney.Named);
+
+                    private static async Task RunLaneJourney(NativeJourney journey)
+                    {
+                        int seed = journey switch { NativeJourney.Named => 1, _ => 0 };
+                        await (journey switch
+                        {
+                            NativeJourney.Named => VerifyNamed(seed),
+                            _ => VerifyStubbed(seed)
+                        });
+                    }
+
+                    private static Task VerifyNamed(int seed) => Task.CompletedTask;
+            """);
+        var unlimitedFoundation = CheckIn(unlimited, foundation);
+        Assert.IsTrue(unlimitedFoundation.Any(p => p.Contains("may reach an Inconclusive lane stub") && p.Contains("default arm in RunLaneJourney")),
+            string.Join(Environment.NewLine, unlimitedFoundation));
+        Assert.IsTrue(unlimitedFoundation.Any(p => p.Contains("without citing")), string.Join(Environment.NewLine, unlimitedFoundation));
+        Assert.IsEmpty(CheckIn(unlimited, native + ".Named"), "A journey its own switch arm sends elsewhere cannot reach the default arm.");
+        // An if/else dispatch to a stub.
+        var ifElse = NativeOnly("""
+                    private static async Task RunLaneJourney(NativeJourney journey)
+                    {
+                        if (journey == NativeJourney.Stubbed) await VerifyStubbed(0);
+                    }
+            """);
+        StringAssert.Contains(CheckIn(ifElse, foundation)[0], "VerifyStubbed is reached other than through a NativeJourney switch arm");
+        // A test that calls a stub itself.
+        var direct = NativeOnly("""
+                    [TestMethod]
+                    public Task DirectStub() => VerifyStubbed(0);
+            """);
+        StringAssert.Contains(CheckIn(direct, native + ".DirectStub")[0], "calls the Inconclusive lane stub VerifyStubbed");
+        StringAssert.Contains(CheckIn(direct, foundation)[0], "reached other than through a NativeJourney switch arm");
+        // The same stub without any unreadable dispatch leaves the journey provable.
+        Assert.IsEmpty(CheckIn(NativeOnly(""), foundation));
         // A name that is only listed, asserted, assigned or used as an object member is not a call.
         StringAssert.Contains(Check("sample_listed", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_listed");
         StringAssert.Contains(Check("sample_other", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_other");
@@ -263,31 +342,43 @@ public sealed class CapabilityCatalogTests
         StringAssert.Contains(Check("sample_attach", KiCadVerificationLevel.McpNativeJourney).Single(), "without evidence");
     }
 
-    // Isolated mapping rule: a KiCad built before handled_requests cannot be produced by this build,
-    // so the fail-closed reading of its handshake is checked directly. The live half runs in the
-    // Foundation journey (McpReattachmentJourney).
+    // Isolated mapping rule over every handshake shape, including ones this build's KiCad never
+    // sends: request type names in capabilities (an unreleased interim lane build) and an entry that
+    // is neither. The tool-level result for a released older build is checked through
+    // kicad_instance_inspect in InstanceToolBoundaryTests, and the live half runs in the Foundation
+    // journey (McpReattachmentJourney); neither can produce these other shapes.
     [TestMethod]
     public void OlderKiCadBuildsReportUnknownRequestCoverageNeverHandlers()
     {
         string[] features = ["session.info", "version.read"];
-        string[] requests = ["kiapi.automation.v1.GetAutomationSession", "kiapi.common.commands.GetVersion"];
+        string[] requests = [GetAutomationSession.Descriptor.FullName, Kiapi.Common.Commands.GetVersion.Descriptor.FullName];
         var current = CapabilityCatalog.Native(new AutomationSession { Capabilities = { features }, HandledRequests = { requests } });
         CollectionAssert.AreEqual(features, current.Features.ToArray());
         Assert.AreEqual(CapabilityCatalog.HandledRequestCoverage, current.RequestCoverage);
         CollectionAssert.AreEqual(requests, current.Requests!.Select(r => r.Name).ToArray());
         Assert.IsTrue(current.Requests!.All(r => r.Availability == "handler-registered"));
 
-        // A released build lists only feature labels; the interim lane build listed request types in
-        // capabilities. Neither says which requests it dispatches, so neither is reported as handlers.
-        foreach (string[] labels in new[] { features, requests })
+        // Without handled_requests nothing says which requests the build dispatches, so none is
+        // reported as a handler, and only feature contract names are published as features: a
+        // request type name or a label that is not a dotted lower-case name never is.
+        string[][] shapes = [features, requests, [.. features, .. requests], ["session.info", "Session.Info", "versionread", "session..info", "version.read."]];
+        foreach (string[] labels in shapes)
         {
             var older = CapabilityCatalog.Native(new AutomationSession { Capabilities = { labels } });
-            CollectionAssert.AreEqual(labels, older.Features.ToArray());
+            CollectionAssert.AreEqual(labels.Where(label => features.Contains(label)).ToArray(), older.Features.ToArray(), string.Join(", ", labels));
             Assert.AreEqual(CapabilityCatalog.UnknownRequestCoverage, older.RequestCoverage);
             Assert.IsNull(older.Requests, "Unknown request coverage is not an empty handler list.");
             var published = JsonSerializer.SerializeToElement(older, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             Assert.AreEqual(JsonValueKind.Null, published.GetProperty("requests").ValueKind, published.GetRawText());
         }
+        // The same rule applies with handled_requests: a request name in capabilities is not a feature.
+        var mixed = CapabilityCatalog.Native(new AutomationSession { Capabilities = { features, requests }, HandledRequests = { requests } });
+        CollectionAssert.AreEqual(features, mixed.Features.ToArray());
+        // No message type of the whole protocol can pass for a feature contract.
+        var protocol = NativeCapabilityProbe.KnownMessageTypes();
+        Assert.IsGreaterThan(300, protocol.Count, "The protocol assembly must describe every KiCad API message.");
+        string[] featureLike = protocol.Where(CapabilityCatalog.IsFeatureContract).ToArray();
+        Assert.IsEmpty(featureLike, "A protocol message type would be published as a feature: " + string.Join(", ", featureLike));
     }
 
     private static string[] DeclaredToolNames() => DeclaredToolTypes
@@ -368,8 +459,13 @@ internal static class CapabilityCatalogAssertions
 /// helper's tool parameter (string toolName = "name"). A listed, asserted or assigned name is not a
 /// call, and comments are removed before matching. NativeSessionTests is the Linux native session
 /// fixture: its partial sources are the journeys that drive a real KiCad. A cited NativeSessionTests
-/// method whose RunNativeSessions(NativeJourney.X) journey reaches an Inconclusive lane stub through
-/// a dispatch switch is rejected. The call check is per class, not per method.
+/// method counts only when this check can read that it does not reach an Inconclusive lane stub: its
+/// body is one call, either RunNativeSessions(NativeJourney.X) with a journey that no dispatch switch
+/// sends to a stub, or a helper that names no journey and no stub. What it cannot read is rejected,
+/// never accepted: a block body, a stub mentioned anywhere but its declaration and NativeJourney
+/// switch arms (an if/else dispatch, for example), and a default arm leading to a stub when no
+/// earlier switch of the same member limits the journeys that reach it. The call check is per
+/// class, not per method.
 /// </summary>
 internal static class VerificationEvidenceRules
 {
@@ -380,30 +476,39 @@ internal static class VerificationEvidenceRules
     private static readonly Regex ClassDeclaration = new(
         @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file)\s+)*class\s+(\w+)", RegexOptions.Multiline);
     private static readonly Regex StartsCompiledServer = new(@"StdioMcpFixture\.StartAsync\(|""kicad-mcp\.dll""");
-    // A test method that runs one native journey: Name(...) => RunNativeSessions(NativeJourney.X...).
-    private static readonly Regex JourneyTest = new(@"\b(?<method>\w+)\s*\([^()]*\)\s*=>\s*RunNativeSessions\s*\(\s*NativeJourney\.(?<journey>\w+)");
+    // A Task or void method declaration, and whether its body is an expression.
+    private static readonly Regex TaskMethod = new(@"\b(?:Task|void)\s+(?<method>\w+)\s*\([^()]*\)\s*(?<arrow>=>)?");
+    // The one call of an expression body: [await] Callee(, with the journey when it is named first.
+    private static readonly Regex DelegatedCall = new(@"\G\s*(?:await\s+)?(?<callee>\w+)\s*\(\s*(?:NativeJourney\.(?<journey>\w+)\b)?");
     // A journey body that only ends Inconclusive: the lane stubs of the shared fixture.
     private static readonly Regex InconclusiveStub = new(
         @"\b(?:Task(?:<[^<>()]*>)?|void)\s+(?<method>\w+)\s*\([^()]*\)\s*(?:=>|\{)\s*(?:throw\s+new\s+AssertInconclusiveException|Assert\.Inconclusive)\s*\(");
     // Members start with an access modifier; local functions and lambdas never do.
     private static readonly Regex MemberStart = new(@"^[ \t]*(?:public|private|internal|protected)\b", RegexOptions.Multiline);
+    // The name a member declares: its first identifier that is followed by a parameter list.
+    private static readonly Regex MemberName = new(@"(?<![.\w])(?<name>[A-Za-z_]\w*)\s*(?:<[^<>()]*>)?\s*\(");
     private static readonly Regex SwitchStart = new(@"\bswitch\s*\{");
     private static readonly Regex SwitchArm = new(
-        @"(?<pattern>NativeJourney\.\w+(?:\s+or\s+NativeJourney\.\w+)*|(?<![\w.])_)\s*=>\s*(?:(?:\w+\.)*(?<target>\w+)\s*\()?");
+        @"(?<pattern>NativeJourney\.\w+(?:\s+or\s+NativeJourney\.\w+)*|(?<![\w.])_)\s*=>\s*(?:(?<throws>throw)\b|(?:\w+\.)*(?<target>\w+)\s*\()?");
     private static readonly Regex JourneyName = new(@"NativeJourney\.(\w+)");
     // The sources are analysed once per source set, not once per checked claim.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<Source>, Analysis> Analyses = new();
 
-    // Classes by name with their comment-free sources, and each NativeSessionTests method whose
-    // journey is an Inconclusive lane stub, with that journey.
-    private sealed record Analysis(IReadOnlyDictionary<string, Source[]> Classes, IReadOnlyDictionary<string, string> StubbedTests);
+    // Classes by name with their comment-free sources, and for each Task or void method declared in
+    // NativeSessionTests: null when it is readable journey evidence, otherwise why it is not.
+    private sealed record Analysis(IReadOnlyDictionary<string, Source[]> Classes, IReadOnlyDictionary<string, string?> NativeTests);
+
+    private sealed record Member(string Name, string Text);
+
+    // Why the dispatch to an Inconclusive stub cannot be read; a journey in Excluded cannot reach it.
+    private sealed record Unresolved(string Reason, IReadOnlySet<string> Excluded);
 
     internal static IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, IReadOnlyList<string> evidence,
         IReadOnlyList<Source> sources, Func<string, string, bool> isTestMethod)
     {
         var problems = new List<string>();
         if (evidence.Count == 0) return [$"{tool} declares verification without evidence."];
-        var (classes, stubbedTests) = Analyses.GetValue(sources, Analyse);
+        var (classes, nativeTests) = Analyses.GetValue(sources, Analyse);
         var nativeSources = classes.GetValueOrDefault(NativeJourneyClass) ?? [];
         string name = Regex.Escape(tool);
         var call = new Regex($@"(?:\bTool|\bCall|\bCallToolAsync)\(\s*""{name}""|""tools/call""\s*,\s*new\s*\{{\s*name\s*=\s*""{name}""" +
@@ -419,9 +524,10 @@ internal static class VerificationEvidenceRules
             }
             if (parts[0] == NativeJourneyClass)
             {
-                if (stubbedTests.GetValueOrDefault(parts[1]) is { } stub)
-                    problems.Add($"{tool} cites {item}, whose journey NativeJourney.{stub} is still an Inconclusive lane stub.");
-                else citesNative = true;
+                if (!nativeTests.TryGetValue(parts[1], out string? refusal))
+                    refusal = "whose declaration this check cannot find, so whether it reaches an Inconclusive lane stub cannot be read.";
+                if (refusal is null) citesNative = true;
+                else problems.Add($"{tool} cites {item}, {refusal}");
                 continue;
             }
             if (level == KiCadVerificationLevel.InProcess) continue;
@@ -449,43 +555,113 @@ internal static class VerificationEvidenceRules
             .GroupBy(entry => entry.Name, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Select(entry => entry.Source).Distinct().ToArray(), StringComparer.Ordinal);
         var nativeSources = classes.GetValueOrDefault(NativeJourneyClass) ?? [];
-        var stubbed = StubJourneys(nativeSources);
-        var stubbedTests = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (Match test in nativeSources.SelectMany(source => JourneyTest.Matches(source.Text)))
-            if (stubbed.Contains(test.Groups["journey"].Value)) stubbedTests.TryAdd(test.Groups["method"].Value, test.Groups["journey"].Value);
-        return new(classes, stubbedTests);
+        string[] stubDeclarations = nativeSources.SelectMany(source => InconclusiveStub.Matches(source.Text))
+            .Select(match => match.Groups["method"].Value).ToArray();
+        var stubs = stubDeclarations.ToHashSet(StringComparer.Ordinal);
+        var members = nativeSources.SelectMany(Members).ToArray();
+        var (stubJourneys, unresolved, armTargets) = ReadDispatch(members, stubs);
+        // A stub is reached only through NativeJourney switch arms. Any other mention, such as an
+        // if/else dispatch, a direct call or a delegate, could reach it from any journey.
+        foreach (string stub in stubs.Order(StringComparer.Ordinal))
+        {
+            var mention = new Regex($@"\b{Regex.Escape(stub)}\b");
+            int mentions = nativeSources.Sum(source => mention.Matches(source.Text).Count);
+            if (mentions > stubDeclarations.Count(declared => declared == stub) + armTargets.GetValueOrDefault(stub))
+                unresolved.Add(new($"the Inconclusive lane stub {stub} is reached other than through a NativeJourney switch arm",
+                    new HashSet<string>(StringComparer.Ordinal)));
+        }
+        var byName = members.ToLookup(member => member.Name, StringComparer.Ordinal);
+        var tests = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var source in nativeSources)
+            foreach (Match declaration in TaskMethod.Matches(source.Text))
+            {
+                string method = declaration.Groups["method"].Value;
+                string? verdict = Verdict(source.Text, declaration, byName, stubs, stubJourneys, unresolved);
+                // Overloads and local functions share the name: any unreadable one makes it unreadable.
+                tests[method] = tests.TryGetValue(method, out string? earlier) ? earlier ?? verdict : verdict;
+            }
+        return new(classes, tests);
     }
 
-    // The journeys that reach an Inconclusive stub. Dispatch switches are read member by member:
-    // an arm naming a journey counts, and a default arm covers the journeys that the member's other
-    // switch arms name but this switch does not (the journeys that reach it).
-    private static HashSet<string> StubJourneys(IReadOnlyList<Source> nativeSources)
+    private static string? Verdict(string text, Match declaration, ILookup<string, Member> members, IReadOnlySet<string> stubs,
+        IReadOnlySet<string> stubJourneys, IReadOnlyList<Unresolved> unresolved)
     {
-        var stubs = nativeSources.SelectMany(source => InconclusiveStub.Matches(source.Text))
-            .Select(match => match.Groups["method"].Value).ToHashSet(StringComparer.Ordinal);
-        var journeys = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var source in nativeSources)
+        const string unreadable = "whose body is not one call to a journey, so whether it reaches an Inconclusive lane stub cannot be read.";
+        if (!declaration.Groups["arrow"].Success) return unreadable;
+        var call = DelegatedCall.Match(text, declaration.Index + declaration.Length);
+        if (!call.Success) return unreadable;
+        string callee = call.Groups["callee"].Value;
+        if (callee == "RunNativeSessions")
         {
-            var starts = MemberStart.Matches(source.Text).Select(match => match.Index).Append(source.Text.Length).ToArray();
-            for (int member = 0; member + 1 < starts.Length; member++)
+            if (!call.Groups["journey"].Success) return unreadable;
+            string journey = call.Groups["journey"].Value;
+            if (stubJourneys.Contains(journey)) return $"whose journey NativeJourney.{journey} is still an Inconclusive lane stub.";
+            return unresolved.FirstOrDefault(entry => !entry.Excluded.Contains(journey)) is { } open
+                ? $"whose journey NativeJourney.{journey} may reach an Inconclusive lane stub: {open.Reason}."
+                : null;
+        }
+        if (stubs.Contains(callee)) return $"which calls the Inconclusive lane stub {callee}.";
+        var helpers = members[callee].ToArray();
+        if (helpers.Length == 0 || helpers.Any(helper => helper.Text.Contains("NativeJourney.", StringComparison.Ordinal)
+                || helper.Text.Contains("RunNativeSessions", StringComparison.Ordinal)
+                || stubs.Any(stub => Regex.IsMatch(helper.Text, $@"\b{Regex.Escape(stub)}\b"))))
+            return $"whose helper {callee} this check cannot read as free of journeys and Inconclusive lane stubs.";
+        return unresolved.Count > 0 ? $"which may reach an Inconclusive lane stub: {unresolved[0].Reason}." : null;
+    }
+
+    private static IEnumerable<Member> Members(Source source)
+    {
+        var starts = MemberStart.Matches(source.Text).Select(match => match.Index).Append(source.Text.Length).ToArray();
+        for (int member = 0; member + 1 < starts.Length; member++)
+        {
+            string text = source.Text[starts[member]..starts[member + 1]];
+            yield return new(MemberName.Match(text) is { Success: true } declared ? declared.Groups["name"].Value : "", text);
+        }
+    }
+
+    // Reads the dispatch switches member by member. An arm naming a journey sends that journey to its
+    // target. A default arm is reached only by the journeys that every earlier switch of the member
+    // lets through (it names them and throws for any other) and that its own switch does not name;
+    // with no such earlier switch, every journey its switch does not name may reach it.
+    private static (HashSet<string> StubJourneys, List<Unresolved> Unresolved, Dictionary<string, int> ArmTargets) ReadDispatch(
+        IReadOnlyList<Member> members, IReadOnlySet<string> stubs)
+    {
+        var journeys = new HashSet<string>(StringComparer.Ordinal);
+        var unresolved = new List<Unresolved>();
+        var targets = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var member in members)
+        {
+            var switches = Switches(member.Text);
+            for (int index = 0; index < switches.Count; index++)
             {
-                var switches = Switches(source.Text[starts[member]..starts[member + 1]]);
-                foreach (var arms in switches)
+                var arms = switches[index];
+                var named = arms.SelectMany(arm => arm.Journeys).ToHashSet(StringComparer.Ordinal);
+                foreach (var arm in arms)
                 {
-                    var named = arms.SelectMany(arm => arm.Journeys).ToHashSet(StringComparer.Ordinal);
-                    var reaching = switches.Where(other => other != arms).SelectMany(other => other).SelectMany(arm => arm.Journeys)
-                        .Except(named).ToArray();
-                    foreach (var arm in arms.Where(arm => arm.Target is not null && stubs.Contains(arm.Target)))
-                        journeys.UnionWith(arm.Journeys.Count > 0 ? arm.Journeys : reaching);
+                    if (arm.Target is null) continue;
+                    targets[arm.Target] = targets.GetValueOrDefault(arm.Target) + 1;
+                    if (!stubs.Contains(arm.Target)) continue;
+                    if (arm.Journeys.Count > 0) { journeys.UnionWith(arm.Journeys); continue; }
+                    var filters = switches.Take(index)
+                        .Where(earlier => earlier.Any(other => other.Journeys.Count > 0) && earlier.Any(other => other.Journeys.Count == 0 && other.Throws))
+                        .Select(earlier => earlier.SelectMany(other => other.Journeys).ToHashSet(StringComparer.Ordinal)).ToArray();
+                    if (filters.Length == 0)
+                    {
+                        unresolved.Add(new($"a default arm in {member.Name} leads to the stub {arm.Target}, and no earlier switch there limits the journeys that reach it", named));
+                        continue;
+                    }
+                    var reaching = filters.Skip(1).Aggregate(filters[0], (all, next) => { all.IntersectWith(next); return all; });
+                    reaching.ExceptWith(named);
+                    journeys.UnionWith(reaching);
                 }
             }
         }
-        return journeys;
+        return (journeys, unresolved, targets);
     }
 
-    private sealed record SwitchArmEntry(IReadOnlyList<string> Journeys, string? Target);
+    private sealed record SwitchArmEntry(IReadOnlyList<string> Journeys, string? Target, bool Throws);
 
-    // Arms of each switch expression in one member; nested braces inside an arm are skipped over.
+    // Arms of each switch expression in one member, in source order; nested braces inside an arm are skipped over.
     private static List<List<SwitchArmEntry>> Switches(string member)
     {
         var result = new List<List<SwitchArmEntry>>();
@@ -500,7 +676,7 @@ internal static class VerificationEvidenceRules
             string body = member[(open + 1)..Math.Min(close, member.Length)];
             result.Add(SwitchArm.Matches(body).Select(arm => new SwitchArmEntry(
                 JourneyName.Matches(arm.Groups["pattern"].Value).Select(j => j.Groups[1].Value).ToArray(),
-                arm.Groups["target"].Success ? arm.Groups["target"].Value : null)).ToList());
+                arm.Groups["target"].Success ? arm.Groups["target"].Value : null, arm.Groups["throws"].Success)).ToList());
         }
         return result;
     }

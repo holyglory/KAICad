@@ -48,7 +48,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 timeout_seconds=300
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery|FullyQualifiedName~PhysicalAllocation)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery|FullyQualifiedName~PhysicalAllocation)&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history/contracts",max_bytes=67108864}]
 [[test.diagram-requirement-history.check]]
 name="native-protocol"
@@ -59,42 +59,9 @@ command=["cmake","--build","automation/artifacts/native","--target","kiapi","kic
 name="native-ui"
 tier="development"
 requires=["contracts","native-protocol"]
-timeout_seconds=600
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
+timeout_seconds=900
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216},{name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216},{name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216},{name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864},{name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864}]
-
-[test.structural-editor-build]
-timeout_seconds=3600
-env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
-[[test.structural-editor-build.check]]
-name="managed"
-tier="development"
-role="preflight"
-invalidates=["contracts","configure","native","rendered"]
-command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
-[[test.structural-editor-build.check]]
-name="contracts"
-tier="development"
-role="preflight"
-invalidates=["configure","native","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~StructuralEditor|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession","--logger","trx","--results-directory","automation/artifacts/structural-editor-contracts"]
-retained_artifacts=[{name="contracts",path="automation/artifacts/structural-editor-contracts",max_bytes=16777216}]
-[[test.structural-editor-build.check]]
-name="configure"
-tier="development"
-role="preflight"
-invalidates=["native","rendered"]
-command=["cmake","-S",".","-B","automation/artifacts/native","-G","Ninja","-DCMAKE_BUILD_TYPE=Debug","-DKICAD_USE_CMAKE_FINDPROTOBUF=ON","-DKICAD_BUILD_QA_TESTS=ON","-DUSE_CCACHE=ON","-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
-[[test.structural-editor-build.check]]
-name="native"
-tier="development"
-command=["cmake","--build","automation/artifacts/native","--target","kicad","kiapi","eeschema_kiface","pcbnew_kiface","cvpcb_kiface","schema_build_copy","api_schema_build_copy","bitmap_archive_build"]
-[[test.structural-editor-build.check]]
-name="rendered"
-tier="development"
-requires=["native"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeStructuralEditor","--logger","trx","--results-directory","automation/artifacts/structural-editor-rendered"]
-retained_artifacts=[{name="rendered",path="automation/artifacts/structural-editor-rendered",max_bytes=16777216},{name="editor-evidence",path="automation/artifacts/native-structural-editor/native-session-current",max_bytes=33554432}]
 
 [test.part-symbol-contracts]
 timeout_seconds=600
@@ -1362,7 +1329,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", 
 name="contracts"
 tier="development"
 requires=["build"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "(FullyQualifiedName~StructuralEditor|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/engineering-model-results"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "(FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/engineering-model-results"]
 retained_artifacts=[{ name = "engineering-model-results", path = "automation/artifacts/engineering-model-results", max_bytes = 16777216 }]
 
 [test.automation]
@@ -3273,14 +3240,14 @@ env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 name="restore"
 tier="development"
 role="preflight"
-invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-structural-editor-build", "journey-diagram-requirement-history"]
+invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history"]
 command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
 
 [[test.native-acceptance.check]]
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-structural-editor-build", "journey-diagram-requirement-history"]
+invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
 [[test.native-acceptance.check]]
@@ -3405,18 +3372,10 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "native-offscreen-move-tests", path = "automation/artifacts/native-offscreen-move-tests", max_bytes = 16777216 }, { name = "native-offscreen-move-evidence", path = "automation/artifacts/native-offscreen-move/native-session-current", max_bytes = 33554432 }]
 
 [[test.native-acceptance.check]]
-name="journey-structural-editor-build"
-tier="development"
-requires=["native-build"]
-after=["journey-native-offscreen-move"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeStructuralEditor", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/structural-editor-rendered"]
-retained_artifacts=[{ name = "rendered", path = "automation/artifacts/structural-editor-rendered", max_bytes = 16777216 }, { name = "editor-evidence", path = "automation/artifacts/native-structural-editor/native-session-current", max_bytes = 33554432 }]
-
-[[test.native-acceptance.check]]
 name="journey-diagram-requirement-history"
 tier="development"
 requires=["native-build"]
-after=["journey-structural-editor-build"]
+after=["journey-native-offscreen-move"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{ name = "dialog-tests", path = "automation/artifacts/field-history-dialog-tests", max_bytes = 16777216 }, { name = "light", path = "automation/artifacts/native-field-history/light/native-session-current", max_bytes = 16777216 }, { name = "dark", path = "automation/artifacts/native-field-history/dark/native-session-current", max_bytes = 16777216 }, { name = "editor-light", path = "automation/artifacts/native-recursive-editor/light/native-session-current", max_bytes = 67108864 }, { name = "editor-dark", path = "automation/artifacts/native-recursive-editor/dark/native-session-current", max_bytes = 67108864 }]
 
@@ -3559,7 +3518,7 @@ retained_artifacts=[{ name = "delivery-observation-scope", path = "automation/ar
 name="intel"
 tier="development"
 requires=["build", "scope-contracts"]
-command=["env","KICAD_DELIVERY_PLATFORM=osx-x64","KICAD_DELIVERY_EVIDENCE=/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-f120-intel-public","KICAD_LANDING_PLATFORM=osx-x64","KICAD_LANDING_CANDIDATE_NAME=kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-macos-x64.tar.gz","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts|TestCategory=LandingBrowser","--logger","trx","--results-directory","automation/artifacts/mac-f120-intel-public-tests"]
+command=["env","KICAD_DELIVERY_PLATFORM=osx-x64","KICAD_DELIVERY_EVIDENCE=/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/mac-f120-intel-public","KICAD_LANDING_PLATFORM=osx-x64","KICAD_LANDING_CANDIDATE_NAME=kicad-codex-f120a47cfbd1832bc9133f6994b5e29aad082f3c-macos-x64.tar.gz","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts|TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-f120-intel-public-tests"]
 retained_artifacts=[{ name = "intel-observations", path = "automation/artifacts/mac-f120-intel-public", max_bytes = 536870912 }, { name = "intel-tests", path = "automation/artifacts/mac-f120-intel-public-tests", max_bytes = 16777216 }]
 
 [test.windows-f120-public]

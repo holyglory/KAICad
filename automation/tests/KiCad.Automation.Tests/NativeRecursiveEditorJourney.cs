@@ -607,25 +607,6 @@ public sealed partial class NativeSessionTests
             string expandedCapture = Path.Combine(evidence, instanceId + "-recursive-expanded.png");
             await CaptureRecursive(display, expandedCapture, token);
             await VerifyExpandedCanvasContent(expandedCapture, token);
-            if (!sessionWide)
-            {
-                // TEMPORARY LIMIT, to be removed with the parent's native-UI time limit change: the second project must repeat
-                // the whole editor journey. Its own MCP attachment, file, window, observations, navigation, edits, saves, field
-                // history, comments, conflict dialog, implementation preview and compact window ran above. The steps below also
-                // act on this instance (its implementation dialogs, whole-diagram history and the agent tools through this
-                // instance's MCP attachment) but run only in the first project, because both full repeats do not fit the
-                // native-UI check's 600 s limit on a shared host. The parent is asked to raise that limit (.devcoordinator.toml,
-                // parent-owned) and delete this early return in the same integration; until then it is an open outcome.
-                Key("w", control: true);
-                using (var isolationClosed = CancellationTokenSource.CreateLinkedTokenSource(token))
-                {
-                    isolationClosed.CancelAfter(TimeSpan.FromSeconds(15));
-                    while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, isolationClosed.Token);
-                }
-                if (interactionFailures.Count != 0)
-                    throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
-                return;
-            }
             string beforeManagement = await File.ReadAllTextAsync(source, token);
             var beforeManagementGraph = RecursiveBlockGraphXml.Read(beforeManagement);
             var sourceCpu = beforeManagementGraph.Inspect(beforeManagementGraph.SelectedRoot).Children[1];

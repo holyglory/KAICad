@@ -10,10 +10,13 @@ public sealed record ElectricalConnectivityDifference(string Kind, IReadOnlyList
     IReadOnlyList<int> SnapshotNetIndexes, IReadOnlyList<PinEndpoint> Pins);
 public sealed record NativePinPartition(int? SnapshotNetIndex, string? NativeName, IReadOnlyList<PinEndpoint> Pins);
 public sealed record UndrawnComponentPin(PinEndpoint Pin, int Unit, IReadOnlyList<string> LibraryPinIds);
+/// <param name="StackedPins">The groups of model pins that one placed symbol's own definition draws at one point, which
+/// KiCad always joins (decision kicad-stacked-pins-one-node-20260924); each is one node of the comparison.</param>
 public sealed record SchematicElectricalComparisonResult(bool PinBindingsComplete, bool ConnectivityEquivalent,
     IReadOnlyList<ElectricalBindingIssue> Issues, IReadOnlyList<ElectricalConnectivityDifference> Differences,
     IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null,
-    IReadOnlyList<NativePinPartition>? PinPartitions = null, IReadOnlyList<UndrawnComponentPin>? UndrawnPins = null);
+    IReadOnlyList<NativePinPartition>? PinPartitions = null, IReadOnlyList<UndrawnComponentPin>? UndrawnPins = null,
+    IReadOnlyList<IReadOnlyList<PinEndpoint>>? StackedPins = null);
 
 /// <summary>Compare pin partitions through exact sheet/symbol/placed-pin bindings.
 /// Snapshot indexes are ephemeral; this never transfers net requirement identities.</summary>
@@ -63,6 +66,8 @@ public static class SchematicElectricalComparison
         }
         var modelPins = new Dictionary<PinEndpoint, List<(string Path, string Id)>>();
         var componentSymbols = new Dictionary<Guid, List<SchematicSymbolInstance>>();
+        // Pins that one placed symbol's own definition draws at one point, by exact definition geometry.
+        var stacked = new List<PinEndpoint[]>();
         foreach (var occurrence in circuit.Symbols)
         {
             token.ThrowIfCancellationRequested();
@@ -94,6 +99,12 @@ public static class SchematicElectricalComparison
                 { issues.Add(new("ambiguous_placed_pin", path, pin.Id.Value, component.Id)); continue; }
                 if (!modelPins.TryGetValue(endpoint, out var placements)) modelPins.Add(endpoint, placements = []);
                 placements.Add(key);
+            }
+            foreach (var group in SchematicPlacedPins.Stacked(symbol, occurrence.Unit))
+            {
+                var members = group.Select(pin => part.Pins.FirstOrDefault(p => p.Number == pin.Number && (p.Unit == 0 || p.Unit == occurrence.Unit)))
+                    .OfType<PartPin>().Select(p => new PinEndpoint(component.Id, p.Number)).Distinct().ToArray();
+                if (members.Length > 1) stacked.Add(members);
             }
         }
         var undrawn = new List<UndrawnComponentPin>();
@@ -162,10 +173,30 @@ public static class SchematicElectricalComparison
             if (partitions > 1) differences.Add(new("model_net_split", [net.Id],
                 net.Pins.Where(p => endpointNets[p] is not null).Select(p => endpointNets[p]!.Value).Distinct().Order().ToArray(), Ordered(net.Pins)));
         }
+        // KiCad always joins the pins one placed symbol stacks at one point, so each stacked group is one node of the
+        // model: its pins share the one model net some of them name, or form one unnamed node when the model leaves all
+        // of them unconnected. A group the model spreads over two nets stays split here, so KiCad's join is reported as a
+        // native_net_join; planning refuses such XML (stacked_pins_on_different_nets). Pins of different symbols or
+        // units are never grouped, even where they touch.
+        var node = new Dictionary<PinEndpoint, string>();
+        var stackedNodes = StackedNodes(stacked);
+        foreach (var group in stackedNodes)
+        {
+            token.ThrowIfCancellationRequested();
+            var nets = group.Where(expected.ContainsKey).Select(p => expected[p]).Distinct().ToArray();
+            if (nets.Length > 1) continue;
+            string key = nets.Length == 1 ? "net:" + nets[0] : "stack:" + group[0].ComponentId + ":" + group[0].Pin;
+            foreach (var pin in group) node[pin] = key;
+            if (group.Select(p => endpointNets[p] is { } index ? "net:" + index : "pin:" + p.ComponentId + ":" + p.Pin)
+                .Distinct(StringComparer.Ordinal).Count() > 1)
+                differences.Add(new("stacked_pins_split", nets, group.Where(p => endpointNets[p] is not null)
+                    .Select(p => endpointNets[p]!.Value).Distinct().Order().ToArray(), group));
+        }
         foreach (var net in endpointNets.Where(p => p.Value is not null).GroupBy(p => p.Value!.Value))
         {
             var pins = net.Select(p => p.Key).ToArray();
-            var partitions = pins.Select(p => expected.TryGetValue(p, out var id) ? "net:" + id : "pin:" + p.ComponentId + ":" + p.Pin)
+            var partitions = pins.Select(p => node.TryGetValue(p, out var joined) ? joined
+                    : expected.TryGetValue(p, out var id) ? "net:" + id : "pin:" + p.ComponentId + ":" + p.Pin)
                 .Distinct(StringComparer.Ordinal).Count();
             if (partitions > 1) differences.Add(new("native_net_join", pins.Where(expected.ContainsKey)
                 .Select(p => expected[p]).Distinct().Order().ToArray(), [net.Key], Ordered(pins)));
@@ -175,11 +206,34 @@ public static class SchematicElectricalComparison
             .Concat(endpointNets.Where(p => p.Value is null).Select(p => new NativePinPartition(null, null, [p.Key])))
             .OrderBy(g => g.Pins[0].ComponentId).ThenBy(g => g.Pins[0].Pin, StringComparer.Ordinal).ToArray();
         return new(true, differences.Count == 0, [], differences, report.CoverageGaps, PinPartitions: nativePartitions,
-            UndrawnPins: undrawn.OrderBy(p => p.Pin.ComponentId).ThenBy(p => p.Pin.Pin, StringComparer.Ordinal).ToArray());
+            UndrawnPins: undrawn.OrderBy(p => p.Pin.ComponentId).ThenBy(p => p.Pin.Pin, StringComparer.Ordinal).ToArray(),
+            StackedPins: stackedNodes);
     }
 
     private static IReadOnlyList<PinEndpoint> Ordered(IEnumerable<PinEndpoint> pins) =>
         pins.OrderBy(p => p.ComponentId).ThenBy(p => p.Pin, StringComparer.Ordinal).ToArray();
+
+    // Stacked groups that share a pin (a common pin drawn by several units, or one symbol on repeated sheets)
+    // are one node; each node is returned once, its pins ordered.
+    private static IReadOnlyList<IReadOnlyList<PinEndpoint>> StackedNodes(IReadOnlyList<PinEndpoint[]> groups)
+    {
+        var parent = new Dictionary<PinEndpoint, PinEndpoint>();
+        PinEndpoint Find(PinEndpoint pin)
+        {
+            var root = pin;
+            while (parent.TryGetValue(root, out var next)) root = next;
+            while (parent.TryGetValue(pin, out var next) && next != root) { parent[pin] = root; pin = next; }
+            return root;
+        }
+        foreach (var group in groups)
+            foreach (var pin in group.Skip(1))
+            {
+                PinEndpoint left = Find(group[0]), right = Find(pin);
+                if (left != right) parent[right] = left;
+            }
+        return [.. groups.SelectMany(g => g).Distinct().GroupBy(Find).Select(g => Ordered(g))
+            .OrderBy(g => g[0].ComponentId).ThenBy(g => g[0].Pin, StringComparer.Ordinal)];
+    }
     private static string Path(Kiapi.Common.Types.SheetPath? path) => path is null ? "" : string.Join('/', path.Path.Select(i => i.Value));
     private static bool Id(string? value) => Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty && value == id.ToString("D");
 }

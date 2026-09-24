@@ -549,6 +549,158 @@ public sealed partial class SchematicSynchronizationPlanTests
     }
 
     [TestMethod]
+    public void PsuCpuStackedRegulatorPinsAreOneConnectionAndNeverSplitAcrossNets()
+    {
+        // Decision kicad-stacked-pins-one-node-20260924 on the frozen fixture's exact definition geometry: the LP3982 (U2)
+        // draws pins 1 and 4 at one point, which KiCad always joins. Isolated planning and comparison logic; the rendered
+        // PSU/CPU creation journey proves the same rules against the editor's own captured symbols.
+        var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
+        var typed = components with { PartSymbols = WithLibraryPinTypes(components.PartSymbols!) };
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit;
+        var references = complete.Components.ToDictionary(c => c.Reference, c => c.Id);
+        PinEndpoint Pin(string reference, string number) => new(references[reference], number);
+        Guid railB = complete.Nets.Single(n => n.Name == "RAIL_B").Id, fault = complete.Nets.Single(n => n.Name == "LDO_FAULT").Id;
+        // U2.4 moved from RAIL_B to LDO_FAULT while its stacked partner U2.1 stays on RAIL_B.
+        CircuitNet[] split = [.. complete.Nets.Select(n => n.Id == railB ? n with { Pins = [.. n.Pins.Where(p => p != Pin("U2", "4"))] }
+            : n.Id == fault ? n with { Pins = [.. n.Pins, Pin("U2", "4")] } : n)];
+        // U2.4 left out of every net: KiCad still joins it to RAIL_B through U2.1, which is no conflict.
+        CircuitNet[] partial = [.. complete.Nets.Select(n => n.Id == railB ? n with { Pins = [.. n.Pins.Where(p => p != Pin("U2", "4"))] } : n)];
+        SchematicSynchronizationPlan Planned(DesignRecoveryState state, SchematicDesign desired)
+        {
+            var saved = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desired, [])) };
+            return SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true));
+        }
+        void Refused(SchematicSynchronizationPlan plan, string path)
+        {
+            Assert.AreEqual(SchematicConnectionErrors.StackedPinsOnDifferentNets, plan.ErrorCode, path + ": " + plan.ErrorMessage);
+            StringAssert.Contains(plan.ErrorMessage!, "U2.1 in net 'RAIL_B' and U2.4 in net 'LDO_FAULT'", path);
+            Assert.IsNull(plan.Candidate, path); Assert.IsNull(plan.CandidateXml, path); Assert.IsNull(plan.Connections, path);
+            Assert.IsEmpty(plan.NativeOperations, path + ": nothing may reach the editor.");
+        }
+
+        // The creation projection, which both creation and connected creation use, refuses the split before placing anything;
+        // plain creation still refuses any new connection first, with its own code.
+        var projected = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(sheets, WithPsuNets(typed, split), [], allowConnected: true));
+        Assert.AreEqual(SchematicConnectionErrors.StackedPinsOnDifferentNets, projected.Code);
+        Assert.AreEqual("created_component_connectivity_requires_resolution",
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(sheets, WithPsuNets(typed, split), [])).Code);
+        // Connected creation from the S1 sheets, and connections added to components the editor already shows.
+        var fromSheets = PsuCpuConnectedState(sheets);
+        Refused(Planned(fromSheets, WithPsuNets(typed, split)), "create and connect");
+        var placed = SchematicNativeCreationProjection.Project(sheets, typed, []).Candidate;
+        var unconnected = PsuCpuConnectedState(placed);
+        Refused(Planned(unconnected, WithPsuNets(placed, split)), "connect only");
+
+        // False positives: listing only one of the stacked pins is planned in both paths, and KiCad's join is predicted:
+        // the unlisted partner belongs to RAIL_B's expected native group.
+        foreach (var (state, design, created) in new[] { (fromSheets, typed, true), (unconnected, placed, false) })
+        {
+            var plan = Planned(state, WithPsuNets(design, partial));
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+            var keys = SchematicConnectionIntentBuilderTests.Keys(plan.Candidate!, (Pin("U2", "1").ComponentId, "1"), (Pin("U2", "4").ComponentId, "4"));
+            var group = intent.ExpectedGroups.Single(g => g.Contains(keys[0]));
+            Assert.IsTrue(group.Contains(keys[1]), (created ? "created" : "existing") + " U2.4 joins RAIL_B's group through U2.1.");
+            Assert.AreEqual(complete.Nets.Single(n => n.Id == railB).Pins.Count, group.Count);
+            Assert.AreEqual(created ? 222 : 41, intent.ExpectedGroups.Sum(g => g.Count));
+        }
+        // Both stacked pins on RAIL_B (the frozen Complete stage) is planned, and two pins of different symbols that share
+        // one local position (LTC2959 U3.1 on DCDC_OUT and STM32 U4.2 on RAIL_A, both on PSU) are never one connection.
+        SchematicConnectionIntentBuilderTests.RequireRealizationPlan(Planned(fromSheets, WithPsuNets(typed, complete.Nets)));
+
+        // Comparison: the created, unconnected components as KiCad shows them, with U2.1 and U2.4 joined.
+        var observed = unconnected.ObservedElectrical!;
+        var result = SchematicElectricalComparison.Compare(placed, observed, []);
+        Assert.IsTrue(result.PinBindingsComplete && result.ConnectivityEquivalent, string.Join("; ", result.Differences.Select(d => d.Kind)));
+        CollectionAssert.AreEquivalent(new[] { Pin("U2", "1"), Pin("U2", "4") }, result.PinPartitions!.Single(p => p.Pins.Count > 1).Pins.ToArray());
+        Assert.AreEqual(220, result.PinPartitions!.Count(p => p.Pins.Count == 1),
+            "Every other pin stays alone, including processor U5, whose four units draw pins at the same local points.");
+        // Must-catch: an editor that showed the stacked pins apart is not KiCad's drawing of this symbol.
+        var apart = observed.Clone(); apart.Nets.Clear();
+        var separated = SchematicElectricalComparison.Compare(placed, apart, []);
+        Assert.IsTrue(separated.PinBindingsComplete); Assert.IsFalse(separated.ConnectivityEquivalent);
+        var difference = separated.Differences.Single();
+        Assert.AreEqual("stacked_pins_split", difference.Kind);
+        CollectionAssert.AreEqual(new[] { Pin("U2", "1"), Pin("U2", "4") }, difference.Pins.ToArray());
+        // Must-catch: U3.1 and U4.2 sit at the same local point of two different symbols; if they touched in the editor,
+        // that is a real join the XML does not have, never a stacked pair.
+        var screen = placed.Schematic.Instances.Single(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
+            && i.Unpack<SchematicSymbolInstance>().ReferenceField.Text.Text_ == "U3"));
+        SchematicPin PlacedPin(string reference, string number) => screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.ReferenceField.Text.Text_ == reference)
+            .Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).Single(p => p.Number == number && p.LibraryPinId is not null);
+        Assert.AreEqual(PlacedPin("U3", "1").Position, PlacedPin("U4", "2").Position, "The premise: one local point in two symbols.");
+        var touching = observed.Clone();
+        var contact = new SchematicNet { Name = "Net-(U3-VDD-Pad1)" };
+        contact.Sheets.Add(new SchematicNetSheetContents { Path = screen.Metadata.Document.SheetPath.Clone(), Items = { PlacedPin("U3", "1").Id.Clone(), PlacedPin("U4", "2").Id.Clone() } });
+        touching.Nets.Add(contact);
+        var joined = SchematicElectricalComparison.Compare(placed, touching, []);
+        Assert.IsTrue(joined.PinBindingsComplete); Assert.IsFalse(joined.ConnectivityEquivalent);
+        CollectionAssert.AreEquivalent(new[] { Pin("U3", "1"), Pin("U4", "2") }, joined.Differences.Single(d => d.Kind == "native_net_join").Pins.ToArray());
+        Assert.IsTrue(SchematicElectricalComparison.Compare(WithPsuNets(placed, [new(Guid.NewGuid(), "SUPPLY", [Pin("U3", "1"), Pin("U4", "2")])]), touching, [])
+            .ConnectivityEquivalent, "The same touch is exactly what an XML net joining the two pins describes.");
+    }
+
+    [TestMethod]
+    public void StackedPinsJoinOnlyWithinOnePlacedUnit()
+    {
+        // Isolated comparison and planning rules on a two-unit part whose units share pin number 8 (common to both units) and
+        // draw pin 1 (unit 1) and pin 7 (unit 2) at the same local point: nothing stacks across units or symbols.
+        var f = SchematicElectricalComparisonTests.Fixture();
+        void Place(int unit, string number, long y)
+        {
+            foreach (var data in new[] { f.Design.Schematic, f.State.Hierarchy.Data })
+            foreach (var screen in data.Instances)
+                for (int index = 0; index < screen.Items.Count; ++index)
+                {
+                    if (!screen.Items[index].Is(SchematicSymbolInstance.Descriptor)) continue;
+                    var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>();
+                    if (symbol.Unit.Unit != unit) continue;
+                    foreach (var child in symbol.Definition.Items)
+                    {
+                        var pin = child.Item.Unpack<SchematicPin>();
+                        if (pin.Number != number) continue;
+                        pin.Position = new() { XNm = 0, YNm = y }; child.Item = Any.Pack(pin);
+                    }
+                    screen.Items[index] = Any.Pack(symbol);
+                }
+        }
+        Place(1, "1", 0); Place(1, "8", 5_080_000); Place(2, "7", 0); Place(2, "8", 5_080_000);
+        var circuit = f.Design.Engineering.Circuit;
+        Guid u1 = circuit.Components[0].Id, u2 = circuit.Components[1].Id, vcc = circuit.Nets[0].Id;
+        // False positive: units drawn alike share local points and pin 8, and every pin keeps its own connection.
+        var alike = SchematicElectricalComparison.Compare(f.Design, f.State, [f.Library]);
+        Assert.IsTrue(alike.PinBindingsComplete && alike.ConnectivityEquivalent, string.Join("; ", alike.Differences.Select(d => d.Kind)));
+        CollectionAssert.AreEquivalent(new[] { new PinEndpoint(u1, "8"), new PinEndpoint(u2, "8") }, alike.PinPartitions!.Single(p => p.Pins.Count > 1).Pins.ToArray());
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(f.Design with { Engineering = f.Design.Engineering with { Circuit = circuit with
+            { Nets = [.. circuit.Nets, new(Guid.NewGuid(), "OUT", [new(u1, "1"), new(u2, "1")]), new(Guid.NewGuid(), "OUT_B", [new(u1, "7"), new(u2, "7")])] } } });
+
+        // Unit 1 now draws pin 1 on its common pin 8: KiCad joins U1.1 and U2.1 into VCC, and an editor that did not is refused.
+        Place(1, "1", 5_080_000);
+        var apart = SchematicElectricalComparison.Compare(f.Design, f.State, [f.Library]);
+        Assert.IsFalse(apart.ConnectivityEquivalent);
+        Assert.IsTrue(apart.Differences.All(d => d.Kind == "stacked_pins_split" && d.ModelNetIds.SequenceEqual([vcc])), string.Join("; ", apart.Differences.Select(d => d.Kind)));
+        foreach (var sheet in f.State.Nets[0].Sheets)
+        {
+            var screen = f.State.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.SheetPath.Equals(sheet.Path));
+            foreach (var symbol in screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()))
+                foreach (var pin in symbol.Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).Where(p => p.Number == "1"))
+                    sheet.Items.Add(pin.Id.Clone());
+        }
+        var together = SchematicElectricalComparison.Compare(f.Design, f.State, [f.Library]);
+        Assert.IsTrue(together.PinBindingsComplete && together.ConnectivityEquivalent, "The stacked pin is one node with the VCC pin it touches.");
+        // Must-catch: the model putting the stacked pin on another net is a join KiCad cannot avoid, and planning refuses it.
+        var other = f.Design with { Engineering = f.Design.Engineering with { Circuit = circuit with
+            { Nets = [.. circuit.Nets, new(Guid.NewGuid(), "OUT", [new(u1, "1"), new(u2, "1")])] } } };
+        var conflict = SchematicElectricalComparison.Compare(other, f.State, [f.Library]);
+        Assert.IsFalse(conflict.ConnectivityEquivalent);
+        Assert.IsTrue(conflict.Differences.Any(d => d.Kind == "native_net_join" && d.ModelNetIds.Contains(vcc)));
+        Assert.AreEqual(SchematicConnectionErrors.StackedPinsOnDifferentNets,
+            Assert.ThrowsExactly<AutomationException>(() => SchematicPlacedPins.RequireStackedPinsOnOneNet(other)).Code);
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(f.Design with { Engineering = f.Design.Engineering with { Circuit = circuit with
+            { Nets = [circuit.Nets[0] with { Pins = [.. circuit.Nets[0].Pins, new(u1, "1"), new(u2, "1")] }] } } });
+    }
+
+    [TestMethod]
     public void PsuCpuWiredCrossingsAreReusedOrJoinedWhenXmlAddsPins()
     {
         // The fixture's Complete stage once the editor shows it wired: every net joined with its hierarchical labels,
@@ -894,6 +1046,34 @@ public sealed partial class SchematicSynchronizationPlanTests
             var native = new SchematicNet { Name = "/" + net.Name };
             native.Sheets.Add(sheets.Values);
             electrical.Nets.Add(native);
+        }
+        // Like KiCad, this editor joins the pins one placed symbol draws at one point (the LP3982's pins 1 and 4):
+        // an unconnected sibling joins its group's net, and a group with no connected pin is a net of its own.
+        foreach (var occurrence in circuit.Symbols.OrderBy(s => s.Id))
+        {
+            string path = paths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])];
+            var screen = screens[path];
+            var symbol = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Single(s => s.Id.Value == natives[occurrence.Id]);
+            var placed = symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)
+                    && !(c.Unit?.Unit is > 0 && c.Unit.Unit != occurrence.Unit) && !(c.BodyStyle?.Style is > 0 && c.BodyStyle.Style != (symbol.BodyStyle?.Style ?? 1)))
+                .Select(c => c.Item.Unpack<SchematicPin>())
+                .Where(p => p.LibraryPinId is not null && p.Position is not null && p.ElectricalType != ElectricalPinType.EptNoConnect);
+            foreach (var stack in placed.GroupBy(p => (p.Position.XNm, p.Position.YNm)).Where(g => g.Count() > 1))
+            {
+                var ids = stack.Select(p => p.Id.Value).ToHashSet(StringComparer.Ordinal);
+                var joined = electrical.Nets.FirstOrDefault(n => n.Sheets.Any(s => string.Join('/', s.Path.Path.Select(p => p.Value)) == path
+                    && s.Items.Any(i => ids.Contains(i.Value))));
+                if (joined is null)
+                {
+                    joined = new SchematicNet { Name = "Net-(" + components[occurrence.ComponentId].Reference + "-Pad" + stack.First().Number + ")" };
+                    electrical.Nets.Add(joined);
+                }
+                var contents = joined.Sheets.FirstOrDefault(s => string.Join('/', s.Path.Path.Select(p => p.Value)) == path);
+                if (contents is null) joined.Sheets.Add(contents = new() { Path = screen.Metadata.Document.SheetPath.Clone() });
+                foreach (var pin in stack.Where(p => !contents.Items.Any(i => i.Value == p.Id.Value)))
+                    contents.Items.Add(pin.Id.Clone());
+            }
         }
         return new(Guid.NewGuid(), Guid.NewGuid(), new("psu-cpu-epoch", 7), false, baseline,
             Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])), baseline.Schematic.Clone(), [],

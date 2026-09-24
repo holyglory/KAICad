@@ -14,6 +14,17 @@
 > version-10 rule and `AbandonRejectedRealization` are landed by the parent at the freeze integration. The rebuild
 > seam used by lane 2C is provisional.
 
+> **Errata 2026-09-24** (decision `kicad-stacked-pins-one-node-20260924`, ne741e8800f5b394f): the LP3982 symbol draws
+> pins 1 and 4 at the same point, and KiCad always joins pins that one placed symbol's own definition stacks at one
+> point. §1.6.3 "Other stages" therefore reads: `Components`: same sheets and symbols; every pin is alone in its native
+> net except U2 pins 1 and 4, which KiCad shows joined in one native net of exactly those two pins; no labels or sheet
+> pins. The same holds for `PsuComponents`, which places the same U2. `ExpectedNative` lists the pair as `JoinedPins`
+> (derived from the exact definition geometry of `lib_symbols.kicad_sexpr`, never from names) and leaves it out of
+> `IsolatedPins`: 220 isolated pins in `Components`, 35 in `PsuComponents`. `Complete` is unchanged: both pins are
+> already in RAIL_B. The electrical comparison treats each stacked group as one node, and XML that puts stacked pins of
+> one symbol on different nets is refused while planning with `stacked_pins_on_different_nets`, before KiCad changes.
+> The frozen fixture files are unchanged.
+
 # KAICad Phase 2 shared contract — PSU→CPU acceptance fixture and lane file ownership
 
 Base read: worktree `the codex/finalization-integration worktree`, branch `codex/finalization-integration`. HEAD moved from `0da1dcdbd8` to `86dbd67c5d` while I was reading. That merge touched only `NativeStructuralEditorJourney.cs` and `pcbnew/api/pcb_drc_run_inputs.h`, so nothing below is affected. The work was read-only: I edited nothing, ran no build or test, and wrote no Coordinator record.

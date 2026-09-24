@@ -358,14 +358,52 @@ public sealed class PsuCpuFixtureTests
             "cross_net_wire", "mem_sda_net" }, expected.Forbidden.ToArray());
         Assert.AreEqual(new PsuCpuPresentationPolicy(10, 50, true), expected.Presentation);
 
+        // Erratum 2026-09-24: KiCad joins the LP3982 pins its symbol stacks at one point, so the unwired stages have
+        // every pin alone except U2 pins 1 and 4, which form one native net. Complete keeps both in RAIL_B.
+        Assert.IsEmpty(expected.JoinedPins);
+        var railB = expected.Nets.Single(n => n.Name == "RAIL_B").Pins;
+        Assert.IsTrue(railB.Contains(new("U2", "1")) && railB.Contains(new("U2", "4")));
+        PsuCpuPinReference[][] stackedU2 = [[new("U2", "1"), new("U2", "4")]];
         var unwired = PsuCpuFixture.ExpectedNative(PsuCpuStage.Components);
-        Assert.IsEmpty(unwired.Nets); Assert.AreEqual(222, unwired.IsolatedPins.Values.Sum(p => p.Count));
+        Assert.IsEmpty(unwired.Nets); Assert.AreEqual(220, unwired.IsolatedPins.Values.Sum(p => p.Count));
+        CollectionAssert.AreEqual(stackedU2.Select(g => string.Join(" ", g)).ToArray(), unwired.JoinedPins.Select(g => string.Join(" ", g)).ToArray());
+        CollectionAssert.AreEqual(new[] { "2", "3", "5", "6", "7", "8", "9" }, unwired.IsolatedPins["U2"].ToArray());
+        Assert.AreEqual(222, unwired.IsolatedPins.Values.Sum(p => p.Count) + unwired.JoinedPins.Sum(g => g.Count), "Every pin is isolated or joined once.");
         Assert.IsTrue(unwired.HierarchicalLabels.Values.Concat(unwired.SheetPins.Values).Concat(unwired.AllowedLabelNames.Values).All(v => v.Count == 0));
         var psu = PsuCpuFixture.ExpectedNative(PsuCpuStage.PsuComponents);
-        Assert.IsTrue(psu.Symbols.Count == 6 && psu.Symbols.All(s => s.Sheet == "PSU") && psu.IsolatedPins.Values.Sum(p => p.Count) == 37);
+        Assert.IsTrue(psu.Symbols.Count == 6 && psu.Symbols.All(s => s.Sheet == "PSU") && psu.IsolatedPins.Values.Sum(p => p.Count) == 35);
+        CollectionAssert.AreEqual(stackedU2.Select(g => string.Join(" ", g)).ToArray(), psu.JoinedPins.Select(g => string.Join(" ", g)).ToArray());
+        Assert.IsEmpty(PsuCpuFixture.ExpectedNative(PsuCpuStage.SheetsOnly).JoinedPins);
         Assert.IsEmpty(PsuCpuFixture.ExpectedNative(PsuCpuStage.SheetsOnly).Symbols);
         var rootOnly = PsuCpuFixture.ExpectedNative(PsuCpuStage.RootOnly);
         Assert.AreEqual((PsuCpuSeed.RootOnly, "ROOT"), (rootOnly.Seed, rootOnly.Sheets.Single().Key));
+    }
+
+    [TestMethod]
+    public void StackedPinsComeFromOneUnitsExactDefinitionGeometry()
+    {
+        // Erratum 2026-09-24: the joined U2 pair is read from the frozen definition geometry, not from pin names.
+        var stacked = PsuCpuFixture.StackedPins().Single();
+        Assert.AreEqual(("Regulator_Linear:LP3982ILD-3.3", 1), (stacked.CacheKey, stacked.Unit));
+        CollectionAssert.AreEqual(new[] { "1", "4" }, stacked.Numbers.ToArray());
+        var regulator = PsuCpuFixture.Parts().Single(p => p.CacheKey == stacked.CacheKey);
+        Assert.AreEqual(regulator.Pins.Single(p => p.Number == "1").Name, regulator.Pins.Single(p => p.Number == "4").Name,
+            "Both stacked pins are the regulator output (OUT).");
+
+        // False-positive guard: the four-unit processor draws pins of different units at the same local points
+        // (independently counted here), and none of them is stacked, because each unit is its own placed symbol.
+        var positions = new Dictionary<(string X, string Y), HashSet<int>>();
+        foreach (var symbol in PsuCpuSexpr.Parse(PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr")).Children("symbol")
+            .Where(s => s.Value(1) == "Library:F28P659DK8PTPQ1"))
+            foreach (var body in symbol.Children("symbol"))
+                foreach (var pin in body.Children("pin"))
+                {
+                    var at = pin.Child("at");
+                    if (!positions.TryGetValue((at.Value(1), at.Value(2)), out var units)) positions.Add((at.Value(1), at.Value(2)), units = []);
+                    units.Add(int.Parse(body.Value(1).Split('_')[^2], CultureInfo.InvariantCulture));
+                }
+        Assert.IsTrue(positions.Values.Count(units => units.Count > 1) > 0, "The processor units share local pin positions.");
+        Assert.IsFalse(PsuCpuFixture.StackedPins().Any(s => s.CacheKey == "Library:F28P659DK8PTPQ1"));
     }
 
     [TestMethod]

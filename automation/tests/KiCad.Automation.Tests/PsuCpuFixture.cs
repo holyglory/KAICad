@@ -28,6 +28,8 @@ internal sealed record PsuCpuPart(Guid Id, int Ordinal, string Name, string Cach
     PsuCpuPartSource Source, IReadOnlyList<PartPin> Pins);
 
 internal sealed record PsuCpuPinReference(string Reference, string Number);
+/// <summary>Pin numbers one unit of a fixture part draws at one point (contract erratum 2026-09-24).</summary>
+internal sealed record PsuCpuStackedPins(string CacheKey, int Unit, IReadOnlyList<string> Numbers);
 internal sealed record PsuCpuExpectedSheet(string Key, Guid ModelSheetInstance, Guid Definition, string? Parent, string File,
     string? SheetName, Guid? NativeSheetSymbol, Guid NativeScreen, string Page, string Paper);
 internal sealed record PsuCpuExpectedSymbol(Guid Component, Guid Occurrence, string Reference, string LibId, string Value, int Unit, string Sheet);
@@ -40,7 +42,14 @@ internal sealed record PsuCpuExpectedNative(PsuCpuStage Stage, PsuCpuSeed Seed, 
     IReadOnlyDictionary<string, IReadOnlyList<string>> IsolatedPins, IReadOnlyDictionary<string, IReadOnlyList<string>> HierarchicalLabels,
     IReadOnlyDictionary<string, IReadOnlyList<string>> SheetPins, IReadOnlyDictionary<string, IReadOnlyList<string>> RequiredLocalLabelNames,
     IReadOnlyDictionary<string, IReadOnlyList<string>> AllowedLabelNames, IReadOnlyList<string> Forbidden, string NetNameRule,
-    PsuCpuPresentationPolicy Presentation);
+    PsuCpuPresentationPolicy Presentation)
+{
+    /// <summary>Pins a placed symbol's own definition draws at one point while the stage leaves them out of every
+    /// model net. KiCad always joins each group into one native net of exactly those pins, so they are not isolated
+    /// (contract erratum 2026-09-24): in the Components and PsuComponents stages, U2 pins 1 and 4. Complete keeps
+    /// none, because RAIL_B already holds both.</summary>
+    public IReadOnlyList<IReadOnlyList<PsuCpuPinReference>> JoinedPins { get; init; } = [];
+}
 internal sealed record PsuCpuExpectedConnection(Guid Connection, string Owner, string Name, DiagramConnectionKind Kind, string Status,
     IReadOnlyList<Guid> Nets, int? Boundary, IReadOnlyList<Guid> Members, IReadOnlyList<PsuCpuPinReference> Pins);
 internal sealed record PsuCpuExpectedRealization(Guid Graph, Guid Circuit, IReadOnlyList<PsuCpuExpectedConnection> Connections);
@@ -84,6 +93,7 @@ internal static class PsuCpuFixture
     private static readonly Lazy<RecursiveBlockGraph> graph = new(() => RecursiveBlockGraphXml.Read(
         Checked("system.blocks.xml", RecursiveBlockGraphXml.Write(PsuCpuFixtureBuilder.Graph()))));
     private static readonly Lazy<PsuCpuExpectedNative> expectedNative = new(ReadExpectedNative);
+    private static readonly Lazy<IReadOnlyList<PsuCpuStackedPins>> stackedPins = new(ReadStackedPins);
     private static readonly Lazy<PsuCpuExpectedRealization> expectedRealization = new(ReadExpectedRealization);
     private static readonly Lazy<PsuCpuExpectedMigration> expectedMigration = new(ReadExpectedMigration);
 
@@ -150,22 +160,36 @@ internal static class PsuCpuFixture
     }
 
     /// <summary>Expected native result after realizing a stage from S1 (RootOnly: the S2 root).
-    /// Only Complete is stored; the other stages follow contract section 1.6.3.</summary>
+    /// Only Complete is stored; the other stages follow contract section 1.6.3 and its erratum of
+    /// 2026-09-24: pins a placed symbol stacks at one point (<see cref="StackedPins"/>) are joined by
+    /// KiCad, so an unwired stage lists them in JoinedPins instead of IsolatedPins.</summary>
     public static PsuCpuExpectedNative ExpectedNative(PsuCpuStage stage)
     {
         var complete = expectedNative.Value;
         var pins = Parts().ToDictionary(p => p.Ordinal, p => (IReadOnlyList<string>)p.Pins.Select(pin => pin.Number).Order(StringComparer.Ordinal).ToArray());
+        var cacheKeys = Parts().ToDictionary(p => p.Ordinal, p => p.CacheKey);
         var partOf = PsuCpuFixtureBuilder.Components.ToDictionary(c => c.Reference, c => c.Part);
         IReadOnlyDictionary<string, IReadOnlyList<string>> Lists(IEnumerable<string> keys, Func<string, IReadOnlyList<string>> value) =>
             keys.Distinct().ToDictionary(k => k, value, StringComparer.Ordinal);
-        PsuCpuExpectedNative Unwired(IReadOnlyList<PsuCpuExpectedSheet> sheets, IReadOnlyList<PsuCpuExpectedSymbol> symbols, PsuCpuSeed seed) => complete with
+        PsuCpuExpectedNative Unwired(IReadOnlyList<PsuCpuExpectedSheet> sheets, IReadOnlyList<PsuCpuExpectedSymbol> symbols, PsuCpuSeed seed)
         {
-            Stage = stage, Seed = seed, Sheets = sheets, Symbols = symbols, Nets = [],
-            IsolatedPins = Lists(symbols.Select(s => s.Reference), r => pins[partOf[r]]),
-            HierarchicalLabels = Lists(sheets.Select(s => s.Key), _ => []),
-            SheetPins = Lists(sheets.Where(s => s.Parent is not null).Select(s => s.Key), _ => []),
-            RequiredLocalLabelNames = Lists([], _ => []), AllowedLabelNames = Lists(sheets.Select(s => s.Key), _ => [])
-        };
+            // No stage without nets connects a stacked pin, so every stacked group of a placed unit is joined.
+            IReadOnlyList<IReadOnlyList<PsuCpuPinReference>> joined = [.. symbols.SelectMany(s => StackedPins()
+                    .Where(x => x.CacheKey == cacheKeys[partOf[s.Reference]] && x.Unit == s.Unit)
+                    .Select(x => (IReadOnlyList<PsuCpuPinReference>)x.Numbers.Select(n => new PsuCpuPinReference(s.Reference, n)).ToArray()))
+                .DistinctBy(g => string.Join(" ", g.Select(p => p.Reference + "." + p.Number)))
+                .OrderBy(g => g[0].Reference, StringComparer.Ordinal).ThenBy(g => g[0].Number, StringComparer.Ordinal)];
+            var notIsolated = joined.SelectMany(g => g).ToHashSet();
+            return complete with
+            {
+                Stage = stage, Seed = seed, Sheets = sheets, Symbols = symbols, Nets = [],
+                IsolatedPins = Lists(symbols.Select(s => s.Reference), r => [.. pins[partOf[r]].Where(n => !notIsolated.Contains(new(r, n)))]),
+                JoinedPins = joined,
+                HierarchicalLabels = Lists(sheets.Select(s => s.Key), _ => []),
+                SheetPins = Lists(sheets.Where(s => s.Parent is not null).Select(s => s.Key), _ => []),
+                RequiredLocalLabelNames = Lists([], _ => []), AllowedLabelNames = Lists(sheets.Select(s => s.Key), _ => [])
+            };
+        }
         return stage switch
         {
             PsuCpuStage.Complete => complete,
@@ -459,6 +483,13 @@ internal static class PsuCpuFixture
                     if (references.TryGetValue(reference, out var component)
                         && partitions.SingleOrDefault(p => p.Pins.Contains(new PinEndpoint(component, number))) is not { Pins.Count: 1 })
                         Differ("isolated_pin", $"{reference}.{number} is not alone in its native net");
+        if (partitions.Count > 0)
+            foreach (var group in expected.JoinedPins)
+            {
+                var pins = group.Select(p => new PinEndpoint(references.GetValueOrDefault(p.Reference), p.Number)).ToHashSet();
+                if (partitions.SingleOrDefault(p => p.Pins.Contains(pins.First())) is not { } joined || !joined.Pins.ToHashSet().SetEquals(pins))
+                    Differ("joined_pin", $"{string.Join(" and ", group.Select(p => p.Reference + "." + p.Number))} are not exactly one native net");
+            }
         if (differences.Count > 0)
             throw Failure("psu_cpu_native_mismatch", string.Join("; ", differences.Take(20))
                 + (differences.Count > 20 ? $"; and {differences.Count - 20} more" : ""));
@@ -645,6 +676,40 @@ internal static class PsuCpuFixture
             new(Text(source, "path"), Text(source, "gitBlob"), Text(source, "symbol"), source.GetProperty("formatVersion").GetInt32()),
             [.. p.GetProperty("pins").EnumerateArray().Select(pin => new PartPin(Text(pin, "number"), Text(pin, "name"), pin.GetProperty("unit").GetInt32()))]);
     })];
+
+    /// <summary>Per fixture part and unit, the pin numbers its own definition draws at one point in body style 1 (or
+    /// common to all units or styles), read from the exact geometry of lib_symbols.kicad_sexpr, never from names. A
+    /// no-connect pin passes no connection on in KiCad and never joins. KiCad joins each group into one connection
+    /// (contract erratum 2026-09-24, decision kicad-stacked-pins-one-node-20260924); for fixture v1 this is exactly
+    /// LP3982 pins 1 and 4.</summary>
+    public static IReadOnlyList<PsuCpuStackedPins> StackedPins() => stackedPins.Value;
+
+    private static IReadOnlyList<PsuCpuStackedPins> ReadStackedPins()
+    {
+        var result = new List<PsuCpuStackedPins>();
+        foreach (var symbol in PsuCpuSexpr.Parse(ReadText("lib_symbols.kicad_sexpr")).Children("symbol"))
+        {
+            string key = symbol.Value(1);
+            var drawn = new List<(int Unit, string Number, decimal X, decimal Y)>();
+            foreach (var body in symbol.Children("symbol"))
+            {
+                var name = body.Value(1).Split('_');
+                int unit = int.Parse(name[^2], CultureInfo.InvariantCulture), style = int.Parse(name[^1], CultureInfo.InvariantCulture);
+                if (style is not (0 or 1)) continue;
+                foreach (var pin in body.Children("pin").Where(p => p.Value(1) != "no_connect"))
+                {
+                    var at = pin.Child("at");
+                    drawn.Add((unit, pin.Child("number").Value(1), decimal.Parse(at.Value(1), CultureInfo.InvariantCulture),
+                        decimal.Parse(at.Value(2), CultureInfo.InvariantCulture)));
+                }
+            }
+            int units = Parts().Single(p => p.CacheKey == key).Units;
+            for (int unit = 1; unit <= units; unit++)
+                foreach (var group in drawn.Where(p => p.Unit == 0 || p.Unit == unit).GroupBy(p => (p.X, p.Y)).Where(g => g.Count() > 1))
+                    result.Add(new(key, unit, [.. group.Select(p => p.Number).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]));
+        }
+        return result;
+    }
 
     private static PsuCpuExpectedNative ReadExpectedNative()
     {

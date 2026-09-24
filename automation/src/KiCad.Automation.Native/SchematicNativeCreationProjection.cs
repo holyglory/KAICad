@@ -234,6 +234,9 @@ internal static class SchematicNativeCreationProjection
         if (!report.IdentitiesResolved)
             throw Invalid("created_binding_invalid", "The generated native identities did not resolve exactly: "
                 + string.Join(",", report.Issues.Select(issue => issue.Code)));
+        // Every created symbol now has its exact definition geometry. Pins that one symbol stacks at one
+        // point are one connection in KiCad, so nets that split them are refused before anything is sent.
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(candidate, token);
         var operations = SchematicHierarchyDelta.Plan(baseline.Schematic, candidate.Schematic, token);
         return new(candidate, operations, created.Order().ToArray());
     }
@@ -366,16 +369,21 @@ internal static class SchematicNativeCreationProjection
         if (new[] { definition.ReferenceField, definition.ValueField, definition.FootprintField,
                 definition.DatasheetField, definition.DescriptionField }.Any(f => f?.Text?.Position is null))
             throw Invalid("incomplete_symbol_fields", "A declared symbol requires all five standard fields with explicit local positions.");
+        // The created symbol takes the form KiCad saves and loads, so a save and reload shows it unchanged: a cache alias
+        // equal to the library identifier is not kept (KiCad's reader drops it), and pin-name spacing lives on the
+        // library definition only, because a placed symbol never saves its own value.
+        string libraryKey = (source.LibraryId.LibraryNickname.Length == 0 ? "" : source.LibraryId.LibraryNickname + ":") + source.LibraryId.EntryName;
         var result = new SchematicSymbolInstance
         {
-            Definition = definition.Clone(), LibraryId = source.LibraryId.Clone(), LibName = source.Symbol.CacheKey,
+            Definition = definition.Clone(), LibraryId = source.LibraryId.Clone(),
+            LibName = source.Symbol.CacheKey == libraryKey ? "" : source.Symbol.CacheKey,
             Position = new(), Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 },
             Locked = LockedState.LsUnlocked,
             BodyStyle = definition.BodyStyle.Count > 1 ? new() { Style = source.BodyStyle } : null,
             Passthrough = SchematicPassthroughMode.SpmDefault,
             SeparatePinIdentities = true, InstanceRecords = new(), Variants = new(),
             ShowPinNames = source.Symbol.ShowPinNames, ShowPinNumbers = source.Symbol.ShowPinNumbers,
-            PinNameOffset = source.Symbol.PinNameOffset.Clone(), DefinitionPinNameOffset = source.Symbol.PinNameOffset.Clone(),
+            PinNameOffset = new(), DefinitionPinNameOffset = source.Symbol.PinNameOffset.Clone(),
             Attributes = definition.Attributes?.Clone() ?? new(),
             ReferenceField = definition.ReferenceField.Clone(), ValueField = definition.ValueField.Clone(),
             FootprintField = definition.FootprintField.Clone(), DatasheetField = definition.DatasheetField.Clone(),

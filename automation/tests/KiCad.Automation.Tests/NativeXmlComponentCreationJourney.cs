@@ -26,8 +26,11 @@ public sealed partial class NativeSessionTests
     // Components stage written as XML, laid out, prepared and applied through the public MCP tools over
     // STDIO. The live editor must then hold every component with its exact pins on its sheet, processor
     // U5 as one component and one declared definition whose units 1-3 sit on CPU and unit 4 on CPU_POWER,
-    // and all 222 pins unconnected (psu-cpu-fixture-and-ownership.md §1.4.2, §1.6.3). One native undo/redo
-    // and one save/reload follow, and the recovery record reattaches to the reloaded editor unchanged.
+    // and every pin unconnected except the regulator U2's pins 1 and 4, which its symbol draws at one point
+    // and KiCad therefore joins (psu-cpu-fixture-and-ownership.md §1.4.2, §1.6.3 and erratum 2026-09-24).
+    // XML that puts those two pins on different nets is refused while planning, before and after creation.
+    // One native undo/redo and one save/reload follow, and the recovery record reattaches to the reloaded
+    // editor unchanged.
     private static async Task VerifyPsuCpuComponentCreation(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -38,6 +41,12 @@ public sealed partial class NativeSessionTests
         string path = context.DesignPath;
         string Evidence(string name) => Path.Combine(evidence, instanceId + "-psu-cpu-" + name);
         var store = new DesignRecoveryStore(Evidence("recovery.json"));
+        // The harness writes the S1 sheet files directly, so KiCad has never saved this project and its project file does not
+        // list the PSU, CPU and CPU_POWER sheets yet. Save it once in KiCad first, as every project a user opens has been saved:
+        // otherwise the apply's own save also writes that sheet list, and publication refuses a save that changed the project
+        // settings (native_save_not_confirmed), which is a separate synchronization defect reported to its owners.
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+        Assert.IsFalse((await Capture()).State.NativeContentDirty, "The S1 seed is saved by KiCad before XML creation.");
         var saved = await PsuCpuFixture.InitializeRecoveryAsync(client, context, store.StatePath, token);
         var desired = PsuCpuFixture.Desired(context, Stage);
         var circuit = desired.Engineering.Circuit;
@@ -127,6 +136,8 @@ public sealed partial class NativeSessionTests
 
         var args = new { instanceId, recoveryPath = store.StatePath, designPath = path, expectedRevisionToken = saved.RevisionToken,
             operationId = operation.ToString("D") };
+        string projectFile = Path.Combine(context.ProjectDirectory, "fixture.kicad_pro");
+        byte[] projectBeforeApply = await File.ReadAllBytesAsync(projectFile, token);
         applied = await host.Tool("kicad_design_sync_apply", args);
         await File.WriteAllTextAsync(Evidence("apply.json"), applied.GetRawText(), token);
         if (applied.TryGetProperty("isError", out var failed) && failed.GetBoolean())
@@ -140,12 +151,19 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
 
         synchronized = store.Read()!.State.Baseline;
-        Assert.AreEqual(SchematicDesignXml.Write(synchronized, []), await File.ReadAllTextAsync(path, token),
-            "The published XML is the synchronized design.");
+        // The file holds exactly the previewed candidate. The recovery baseline is that same design with KiCad's own item
+        // enumeration kept, because the executor never rewrites XML for enumeration alone.
+        string publishedXml = await File.ReadAllTextAsync(path, token);
+        Assert.AreEqual(planner.CandidateXml, publishedXml, "The published XML is the previewed candidate.");
+        var publishedDesign = SchematicDesignXml.Read(publishedXml, []);
+        Assert.AreEqual(publishedXml, SchematicDesignXml.Write(synchronized with { Schematic = publishedDesign.Schematic }, []),
+            "The synchronized design is the published one apart from native item order.");
+        Assert.IsTrue(Same(publishedDesign.Schematic, synchronized.Schematic), "The synchronized native objects are the published ones.");
         created = await Capture();
         Assert.IsFalse(created.State.NativeContentDirty, "Apply saves the created sheets.");
         var afterApply = RequireCreated(created, "after apply");
         await CheckPresentation(created);
+        var stackedAfterApply = await RequireStackedPinsOnCreatedSymbols();
 
         // One native undo removes every created symbol from all three sheets; redo restores them exactly.
         await FocusedSchematicShortcut(client, document, processId, display, "z", token);
@@ -191,9 +209,21 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(settled);
         Assert.AreEqual(0, settled.GetProperty("structuredContent").GetProperty("nativeOperationsJson").GetArrayLength(), settled.GetRawText());
         Assert.AreEqual(reloaded, await Capture());
+        // Recorded, not asserted: whether the settled preview would also publish nothing. The general reconciliation path
+        // (lane 2C) may take KiCad's join of U2's stacked pins for a native edit and add a generated net to the XML.
+        byte[] published = await File.ReadAllBytesAsync(path, token);
+        string? settledXml = settled.GetProperty("structuredContent").TryGetProperty("candidateDesignXml", out var candidateXml) ? candidateXml.GetString() : null;
+        IReadOnlyList<CircuitNet> settledNets = settledXml is null ? [] : SchematicDesignXml.Read(settledXml, []).Engineering.Circuit.Nets;
+        var settledPlan = new
+        {
+            nativeOperations = 0, keepsPublishedXml = settledXml == Encoding.UTF8.GetString(published),
+            addedNets = settledNets.Where(n => !synchronized.Engineering.Circuit.Nets.Any(x => x.Id == n.Id)).Select(n => new
+            {
+                n.Name, pins = n.Pins.Select(p => synchronized.Engineering.Circuit.Components.Single(c => c.Id == p.ComponentId).Reference + "." + p.Pin).ToArray()
+            }).ToArray()
+        };
 
         // The published XML is retained in the recovery record; the proof names it by length and SHA-256.
-        byte[] published = await File.ReadAllBytesAsync(path, token);
         await NativeKeyboard.CaptureAsync(display, Evidence("window.png"), token);
         await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
         {
@@ -204,8 +234,10 @@ public sealed partial class NativeSessionTests
             observedAfterApply = afterApply.Connectivity, observedAfterReload = afterReload.Connectivity,
             publishedXml = new { length = published.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(published)) },
             processorUnit4Sheet = "CPU_POWER", processorOneComponentOneDefinition = true,
+            stackedPinsJoinedByKiCad = expected.JoinedPins.Select(g => g.Select(p => p.Reference + "." + p.Number).ToArray()).ToArray(),
+            stackedPinsOnCreatedSymbols = stackedAfterApply,
             nativeUndoRedoVerified = true, undoRestoredLibraryCache, saveReloadVerified = true, recoveryReattachedWithoutChanges = true,
-            presentation = expected.Presentation, crossPlatformReady = false, connectionIntent
+            settledPlan, presentation = expected.Presentation, crossPlatformReady = false, connectionIntent
         }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
@@ -234,13 +266,66 @@ public sealed partial class NativeSessionTests
             var plan = SchematicSynchronizationPlanner.Plan(revision, advertised, token);
             var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
             SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, plan.Candidate!, created: true);
+            // Must-catch on this editor's own captured LP3982 geometry: moving U2.4 from RAIL_B to LDO_FAULT splits the pins
+            // its symbol draws at one point, which KiCad always joins, so creating and connecting it is refused while planning.
+            var split = current.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(layout with { Engineering = layout.Engineering with
+                { Circuit = layout.Engineering.Circuit with { Nets = SplitStackedPins(nets, layout.Engineering.Circuit) } } }, [])) };
+            var refused = RequireStackedRefusal(SchematicSynchronizationPlanner.Plan(split, advertised, token), "create and connect");
             Assert.AreEqual(nativeBefore, await Capture(), "Planning connections must not change the native document.");
             Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, "Planning connections must not advance recovery.");
             CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning connections must not publish XML.");
             await File.WriteAllTextAsync(Evidence("connection-intent.json"), JsonSerializer.Serialize(new
-                { gatedErrorCode = gated.ErrorCode, intent = SchematicConnectionIntentBuilder.Summary(intent) }), token);
+                { gatedErrorCode = gated.ErrorCode, intent = SchematicConnectionIntentBuilder.Summary(intent), stackedSplit = refused }), token);
             return new { gatedErrorCode = gated.ErrorCode, nets = intent.Nets.Count, islands = intent.Screens.Sum(s => s.Islands.Count),
-                ports = intent.Ports.Count, expectedGroups = intent.ExpectedGroups.Count, createdSymbols = intent.CreatedSymbolIds.Count };
+                ports = intent.Ports.Count, expectedGroups = intent.ExpectedGroups.Count, createdSymbols = intent.CreatedSymbolIds.Count,
+                stackedSplit = refused };
+        }
+
+        // The same rules once KiCad shows the created components with U2's stacked pins joined: splitting them over two nets is
+        // refused before anything is sent, while the frozen Complete nets (both pins on RAIL_B) still plan over KiCad's joined
+        // pair, predicting it inside RAIL_B's native group. Nothing is saved, published or sent to the editor.
+        async Task<object> RequireStackedPinsOnCreatedSymbols()
+        {
+            var session = await client.HandshakeAsync(token);
+            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var current = store.Read()!;
+            Assert.IsFalse(current.State.HasPendingWork);
+            var nativeBefore = await Capture();
+            byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+            var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
+            var baseline = current.State.Baseline;
+            DesignRecoveryState Revision(IReadOnlyList<CircuitNet> nets) => current.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(
+                baseline with { Engineering = baseline.Engineering with { Circuit = baseline.Engineering.Circuit with { Nets = nets } } }, [])) };
+            var refused = RequireStackedRefusal(SchematicSynchronizationPlanner.Plan(Revision(SplitStackedPins(complete, baseline.Engineering.Circuit)), advertised, token),
+                "connect only");
+            var planned = SchematicSynchronizationPlanner.Plan(Revision(complete), advertised, token);
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(planned);
+            SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, planned.Candidate!, created: false);
+            var u2 = baseline.Engineering.Circuit.Components.Single(c => c.Reference == "U2").Id;
+            var stackedKeys = SchematicConnectionIntentBuilderTests.Keys(planned.Candidate!, (u2, "1"), (u2, "4"));
+            Assert.IsTrue(intent.ExpectedGroups.Any(g => stackedKeys.All(k => g.Contains(k))), "RAIL_B's expected native group holds both stacked pins.");
+            Assert.AreEqual(nativeBefore, await Capture(), "Planning connections must not change the native document.");
+            Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, "Planning connections must not advance recovery.");
+            CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning connections must not publish XML.");
+            return new { stackedSplit = refused, completeNetsPlanned = intent.Nets.Count, expectedGroups = intent.ExpectedGroups.Count };
+        }
+
+        // U2.4 moved from RAIL_B into LDO_FAULT, away from the pin 1 its symbol stacks it on.
+        static IReadOnlyList<CircuitNet> SplitStackedPins(IReadOnlyList<CircuitNet> nets, Circuit circuit)
+        {
+            var stacked = new PinEndpoint(circuit.Components.Single(c => c.Reference == "U2").Id, "4");
+            Assert.IsTrue(nets.Single(n => n.Name == "RAIL_B").Pins.Contains(stacked));
+            return [.. nets.Select(n => n.Name == "RAIL_B" ? n with { Pins = [.. n.Pins.Where(p => p != stacked)] }
+                : n.Name == "LDO_FAULT" ? n with { Pins = [.. n.Pins, stacked] } : n)];
+        }
+
+        static object RequireStackedRefusal(SchematicSynchronizationPlan plan, string path)
+        {
+            Assert.AreEqual(SchematicConnectionErrors.StackedPinsOnDifferentNets, plan.ErrorCode, path + ": " + plan.ErrorMessage);
+            StringAssert.Contains(plan.ErrorMessage!, "U2.1 in net 'RAIL_B' and U2.4 in net 'LDO_FAULT'", path);
+            Assert.IsNull(plan.Candidate, path); Assert.IsNull(plan.CandidateXml, path); Assert.IsNull(plan.Connections, path);
+            Assert.IsEmpty(plan.NativeOperations, path + ": nothing may reach the editor.");
+            return new { path, errorCode = plan.ErrorCode, errorMessage = plan.ErrorMessage, nativeOperations = plan.NativeOperations.Count };
         }
 
         static SchematicHierarchyData WithoutLibraryCache(SchematicHierarchyData data)
@@ -301,7 +386,8 @@ public sealed partial class NativeSessionTests
                     errorCode = ErrorCode(applied), xmlUnchanged = await XmlUnchanged(), recovery = RecoveryObservation(before),
                     nativeDirty = actual.State.NativeContentDirty, nativeSymbols = drawn.Count, plannedSymbols = planned.Count,
                     nativeHoldsExactlyPlannedSymbols = drawn.SetEquals(planned), plannedBindingsResolveOnPlannedSheets = bindingsResolve,
-                    nativeObjectsMatchCandidate = Same(actual.Electrical.Hierarchy.Data, candidate.Schematic)
+                    nativeObjectsMatchCandidate = Same(actual.Electrical.Hierarchy.Data, candidate.Schematic),
+                    nativeSave = await NativeSaveObservation(actual.State)
                 }
             }), token);
 
@@ -358,6 +444,26 @@ public sealed partial class NativeSessionTests
                 }
             }
             async Task<bool> XmlUnchanged() => (await File.ReadAllBytesAsync(path, token)).AsSpan().SequenceEqual(bytes);
+            // The save confirmation compares the recorded pre-save state with KiCad's state after saving: the same state
+            // digest, clean content, project settings included and every native file covered. Which of these differs, and
+            // whether saving rewrote the project file, is recorded with both project files.
+            async Task<object?> NativeSaveObservation(DocumentLifecycleState after)
+            {
+                var expectedSave = store.Read()!.State.PendingNativeSave?.ExpectedState;
+                byte[] projectAfter = await File.ReadAllBytesAsync(projectFile, token);
+                await File.WriteAllBytesAsync(Evidence("project-before-apply.kicad_pro"), projectBeforeApply, token);
+                await File.WriteAllBytesAsync(Evidence("project-after-apply.kicad_pro"), projectAfter, token);
+                return expectedSave is null ? null : new
+                {
+                    sameStateSha256 = after.StateSha256 == expectedSave.StateSha256, sameNativeIdentity = after.NativeIdentity == expectedSave.NativeIdentity,
+                    sameRevisionEpoch = after.Revision?.Epoch == expectedSave.Revision?.Epoch, sequenceBefore = expectedSave.Revision?.Sequence,
+                    sequenceAfter = after.Revision?.Sequence, after.NativeContentDirty, after.ProjectSettingsIncluded,
+                    fileCoverage = CheckedSchematicContract.FileCoverage(after), projectFileRewritten = !projectAfter.AsSpan().SequenceEqual(projectBeforeApply),
+                    files = after.FileBaselines.Select(f => new { f.Path, status = f.Status.ToString(), f.BaselineKnown, f.CurrentKnown,
+                        f.BaselineExists, f.CurrentExists, sameSha256 = f.BaselineSha256 == f.CurrentSha256, f.BaselineBytes, f.CurrentBytes }).ToArray(),
+                    nativeFiles = after.NativeFiles.ToArray()
+                };
+            }
             object RecoveryObservation(string baselineBefore)
             {
                 var state = store.Read()!.State;
@@ -439,7 +545,9 @@ public sealed partial class NativeSessionTests
             foreach (var unit in drawn)
             {
                 Assert.AreEqual(declaration.LibraryId, unit.LibraryId, when);
-                Assert.AreEqual(declaration.Symbol.CacheKey, unit.LibName, when);
+                // The declared cache key is the library identifier, so KiCad keeps no separate alias (saved and reloaded form).
+                Assert.AreEqual(declaration.Symbol.CacheKey, unit.LibraryId.LibraryNickname + ":" + unit.LibraryId.EntryName, when);
+                Assert.AreEqual("", unit.LibName, when);
                 Assert.AreEqual(declaration.Symbol.Definition.Id, unit.Definition.Id, when);
                 Assert.AreEqual("U5", unit.ReferenceField.Text.Text_, when);
             }
@@ -451,16 +559,25 @@ public sealed partial class NativeSessionTests
                     .CachedSymbols.Single(c => c.CacheKey == declaration.Symbol.CacheKey)), $"{when}: one processor definition on {sheet}");
 
             var comparison = SchematicElectricalComparison.Compare(synchronized, state.Electrical, [], token);
-            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, when);
+            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, when + ": "
+                + string.Join("; ", comparison.Differences.Select(d => d.Kind + " " + string.Join(",", d.Pins.Select(p => Reference(p))))));
             var allPins = model.Components.SelectMany(c => parts[definitions[c.DefinitionId].PartId].Pins.Select(p => new PinEndpoint(c.Id, p.Number))).ToArray();
             Assert.HasCount(222, allPins);
             var partitions = comparison.PinPartitions ?? throw new AssertFailedException(when + ": the native pin partition is missing.");
-            Assert.IsTrue(partitions.All(p => p.Pins.Count == 1), when + ": no two pins may share a native net in this stage.");
+            // Erratum 2026-09-24: the only native net with several pins is the regulator's stacked pair, exactly as the
+            // fixture expects it, and no pin of another symbol or another processor unit joins it.
+            string[] Keys(IEnumerable<PinEndpoint> pins) => [.. pins.Select(Reference).Order(StringComparer.Ordinal)];
+            string Reference(PinEndpoint pin) => components[pin.ComponentId].Reference + "." + pin.Pin;
+            var joined = partitions.Where(p => p.Pins.Count > 1).Select(p => string.Join(" ", Keys(p.Pins))).Order(StringComparer.Ordinal).ToArray();
+            CollectionAssert.AreEqual(expected.JoinedPins.Select(g => string.Join(" ", g.Select(p => p.Reference + "." + p.Number).Order(StringComparer.Ordinal)))
+                .Order(StringComparer.Ordinal).ToArray(), joined, when + ": only KiCad's stacked U2 pins may share a native net in this stage.");
+            CollectionAssert.AreEqual(new[] { "U2.1 U2.4" }, joined, when);
             CollectionAssert.AreEquivalent(allPins, partitions.SelectMany(p => p.Pins).ToArray(), when);
             return (result, new
             {
                 nativeNets = state.Electrical.Nets.Count, isolatedPins = partitions.Count(p => p.Pins.Count == 1),
-                multiPinNets = partitions.Count(p => p.Pins.Count > 1), pinsWithoutNativeNet = partitions.Count(p => p.SnapshotNetIndex is null)
+                multiPinNets = partitions.Count(p => p.Pins.Count > 1), pinsWithoutNativeNet = partitions.Count(p => p.SnapshotNetIndex is null),
+                joinedNativeNets = partitions.Where(p => p.Pins.Count > 1).Select(p => new { name = p.NativeName, pins = Keys(p.Pins) }).ToArray()
             });
         }
 

@@ -25,6 +25,7 @@
 
 #include <advanced_config.h>
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <confirm.h>
 #include <kidialog.h>
 #include <core/arraydim.h>
@@ -1054,6 +1055,9 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     if( pcbFileName.GetExt() == FILEEXT::LegacyPcbFileExtension )
         pcbFileName.SetExt( FILEEXT::KiCadPcbFileExtension );
 
+    // A checked save names the board as the document spells it, before following a link.
+    const wxString documentPath = pcbFileName.GetFullPath();
+
     // Write through symlinks, don't replace them
     WX_FILENAME::ResolvePossibleSymlinks( pcbFileName );
 
@@ -1076,6 +1080,13 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile, false ) ) )
     {
+        // A read-only file or folder is found by the checked save's own check of every file.
+        if( !projectFile.FileExists() )
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM::SAVE_REFUSED, projectFile.GetFullPath(),
+                    wxS( "the project file does not exist, and automation saves a board only together with its "
+                         "project file" ) );
+
         reportFailure( "The project file is missing or not writable; the PCB was not saved" );
         return false;
     }
@@ -1086,6 +1097,20 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         bool projectSaved = GetSettingsManager()->SaveProject();
         if( automation && !projectSaved )
         {
+            // Tell a checked save why: KiCad holds the project read-only, the file system blocks
+            // the file, or the settings writer failed without giving its system reason.
+            using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+            const wxString path = projectFile.GetFullPath();
+
+            if( wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() ); !readOnly.empty() )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, path, readOnly );
+            else if( wxString blocker = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( path ); !blocker.empty() )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, path, blocker );
+            else
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                        SAVE_PROBLEM::WRITE_FAILED, path,
+                        wxS( "writing the project settings failed, and the settings writer gave no system reason" ) );
+
             reportFailure( "Project persistence failed; the PCB was not saved" );
             return false;
         }
@@ -1134,6 +1159,12 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     }
     catch( const IO_ERROR& ioe )
     {
+        // The writer names the file and the system error, for example a full disk. A checked
+        // save that refused the write itself ignores this report and keeps its own reason.
+        if( automation )
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM::WRITE_BLOCKED, documentPath, ioe.Problem() );
+
         reportFailure( wxString::Format( _( "Error saving board file '%s'.\n%s" ),
                                          pcbFileName.GetFullPath(), ioe.What() ) );
         return false;

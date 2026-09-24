@@ -6,6 +6,9 @@
 #include <file_content_baseline.h>
 #include <ki_exception.h>
 #include <kiplatform/io.h>
+#include <lockfile.h>
+#include <project.h>
+#include <project/project_file.h>
 #include <optional>
 #include <set>
 #include <algorithm>
@@ -215,6 +218,48 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
 }
 
 
+wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aProject )
+{
+    if( !aProject.IsReadOnly() )
+        return wxEmptyString;
+
+    if( aProject.IsNullProject() )
+        return wxS( "no project is open in KiCad, so it writes no project files" );
+
+    const wxString path = aProject.GetProjectFullName();
+
+    // Loading a project marks it read-only when its project file was read-only at that moment
+    // (JSON_SETTINGS::LoadFromFile), and KiCad never looks again until the project is reopened.
+    if( aProject.GetProjectFile().IsReadOnly() )
+    {
+        if( WriteBlocker( path ).empty() )
+            return wxS( "KiCad opened this project read-only because its project file was read-only when the "
+                        "project was opened; the file is writable now, but KiCad only notices that when the "
+                        "project is reopened, so reopen the project in KiCad" );
+
+        return wxS( "KiCad opened this project read-only because its project file was read-only when the "
+                    "project was opened; make the file writable, then reopen the project in KiCad" );
+    }
+
+    // Without a lock KiCad could take, the project stays read-only (SETTINGS_MANAGER::LoadProject
+    // and KICAD_MANAGER_FRAME::ProjectChanged).
+    const LOCKFILE* lock = aProject.GetProjectLock();
+
+    if( !lock || !lock->Valid() )
+        return wxString::Format( wxS( "KiCad opened this project read-only because another KiCad holds the project "
+                                      "lock '%s'; close the project in that KiCad, then reopen it here" ),
+                                 LOCKFILE::LockPathFor( path ) );
+
+    // A schematic opened on its own, without a project file, keeps its stand-in project read-only
+    // (SCH_EDIT_FRAME::OpenProjectFiles).
+    if( !wxFileName::FileExists( path ) )
+        return wxS( "KiCad opened this schematic without its project file and keeps the project read-only; "
+                    "open the schematic through its project" );
+
+    return wxS( "KiCad holds this project read-only and writes none of its files; reopen the project in KiCad" );
+}
+
+
 void DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM aKind, const wxString& aPath,
                                                        const wxString& aReason )
 {
@@ -411,14 +456,23 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             return text;
         };
 
-        CAUSES blocked, refused;
+        CAUSES blocked, refused, failed, unconfirmed;
         const size_t reports = refusal ? refusal->reportsBefore : saveProblems.size();
 
         for( size_t i = 0; i < reports; ++i )
         {
             const SAVE_PROBLEM_REPORT& problem = saveProblems[i];
-            add( problem.kind == SAVE_PROBLEM::WRITE_BLOCKED ? blocked : refused, observedPath( problem.path ),
-                 Utf8( problem.reason ) );
+            const std::string path = observedPath( problem.path );
+
+            // The writer failed after it had already replaced this file, for example while
+            // flushing its folder to disk: the file is written, so it is not a blocked file.
+            if( problem.kind != SAVE_PROBLEM::SAVE_REFUSED && written( path ) )
+                add( unconfirmed, path, Utf8( problem.reason ) );
+            else
+                add( problem.kind == SAVE_PROBLEM::WRITE_BLOCKED ? blocked
+                     : problem.kind == SAVE_PROBLEM::SAVE_REFUSED ? refused
+                                                                  : failed,
+                     path, Utf8( problem.reason ) );
         }
 
         // A saver that reports nothing, such as the PCB editor, is explained by checking every
@@ -448,7 +502,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         std::string cause;
         auto sentence = [&]( const std::string& aText ) { cause += ( cause.empty() ? "" : ". " ) + aText; };
 
-        if( unexplained || ( !refusal && blocked.empty() && refused.empty() ) )
+        if( unexplained || ( !refusal && blocked.empty() && refused.empty() && failed.empty() && unconfirmed.empty() ) )
             sentence( "KiCad reported: " + Clause( aNative ) );
 
         if( refusal )
@@ -460,6 +514,12 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
 
         if( !blocked.empty() )
             sentence( "KiCad cannot write " + list( blocked ) );
+
+        if( !failed.empty() )
+            sentence( "KiCad could not write " + list( failed ) );
+
+        if( !unconfirmed.empty() )
+            sentence( "After replacing it, KiCad reported a failure for " + list( unconfirmed ) );
 
         const bool blockedFiles = result.blocked_files_size() > 0;
         const std::string code = refusal         ? refusal->code
@@ -477,6 +537,9 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                           "writable or free disk space), then " + again
                 : !refused.empty()
                         ? "Resolve what KiCad refused; making files writable does not help. Then " + again
+                : !failed.empty() || !unconfirmed.empty()
+                        ? "KiCad found nothing that blocks the named files now, so the cause may have passed (for "
+                          "example a full disk or an unavailable network drive): check the disk, then " + again
                         : "Inspect the document in KiCad, then " + again;
         const std::string editor = !aAfter ? "KiCad could not report the editor state afterwards; read "
                                              "kicad_document_state before doing anything else."
@@ -565,11 +628,32 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             return std::find_if( accepted.begin(), accepted.end(), [&]( const auto& entry )
                     { return FILE_CONTENT_BASELINE::SamePath( entry.first, path ); } );
         };
+        // The file the writer was allowed to replace and has not confirmed yet, with its version
+        // before. A writer can fail after the replacement itself, for example while flushing the
+        // folder to disk, and then never confirms it.
+        std::optional<std::pair<wxString, FILE_VERSION>> replacing;
+        auto countInterruptedReplacement = [&]()
+        {
+            if( !replacing )
+                return;
+
+            const auto current = FILE_CONTENT_BASELINE::Read( replacing->first );
+            const FILE_VERSION& previous = replacing->second;
+
+            if( current.Known() && ( current.Exists() != previous.exists || current.Bytes() != previous.bytes
+                                     || current.Sha256() != previous.sha )
+                    && std::find( writtenFiles.begin(), writtenFiles.end(), previous.path ) == writtenFiles.end() )
+                writtenFiles.push_back( previous.path );
+
+            replacing.reset();
+        };
         // The writer calls the first function just before it replaces a file and the second once
         // it has. A refusal here is recorded with its own code before the writer sees it fail.
         FILE_WRITE_OBSERVER writes(
             [&]( const wxString& path )
             {
+                // A writer that moves on to another file after failing never confirms the last one.
+                countInterruptedReplacement();
                 auto entry = locate( path );
                 if( entry == accepted.end() )
                 {
@@ -605,12 +689,14 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                             "which version to keep, and save again with a new operation ID." );
                     THROW_IO_ERROR( "File changed during checked save: " + path );
                 }
+                replacing.emplace( path, entry->second );
             },
             [&]( const FILE_CONTENT_BASELINE& written )
             {
                 auto entry = locate( written.Path() );
                 if( entry == accepted.end() )
                     return;
+                replacing.reset();
                 // Called only after the file was replaced, so it counts as written even when its
                 // new version is unknown; only a known version can accept a later write.
                 if( std::find( writtenFiles.begin(), writtenFiles.end(), entry->second.path ) == writtenFiles.end() )
@@ -628,7 +714,18 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                 { activeSaveProblems = &aProblems; }
                 ~PROBLEM_SCOPE() { activeSaveProblems = previous; }
             } problemScope( saveProblems );
-            saved = aDispatch( envelope );
+
+            try
+            {
+                saved = aDispatch( envelope );
+            }
+            catch( ... )
+            {
+                countInterruptedReplacement();
+                throw;
+            }
+
+            countInterruptedReplacement();
         }
         auto after = observe();
         if( after ) result.mutable_observed_state()->CopyFrom( *after );

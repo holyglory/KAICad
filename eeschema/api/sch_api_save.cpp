@@ -63,6 +63,15 @@ void ReportRefused( const wxString& aPath, const wxString& aReason )
 }
 
 
+// Tell a running checked save that writing this file failed although neither the writer nor a
+// check of the file found why, so it is not reported as a blocked file.
+void ReportFailed( const wxString& aPath, const wxString& aReason )
+{
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_FAILED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Writing '%s' failed: %s" ), aPath, aReason );
+}
+
+
 // The file and the folder it is replaced in must both accept the write, following a symbolic
 // link as the writer does, or no file of the save is written.
 bool WritableDestination( const wxString& aPath )
@@ -223,16 +232,16 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
     // save changes nothing on disk and the caller can fix all causes at once.
     bool writable = true;
 
-    if( aProject.IsReadOnly() || aProject.GetProjectFile().IsReadOnly() )
-    {
-        // KiCad's own state, not the file system: making the file writable does not change it.
-        ReportRefused( aProject.GetProjectFullName(),
-                       wxS( "KiCad opened this project read-only (another KiCad may hold its lock, or the "
-                            "schematic was opened without its project file) and writes no files for it" ) );
+    // The file system decides whether the project file can be written, like every sheet file.
+    if( !WritableDestination( aProject.GetProjectFullName() ) )
         writable = false;
-    }
-    else if( !WritableDestination( aProject.GetProjectFullName() ) )
+
+    // KiCad's own read-only state is fixed when the project is opened, so making the file writable
+    // alone does not change it.
+    if( const wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( aProject );
+        !readOnly.empty() )
     {
+        ReportRefused( aProject.GetProjectFullName(), readOnly );
         writable = false;
     }
 
@@ -285,12 +294,17 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
     if( !UpdateProjectFile( aSchematic, aProject ) )
     {
         // The project file and its folder accepted writes before the first sheet was written,
-        // so check again for what changed; the settings writer itself gives no reason.
+        // so check again for what changed. The settings writer itself gives no reason, so a file
+        // the check finds writable is not reported as blocked.
         const wxString reason = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( aProject.GetProjectFullName() );
-        ReportBlocked( aProject.GetProjectFullName(),
-                       reason.empty() ? wxString( wxS( "writing the project settings failed after the sheets were "
-                                                       "written, and the settings writer gave no system reason" ) )
-                                      : reason );
+
+        if( reason.empty() )
+            ReportFailed( aProject.GetProjectFullName(),
+                          wxS( "writing the project settings failed after the sheets were written, and the "
+                               "settings writer gave no system reason" ) );
+        else
+            ReportBlocked( aProject.GetProjectFullName(), reason );
+
         return false;
     }
 

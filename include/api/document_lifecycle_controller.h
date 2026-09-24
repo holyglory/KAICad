@@ -8,6 +8,8 @@
 #include <vector>
 #include <wx/string.h>
 
+class PROJECT;
+
 class KICOMMON_API DOCUMENT_LIFECYCLE_CONTROLLER
 {
 public:
@@ -33,6 +35,14 @@ public:
      */
     static wxString WriteBlocker( const wxString& aPath );
 
+    /**
+     * Why KiCad holds @a aProject read-only and writes none of its files, or an empty string when
+     * it does not.  KiCad decides this when it opens the project (another KiCad holds the project
+     * lock, or the project file was read-only then), so the reason says what to change and that
+     * the project must then be reopened.
+     */
+    static wxString ReadOnlyProjectReason( const PROJECT& aProject );
+
     /// Why a native saver did not write a document file during a checked save.
     enum class SAVE_PROBLEM
     {
@@ -41,7 +51,11 @@ public:
         WRITE_BLOCKED,
         /// KiCad refused to save for a reason that making files writable does not fix, for
         /// example conflicting root page numbers or a sheet without a file name.
-        SAVE_REFUSED
+        SAVE_REFUSED,
+        /// Writing the file failed, but neither the writer nor a check of the file and its folder
+        /// found why (the project settings writer keeps its system error to itself).  The file is
+        /// named with that explanation and is never listed as blocked.
+        WRITE_FAILED
     };
 
     /// Message prefix, followed by ':', of the refusal to read an operation this process has no
@@ -51,7 +65,9 @@ public:
     /**
      * Native savers call this during a checked save to say why they did not write a file.  The
      * checked save result names every problem with its reason.  Only WRITE_BLOCKED problems
-     * make the result report file_not_writable and list the file among its blocked files.
+     * make the result report file_not_writable and list the file among its blocked files;
+     * SAVE_REFUSED problems make it native_save_refused, and WRITE_FAILED problems alone
+     * native_save_failed.
      * @a aPath may be empty when the problem concerns no single file.  Outside a checked save on
      * this thread it does nothing.
      */

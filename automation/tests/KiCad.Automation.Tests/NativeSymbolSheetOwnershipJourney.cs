@@ -58,33 +58,49 @@ public sealed partial class NativeSessionTests
             }
             return symbol;
         }
-        GlobalLabel Label(Vector2 position)
+        // The labels are written the way API clients and the XML synchronization write them. Only
+        // some carry KiCad's hidden inter-sheet reference field (CN-1 §6.6 leaves it unset and
+        // KiCad creates it); some carry custom fields, one visible and one hidden.
+        (string Name, bool Visible)[] customFields = [("Signal note", true), ("Reviewer", false)];
+        GlobalLabel Label(Vector2 position, bool referenceField = false, bool custom = false)
         {
             var label = new GlobalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = position.Clone(),
                 Text = new() { Text_ = "CROSS_SHEET_LINK", Position = position.Clone(), Attributes = new()
                     { Size = new() { XNm = 1270000, YNm = 1270000 }, HorizontalAlignment = HorizontalAlignment.HaLeft,
                         VerticalAlignment = VerticalAlignment.VaCenter } }, Shape = SchematicLabelShape.SlshBidi, SpinStyle = SchematicLabelSpinStyle.SlssRight };
-            // Every native global label owns a hidden inter-sheet reference field;
-            // later project-setting refreshes read it. Create the label KiCad creates.
-            label.IntersheetRefsField = new SchematicField { Name = "Intersheetrefs", AllowAutoPlace = true, Visible = false,
-                Text = label.Text.Clone() };
-            label.IntersheetRefsField.Text.Text_ = "${INTERSHEET_REFS}";
-            label.IntersheetRefsField.Text.Attributes.Multiline = true;
+            SchematicField Field(string name, string value, bool isVisible, long dy)
+            {
+                var field = new SchematicField { Name = name, AllowAutoPlace = true, Visible = isVisible, Text = label.Text.Clone() };
+                field.Text.Text_ = value; field.Text.Position.YNm += dy;
+                // SCH_FIELD reloads with the native multiline text mode, unlike label text.
+                field.Text.Attributes.Multiline = true;
+                return field;
+            }
+            // As KiCad reports the field, placed above the label so the request stays recognizable.
+            if (referenceField) label.IntersheetRefsField = Field("Intersheetrefs", "${INTERSHEET_REFS}", false, -2540000);
+            if (custom)
+                for (int index = 0; index < customFields.Length; index++)
+                    label.Fields.Add(Field(customFields[index].Name, "Cross-sheet link " + customFields[index].Name.ToLowerInvariant(),
+                        customFields[index].Visible, 2540000L * (index + 1)));
             return label;
         }
+        var labels = new List<(DocumentSpecifier Sheet, GlobalLabel Sent)>();
         var rootBatch = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Cross-sheet component root units" };
         for (int index = 0; index < 2; index++)
         {
             var symbol = Symbol(index, root, 1, 150000000 + index * 30000000L);
             rootBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(symbol) });
-            rootBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(Label(symbol.Position)) });
+            labels.Add((root, index == 0 ? Label(symbol.Position) : Label(symbol.Position, referenceField: true, custom: true)));
+            rootBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(labels[^1].Sent) });
         }
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(rootBatch, token);
         var shared = Symbol(2, first, 2, 150000000);
         var childBatch = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Cross-sheet shared second unit" };
         childBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(shared) });
-        childBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(Label(shared.Position)) });
+        labels.Add((first, Label(shared.Position, custom: true)));
+        childBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(labels[^1].Sent) });
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(childBatch, token);
+        await VerifyApiGlobalLabelFields();
 
         var initial = await Capture();
         Guid ModelSheet(DocumentSpecifier document) => baseline.SheetBindings.Single(b => SchematicDesignBindings.PathKey(b.NativePath)
@@ -249,6 +265,7 @@ public sealed partial class NativeSessionTests
             retainedXmlServiceRecoveryVerified = true,
             nativeKeyboardOwnerUndoRedo = true, newerInstructionsPreservedThroughUndoRedo = true,
             explicitOwnershipChoiceUsed = true, restorationServiceRecoveryVerified = true,
+            apiGlobalLabelReferenceFieldsSurviveSchematicSetup = true,
             automaticOwnershipReconciliationQualified = false, crossPlatformReady = false }), token);
 
         async Task PublishNativeChange(CheckedSchematicState observed)
@@ -354,6 +371,130 @@ public sealed partial class NativeSessionTests
                 if (current.State.Revision.Equals(beforeHistory.State.Revision)) await Task.Delay(40, limit.Token);
             } while (current.State.Revision.Equals(beforeHistory.State.Revision));
             await PublishNativeChange(current);
+        }
+
+        // Every label written above keeps KiCad's hidden inter-sheet reference field, and the
+        // Schematic Setup refresh that reads it neither stops KiCad nor touches another field.
+        async Task VerifyApiGlobalLabelFields()
+        {
+            GlobalLabel NativeLabel(CheckedSchematicState state, DocumentSpecifier sheet, GlobalLabel sent) =>
+                state.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(sheet)).Items
+                    .Where(i => i.Is(GlobalLabel.Descriptor)).Select(i => i.Unpack<GlobalLabel>()).Single(l => l.Id.Equals(sent.Id));
+            // Custom fields in stored order, with the text and visibility the request gave them.
+            static string[] Custom(GlobalLabel label) => [.. label.Fields.Select(f => $"{f.Name}|{f.Text.Text_}|{f.Visible}")];
+            // KiCad refreshes the reference fields of the sheet it shows; the others keep theirs.
+            string RequireFields(CheckedSchematicState state, DocumentSpecifier? shownOn, string phase)
+            {
+                foreach (var (sheet, sent) in labels)
+                {
+                    var label = NativeLabel(state, sheet, sent);
+                    // The field is identified by its own message; KiCad reports its display name.
+                    Assert.IsNotNull(label.IntersheetRefsField, $"{phase}: every global label keeps its inter-sheet reference field.");
+                    Assert.AreEqual("${INTERSHEET_REFS}", label.IntersheetRefsField.Text.Text_, phase);
+                    Assert.AreEqual(shownOn is not null && sheet.Equals(shownOn), label.IntersheetRefsField.Visible,
+                        $"{phase}: only the reference fields of the refreshed sheet follow the project setting.");
+                    CollectionAssert.AreEqual(Custom(sent), Custom(label), $"{phase}: custom fields keep their order, text and visibility.");
+                }
+                return JsonSerializer.Serialize(labels.Select(l => NativeLabel(state, l.Sheet, l.Sent)).Select(l => new
+                {
+                    id = l.Id.Value, referenceVisible = l.IntersheetRefsField.Visible, referenceText = l.IntersheetRefsField.Text.Text_,
+                    referenceX = l.IntersheetRefsField.Text.Position.XNm, referenceY = l.IntersheetRefsField.Text.Position.YNm,
+                    custom = Custom(l)
+                }));
+            }
+            var phases = new Dictionary<string, string>();
+
+            var labelsCreated = await Capture();
+            phases["created"] = RequireFields(labelsCreated, null, "Created");
+            foreach (var (sheet, sent) in labels)
+            {
+                var label = NativeLabel(labelsCreated, sheet, sent);
+                // Unset in the request: the one KiCad gives a new label, on the label.
+                Assert.AreEqual(sent.IntersheetRefsField?.Text.Position ?? label.Position, label.IntersheetRefsField.Text.Position,
+                    "A requested reference field is kept; a missing one is created on the label.");
+            }
+
+            // A custom field under the reference field's name would replace that field when the
+            // saved file is read back, so KiCad refuses the whole batch and changes nothing.
+            var shadowing = Label(new() { XNm = 150000000, YNm = 180000000 }, custom: true);
+            shadowing.Fields[1].Name = "intersheetrefs";
+            var refusedBatch = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Shadowed reference field" };
+            refusedBatch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(shadowing) });
+            await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(refusedBatch, token));
+            Assert.AreEqual(labelsCreated, await Capture(), "A refused label must leave the design exactly as it was.");
+
+            // Opening Schematic Setup and pressing OK refreshes the reference fields of the shown
+            // sheet. Unchanged, it must record nothing and leave every label as it was.
+            await AcceptUnchangedSetup(root, "hidden-root");
+            await AcceptUnchangedSetup(first, "hidden-child");
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
+
+            // Shown references show exactly the reference fields, whatever custom fields the
+            // label carries: the refresh finds the field itself.
+            var screenBefore = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                new() { Document = root.Clone() }, token);
+            var originalFormatting = screenBefore.Data.Metadata.Formatting.Clone();
+            Assert.IsFalse(originalFormatting.ShowIntersheetReferences, "The fixture starts with inter-sheet references hidden.");
+            async Task ShowReferences(bool referencesShown)
+            {
+                var screen = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                    new() { Document = root.Clone() }, token);
+                var desiredFormatting = originalFormatting.Clone(); desiredFormatting.ShowIntersheetReferences = referencesShown;
+                var formattingBatch = new ApplySchematicItemBatch { Document = root.Clone(), ExpectedRevision = screen.Revision.Clone(),
+                    DocumentEpoch = screen.Revision.Epoch, OperationId = Guid.NewGuid().ToString("D"),
+                    Description = referencesShown ? "Show inter-sheet references" : "Hide inter-sheet references" };
+                formattingBatch.Operations.Add(new SchematicItemOperation { SetFormatting = desiredFormatting });
+                Assert.IsTrue((await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(formattingBatch, token))
+                    .FormattingChanged);
+            }
+            await ShowReferences(true);
+            phases["shown"] = RequireFields(await Capture(), root, "Shown");
+            var shownView = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = root.Clone() }, token);
+            await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-global-label-references-shown.png"),
+                shownView.Preview.Png.ToByteArray(), token);
+            await AcceptUnchangedSetup(root, "shown-root");
+            await ShowReferences(false);
+            phases["hidden"] = RequireFields(await Capture(), null, "Hidden again");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-global-label-fields.json"),
+                JsonSerializer.Serialize(phases), token);
+        }
+
+        async Task AcceptUnchangedSetup(DocumentSpecifier sheet, string stage)
+        {
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = sheet.Clone() }, token);
+            var beforeSetup = await Capture();
+            // Its readiness probe reads the page settings of the displayed sheet.
+            await NativeSetupUi.Open(client, sheet, display, processId, token);
+            // Every accepted Setup journey returns to the Formatting row before OK.
+            await NativeSetupUi.SelectPage(display, processId, 34, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Schematic Setup", false, clickFromRight: 60, clickFromBottom: 25);
+            using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                closing.CancelAfter(TimeSpan.FromSeconds(15));
+                int delay = 25;
+                try
+                {
+                    while (NativeKeyboard.HasWindow(display, processId, "Schematic Setup"))
+                    { await Task.Delay(delay, closing.Token); delay = Math.Min(delay * 2, 500); }
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    // A Debug build stops on a failed native assertion in a modal window.
+                    var windows = new List<string>();
+                    NativeKeyboard.HasWindow(display, processId, "Schematic Setup", describe: windows.Add);
+                    await File.WriteAllLinesAsync(Path.Combine(evidence, instanceId + "-global-label-setup-" + stage + "-windows.txt"), windows, token);
+                    await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-global-label-setup-" + stage + ".png"), token);
+                    Assert.Fail($"Schematic Setup ({stage}) did not close after OK; see the retained window list and screenshot.");
+                }
+            }
+            // OK also saves the project file, so only the files' baselines may differ.
+            var afterSetup = await Capture();
+            Assert.AreEqual(beforeSetup.State.Revision, afterSetup.State.Revision,
+                $"Accepting an unchanged Schematic Setup ({stage}) must record nothing.");
+            Assert.AreEqual(beforeSetup.State.StateSha256, afterSetup.State.StateSha256, stage);
+            Assert.AreEqual(beforeSetup.Electrical, afterSetup.Electrical,
+                $"Accepting an unchanged Schematic Setup ({stage}) must leave every global label as it was.");
         }
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()

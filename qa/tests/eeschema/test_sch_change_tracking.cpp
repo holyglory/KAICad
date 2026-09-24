@@ -62,6 +62,7 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <refdes_tracker.h>
 #include <sch_commit.h>
+#include <sch_label.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_symbol.h>
@@ -72,6 +73,9 @@
 #include <settings/settings_manager.h>
 #include <tool/tool_manager.h>
 #include <kiid.h>
+
+#include <api/schematic/schematic_types.pb.h>
+#include <google/protobuf/any.pb.h>
 
 #include <chrono>
 #include <iomanip>
@@ -3837,6 +3841,280 @@ BOOST_FIXTURE_TEST_CASE( DroppedAnnotationReturnsItsDesignators, TRACKED_SCHEMAT
     SCH_COMMIT::RestoreReferenceInventory( doc, kept.get() );
     BOOST_REQUIRE( live );
     BOOST_CHECK( live->Contains( "R1" ) );
+}
+
+
+/// A global label as an API client or the XML synchronization writes it: KiCad's hidden
+/// reference field only when @a aReferenceField, then the custom fields @a aCustom
+/// (name, visible), in that order.
+inline kiapi::schematic::types::GlobalLabel apiGlobalLabel( const std::string& aText, int aX, bool aReferenceField,
+                                                             const std::vector<std::pair<std::string, bool>>& aCustom )
+{
+    kiapi::schematic::types::GlobalLabel label;
+    label.mutable_id()->set_value( KIID().AsStdString() );
+    label.mutable_position()->set_x_nm( aX );
+    label.mutable_position()->set_y_nm( 25400000 );
+    label.set_shape( kiapi::schematic::types::SLSH_BIDI );
+    label.set_spin_style( kiapi::schematic::types::SLSS_RIGHT );
+    label.mutable_text()->set_text( aText );
+    *label.mutable_text()->mutable_position() = label.position();
+    label.mutable_text()->mutable_attributes()->mutable_size()->set_x_nm( 1270000 );
+    label.mutable_text()->mutable_attributes()->mutable_size()->set_y_nm( 1270000 );
+    label.mutable_text()->mutable_attributes()->set_horizontal_alignment( kiapi::common::types::HA_LEFT );
+    label.mutable_text()->mutable_attributes()->set_vertical_alignment( kiapi::common::types::VA_CENTER );
+
+    auto field = [&]( kiapi::schematic::types::SchematicField* aField, const std::string& aName,
+                      const std::string& aValue, bool aVisible, int aDy )
+    {
+        aField->set_name( aName );
+        aField->set_visible( aVisible );
+        aField->set_allow_auto_place( true );
+        aField->mutable_text()->set_text( aValue );
+        aField->mutable_text()->mutable_position()->set_x_nm( aX );
+        aField->mutable_text()->mutable_position()->set_y_nm( 25400000 + aDy );
+        aField->mutable_text()->mutable_attributes()->mutable_size()->set_x_nm( 1270000 );
+        aField->mutable_text()->mutable_attributes()->mutable_size()->set_y_nm( 1270000 );
+        aField->mutable_text()->mutable_attributes()->set_multiline( true );
+    };
+
+    // As KiCad serializes the field, but placed away from the label so the request is visible.
+    if( aReferenceField )
+        field( label.mutable_intersheet_refs_field(), "Intersheetrefs", "${INTERSHEET_REFS}", false, -2540000 );
+
+    int dy = 2540000;
+
+    for( const auto& [name, visible] : aCustom )
+    {
+        field( label.add_fields(), name, "value of " + name, visible, dy );
+        dy += 2540000;
+    }
+
+    return label;
+}
+
+
+inline std::unique_ptr<SCH_GLOBALLABEL> deserialized( const kiapi::schematic::types::GlobalLabel& aLabel )
+{
+    google::protobuf::Any any;
+    any.PackFrom( aLabel );
+    auto label = std::make_unique<SCH_GLOBALLABEL>();
+
+    if( !label->Deserialize( any ) )
+        return nullptr;
+
+    return label;
+}
+
+
+inline std::string serialized( const SCH_GLOBALLABEL& aLabel )
+{
+    google::protobuf::Any any;
+    aLabel.Serialize( any );
+    kiapi::schematic::types::GlobalLabel label;
+    BOOST_REQUIRE( any.UnpackTo( &label ) );
+    return label.SerializeAsString();
+}
+
+
+/// The label's custom fields as (name, visible), in stored order.
+inline std::vector<std::pair<std::string, bool>> customFields( const SCH_GLOBALLABEL& aLabel )
+{
+    std::vector<std::pair<std::string, bool>> fields;
+
+    for( const SCH_FIELD& field : aLabel.GetFields() )
+    {
+        if( field.GetId() != FIELD_T::INTERSHEET_REFS )
+            fields.emplace_back( field.GetName( false ).ToStdString(), field.IsVisible() );
+    }
+
+    return fields;
+}
+
+
+/// Exactly one reference field, and it is the first: the place a label read from a file keeps it
+/// and the label properties dialog protects.
+inline const SCH_FIELD& firstReferenceField( const SCH_GLOBALLABEL& aLabel )
+{
+    BOOST_REQUIRE( !aLabel.GetFields().empty() );
+    BOOST_REQUIRE( std::count_if( aLabel.GetFields().begin(), aLabel.GetFields().end(),
+                                  []( const SCH_FIELD& field )
+                                  {
+                                      return field.GetId() == FIELD_T::INTERSHEET_REFS;
+                                  } )
+                   == 1 );
+    BOOST_REQUIRE( aLabel.GetFields().front().GetId() == FIELD_T::INTERSHEET_REFS );
+    return aLabel.GetFields().front();
+}
+
+
+/**
+ * A global label written through the API or the XML synchronization keeps KiCad's hidden
+ * reference field in its first place, with or without the field in the request and with custom
+ * fields, and the Schematic Setup refresh (SCHEMATIC::RecomputeIntersheetRefs(), which an
+ * accepted Setup runs under its tracked change) touches only that field.  An unchanged Setup
+ * therefore records nothing; showing references records one change that shows exactly the
+ * reference fields.  Unit level because it pins the lookup itself: a label whose reference
+ * field is not first, or missing, cannot be written through the API, so the native journey
+ * (NativeSymbolSheetOwnershipJourney) cannot reach those two cases.
+ */
+BOOST_FIXTURE_TEST_CASE( ApiGlobalLabelsKeepTheirReferenceFieldThroughSetup, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC&  doc = *schematic;
+    SCH_SCREEN* screen = doc.CurrentSheet().LastScreen();
+    BOOST_REQUIRE( screen == doc.RootScreen() );
+
+    const std::vector<std::pair<std::string, bool>> custom = { { "Signal note", true }, { "Reviewer", false } };
+    const std::vector<std::pair<std::string, bool>> none;
+
+    const kiapi::schematic::types::GlobalLabel bareProto = apiGlobalLabel( "BARE", 25400000, false, none );
+    const kiapi::schematic::types::GlobalLabel explicitProto = apiGlobalLabel( "EXPLICIT", 50800000, true, none );
+    const kiapi::schematic::types::GlobalLabel customProto = apiGlobalLabel( "CUSTOM", 76200000, false, custom );
+    const kiapi::schematic::types::GlobalLabel bothProto = apiGlobalLabel( "BOTH", 101600000, true, custom );
+
+    std::unique_ptr<SCH_GLOBALLABEL> bare = deserialized( bareProto );
+    std::unique_ptr<SCH_GLOBALLABEL> explicitField = deserialized( explicitProto );
+    std::unique_ptr<SCH_GLOBALLABEL> customOnly = deserialized( customProto );
+    std::unique_ptr<SCH_GLOBALLABEL> both = deserialized( bothProto );
+    BOOST_REQUIRE( bare && explicitField && customOnly && both );
+
+    // Without the field in the request: the one a new label has, hidden on the label.
+    for( SCH_GLOBALLABEL* label : { bare.get(), customOnly.get() } )
+    {
+        const SCH_FIELD& refs = firstReferenceField( *label );
+        BOOST_CHECK_EQUAL( refs.GetText(), wxS( "${INTERSHEET_REFS}" ) );
+        BOOST_CHECK( !refs.IsVisible() );
+        BOOST_CHECK( refs.GetTextPos() == label->GetPosition() );
+        BOOST_CHECK( refs.GetParent() == label );
+    }
+
+    // With it: the request's field, still first.
+    for( SCH_GLOBALLABEL* label : { explicitField.get(), both.get() } )
+    {
+        const SCH_FIELD& refs = firstReferenceField( *label );
+        BOOST_CHECK_EQUAL( refs.GetText(), wxS( "${INTERSHEET_REFS}" ) );
+        BOOST_CHECK( !refs.IsVisible() );
+        BOOST_CHECK( refs.GetTextPos() == label->GetPosition() + VECTOR2I( 0, -schIUScale.mmToIU( 2.54 ) ) );
+    }
+
+    // Custom fields follow in the request's order and keep their visibility.
+    BOOST_CHECK( customFields( *bare ).empty() );
+    BOOST_CHECK( customFields( *explicitField ).empty() );
+    BOOST_CHECK( customFields( *customOnly ) == custom );
+    BOOST_CHECK( customFields( *both ) == custom );
+
+    // What KiCad reports back carries the field in its own place and the custom fields apart, and
+    // writing that back gives the same label.
+    for( SCH_GLOBALLABEL* label : { bare.get(), explicitField.get(), customOnly.get(), both.get() } )
+    {
+        google::protobuf::Any any;
+        label->Serialize( any );
+        kiapi::schematic::types::GlobalLabel reported;
+        BOOST_REQUIRE( any.UnpackTo( &reported ) );
+        BOOST_CHECK( reported.has_intersheet_refs_field() );
+        BOOST_CHECK_EQUAL( reported.intersheet_refs_field().text().text(), "${INTERSHEET_REFS}" );
+        BOOST_CHECK_EQUAL( (size_t) reported.fields_size(), customFields( *label ).size() );
+
+        std::unique_ptr<SCH_GLOBALLABEL> again = deserialized( reported );
+        BOOST_REQUIRE( again );
+        BOOST_CHECK_EQUAL( serialized( *again ), serialized( *label ) );
+    }
+
+    // A custom field under the reference field's name would replace it when the saved file is
+    // read back.  It is refused, and a refused request leaves an existing label as it was.
+    for( const std::string& reserved : { std::string( "Intersheetrefs" ), std::string( "intersheetrefs" ),
+                                         std::string( "Intersheet References" ) } )
+    {
+        kiapi::schematic::types::GlobalLabel shadowing = apiGlobalLabel( "SHADOW", 127000000, false,
+                                                                         { { "Signal note", true },
+                                                                           { reserved, false } } );
+        BOOST_CHECK_MESSAGE( !deserialized( shadowing ), reserved );
+
+        const std::string before = serialized( *both );
+        google::protobuf::Any any;
+        shadowing.mutable_id()->set_value( both->m_Uuid.AsStdString() );
+        any.PackFrom( shadowing );
+        BOOST_CHECK( !both->Deserialize( any ) );
+        BOOST_CHECK_EQUAL( serialized( *both ), before );
+    }
+
+    // Each label with the custom fields it must keep, as (name, visible).
+    const std::vector<std::pair<SCH_GLOBALLABEL*, std::vector<std::pair<std::string, bool>>>> labels = {
+        { bare.get(), none }, { explicitField.get(), none }, { customOnly.get(), custom }, { both.get(), custom }
+    };
+
+    for( std::unique_ptr<SCH_GLOBALLABEL>* owned : { &bare, &explicitField, &customOnly, &both } )
+        screen->Append( owned->release() );
+
+    auto refreshedBySetup = [&]()
+    {
+        SCH_TRACKED_CHANGE change( doc, "Edit Schematic Setup", { doc.RootScreen() }, SCH_TRACKED_CHANGE::Mark( doc ) );
+        doc.RecomputeIntersheetRefs();
+        return change.Complete();
+    };
+
+    // An unchanged Setup (references hidden) changes nothing and records nothing: in particular
+    // the visible custom field stays visible.
+    BOOST_REQUIRE( !doc.Settings().m_IntersheetRefsShow );
+    const uint64_t unchanged = doc.ChangeJournal().Sequence();
+    BOOST_CHECK( !refreshedBySetup() );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), unchanged );
+
+    for( const auto& [label, kept] : labels )
+    {
+        BOOST_CHECK( !firstReferenceField( *label ).IsVisible() );
+        BOOST_CHECK( customFields( *label ) == kept );
+    }
+
+    // Showing references shows each reference field and nothing else, as one recorded change;
+    // hiding them again restores the visibility.
+    doc.Settings().m_IntersheetRefsShow = true;
+    BOOST_CHECK( refreshedBySetup() );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), unchanged + 1 );
+
+    for( const auto& [label, kept] : labels )
+    {
+        BOOST_CHECK( firstReferenceField( *label ).IsVisible() );
+        BOOST_CHECK( customFields( *label ) == kept );
+    }
+
+    BOOST_CHECK( !refreshedBySetup() );
+
+    doc.Settings().m_IntersheetRefsShow = false;
+    BOOST_CHECK( refreshedBySetup() );
+
+    for( const auto& [label, kept] : labels )
+    {
+        BOOST_CHECK( !firstReferenceField( *label ).IsVisible() );
+        BOOST_CHECK( customFields( *label ) == kept );
+    }
+
+    // The refresh finds the field by its type, not its place: a label whose custom field comes
+    // first shows the reference field, not the custom one, and a label without any field gets
+    // the default field first instead of an out-of-range read.
+    SCH_GLOBALLABEL* reordered = labels[3].first;
+    std::rotate( reordered->GetFields().begin(), reordered->GetFields().begin() + 1, reordered->GetFields().end() );
+    BOOST_REQUIRE( reordered->GetFields().front().GetId() == FIELD_T::USER );
+
+    SCH_GLOBALLABEL* fieldless = labels[0].first;
+    fieldless->GetFields().clear();
+
+    doc.Settings().m_IntersheetRefsShow = true;
+    doc.RecomputeIntersheetRefs();
+
+    const SCH_FIELD* reorderedRefs = static_cast<const SCH_GLOBALLABEL*>( reordered )->GetField( FIELD_T::INTERSHEET_REFS );
+    BOOST_REQUIRE( reorderedRefs );
+    BOOST_CHECK( reorderedRefs->IsVisible() );
+    BOOST_CHECK( customFields( *reordered ) == custom );
+
+    const SCH_FIELD& created = firstReferenceField( *fieldless );
+    BOOST_CHECK_EQUAL( created.GetText(), wxS( "${INTERSHEET_REFS}" ) );
+    BOOST_CHECK( created.IsVisible() );
+    BOOST_CHECK( created.GetParent() == fieldless );
+
+    doc.Settings().m_IntersheetRefsShow = false;
+    doc.RecomputeIntersheetRefs();
+    BOOST_CHECK( !reorderedRefs->IsVisible() );
+    BOOST_CHECK( customFields( *reordered ) == custom );
 }
 
 

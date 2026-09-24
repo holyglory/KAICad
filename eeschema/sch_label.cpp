@@ -2101,6 +2101,36 @@ bool SCH_DIRECTIVE_LABEL::IncrementLabel( int aIncrement )
 }
 
 
+/**
+ * The hidden intersheet reference field KiCad gives every new global label, placed on @a aLabel.
+ *
+ * A global label owns it as its first field: the constructor puts it there, a label read from a
+ * file keeps it there, and the label properties dialog keeps the mandatory fields first.
+ */
+static SCH_FIELD defaultIntersheetRefsField( SCH_GLOBALLABEL& aLabel )
+{
+    SCH_FIELD refs( nullptr, FIELD_T::INTERSHEET_REFS,
+                    ::GetDefaultFieldName( FIELD_T::INTERSHEET_REFS, UNTRANSLATED ) );
+    refs.SetText( wxT( "${INTERSHEET_REFS}" ) );
+    refs.SetVisible( false );
+    refs.SetVertJustify( GR_TEXT_V_ALIGN_CENTER );
+    refs.SetTextPos( aLabel.GetPosition() );
+    refs.SetParent( &aLabel );
+    return refs;
+}
+
+
+/**
+ * True when a field named @a aName would be read back from a saved schematic as a global label's
+ * intersheet reference field (see SCH_IO_KICAD_SEXPR_PARSER::parseSchField()).
+ */
+static bool isIntersheetRefsFieldName( const wxString& aName )
+{
+    return aName.CmpNoCase( ::GetDefaultFieldName( FIELD_T::INTERSHEET_REFS, UNTRANSLATED ) ) == 0
+           || aName.CmpNoCase( wxT( "Intersheet References" ) ) == 0;
+}
+
+
 SCH_GLOBALLABEL::SCH_GLOBALLABEL( const VECTOR2I& pos, const wxString& text ) :
         SCH_LABEL_BASE( pos, text, SCH_GLOBAL_LABEL_T )
 {
@@ -2110,13 +2140,7 @@ SCH_GLOBALLABEL::SCH_GLOBALLABEL( const VECTOR2I& pos, const wxString& text ) :
 
     SetVertJustify( GR_TEXT_V_ALIGN_CENTER );
 
-    m_fields.emplace_back(
-            SCH_FIELD( this, FIELD_T::INTERSHEET_REFS,
-                       ::GetDefaultFieldName( FIELD_T::INTERSHEET_REFS, UNTRANSLATED ) ) );
-    m_fields.back().SetText( wxT( "${INTERSHEET_REFS}" ) );
-    m_fields.back().SetVisible( false );
-    m_fields.back().SetVertJustify( GR_TEXT_V_ALIGN_CENTER );
-    m_fields.back().SetTextPos( pos );
+    m_fields.push_back( defaultIntersheetRefsField( *this ) );
 }
 
 
@@ -2165,6 +2189,15 @@ bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
     if( !aContainer.UnpackTo( &label ) )
         return false;
 
+    // A custom field under the reference field's name would be read back from the saved file
+    // as the reference field itself and replace it.  Refuse it before changing anything rather
+    // than lose one of the two on reopen.
+    for( const kiapi::schematic::types::SchematicField& field : label.fields() )
+    {
+        if( isIntersheetRefsFieldName( wxString::FromUTF8( field.name() ) ) )
+            return false;
+    }
+
     kiapi::common::UnpackCustomProperties( label.custom_properties(), *this );
 
     if( !unpackLabel( label, *this ) )
@@ -2173,22 +2206,15 @@ bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
     SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>(
             label.shape() ) );
 
-    // Every native global label owns its intersheet reference field as its first field, as a
-    // label read from a file does: RecomputeIntersheetRefs() addresses it as fields[0]. The
-    // label fields were just replaced, so restore it from the request, or, when the request
-    // leaves it unset (CN-1 §6.6), exactly as the constructor gives a new label at this position.
-    SCH_FIELD refs( nullptr, FIELD_T::INTERSHEET_REFS,
-                    ::GetDefaultFieldName( FIELD_T::INTERSHEET_REFS, UNTRANSLATED ) );
-    refs.SetText( wxT( "${INTERSHEET_REFS}" ) );
-    refs.SetVisible( false );
-    refs.SetVertJustify( GR_TEXT_V_ALIGN_CENTER );
-    refs.SetTextPos( GetPosition() );
+    // The label fields were just replaced by the request's custom fields.  Put the reference
+    // field back in its first place: from the request, or, when the request leaves it unset
+    // (CN-1 §6.6), exactly as the constructor gives a new label at this position.
+    SCH_FIELD refs = defaultIntersheetRefsField( *this );
 
     if( label.has_intersheet_refs_field()
             && !refs.Deserialize( label.intersheet_refs_field(), schIUScale ) )
         return false;
 
-    refs.SetParent( this );
     m_fields.insert( m_fields.begin(), refs );
     return true;
 }
@@ -2198,6 +2224,10 @@ SCH_FIELD* SCH_GLOBALLABEL::GetField( FIELD_T aFieldType )
 {
     if( SCH_FIELD* field = FindField( m_fields, aFieldType ) )
         return field;
+
+    // A label without its reference field (a legacy file) gets the one a new label has, first.
+    if( aFieldType == FIELD_T::INTERSHEET_REFS )
+        return &*m_fields.insert( m_fields.begin(), defaultIntersheetRefsField( *this ) );
 
     m_fields.emplace_back( this, aFieldType );
     return &m_fields.back();

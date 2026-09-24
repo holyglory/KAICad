@@ -693,10 +693,11 @@ public sealed partial class NativeSessionTests
     // inset carried by the explicit usable regions instead.
     private static readonly InitialLayoutPolicy PsuCpuLayoutPolicy = new(1_270_000, 2_540_000, 0);
 
-    /// <summary>The stated distance: every new, coordinate-free symbol lands with at least one of its connected pins at most
-    /// 50.8 mm (2 in) from the nearest already placed pin it connects to on its sheet. The PSU sheet's usable width is 277 mm
-    /// and the CPU sheet's 400 mm.</summary>
-    internal const long ConnectedPartnerDistanceNm = 50_800_000;
+    /// <summary>The stated distance, a nearest-connection bound: every new, coordinate-free symbol lands with at least one of its
+    /// connected pins at most 50.8 mm (2 in) from the nearest already placed pin it connects to on its sheet. Its other connected
+    /// pins are not bounded; milestone-1 realization joins each pin through its own short stub and label, and the journey records
+    /// every pin's distance. The PSU sheet's usable width is 277 mm and the CPU sheet's 400 mm.</summary>
+    internal const long NearestConnectionDistanceNm = 50_800_000;
 
     internal const string ConnectionTooLong = "connection_too_long";
     internal const string ExistingSymbolMoved = "existing_symbol_moved";
@@ -743,7 +744,7 @@ public sealed partial class NativeSessionTests
         var aware = await ProposedRooms(proposal.DesiredDesign!);
         var awareIssues = aware.Sheets.SelectMany(s => ConnectedPlacementIssues(s, aware.Expectation)).ToArray();
         Assert.IsEmpty(awareIssues, "Connection-aware Complete layout: " + string.Join("; ", awareIssues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
-        Assert.IsTrue(aware.Sheets.Sum(s => s.Rooms.Count) > 20, "Every connected pin's room was measured.");
+        RequireEveryStubRoomMeasured(aware.Sheets, aware.Plan.Connections!, "Connection-aware Complete layout");
 
         // Must-catch: the ordinary layout of the same symbols (their connections left out) keeps no such room.
         var ordinary = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(current.State, PsuCpuLayoutPolicy, regions, Instructions, live, token);
@@ -846,7 +847,8 @@ public sealed partial class NativeSessionTests
     // on CPU. The public layout tool over STDIO refuses the connected addition because this editor does not advertise connection
     // realization; the same planner, as an editor advertising it would run it on this editor's measurements, aims R2 and R4 at the
     // placed pins they connect to. KiCad then measures the proposal: existing symbols unmoved, R3 exactly where the XML put it,
-    // R2 and R4 each with a connected pin within ConnectedPartnerDistanceNm of the nearest placed pin it connects to, no symbol
+    // R2 and R4 each with its nearest connection within NearestConnectionDistanceNm (at least one connected pin that close to a
+    // placed pin it connects to; every pin's distance is recorded, and a pull-up's other pin may be farther), no symbol
     // overlapping another, every symbol inside its usable region, and the room for each new pin's shortest stub and its label
     // clear of every other symbol, item and other symbol's stub room. The checks are shown to catch an overlap, a symbol off the
     // page, a moved existing symbol, a distant symbol and a blocked stub, and to pass the real layout unchanged. Applying the
@@ -950,6 +952,7 @@ public sealed partial class NativeSessionTests
         }
         var r3 = sheets.Single(s => s.Key == "PSU").Bodies.ContainsKey(bodies[added["R3"].Occurrence]);
         Assert.IsTrue(r3, "R3 is measured on PSU.");
+        RequireEveryStubRoomMeasured(sheets, intent, "Connected addition");
         var issues = sheets.SelectMany(s => ConnectedPlacementIssues(s, expectation)).ToArray();
         Assert.IsEmpty(issues, string.Join("; ", issues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
 
@@ -968,8 +971,8 @@ public sealed partial class NativeSessionTests
             ["blockedStub"] = Codes(psu with { Items = [.. psu.Items, (Guid.NewGuid(), psu.Rooms.First(r => r.Owner == r2).Label)] }),
             ["unchanged"] = Codes(psu)
         };
-        CollectionAssert.Contains(caught["overlap"], NativePresentationChecks.SymbolBodiesOverlap);
-        CollectionAssert.Contains(caught["offPage"], NativePresentationChecks.SymbolOutsideUsableRegion);
+        CollectionAssert.AreEqual(new[] { NativePresentationChecks.SymbolBodiesOverlap }, caught["overlap"]);
+        CollectionAssert.AreEqual(new[] { NativePresentationChecks.SymbolOutsideUsableRegion }, caught["offPage"]);
         CollectionAssert.AreEqual(new[] { ExistingSymbolMoved }, caught["movedExisting"]);
         CollectionAssert.AreEqual(new[] { ConnectionTooLong }, caught["distant"]);
         CollectionAssert.AreEqual(new[] { ConnectionRoomBlocked }, caught["blockedStub"]);
@@ -991,14 +994,17 @@ public sealed partial class NativeSessionTests
         await File.WriteAllBytesAsync(path, fileBefore, token);
         var restored = store.Save(store.Read()!.State with { DesiredFileBytes = current.State.DesiredFileBytes }, store.Read()!.RevisionToken);
         CollectionAssert.AreEqual(current.State.DesiredFileBytes, restored.State.DesiredFileBytes);
+        // Every connected pin's distance is recorded; only each symbol's nearest connection is bounded (NearestConnectionDistanceNm).
         var distances = sheets.SelectMany(s => PartnerDistances(s, expectation)).ToArray();
+        var names = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
         var summary = new
         {
             gatedErrorCode = "unsupported_layout_creation", deterministic = true, preferredAnchors = proposal.PreferredAnchors.Count,
-            pinnedR3Preserved = true, existingSymbolsUnmoved = true, statedDistanceNm = ConnectedPartnerDistanceNm,
-            symbolDistanceNm = distances.GroupBy(d => d.Symbol).ToDictionary(g => g.Key.ToString("D"), g => g.Min(d => d.DistanceNm)),
-            distances = distances.Select(d => new { d.Sheet, d.Pin, d.DistanceNm }), measuredRooms = sheets.Sum(s => s.Rooms.Count),
-            mustCatch = caught, realizerObservation = realizer
+            pinnedR3Preserved = true, existingSymbolsUnmoved = true, nearestConnectionBoundNm = NearestConnectionDistanceNm,
+            nearestConnectionNm = distances.GroupBy(d => names[d.Endpoint.ComponentId]).ToDictionary(g => g.Key, g => g.Min(d => d.DistanceNm)),
+            longestConnectionNm = distances.GroupBy(d => names[d.Endpoint.ComponentId]).ToDictionary(g => g.Key, g => g.Max(d => d.DistanceNm)),
+            connections = distances.Select(d => new { d.Sheet, pin = names[d.Endpoint.ComponentId] + "." + d.Endpoint.Pin, d.Net, d.DistanceNm }),
+            measuredRooms = sheets.Sum(s => s.Rooms.Count), mustCatch = caught, realizerObservation = realizer
         };
         await File.WriteAllTextAsync(evidence("connected-addition.json"), JsonSerializer.Serialize(summary), token);
         return summary;
@@ -1095,11 +1101,23 @@ public sealed partial class NativeSessionTests
         }
     }
 
+    // Every pin that needs a stub on the measured sheets has exactly one measured room, and no other pin has one.
+    private static void RequireEveryStubRoomMeasured(IReadOnlyList<ConnectedSheetGeometry> sheets, SchematicConnectionIntent intent, string context)
+    {
+        var paths = sheets.Select(s => s.PathKey).ToHashSet(StringComparer.Ordinal);
+        var expected = intent.Screens.SelectMany(s => s.Islands).Where(i => paths.Contains(i.SheetPathKey))
+            .SelectMany(i => i.Members.Where(m => m.RequiresStub).Select(m => (Sheet: i.SheetPathKey, Pin: m.Pin.PlacedPinId))).ToArray();
+        var measured = sheets.SelectMany(s => s.Rooms.Select(r => (Sheet: s.PathKey, r.Pin))).ToArray();
+        Assert.IsNotEmpty(expected, context + ": some pin needs a stub.");
+        Assert.AreEqual(expected.Length, measured.Length, context + ": one measured room per pin that needs a stub.");
+        CollectionAssert.AreEquivalent(expected, measured, context + ": the measured rooms belong to exactly the pins that need a stub.");
+    }
+
     internal sealed record ConnectedPlacementIssue(string Code, IReadOnlyList<Guid> Symbols);
 
     /// <summary>Everything wrong with a connected addition's layout on one sheet: a symbol outside the usable region or two
     /// symbol bodies overlapping (<see cref="NativePresentationChecks"/>), an existing symbol that moved, a connected pin of a
-    /// new coordinate-free symbol none of whose connected pins lies within <see cref="ConnectedPartnerDistanceNm"/> of a placed
+    /// new coordinate-free symbol none of whose connected pins lies within <see cref="NearestConnectionDistanceNm"/> of a placed
     /// pin it connects to,
     /// a new pin whose shortest stub or label meets another symbol, an item or another symbol's stub room, and an existing pin
     /// whose stub or label meets a new symbol or a new symbol's stub room.</summary>
@@ -1112,7 +1130,7 @@ public sealed partial class NativeSessionTests
         foreach (var (id, at) in sheet.Before.OrderBy(p => p.Key))
             if (!sheet.After.TryGetValue(id, out var now) || now != at) issues.Add(new(ExistingSymbolMoved, [id]));
         foreach (var symbol in PartnerDistances(sheet, expectation).GroupBy(d => d.Symbol).OrderBy(g => g.Key))
-            if (symbol.Min(d => d.DistanceNm) > ConnectedPartnerDistanceNm) issues.Add(new(ConnectionTooLong, [symbol.Key]));
+            if (symbol.Min(d => d.DistanceNm) > NearestConnectionDistanceNm) issues.Add(new(ConnectionTooLong, [symbol.Key]));
         // Placement controls the room between symbols; a label that meets its own symbol is the realizer's concern. A new
         // symbol's room must be clear of everything else; an existing symbol's room must be clear of every new symbol and room.
         foreach (var room in sheet.Rooms)
@@ -1127,10 +1145,10 @@ public sealed partial class NativeSessionTests
         return issues;
     }
 
-    internal sealed record PartnerDistance(string Sheet, Guid Symbol, Guid Pin, long DistanceNm);
+    internal sealed record PartnerDistance(string Sheet, Guid Symbol, Guid Pin, PinEndpoint Endpoint, string Net, long DistanceNm);
 
     // For each connected pin of a new coordinate-free symbol, the Euclidean distance to the nearest same-net pin on this sheet
-    // of a symbol whose position was already known (existing or explicitly placed).
+    // of a symbol whose position was already known (existing or explicitly placed), with the pin's net.
     internal static IEnumerable<PartnerDistance> PartnerDistances(ConnectedSheetGeometry sheet, ConnectedPlacementExpectation expectation)
     {
         foreach (var island in expectation.Intent.Screens.SelectMany(s => s.Islands).Where(i => i.SheetPathKey == sheet.PathKey))
@@ -1142,7 +1160,8 @@ public sealed partial class NativeSessionTests
             {
                 var at = sheet.Pins[member.Pin.PlacedPinId];
                 double nearest = partners.Min(p => Math.Sqrt(Math.Pow(p.XNm - at.XNm, 2) + Math.Pow(p.YNm - at.YNm, 2)));
-                yield return new(sheet.Key, member.Pin.SymbolId, member.Pin.PlacedPinId, (long)Math.Ceiling(nearest));
+                yield return new(sheet.Key, member.Pin.SymbolId, member.Pin.PlacedPinId, member.Pin.Endpoint,
+                    expectation.Intent.Nets.Single(n => n.NetId == island.NetId).Name, (long)Math.Ceiling(nearest));
             }
         }
     }

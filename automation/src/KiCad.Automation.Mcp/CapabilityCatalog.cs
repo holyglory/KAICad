@@ -24,10 +24,13 @@ public enum KiCadVerificationLevel
 /// journey and a call to the tool by name in a NativeSessionTests source (the Linux native
 /// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
 /// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
-/// STDIO server and call the tool by name. A cited NativeSessionTests method whose journey is still
-/// an Inconclusive lane stub proves nothing and is rejected, and so is one whose dispatch the check
-/// cannot read. Comments never count as calls. The call check is per class, not per method: it
-/// cannot tell which journey of NativeSessionTests makes the call.
+/// STDIO server and call the tool by name. A cited NativeSessionTests method proves nothing, and is
+/// rejected, when it can reach an Inconclusive lane stub (any member that raises
+/// AssertInconclusiveException or calls Assert.Inconclusive) or when the check cannot read whether
+/// it can: its journey's dispatch switches are read exactly, and a test that hands over to helpers
+/// is followed through every NativeSessionTests member it names, to any depth. Comments never count
+/// as calls. The call check is per class, not per method: it cannot tell which journey of
+/// NativeSessionTests makes the call.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute

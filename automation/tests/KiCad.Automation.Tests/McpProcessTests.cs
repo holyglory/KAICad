@@ -45,6 +45,7 @@ public sealed class McpProcessTests
                 .Select(t => t.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.Contains(names, "kicad_instances_list");
             CollectionAssert.Contains(names, "kicad_instance_capabilities");
+            CollectionAssert.Contains(names, "kicad_service_capabilities");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");
             CollectionAssert.Contains(names, "kicad_pcb_drc_job");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");

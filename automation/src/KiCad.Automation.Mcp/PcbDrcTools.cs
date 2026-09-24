@@ -134,7 +134,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_state", ReadOnly = true),
-     Description("Read the selected PCB's real native DRC marker inventory, identities, exclusion flags and comments. Reports running calculation without traversing in-progress markers. This does not run DRC or prove that existing findings are fresh for the current design; freshness remains explicit.")]
+     Description("Read the selected PCB's real native DRC marker inventory, identities, exclusion flags and comments. Reports running calculation without traversing in-progress markers. This does not run DRC or prove that existing findings are fresh for the current design; freshness remains explicit."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "explicit instance ID and PCB document"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> Read(string instanceId, string documentJson, CancellationToken cancellationToken) =>
         InstanceToolBoundary.Run(async () =>
         {

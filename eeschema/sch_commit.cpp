@@ -175,16 +175,15 @@ void SCH_COMMIT::KeepReferenceInventory()
 {
     SCH_EDIT_FRAME* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
 
-    if( !frame || m_isLibEditor )
-        return;
-
-    KeepReferenceInventory( frame->Schematic() );
+    if( frame )
+        KeepReferenceInventory( frame->Schematic() );
 }
 
 
 void SCH_COMMIT::KeepReferenceInventory( SCHEMATIC& aSchematic )
 {
-    if( m_referenceInventoryKept )
+    // A symbol editor commit hands out no schematic designators.
+    if( m_isLibEditor || m_referenceInventoryKept )
         return;
 
     m_referenceInventoryKept = true;

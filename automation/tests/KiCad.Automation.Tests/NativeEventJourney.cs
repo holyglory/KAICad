@@ -684,8 +684,65 @@ public sealed partial class NativeSessionTests
         // same identity on disk and is reloaded; Annotate then has nothing to do but that repair,
         // which must be exactly one "Annotate" revision that marks the design modified and changes
         // nothing else on any sheet.
-        void PressAnnotate() => NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog,
-            false, true, 60, 25);
+        //
+        // A fresh dialog's message panel is empty, and Annotate always ends by reporting there
+        // ("Annotation complete." at least), so text appearing in the panel shows that the click
+        // reached the Annotate button and Annotate ran to its end.  The scope and option radio
+        // buttons have no mnemonic; they are clicked at their rendered places in the fixture's
+        // dialog, whose layout from its top-left corner is fixed.
+        async Task<int> MessageInk()
+        {
+            (int X, int Y, int Width, int Height) at = default;
+            NativeKeyboard.SchematicShortcut(display, processId, "", annotateDialog, false, false,
+                observeGeometry: geometry => at = geometry);
+            // The first lines of the message panel, inside its white area.
+            return await DisplayRegionInk(display, at.X + 24, at.Y + 282, 560, 60, token);
+        }
+        async Task MessagePanel(Func<int, bool> shown, string what, string step)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            int ink = 0;
+            try
+            {
+                while (!shown(ink = await MessageInk()))
+                    await Task.Delay(100, limit.Token);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await Failed(step, $"The Annotate dialog's message panel never showed {what} ({ink} marked pixels) during {step}.");
+            }
+        }
+        async Task PressAnnotate(string step)
+        {
+            // Once painted, the fresh dialog's panel is empty; after the click it holds Annotate's report.
+            await MessagePanel(ink => ink < 20, "an empty panel before Annotate", step);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog, false, true, 60, 25);
+            await MessagePanel(ink => ink > 100, "Annotate's report", step);
+        }
+        const string entireSchematic = "Entire schematic", selectionScope = "Selection",
+            keepAnnotations = "Keep existing annotations", resetAnnotations = "Reset existing annotations";
+        void AnnotateOption(string option)
+        {
+            var (left, top) = option switch
+            {
+                entireSchematic => (60, 39),
+                selectionScope => (60, 81),
+                keepAnnotations => (60, 167),
+                resetAnnotations => (60, 188),
+                _ => throw new ArgumentOutOfRangeException(nameof(option), option, "Not an Annotate option."),
+            };
+            NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog, false, true,
+                clickFromLeft: left, clickFromTop: top);
+        }
+        // Undo, then open and close Annotate Schematic: the editor handles the toolbar click after
+        // the undo key, so once the dialog has opened the undo has run or found nothing to undo.
+        async Task UndoThenFence(string step)
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, "z");
+            await OpenAnnotate(step);
+            await Button(annotateDialog, false, step);
+        }
         const string repeatedText = "Tracked repeated identity";
         async Task<List<SchematicScreenData>> Sheets() => (await Settled(t =>
                 client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document.Clone() }, t)))
@@ -720,49 +777,59 @@ public sealed partial class NativeSessionTests
         string RepeatedNote(double y) =>
             $"(text \"{repeatedText}\" (at 30.48 {y.ToString(System.Globalization.CultureInfo.InvariantCulture)} 0) "
             + $"(effects (font (size 1.27 1.27))) (uuid {repeatedId}))\n";
-        await File.WriteAllTextAsync(rootFile, savedRoot.Insert(rootAt, RepeatedNote(35.56)), token);
-        await File.WriteAllTextAsync(childSheetFile, savedChild.Insert(childAt, RepeatedNote(40.64)), token);
-        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
-        var duplicated = await State();
-        Assert.IsFalse(duplicated.NativeContentDirty, "The reloaded design must start unmodified.");
-        var duplicatedSheets = await Sheets();
-        var loadedNotes = RepeatedNotes(duplicatedSheets);
-        Assert.HasCount(2, loadedNotes, "Both sheet files' notes must be loaded.");
-        Assert.IsTrue(loadedNotes.All(n => n.Id.Value == repeatedId), "Loading must keep the repeated identity for Annotate to repair.");
+        async Task<(DocumentLifecycleState State, List<SchematicScreenData> Sheets, List<SchematicText> Notes)> LoadRepeatedIdentity()
+        {
+            await File.WriteAllTextAsync(rootFile, savedRoot.Insert(rootAt, RepeatedNote(35.56)), token);
+            await File.WriteAllTextAsync(childSheetFile, savedChild.Insert(childAt, RepeatedNote(40.64)), token);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+            var loaded = await State();
+            Assert.IsFalse(loaded.NativeContentDirty, "The reloaded design must start unmodified.");
+            var sheets = await Sheets();
+            var notes = RepeatedNotes(sheets);
+            Assert.HasCount(2, notes, "Both sheet files' notes must be loaded.");
+            Assert.IsTrue(notes.All(n => n.Id.Value == repeatedId), "Loading must keep the repeated identity for Annotate to repair.");
+            return (loaded, sheets, notes);
+        }
+        async Task OnlyTheIdentityRepaired((DocumentLifecycleState State, List<SchematicScreenData> Sheets, List<SchematicText> Notes) loaded,
+            DocumentLifecycleState repaired, string step)
+        {
+            Assert.AreNotEqual(loaded.State.StateSha256, repaired.StateSha256, "The new identity must change the saved design.");
+            Assert.IsTrue(repaired.NativeContentDirty, "Repairing an identity must mark the design modified.");
+            var repairedSheets = await Sheets();
+            var repairedNotes = RepeatedNotes(repairedSheets);
+            Assert.HasCount(2, repairedNotes, "Repairing an identity must keep both notes.");
+            CollectionAssert.AllItemsAreUnique(repairedNotes.Select(n => n.Id.Value).ToList(), "Each note must have its own identity.");
+            Assert.AreEqual(1, repairedNotes.Count(n => n.Id.Value == repeatedId), "One note must keep the repeated identity.");
+            CollectionAssert.AreEquivalent(loaded.Notes.Select(WithoutIdentity).ToList(), repairedNotes.Select(WithoutIdentity).ToList(),
+                "Only the identity of the renumbered note may change.");
+            var expectedSheets = loaded.Sheets.Select(WithoutRepeatedNotes).ToList();
+            var actualSheets = repairedSheets.Select(WithoutRepeatedNotes).ToList();
+            if (!expectedSheets.SequenceEqual(actualSheets))
+            {
+                await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-expected.json"),
+                    expectedSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+                await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-actual.json"),
+                    actualSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+            }
+            CollectionAssert.AreEqual(expectedSheets, actualSheets, "Annotate had nothing else to do, so every other item, "
+                + "setting, cached definition and the reference inventory must be unchanged on every sheet (both are kept as evidence).");
+            Assert.AreEqual(reference, await Reference());
+        }
 
+        var duplicated = await LoadRepeatedIdentity();
         await OpenAnnotate("annotate-repair");
-        PressAnnotate();
-        await Advanced(duplicated, "annotate-repair");
+        await PressAnnotate("annotate-repair");
+        await Advanced(duplicated.State, "annotate-repair");
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-repaired.png"), token);
         await Button(annotateDialog, false, "annotate-repair");
         var repaired = await State();
-        await OneChange(duplicated, "Annotate", SchematicChange.Types.Kind.Commit);
-        Assert.AreNotEqual(duplicated.StateSha256, repaired.StateSha256, "The new identity must change the saved design.");
-        Assert.IsTrue(repaired.NativeContentDirty, "Repairing an identity must mark the design modified.");
-        var repairedSheets = await Sheets();
-        var repairedNotes = RepeatedNotes(repairedSheets);
-        Assert.HasCount(2, repairedNotes, "Repairing an identity must keep both notes.");
-        CollectionAssert.AllItemsAreUnique(repairedNotes.Select(n => n.Id.Value).ToList(), "Each note must have its own identity.");
-        Assert.AreEqual(1, repairedNotes.Count(n => n.Id.Value == repeatedId), "One note must keep the repeated identity.");
-        CollectionAssert.AreEquivalent(loadedNotes.Select(WithoutIdentity).ToList(), repairedNotes.Select(WithoutIdentity).ToList(),
-            "Only the identity of the renumbered note may change.");
-        var expectedSheets = duplicatedSheets.Select(WithoutRepeatedNotes).ToList();
-        var actualSheets = repairedSheets.Select(WithoutRepeatedNotes).ToList();
-        if (!expectedSheets.SequenceEqual(actualSheets))
-        {
-            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-repair-expected.json"),
-                expectedSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
-            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-repair-actual.json"),
-                actualSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
-        }
-        CollectionAssert.AreEqual(expectedSheets, actualSheets, "Annotate had nothing else to do, so every other item, "
-            + "setting, cached definition and the reference inventory must be unchanged on every sheet (both are kept as evidence).");
-        Assert.AreEqual(reference, await Reference());
+        await OneChange(duplicated.State, "Annotate", SchematicChange.Types.Kind.Commit);
+        await OnlyTheIdentityRepaired(duplicated, repaired, "annotate-repair");
 
         // Put the saved design back and annotate it: every symbol is annotated and no identity
         // repeats, so Annotate has nothing to do and must leave no revision, saved change or
-        // modified flag.  The Close click is handled after Annotate's, so its window closing shows
-        // Annotate has run.
+        // modified flag.  Loading cleared the undo history, so an undo that follows finds nothing
+        // to undo only when Annotate also left no undo entry.
         await File.WriteAllTextAsync(rootFile, savedRoot, token);
         await File.WriteAllTextAsync(childSheetFile, savedChild, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
@@ -770,12 +837,139 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(annotatedDesign.StateSha256, reloaded.StateSha256, "Reloading the saved design must restore it exactly.");
         Assert.IsFalse(reloaded.NativeContentDirty);
         await OpenAnnotate("annotate-nothing");
-        PressAnnotate();
-        await Task.Delay(1000, token);
+        await PressAnnotate("annotate-nothing");
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-nothing.png"), token);
         await Button(annotateDialog, false, "annotate-nothing");
         await Unchanged(reloaded, "Annotating an annotated schematic");
+        await UndoThenFence("annotate-nothing-undo");
+        await Unchanged(reloaded, "Undoing after annotating an annotated schematic");
         Assert.AreEqual(reference, await Reference());
+
+        // The same repair with nothing staged: with the Selection scope and nothing selected,
+        // Annotate annotates no symbol and its commit stays empty, so nothing is pushed and the
+        // dialog itself records the repaired identity as one "Annotate" revision and marks the
+        // design modified.  Nothing was pushed, so an undo that follows finds nothing to undo (with
+        // the Entire schematic scope every symbol would be staged and pushed as an undo entry).
+        var unstaged = await LoadRepeatedIdentity();
+        await client.InvokeAsync<ClearSelection, Empty>(new() { Header = header.Clone() }, token);
+        Assert.IsEmpty((await client.InvokeAsync<GetSelection, SelectionResponse>(new() { Header = header.Clone() }, token)).Items,
+            "Nothing may be selected for an Annotate of the selection to stage nothing.");
+        await OpenAnnotate("annotate-repair-unstaged");
+        AnnotateOption(selectionScope);
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-selection-scope.png"), token);
+        await PressAnnotate("annotate-repair-unstaged");
+        await Advanced(unstaged.State, "annotate-repair-unstaged");
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-repaired-unstaged.png"), token);
+        await Button(annotateDialog, false, "annotate-repair-unstaged");
+        var repairedUnstaged = await State();
+        await OneChange(unstaged.State, "Annotate", SchematicChange.Types.Kind.Commit);
+        await OnlyTheIdentityRepaired(unstaged, repairedUnstaged, "annotate-repair-unstaged");
+        await UndoThenFence("annotate-repair-unstaged-undo");
+        await Unchanged(repairedUnstaged, "Undoing an identity repair that staged nothing");
+
+        // An Annotate whose only saved change is the reference inventory (the designators handed
+        // out, saved with the project settings).  "Reset existing annotations" on one selected
+        // symbol whose first free designator is its own gives it that designator back and hands it
+        // out again.  With the designator first taken out of the inventory, the symbol compares
+        // unchanged and only the inventory differs, which must still be one "Annotate" revision
+        // that marks the design modified and changes nothing else.
+        await File.WriteAllTextAsync(rootFile, savedRoot, token);
+        await File.WriteAllTextAsync(childSheetFile, savedChild, token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+        Assert.AreEqual(annotatedDesign.StateSha256, (await State()).StateSha256, "Reloading the saved design must restore it exactly.");
+        var inventoryScreen = await ScreenData();
+        var numbering = inventoryScreen.Metadata.Annotation;
+        Assert.AreEqual(SchematicAnnotationMethod.SamIncremental, numbering.Method,
+            "The fixture numbers designators from the first free number, which the chosen symbol's designator relies on.");
+        var inventory = inventoryScreen.Metadata.ReferenceInventory?.Allocated.ToList() ?? new List<string>();
+        var placedReferences = (await Sheets()).SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).Select(s => (Id: s.Id.Value, Reference: s.ReferenceField.Text.Text_)).ToList();
+        SchematicSymbolInstance? reissued = null;
+        foreach (var candidate in inventoryScreen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.Id.Value == symbol.Id.Value ? 0 : 1))
+        {
+            // The first designator from the first free number that no other placed symbol uses and,
+            // unless designators may be reused, the inventory without this one does not hold.
+            var own = Regex.Match(candidate.ReferenceField.Text.Text_, "^([A-Za-z]+)([0-9]+)$");
+            if (!own.Success) continue;
+            var others = placedReferences.Where(p => p.Id != candidate.Id.Value).Select(p => p.Reference).ToHashSet(StringComparer.Ordinal);
+            if (others.Contains(own.Value)) continue;
+            string Numbered(int number) => own.Groups[1].Value + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            int first = numbering.StartAfter + 1;
+            while (others.Contains(Numbered(first))
+                || (!numbering.ReuseDesignators && Numbered(first) != own.Value && inventory.Contains(Numbered(first))))
+                first++;
+            if (Numbered(first) == own.Value) { reissued = candidate; break; }
+        }
+        Assert.IsNotNull(reissued, "The fixture's root sheet must hold a symbol whose first free designator is its own.");
+        string reissuedReference = reissued.ReferenceField.Text.Text_;
+        if (inventory.Contains(reissuedReference))
+        {
+            var trim = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), Description = "Take one designator out of the reference inventory"
+            };
+            var without = new SchematicReferenceInventory();
+            without.Allocated.Add(inventory.Where(r => r != reissuedReference));
+            trim.Operations.Add(new SchematicItemOperation { SetReferenceInventory = without });
+            Assert.IsTrue((await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(trim, token)).ReferenceInventoryChanged);
+        }
+        var trimmed = await Saved();
+        var trimmedInventory = (await ScreenData()).Metadata.ReferenceInventory?.Allocated.ToList() ?? new List<string>();
+        CollectionAssert.DoesNotContain(trimmedInventory, reissuedReference);
+        static SchematicScreenData WithoutInventory(SchematicScreenData sheet)
+        {
+            var copy = sheet.Clone();
+            if (copy.Metadata is not null) copy.Metadata.ReferenceInventory = null;
+            return copy;
+        }
+        var trimmedSheets = (await Sheets()).Select(WithoutInventory).ToList();
+        var reissuedQuery = new GetItemsById { Header = header.Clone() }; reissuedQuery.Items.Add(reissued.Id.Clone());
+        await Select(reissued.Id);
+        await OpenAnnotate("annotate-inventory");
+        AnnotateOption(selectionScope);
+        AnnotateOption(resetAnnotations);
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-inventory-options.png"), token);
+        await PressAnnotate("annotate-inventory");
+        await Advanced(trimmed, "annotate-inventory");
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-inventory.png"), token);
+        await Button(annotateDialog, false, "annotate-inventory");
+        var inventoried = await State();
+        await OneChange(trimmed, "Annotate", SchematicChange.Types.Kind.Commit);
+        Assert.AreNotEqual(trimmed.StateSha256, inventoried.StateSha256, "The designator handed out again must change the saved design.");
+        Assert.IsTrue(inventoried.NativeContentDirty, "Handing out a designator must mark the design modified.");
+        Assert.AreEqual(reissuedReference, (await Settled(t => client.InvokeAsync<GetItemsById, GetItemsResponse>(reissuedQuery, t)))
+            .Items.Single().Unpack<SchematicSymbolInstance>().ReferenceField.Text.Text_, "Resetting must give the symbol its own designator back.");
+        var reissuedInventory = (await ScreenData()).Metadata.ReferenceInventory?.Allocated.ToList() ?? new List<string>();
+        CollectionAssert.AreEquivalent(trimmedInventory.Append(reissuedReference).ToList(), reissuedInventory,
+            "Annotate must hand the symbol's designator out again, and nothing else.");
+        var inventoriedSheets = (await Sheets()).Select(WithoutInventory).ToList();
+        if (!trimmedSheets.SequenceEqual(inventoriedSheets))
+        {
+            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-inventory-expected.json"),
+                trimmedSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-inventory-actual.json"),
+                inventoriedSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+        }
+        CollectionAssert.AreEqual(trimmedSheets, inventoriedSheets, "Only the reference inventory may change: every item, setting "
+            + "and cached definition must be unchanged on every sheet (both are kept as evidence).");
+        await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate.txt"),
+            "Annotate with one repeated item identity and nothing else to do recorded one 'Annotate' revision and marked the "
+            + "design modified, with the Entire schematic scope (every symbol staged and pushed) and with the Selection scope "
+            + "and nothing selected (nothing staged, nothing to undo afterwards)." + Environment.NewLine
+            + "Annotate on the annotated design left no revision, saved change, modified flag or undo entry." + Environment.NewLine
+            + $"Reset existing annotations on the selected {reissuedReference}, with {reissuedReference} taken out of the reference "
+            + $"inventory ({trimmedInventory.Count} entries left), gave it {reissuedReference} again and handed it out again; that "
+            + "inventory change alone was one 'Annotate' revision and marked the design modified." + Environment.NewLine, token);
+
+        // The scope and option are the editor's own settings, kept for the next time the dialog
+        // opens; put back the ones every other step here and later uses.
+        await OpenAnnotate("annotate-options-restore");
+        AnnotateOption(entireSchematic);
+        AnnotateOption(keepAnnotations);
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-options-restored.png"), token);
+        await Button(annotateDialog, false, "annotate-options-restore");
+        Assert.AreEqual(inventoried.Revision, (await State()).Revision, "The dialog's scope and option are not saved with the design.");
 
         // Place > Import Sheet.  The first placement brings a child sheet with it.  Cancelling a later
         // placement must leave nothing when its file repeats no identity the design uses, and must
@@ -960,6 +1154,38 @@ public sealed partial class NativeSessionTests
 
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, token);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-final.png"), token);
+    }
+
+    /// <summary>
+    /// The pixels of a rectangle of the fixture display that differ from its top-left pixel (the
+    /// measure <see cref="CountCanvasInk"/> applies), captured without the pointer.
+    /// </summary>
+    private static async Task<int> DisplayRegionInk(string display, int left, int top, int width, int height,
+        CancellationToken token)
+    {
+        var start = new ProcessStartInfo("ffmpeg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string arg in new[] { "-nostdin", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0",
+            "-video_size", $"{width}x{height}", "-i", $"{display}+{left},{top}", "-frames:v", "1",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1" }) start.ArgumentList.Add(arg);
+        using var process = Process.Start(start)!;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        using var pixels = new MemoryStream();
+        var copy = process.StandardOutput.BaseStream.CopyToAsync(pixels, deadline.Token);
+        var diagnostics = process.StandardError.ReadToEndAsync(deadline.Token);
+        try
+        {
+            await process.WaitForExitAsync(deadline.Token);
+            await copy;
+            Assert.AreEqual(0, process.ExitCode, "Fixture display capture failed: " + await diagnostics);
+        }
+        finally
+        {
+            if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(CancellationToken.None); }
+        }
+        byte[] image = pixels.ToArray();
+        Assert.AreEqual(width * height * 3, image.Length, "The fixture display region was not captured whole.");
+        return CountCanvasInk(image);
     }
 
     /// <summary>

@@ -102,7 +102,11 @@ public:
      */
     void KeepReferenceInventory();
 
-    /// KeepReferenceInventory() for @a aSchematic, when the commit has no schematic editor.
+    /**
+     * KeepReferenceInventory() for @a aSchematic, the schematic-only form for a commit that has
+     * no schematic editor (a headless schematic or a test).  Like the editor form, it keeps
+     * nothing for a symbol editor commit, and only the first call keeps a copy.
+     */
     void KeepReferenceInventory( SCHEMATIC& aSchematic );
 
     /// A copy of @a aSchematic's reference inventory, or null when it has none.

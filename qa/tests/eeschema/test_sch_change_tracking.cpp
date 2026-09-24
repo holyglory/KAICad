@@ -2187,7 +2187,8 @@ inline std::vector<HELPER> reviewedHelpers()
           "Annotation edits the caller's commit, keeping the reference inventory in it so a cancelled "
           "placement returns the designators it handed out; the caller's push marks the document modified.  "
           "Annotate Schematic declares a tracked change on that commit first, which pushes or reverts it and "
-          "records the identities annotation replaced outside it (see its tracker review)." },
+          "records the identities annotation replaced outside it (see its tracker review); it is the only caller "
+          "that asks for that repair (identityRepairCallers)." },
         { "resyncAfterTopLevelSheetChange", { "eeschema/widgets/hierarchy_pane.cpp" },
           { { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, CALLER_RULE::ROUTED_CALL,
               {} } },
@@ -2215,6 +2216,27 @@ inline std::vector<HELPER> reviewedHelpers()
               "DIALOG_LIB_SYMBOL_PROPERTIES::DIALOG_LIB_SYMBOL_PROPERTIES", 1, CALLER_RULE::OTHER_DOCUMENT, {} } },
           "Every dialog that hosts the fields grid persists through a routed owner (or edits a library)." },
     };
+}
+
+
+/// AnnotateSymbols' ninth argument asks it to repair item identities that sheets repeat.  The
+/// repair gives items new identities outside the caller's commit, which can neither compare nor
+/// restore them, so AnnotateSymbols returns how many it replaced.  Only a caller reviewed here,
+/// which reports that count as a change outside its commit, may ask for the repair; every other
+/// call must pass the literal false.
+inline std::vector<EVIDENCE> identityRepairCallers()
+{
+    return { { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "int replaced = m_Parent->AnnotateSymbols(" },
+             { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "if( replaced > 0 ) change.ChangedOutsideCommit();" } };
+}
+
+
+/// The repair argument of an AnnotateSymbols call (comments removed), or empty when the call
+/// does not pass the eleven arguments the review knows.
+inline std::string identityRepairArgument( const CALL_SITE& aCall )
+{
+    const std::vector<std::string> arguments = topLevelArgumentTexts( "(" + aCall.arguments + ")", 0 );
+    return arguments.size() == 11 ? arguments[8] : std::string();
 }
 
 
@@ -2389,10 +2411,14 @@ inline std::vector<PROOF> journeyProofs()
           { "Cancelling Schematic Setup", "Accepting unchanged Schematic Setup" } },
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
           { "Closing unchanged Annotate Schematic" } },
-        // Annotate itself: repairing one duplicated identity with nothing else to annotate is one
-        // revision, and annotating an annotated schematic is none.
+        // Annotate itself.  Repairing one duplicated identity with nothing else to annotate is one
+        // revision, both when every symbol is staged and pushed and when nothing is staged (the
+        // dialog records it; nothing is left to undo), and so is handing out a designator again
+        // with every staged symbol unchanged (the kept reference inventory differs).  Annotating
+        // an annotated schematic is no revision and leaves nothing to undo.
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "Annotate",
-          { "Annotating an annotated schematic" } },
+          { "Annotating an annotated schematic", "Undoing after annotating an annotated schematic",
+            "Undoing an identity repair that staged nothing" } },
     };
 }
 
@@ -3151,6 +3177,93 @@ BOOST_AUTO_TEST_CASE( EveryHelperCallIsRouted )
 }
 
 
+BOOST_AUTO_TEST_CASE( OnlyAReportingCallerRepairsIdentities )
+{
+    ORACLE_FIXTURE oracle;
+    BOOST_REQUIRE( !oracle.root.empty() );
+
+    std::map<std::string, int> reporting;
+
+    for( const EVIDENCE& evidence : identityRepairCallers() )
+    {
+        reporting[evidence.file + " | " + evidence.function] = 0;
+
+        std::string failure;
+        BOOST_CHECK_MESSAGE( oracle.Evidence( evidence, failure ), "AnnotateSymbols repair: " + failure );
+    }
+
+    size_t calls = 0;
+
+    for( const fs::path& file : sourceFiles( oracle.root, "eeschema" ) )
+    {
+        const std::string relative = relativeName( oracle.root, file );
+
+        for( const CALL_SITE& call : oracle.Scan( relative ).calls )
+        {
+            // A qualified name is the definition, not a call.
+            if( call.identifier != "AnnotateSymbols" || call.receiver.find( "::" ) != std::string::npos )
+                continue;
+
+            ++calls;
+
+            const std::string key = relative + " | " + call.function;
+            const std::string where = key + " line " + std::to_string( call.line );
+            const std::string repair = identityRepairArgument( call );
+
+            BOOST_CHECK_MESSAGE( !repair.empty(), where + " calls AnnotateSymbols with arguments the review does not "
+                                                          "know: " + call.arguments );
+
+            if( auto it = reporting.find( key ); it != reporting.end() )
+            {
+                ++it->second;
+                continue;
+            }
+
+            BOOST_CHECK_MESSAGE( repair == "false", where + " asks AnnotateSymbols to repair identities (" + repair
+                                                            + ") without reporting the replaced count as a change "
+                                                              "outside its commit." );
+        }
+    }
+
+    BOOST_CHECK_GT( calls, 0u );
+
+    for( const auto& [key, count] : reporting )
+        BOOST_CHECK_MESSAGE( count == 1, key + " calls AnnotateSymbols " + std::to_string( count ) + " time(s); the "
+                                                                                                     "review covers 1." );
+
+    // Recall and precision of the argument reading: comments are not arguments, a cast or a
+    // nested call keeps its own commas, a repairing call is read as such, and a call with
+    // another argument list is not read at all.
+    const std::string probe = R"src(
+void TOOL::Placed()
+{
+    m_frame->AnnotateSymbols( &commit, ANNOTATE_SELECTION, (ANNOTATE_ORDER_T) settings.m_AnnotateSortOrder,
+                              (ANNOTATE_ALGO_T) settings.m_AnnotateMethod, true /* recursive */,
+                              settings.m_AnnotateStartNum, true /* reset */, false,
+                              false /* repair, true */, reporter, SYMBOL_FILTER_NON_POWER );
+}
+
+void TOOL::Repairing()
+{
+    m_frame->AnnotateSymbols( &commit, ANNOTATE_ALL, order( a, b ), algo, false, 0, false, false,
+                              // false
+                              true, reporter, SYMBOL_FILTER_ALL );
+}
+
+void TOOL::Shortened()
+{
+    AnnotateSymbols( &commit, 1 );
+}
+)src";
+    const SOURCE_SCAN probed = scanSource( probe, { "AnnotateSymbols" } );
+
+    BOOST_REQUIRE_EQUAL( probed.calls.size(), 3u );
+    BOOST_CHECK_EQUAL( identityRepairArgument( probed.calls[0] ), "false" );
+    BOOST_CHECK_EQUAL( identityRepairArgument( probed.calls[1] ), "true" );
+    BOOST_CHECK_EQUAL( identityRepairArgument( probed.calls[2] ), "" );
+}
+
+
 BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
 {
     ORACLE_FIXTURE oracle;
@@ -3820,11 +3933,11 @@ BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
 
     // The reference inventory a commit kept before annotating is compared as well: designators
     // handed out since then are saved with the project settings, so they are a change even when
-    // every staged symbol compares unchanged (Annotate with "Reset existing annotations" giving
-    // symbols back designators an explicit inventory clear removed).  The rendered journey
-    // reaches the unchanged side on every Annotate.  The changed side needs that reset option,
-    // which has no keyboard mnemonic, after clearing the inventory through the API, so it is
-    // checked here, on the comparison itself.
+    // every staged symbol compares unchanged (Annotate with "Reset existing annotations" giving a
+    // symbol back a designator taken out of the inventory).  The rendered journey reaches both
+    // sides through Annotate (an annotated schematic, and that reset); this checks the
+    // comparison's own rules, which the journey cannot tell apart: only the first keep counts,
+    // and abandoning the commit drops the kept inventory.
     {
         std::shared_ptr<REFDES_TRACKER>& live = doc.Settings().m_refDesTracker;
 

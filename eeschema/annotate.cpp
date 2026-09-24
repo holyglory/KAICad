@@ -407,6 +407,10 @@ void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnn
         }
     }
 
+    // Annotation hands out designators, which the project's reference inventory records.  The
+    // caller's commit keeps the inventory from before, so a placement that is then cancelled
+    // returns them.
+    aCommit->KeepReferenceInventory();
     references.SetRefDesTracker( Schematic().Settings().m_refDesTracker );
 
     // Break full symbol reference into name (prefix) and number:
@@ -500,9 +504,10 @@ void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnn
 
     SyncView();
     GetCanvas()->Refresh();
-    OnModify();
 
-    // Must go after OnModify() so the connectivity graph has been updated
+    // Every annotation is staged in the caller's commit, whose push marks the document
+    // modified.  A placement that is cancelled instead reverts it and must leave the document
+    // as it was, so annotating alone never marks it modified.
     UpdateNetHighlightStatus();
 }
 

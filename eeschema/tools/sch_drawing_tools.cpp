@@ -59,6 +59,7 @@
 #include <sch_bitmap.h>
 #include <schematic.h>
 #include <sch_commit.h>
+#include <refdes_tracker.h>
 #include <api/api_sch_state_groups.h>
 #include <scoped_set_reset.h>
 #include <libraries/legacy_symbol_library.h>
@@ -211,6 +212,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 m_frame->GetCanvas()->SetCurrentCursor( symbol ? KICURSOR::MOVING : KICURSOR::COMPONENT );
             };
 
+    // Annotating a symbol before it is placed hands out a designator, which the project's
+    // reference inventory (saved with the project settings) records.  A symbol that is dropped
+    // instead of placed returns it: the inventory from before its annotation is kept until then.
+    std::unique_ptr<REFDES_TRACKER> inventoryBeforeCarried;
+    bool                            carriedAnnotated = false;
+
     auto cleanup =
             [&]()
             {
@@ -218,6 +225,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 m_view->ClearPreview();
                 delete symbol;
                 symbol = nullptr;
+
+                if( carriedAnnotated )
+                {
+                    SCH_COMMIT::RestoreReferenceInventory( m_frame->Schematic(), inventoryBeforeCarried.get() );
+                    inventoryBeforeCarried.reset();
+                    carriedAnnotated = false;
+                }
 
                 existingRefs.Clear();
                 hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_ALL );
@@ -228,6 +242,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             [&]()
             {
                 EESCHEMA_SETTINGS* cfg = m_frame->eeconfig();
+
+                if( !carriedAnnotated )
+                {
+                    inventoryBeforeCarried = SCH_COMMIT::CopyReferenceInventory( m_frame->Schematic() );
+                    carriedAnnotated = true;
+                }
 
                 // Then we need to annotate all instances by sheet
                 for( SCH_SHEET_PATH& instance : newInstances )
@@ -486,6 +506,10 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 lwbTool->AddJunctionsIfNeeded( &commit, &m_selectionTool->GetSelection() );
 
                 commit.Push( _( "Place Symbol" ) );
+
+                // The placed symbol keeps its designator.
+                inventoryBeforeCarried.reset();
+                carriedAnnotated = false;
 
                 // A preselected single-unit symbol exits here rather than re-opening the
                 // chooser.  Multi-unit placement must fall through to the unit continuation
@@ -853,12 +877,15 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 for( EDA_ITEM* item : screen->Items() )
                     item->SetFlags( SKIP_STRUCT );
 
-                // Loading the file changes more than the placed items: it adds cached library
-                // definitions and gives duplicated identities, possibly of items placed
-                // earlier on any sheet, new UUIDs.  Reverting the placement below removes only
-                // the placed items, so the whole saved state is compared around the import.  A
-                // kept placement is recorded by its commit; a cancelled one is recorded only if
-                // it still left a saved change.
+                // Loading the file changes more than the placed items: when the file repeats an
+                // identity the design already uses, whichever duplicate comes later in sheet
+                // order gets a new UUID, and on a sheet below this one that is the existing
+                // item.  Reverting the placement below removes the placed items (and cached
+                // library definitions only they used) and returns the designators annotating
+                // them handed out, but not such a renumbering, which can be on any sheet, so the
+                // whole saved state is compared around the import.  A kept
+                // placement is recorded by its commit; a cancelled one is recorded only if it
+                // still left a saved change.
                 SCH_TRACKED_CHANGE change( m_frame->Schematic(), placingDesignBlock
                                                                  ? "Add Design Block"
                                                                  : "Import Schematic Sheet Content" );
@@ -866,7 +893,8 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 if( !m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath, sheetFileName, true,
                                                  placingDesignBlock ) )
                 {
-                    // A refused file can still have been read partly; record what it left.
+                    // A refused file is refused before anything is appended; completing here
+                    // records a change only if loading it still left one.
                     if( change.Complete() )
                         m_frame->OnModify();
 

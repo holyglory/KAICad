@@ -2793,6 +2793,10 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
     // SCH_SEXP_PLUGIN added the items to the paste screen, but not to the view or anything
     // else.  Pull them back out to start with.
     SCH_COMMIT             commit( m_toolMgr );
+
+    // Annotating the pasted symbols below hands out designators, which the project's reference
+    // inventory records.  A paste that is cancelled places nothing and returns them.
+    commit.KeepReferenceInventory();
     EDA_ITEMS              loadedItems;
     std::vector<SCH_ITEM*> sortedLoadedItems;
     bool                   sheetsPasted = false;
@@ -3244,11 +3248,8 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
     // schematic file.
     prunePastedSymbolInstances();
 
-    SCH_SHEET_LIST sheets = m_frame->Schematic().Hierarchy();
-    SCH_SCREENS    allScreens( m_frame->Schematic().Root() );
-
-    allScreens.PruneOrphanedSymbolInstances( m_frame->Prj().GetProjectName(), sheets );
-    allScreens.PruneOrphanedSheetInstances( m_frame->Prj().GetProjectName(), sheets );
+    // Orphaned instance paths on every sheet are pruned when the paste is placed (below): pruning
+    // them here, outside the commit, would change saved sheets even when the paste is cancelled.
 
     // Now clear the previous selection, select the pasted items, and fire up the "move" tool.
     m_toolMgr->RunAction( ACTIONS::selectionClear );
@@ -3404,6 +3405,14 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
         if( m_toolMgr->RunSynchronousAction( SCH_ACTIONS::move, &commit ) )
         {
+            // Keep the pasted instance paths, and those already on every sheet, from accumulating
+            // in the saved files; part of this placement's revision.
+            SCH_SHEET_LIST sheets = m_frame->Schematic().Hierarchy();
+            SCH_SCREENS    allScreens( m_frame->Schematic().Root() );
+
+            allScreens.PruneOrphanedSymbolInstances( m_frame->Prj().GetProjectName(), sheets );
+            allScreens.PruneOrphanedSheetInstances( m_frame->Prj().GetProjectName(), sheets );
+
             // Pushing the commit will update the connectivity.
             commit.Push( _( "Paste" ) );
 

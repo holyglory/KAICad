@@ -92,6 +92,20 @@ public:
      * freed.  For a commit whose items were freed with a replaced document.
      */
     void Abandon();
+
+    /**
+     * Keep the project's reference inventory (the designators annotation has handed out,
+     * saved with the project settings) as it is now, before annotating items this commit adds
+     * or changes.  Reverting the commit returns the designators handed out since; pushing it
+     * keeps them handed out.  Only the first call keeps a copy.
+     */
+    void KeepReferenceInventory();
+
+    /// A copy of @a aSchematic's reference inventory, or null when it has none.
+    static std::unique_ptr<REFDES_TRACKER> CopyReferenceInventory( SCHEMATIC& aSchematic );
+
+    /// Return @a aSchematic's reference inventory to @a aKept (none: empty).
+    static void RestoreReferenceInventory( SCHEMATIC& aSchematic, const REFDES_TRACKER* aKept );
     void SetAutomationOrigin( const std::string& aOriginId, const std::string& aOperationId )
     {
         m_automationBatch = true;
@@ -182,4 +196,6 @@ private:
     bool m_libraryCacheChanged = false;
     bool m_connectivitySettingsChanged = false;
     bool m_netSettingsChanged = false;
+    bool m_referenceInventoryKept = false;               ///< KeepReferenceInventory() was called.
+    std::unique_ptr<REFDES_TRACKER> m_referenceInventory; ///< The kept inventory, if there was one.
 };

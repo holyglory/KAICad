@@ -109,7 +109,8 @@ void SCH_STATE_GROUPS::add( const std::string& aName, const NATIVE_STATE_DIGEST&
 
 
 SCH_STATE_GROUPS SCH_STATE_GROUPS::CaptureScreens( SCHEMATIC& aSchematic,
-                                                   const std::vector<const SCH_SCREEN*>& aScreens )
+                                                   const std::vector<const SCH_SCREEN*>& aScreens,
+                                                   bool aWithProjectSettings )
 {
     if( !aSchematic.IsValid() )
         throw std::runtime_error( "The schematic is not loaded" );
@@ -134,16 +135,15 @@ SCH_STATE_GROUPS SCH_STATE_GROUPS::CaptureScreens( SCHEMATIC& aSchematic,
         result.m_sheets.push_back( sheet );
     }
 
-    if( aScreens.empty() )
+    if( aScreens.empty() || aWithProjectSettings )
     {
         NATIVE_STATE_DIGEST settings;
         settings.Append( persistedProjectSettings( aSchematic ).dump() );
         result.add( "project-settings", settings );
     }
-    else if( result.m_sheets.size() != aScreens.size() )
-    {
+
+    if( !aScreens.empty() && result.m_sheets.size() != aScreens.size() )
         throw std::runtime_error( "A tracked screen is not part of the schematic" );
-    }
 
     wxLogTrace( traceSchTracking, wxS( "Captured %zu persisted group(s), %llu bytes, in %lld us" ),
                 result.m_groups.size(), static_cast<unsigned long long>( result.m_bytes ),
@@ -307,11 +307,21 @@ SCH_TRACKED_CHANGE::~SCH_TRACKED_CHANGE()
 }
 
 
+void SCH_TRACKED_CHANGE::ChangedOutsideCommit()
+{
+    if( !m_commit )
+        throw std::logic_error( "Only a staged tracked change counts a change outside its commit" );
+
+    m_changedOutsideCommit = true;
+}
+
+
 std::optional<SCH_STATE_GROUPS> SCH_TRACKED_CHANGE::capture() const
 {
     try
     {
-        return SCH_STATE_GROUPS::CaptureScreens( m_schematic, m_screens );
+        // The screen-restricted form compares the project settings as well.
+        return SCH_STATE_GROUPS::CaptureScreens( m_schematic, m_screens, true );
     }
     catch( const std::exception& error )
     {
@@ -342,9 +352,13 @@ bool SCH_TRACKED_CHANGE::changedSinceStart()
     if( recordedSinceStart() )
         return true;
 
-    // Staged: compare only what the commit staged with the copies it saved.
+    // Staged: compare only what the commit staged with the copies it saved, unless the owner
+    // already reported a change it made outside the commit.
     if( m_commit )
     {
+        if( m_changedOutsideCommit )
+            return true;
+
         try
         {
             return m_commit->PersistsChange( m_schematic );

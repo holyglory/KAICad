@@ -34,6 +34,8 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <sch_embedded_files_undo.h>
 #include <sch_page_settings_undo.h>
+#include <refdes_tracker.h>
+#include <schematic_settings.h>
 #include <api/api_sch_state_groups.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <connection_graph.h>
@@ -87,6 +89,18 @@ bool SCH_COMMIT::PersistsChange( SCHEMATIC& aSchematic ) const
         return true;
     }
 
+    // Designators handed out since the reference inventory was kept are saved with the project.
+    if( m_referenceInventoryKept )
+    {
+        const std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+        const std::vector<std::string> now = live ? live->GetAllocatedReferences() : std::vector<std::string>();
+        const std::vector<std::string> kept =
+                m_referenceInventory ? m_referenceInventory->GetAllocatedReferences() : std::vector<std::string>();
+
+        if( now != kept )
+            return true;
+    }
+
     for( const COMMIT_LINE& entry : m_entries )
     {
         if( ( entry.m_type & CHT_TYPE ) != CHT_MODIFY || !entry.m_copy || !entry.m_item->IsSCH_ITEM() )
@@ -121,6 +135,51 @@ void SCH_COMMIT::Abandon()
     m_libraryCacheChanged = false;
     m_connectivitySettingsChanged = false;
     m_netSettingsChanged = false;
+    m_referenceInventoryKept = false;
+    m_referenceInventory.reset();
+}
+
+
+std::unique_ptr<REFDES_TRACKER> SCH_COMMIT::CopyReferenceInventory( SCHEMATIC& aSchematic )
+{
+    const std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+
+    if( !live )
+        return nullptr;
+
+    auto copy = std::make_unique<REFDES_TRACKER>();
+    copy->CopyAllocatedFrom( *live );
+    return copy;
+}
+
+
+void SCH_COMMIT::RestoreReferenceInventory( SCHEMATIC& aSchematic, const REFDES_TRACKER* aKept )
+{
+    std::shared_ptr<REFDES_TRACKER>& live = aSchematic.Settings().m_refDesTracker;
+
+    if( aKept )
+    {
+        if( !live )
+            live = std::make_shared<REFDES_TRACKER>();
+
+        live->CopyAllocatedFrom( *aKept );
+    }
+    else if( live )
+    {
+        live->Clear();
+    }
+}
+
+
+void SCH_COMMIT::KeepReferenceInventory()
+{
+    SCH_EDIT_FRAME* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+
+    if( !frame || m_isLibEditor || m_referenceInventoryKept )
+        return;
+
+    m_referenceInventoryKept = true;
+    m_referenceInventory = CopyReferenceInventory( frame->Schematic() );
 }
 
 
@@ -1517,6 +1576,10 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
 
 void SCH_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 {
+    // Designators handed out for pushed items stay handed out, as they always have.
+    m_referenceInventoryKept = false;
+    m_referenceInventory.reset();
+
     if( Empty() )
     {
         m_libraryCacheScopes.clear();
@@ -1627,6 +1690,17 @@ void SCH_COMMIT::Revert()
     SCH_EDIT_FRAME*     frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
     SCH_SELECTION_TOOL* selTool = m_toolMgr->GetTool<SCH_SELECTION_TOOL>();
     SCH_SHEET_LIST      sheets;
+
+    // Nothing this commit annotated is placed any more, so the designators handed out since
+    // the reference inventory was kept are returned, whether or not anything else was staged.
+    if( m_referenceInventoryKept )
+    {
+        if( frame )
+            RestoreReferenceInventory( frame->Schematic(), m_referenceInventory.get() );
+
+        m_referenceInventoryKept = false;
+        m_referenceInventory.reset();
+    }
 
     if( Empty() && m_libraryCacheUndo.empty() )
         return;

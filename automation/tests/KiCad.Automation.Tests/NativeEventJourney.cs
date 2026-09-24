@@ -27,21 +27,10 @@ public sealed partial class NativeSessionTests
         Assert.AreNotEqual(session.InstanceId, other.InstanceId, "Each editor must identify its own instance.");
         if (string.CompareOrdinal(session.InstanceId, other.InstanceId) < 0)
         {
+            await VerifyDirectOwnerTracking(client, document, processId, display, evidence, instanceId, token);
             // What tracking compares on the largest demo design is measured by the native test
-            // binary alongside the rendered steps; a failed step stops the measurement too.
-            using var costStop = CancellationTokenSource.CreateLinkedTokenSource(token);
-            var largeDesignCost = MeasureTrackingCostOnLargestDemo(evidence, instanceId, costStop.Token);
-            try
-            {
-                await VerifyDirectOwnerTracking(client, document, processId, display, evidence, instanceId, token);
-            }
-            catch
-            {
-                costStop.Cancel();
-                try { await largeDesignCost; } catch (Exception) { }
-                throw;
-            }
-            await largeDesignCost;
+            // binary after the rendered steps, never alongside them, so neither slows the other.
+            await MeasureTrackingCostOnLargestDemo(evidence, instanceId, token);
         }
     }
 
@@ -177,13 +166,14 @@ public sealed partial class NativeSessionTests
     /// <summary>
     /// Native editor actions that change the saved design outside an ordinary item commit must
     /// make older AI requests stale, and cancelled or unchanged ones must not (p0bd2c0d9e475f181).
-    /// Drives the rendered Symbol Properties dialog with its fields grid, the Sheet Properties
-    /// dialog, the hierarchy pane's top-level sheet actions, Page Settings, Schematic Setup,
-    /// Annotate Schematic and Place > Import Sheet, and compares the exact persisted state digest, journal revision and
-    /// modified flag after each action.  The change-tracking oracle requires every proven owner's
-    /// OneChange and Unchanged steps here.  It also records what tracking costs: a lifecycle read
-    /// on this fixture, and the comparisons on the largest demo design, measured by the native
-    /// test binary and kept with this evidence.
+    /// Drives the rendered Symbol Properties dialog with its fields grid (also on a symbol that a
+    /// duplication or a move still carries), the Sheet Properties dialog, the hierarchy pane's
+    /// top-level sheet actions, Page Settings, Schematic Setup, Annotate Schematic and Place >
+    /// Import Sheet, and compares the exact persisted state digest, journal revision and modified
+    /// flag after each action.  The change-tracking oracle requires every proven owner's OneChange
+    /// and Unchanged steps here, as statements this method always runs.  It also records what a
+    /// lifecycle read costs on this fixture; the comparisons on the largest demo design are
+    /// measured afterwards by the native test binary.
     /// </summary>
     private static async Task VerifyDirectOwnerTracking(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, CancellationToken token)
@@ -233,15 +223,23 @@ public sealed partial class NativeSessionTests
             {
                 Document = document.Clone(), DocumentEpoch = since.Revision.Epoch, AfterSequence = since.Revision.Sequence
             }, t));
-        async Task<DocumentLifecycleState> Advanced(DocumentLifecycleState since)
+        async Task<DocumentLifecycleState> Advanced(DocumentLifecycleState since, string step = "revision")
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
             limit.CancelAfter(TimeSpan.FromSeconds(5));
-            while (true)
+            try
             {
-                var current = await State();
-                if (current.Revision.Sequence != since.Revision.Sequence) return current;
-                await Task.Delay(50, limit.Token);
+                while (true)
+                {
+                    var current = await State();
+                    if (current.Revision.Sequence != since.Revision.Sequence) return current;
+                    await Task.Delay(50, limit.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await Failed(step, $"No revision followed revision {since.Revision.Sequence} within 5 s during {step}.");
+                throw;
             }
         }
         async Task Unchanged(DocumentLifecycleState baseline, string step)
@@ -296,8 +294,11 @@ public sealed partial class NativeSessionTests
         samples.Sort();
         string cost = $"Lifecycle read over {clean.NativeFiles.Count - 1} screen file(s) and the project settings "
             + $"(one whole-state capture plus the request round trip, Debug build): median {samples[samples.Count / 2]:F1} ms, "
-            + $"min {samples[0]:F1} ms, max {samples[^1]:F1} ms. A whole-state tracker captures twice per action; "
-            + "Symbol Properties, undoable Sheet Properties and the simulator tuner compare only their staged items.";
+            + $"min {samples[0]:F1} ms, max {samples[^1]:F1} ms. A whole-state tracker (Page Settings, Import Sheet "
+            + "and design block placement, and the other whole-state owners) captures twice per action, a cancelled "
+            + "one included; Schematic Setup and the simulation settings capture the project settings and the first "
+            + "top-level sheet twice; Symbol Properties, undoable Sheet Properties and the simulator tuner compare "
+            + "only their staged items.";
         Console.WriteLine("Native tracking cost: " + cost);
         await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-capture-cost.txt"), cost + Environment.NewLine, token);
 
@@ -368,6 +369,75 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(edited.NativeContentDirty);
         await Undo(edited, clean, "Symbol Properties");
         Assert.AreEqual(reference, await Reference());
+
+        // Symbol Properties on a symbol that a duplication or a move still carries, with automatic
+        // field placement on: the carrying tool owns the edit, so cancelling it must leave nothing,
+        // not even an undo entry.  Placing from the symbol chooser needs a symbol library the fixture
+        // does not have; a duplicated symbol is placed by the same kind of carrying tool.  The probe's
+        // fields are first marked as automatically placed but left away from their automatic places,
+        // so placing them after the dialog really moves them.
+        var carried = (await Settled(t => client.InvokeAsync<GetItemsById, GetItemsResponse>(symbolQuery, t)))
+            .Items.Single().Unpack<SchematicSymbolInstance>();
+        carried.FieldsAutoplaced = true;
+        carried.ReferenceField.Text.Position.XNm += 5080000;
+        carried.ValueField.Text.Position.XNm += 5080000;
+        var autoplaced = new ApplySchematicItemBatch
+        {
+            Document = document.Clone(), Description = "Mark the probe's fields as automatically placed"
+        };
+        autoplaced.Operations.Add(new SchematicItemOperation { Update = Any.Pack(carried) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(autoplaced, token);
+        var placing = await Saved();
+        Assert.AreNotEqual(clean.StateSha256, placing.StateSha256);
+        async Task<SchematicScreenData> ScreenData() =>
+            (await Settled(t => client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                new() { Document = document.Clone() }, t))).Data;
+        var placingData = await ScreenData();
+        async Task SameScreen(string step)
+        {
+            // The sheet's items, cached definitions and settings, the reference inventory of handed
+            // out designators included.  A difference is kept as evidence before it fails.
+            var after = await ScreenData();
+            if (!placingData.Equals(after))
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-expected.json"),
+                    SchematicJson.Formatter.Format(placingData), token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-actual.json"),
+                    SchematicJson.Formatter.Format(after), token);
+            }
+            CollectionAssert.AreEqual(placingData.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>(),
+                after.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>(),
+                $"{step} must return every designator it handed out.");
+            Assert.AreEqual(placingData, after, $"{step} must leave the sheet exactly as it was (both states are kept as evidence).");
+        }
+        async Task EditWhileCarried(string carry, bool control, string step)
+        {
+            await Select(symbol.Id);
+            Key(carry, "Schematic Editor", control);
+            // The carried symbol now follows the pointer.
+            await Task.Delay(500, token);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-carried.png"), token);
+            Key("e", "Schematic Editor");
+            await Window(symbolDialog, true, step);
+            // The dialog opens its first value cell editor through queued events.
+            await Task.Delay(500, token);
+            await AppendToFirstValue(symbolDialog, step);
+            // Hovering gives the canvas keyboard focus without the click that would place the symbol.
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", controlKey: false, focusCanvas: true);
+            NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: false);
+            await Task.Delay(1000, token);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-cancelled.png"), token);
+        }
+        await EditWhileCarried("d", true, "duplicate-properties");
+        await SameScreen("duplicate-properties");
+        await Unchanged(placing, "Cancelling a duplicated symbol after editing its properties");
+        await EditWhileCarried("m", false, "move-properties");
+        await SameScreen("move-properties");
+        await Unchanged(placing, "Cancelling a symbol move after editing its properties");
+        Assert.AreEqual(reference, await Reference());
+        // Neither cancelled edit left an undo entry: the next undo reverts the field marking above
+        // and restores the exact state before it.
+        await Undo(placing, clean, "the field marking");
 
         // Sheet Properties: its commit is pushed or reverted by the tracked owner.
         var cleanSheets = await Saved();
@@ -605,21 +675,46 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(cleanAnnotate.StateSha256, reannotated.StateSha256,
             "Choosing the original order again must return the exact saved state.");
 
-        // Place > Import Sheet, twice from the same file.  Loading it outside the placement commit
-        // can add cached definitions and renumber duplicated identities, including the first
-        // placement's; cancelling the second placement must leave no change, or record exactly
-        // the change it left.
-        const string chooser = "Choose Schematic";
-        string importFile = Path.Combine(Path.GetTempPath(), $"kicad-import-{Guid.NewGuid():N}"[..21] + ".kicad_sch");
-        await File.WriteAllTextAsync(importFile,
-            "(kicad_sch (version 20250114) (generator \"eeschema\") (uuid 7e57f1c5-0000-4000-8000-0c2c00000001) (paper \"A4\")"
-            + " (lib_symbols)"
-            + " (wire (pts (xy 20.32 20.32) (xy 40.64 20.32)) (stroke (width 0) (type default)) (uuid 7e57f1c5-0000-4000-8000-0c2c00000002))"
-            + " (text \"Tracked import\" (at 20.32 25.4 0) (effects (font (size 1.27 1.27))) (uuid 7e57f1c5-0000-4000-8000-0c2c00000003))"
+        // Place > Import Sheet.  The first placement brings a child sheet with it.  Cancelling a later
+        // placement must leave nothing when its file repeats no identity the design uses, and must
+        // record exactly the change it leaves when it does: loading gives whichever duplicate comes
+        // later in sheet order a new identity, and for an item on a sheet below the current one that
+        // is the existing item, which keeps its new identity after the cancel.  Removing the placed
+        // items also removes cached library definitions only they used, so those never stay.
+        const string chooser = "Choose Schematic", childNoteText = "Tracked child note";
+        string importDirectory = Path.Combine(Path.GetTempPath(), "kicad-import-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(importDirectory);
+        string childFile = Path.Combine(importDirectory, "child.kicad_sch");
+        string placedFile = Path.Combine(importDirectory, "placed.kicad_sch");
+        string freshFile = Path.Combine(importDirectory, "fresh.kicad_sch");
+        string childNote = Guid.NewGuid().ToString("D"), placedRoot = Guid.NewGuid().ToString("D");
+        string Opening(string id) =>
+            $"(kicad_sch (version 20250114) (generator \"eeschema\") (uuid {id}) (paper \"A4\") (lib_symbols)";
+        string Wiring() =>
+            $" (wire (pts (xy 20.32 20.32) (xy 40.64 20.32)) (stroke (width 0) (type default)) (uuid {Guid.NewGuid():D}))"
+            + $" (text \"Tracked import\" (at 20.32 25.4 0) (effects (font (size 1.27 1.27))) (uuid {Guid.NewGuid():D}))";
+        async Task<(int Original, int Notes)> ChildNotes()
+        {
+            var electrical = await Settled(t => client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(
+                new() { Document = document.Clone() }, t));
+            var notes = electrical.Hierarchy.Data.Instances.SelectMany(s => s.Items)
+                .Where(i => i.Is(SchematicText.Descriptor)).Select(i => i.Unpack<SchematicText>())
+                .Where(t => t.Text.Text_ == childNoteText).ToList();
+            return (notes.Count(t => t.Id.Value == childNote), notes.Count);
+        }
+        await File.WriteAllTextAsync(childFile, Opening(Guid.NewGuid().ToString("D"))
+            + $" (text \"{childNoteText}\" (at 20.32 30.48 0) (effects (font (size 1.27 1.27))) (uuid {childNote})))", token);
+        await File.WriteAllTextAsync(placedFile, Opening(placedRoot) + Wiring()
+            + $" (sheet (at 50.8 20.32) (size 20.32 10.16) (stroke (width 0) (type default)) (fill (color 0 0 0 0)) (uuid {Guid.NewGuid():D})"
+            + " (property \"Sheetname\" \"Tracked import child\" (at 50.8 19.5 0) (effects (font (size 1.27 1.27)) (justify left bottom)))"
+            + " (property \"Sheetfile\" \"child.kicad_sch\" (at 50.8 31.1 0) (effects (font (size 1.27 1.27)) (justify left top)))"
+            + $" (instances (project \"import\" (path \"/{placedRoot}\" (page \"2\")))))"
+            + " (sheet_instances (path \"/\" (page \"1\"))))", token);
+        await File.WriteAllTextAsync(freshFile, Opening(Guid.NewGuid().ToString("D")) + Wiring()
             + " (sheet_instances (path \"/\" (page \"1\"))))", token);
         try
         {
-            async Task Import(string step)
+            async Task Import(string step, string file)
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: true);
                 // Place menu, last item, then up to Import Sheet... past the eleven drawing items.
@@ -631,7 +726,7 @@ public sealed partial class NativeSessionTests
                 await Window(chooser, true, step);
                 await Task.Delay(500, token);
                 // A leading slash opens the chooser's location entry with the path typed so far.
-                foreach (char c in importFile) Key(c == ' ' ? "space" : c.ToString(), chooser);
+                foreach (char c in file) Key(c == ' ' ? "space" : c.ToString(), chooser);
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-chooser.png"), token);
                 Key("Return", chooser);
                 await Window(chooser, false, step);
@@ -639,9 +734,16 @@ public sealed partial class NativeSessionTests
                 await Task.Delay(1000, token);
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-moving.png"), token);
             }
+            async Task CancelImport()
+            {
+                // Hovering gives the canvas keyboard focus without the click that would place the items.
+                NativeKeyboard.SchematicShortcut(display, processId, "motion", controlKey: false, focusCanvas: true);
+                NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: false);
+                await Task.Delay(1000, token);
+            }
 
             var beforeImport = await Saved();
-            await Import("import-place");
+            await Import("import-place", placedFile);
             // Place it away from the margin point used to give the canvas focus: a later focus
             // click on the placed wire's open end would start a new wire.
             NativeKeyboard.SchematicShortcut(display, processId, "click", controlKey: false, focusCanvas: true,
@@ -650,34 +752,46 @@ public sealed partial class NativeSessionTests
             await OneChange(beforeImport, "Import Schematic Sheet Content", SchematicChange.Types.Kind.Commit);
             Assert.AreNotEqual(beforeImport.StateSha256, imported.StateSha256);
             Assert.IsTrue(imported.NativeContentDirty);
+            Assert.AreEqual((1, 1), await ChildNotes(), "The placed child sheet must keep its note's identity.");
+            // A saved baseline, so the cancelled placements are checked for the modified flag too.
+            var placed = await Saved();
 
-            await Import("import-cancel");
-            // Hovering gives the canvas keyboard focus without the click that would place the items.
-            NativeKeyboard.SchematicShortcut(display, processId, "motion", controlKey: false, focusCanvas: true);
-            NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: false);
-            await Task.Delay(1000, token);
-            var afterCancel = await State();
-            string outcome;
-            if (afterCancel.Revision.Sequence == imported.Revision.Sequence)
-            {
-                await Unchanged(imported, "Cancelling a repeated sheet import");
-                outcome = "The cancelled second import left no saved change and recorded nothing.";
-            }
-            else
-            {
-                // Loading the file renumbered identities of the first placement: that change stays,
-                // so it must be exactly one revision of the same action.
-                await OneChange(imported, "Import Schematic Sheet Content", SchematicChange.Types.Kind.Commit);
-                Assert.AreNotEqual(imported.StateSha256, afterCancel.StateSha256);
-                Assert.IsTrue(afterCancel.NativeContentDirty);
-                outcome = "The cancelled second import left a saved change (renumbered identities) recorded as one revision.";
-            }
-            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-import-cancel.txt"), outcome + Environment.NewLine, token);
-            await Undo(afterCancel, beforeImport, "the sheet import");
+            // Precision: nothing in this file is already in the design.
+            await Import("import-cancel", freshFile);
+            await CancelImport();
+            await Unchanged(placed, "Cancelling a sheet import");
+
+            // Recall: the child sheet's own file repeats the identity of the note on the placed child
+            // sheet, which follows the current sheet in sheet order and so is the one renumbered.
+            await Import("import-repeat", childFile);
+            await CancelImport();
+            var repeated = await Advanced(placed, "import-repeat");
+            await OneChange(placed, "Import Schematic Sheet Content", SchematicChange.Types.Kind.Commit);
+            Assert.AreNotEqual(placed.StateSha256, repeated.StateSha256, "The renumbered note must change the saved state.");
+            Assert.IsTrue(repeated.NativeContentDirty, "A cancelled placement that left a saved change must mark the design modified.");
+            Assert.AreEqual((0, 1), await ChildNotes(),
+                "The child sheet must keep its one note, under the new identity the cancelled placement gave it.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-import-cancel.txt"),
+                "Cancelling an import whose file repeats no identity in the design left no saved change, no revision and "
+                + "no modified flag." + Environment.NewLine
+                + "Cancelling an import of the placed child sheet's own file left the child sheet's note renumbered; that "
+                + "saved change was recorded as one 'Import Schematic Sheet Content' revision and marked the design modified."
+                + Environment.NewLine, token);
+
+            // Undoing the first placement removes the child sheet with its renumbered note.  Saving then
+            // writes exactly the design saved before the import: the project settings list the saved
+            // sheets, and that list is only refreshed by a save.
+            NativeKeyboard.SchematicShortcut(display, processId, "z");
+            await Advanced(repeated);
+            await OneChange(repeated, "Undo", SchematicChange.Types.Kind.Undo);
+            Assert.AreEqual((0, 0), await ChildNotes());
+            var restored = await Saved();
+            Assert.AreEqual(beforeImport.StateSha256, restored.StateSha256,
+                "Undoing the sheet import and saving must restore the exact saved design state.");
         }
         finally
         {
-            File.Delete(importFile);
+            Directory.Delete(importDirectory, true);
         }
 
         await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, token);
@@ -686,12 +800,18 @@ public sealed partial class NativeSessionTests
 
     /// <summary>
     /// Runs the native test binary's measurement of what tracking compares on the largest demo
-    /// design (vme-wren): one whole-state capture, the largest single screen, and a staged
-    /// comparison of the symbol with the largest library definition.  Its output is kept as
-    /// evidence; the staged comparison must stay far below the whole-state capture.
+    /// design (vme-wren): one whole-state capture, the largest single screen, the project
+    /// settings with the first top-level sheet, and a staged comparison of the symbol with the
+    /// largest library definition.  It runs on its own, after the rendered steps; the host's
+    /// load around it is kept with its output as evidence, because the governed host is shared.
+    /// The staged comparison must stay far below the whole-state capture.
     /// </summary>
     private static async Task MeasureTrackingCostOnLargestDemo(string evidence, string instanceId, CancellationToken token)
     {
+        static string Load() => File.Exists("/proc/loadavg")
+            ? string.Join(' ', File.ReadAllText("/proc/loadavg").Split(' ').Take(3))
+            : "unavailable";
+        string loadBefore = Load();
         string root = FindRoot();
         string binary = Path.Combine(root, "automation", "artifacts", "native", "qa", "tests", "eeschema", "qa_symbol_graphic_identity");
         Assert.IsTrue(File.Exists(binary), "The native tracking test binary must be built first.");
@@ -722,7 +842,11 @@ public sealed partial class NativeSessionTests
                 if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(CancellationToken.None); }
             }
             string text = await output + await error;
-            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-tracking-cost-vme-wren.txt"), text, CancellationToken.None);
+            string conditions = $"Measured after the rendered journey, not alongside it, on a shared host with "
+                + $"{Environment.ProcessorCount} processors (Debug build). Load average (1, 5, 15 min) before: {loadBefore}; "
+                + $"after: {Load()}." + Environment.NewLine;
+            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-tracking-cost-vme-wren.txt"), conditions + text,
+                CancellationToken.None);
             Assert.AreEqual(0, process.ExitCode, "The large-design tracking measurement failed:\n" + text);
             double Median(string measurement)
             {
@@ -731,9 +855,12 @@ public sealed partial class NativeSessionTests
                 return double.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             }
             double whole = Median("whole_state_capture_ms"), staged = Median("staged_symbol_compare_ms");
+            double settingsAndFirst = Median("settings_and_first_sheet_capture_ms");
             Median("largest_screen_capture_ms");
-            Console.WriteLine($"Native tracking cost on vme-wren: whole-state capture {whole:F1} ms, staged symbol comparison {staged:F1} ms.");
+            Console.WriteLine($"Native tracking cost on vme-wren: whole-state capture {whole:F1} ms, project settings and "
+                + $"first sheet {settingsAndFirst:F1} ms, staged symbol comparison {staged:F1} ms.");
             Assert.IsLessThan(whole / 10, staged, "A staged comparison must stay far below a whole-state capture.");
+            Assert.IsLessThan(whole, settingsAndFirst, "The project settings and first sheet must cost less than the whole design.");
         }
         finally
         {

@@ -670,10 +670,13 @@ bool SIMULATOR_FRAME::EditAnalysis()
 
     // The dialog writes the ngspice settings, which are saved with the project, straight into
     // the live project settings: the compatibility mode even before a later check can keep
-    // the dialog open and let it be cancelled.  Compare the saved state around it, so a real
-    // change makes older automation requests stale and marks the schematic modified, and an
-    // unchanged or cancelled dialog records nothing.  The analysis itself is workbook state.
-    SCH_TRACKED_CHANGE change( m_schematicFrame->Schematic(), "Edit Simulation Settings" );
+    // the dialog open and let it be cancelled.  Compare the project settings (and the first
+    // top-level sheet) around it, so a real change makes older automation requests stale and
+    // marks the schematic modified, and an unchanged or cancelled dialog records nothing.  The
+    // analysis itself is workbook state, and no sheet is edited here.
+    SCHEMATIC&         schematic = m_schematicFrame->Schematic();
+    SCH_TRACKED_CHANGE change( schematic, "Edit Simulation Settings", { schematic.RootScreen() },
+                               SCH_TRACKED_CHANGE::Mark( schematic ) );
 
     m_circuitModel->ReadSchematicAndLibraries( NETLIST_EXPORTER_SPICE::OPTION_DEFAULT_FLAGS,
                                                s_reporter );

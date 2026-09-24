@@ -126,11 +126,16 @@ void SCH_EDIT_FRAME::ShowSchematicSetupDialog( const wxString& aInitialPage )
 
     std::map<wxString, std::vector<wxString>> oldAliases = Prj().GetProjectFile().m_BusAliases;
 
-    // The same saved state an automation client compares: every screen and the project
-    // settings as they are saved.  The dialog applies its settings in one commit; anything the
-    // refresh below changes outside it, a project save included, is part of the same action.
-    // A cancelled or unchanged Setup records nothing and leaves the document unmodified.
-    SCH_TRACKED_CHANGE change( Schematic(), "Edit Schematic Setup" );
+    // Setup edits the project settings and, through its own commit, the schematic-wide data
+    // saved with the first top-level sheet (embedded files, net chains) and library caches;
+    // a pushed commit is already a revision.  Outside the commit only the project settings
+    // change, and the refresh below reaches other sheets (connectivity clean-up) only when
+    // the bus aliases, themselves project settings, changed.  So the project settings and
+    // the first top-level sheet are compared, never the whole design, which on a large
+    // design would cost seconds before the dialog even opens.  A cancelled or unchanged
+    // Setup records nothing and leaves the document unmodified.
+    SCH_TRACKED_CHANGE change( Schematic(), "Edit Schematic Setup", { Schematic().RootScreen() },
+                               SCH_TRACKED_CHANGE::Mark( Schematic() ) );
 
     DIALOG_SCHEMATIC_SETUP dlg( this );
 

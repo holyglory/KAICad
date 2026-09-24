@@ -3005,7 +3005,16 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
             {
                 const SCH_TRACKED_CHANGE::MARK now = SCH_TRACKED_CHANGE::Mark( m_frame->Schematic() );
 
-                if( now.epoch == started.epoch && now.sequence != started.sequence )
+                if( symbol->GetEditFlags() != 0 )
+                {
+                    // A symbol still being placed, pasted or moved belongs to the tool that
+                    // carries it: that tool's commit records the placed symbol, fields included,
+                    // or discards it when the placement or move is cancelled.  A commit of its
+                    // own here would push a symbol that is not placed yet and clear the flags
+                    // the carrying tool depends on.
+                    symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                }
+                else if( now.epoch == started.epoch && now.sequence != started.sequence )
                 {
                     // The dialog recorded its edit: placing this symbol's fields is part of that
                     // revision, and its undo entry, which kept the symbol from before the dialog,
@@ -3101,13 +3110,24 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
         SCH_COMMIT commit( m_toolMgr );
         commit.Modify( sheet, m_frame->GetScreen() );
 
-        // Only the staged sheet is compared with its saved copy, never the whole design.  A
-        // file change always changes the sheet's file name field, so it is recorded as well;
-        // loading the file and clearing annotation below are part of that one revision.
+        // Only the staged sheet is compared with its saved copy, never the whole design.
         SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Sheet Properties", commit );
+
+        // A file change is applied to the sheet's screen, outside the commit, and the dialog
+        // restores the sheet's file name field when a later step fails: a renamed screen then
+        // keeps its new file name, and a relinked sheet its new screen.  Compare both too.
+        // Loading the file and clearing annotation below are part of the same revision.
+        const SCH_SCREEN* screenBefore = sheet->GetScreen();
+        const wxString    fileBefore = screenBefore ? screenBefore->GetFileName() : wxString();
 
         okPressed = m_frame->EditSheetProperties( sheet, &m_frame->GetCurrentSheet(), &isUndoable, &doClearAnnotation,
                                                   &updateHierarchyNavigator );
+
+        if( sheet->GetScreen() != screenBefore
+                || ( sheet->GetScreen() && sheet->GetScreen()->GetFileName() != fileBefore ) )
+        {
+            change.ChangedOutsideCommit();
+        }
 
         if( okPressed )
         {
@@ -3148,8 +3168,9 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
             sheet->GetScreen()->ClearAnnotation( &m_frame->GetCurrentSheet(), false );
         }
 
-        // A file change applied before a later check failed stays even when the dialog is
-        // then cancelled; it is recorded and marked like an accepted one.
+        // A file change applied before a later step failed stays even when the dialog is then
+        // cancelled (the screen keeps its new file name or the sheet its new screen); it is
+        // recorded and marked like an accepted one.
         if( change.Complete() && !okPressed )
             m_frame->OnModify();
 

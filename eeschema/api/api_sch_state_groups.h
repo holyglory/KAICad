@@ -36,12 +36,13 @@ public:
     static SCH_STATE_GROUPS Capture( SCHEMATIC& aSchematic );
 
     /**
-     * Capture only @a aScreens.  For an owner that provably changes nothing else; every
-     * such use is reviewed by the change-tracking oracle.  Throws when a group cannot be
-     * written.
+     * Capture only @a aScreens, and the project settings when @a aWithProjectSettings is set.
+     * For an owner that provably changes nothing else; every such use is reviewed by the
+     * change-tracking oracle.  Throws when a group cannot be written.
      */
     static SCH_STATE_GROUPS CaptureScreens( SCHEMATIC& aSchematic,
-                                            const std::vector<const SCH_SCREEN*>& aScreens );
+                                            const std::vector<const SCH_SCREEN*>& aScreens,
+                                            bool aWithProjectSettings = false );
 
     bool operator==( const SCH_STATE_GROUPS& aOther ) const { return m_groups == aOther.m_groups; }
     bool operator!=( const SCH_STATE_GROUPS& aOther ) const { return !( *this == aOther ); }
@@ -88,12 +89,15 @@ private:
  *
  * Three forms, each reviewed by the change-tracking oracle by its argument count:
  *  - two arguments: compares the whole persisted state (every screen and the project
- *    settings).  Only for edits made outside a commit, because each capture writes the
- *    whole design;
+ *    settings).  Only for edits that can reach any sheet outside a commit, because each
+ *    capture writes the whole design;
  *  - three arguments: an owner whose every persisted edit is staged in one SCH_COMMIT.
  *    Only the staged items are compared with the copies the commit saved, so the cost
- *    follows the edit, not the size of the design.  Declare it after the commit;
- *  - four arguments: named screens only, for an owner that provably changes nothing else.
+ *    follows the edit, not the size of the design.  Declare it after the commit.  An edit
+ *    the owner makes outside the commit is counted only when it reports it
+ *    (ChangedOutsideCommit());
+ *  - four arguments: named screens and the project settings, for an owner that provably
+ *    changes nothing else.
  */
 class SCH_TRACKED_CHANGE
 {
@@ -118,10 +122,11 @@ public:
     SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription, SCH_COMMIT& aCommit );
 
     /**
-     * Track only @a aScreens, as part of a user action that began at @a aSince.  When a
-     * commit was recorded since that mark the action is already a revision, so nothing is
-     * captured or recorded again.  Only for owners that provably change nothing but these
-     * screens; the change-tracking oracle reviews every such use.
+     * Track only @a aScreens and the project settings, as part of a user action that began
+     * at @a aSince.  When a commit was recorded since that mark the action is already a
+     * revision, so nothing is captured or recorded again.  Only for owners that provably
+     * change nothing but these screens and the project settings; the change-tracking oracle
+     * reviews every such use.
      */
     SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription,
                         std::vector<const SCH_SCREEN*> aScreens, const MARK& aSince );
@@ -130,6 +135,14 @@ public:
 
     SCH_TRACKED_CHANGE( const SCH_TRACKED_CHANGE& ) = delete;
     SCH_TRACKED_CHANGE& operator=( const SCH_TRACKED_CHANGE& ) = delete;
+
+    /**
+     * Report a persisted change the owner made outside its staged commit and detected itself,
+     * such as a sheet's screen being renamed or replaced.  Completion then counts the action
+     * as changed, and records it once, even when every staged item compares unchanged.  Only
+     * for the staged form; the other forms compare everything they may change.
+     */
+    void ChangedOutsideCommit();
 
     /**
      * Finish tracking.  Returns true when the persisted state changed, whether this call
@@ -164,5 +177,6 @@ private:
     SCH_COMMIT*                     m_commit = nullptr; ///< Staged form: the compared commit.
     MARK                            m_start;
     std::optional<SCH_STATE_GROUPS> m_before;
+    bool                            m_changedOutsideCommit = false;
     bool                            m_complete = false;
 };

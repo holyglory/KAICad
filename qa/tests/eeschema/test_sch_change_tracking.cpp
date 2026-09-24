@@ -17,15 +17,18 @@
 //    not count; a braces-less if at the same brace level is not distinguished);
 //  - a call to a helper that marks the document modified is not itself routed, or stages into
 //    a commit that is not pushed after it;
-//  - a SCH_TRACKED_CHANGE is declared without review, is restricted to screens without a
-//    reason, or compares a commit that is not declared before it (a whole-state tracker
-//    compares the same state as the lifecycle digest; a staged tracker compares only the
-//    items its commit staged);
+//  - a SCH_TRACKED_CHANGE is declared without review, is staged or restricted to screens
+//    without a reason (or without the code its reason depends on), or compares a commit that
+//    is not declared before it (a whole-state tracker compares the same state as the lifecycle
+//    digest; a staged tracker compares only the items its commit staged and what its owner
+//    reports; a restricted tracker compares named screens and the project settings);
 //  - a schematic writer gains or loses a pinned persisted field, or a pinned writer group has
 //    no owner (the commit machinery or a reviewed direct owner);
-//  - a proven owner loses its rendered journey steps (a real OneChange and Unchanged call in
-//    the journey method, not a comment or text), or complete tracking is claimed anywhere in
-//    the scanned sources while owners are pending or routed but not yet proven end to end.
+//  - a proven owner loses its rendered journey steps (a real OneChange and Unchanged call that
+//    the journey method always runs: not a comment or text, and not inside a branch, loop,
+//    catch, local function, lambda or conditional expression, or after an early return), or
+//    complete tracking is claimed anywhere in the scanned sources while owners are pending or
+//    routed but not yet proven end to end.
 //
 // Owners that change no persisted schematic state are an explicit, reviewed allow-list.
 //
@@ -46,6 +49,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,13 +57,17 @@
 #if defined( EESCHEMA )
 #include <api/api_sch_state_groups.h>
 #include <lib_symbol.h>
+#include <project.h>
+#include <project/project_file.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
+#include <refdes_tracker.h>
 #include <sch_commit.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_symbol.h>
 #include <sch_text.h>
 #include <schematic.h>
+#include <schematic_settings.h>
 #include <schematic_utils/schematic_file_util.h>
 #include <settings/settings_manager.h>
 #include <tool/tool_manager.h>
@@ -1448,15 +1456,24 @@ inline std::pair<size_t, size_t> csharpMethodBody( const std::string& aCode, con
 }
 
 
+/// An awaited call with a plain string literal argument: the literal and the offset of its
+/// "await" keyword.
+struct AWAITED_CALL
+{
+    std::string literal;
+    size_t      await = 0;
+};
+
+
 /// The string literal passed as argument @a aIndex of every awaited call of @a aName in
 /// [aBegin, aEnd) of blanked C# @a aCode: "await Name(a, "text", ...)".  The literal is read
 /// from @a aRaw at the same offsets; an argument that is not a plain literal yields nothing.
-inline std::vector<std::string> awaitedLiteralArguments( const std::string& aRaw, const std::string& aCode,
-                                                         const std::string& aName, size_t aIndex,
-                                                         size_t aBegin, size_t aEnd )
+inline std::vector<AWAITED_CALL> awaitedLiteralCalls( const std::string& aRaw, const std::string& aCode,
+                                                      const std::string& aName, size_t aIndex,
+                                                      size_t aBegin, size_t aEnd )
 {
-    std::vector<std::string> found;
-    const size_t             end = std::min( aEnd, aCode.size() );
+    std::vector<AWAITED_CALL> found;
+    const size_t              end = std::min( aEnd, aCode.size() );
 
     for( size_t pos = aCode.find( aName, aBegin ); pos != std::string::npos && pos < end;
          pos = aCode.find( aName, pos + 1 ) )
@@ -1502,7 +1519,7 @@ inline std::vector<std::string> awaitedLiteralArguments( const std::string& aRaw
                     if( first != std::string::npos && last > first && text[first] == '"' && text[last] == '"'
                             && text.find( '"', first + 1 ) == last )
                     {
-                        found.push_back( text.substr( first + 1, last - first - 1 ) );
+                        found.push_back( { text.substr( first + 1, last - first - 1 ), before - 5 } );
                     }
 
                     break;
@@ -1518,6 +1535,227 @@ inline std::vector<std::string> awaitedLiteralArguments( const std::string& aRaw
     }
 
     return found;
+}
+
+
+/// How the statements of a brace block inside a C# method body run.
+enum class CS_BLOCK
+{
+    ALWAYS,        ///< Every time the enclosing statements do: a bare block, a try without a catch,
+                   ///< finally, using or lock.
+    CONDITIONAL,   ///< Perhaps not, or more than once: if, else, a loop, switch, catch, or a try
+                   ///< whose catch could swallow a failed assertion.
+    NOT_A_STATEMENT_OF_THE_METHOD   ///< A local function, lambda, anonymous method or initializer.
+};
+
+
+/// The opening brace of every block enclosing @a aPos, from [aBegin, aPos) of blanked C# code.
+inline std::vector<size_t> csharpEnclosingBraces( const std::string& aCode, size_t aBegin, size_t aPos )
+{
+    std::vector<size_t> open;
+
+    for( size_t k = aBegin; k < aPos && k < aCode.size(); ++k )
+    {
+        if( aCode[k] == '{' )
+            open.push_back( k );
+        else if( aCode[k] == '}' && !open.empty() )
+            open.pop_back();
+    }
+
+    return open;
+}
+
+
+/// The start of the statement or header that ends at @a aPos: just after the previous ';', '{',
+/// '}' or ',' outside parentheses, or after an unmatched '(' or '[' (the position is then inside
+/// an argument list).  @a aInsideArguments reports that last case.
+inline size_t csharpStatementStart( const std::string& aCode, size_t aBegin, size_t aPos,
+                                    bool* aInsideArguments = nullptr )
+{
+    size_t k = aPos;
+    int    depth = 0;
+
+    if( aInsideArguments )
+        *aInsideArguments = false;
+
+    while( k > aBegin )
+    {
+        const char c = aCode[k - 1];
+
+        if( c == ')' || c == ']' )
+        {
+            ++depth;
+        }
+        else if( c == '(' || c == '[' )
+        {
+            if( depth == 0 )
+            {
+                if( aInsideArguments )
+                    *aInsideArguments = true;
+
+                break;
+            }
+
+            --depth;
+        }
+        else if( depth == 0 && ( c == ';' || c == '{' || c == '}' || c == ',' ) )
+        {
+            break;
+        }
+
+        --k;
+    }
+
+    return k;
+}
+
+
+inline std::string trimmed( const std::string& aText )
+{
+    const size_t first = aText.find_first_not_of( " \t\r\n" );
+
+    if( first == std::string::npos )
+        return {};
+
+    return aText.substr( first, aText.find_last_not_of( " \t\r\n" ) - first + 1 );
+}
+
+
+inline std::string leadingWord( const std::string& aText )
+{
+    size_t k = 0;
+
+    while( k < aText.size() && isIdentChar( aText[k] ) )
+        ++k;
+
+    return aText.substr( 0, k );
+}
+
+
+/// C# keywords that begin a statement that may skip, repeat or leave what follows.
+inline const std::set<std::string>& csharpControlKeywords()
+{
+    static const std::set<std::string> keywords{ "if", "else", "for", "foreach", "while", "do", "switch", "catch",
+                                                 "case", "default", "when", "return", "goto", "break",
+                                                 "continue", "throw", "yield" };
+    return keywords;
+}
+
+
+/// How the block opened by the brace at @a aBrace runs, judged by its header.
+inline CS_BLOCK csharpBlockKind( const std::string& aCode, size_t aBegin, size_t aEnd, size_t aBrace )
+{
+    const size_t      start = csharpStatementStart( aCode, aBegin, aBrace );
+    const std::string header = trimmed( aCode.substr( start, aBrace - start ) );
+    const std::string word = leadingWord( header );
+
+    if( header.empty() || word == "finally" || word == "using" || word == "lock" )
+        return CS_BLOCK::ALWAYS;
+
+    if( word == "try" )
+    {
+        // A catch after the try block could swallow a failed assertion inside it.
+        int    depth = 0;
+        size_t close = aBrace;
+
+        for( ; close < aEnd; ++close )
+        {
+            if( aCode[close] == '{' )
+                ++depth;
+            else if( aCode[close] == '}' && --depth == 0 )
+                break;
+        }
+
+        const size_t next = aCode.find_first_not_of( " \t\r\n", close + 1 );
+        const bool   caught = next != std::string::npos && next < aEnd && aCode.compare( next, 5, "catch" ) == 0
+                            && !( next + 5 < aCode.size() && isIdentChar( aCode[next + 5] ) );
+
+        return caught ? CS_BLOCK::CONDITIONAL : CS_BLOCK::ALWAYS;
+    }
+
+    if( csharpControlKeywords().count( word ) )
+        return CS_BLOCK::CONDITIONAL;
+
+    return CS_BLOCK::NOT_A_STATEMENT_OF_THE_METHOD;
+}
+
+
+/// True when the awaited call at @a aAwait is a statement the method body [aBegin, aEnd) always
+/// runs: every enclosing block runs unconditionally, the call is a whole statement (optionally
+/// assigned to a variable), and no return or goto of the method itself comes before it.  A call
+/// inside a branch, loop, catch, local function or lambda, part of a conditional expression, or
+/// after an early return proves nothing about the journey.
+inline bool csharpUnconditionalStatement( const std::string& aCode, size_t aBegin, size_t aEnd, size_t aAwait )
+{
+    for( size_t brace : csharpEnclosingBraces( aCode, aBegin, aAwait ) )
+    {
+        if( csharpBlockKind( aCode, aBegin, aEnd, brace ) != CS_BLOCK::ALWAYS )
+            return false;
+    }
+
+    // Only "await Call(...)", "name = await Call(...)" or "Type name = await Call(...)".
+    bool              insideArguments = false;
+    const size_t      start = csharpStatementStart( aCode, aBegin, aAwait, &insideArguments );
+    const std::string prefix = trimmed( aCode.substr( start, aAwait - start ) );
+
+    if( insideArguments )
+        return false;
+
+    if( !prefix.empty() )
+    {
+        if( prefix.back() != '=' || prefix.size() < 2
+                || std::string( "=!<>" ).find( prefix[prefix.size() - 2] ) != std::string::npos )
+        {
+            return false;
+        }
+
+        std::istringstream       words( prefix.substr( 0, prefix.size() - 1 ) );
+        std::vector<std::string> tokens;
+
+        for( std::string token; words >> token; )
+            tokens.push_back( token );
+
+        if( tokens.empty() || tokens.size() > 2 || leadingWord( tokens.back() ) != tokens.back()
+                || csharpControlKeywords().count( leadingWord( tokens.front() ) ) )
+        {
+            return false;
+        }
+
+        for( char c : tokens.front() )
+        {
+            if( !isIdentChar( c ) && std::string( "<>.?[]" ).find( c ) == std::string::npos )
+                return false;
+        }
+    }
+
+    // A return or goto of the method itself before the call can skip it.
+    for( const char* exit : { "return", "goto" } )
+    {
+        const std::string keyword( exit );
+
+        for( size_t pos = aCode.find( keyword, aBegin ); pos != std::string::npos && pos < aAwait;
+             pos = aCode.find( keyword, pos + 1 ) )
+        {
+            if( ( pos > 0 && isIdentChar( aCode[pos - 1] ) )
+                    || ( pos + keyword.size() < aCode.size() && isIdentChar( aCode[pos + keyword.size()] ) ) )
+            {
+                continue;
+            }
+
+            bool ownExit = true;
+
+            for( size_t brace : csharpEnclosingBraces( aCode, aBegin, pos ) )
+            {
+                if( csharpBlockKind( aCode, aBegin, aEnd, brace ) == CS_BLOCK::NOT_A_STATEMENT_OF_THE_METHOD )
+                    ownExit = false;
+            }
+
+            if( ownExit )
+                return false;
+        }
+    }
+
+    return true;
 }
 
 
@@ -1632,13 +1870,14 @@ inline std::vector<OWNER> reviewedOwners()
     const std::string workbook = "Simulator workbook (.wbk), a separate document.";
 
     std::vector<OWNER> owners = {
-        // Schematic editor frame and its tools.
-        { "eeschema/annotate.cpp", "SCH_EDIT_FRAME::AnnotateSymbols", "", 1, DISPOSITION::ROUTED_BY_CALLERS,
-          { G_SYMBOL, G_FIELD }, {}, "Annotation stages into the caller's commit; every caller pushes it." },
+        // Schematic editor frame and its tools.  Annotation (SCH_EDIT_FRAME::AnnotateSymbols) no
+        // longer marks the document modified: it stages into the caller's commit, whose push does,
+        // and a cancelled placement reverts it (see the AnnotateSymbols helper review).
         { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "", 1, DISPOSITION::ROUTED,
           { G_PROJECT, G_EMBEDDED, G_LIB_CACHE }, {},
-          "Schematic Setup is compared with the same whole saved state as the lifecycle digest; an accepted "
-          "change is recorded once, by the dialog's commit or by the tracked change, then marked modified." },
+          "Schematic Setup compares the project settings and the first top-level sheet, which carries the "
+          "schematic-wide data its commit can change; an accepted change is recorded once, by the dialog's "
+          "commit or by the tracked change, then marked modified." },
         { "eeschema/files-io.cpp", "SCH_EDIT_FRAME::OpenProjectFiles", "", 3, DISPOSITION::LOAD_BASELINE,
           { G_FORMAT, G_SYMBOL, G_SHEET, G_INSTANCES }, {},
           "Legacy conversion, page-number repair and bus migration run inside the load that creates a new "
@@ -1935,7 +2174,8 @@ inline std::vector<HELPER> reviewedHelpers()
             { drawing, "SCH_DRAWING_TOOLS::DrawSheet", 2, CALLER_RULE::STAGED_COMMIT, {} },
             { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::RepeatDrawItem", 1, CALLER_RULE::STAGED_COMMIT,
               {} } },
-          "Annotation edits the caller's commit." },
+          "Annotation edits the caller's commit, keeping the reference inventory in it so a cancelled "
+          "placement returns the designators it handed out; the caller's push marks the document modified." },
         { "resyncAfterTopLevelSheetChange", { "eeschema/widgets/hierarchy_pane.cpp" },
           { { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, CALLER_RULE::ROUTED_CALL,
               {} } },
@@ -1968,21 +2208,26 @@ inline std::vector<HELPER> reviewedHelpers()
 
 /// A reviewed SCH_TRACKED_CHANGE declaration site.  Every tracker compares the whole persisted
 /// state (every screen and the project settings, the same groups as the lifecycle digest)
-/// unless it is restricted to named screens, which needs a reason.
+/// unless it compares only its commit's staged items or named screens and the project
+/// settings, which needs a reason and may need evidence that the owner reports or compares
+/// what lies outside that narrower comparison.
 struct TRACKER_SITE
 {
-    std::string file;
-    std::string function;
-    int         wholeState;   ///< Two-argument declarations: every screen and the project.
-    int         staged;       ///< Three-argument declarations: only the named commit's items.
-    int         screens;      ///< Four-argument, screen-restricted declarations.
-    std::string reason;       ///< Why the staged or restricted trackers cannot miss a change.
+    std::string           file;
+    std::string           function;
+    int                   wholeState;   ///< Two-argument declarations: every screen and the project.
+    int                   staged;       ///< Three-argument declarations: only the named commit's items.
+    int                   screens;      ///< Four-argument declarations: named screens and the project.
+    std::string           reason;       ///< Why the staged or restricted trackers cannot miss a change.
+    std::vector<EVIDENCE> evidence = {}; ///< Code the reason depends on.
 };
 
 
-/// Every tracker declaration.  Whole-state trackers write the whole design twice, so they are
-/// for edits made outside a commit; an owner whose every edit is staged compares the staged
-/// items instead, at a cost that does not grow with the design.
+/// Every tracker declaration.  Whole-state trackers write the whole design twice (on the
+/// largest demo design, seconds per action in a Debug build), so they are only for edits that
+/// can reach any sheet outside a commit; an owner whose every edit is staged compares the
+/// staged items instead, and one that changes only the project settings and named screens
+/// compares those, at a cost that does not grow with the number of sheets.
 inline std::vector<TRACKER_SITE> reviewedTrackers()
 {
     return {
@@ -1998,13 +2243,29 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
         { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::rescueProject", 1, 0, 0, "" },
         { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", 1, 0, 0, "" },
         { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", 0, 2, 0,
-          "Sheet Properties stages its sheet; a file change always changes the staged sheet's file name, and "
-          "loading the file and clearing annotation are part of that one revision.  Field placement after "
-          "Symbol Properties moves only that symbol's fields: when the dialog recorded nothing it is staged "
-          "on the symbol; otherwise it is part of the dialog's revision, whose undo entry restores it." },
+          "Sheet Properties stages its sheet and also compares the sheet's screen and that screen's file name, "
+          "which a file change sets outside the commit (a rename that fails later keeps the screen's new file "
+          "name while the dialog restores the field) and reports as a change outside the commit; loading the "
+          "file and clearing annotation are part of that one revision.  Field placement after Symbol "
+          "Properties moves only that symbol's fields: a symbol still being placed, pasted or moved belongs to "
+          "the carrying tool's commit and gets no tracker of its own; otherwise, when the dialog recorded "
+          "nothing, it is staged on the symbol, and when it did, it is part of the dialog's revision, whose "
+          "undo entry restores it.",
+          { { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "symbol->GetEditFlags() != 0" },
+            { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "sheet->GetScreen() != screenBefore" },
+            { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "change.ChangedOutsideCommit()" } } },
         { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", 1, 0, 0, "" },
-        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", 1, 0, 0, "" },
-        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", 1, 0, 0, "" },
+        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", 0, 0, 1,
+          "Setup changes the project settings and, through its own commit (already a revision when pushed), the "
+          "schematic-wide data saved with the first top-level sheet and library caches.  Outside the commit only "
+          "the project settings change; connectivity is cleaned up across every sheet only when the bus "
+          "aliases, themselves project settings, changed, which is then already a change.",
+          { { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "{ Schematic().RootScreen() }" },
+            { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "if( oldAliases != newAliases )" } } },
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", 0, 0, 1,
+          "The simulation settings dialog writes only the ngspice settings, which are project settings; the "
+          "analysis command is workbook state and no sheet is edited.",
+          { { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", "{ schematic.RootScreen() }" } } },
         { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, 0, 0, "" },
     };
 }
@@ -2053,9 +2314,10 @@ inline std::vector<UNPROVEN> unprovenRoutes()
 
 
 /// A routed owner whose change and whose cancel and no-op precision the rendered journey
-/// proves: inside the journey method, an awaited OneChange(...) call asserts exactly one
-/// revision with this journal description, and an awaited Unchanged(...) call asserts each
-/// cancel or no-op step left the revision, saved state, modified flag and journal alone.
+/// proves: among the statements the journey method always runs, an awaited OneChange(...) call
+/// asserts exactly one revision with this journal description, and an awaited Unchanged(...)
+/// call asserts each cancel or no-op step left the revision, saved state, modified flag and
+/// journal alone.
 struct PROOF
 {
     std::string              file;          ///< The owner's source.
@@ -2074,11 +2336,16 @@ inline std::vector<PROOF> journeyProofs()
           { "Cancelling Symbol Properties", "Accepting unchanged Symbol Properties" } },
         { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "Edit Sheet Properties",
           { "Cancelling Sheet Properties", "Accepting unchanged Sheet Properties" } },
+        // Field placement after Symbol Properties on a symbol that a duplication or a move still
+        // carries: the carrying tool's cancel must leave nothing, not even an undo entry.
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "Edit Symbol Properties",
+          { "Cancelling a duplicated symbol after editing its properties",
+            "Cancelling a symbol move after editing its properties" } },
         { pane, "HIERARCHY_PANE::onRightClick", "New Top-Level Sheet", { "Cancelling a new top-level sheet" } },
         { pane, "HIERARCHY_PANE::onRightClick", "Delete Top-Level Sheet",
           { "Declining to delete a top-level sheet" } },
         { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "Import Schematic Sheet Content",
-          { "Cancelling a repeated sheet import" } },
+          { "Cancelling a sheet import" } },
         { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "Edit Page Settings",
           { "Cancelling Page Settings", "Accepting unchanged Page Settings" } },
         { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "Edit Schematic Setup",
@@ -2107,11 +2374,15 @@ inline std::map<std::string, std::vector<std::string>> journeyStepAssertions()
 
 
 /// The journey steps found in the journey method: descriptions asserted by OneChange and step
-/// names asserted by Unchanged, or failures when the method or a step helper is missing.
+/// names asserted by Unchanged, or failures when the method or a step helper is missing.  Only
+/// statements the method always runs count; a step call found only elsewhere in the method
+/// (a branch, loop, catch, local function, lambda or conditional expression, or after an early
+/// return) is listed in @a conditional instead.
 struct JOURNEY_STEPS
 {
     std::set<std::string>    changes;
     std::set<std::string>    unchanged;
+    std::set<std::string>    conditional;
     std::vector<std::string> failures;
 };
 
@@ -2147,11 +2418,17 @@ inline JOURNEY_STEPS journeySteps( const std::string& aSource, const std::string
         }
     }
 
-    for( const std::string& text : awaitedLiteralArguments( aSource, blanked.code, "OneChange", 1, begin, end ) )
-        steps.changes.insert( text );
-
-    for( const std::string& text : awaitedLiteralArguments( aSource, blanked.code, "Unchanged", 1, begin, end ) )
-        steps.unchanged.insert( text );
+    for( const auto& [helper, found] : { std::make_pair( std::string( "OneChange" ), &steps.changes ),
+                                         std::make_pair( std::string( "Unchanged" ), &steps.unchanged ) } )
+    {
+        for( const AWAITED_CALL& call : awaitedLiteralCalls( aSource, blanked.code, helper, 1, begin, end ) )
+        {
+            if( csharpUnconditionalStatement( blanked.code, begin, end, call.await ) )
+                found->insert( call.literal );
+            else
+                steps.conditional.insert( call.literal );
+        }
+    }
 
     return steps;
 }
@@ -2880,6 +3157,13 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
 
         BOOST_CHECK_MESSAGE( ( site.screens == 0 && site.staged == 0 ) || !site.reason.empty(),
                              key + " stages or restricts a tracker without a reason." );
+
+        for( const EVIDENCE& evidence : site.evidence )
+        {
+            std::string failure;
+            BOOST_CHECK_MESSAGE( oracle.Evidence( evidence, failure ),
+                                 key + ": the reviewed reason no longer holds: " + failure );
+        }
     }
 
     for( const auto& [key, counts] : found )
@@ -3094,20 +3378,32 @@ BOOST_AUTO_TEST_CASE( EveryProvenOwnerKeepsItsRenderedSteps )
         BOOST_CHECK_MESSAGE( oracle.Evidence( { proof.file, proof.function, ANY_ROUTE }, failure ),
                              "Proven owner " + failure );
 
+        auto where = [&]( const std::string& aLiteral )
+        {
+            return steps.conditional.count( aLiteral )
+                           ? std::string( " (it is called only where it may not run: a branch, loop, catch, "
+                                          "local function, lambda or conditional expression, or after an early "
+                                          "return)" )
+                           : std::string();
+        };
+
         BOOST_CHECK_MESSAGE( steps.changes.count( proof.description ),
                              proof.function + " is no longer proven: " + JOURNEY_METHOD
-                                     + " has no awaited OneChange(..., \"" + proof.description + "\", ...) step." );
+                                     + " has no unconditional awaited OneChange(..., \"" + proof.description
+                                     + "\", ...) step" + where( proof.description ) + "." );
 
         for( const std::string& step : proof.unchanged )
         {
             BOOST_CHECK_MESSAGE( steps.unchanged.count( step ),
                                  proof.function + " is no longer proven: " + JOURNEY_METHOD
-                                         + " has no awaited Unchanged(..., \"" + step + "\") step." );
+                                         + " has no unconditional awaited Unchanged(..., \"" + step + "\") step"
+                                         + where( step ) + "." );
         }
     }
 
     // Recall and precision of the journey scan: steps named in comments, strings, raw strings
-    // or other methods do not count, and helpers must keep their assertions.
+    // or other methods do not count, steps the method may not run do not count, and helpers
+    // must keep their assertions.
     const std::string probe = R"cs(
 private static async Task VerifyDirectOwnerTracking(NativeClient client)
 {
@@ -3138,14 +3434,37 @@ private static async Task VerifyDirectOwnerTracking(NativeClient client)
     await OneChange(clean, "Real change", SchematicChange.Types.Kind.Commit);
     await Unchanged(clean, "Real cancel");
     await Unchanged(clean, $"Interpolated {text}");
+    var assigned = await OneChange(clean, "Assigned change", SchematicChange.Types.Kind.Commit);
+    try { await Unchanged(clean, "Inside a try"); } finally { Cleanup(); }
+    using (var scope = Scope()) { await Unchanged(clean, "Inside a using"); }
+    if (clean.NativeContentDirty) { await Unchanged(clean, "Inside a branch"); }
+    if (clean.NativeContentDirty) await Unchanged(clean, "Braceless branch");
+    else await Unchanged(clean, "Braceless else");
+    foreach (var item in items) { await OneChange(clean, "Inside a loop", kind); }
+    try { await Unchanged(clean, "Swallowed"); } catch (Exception) { }
+    async Task Local() { await Unchanged(clean, "Inside a local function"); }
+    await Assert.ThrowsAsync<Exception>(async () => await Unchanged(clean, "Inside a lambda"));
+    var either = flag ? await OneChange(clean, "Inside a conditional expression", kind) : null;
+    async Task<int> Helper() { return 1; }
+    await Unchanged(clean, "After a local function's return");
+    if (flag) return;
+    await Unchanged(clean, "After an early return");
+    await OneChange(clean, "Also after an early return", kind);
 }
 
 private static async Task Elsewhere() { await OneChange(clean, "Elsewhere", kind); }
 )cs";
     const JOURNEY_STEPS probed = journeySteps( probe, JOURNEY_METHOD );
 
-    BOOST_CHECK( probed.changes == std::set<std::string>{ "Real change" } );
-    BOOST_CHECK( probed.unchanged == std::set<std::string>{ "Real cancel" } );
+    BOOST_CHECK( ( probed.changes == std::set<std::string>{ "Real change", "Assigned change" } ) );
+    BOOST_CHECK( ( probed.unchanged
+                   == std::set<std::string>{ "Real cancel", "Inside a try", "Inside a using",
+                                             "After a local function's return" } ) );
+    BOOST_CHECK( ( probed.conditional
+                   == std::set<std::string>{ "Inside a branch", "Braceless branch", "Braceless else", "Inside a loop",
+                                             "Swallowed", "Inside a local function", "Inside a lambda",
+                                             "Inside a conditional expression", "After an early return",
+                                             "Also after an early return" } ) );
     BOOST_REQUIRE_EQUAL( probed.failures.size(), 1u );
     BOOST_CHECK_MESSAGE( probed.failures[0].find( "Assert.AreEqual(description,change.Description)" ) != std::string::npos,
                          probed.failures[0] );
@@ -3340,6 +3659,24 @@ BOOST_FIXTURE_TEST_CASE( RecordsOnlyRealEditsOfTheSameDocument, TRACKED_SCHEMATI
 
     BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
 
+    // The screen-restricted form compares the project settings as well as its screens:
+    // precision when neither changed, recall for a change to the settings alone.
+    {
+        SCH_TRACKED_CHANGE change( doc, "Settings", { doc.RootScreen() }, SCH_TRACKED_CHANGE::Mark( doc ) );
+        BOOST_CHECK( !change.Complete() );
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+
+    {
+        SCH_TRACKED_CHANGE change( doc, "Settings", { doc.RootScreen() }, SCH_TRACKED_CHANGE::Mark( doc ) );
+        doc.Project().GetProjectFile().GetSheets().emplace_back( KIID(), wxS( "Tracked settings" ) );
+        BOOST_CHECK( change.Complete() );
+    }
+
+    doc.Project().GetProjectFile().GetSheets().pop_back();
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 2u );
+
     // A replaced document starts a new journal epoch.  It is not an edit by the owner that was
     // running across the replacement: nothing is recorded and the owner must not mark it.
     const std::string oldEpoch = doc.ChangeJournal().Epoch();
@@ -3414,6 +3751,38 @@ BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
         BOOST_CHECK( commit.Empty() );
     }
 
+    // A change the owner made outside its commit (a sheet screen renamed by Sheet Properties)
+    // counts only when the owner reports it: then it is recorded once although every staged
+    // item is unchanged.
+    {
+        SCH_COMMIT commit( &manager );
+        commit.Modify( text, screen );
+        SCH_TRACKED_CHANGE change( doc, "Unreported", commit );
+        BOOST_CHECK( !change.Complete() );
+        commit.Abandon();
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+
+    {
+        SCH_COMMIT commit( &manager );
+        commit.Modify( text, screen );
+        SCH_TRACKED_CHANGE change( doc, "Changed outside the commit", commit );
+        change.ChangedOutsideCommit();
+        BOOST_CHECK( change.Complete() );
+        commit.Abandon();
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().ReadAfter( doc.ChangeJournal().Epoch(), 0 ).entries.at( 0 ).description,
+                       "Changed outside the commit" );
+
+    {
+        // Only the staged form takes a report: the other forms compare what they may change.
+        SCH_TRACKED_CHANGE whole( doc, "Whole state" );
+        BOOST_CHECK_THROW( whole.ChangedOutsideCommit(), std::logic_error );
+    }
+
     // A staged tracker that finishes after the document was replaced neither pushes nor
     // reverts: the replacement freed the document's items.  The staged item here lives on a
     // screen the test owns, so the check can see that it was left exactly as edited.
@@ -3433,6 +3802,41 @@ BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
 
     BOOST_CHECK_EQUAL( keptText->GetText(), wxS( "after" ) );
     BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+}
+
+
+/// A placement, paste or duplication that is cancelled returns the designators its annotation
+/// handed out: the reference inventory kept before annotating is restored.  The rendered journey
+/// proves this for a cancelled duplication; this checks the keep and restore themselves,
+/// including an inventory that did not exist, which the journey cannot reach.
+BOOST_FIXTURE_TEST_CASE( DroppedAnnotationReturnsItsDesignators, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC&                       doc = *schematic;
+    std::shared_ptr<REFDES_TRACKER>& live = doc.Settings().m_refDesTracker;
+
+    if( !live )
+        live = std::make_shared<REFDES_TRACKER>();
+
+    live->Insert( "R1" );
+
+    std::unique_ptr<REFDES_TRACKER> kept = SCH_COMMIT::CopyReferenceInventory( doc );
+    BOOST_REQUIRE( kept );
+
+    // Annotating a symbol that is then dropped hands out R2.
+    live->Insert( "R2" );
+    SCH_COMMIT::RestoreReferenceInventory( doc, kept.get() );
+    BOOST_CHECK( live->Contains( "R1" ) );
+    BOOST_CHECK( !live->Contains( "R2" ) );
+
+    // Kept from a project without an inventory: restoring empties it.
+    SCH_COMMIT::RestoreReferenceInventory( doc, nullptr );
+    BOOST_CHECK( !live->Contains( "R1" ) );
+
+    live.reset();
+    BOOST_CHECK( !SCH_COMMIT::CopyReferenceInventory( doc ) );
+    SCH_COMMIT::RestoreReferenceInventory( doc, kept.get() );
+    BOOST_REQUIRE( live );
+    BOOST_CHECK( live->Contains( "R1" ) );
 }
 
 
@@ -3483,7 +3887,7 @@ BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::d
         whole.push_back( elapsedMs( started ) );
     }
 
-    // The largest screen alone, as a screen-restricted tracker captures it.
+    // The largest screen alone: what one sheet costs to write.
     SCH_SCREEN* largest = nullptr;
     size_t      largestItems = 0;
     size_t      symbols = 0;
@@ -3508,6 +3912,19 @@ BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::d
         const auto started = std::chrono::steady_clock::now();
         SCH_STATE_GROUPS::CaptureScreens( *schematic, { largest } );
         oneScreen.push_back( elapsedMs( started ) );
+    }
+
+    // The project settings and the first top-level sheet, as the Schematic Setup and the
+    // simulation settings owners capture them before and after their dialogs.
+    SCH_SCREEN* first = schematic->RootScreen();
+    BOOST_REQUIRE( first );
+    std::vector<double> settingsAndFirst;
+
+    for( int sample = 0; sample < 5; ++sample )
+    {
+        const auto started = std::chrono::steady_clock::now();
+        SCH_STATE_GROUPS::CaptureScreens( *schematic, { first }, true );
+        settingsAndFirst.push_back( elapsedMs( started ) );
     }
 
     // A staged comparison of the symbol with the largest library definition: the worst single
@@ -3555,12 +3972,16 @@ BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::d
               << "tracking-cost whole_state_capture_ms " << timing( whole ) << "\n"
               << "tracking-cost largest_screen_capture_ms " << timing( oneScreen ) << " items=" << largestItems
               << "\n"
+              << "tracking-cost settings_and_first_sheet_capture_ms " << timing( settingsAndFirst )
+              << " items=" << first->Items().size() << "\n"
               << "tracking-cost staged_symbol_compare_ms " << timing( staged ) << " pins=" << heaviestPins
               << "\n";
     std::cout.flush();
 
-    // A staged comparison is the point of the staged form: it must stay well below the capture.
+    // A staged comparison is the point of the staged form: it must stay well below the capture,
+    // and so must the restricted capture of the settings and the first sheet.
     BOOST_CHECK_LT( median( staged ) * 10, median( whole ) );
+    BOOST_CHECK_LT( median( settingsAndFirst ), median( whole ) );
 }
 
 

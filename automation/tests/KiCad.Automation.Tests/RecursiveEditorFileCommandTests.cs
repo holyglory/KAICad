@@ -915,6 +915,18 @@ public sealed class RecursiveEditorFileCommandTests
             { var probe = read.Clone(); attach(probe); probes.Add((name + " payload on a read", probe, "ambiguous_diagram_file_request")); }
             var pagedLevel = read.Clone(); pagedLevel.Action = P.RecursiveFileAction.RfaRebaseLevel; pagedLevel.RebaseLevel = new(); pagedLevel.Limit = 3;
             probes.Add(("paged level rebase", pagedLevel, "ambiguous_diagram_file_request"));
+            // Each level action needs its own payload, and a save or removal the exact observed file token (section 7
+            // step 3); these use the stable section 11 code rather than an action-specific one.
+            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareLevelEdit, P.RecursiveFileAction.RfaSaveLevel, P.RecursiveFileAction.RfaRebaseLevel })
+            {
+                var probe = read.Clone(); probe.Action = action; probe.ExpectedSourceToken = loaded.SourceToken;
+                probes.Add((action + " without its payload", probe, "ambiguous_diagram_file_request"));
+            }
+            var tokenless = read.Clone(); tokenless.Action = P.RecursiveFileAction.RfaSaveLevel; tokenless.SaveLevel = new();
+            probes.Add(("level save without the observed token", tokenless, "ambiguous_diagram_file_request"));
+            var malformedToken = read.Clone(); malformedToken.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; malformedToken.LevelEdit = new();
+            malformedToken.ExpectedSourceToken = "not-a-file-token";
+            probes.Add(("removal with a malformed token", malformedToken, "ambiguous_diagram_file_request"));
             var conversion = read.Clone(); conversion.DocumentId = ""; conversion.Action = P.RecursiveFileAction.RfaMigrateFlatDiagram;
             conversion.Migrate = new() { OperationId = Guid.NewGuid().ToString("D"), FlatSourcePath = Path.Combine(root, "flat.engineering.xml"),
                 RootName = "System", ImplementationName = "Initial" };
@@ -1125,6 +1137,82 @@ public sealed class RecursiveEditorFileCommandTests
             await File.AppendAllTextAsync(path, "\n");
             var moved = await Invoke(resolve);
             Assert.IsFalse(moved.Success); Assert.AreEqual("stale_requirement_resolution", moved.ErrorCode);
+
+            // Layout never blocks a rebase (section 4.8). The same block moved differently on both sides keeps the draft's
+            // position and reports the saved one; separate moves compose silently; the same move on both sides is no override.
+            DiagramPresentationView Moved(RecursiveBlockGraph on, Guid block, decimal x, decimal y)
+            {
+                var view = on.Inspect(on.SelectedRoot).LocalDiagram.Layout;
+                return view with { Blocks = [.. view.Blocks.Select(b => b.BlockId == block ? b with { Rect = b.Rect with { X = x, Y = y } } : b)] };
+            }
+            RecursiveLevelDraft Arranged(RecursiveBlockGraph on, DiagramPresentationView view)
+            {
+                var start = on.StartLevelDraft(on.SelectedRoot);
+                return start with { Scope = start.Scope with { Diagram = start.Scope.LocalDiagram with { Presentation = view } } };
+            }
+            var remoteMove = latest.StartDraft(latest.SelectedRoot);
+            remoteMove = remoteMove with { Diagram = remoteMove.LocalDiagram with { Presentation = Moved(latest, psu.BlockId, 100, 100) } };
+            var arranged = latest.SaveDraft(latest.SelectedRoot, [latest.SelectedRoot], remoteMove, Guid.NewGuid(), Guid.NewGuid(), [],
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(arranged));
+            var bothMoved = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, psu.BlockId, 180, 110))));
+            Assert.IsTrue(bothMoved.Success, bothMoved.ErrorMessage); Assert.IsEmpty(bothMoved.LevelMerge.Conflicts);
+            var keptPosition = bothMoved.LevelMerge.PresentationOverrides.Single();
+            Assert.AreEqual("block:" + psu.BlockId.ToString("D"), keptPosition.ElementKey);
+            var savedPosition = System.Text.Json.JsonDocument.Parse(keptPosition.SavedValueJson).RootElement.GetProperty("rect");
+            Assert.AreEqual((100m, 100m), (savedPosition.GetProperty("x").GetDecimal(), savedPosition.GetProperty("y").GetDecimal()),
+                "The override reports the saved position the draft replaced.");
+            var keptDraft = RecursiveBlockCodec.Decode(bothMoved.LevelMerge.Candidate, graph.DocumentId);
+            Assert.AreEqual(new DiagramRect(180, 110, 240, 145), keptDraft.Scope.LocalDiagram.Layout.Blocks.Single(b => b.BlockId == psu.BlockId).Rect);
+            var separate = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, cpu.BlockId, 520, 120))));
+            Assert.IsTrue(separate.Success, separate.ErrorMessage);
+            Assert.IsEmpty(separate.LevelMerge.Conflicts); Assert.IsEmpty(separate.LevelMerge.PresentationOverrides, "Moves of different blocks compose silently.");
+            var separateLayout = RecursiveBlockCodec.Decode(separate.LevelMerge.Candidate, graph.DocumentId).Scope.LocalDiagram.Layout;
+            Assert.AreEqual(new DiagramRect(100, 100, 240, 145), separateLayout.Blocks.Single(b => b.BlockId == psu.BlockId).Rect, "The saved move is kept.");
+            Assert.AreEqual(new DiagramRect(520, 120, 240, 145), separateLayout.Blocks.Single(b => b.BlockId == cpu.BlockId).Rect, "The draft's move is kept.");
+            var sameMove = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, psu.BlockId, 100, 100))));
+            Assert.IsTrue(sameMove.Success, sameMove.ErrorMessage);
+            Assert.IsEmpty(sameMove.LevelMerge.Conflicts); Assert.IsEmpty(sameMove.LevelMerge.PresentationOverrides, "The same move on both sides is no override.");
+            var keptSave = await Invoke(SaveLevelRequest(read, bothMoved.SourceToken, arranged.SelectedRoot, [arranged.SelectedRoot], keptDraft));
+            Assert.IsTrue(keptSave.Success, keptSave.ErrorMessage);
+            var afterLayout = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path));
+            Assert.AreEqual(new DiagramRect(180, 110, 240, 145), afterLayout.Inspect(afterLayout.SelectedRoot).LocalDiagram.Layout.Blocks
+                .Single(b => b.BlockId == psu.BlockId).Rect, "Saving the rebased level stores the draft's position.");
+
+            // Changes a draft cannot combine keep the draft and list each conflict: another editor removed the drawn LDO (with the
+            // connections ending on it) and renamed the level, while this draft renamed the LDO and the level, or connected to it.
+            var levelPath = ImmutableArray.Create(afterLayout.SelectedRoot);
+            var (withoutLdo, _) = RecursiveLevelEdits.Apply(afterLayout, levelPath, afterLayout.StartLevelDraft(afterLayout.SelectedRoot),
+                new LevelEditCommand(LevelEditCommandKind.RemoveChild, ldo.BlockId, null, null, false, RecursiveBlockFixture.Origin("Another agent")));
+            withoutLdo = withoutLdo with { Scope = withoutLdo.Scope with { Name = "Remote system" } };
+            var remoteRemoval = afterLayout.SaveLevelDraft(afterLayout.SelectedRoot, levelPath, withoutLdo,
+                new LevelRevisionIds(Guid.NewGuid(), Guid.NewGuid(), [], ImmutableDictionary<Guid, LevelRevisionId>.Empty, ImmutableDictionary<Guid, LevelRevisionId>.Empty),
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(remoteRemoval));
+            var removedBytes = await File.ReadAllTextAsync(path);
+            var ldoNow = afterLayout.Inspect(afterLayout.SelectedRoot).Children.Single(c => c.BlockId == ldo.BlockId);
+            var editsLdo = afterLayout.StartLevelDraft(afterLayout.SelectedRoot);
+            editsLdo = editsLdo with { Scope = editsLdo.Scope with { Name = "Local system" },
+                ChildDrafts = [afterLayout.StartDraft(ldoNow) with { Name = "LDO regulator" }] };
+            var staleChild = await Invoke(RebaseLevelRequest(read, "", editsLdo));
+            Assert.IsTrue(staleChild.Success, staleChild.ErrorMessage); Assert.IsNull(staleChild.LevelMerge.Candidate, "A conflicting draft is kept, never saved.");
+            CollectionAssert.AreEquivalent(new[] { P.LevelConflictKind.LckName, P.LevelConflictKind.LckStaleChild },
+                staleChild.LevelMerge.Conflicts.Select(c => c.Kind).ToArray());
+            Assert.AreEqual(ldo.BlockId.ToString("D"), staleChild.LevelMerge.Conflicts.Single(c => c.Kind == P.LevelConflictKind.LckStaleChild).ObjectId);
+            var sense = new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            var connectsLdo = afterLayout.StartLevelDraft(afterLayout.SelectedRoot);
+            connectsLdo = connectsLdo with
+            {
+                Scope = connectsLdo.Scope with { Diagram = connectsLdo.Scope.LocalDiagram with { Connections = connectsLdo.Scope.LocalDiagram.Connections.Add(sense) } },
+                NewConnections = [new(sense, Guid.NewGuid(), "Initial", "Sense", DiagramConnectionKind.Abstract, DiagramDomain.Unspecified,
+                    DiagramConnectionDirection.Unspecified, [DiagramEndpointBinding.Unknown(cpu.BlockId), DiagramEndpointBinding.Unknown(ldo.BlockId)],
+                    DiagramRequirements.Empty, null)]
+            };
+            var dangling = await Invoke(RebaseLevelRequest(read, "", connectsLdo));
+            Assert.IsTrue(dangling.Success, dangling.ErrorMessage); Assert.IsNull(dangling.LevelMerge.Candidate);
+            var danglingConflict = dangling.LevelMerge.Conflicts.Single();
+            Assert.AreEqual((P.LevelConflictKind.LckDanglingReference, sense.ConnectionId.ToString("D")), (danglingConflict.Kind, danglingConflict.ObjectId));
+            Assert.AreEqual(removedBytes, await File.ReadAllTextAsync(path), "Comparing never writes.");
         }
         finally { Directory.Delete(root, true); }
 

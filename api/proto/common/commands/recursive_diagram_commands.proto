@@ -140,6 +140,10 @@ message RecursiveDiagramEditorState {
   string notice = 208;
   // The drawing and inspector controls as rendered, for rendered-input journeys.
   repeated DiagramControlRect controls = 209;
+  // The status bar text as shown, for example why Save is unavailable.
+  string status_text = 210;
+  // Whether a pointer drag on the canvas (a move, resize, port or note drag) is still in progress.
+  bool dragging = 211;
 }
 
 // One rendered control relative to the editor window, in pixels. active is the

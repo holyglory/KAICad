@@ -1661,7 +1661,8 @@ public sealed partial class NativeSessionTests
                 while (true)
                 {
                     current = await Read();
-                    if (!current.Busy && condition(current)) return current;
+                    // A drawn step is complete once the editor is idle and any pointer drag has been released.
+                    if (!current.Busy && !current.Dragging && condition(current)) return current;
                     await Task.Delay(50, deadline.Token);
                 }
             }
@@ -1735,6 +1736,20 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(Find(start, "RecursiveToolDelete").Enabled, "Nothing is selected that can be removed.");
         await Capture("empty");
 
+        // The plain letters B, P and C choose the same tools as both entry points. A connection cannot start on empty
+        // space; Escape returns to Select. With Ctrl held the letters belong to other commands and never switch tools.
+        Key("b"); await Wait("key-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+        Key("p"); await Wait("key-place-port", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+        Key("c"); await Wait("key-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+        await At(430, 420);
+        var emptyStart = await Wait("connect-start-empty", s => s.Notice == "Start the connection on a block or port.");
+        Assert.AreEqual("", emptyStart.CanvasHint, "Nothing was started."); Assert.IsFalse(emptyStart.Dirty);
+        Key("Escape"); await Wait("key-escape", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+        ulong navigation = (await Read()).NavigationInputRevision;
+        Key("c", control: true); Key("b", control: true); Key("p", control: true); Key("Right");
+        var modified = await Wait("modified-letters", s => s.NavigationInputRevision > navigation);
+        Assert.IsTrue(Tool(modified, "select", "RecursiveToolSelect", "DiagramPaletteSelect"), "Ctrl+C, Ctrl+B and Ctrl+P never switch tools.");
+
         // Toolbar strip: Add block. Cancel first (Escape), then a blank caption is refused, then a caption is kept.
         await Press("RecursiveToolAddBlock");
         await Wait("strip-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
@@ -1771,6 +1786,9 @@ public sealed partial class NativeSessionTests
         var (psuX, psuY) = Centre(cpuAdded, psu); var (cpuX, cpuY) = Centre(cpuAdded, cpu);
         await At(psuX, psuY);
         await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        await At(psuX + 60, psuY + 30);
+        await Wait("connect-same-block", s => s.Notice == "Connect two different blocks or ports." && s.CanvasHint == "Click a port to finish connection"
+            && s.CaptionEditor == "");
         await At(430, 420); await Wait("connect-empty", s => s.Notice.Contains("Finish the connection", StringComparison.Ordinal)
             && s.CanvasHint == "Click a port to finish connection");
         await Capture("connect-hint");
@@ -1839,6 +1857,15 @@ public sealed partial class NativeSessionTests
         await Drag(380, 180, 380, 230);
         var portMoved = await Wait("port-moved", s => s.LevelDraft.Scope.LocalDiagram.Presentation.Ports.Single(p => p.InterfaceId == rail).Offset == "100");
         Assert.AreEqual(rail, portMoved.SelectedInterfaceId);
+        // Rail feed and Power both end at the CPU's one anchor (rule F2), so Rail feed was given a stored route whose middle
+        // leg runs apart from Power's. The route followed the CPU move, the resize and the port move; Power keeps its
+        // computed path. A click near the CPU end of Rail feed's own leg selects Rail feed.
+        var feedRoute = portMoved.LevelDraft.Scope.LocalDiagram.Presentation.Routes.Single(r => r.ConnectionId == feed.Selection.ConnectionId);
+        Assert.AreEqual((1U, "500", "230", "500", "275"), (feedRoute.EndpointIndex, feedRoute.Waypoints[0].X, feedRoute.Waypoints[0].Y,
+            feedRoute.Waypoints[1].X, feedRoute.Waypoints[1].Y));
+        Assert.IsFalse(portMoved.LevelDraft.Scope.LocalDiagram.Presentation.Routes.Any(r => r.ConnectionId == power.Selection.ConnectionId));
+        await At(500, 262);
+        await Wait("feed-near-cpu", s => s.ConnectionDraft?.Baseline.ConnectionId == feed.Selection.ConnectionId && s.SelectedInterfaceId == "");
 
         // Removing: the connection (Delete key), the CPU block (toolbar Delete), the used port (palette Delete, asked first).
         await ClickRoute(power.Selection.ConnectionId); await Wait("power-selected", s => s.ConnectionDraft?.Baseline.ConnectionId == power.Selection.ConnectionId);
@@ -1909,8 +1936,22 @@ public sealed partial class NativeSessionTests
         await Wait("feed-comment", s => s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatConnection
             && n.TargetId == feed.Selection.ConnectionId && n.Text == "Feed the CPU from the rail."));
 
-        // Save stores everything in one level revision with the layout in the level's format 2 presentation.
+        // A blank caption cannot be saved: Ctrl+S keeps its editor open with the notice and writes nothing. Moving focus into
+        // the inspector then cancels the blank caption and leaves focus where the person put it.
         ulong saves = (await Read()).CompletedSaveCount;
+        string unsavedBytes = await File.ReadAllTextAsync(created.Path, token);
+        await Press("RecursiveToolAddBlock"); await At(260, 480); await Wait("save-blank-caption", s => s.CaptionEditor == "block");
+        Key("s", control: true);
+        var refusedSave = await Wait("save-refused", s => s.CaptionEditor == "block" && s.Notice == "Type a caption, or press Escape to cancel.");
+        Assert.AreEqual(saves, refusedSave.CompletedSaveCount, "Nothing was sent to save."); Assert.IsTrue(refusedSave.Dirty);
+        Assert.AreEqual(unsavedBytes, await File.ReadAllTextAsync(created.Path, token));
+        await Press("RecursiveComments");
+        var focusLeft = await Wait("caption-focus-left", s => s.CaptionEditor == "" && s.FocusedControl == "RecursiveComments");
+        Assert.HasCount(2, focusLeft.LevelDraft.NewChildren, "The blank caption added nothing.");
+        Assert.AreEqual("", focusLeft.Notice);
+        await Press("RecursiveToolSelect"); await Wait("save-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+
+        // Save stores everything in one level revision with the layout in the level's format 2 presentation.
         Key("s", control: true);
         var saved = await Wait("saved", s => s.CompletedSaveCount > saves && !s.Dirty);
         Assert.AreEqual("", saved.ErrorMessage);
@@ -1930,22 +1971,61 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(new DiagramRect(560, 190, 280, 170), layout.Blocks.Single(b => b.BlockId.ToString("D") == cpu).Rect);
         Assert.AreEqual(new DiagramRect(100, 90, 780, 310), layout.Frame);
         Assert.AreEqual(new DiagramPortPlacement(Guid.Parse(psu), Guid.Parse(rail), DiagramPortSide.Right, 100), layout.Ports.Single(p => p.InterfaceId.ToString("D") == rail));
+        var storedRoute = layout.ConnectionRoutes.Single();
+        Assert.AreEqual((feed.Selection.ConnectionId, 1), (storedRoute.ConnectionId.ToString("D"), storedRoute.EndpointIndex), "Only Rail feed needed a route.");
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(500, 230), new DiagramPoint(500, 275) }, storedRoute.Points.ToArray());
         var archive = graph.Connections(graph.SelectedRoot.BlockId);
         CollectionAssert.AreEqual(new[] { "Power", "Rail feed" }, top.LocalDiagram.Connections.Select(c => archive.Inspect(c).Name).ToArray());
         Assert.IsTrue(top.LocalDiagram.Connections.All(c => archive.Requirements(c).Requirements == DiagramRequirements.Empty));
         Assert.AreEqual("Feed the CPU from the rail.", top.LocalDiagram.Notes.Single().Text);
         await Capture("saved");
 
+        // A save made against an older file rebases (contract rbg-v2 section 9.1): another editor moved the PSU up while this
+        // draft moved it down and right. The draft's position is kept with a non-modal notice and the automatic save stores it.
+        await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
+        await Wait("psu-moved-here", s => s.Dirty && Placement(s, psu).X == "160");
+        var elsewhere = graph.StartDraft(graph.SelectedRoot); var elsewhereView = elsewhere.LocalDiagram.Layout;
+        elsewhere = elsewhere with { Diagram = elsewhere.LocalDiagram with { Presentation = elsewhereView with { Blocks = [.. elsewhereView.Blocks.Select(b =>
+            b.BlockId.ToString("D") == psu ? b with { Rect = b.Rect with { Y = 110 } } : b)] } } };
+        var movedElsewhere = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], elsewhere, Guid.NewGuid(), Guid.NewGuid(), [],
+            RecursiveBlockFixture.Origin("Another agent")).Graph;
+        await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(movedElsewhere), token);
+        ulong beforeRebase = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        const string keptNotice = "Your layout kept a position that was also moved in the saved design.";
+        var rebased = await Wait("layout-rebased", s => s.CompletedSaveCount >= beforeRebase + 2 && !s.Dirty && s.Notice == keptNotice);
+        Assert.AreEqual("", rebased.ErrorCode); Assert.AreEqual(keptNotice, rebased.StatusText, "The notice is shown without a dialog.");
+        Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving"), "A layout-only overlap never asks.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token); saved = rebased;
+        var rebasedGraph = RecursiveBlockGraphXml.Read(savedXml); var rebasedLayout = rebasedGraph.Inspect(rebasedGraph.SelectedRoot).LocalDiagram.Layout;
+        Assert.AreEqual(new DiagramRect(160, 150, 240, 140), rebasedLayout.Blocks.Single(b => b.BlockId.ToString("D") == psu).Rect, "The draft's position was saved.");
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(510, 250), new DiagramPoint(510, 275) }, rebasedLayout.ConnectionRoutes.Single().Points.ToArray(),
+            "Rail feed's route followed the PSU.");
+
         // Decline discards a later layout edit and writes nothing.
         await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
-        await Wait("psu-moved", s => s.Dirty && Placement(s, psu).X == "160");
-        Key("d", alt: true); await Wait("declined", s => !s.Dirty && Placement(s, psu).X == "140");
+        await Wait("psu-moved", s => s.Dirty && Placement(s, psu).X == "180");
+        Key("d", alt: true); await Wait("declined", s => !s.Dirty && Placement(s, psu).X == "160");
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
 
-        // A compact window keeps the toolbar strip and the palette usable; View hides and restores the palette.
+        // A compact window keeps the toolbar strip and the palette usable, and re-fits so every block stays in view beside the
+        // palette (the canvas cannot scroll); View hides and restores the palette.
+        bool BlocksInView(P.RecursiveDiagramEditorState at)
+        {
+            int paletteRight = at.Controls.Where(c => c.Name.StartsWith("DiagramPalette", StringComparison.Ordinal) && c.Shown).Select(c => c.X + c.Width)
+                .DefaultIfEmpty(at.CanvasWindowX).Max() - at.CanvasWindowX;
+            return at.LevelDraft.Scope.LocalDiagram.Presentation.Blocks.All(b =>
+            {
+                double Units(string value) => double.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+                double left = (Units(b.Rect.X) - at.CanvasOriginX) * at.CanvasScale, top = (Units(b.Rect.Y) - at.CanvasOriginY) * at.CanvasScale;
+                return left >= paletteRight && top >= 0 && left + Units(b.Rect.Width) * at.CanvasScale <= at.CanvasPixelWidth
+                    && top + Units(b.Rect.Height) * at.CanvasScale <= at.CanvasPixelHeight;
+            });
+        }
         ulong beforeCompact = (await Read()).ViewRevision;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
-        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact);
+        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800 && BlocksInView(s));
+        Assert.HasCount(2, compact.LevelDraft.Scope.LocalDiagram.Presentation.Blocks);
         var palette = Find(compact, "DiagramPaletteUndo");
         Assert.IsTrue(palette.Shown && palette.Y + palette.Height <= compact.CanvasWindowY + (int)compact.CanvasPixelHeight, "The palette fits the compact canvas.");
         Assert.IsTrue(Find(compact, "RecursiveToolDelete").Shown, "The toolbar strip stays visible in a compact window.");
@@ -1972,36 +2052,64 @@ public sealed partial class NativeSessionTests
         Key("p"); await Wait("palette-shown", s => s.PaletteShown && Find(s, "DiagramPaletteSelect").Shown);
         _ = hidden;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
-        await Wait("expanded", s => s.Rendered);
+        await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900 && BlocksInView(s));
 
-        // Save and reopen: the level comes back exactly as saved, from its stored layout.
-        Key("w", control: true);
-        using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+        // Close, make the saved file read-only and reopen it. The level comes back exactly as saved, from its stored layout, and
+        // a read-only file opens for viewing and editing but not saving (contract rbg-v2 section 9.1): Save stays unavailable
+        // with the reason in the status bar, Ctrl+S reports diagram_file_read_only, and the file is never written.
+        async Task Closed()
         {
-            closing.CancelAfter(TimeSpan.FromSeconds(15));
+            using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
             while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
         }
+        Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
-        var reopened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
-            ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
-        Assert.IsFalse(reopened.IsError == true);
-        var again = await Wait("reopened", s => s.Ready && s.Rendered);
-        Assert.AreEqual(saved.SourceToken, again.SourceToken);
-        var resolved = (await Route(again, top.LocalDiagram.Connections[1].ConnectionId.ToString("D")));
-        Assert.AreEqual("RPS_FALLBACK", resolved.GetProperty("source").GetString(), "No route was drawn; the connection path is computed.");
-        var reopenedView = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), token)).RootElement
-            .GetProperty("resolvedLayout");
-        Assert.IsTrue(reopenedView.GetProperty("blocks").EnumerateArray().All(b => b.GetProperty("source").GetString() == "RPS_PLACED"));
-        Assert.AreEqual("RPS_PLACED", reopenedView.GetProperty("frameSource").GetString());
-        Assert.AreEqual(0U, reopenedView.GetProperty("dormantEntries").GetUInt32());
-        await Capture("reopened");
-        NativeKeyboard.SchematicShortcut(display, processId, "w", title, true, false);
-        using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+        UnixFileMode? writableMode = null;
+        if (!OperatingSystem.IsWindows())
         {
-            closing.CancelAfter(TimeSpan.FromSeconds(15));
-            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+            writableMode = File.GetUnixFileMode(created.Path);
+            File.SetUnixFileMode(created.Path, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         }
-        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+        try
+        {
+            var reopened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
+            Assert.IsFalse(reopened.IsError == true, "A read-only diagram still opens.");
+            var again = await Wait("reopened", s => s.Ready && s.Rendered);
+            Assert.AreEqual(saved.SourceToken, again.SourceToken);
+            var storedPath = await Route(again, top.LocalDiagram.Connections[1].ConnectionId.ToString("D"));
+            Assert.AreEqual("RPS_PLACED", storedPath.GetProperty("source").GetString(), "Rail feed comes back on its stored route.");
+            CollectionAssert.AreEqual(new[] { "400,250", "510,250", "510,275", "560,275" }, storedPath.GetProperty("points").EnumerateArray()
+                .Select(p => p.GetProperty("x").GetString() + "," + p.GetProperty("y").GetString()).ToArray());
+            var reopenedView = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), token)).RootElement
+                .GetProperty("resolvedLayout");
+            string powerId = top.LocalDiagram.Connections[0].ConnectionId.ToString("D");
+            Assert.AreEqual("RPS_FALLBACK", reopenedView.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == powerId)
+                .GetProperty("source").GetString(), "Power keeps its computed path.");
+            Assert.IsTrue(reopenedView.GetProperty("blocks").EnumerateArray().All(b => b.GetProperty("source").GetString() == "RPS_PLACED"));
+            Assert.AreEqual("RPS_PLACED", reopenedView.GetProperty("frameSource").GetString());
+            Assert.AreEqual(0U, reopenedView.GetProperty("dormantEntries").GetUInt32());
+            await Capture("reopened");
+            if (writableMode is not null)
+            {
+                const string readOnlyStatus = "This diagram file is read-only; changes cannot be saved.";
+                Assert.IsFalse(again.SourceWritable); Assert.AreEqual(readOnlyStatus, again.StatusText);
+                await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
+                var lockedDraft = await Wait("read-only-draft", s => s.Dirty && Placement(s, psu).X == "180");
+                Assert.IsFalse(Find(lockedDraft, "RecursiveSave").Enabled, "Save stays unavailable for a read-only file.");
+                Assert.IsTrue(Find(lockedDraft, "RecursiveDecline").Enabled);
+                Assert.AreEqual(readOnlyStatus, lockedDraft.StatusText, "The status bar explains why Save is unavailable.");
+                Key("s", control: true);
+                var lockedSave = await Wait("read-only-save", s => s.ErrorCode == "diagram_file_read_only");
+                Assert.IsTrue(lockedSave.Dirty); Assert.AreEqual(lockedDraft.CompletedSaveCount, lockedSave.CompletedSaveCount, "Nothing was sent to save.");
+                Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "A read-only file is never written.");
+                await Capture("read-only");
+                Key("d", alt: true); await Wait("read-only-declined", s => !s.Dirty && Placement(s, psu).X == "160" && s.ErrorCode == "");
+            }
+            Key("w", control: true); await Closed();
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+        }
+        finally { if (writableMode is { } mode && !OperatingSystem.IsWindows()) File.SetUnixFileMode(created.Path, mode); }
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)

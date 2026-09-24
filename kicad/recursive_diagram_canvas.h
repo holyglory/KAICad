@@ -100,6 +100,8 @@ public:
     /// The drawn path from endpoint 0 to endpoint aEndpoint (rule F4).
     std::vector<POINT> Route( const LINK& aLink, int aEndpoint ) const;
     bool HasRoute( const std::string& aConnectionId, int aEndpoint ) const;
+    /// The caption position a stored route names, if it names one.
+    std::optional<POINT> RouteLabel( const std::string& aConnectionId, int aEndpoint ) const;
     std::optional<RECT> Frame() const { return m_frame; }
     /// Rule F3: the bounding box of the drawn children, notes and boundary anchors, expanded by 40.
     RECT FallbackFrame() const;

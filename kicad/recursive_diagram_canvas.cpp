@@ -234,6 +234,16 @@ bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
     return std::any_of( m_routes.begin(), m_routes.end(), [&]( const auto& route )
                         { return route.connection_id() == id && route.endpoint_index() == static_cast<unsigned>( endpoint ); } );
 }
+std::optional<POINT> LEVEL_LAYOUT::RouteLabel( const std::string& id, int endpoint ) const
+{
+    for( const auto& route : m_routes )
+        if( route.connection_id() == id && route.endpoint_index() == static_cast<unsigned>( endpoint ) && route.has_label() )
+        {
+            POINT point;
+            if( ParseUnits( route.label().x(), point.x ) && ParseUnits( route.label().y(), point.y ) ) return point;
+        }
+    return std::nullopt;
+}
 std::vector<POINT> LEVEL_LAYOUT::Route( const LINK& link, int index ) const
 {
     if( index < 1 || index >= static_cast<int>( link.endpoints.size() ) ) return {};
@@ -421,6 +431,99 @@ std::pair<D::DiagramPortSide, int64_t> project( const R::POINT& point, const R::
     return { D::DPS_BOTTOM, along( point.x - rect.x, rect.w ) };
 }
 struct DRAWN_PORT { std::string owner, id, name; wxPoint at; bool boundary, placed; };
+void encodePoint( const R::POINT& point, D::DiagramAnnotationPointData* out )
+{
+    out->set_x( R::FormatUnits( point.x ) ); out->set_y( R::FormatUnits( point.y ) );
+}
+/// How far two drawn paths run along each other: the summed length of their collinear horizontal and
+/// vertical segments. Crossing at a point or meeting at a shared end point does not count.
+int64_t sharedLength( const std::vector<R::POINT>& path, const std::vector<std::vector<R::POINT>>& others )
+{
+    int64_t total = 0;
+    for( size_t i = 1; i < path.size(); ++i )
+        for( const auto& other : others )
+            for( size_t j = 1; j < other.size(); ++j )
+            {
+                const R::POINT &a = path[i - 1], &b = path[i], &c = other[j - 1], &d = other[j];
+                if( a.y == b.y && c.y == d.y && a.y == c.y )
+                    total += std::max<int64_t>( 0, std::min( std::max( a.x, b.x ), std::max( c.x, d.x ) ) - std::max( std::min( a.x, b.x ), std::min( c.x, d.x ) ) );
+                else if( a.x == b.x && c.x == d.x && a.x == c.x )
+                    total += std::max<int64_t>( 0, std::min( std::max( a.y, b.y ), std::max( c.y, d.y ) ) - std::max( std::min( a.y, b.y ), std::min( c.y, d.y ) ) );
+            }
+    return total;
+}
+/// Where a connection's caption goes: centred above the middle of its longest horizontal leg, or beside the
+/// middle of its longest vertical leg, so each caption sits on its own connection.
+wxPoint captionPosition( const std::vector<wxPoint>& points, const wxSize& extent )
+{
+    size_t longest = 1; int length = -1;
+    for( size_t i = 1; i < points.size(); ++i )
+    {
+        int here = std::abs( points[i].x - points[i - 1].x ) + std::abs( points[i].y - points[i - 1].y );
+        if( here > length ) { length = here; longest = i; }
+    }
+    const wxPoint &a = points[longest - 1], &b = points[longest];
+    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
+    if( std::abs( b.y - a.y ) > std::abs( b.x - a.x ) ) return { middle.x + 6, middle.y - extent.y / 2 };
+    return { middle.x - extent.x / 2, middle.y - extent.y - 4 };
+}
+}
+
+void RECURSIVE_DIAGRAM_FRAME::routeNewConnection( const std::string& id )
+{
+    // Rule F4 draws a new connection's computed path. Where that path would run along a connection already on
+    // the level (two connections ending on the same block edge share an anchor, rule F2), the editor stores a
+    // route whose middle leg moves to a free channel between the ends, so each connection stays visible and
+    // selectable on its own. Storing a route is a layout edit (rule F1a).
+    auto drawn = layout( current(), true );
+    const R::LINK* link = drawn.Link( id );
+    if( !link || link->endpoints.size() != 2 || drawn.HasRoute( id, 1 ) ) return;
+    auto computed = drawn.Route( *link, 1 );
+    if( computed.size() != 4 ) return;
+    std::vector<std::vector<R::POINT>> others;
+    for( const auto& other : drawn.Links() ) if( other.id != id )
+        for( int i = 1; i < static_cast<int>( other.endpoints.size() ); ++i ) others.push_back( drawn.Route( other, i ) );
+    const R::POINT from = computed.front(), to = computed.back();
+    const int64_t middle = ( from.x + to.x ) / 2, margin = 10 * Q;
+    const int64_t low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
+    int64_t best = sharedLength( computed, others ), channel = middle;
+    for( int step = 1; step <= 6 && best > 0; ++step )
+        for( int sign : { 1, -1 } )
+        {
+            int64_t x = middle + sign * step * 30 * Q;
+            if( x < low || x > high ) continue;
+            int64_t shared = sharedLength( { from, { x, from.y }, { x, to.y }, to }, others );
+            if( shared < best ) { best = shared; channel = x; }
+        }
+    if( channel == middle ) return;
+    materialize();
+    auto* row = presentation()->add_routes(); row->set_connection_id( id ); row->set_endpoint_index( 1 );
+    encodePoint( { channel, from.y }, row->add_waypoints() ); encodePoint( { channel, to.y }, row->add_waypoints() );
+}
+void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
+{
+    // A route laid out as one offset channel (two waypoints on one vertical line at the heights of its two
+    // ends) keeps its offset from the computed middle when an end moves, so it never leaves a stale corner.
+    // Any other stored route is kept exactly as drawn.
+    if( !m_level.scope().local_diagram().has_presentation() ) return;
+    auto after = layout( current(), true );
+    for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
+    {
+        const R::LINK *was = before.Link( row.connection_id() ), *now = after.Link( row.connection_id() );
+        int index = static_cast<int>( row.endpoint_index() );
+        if( !was || !now || row.waypoints_size() != 2 ) continue;
+        R::POINT first, second;
+        if( !R::ParseUnits( row.waypoints( 0 ).x(), first.x ) || !R::ParseUnits( row.waypoints( 0 ).y(), first.y )
+            || !R::ParseUnits( row.waypoints( 1 ).x(), second.x ) || !R::ParseUnits( row.waypoints( 1 ).y(), second.y ) ) continue;
+        auto previous = before.Route( *was, index ), next = after.Route( *now, index );
+        if( previous.size() != 4 || next.size() != 4 || first.x != second.x || first.y != previous.front().y || second.y != previous.back().y ) continue;
+        const R::POINT from = next.front(), to = next.back();
+        if( from.x == previous.front().x && from.y == previous.front().y && to.x == previous.back().x && to.y == previous.back().y ) continue;
+        int64_t x = ( from.x + to.x ) / 2 + first.x - ( previous.front().x + previous.back().x ) / 2;
+        const int64_t margin = 10 * Q, low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
+        x = low <= high ? std::clamp( x, low, high ) : ( from.x + to.x ) / 2;
+        encodePoint( { x, from.y }, row.mutable_waypoints( 0 ) ); encodePoint( { x, to.y }, row.mutable_waypoints( 1 ) );
+    }
 }
 
 R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool withDraft ) const
@@ -610,6 +713,9 @@ std::string RECURSIVE_DIAGRAM_FRAME::blockAt( const R::LEVEL_LAYOUT& drawn, cons
 }
 std::string RECURSIVE_DIAGRAM_FRAME::connectionAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
 {
+    // The connection drawn nearest the click wins. Where two connections share a segment (they end at one
+    // anchor), the one already selected stays selected.
+    std::string nearest; int best = FromDIP( 6 ) + 1;
     for( const auto& link : drawn.Links() )
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
@@ -619,10 +725,11 @@ std::string RECURSIVE_DIAGRAM_FRAME::connectionAt( const R::LEVEL_LAYOUT& drawn,
                 wxPoint a = toScreen( route[j - 1] ), b = toScreen( route[j] );
                 int x = std::clamp( point.x, std::min( a.x, b.x ), std::max( a.x, b.x ) );
                 int y = std::clamp( point.y, std::min( a.y, b.y ), std::max( a.y, b.y ) );
-                if( std::abs( point.x - x ) + std::abs( point.y - y ) <= FromDIP( 6 ) ) return link.id;
+                int distance = std::abs( point.x - x ) + std::abs( point.y - y );
+                if( distance < best || ( distance == best && link.id == m_connectionId ) ) { best = distance; nearest = link.id; }
             }
         }
-    return {};
+    return nearest;
 }
 int RECURSIVE_DIAGRAM_FRAME::handleAt( const wxPoint& point ) const
 {
@@ -636,18 +743,51 @@ int RECURSIVE_DIAGRAM_FRAME::handleAt( const wxPoint& point ) const
     return -1;
 }
 
+int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
+{
+    // The canvas-edge palette keeps its strip; the diagram fits beside it.
+    return m_paletteShown && m_palette->IsShown() ? m_palette->GetPosition().x + m_palette->GetSize().x + FromDIP( 12 ) : 0;
+}
+RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // A port on the level frame names itself outside the frame at a fixed text size (see paint), so fitting
+    // leaves that many pixels beside the drawing on the port's side.
+    LABEL_ROOM room;
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    for( const auto& port : drawn.Ports() ) if( port.boundary && port.placed )
+    {
+        wxSize extent = dc.GetTextExtent( Text( port.name ) );
+        switch( port.side )
+        {
+        case D::DPS_RIGHT: room.right = std::max( room.right, extent.x + 12 ); break;
+        case D::DPS_TOP: room.top = std::max( room.top, extent.y + 10 ); break;
+        case D::DPS_BOTTOM: room.bottom = std::max( room.bottom, extent.y + 10 ); break;
+        default: room.left = std::max( room.left, extent.x + 12 ); break;
+        }
+    }
+    return room;
+}
+bool RECURSIVE_DIAGRAM_FRAME::drawingFits() const
+{
+    if( !current() ) return true;
+    auto drawn = layout( current(), !m_historyPreview );
+    wxRect drawing = toScreen( drawn.Bounds() ); LABEL_ROOM room = labelRoom( drawn );
+    drawing.x -= room.left; drawing.y -= room.top; drawing.width += room.left + room.right; drawing.height += room.top + room.bottom;
+    int reserve = paletteReserve(); auto area = m_canvas->GetClientSize();
+    return wxRect( reserve, 0, std::max( 0, area.x - reserve ), area.y ).Contains( drawing );
+}
 void RECURSIVE_DIAGRAM_FRAME::fit()
 {
     if( !current() ) return;
-    R::RECT bounds = layout( current(), !m_historyPreview ).Bounds();
+    auto drawn = layout( current(), !m_historyPreview );
+    R::RECT bounds = drawn.Bounds(); LABEL_ROOM room = labelRoom( drawn );
     double left = bounds.x / double( Q ), top = bounds.y / double( Q ), width = bounds.w / double( Q ), height = bounds.h / double( Q );
     auto area = m_canvas->GetClientSize();
-    // The canvas-edge palette keeps its strip; the diagram fits beside it.
-    int reserve = m_paletteShown && m_palette->IsShown() ? m_palette->GetPosition().x + m_palette->GetSize().x + FromDIP( 12 ) : 0;
-    double available = std::max( 64, area.x - reserve );
-    m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, area.y / height } ) );
-    m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - ( area.y / m_scale - height ) / 2 };
-    ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
+    int reserve = paletteReserve() + room.left;
+    double available = std::max( 64, area.x - reserve - room.right ), tall = std::max( 64, area.y - room.top - room.bottom );
+    m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, tall / height } ) );
+    m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - room.top / m_scale - ( tall / m_scale - height ) / 2 };
+    m_fitted = true; ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::placePaletteAndEditor()
 {
@@ -713,6 +853,10 @@ void RECURSIVE_DIAGRAM_FRAME::finishCaption( bool commit )
         // A drawn element starts as its caption; it cannot be blank.
         m_notice = Utf8( _( "Type a caption, or press Escape to cancel." ) ); refresh(); m_caption->SetFocus(); return;
     }
+    // Keyboard focus returns to the canvas only from the caption itself; focus the person moved elsewhere
+    // (for example into the inspector) stays where they put it.
+    wxWindow* focus = wxWindow::FindFocus();
+    bool returnFocus = !focus || focus == m_caption || focus == m_canvas;
     m_captionKind = 0; m_caption->Hide(); m_notice.clear();
     if( commit )
     {
@@ -723,11 +867,12 @@ void RECURSIVE_DIAGRAM_FRAME::finishCaption( bool commit )
     }
     m_connectFrom.reset(); m_connectTo.reset();
     ++m_viewRevision; refresh();
-    if( !m_closing ) m_canvas->SetFocus();
+    if( !m_closing && returnFocus ) m_canvas->SetFocus();
 }
 void RECURSIVE_DIAGRAM_FRAME::commitNewBlock( const std::string& caption )
 {
     pushUndo(); materialize();
+    auto before = layout( current(), true );
     auto* child = m_level.add_new_children();
     child->mutable_selection()->set_block_id( FreshId() ); child->mutable_selection()->set_state_id( FreshId() );
     child->mutable_selection()->set_revision_id( FreshId() ); child->set_requirement_revision_id( FreshId() );
@@ -736,7 +881,7 @@ void RECURSIVE_DIAGRAM_FRAME::commitNewBlock( const std::string& caption )
     // New blocks are placed explicitly where the user clicked (rule 9.2).
     R::RECT rect{ snap( m_pendingPoint.x - 120 * Q ), snap( m_pendingPoint.y - 70 * Q ), 240 * Q, 140 * Q };
     auto* row = presentation()->add_blocks(); row->set_block_id( child->selection().block_id() ); encodeRect( rect, row->mutable_rect() );
-    encloseInFrame( rect );
+    encloseInFrame( rect ); followRoutes( before );
     m_selected = child->selection().block_id(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear();
     m_lastEffects.Clear(); m_tool = TOOL::SELECT; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); changed();
 }
@@ -750,13 +895,17 @@ void RECURSIVE_DIAGRAM_FRAME::commitNewConnection( const std::string& caption )
     link->set_implementation_name( "Initial" ); link->set_name( caption ); link->set_kind( D::DCK_ABSTRACT ); link->mutable_fields();
     *link->add_endpoints() = *m_connectFrom; *link->add_endpoints() = *m_connectTo;
     *m_level.mutable_scope()->mutable_local_diagram()->add_connections() = link->selection();
-    m_selected = m_level.scope().baseline().block_id(); m_connectionId = link->selection().connection_id();
+    std::string id = link->selection().connection_id();
+    routeNewConnection( id );
+    m_selected = m_level.scope().baseline().block_id(); m_connectionId = id;
     m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_lastEffects.Clear();
     m_tool = TOOL::SELECT; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); changed();
 }
 void RECURSIVE_DIAGRAM_FRAME::commitNewPort( const std::string& caption )
 {
-    pushUndo();
+    pushUndo(); materialize();
+    // A new port changes where unresolved ends on its owner attach (rule F2); channel routes follow.
+    auto before = layout( current(), true );
     std::string scope = m_level.scope().baseline().block_id(), owner = m_pendingOwner.empty() ? scope : m_pendingOwner;
     D::DiagramBoundaryInterfaceData port; port.set_id( FreshId() ); port.set_name( caption );
     R::RECT outline;
@@ -780,6 +929,7 @@ void RECURSIVE_DIAGRAM_FRAME::commitNewPort( const std::string& caption )
     auto [side, offset] = project( m_pendingPoint, outline );
     auto* row = presentation()->add_ports(); row->set_block_id( owner ); row->set_interface_id( port.id() ); row->set_side( side );
     row->set_offset( R::FormatUnits( offset ) );
+    followRoutes( before );
     m_selected = owner; m_connectionId.clear(); m_portOwner = owner; m_portId = port.id(); m_commentId.clear(); m_lastEffects.Clear();
     m_tool = TOOL::SELECT; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); changed();
 }
@@ -825,7 +975,12 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             for( size_t segment = 1; segment < points.size(); ++segment ) dc.DrawLine( points[segment - 1], points[segment] );
             // A boundary already names its interface. Avoid duplicating the title on it.
             if( points.size() >= 2 && link.endpoints[0].block_id() != drawn.ScopeId() && link.endpoints[i].block_id() != drawn.ScopeId() )
-                dc.DrawText( Text( link.name ), std::min( points.front().x, points.back().x ) + 8, points.front().y - 24 );
+            {
+                wxString caption = Text( link.name ); wxSize extent = dc.GetTextExtent( caption );
+                wxPoint at = captionPosition( points, extent );
+                if( auto label = drawn.RouteLabel( link.id, i ) ) at = toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 );
+                dc.DrawText( caption, at );
+            }
         }
     }
     for( const auto& node : drawn.Nodes() )
@@ -945,6 +1100,10 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 {
     if( !m_ready || m_process || !current() || m_diagramHistoryOpen ) return;
     wxPoint point = event.GetPosition(); m_pointer = point;
+    // A new press ends any drag whose release was not delivered; a press the canvas receives only through
+    // its mouse capture, outside its own area, belongs to another control and changes nothing here.
+    if( m_drag != DRAG::NONE ) release();
+    if( !wxRect( wxPoint( 0, 0 ), m_canvas->GetClientSize() ).Contains( point ) ) return;
     if( m_captionKind )
     {
         // Clicking elsewhere keeps a typed caption, or cancels an empty one.
@@ -1061,6 +1220,7 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
     }
     // Recompute from the state before the drag, so materialization and the edit are one step.
     m_level = m_dragBefore; materialize();
+    auto before = layout( current(), true );
     int64_t dx = snap( std::llround( delta.x / m_scale * Q ) ), dy = snap( std::llround( delta.y / m_scale * Q ) );
     auto place = [this]( const std::string& id, const R::RECT& rect )
     {
@@ -1103,6 +1263,7 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
             row->set_side( side ); row->set_offset( R::FormatUnits( offset ) );
         }
     }
+    followRoutes( before );
     m_rendered = false; m_canvas->Refresh();
 }
 
@@ -1130,10 +1291,12 @@ bool RECURSIVE_DIAGRAM_FRAME::canvasKey( wxKeyEvent& event )
     if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
     { ++m_navigationInputRevision; if( children.size() ) select( children.Get( ( index + children.size() - 1 ) % children.size() ).block_id() ); return true; }
     if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return true; }
-    if( event.GetKeyCode() == 'N' ) { setTool( TOOL::NOTE ); return true; }
-    if( event.GetKeyCode() == 'B' ) { setTool( TOOL::ADD_BLOCK ); return true; }
-    if( event.GetKeyCode() == 'C' ) { setTool( TOOL::CONNECT ); return true; }
-    if( event.GetKeyCode() == 'P' ) { setTool( TOOL::ADD_PORT ); return true; }
+    // Letter shortcuts are plain letters: Ctrl+C, Ctrl+B or Alt+P belong to other commands and never switch tools.
+    bool plain = !event.HasAnyModifiers();
+    if( plain && event.GetKeyCode() == 'N' ) { setTool( TOOL::NOTE ); return true; }
+    if( plain && event.GetKeyCode() == 'B' ) { setTool( TOOL::ADD_BLOCK ); return true; }
+    if( plain && event.GetKeyCode() == 'C' ) { setTool( TOOL::CONNECT ); return true; }
+    if( plain && event.GetKeyCode() == 'P' ) { setTool( TOOL::ADD_PORT ); return true; }
     if( event.GetKeyCode() == WXK_DELETE ) { removeSelection(); return true; }
     if( event.GetKeyCode() == WXK_F2 && drawingAvailable() && ( !m_connectionId.empty() || !m_selected.empty() ) )
     {
@@ -1144,7 +1307,7 @@ bool RECURSIVE_DIAGRAM_FRAME::canvasKey( wxKeyEvent& event )
         beginCaption( 4, box, Text( selectedName() ) ); return true;
     }
     const auto& connections = m_level.scope().local_diagram().connections();
-    if( event.GetKeyCode() == 'L' && connections.size() )
+    if( plain && event.GetKeyCode() == 'L' && connections.size() )
     {
         int selected = -1;
         for( int i = 0; i < connections.size(); ++i ) if( connections.Get( i ).connection_id() == m_connectionId ) selected = i;

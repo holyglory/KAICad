@@ -99,6 +99,10 @@ private:
     void materialize();
     void materializeFrame();
     void encloseInFrame( const RECURSIVE_DIAGRAM::RECT& aRect );
+    /// Stores a route for a new connection whose computed path would run along another one (rule F4).
+    void routeNewConnection( const std::string& aConnectionId );
+    /// Keeps each stored channel route's offset when its ends moved since aBefore.
+    void followRoutes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore );
 
     // Selection and navigation.
     void select( const std::string& aBlockId );
@@ -157,6 +161,13 @@ private:
             kiapi::automation::diagrams::v1::DiagramAnnotationData>& aNotes ) const;
     const google::protobuf::RepeatedPtrField<kiapi::automation::diagrams::v1::DiagramAnnotationData>& visibleNotes() const;
     void fit();
+    /// The canvas width the edge palette covers; the diagram fits beside it.
+    int paletteReserve() const;
+    /// Whether the whole level, with its margin and frame port names, is in view beside the palette.
+    bool drawingFits() const;
+    /// Pixels the names of ports on the level frame need beyond the frame on each side.
+    struct LABEL_ROOM { int left = 0, top = 0, right = 0, bottom = 0; };
+    LABEL_ROOM labelRoom( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     wxPoint toScreen( const RECURSIVE_DIAGRAM::POINT& aPoint ) const;
     wxRect toScreen( const RECURSIVE_DIAGRAM::RECT& aRect ) const;
     RECURSIVE_DIAGRAM::POINT toDiagram( const wxPoint& aPoint ) const;
@@ -240,6 +251,8 @@ private:
     std::array<wxSizer*, 3> m_fieldHeadings;
     wxToolBar* m_toolbar;
     double m_scale = 1.0;
+    /// The view is the one fit() chose, not a restored per-level or history view.
+    bool m_fitted = false;
     wxPoint2DDouble m_origin{ 0, 0 };
     struct VIEW { double scale; wxPoint2DDouble origin; std::string selected; };
     std::optional<VIEW> m_historyView;

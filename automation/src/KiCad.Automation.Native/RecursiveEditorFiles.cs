@@ -182,13 +182,14 @@ public static class RecursiveEditorFiles
 
     /// <summary>Actions 11-13 (contract rbg-v2 section 7): a removal is prepared against the exact observed
     /// file and never writes; a level save writes only when something changed; a level rebase compares the
-    /// retained draft with the latest file and never writes.</summary>
+    /// retained draft with the latest file and never writes. A request without its own payload, or a save or
+    /// removal without the observed file token, is ambiguous (section 7 step 3; section 11 stable codes).</summary>
     private static async Task<P.RecursiveFileResult> ExecuteLevelAsync(P.RecursiveFileRequest request, Guid document, CancellationToken token)
     {
         if (request.Action == P.RecursiveFileAction.RfaSaveLevel)
         {
             if (request.SaveLevel is not { } save || request.ExpectedSourceToken.Length != 64)
-                throw Invalid("invalid_level_save_request", "A level save needs the exact observed file token, root, level path, draft, revision identities and origin.");
+                throw Invalid("ambiguous_diagram_file_request", "A level save needs its level save payload and the exact observed file token.");
             var (root, path, draft, ids, origin, resolutions, choose) = RecursiveBlockCodec.Decode(save, document);
             var (snapshot, saved) = await RecursiveBlockFiles.SaveLevelAsync(request.RepositoryRoot, request.SourcePath, document, request.ExpectedSourceToken,
                 root, path, draft, ids, origin, resolutions, choose, token);
@@ -200,7 +201,7 @@ public static class RecursiveEditorFiles
         if (request.Action == P.RecursiveFileAction.RfaPrepareLevelEdit)
         {
             if (request.LevelEdit is not { } edit || request.ExpectedSourceToken.Length != 64)
-                throw Invalid("invalid_level_edit_request", "A removal needs the exact observed file token, root, level path, draft and command.");
+                throw Invalid("ambiguous_diagram_file_request", "A removal needs its removal payload and the exact observed file token.");
             if (request.ExpectedSourceToken != loaded.ContentSha256)
                 throw Invalid("recursive_block_file_changed", "The design file changed; save or reload the level before removing anything.");
             var (root, path, draft, command) = RecursiveBlockCodec.Decode(edit, document);
@@ -210,7 +211,7 @@ public static class RecursiveEditorFiles
             return new P.RecursiveFileResult { Success = true, SourceToken = loaded.ContentSha256, LevelEdit = RecursiveBlockCodec.Encode(next, effects) };
         }
         if (request.RebaseLevel is not { } rebase)
-            throw Invalid("invalid_level_rebase_request", "Provide the retained level draft and any exact requirement resolutions.");
+            throw Invalid("ambiguous_diagram_file_request", "A level rebase needs its rebase payload with the retained level draft.");
         var (retained, choices) = RecursiveBlockCodec.Decode(rebase, document);
         if (choices.Length != 0 && request.ExpectedSourceToken != loaded.ContentSha256)
             throw Invalid("stale_requirement_resolution", "The saved design changed again; preserve the resolution and compare the latest version.");

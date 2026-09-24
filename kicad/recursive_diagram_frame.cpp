@@ -30,6 +30,7 @@
 #include <wx/simplebook.h>
 #include <wx/splitter.h>
 #include <wx/stattext.h>
+#include <wx/statusbr.h>
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
 #include <wx/tglbtn.h>
@@ -117,8 +118,13 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_caption = new wxTextCtrl( m_canvas, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
     m_caption->SetName( "DiagramCaptionEditor" ); m_caption->Hide();
     m_caption->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { finishCaption( true ); } );
+    // Moving focus away keeps a typed caption and cancels a blank one, so focus is never pulled back.
     m_caption->Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event )
-    { event.Skip(); if( m_captionKind ) CallAfter( [this] { if( m_captionKind && wxWindow::FindFocus() != m_caption ) finishCaption( true ); } ); } );
+    {
+        event.Skip();
+        if( m_captionKind ) CallAfter( [this] { if( m_captionKind && wxWindow::FindFocus() != m_caption )
+            finishCaption( !m_caption->GetValue().Strip( wxString::both ).empty() ); } );
+    } );
     auto* inspectorRoot = new wxPanel( splitter ); inspectorRoot->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
     m_inspectorBook = new wxSimplebook( inspectorRoot );
     auto* inspector = new wxPanel( m_inspectorBook ); auto* properties = new wxBoxSizer( wxVERTICAL );
@@ -201,7 +207,13 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
     m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
-    { m_rendered = false; ++m_viewRevision; updateImplementationLabel(); placePaletteAndEditor(); m_canvas->Refresh(); event.Skip(); } );
+    {
+        m_rendered = false; ++m_viewRevision; updateImplementationLabel(); placePaletteAndEditor();
+        // The canvas has no scrolling: a resized window re-fits while the view is still the fitted one, or
+        // whenever part of the level would otherwise be out of view.
+        if( m_ready && current() && !m_captionKind && m_drag == DRAG::NONE && ( m_fitted || !drawingFits() ) ) fit();
+        m_canvas->Refresh(); event.Skip();
+    } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::motion, this );
@@ -238,6 +250,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         {
             if( event.GetKeyCode() == WXK_ESCAPE ) { finishCaption( false ); return; }
             if( event.GetKeyCode() == WXK_RETURN || event.GetKeyCode() == WXK_NUMPAD_ENTER ) { finishCaption( true ); return; }
+            // Save keeps a typed caption first; a blank one refuses the save and stays open.
+            if( event.ControlDown() && event.GetKeyCode() == 'S' ) { save(); return; }
             event.Skip(); return;
         }
         if( event.GetKeyCode() == WXK_ESCAPE && m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
@@ -683,7 +697,10 @@ void RECURSIVE_DIAGRAM_FRAME::levelResult( const D::RecursiveFileResult& result 
         || !same( result.level_edit().draft().scope().baseline(), sent.draft().scope().baseline() ) )
     { m_errorCode = "level_edit_mismatch"; m_error = "The removal result belongs to another diagram level; nothing was changed."; refresh(); return; }
     m_undo.push_back( m_removalBefore ); m_redo.clear();
+    // A removed port changes where the remaining unresolved ends on its owner attach (rule F2).
+    auto before = layout( current(), true );
     m_level = result.level_edit().draft(); m_lastEffects = result.level_edit().effects();
+    followRoutes( before );
     // Show every effect of the removal in one line; Undo restores all of them.
     wxArrayString removed; int unresolved = 0, realizations = 0;
     for( const auto& effect : m_lastEffects )
@@ -719,9 +736,10 @@ void RECURSIVE_DIAGRAM_FRAME::rebaseResult( const D::RecursiveFileResult& result
         if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
         LEVEL candidate = merge.candidate();
         resetLevel(); m_level = std::move( candidate ); m_dirty = true;
-        if( merge.presentation_overrides_size() )
-            m_notice = Utf8( wxString::Format( _( "Your layout kept %d positions that were also moved in the saved design." ),
-                                               merge.presentation_overrides_size() ) );
+        if( int kept = merge.presentation_overrides_size(); kept == 1 )
+            m_notice = Utf8( _( "Your layout kept a position that was also moved in the saved design." ) );
+        else if( kept > 1 )
+            m_notice = Utf8( wxString::Format( _( "Your layout kept %d positions that were also moved in the saved design." ), kept ) );
         m_rebasing = true; save(); return;
     }
     bool textOnly = merge.conflicts_size() > 0 && std::all_of( merge.conflicts().begin(), merge.conflicts().end(),
@@ -1002,7 +1020,7 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_connectFrom.reset();
     resetLevel(); m_dirty = false;
     select( id );
-    if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; select( saved->second.selected ); }
+    if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; m_fitted = false; select( saved->second.selected ); }
     else fit();
     ++m_viewRevision; refresh();
     CallAfter( [this] { if( !m_closing ) m_canvas->SetFocus(); } );
@@ -1230,10 +1248,13 @@ void RECURSIVE_DIAGRAM_FRAME::editComment()
 }
 void RECURSIVE_DIAGRAM_FRAME::save()
 {
-    if( !m_ready || m_process || !m_dirty || ( m_diagramHistoryOpen && !m_pendingHistoryRestore ) ) return;
+    if( !m_ready || m_process || ( m_diagramHistoryOpen && !m_pendingHistoryRestore ) ) return;
+    // A caption being typed is part of the draft. A blank one cannot be kept, so nothing is saved and the
+    // caption editor stays open with its notice.
+    if( m_captionKind ) { finishCaption( true ); if( m_captionKind ) return; }
+    if( !m_dirty ) return;
     if( !m_document.source_writable() )
     { m_errorCode = "diagram_file_read_only"; m_error = "This diagram file is read-only; changes cannot be saved."; refresh(); return; }
-    finishCaption( true );
     // A save the user asks for may rebase again; the automatic save of a rebased candidate may not.
     if( !m_rebasing ) m_rebaseAttempts = 0;
     m_rebasing = false;
@@ -1300,7 +1321,7 @@ void RECURSIVE_DIAGRAM_FRAME::returnFromHistoryPreview()
 {
     if( !m_historyPreview ) return;
     m_historyPreview.reset();
-    if( m_historyView ) { m_scale = m_historyView->scale; m_origin = m_historyView->origin; m_historyView.reset(); }
+    if( m_historyView ) { m_scale = m_historyView->scale; m_origin = m_historyView->origin; m_fitted = false; m_historyView.reset(); }
     m_diagramHistoryPanel->SetPreviewing( false ); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::closeDiagramHistory()
@@ -1601,6 +1622,8 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     *result.mutable_last_effects() = m_lastEffects;
     for( int i = 0; i < 3; ++i ) if( m_ready && m_fields[i]->IsShown() ) result.add_shown_requirement_fields( static_cast<D::RequirementFieldKind>( i + 1 ) );
     result.set_notice( m_notice );
+    if( auto* status = GetStatusBar() ) result.set_status_text( Utf8( status->GetStatusText() ) );
+    result.set_dragging( m_drag != DRAG::NONE );
     for( const auto& [block, view] : m_views )
     { auto* row = result.add_level_viewports(); row->set_block_id( block ); row->set_origin_x( view.origin.m_x ); row->set_origin_y( view.origin.m_y ); row->set_scale( view.scale ); }
     if( auto* canvas = current() )
@@ -1642,7 +1665,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
     };
-    std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete, m_endpoints };
+    std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete, m_endpoints, m_comments };
     for( auto& [tool, button] : m_strip ) windows.push_back( button );
     for( auto* child : m_palette->GetChildren() ) windows.push_back( child );
     for( int i = 0; i < 3; ++i ) { windows.push_back( m_fields[i] ); windows.push_back( m_history[i] ); }

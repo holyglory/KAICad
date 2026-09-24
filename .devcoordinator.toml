@@ -2635,7 +2635,7 @@ command=["cmake", "--build", "automation/artifacts/native", "--target", "qa_eesc
 [[test.native-symbol-library-identity.check]]
 name="identity"
 tier="development"
-command=["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--no-tests=error", "--output-on-failure", "-R", "^qa_schematic_(symbol_library_identity|formatting)$"]
+command=["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--no-tests=error", "--output-on-failure", "-R", "^qa_schematic_(symbol_library_identity|formatting)$|^qa_api_sch_proto$|^qa_sch_pin_geometry_facts$|^qa_sch_change_tracking$"]
 
 [[test.native-symbol-library-identity.check]]
 name="managed-build"
@@ -3266,7 +3266,7 @@ command=["cmake", "--build", "automation/artifacts/native", "--target", "api_sch
 name="native-suites"
 tier="development"
 requires=["native-build"]
-command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_api_request_target$|^qa_automation_caption$|^qa_automation_update_client$|^qa_automation_wire_rollback$|^qa_checked_schematic_controller$|^qa_document_change_journal$|^qa_document_lifecycle_controller$|^qa_erc_override_edits$|^qa_file_content_baseline$|^qa_native_state_digest$|^qa_net_chain_terminals$|^qa_net_settings_capture$|^qa_netclass_proto$|^qa_pcbnew_file_baseline$|^qa_pcbnew_state_format$|^qa_schematic_bom_settings$|^qa_schematic_parity_netlist$|^qa_schematic_setup_draft$|^qa_schematic_state_format$|^qa_settings_save_outcome$|^qa_symbol_graphic_identity$|^qa_symbol_update_identity$|^qa_undo_geometry_policy$", "--output-on-failure", "--no-tests=error"]
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_api_request_target$|^qa_automation_caption$|^qa_automation_update_client$|^qa_automation_wire_rollback$|^qa_checked_schematic_controller$|^qa_document_change_journal$|^qa_document_lifecycle_controller$|^qa_erc_override_edits$|^qa_file_content_baseline$|^qa_native_state_digest$|^qa_net_chain_terminals$|^qa_net_settings_capture$|^qa_netclass_proto$|^qa_pcbnew_file_baseline$|^qa_pcbnew_state_format$|^qa_schematic_bom_settings$|^qa_schematic_parity_netlist$|^qa_schematic_setup_draft$|^qa_schematic_state_format$|^qa_settings_save_outcome$|^qa_symbol_graphic_identity$|^qa_symbol_update_identity$|^qa_undo_geometry_policy$|^qa_api_sch_proto$|^qa_sch_pin_geometry_facts$|^qa_sch_change_tracking$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-acceptance.check]]
 name="journey-native-foundation"

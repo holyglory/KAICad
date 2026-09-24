@@ -459,9 +459,22 @@ wxRect CaptionRect( wxDC& dc, const NODE& node, const wxRect& inner, const wxFon
     return wxRect( wxPoint( inner.x + 10, inner.y + 24 ), extent ).Intersect( inner );
 }
 
-BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wxFont& small, const wxRect& caption )
+wxRect PortNameRect( wxDC& dc, const wxString& name, D::DiagramPortSide side, const wxPoint& at )
 {
-    BLOCK_CHIPS result; result.caption = caption;
+    wxSize extent = dc.GetTextExtent( name );
+    switch( side )
+    {
+    case D::DPS_RIGHT: return wxRect( wxPoint( at.x - extent.x - 8, at.y - extent.y / 2 ), extent );
+    case D::DPS_TOP: return wxRect( wxPoint( at.x - extent.x / 2, at.y + 6 ), extent );
+    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x - extent.x / 2, at.y - extent.y - 6 ), extent );
+    default: return wxRect( wxPoint( at.x + 8, at.y - extent.y / 2 ), extent );
+    }
+}
+
+BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wxFont& small, const wxRect& caption,
+                         const std::vector<wxRect>& portNames )
+{
+    BLOCK_CHIPS result; result.caption = caption; result.portNames = portNames;
     const int captionRight = caption.IsEmpty() ? box.x : caption.GetRight() + 1;
     std::vector<int> chosen;
     for( int facet = 0; facet < FACETS; ++facet )
@@ -477,45 +490,68 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
     // aBox is the block's content area: the caption sits at its top (24 to about 46 pixels down).
     const int height = dc.GetCharHeight() + 6, gap = 3, left = box.x + 10, width = box.width - 20, top = box.y + 50;
     const int mark = height - 9, textLeft = 6 + mark + 6;
+    // The part of a row from aFrom to aTo that is clear of the port names drawn inside the block edge: a name in the
+    // right half of the block ends the row before it, one in the left half starts the row after it.
+    auto span = [&]( int y, int h, int from, int to ) -> std::pair<int, int>
+    {
+        for( const auto& name : portNames )
+            if( name.y < y + h && name.GetBottom() >= y )
+            {
+                if( name.x + name.width / 2 >= box.x + box.width / 2 ) to = std::min( to, name.x - gap );
+                else from = std::max( from, name.GetRight() + 1 + gap );
+            }
+        return { from, std::max( from, to ) };
+    };
+    auto rowTop = [&]( size_t row ) { return top + static_cast<int>( row ) * ( height + gap ); };
+    auto rowSpan = [&]( size_t row ) { return span( rowTop( row ), height, left, left + width ); };
     int bottom = box.GetBottom() - 1;
     wxSize linkSize = dc.GetTextExtent( _( "Review facets" ) );
-    if( linkSize.x <= width && bottom - linkSize.y >= top )
-    { result.link = wxRect( left, bottom - linkSize.y, linkSize.x, linkSize.y ); bottom = result.link->y - gap; }
+    if( bottom - linkSize.y >= top )
+    {
+        auto [from, to] = span( bottom - linkSize.y, linkSize.y, left, left + width );
+        if( linkSize.x <= to - from ) { result.link = wxRect( from, bottom - linkSize.y, linkSize.x, linkSize.y ); bottom = result.link->y - gap; }
+    }
     int rows = bottom - top >= height ? ( bottom - top + gap ) / ( height + gap ) : 0;
     size_t shown = std::min<size_t>( chosen.size(), static_cast<size_t>( std::max( 0, rows ) ) );
     auto moreText = []( size_t count ) { return wxString::Format( _( "+%u more" ), static_cast<unsigned>( count ) ); };
+    auto rowWidth = [&]( size_t row ) { auto [from, to] = rowSpan( row ); return to - from; };
     int moreWidth = 0; bool ownRow = false;
     if( shown < chosen.size() )
     {
         moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16;
         // "+N more" shares the last row when a chip can keep some text beside it; otherwise it takes that row.
-        if( shown > 0 && moreWidth + gap + textLeft + 40 > width )
+        if( shown > 0 && moreWidth + gap + textLeft + 40 > rowWidth( shown - 1 ) )
         { --shown; ownRow = true; moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16; }
     }
     for( size_t i = 0; i < shown; ++i )
     {
         const auto& choice = *Facet( node.definition, chosen[i] );
+        auto [from, to] = rowSpan( i );
         bool shareRow = i + 1 == shown && shown < chosen.size() && !ownRow;
-        int available = shareRow ? width - moreWidth - gap : width;
+        int available = shareRow ? to - from - moreWidth - gap : to - from;
         wxString text = FacetLabel( chosen[i] ) + wxS( ": " ) + ChoiceValue( choice, wxS( " / " ) );
         text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, std::max( 0, available - textLeft - 6 ) );
-        int chipWidth = std::min( available, textLeft + dc.GetTextExtent( text ).x + 8 );
-        result.chips.push_back( { chosen[i], choice.state(), text, wxRect( left, top + static_cast<int>( i ) * ( height + gap ), chipWidth, height ) } );
+        int chipWidth = std::max( 0, std::min( available, textLeft + dc.GetTextExtent( text ).x + 8 ) );
+        result.chips.push_back( { chosen[i], choice.state(), text, wxRect( from, rowTop( i ), chipWidth, height ) } );
     }
     result.hidden = static_cast<unsigned>( chosen.size() - result.chips.size() );
-    if( result.hidden && moreWidth <= width )
+    if( result.hidden )
     {
         if( !result.chips.empty() && !ownRow )
-            result.more = wxRect( result.chips.back().rect.GetRight() + 1 + gap, result.chips.back().rect.y, moreWidth, height );
-        else if( rows > 0 )
-            result.more = wxRect( left, top + static_cast<int>( result.chips.size() ) * ( height + gap ), moreWidth, height );
+        {
+            wxRect more( result.chips.back().rect.GetRight() + 1 + gap, result.chips.back().rect.y, moreWidth, height );
+            if( more.GetRight() < rowSpan( result.chips.size() - 1 ).second + 1 ) result.more = more;
+        }
+        else if( rows > 0 && static_cast<size_t>( rows ) > result.chips.size() && moreWidth <= rowWidth( result.chips.size() ) )
+            result.more = wxRect( rowSpan( result.chips.size() ).first, rowTop( result.chips.size() ), moreWidth, height );
     }
     if( result.chips.empty() && !result.more && !chosen.empty() )
     {
         // Too small for a chip: the choices' state marks follow the caption where they fit.
         const int size = std::max( 6, std::min( 12, mark ) ), step = size + 3;
-        int x = box.GetRight() - static_cast<int>( chosen.size() ) * step;
-        if( x >= std::max( captionRight + 6, left ) && box.y + 29 + size <= box.GetBottom() )
+        auto [from, to] = span( box.y + 29, size, std::max( captionRight + 6, left ), box.GetRight() );
+        int x = to - static_cast<int>( chosen.size() ) * step;
+        if( x >= from && box.y + 29 + size <= box.GetBottom() )
             for( size_t i = 0; i < chosen.size(); ++i )
                 result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, box.y + 29, size, size ) } );
     }
@@ -800,26 +836,35 @@ void RECURSIVE_DIAGRAM_FRAME::routeNewConnection( const std::string& id )
 }
 void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
 {
-    // A route laid out as one offset channel (two waypoints on one vertical line at the heights of its two
-    // ends) keeps its offset from the computed middle when an end moves, so it never leaves a stale corner.
-    // Any other stored route is kept exactly as drawn.
+    // A channel route (two unlocked waypoints on one vertical line) always runs level from each end to its channel:
+    // its two heights are the current heights of its ends, even when a merge or an earlier writer left them out of
+    // line, so every leg stays horizontal or vertical. When an end moved since aBefore, the channel keeps its offset
+    // from the middle between the ends. A locked route, and any other stored route, is kept exactly as drawn.
     if( !m_level.scope().local_diagram().has_presentation() ) return;
     auto after = layout( current(), true );
     for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
     {
-        const R::LINK *was = before.Link( row.connection_id() ), *now = after.Link( row.connection_id() );
+        if( row.locked() || row.waypoints_size() != 2 ) continue;
+        const R::LINK* now = after.Link( row.connection_id() );
         int index = static_cast<int>( row.endpoint_index() );
-        if( !was || !now || row.waypoints_size() != 2 ) continue;
+        if( !now ) continue;
         R::POINT first, second;
         if( !R::ParseUnits( row.waypoints( 0 ).x(), first.x ) || !R::ParseUnits( row.waypoints( 0 ).y(), first.y )
             || !R::ParseUnits( row.waypoints( 1 ).x(), second.x ) || !R::ParseUnits( row.waypoints( 1 ).y(), second.y ) ) continue;
-        auto previous = before.Route( *was, index ), next = after.Route( *now, index );
-        if( previous.size() != 4 || next.size() != 4 || first.x != second.x || first.y != previous.front().y || second.y != previous.back().y ) continue;
+        auto next = after.Route( *now, index );
+        if( next.size() != 4 || first.x != second.x ) continue;
         const R::POINT from = next.front(), to = next.back();
-        if( from.x == previous.front().x && from.y == previous.front().y && to.x == previous.back().x && to.y == previous.back().y ) continue;
-        int64_t x = ( from.x + to.x ) / 2 + first.x - ( previous.front().x + previous.back().x ) / 2;
-        const int64_t margin = 10 * Q, low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
-        x = low <= high ? std::clamp( x, low, high ) : ( from.x + to.x ) / 2;
+        int64_t x = first.x;
+        const R::LINK* was = before.Link( row.connection_id() );
+        auto previous = was ? before.Route( *was, index ) : std::vector<R::POINT>();
+        if( previous.size() == 4 && ( from.x != previous.front().x || from.y != previous.front().y
+                                      || to.x != previous.back().x || to.y != previous.back().y ) )
+        {
+            x = ( from.x + to.x ) / 2 + first.x - ( previous.front().x + previous.back().x ) / 2;
+            const int64_t margin = 10 * Q, low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
+            x = low <= high ? std::clamp( x, low, high ) : ( from.x + to.x ) / 2;
+        }
+        if( x == first.x && from.y == first.y && to.y == second.y ) continue;
         encodePoint( { x, from.y }, row.mutable_waypoints( 0 ) ); encodePoint( { x, to.y }, row.mutable_waypoints( 1 ) );
     }
 }
@@ -999,6 +1044,39 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
     }
     return result;
 }
+/// Where a boundary port drawn at aAt names itself, in canvas pixels, with aDC's font: outside the level frame beside the
+/// port's side, or above and right of a boundary port that has no stored placement yet.
+wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
+{
+    wxSize extent = dc.GetTextExtent( Text( port.name ) );
+    if( !port.placed ) return wxRect( wxPoint( at.x + 12, at.y - 24 ), extent );
+    switch( port.side )
+    {
+    case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 8, at.y - extent.y - 4 ), extent );
+    case D::DPS_TOP: return wxRect( wxPoint( at.x + 8, at.y - extent.y - 6 ), extent );
+    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x + 8, at.y + 6 ), extent );
+    default: return wxRect( wxPoint( at.x - extent.x - 8, at.y - extent.y - 4 ), extent );
+    }
+}
+}
+
+std::vector<std::pair<std::string, wxRect>> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<std::pair<std::string, wxRect>> result;
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    for( const auto& port : drawn.Ports() )
+        if( port.boundary ) result.emplace_back( port.name, boundaryName( dc, port, toScreen( port.anchor ) ) );
+    return result;
+}
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL_LAYOUT& drawn, const std::string& block ) const
+{
+    // The names a block always shows inside its edge: its placed ports' (see paint). The chips keep clear of them.
+    std::vector<wxRect> result;
+    dc.SetFont( chipFont() );
+    for( const auto& port : drawn.Ports() )
+        if( !port.boundary && port.placed && port.blockId == block )
+            result.push_back( R::PortNameRect( dc, Text( port.name ), port.side, toScreen( port.anchor ) ) );
+    return result;
 }
 
 const R::PORT* RECURSIVE_DIAGRAM_FRAME::portAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
@@ -1302,6 +1380,9 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     {
         dc.SetPen( wxPen( muted, 1, wxPENSTYLE_SHORT_DASH ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawRectangle( toScreen( *frame ) );
     }
+    // Connection captions are drawn after the blocks and their resize handles, so a handle never covers one.
+    std::vector<std::pair<wxString, wxPoint>> captions;
+    const wxFont captionFont = dc.GetFont();
     for( const auto& link : drawn.Links() )
     {
         bool highlighted = link.id == m_connectionId;
@@ -1319,7 +1400,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
                 wxString caption = Text( link.name ); wxSize extent = dc.GetTextExtent( caption );
                 wxPoint at = captionPosition( points, extent );
                 if( auto label = drawn.RouteLabel( link.id, i ) ) at = toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 );
-                dc.DrawText( caption, at );
+                captions.emplace_back( caption, at );
             }
         }
     }
@@ -1346,11 +1427,14 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         // The block's content sits inside an 8-pixel margin; the outline and its handles stay on the block's edges.
         wxRect inner = wxRect( box ).Deflate( 8 );
         dc.SetClippingRegion( inner );
+        auto names = portNames( dc, drawn, node.id );
         wxRect caption = R::CaptionRect( dc, node, inner, GetFont().Bold().Larger() );
         dc.DrawText( Text( node.name ), inner.x + 10, inner.y + 24 ); dc.SetFont( GetFont() );
         // A block shows a chip for each chosen or candidate component choice once it has any (Round A4, owner
         // decision n0b2a908b00e78823); until then it is only its caption (owner decision n98a3f3c41084f0ed).
-        auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption );
+        auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption, names );
+        // A previewed past revision is read only: its blocks keep their chips, but Review facets would do nothing there.
+        if( m_historyPreview ) chips.link.reset();
         if( chips.shown ) R::DrawChips( dc, chips, chipFont(), dark, foreground, linkColour() );
         else if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), inner.x + 10, inner.y + 58 );
         dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
@@ -1363,41 +1447,29 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             for( const auto& handle : handles ) dc.DrawRectangle( handle.x - 3, handle.y - 3, 7, 7 );
         }
     }
+    dc.SetFont( captionFont ); dc.SetTextForeground( foreground );
+    for( const auto& [caption, at] : captions ) dc.DrawText( caption, at );
+    dc.SetFont( GetFont() );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
         bool selected = port.owner == m_portOwner && port.id == m_portId;
         dc.SetPen( wxPen( selected ? accent : foreground, selected ? 2 : 1 ) );
         dc.SetBrush( selected ? wxBrush( accent.ChangeLightness( dark ? 70 : 160 ) ) : wxBrush( background ) );
         dc.DrawRectangle( port.at.x - 4, port.at.y - 4, 8, 8 );
-        if( port.boundary && !port.placed ) dc.DrawText( Text( port.name ), port.at.x + 12, port.at.y - 24 );
-        else if( port.boundary )
+        if( port.boundary )
         {
             // A port on the level frame names itself outside the frame, beside its side.
-            const R::PORT* stored = drawn.Port( port.owner, port.id );
-            wxSize extent = dc.GetTextExtent( Text( port.name ) );
-            switch( stored ? stored->side : D::DPS_LEFT )
-            {
-            case D::DPS_RIGHT: dc.DrawText( Text( port.name ), port.at.x + 8, port.at.y - extent.y - 4 ); break;
-            case D::DPS_TOP: dc.DrawText( Text( port.name ), port.at.x + 8, port.at.y - extent.y - 6 ); break;
-            case D::DPS_BOTTOM: dc.DrawText( Text( port.name ), port.at.x + 8, port.at.y + 6 ); break;
-            default: dc.DrawText( Text( port.name ), port.at.x - extent.x - 8, port.at.y - extent.y - 4 ); break;
-            }
+            if( const R::PORT* stored = drawn.Port( port.owner, port.id ) )
+                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at ).GetTopLeft() );
         }
         else if( port.placed || selected )
         {
             // A block's port names itself just inside the block edge, as KiCad labels sheet pins,
-            // so it never collides with connection captions drawn outside the block.
-            wxFont small = GetFont(); small.SetPointSize( std::max( 8, small.GetPointSize() - 2 ) ); dc.SetFont( small );
-            wxSize extent = dc.GetTextExtent( Text( port.name ) ); wxRect box = toScreen( drawn.Rect( port.owner ) );
+            // so it never collides with connection captions drawn outside the block; chips keep clear of it.
+            dc.SetFont( chipFont() ); wxRect box = toScreen( drawn.Rect( port.owner ) );
             const R::PORT* stored = drawn.Port( port.owner, port.id );
             D::DiagramPortSide side = stored && stored->placed ? stored->side : ( port.at.x >= box.x + box.width / 2 ? D::DPS_RIGHT : D::DPS_LEFT );
-            switch( side )
-            {
-            case D::DPS_RIGHT: dc.DrawText( Text( port.name ), port.at.x - extent.x - 8, port.at.y - extent.y / 2 ); break;
-            case D::DPS_TOP: dc.DrawText( Text( port.name ), port.at.x - extent.x / 2, port.at.y + 6 ); break;
-            case D::DPS_BOTTOM: dc.DrawText( Text( port.name ), port.at.x - extent.x / 2, port.at.y - extent.y - 6 ); break;
-            default: dc.DrawText( Text( port.name ), port.at.x + 8, port.at.y - extent.y / 2 ); break;
-            }
+            dc.DrawText( Text( port.name ), R::PortNameRect( dc, Text( port.name ), side, port.at ).GetTopLeft() );
             dc.SetFont( GetFont() );
         }
     }
@@ -1460,6 +1532,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
 
 void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 {
+    ++m_canvasPresses;
     if( !m_ready || m_process || !current() || m_diagramHistoryOpen ) return;
     wxPoint point = event.GetPosition(); m_pointer = point;
     // A new press ends any drag whose release was not delivered; a press the canvas receives only through

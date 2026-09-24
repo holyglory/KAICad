@@ -923,10 +923,14 @@ void RECURSIVE_DIAGRAM_FRAME::rebaseResult( const D::RecursiveFileResult& result
         // Save the revalidated candidate against this exact new file token; the
         // normal disk guard rejects another change between compare and save.
         std::string scope = m_level.scope().baseline().block_id();
+        // The retained draft as drawn: the merge keeps this draft's routes while another writer may have moved
+        // their ends, so the candidate's channel routes follow the ends before it is saved.
+        auto before = layout( current(), true );
         m_document = result.document();
         if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
         LEVEL candidate = merge.candidate();
         resetLevel(); m_level = std::move( candidate ); m_dirty = true;
+        followRoutes( before );
         if( int kept = merge.presentation_overrides_size(); kept == 1 )
             m_notice = Utf8( _( "Your layout kept a position that was also moved in the saved design." ) );
         else if( kept > 1 )
@@ -1129,6 +1133,14 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     for( auto& [tool, button] : m_strip ) { button->SetValue( tool == m_tool ); button->Enable( drawing ); }
     m_stripDelete->Enable( drawing && canDelete() );
     m_palette->SetState( m_tool, drawing, canDelete(), available && !m_undo.empty() );
+    showStatus();
+    fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
+    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    m_updating = false; m_rendered = false; m_canvas->Refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::showStatus()
+{
+    // One status line for every path that changes the draft, so typing never hides why Save is unavailable.
     wxString status = !m_error.empty() ? Text( m_error ) : m_process ? _( "Working…" )
         : !m_notice.empty() ? Text( m_notice )
         : m_tool == TOOL::CONNECT && m_connectFrom ? _( "Click a port to finish connection" )
@@ -1139,9 +1151,6 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
         : m_ready && !m_document.source_writable() ? _( "This diagram file is read-only; changes cannot be saved." )
         : m_dirty ? _( "Unsaved changes" ) : wxString();
     SetStatusText( status );
-    fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
-    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
-    m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
 {
@@ -1641,7 +1650,7 @@ void RECURSIVE_DIAGRAM_FRAME::captionEdited()
     m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
-    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    showStatus();
     m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::fillConnection( bool available )
@@ -1794,8 +1803,6 @@ bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice
     int state = facetState(), strength = facetStrength();
     choice.Clear();
     choice.set_strength( static_cast<kiapi::automation::structure::v1::StructuralGuidanceStrength>( strength ) );
-    // Conditions and sources recorded with the facet stay with it.
-    if( base ) { choice.set_applicability( base->applicability() ); *choice.mutable_sources() = base->sources(); }
     if( state == 0 )
     {
         wxString value = m_facetValue->GetValue().Strip( wxString::both );
@@ -1819,9 +1826,13 @@ bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice
         if( reason.empty() ) { problem = _( "Say why this is unknown." ); return false; }
         choice.set_state( D::DCSD_UNKNOWN ); choice.set_unknown_reason( R::Utf8( reason ) );
     }
-    // A changed state or value is no longer the one that was verified.
+    // The sources, the condition it applies under and the verification recorded with a facet describe that exact
+    // choice. A changed state, value or unknown reason is a new statement: it keeps none of them (the inspector does
+    // not show them, so the person could not see that they no longer fit). A changed strength alone keeps them.
     bool same = base && base->state() == choice.state() && base->values().size() == choice.values().size()
-                && std::equal( base->values().begin(), base->values().end(), choice.values().begin() );
+                && std::equal( base->values().begin(), base->values().end(), choice.values().begin() )
+                && base->unknown_reason() == choice.unknown_reason();
+    if( same ) { choice.set_applicability( base->applicability() ); *choice.mutable_sources() = base->sources(); }
     choice.set_verification( same ? base->verification() : kiapi::automation::structure::v1::SV_UNVERIFIED );
     problem.clear(); return true;
 }
@@ -1996,7 +2007,7 @@ void RECURSIVE_DIAGRAM_FRAME::facetEdited()
         m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
         m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision; return;
     }
-    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) { m_notice.clear(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); }
+    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) { m_notice.clear(); showStatus(); }
     m_facetTouched = false; m_facetProblem.clear();
     if( m_facetNotice->IsShown() ) { m_facetNotice->Hide(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); }
     const auto* existing = R::Facet( *selectedDefinition(), m_facet );
@@ -2021,7 +2032,7 @@ void RECURSIVE_DIAGRAM_FRAME::facetEdited()
     m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
-    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    showStatus();
     m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::clearFacet()
@@ -2059,7 +2070,10 @@ std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::dra
     for( const auto& node : drawn.Nodes() )
     {
         wxRect inner = wxRect( toScreen( drawn.Rect( node.id ) ) ).Deflate( 8 );
-        auto chips = R::LayoutChips( dc, node, inner, small, R::CaptionRect( dc, node, inner, caption ) );
+        auto names = portNames( dc, drawn, node.id );
+        auto chips = R::LayoutChips( dc, node, inner, small, R::CaptionRect( dc, node, inner, caption ), names );
+        // As drawn: a previewed past revision shows no Review facets link (see paint).
+        if( m_historyPreview ) chips.link.reset();
         if( chips.shown ) result.emplace_back( node.id, std::move( chips ) );
     }
     return result;
@@ -2088,7 +2102,7 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
     m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
-    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    showStatus();
 }
 void RECURSIVE_DIAGRAM_FRAME::fillComments()
 {
@@ -2147,7 +2161,7 @@ void RECURSIVE_DIAGRAM_FRAME::editComment()
     m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges();
     ++m_viewRevision; m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
-    fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); showStatus();
     m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::save()
@@ -2580,6 +2594,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             }
             if( chips.more ) place( row->mutable_more(), "DiagramMoreChips", *chips.more, false );
             place( row->mutable_caption(), "DiagramBlockCaption", chips.caption, false );
+            for( const auto& name : chips.portNames ) place( row->add_port_names(), "DiagramBlockPortName", name, false );
         }
         for( int facet = 0; facet < R::FACETS; ++facet ) if( m_facetRows[facet]->IsShown() ) result.add_shown_facets( R::FacetName( facet ) );
         result.set_facet_editor( m_facet >= 0 ? R::FacetName( m_facet ) : "" );
@@ -2602,7 +2617,17 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             place( mark->add_arrows(), "DiagramArrow", box, false );
         }
         for( auto& [id, mark] : marks ) std::sort( mark->mutable_arrow_endpoints()->begin(), mark->mutable_arrow_endpoints()->end() );
+        // Round A1: the level frame and the names of its boundary ports as drawn, so a journey can check that fitting keeps
+        // them beside the palette and inside the canvas.
+        if( m_ready && current() )
+        {
+            auto drawn = layout( current(), !m_historyPreview );
+            if( auto frame = drawn.Frame() ) place( result.mutable_level_frame(), "DiagramLevelFrame", toScreen( *frame ), false );
+            for( const auto& [name, rect] : boundaryNames( drawn ) )
+            { auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", rect, false ); row->set_label( name ); }
+        }
     }
+    result.set_canvas_presses( m_canvasPresses );
     for( const auto& [block, view] : m_views )
     { auto* row = result.add_level_viewports(); row->set_block_id( block ); row->set_origin_x( view.origin.m_x ); row->set_origin_y( view.origin.m_y ); row->set_scale( view.scale ); }
     if( auto* canvas = current() )

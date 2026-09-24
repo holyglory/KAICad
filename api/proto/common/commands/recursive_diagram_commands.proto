@@ -165,6 +165,14 @@ message RecursiveDiagramEditorState {
   string connection_notice = 218;
   // How each connection of the viewed level shows its direction on the canvas, as drawn.
   repeated DiagramCanvasConnectionMarks connection_marks = 219;
+  // The viewed level's stored frame (its dashed boundary) as drawn, relative to the editor window; absent while the
+  // level has no stored frame. shown is true when the whole frame lies inside the canvas.
+  DiagramControlRect level_frame = 220;
+  // Each port on the level's boundary, with its name (label) as drawn beside the frame, relative to the editor window.
+  // shown is true when the whole name lies inside the canvas.
+  repeated DiagramControlRect boundary_port_names = 221;
+  // Presses the canvas has received, so rendered input can tell a press that changed nothing from one not yet delivered.
+  uint64 canvas_presses = 222;
 }
 
 // The arrowheads a connection shows on the canvas for its direction detail; a connection without a
@@ -212,6 +220,9 @@ message DiagramCanvasBlockChips {
   DiagramControlRect more = 6;
   // The block's caption text as drawn (clipped to the block's content area).
   DiagramControlRect caption = 7;
+  // The names of the block's placed ports as drawn just inside its edge; chips, "+N more", marks and the Review facets
+  // link keep clear of them.
+  repeated DiagramControlRect port_names = 8;
 }
 
 // One rendered control relative to the editor window, in pixels. active is the

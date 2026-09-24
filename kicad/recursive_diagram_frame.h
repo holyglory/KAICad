@@ -74,6 +74,9 @@ private:
     void levelResult( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult );
     void rebaseResult( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult );
     void refresh();
+    /// The status bar line: an error, a running request, a notice, the active tool's hint, why Save is unavailable
+    /// for a read-only file, or unsaved changes. Every path that changes the draft shows it the same way.
+    void showStatus();
 
     // The level draft.
     const kiapi::automation::diagrams::v1::ConnectionRevisionData* savedConnection( const std::string& aConnectionId ) const;
@@ -104,7 +107,8 @@ private:
     void encloseInFrame( const RECURSIVE_DIAGRAM::RECT& aRect );
     /// Stores a route for a new connection whose computed path would run along another one (rule F4).
     void routeNewConnection( const std::string& aConnectionId );
-    /// Keeps each stored channel route's offset when its ends moved since aBefore.
+    /// Keeps each unlocked channel route level with its ends' current heights, and its offset from the middle
+    /// when its ends moved since aBefore.
     void followRoutes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore );
 
     // Selection and navigation.
@@ -248,6 +252,10 @@ private:
     /// Pixels the names of ports on the level frame need beyond the frame on each side.
     struct LABEL_ROOM { int left = 0, top = 0, right = 0, bottom = 0; };
     LABEL_ROOM labelRoom( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Where the placed ports of aBlock name themselves inside its edge, in canvas pixels (sets aDC's font to the chip font).
+    std::vector<wxRect> portNames( wxDC& aDC, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::string& aBlock ) const;
+    /// Each boundary port's name and where it is drawn beside the level frame, in canvas pixels.
+    std::vector<std::pair<std::string, wxRect>> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     wxPoint toScreen( const RECURSIVE_DIAGRAM::POINT& aPoint ) const;
     wxRect toScreen( const RECURSIVE_DIAGRAM::RECT& aRect ) const;
     RECURSIVE_DIAGRAM::POINT toDiagram( const wxPoint& aPoint ) const;
@@ -279,6 +287,8 @@ private:
     bool m_ready = false, m_dirty = false, m_rendered = false, m_updating = false, m_closing = false;
     uint64_t m_viewRevision = 0, m_saveCount = 0;
     uint64_t m_navigationInputRevision = 0;
+    /// Presses the canvas received, reported so rendered input can tell a press that changed nothing from one not yet delivered.
+    uint64_t m_canvasPresses = 0;
     unsigned m_rebaseAttempts = 0;
     bool m_rebasing = false;
     LEVEL m_sentLevel, m_removalBefore;

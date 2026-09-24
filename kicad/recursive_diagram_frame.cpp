@@ -107,7 +107,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     // active tool the same clear way (design QA P2-1, P2-2 and P2-3).
     auto strip = [&]( TOOL tool, const wxString& label, R::GLYPH glyph, const char* name, const wxString& tip )
     {
-        auto* button = new R::TOOL_BUTTON( m_toolbar, label, glyph, R::TOOL_BUTTON::STYLE::STRIP, name, true, tip );
+        auto* button = new R::TOOL_BUTTON( m_toolbar, label, glyph, R::TOOL_STYLE::STRIP, name, tip );
         button->Bind( wxEVT_TOGGLEBUTTON, [this, tool]( wxCommandEvent& ) { setTool( tool ); m_canvas->SetFocus(); } );
         m_toolbar->AddControl( button ); m_strip.emplace_back( tool, button );
     };
@@ -115,7 +115,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     strip( TOOL::ADD_BLOCK, _( "Add block" ), R::GLYPH::ADD_BLOCK, "RecursiveToolAddBlock", _( "Add a block where you click (B)" ) );
     strip( TOOL::CONNECT, _( "Connect" ), R::GLYPH::CONNECT, "RecursiveToolConnect", _( "Connect two blocks or ports (C)" ) );
     strip( TOOL::ADD_PORT, _( "Place port" ), R::GLYPH::PORT, "RecursiveToolPlacePort", _( "Place a port on a block edge or the level boundary (P)" ) );
-    m_stripDelete = new R::TOOL_BUTTON( m_toolbar, _( "Delete" ), R::GLYPH::REMOVE, R::TOOL_BUTTON::STYLE::STRIP, "RecursiveToolDelete", false,
+    m_stripDelete = new R::TOOL_ACTION( m_toolbar, _( "Delete" ), R::GLYPH::REMOVE, R::TOOL_STYLE::STRIP, "RecursiveToolDelete",
                                         _( "Delete the selection (Delete)" ) );
     m_stripDelete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeSelection(); } );
     m_toolbar->AddControl( m_stripDelete );
@@ -2791,11 +2791,19 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.
     wxPoint window = GetScreenPosition();
-    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label )
+    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label,
+                        wxWindow* item = nullptr )
     {
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
         row->set_label( Utf8( label ) );
+        // What assistive technology reads from a button, a one-click choice or a facet row, from the toolkit itself.
+        if( item && ( dynamic_cast<wxAnyButton*>( item ) || dynamic_cast<wxRadioButton*>( item ) || dynamic_cast<R::FACET_ROW*>( item ) ) )
+            if( auto accessible = R::AccessibleOf( item ) )
+            {
+                auto* out = row->mutable_accessible();
+                out->set_role( accessible->role ); out->set_name( accessible->name ); out->set_checked( accessible->checked );
+            }
     };
     std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete,
                                     m_endpoints, m_comments, m_inspectorScroll, m_connectionCaption, m_signalEntry, m_savedVersion };
@@ -2815,15 +2823,14 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
         auto* toggle = dynamic_cast<wxToggleButton*>( item );
         auto* radio = dynamic_cast<wxRadioButton*>( item );
-        auto* tool = dynamic_cast<R::TOOL_BUTTON*>( item );
-        bool labelled = radio || dynamic_cast<wxAnyButton*>( item ) || tool || dynamic_cast<R::LINK_BUTTON*>( item ) || item == m_owner
+        bool labelled = radio || dynamic_cast<wxAnyButton*>( item ) || dynamic_cast<R::FACET_ROW*>( item ) || item == m_owner
                         || dynamic_cast<wxStaticText*>( item );
         // The connection's caption field and new-signal entry report the text they show (Round A3).
         auto* text = dynamic_cast<wxStaticText*>( item );
         wxString label = item == m_connectionCaption ? m_connectionCaption->GetValue() : item == m_signalEntry ? m_signalEntry->GetValue()
                        : text ? text->GetLabelText() : labelled ? item->GetLabel() : wxString();
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
-                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ) || ( tool && tool->IsToggle() && tool->GetValue() ), label );
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label, item );
     }
     // The splitter's sash between the canvas and the inspector, which widens or narrows the inspector.
     if( m_splitter->IsSplit() )

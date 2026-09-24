@@ -3,10 +3,12 @@
 #define KICAD_RECURSIVE_DIAGRAM_CANVAS_H
 
 #include <api/common/commands/recursive_diagram_commands.pb.h>
+#include <wx/button.h>
 #include <wx/colour.h>
 #include <wx/control.h>
 #include <wx/panel.h>
 #include <wx/string.h>
+#include <wx/tglbtn.h>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -267,6 +269,10 @@ private:
     int64_t referenceY( const D::DiagramEndpointBindingData& aEndpoint ) const;
     bool isBlockEnd( const D::DiagramEndpointBindingData& aEndpoint ) const;
     D::DiagramPortSide facing( const D::DiagramEndpointBindingData& aEndpoint, const D::DiagramEndpointBindingData& aPeer ) const;
+    /// Which way a path leaves aEndpoint attached at aAt (rule F4c): +1 right, -1 left, 0 for a top or bottom side.
+    int normal( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
+    /// The child block aEndpoint is on, or an empty id for a boundary end.
+    std::string ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
     void placeBlockEnds();
     void placePaths();
 
@@ -292,63 +298,90 @@ enum class TOOL { SELECT, ADD_BLOCK, CONNECT, ADD_PORT, NOTE };
 /// The observation name of a tool: "select", "add-block", "connect", "add-port" or "note".
 const char* ToolName( TOOL aTool );
 
-/** One drawing tool button with its glyph above its label: a tool (one of which is active) or an action. The toolbar
- * strip and the canvas-edge palette use the same buttons (Round A1), drawn by the editor so both entry points show the
- * active tool the same clear way (design QA P2-1): in the strip a pale accent tile with an accent border, glyph and
- * label, and in the palette a solid accent cell. It is pressed with the pointer, or Space or Enter when focused. */
-class TOOL_BUTTON : public wxControl
+enum class TOOL_STYLE { STRIP, PALETTE };
+
+/// How a drawing tool looks: its glyph above its label, in the toolbar strip (sketch 1) or in a palette cell (sketch 2).
+/// The strip and the palette share it, so both entry points show one icon family and the active tool the same clear way
+/// (design QA P2-1 to P2-3): in the strip a pale accent tile with an accent border, glyph and label, in the palette a
+/// solid accent cell.
+struct TOOL_FACE
+{
+    wxString label;
+    GLYPH glyph;
+    TOOL_STYLE style;
+    wxSize BestSize( const wxWindow* aWindow ) const;
+    /// The glyph's box and the label's text box as drawn in aWindow, in client pixels.
+    wxRect GlyphRect( const wxWindow* aWindow ) const;
+    wxRect LabelRect( const wxWindow* aWindow ) const;
+    void Paint( wxDC& aDC, const wxWindow* aWindow, bool aActive, bool aHover, bool aDown ) const;
+};
+
+/// A platform button the editor paints itself.
+class BUTTON_PAINTER
 {
 public:
-    enum class STYLE { STRIP, PALETTE };
-    TOOL_BUTTON( wxWindow* aParent, const wxString& aLabel, GLYPH aGlyph, STYLE aStyle, const char* aName, bool aToggle,
-                 const wxString& aToolTip, const wxSize& aCell = wxDefaultSize );
-    bool IsToggle() const { return m_toggle; }
-    bool GetValue() const { return m_value; }
-    void SetValue( bool aValue );
-    bool AcceptsFocus() const override { return IsShown() && IsEnabled(); }
-    /// The visible label, which is also the button's accessible name.
-    void SetLabel( const wxString& aLabel ) override;
-    wxString GetLabel() const override;
-    /// The glyph's box and the label's text box as drawn, in client pixels.
-    wxRect GlyphRect() const;
-    wxRect LabelRect() const;
-    bool Enable( bool aEnable = true ) override;
+    virtual ~BUTTON_PAINTER() = default;
+    /// Paints the whole button in client pixels; aHover and aDown are the pointer's state over it.
+    virtual void PaintButton( wxDC& aDC, bool aHover, bool aDown ) = 0;
+};
+
+/// On GTK, hands the drawing of aButton, a platform button, to aPainter. The button stays the platform's own, so it keeps
+/// its role, its label as its name, its pressed state, its focus and its keys for assistive technology (wxGTK has no
+/// wxAccessible). A press leaves the keyboard focus where it was. Elsewhere the platform draws the button.
+void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter );
+/// Gives aWindow the accessible role aRole (an ATK role name such as "link" or "push button") and, when not empty, the
+/// accessible name aName (GTK; elsewhere nothing changes).
+void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName );
+/// What assistive technology reads from a control: its role, its name and whether it is checked (pressed).
+struct ACCESSIBLE { std::string role, name; bool checked = false; };
+/// The accessible role, name and checked state of aWindow as the toolkit exposes them (GTK's ATK object); none elsewhere.
+std::optional<ACCESSIBLE> AccessibleOf( wxWindow* aWindow );
+
+/** One drawing tool (one of which is active) in the toolbar strip or the canvas-edge palette (Round A1). It is the
+ * platform's own toggle button, pressed with the pointer, or Space or Enter when focused, and on GTK the editor paints
+ * it as TOOL_FACE describes. */
+class TOOL_BUTTON : public wxToggleButton, public BUTTON_PAINTER
+{
+public:
+    TOOL_BUTTON( wxWindow* aParent, const wxString& aLabel, GLYPH aGlyph, TOOL_STYLE aStyle, const char* aName, const wxString& aToolTip );
+    const TOOL_FACE& Face() const { return m_face; }
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
 
 protected:
     wxSize DoGetBestSize() const override;
 
 private:
-    void paint();
-    void press();
-
-    wxString m_label;
-    GLYPH m_glyph;
-    STYLE m_style;
-    bool m_toggle, m_value = false, m_hover = false, m_down = false;
-    wxSize m_cell;
+    TOOL_FACE m_face;
 };
 
-/** A quiet action drawn as an underlined link in the link colour, pressed with the pointer, or Space or Enter when
- * focused (design QA P2-10: "Back to facet overview" and "Clear facet"). */
-class LINK_BUTTON : public wxPanel
+/// An action beside the tools (Delete, and Undo in the palette): the platform's own push button, painted as the tools are.
+class TOOL_ACTION : public wxButton, public BUTTON_PAINTER
+{
+public:
+    TOOL_ACTION( wxWindow* aParent, const wxString& aLabel, GLYPH aGlyph, TOOL_STYLE aStyle, const char* aName, const wxString& aToolTip );
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    TOOL_FACE m_face;
+};
+
+/** A quiet action drawn as an underlined link in the link colour (design QA P2-10: "Back to facet overview" and "Clear
+ * facet"). It is the platform's own push button, announced as a link, pressed with the pointer, or Space or Enter when
+ * focused. */
+class LINK_BUTTON : public wxButton, public BUTTON_PAINTER
 {
 public:
     LINK_BUTTON( wxWindow* aParent, const wxString& aLabel, const char* aName );
-    bool AcceptsFocus() const override { return IsShown() && IsEnabled(); }
     void SetLabel( const wxString& aLabel ) override;
-    wxString GetLabel() const override;
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
     /// The link colour of the current theme (#20518D on a light surface, #B8CBE1 on a dark one, or the theme's own).
     static wxColour LinkColour( const wxColour& aSurface );
 
 protected:
     wxSize DoGetBestSize() const override;
-
-private:
-    void paint();
-    void press();
-
-    wxString m_label;
-    bool m_hover = false, m_down = false;
 };
 
 /** The canvas-edge palette (Round A1 option 2): the same drawing tools as the toolbar strip plus
@@ -374,8 +407,8 @@ private:
 
     ACTIONS m_actions;
     std::vector<std::pair<TOOL, TOOL_BUTTON*>> m_tools;
-    TOOL_BUTTON* m_delete;
-    TOOL_BUTTON* m_undo;
+    TOOL_ACTION* m_delete;
+    TOOL_ACTION* m_undo;
 };
 }
 

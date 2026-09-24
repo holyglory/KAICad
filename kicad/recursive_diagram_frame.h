@@ -321,7 +321,7 @@ private:
     wxWindow* m_canvas;
     RECURSIVE_DIAGRAM::TOOL_PALETTE* m_palette;
     std::vector<std::pair<TOOL, RECURSIVE_DIAGRAM::TOOL_BUTTON*>> m_strip;
-    RECURSIVE_DIAGRAM::TOOL_BUTTON* m_stripDelete;
+    RECURSIVE_DIAGRAM::TOOL_ACTION* m_stripDelete;
     bool m_paletteShown = true;
     wxTextCtrl* m_caption;
     int m_captionKind = 0;

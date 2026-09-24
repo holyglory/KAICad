@@ -12,6 +12,8 @@
 #include <wx/dc.h>
 #include <wx/dcbuffer.h>
 #include <wx/dcclient.h>
+#include <wx/dcgraph.h>
+#include <wx/image.h>
 #include <wx/graphics.h>
 #include <wx/menu.h>
 #include <wx/textctrl.h>
@@ -183,9 +185,19 @@ void PadTextBox( wxTextCtrl* control, int horizontal, int vertical )
 
 void DrawGlyph( wxDC& dc, GLYPH glyph, const wxRect& box, const wxColour& colour )
 {
-    // A 24-unit design grid scaled to the box; strokes are about 1.75 units wide with round ends.
-    std::unique_ptr<wxGraphicsContext> gc( wxGraphicsContext::CreateFromUnknownDC( dc ) );
+    // A 24-unit design grid scaled to the box; strokes are about 1.75 units wide with round ends. A graphics DC (a platform
+    // button the editor paints, see PaintNatively) lends its own context; any other DC gets one of its own.
+    std::unique_ptr<wxGraphicsContext> owned;
+    wxGraphicsContext* gc = nullptr;
+    if( auto* graphics = dynamic_cast<wxGCDC*>( &dc ) ) gc = graphics->GetGraphicsContext();
+    else { owned.reset( wxGraphicsContext::CreateFromUnknownDC( dc ) ); gc = owned.get(); }
     if( !gc ) return;
+    // The DC's own pen and brush are applied again after the glyph, so the DC draws on as before.
+    struct RESTORE
+    {
+        wxDC& dc;
+        ~RESTORE() { dc.SetPen( dc.GetPen() ); dc.SetBrush( dc.GetBrush() ); }
+    } restore{ dc };
     gc->SetAntialiasMode( wxANTIALIAS_DEFAULT );
     const double s = std::min( box.width, box.height ) / 24.0;
     const double ox = box.x + ( box.width - 24 * s ) / 2, oy = box.y + ( box.height - 24 * s ) / 2;
@@ -523,25 +535,122 @@ POINT LEVEL_LAYOUT::EndAnchor( const LINK& link, int endpoint, int leg ) const
             return found->second;
     return Anchor( end, centreX( peer ) );
 }
+int LEVEL_LAYOUT::normal( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
+{
+    // Which way a path leaves an end (rule F4c): +1 to the right, -1 to the left, 0 for an end on a top or bottom side. A
+    // child block's end points out of the block; a boundary port points into the level.
+    auto side = []( D::DiagramPortSide portSide, bool boundary ) -> int
+    {
+        if( portSide == D::DPS_LEFT ) return boundary ? 1 : -1;
+        if( portSide == D::DPS_RIGHT ) return boundary ? -1 : 1;
+        return 0;
+    };
+    if( endpoint.block_id() == m_scope )
+    {
+        if( endpoint.has_interface_id() )
+            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return side( port->side, true );
+        return 1;
+    }
+    if( endpoint.has_interface_id() )
+        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return side( port->side, false );
+    return at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1;
+}
+std::string LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
+{
+    return endpoint.block_id() != m_scope && Node( endpoint.block_id() ) ? endpoint.block_id() : std::string();
+}
 void LEVEL_LAYOUT::placePaths()
 {
-    // Rule F4: a leg with a stored route runs through its waypoints. A computed leg is the legacy three-segment path, with
-    // one addition (F4a, design QA P2-5): its vertical middle leg keeps at least 10 units from every earlier one it would
-    // run beside. Stored routes come first, then computed legs in level order; a computed leg that would run within 10 units
-    // of an earlier vertical leg moves its middle to mid - 10, mid + 10, mid - 20, ... (up to 60, staying 10 units inside its
-    // ends), taking the free place that crosses the fewest earlier legs, the first on a tie; with no free place it stays.
-    struct VERTICAL { int64_t x, top, bottom; };
-    std::vector<VERTICAL> verticals;
-    std::vector<std::pair<POINT, POINT>> segments;
-    auto record = [&]( const std::vector<POINT>& path )
+    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
+    // (two waypoints on one vertical line) runs level from each of its ends to its channel, so a route stored against ends
+    // that have since moved never draws a slanted leg (F4b). A computed leg is the three-segment path from, (x, from.y),
+    // (x, to.y), to, whose channel x is chosen so that the leg leaves each block along its edge before turning (F4c) and
+    // keeps apart from the other legs (F4a):
+    //  - An end on a block's left or right edge, or on a boundary port, needs the channel at least 20 units out along its
+    //    edge. The preferred channel is the middle between the ends moved into those limits; the candidates are it and every
+    //    channel 10k units from it inside the limits (up to 200 units past the ends on an open side). When the limits of the
+    //    two ends cannot both hold, the preferred channel is the middle and the candidates stay 10 units inside the ends.
+    //  - A candidate scores, in this order: the runs beside another leg (its vertical leg within 10 units of another vertical
+    //    leg over heights they share or meet at; its horizontal leg on the height of another leg's horizontal segment that
+    //    overlaps it or ends within 10 units of it, unless that other leg starts or ends at the same point), the blocks its
+    //    segments come within 10 units of (a segment leaving an end does not count that end's own block), the other legs it
+    //    crosses, and its distance from the preferred channel; then the lower channel.
+    //  - Stored routes are laid out first, then the computed legs in level order, each taking its best candidate against the
+    //    legs laid out before it. Then, up to four times over, each computed leg still running beside another is laid out
+    //    again together with each computed leg it runs beside, over every pair of their candidates, against all the other
+    //    legs; a pair is taken when its summed score is lower than the pair's current one (the first such lowest pair, in
+    //    candidate order).
+    const int64_t apart = 10 * QUANTUM, stub = 20 * QUANTUM, reach = 200 * QUANTUM;
+    struct PATH { std::vector<POINT> points; };
+    struct LEG
     {
-        for( size_t i = 1; i < path.size(); ++i )
+        std::pair<std::string, int> key;
+        POINT from, to;
+        std::string fromBlock, toBlock;
+        int64_t preferred = 0;
+        std::vector<int64_t> candidates;
+    };
+    struct SCORE
+    {
+        int64_t conflicts = 0, contacts = 0, crossings = 0, distance = 0;
+        SCORE operator+( const SCORE& other ) const
         {
-            segments.emplace_back( path[i - 1], path[i] );
-            if( path[i - 1].x == path[i].x && path[i - 1].y != path[i].y )
-                verticals.push_back( { path[i].x, std::min( path[i - 1].y, path[i].y ), std::max( path[i - 1].y, path[i].y ) } );
+            return { conflicts + other.conflicts, contacts + other.contacts, crossings + other.crossings, distance + other.distance };
+        }
+        bool operator<( const SCORE& other ) const
+        {
+            return std::tie( conflicts, contacts, crossings, distance ) < std::tie( other.conflicts, other.contacts, other.crossings, other.distance );
         }
     };
+    std::vector<PATH> stored;
+    std::vector<LEG> legs;
+    for( const auto& link : m_links )
+        for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
+        {
+            const POINT from = EndAnchor( link, 0, leg ), to = EndAnchor( link, leg, leg );
+            const D::DiagramConnectionRouteData* route = nullptr;
+            for( const auto& row : m_routes )
+                if( row.connection_id() == link.id && row.endpoint_index() == static_cast<unsigned>( leg ) ) { route = &row; break; }
+            if( route )
+            {
+                std::vector<POINT> waypoints;
+                for( const auto& waypoint : route->waypoints() )
+                { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) waypoints.push_back( point ); }
+                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x ) { waypoints[0].y = from.y; waypoints[1].y = to.y; }
+                std::vector<POINT> points{ from };
+                points.insert( points.end(), waypoints.begin(), waypoints.end() );
+                points.push_back( to );
+                m_paths[{ link.id, leg }] = points; stored.push_back( { std::move( points ) } );
+                continue;
+            }
+            LEG item{ { link.id, leg }, from, to, ownBlock( link.endpoints[0] ), ownBlock( link.endpoints[leg] ), 0, {} };
+            std::optional<int64_t> low, high;
+            for( const auto& [endpoint, at] : { std::pair{ &link.endpoints[0], from }, std::pair{ &link.endpoints[leg], to } } )
+            {
+                int direction = normal( *endpoint, at );
+                if( direction > 0 ) low = low ? std::max( *low, at.x + stub ) : at.x + stub;
+                else if( direction < 0 ) high = high ? std::min( *high, at.x - stub ) : at.x - stub;
+            }
+            int64_t left, right, preferred = ( from.x + to.x ) / 2;
+            if( !low || !high || *low <= *high )
+            {
+                if( low ) preferred = std::max( preferred, *low );
+                if( high ) preferred = std::min( preferred, *high );
+                left = low ? *low : std::min( from.x, to.x ) - reach;
+                right = high ? *high : std::max( from.x, to.x ) + reach;
+            }
+            else
+            {
+                left = std::min( from.x, to.x ) + apart; right = std::max( from.x, to.x ) - apart;
+            }
+            item.preferred = preferred; item.candidates = { preferred };
+            if( from.y != to.y )
+                for( int64_t k = 1; preferred - k * apart >= left || preferred + k * apart <= right; ++k )
+                    for( int64_t x : { preferred - k * apart, preferred + k * apart } )
+                        if( x >= left && x <= right ) item.candidates.push_back( x );
+            legs.push_back( std::move( item ) );
+        }
+    auto pathOf = []( const LEG& leg, int64_t x ) { return PATH{ { leg.from, { x, leg.from.y }, { x, leg.to.y }, leg.to } }; };
     auto crosses = []( const POINT& a, const POINT& b, const POINT& c, const POINT& d )
     {
         auto one = []( const POINT& h1, const POINT& h2, const POINT& v1, const POINT& v2 )
@@ -551,50 +660,122 @@ void LEVEL_LAYOUT::placePaths()
         };
         return one( a, b, c, d ) || one( c, d, a, b );
     };
-    for( const auto& link : m_links )
-        for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
-            for( const auto& route : m_routes )
-                if( route.connection_id() == link.id && route.endpoint_index() == static_cast<unsigned>( leg ) )
-                {
-                    std::vector<POINT> points{ EndAnchor( link, 0, leg ) };
-                    for( const auto& waypoint : route.waypoints() )
-                    { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) points.push_back( point ); }
-                    points.push_back( EndAnchor( link, leg, leg ) );
-                    record( points ); m_paths[{ link.id, leg }] = std::move( points );
-                    break;
-                }
-    const int64_t apart = 10 * QUANTUM;
-    for( const auto& link : m_links )
-        for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
+    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
+    // How leg aLeg on channel aX runs beside and crosses one other drawn leg.
+    auto against = [&]( const LEG& leg, int64_t x, const PATH& other ) -> SCORE
+    {
+        SCORE score;
+        const PATH mine = pathOf( leg, x );
+        const int64_t top = std::min( leg.from.y, leg.to.y ), bottom = std::max( leg.from.y, leg.to.y );
+        const auto& points = other.points;
+        const POINT &otherFrom = points.front(), &otherTo = points.back();
+        for( size_t i = 1; i < points.size(); ++i )
         {
-            if( m_paths.count( { link.id, leg } ) ) continue;
-            const POINT from = EndAnchor( link, 0, leg ), to = EndAnchor( link, leg, leg );
-            const int64_t middle = ( from.x + to.x ) / 2, top = std::min( from.y, to.y ), bottom = std::max( from.y, to.y );
-            auto beside = [&]( int64_t x )
+            const POINT &a = points[i - 1], &b = points[i];
+            if( same( a, b ) ) continue;
+            if( a.x == b.x && top != bottom )
             {
-                return std::any_of( verticals.begin(), verticals.end(), [&]( const VERTICAL& v )
-                                    { return std::llabs( v.x - x ) < apart && std::min( v.bottom, bottom ) > std::max( v.top, top ); } );
-            };
-            int64_t chosen = middle;
-            if( top != bottom && beside( middle ) )
-            {
-                const int64_t low = std::min( from.x, to.x ) + apart, high = std::max( from.x, to.x ) - apart;
-                size_t fewest = SIZE_MAX;
-                for( int step = 1; step <= 6; ++step )
-                    for( int sign : { -1, 1 } )
-                    {
-                        int64_t x = middle + sign * step * apart;
-                        if( x < low || x > high || beside( x ) ) continue;
-                        std::vector<POINT> candidate{ from, { x, from.y }, { x, to.y }, to };
-                        size_t crossings = 0;
-                        for( size_t i = 1; i < candidate.size(); ++i )
-                            for( const auto& [a, b] : segments ) crossings += crosses( candidate[i - 1], candidate[i], a, b ) ? 1 : 0;
-                        if( crossings < fewest ) { fewest = crossings; chosen = x; }
-                    }
+                if( std::llabs( a.x - x ) < apart && std::min( std::max( a.y, b.y ), bottom ) >= std::max( std::min( a.y, b.y ), top ) ) ++score.conflicts;
             }
-            std::vector<POINT> points{ from, { chosen, from.y }, { chosen, to.y }, to };
-            record( points ); m_paths[{ link.id, leg }] = std::move( points );
+            else if( a.y == b.y )
+            {
+                for( const auto& [y, x1, x2, anchor] : { std::tuple{ leg.from.y, std::min( leg.from.x, x ), std::max( leg.from.x, x ), leg.from },
+                                                         std::tuple{ leg.to.y, std::min( leg.to.x, x ), std::max( leg.to.x, x ), leg.to } } )
+                {
+                    if( x1 == x2 || a.y != y || same( anchor, otherFrom ) || same( anchor, otherTo ) ) continue;
+                    if( std::max( std::min( a.x, b.x ), x1 ) - std::min( std::max( a.x, b.x ), x2 ) < apart ) ++score.conflicts;
+                }
+            }
+            for( size_t j = 1; j < mine.points.size(); ++j ) if( crosses( mine.points[j - 1], mine.points[j], a, b ) ) ++score.crossings;
         }
+        return score;
+    };
+    // Its own part of the score: the blocks it comes near and its distance from the preferred channel.
+    auto alone = [&]( const LEG& leg, int64_t x ) -> SCORE
+    {
+        SCORE score;
+        const PATH mine = pathOf( leg, x );
+        for( size_t j = 1; j < mine.points.size(); ++j )
+        {
+            const POINT &a = mine.points[j - 1], &b = mine.points[j];
+            if( same( a, b ) ) continue;
+            for( size_t n = 0; n < m_nodes.size(); ++n )
+            {
+                if( ( j == 1 && m_nodes[n].id == leg.fromBlock ) || ( j == 3 && m_nodes[n].id == leg.toBlock ) ) continue;
+                const RECT& r = m_rects[n];
+                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
+                    && std::min( a.y, b.y ) < r.Bottom() + apart )
+                    ++score.contacts;
+            }
+        }
+        score.distance = std::llabs( x - leg.preferred );
+        return score;
+    };
+    auto cost = [&]( const LEG& leg, int64_t x, const std::vector<const PATH*>& others )
+    {
+        SCORE score = alone( leg, x );
+        for( const PATH* other : others ) score = score + against( leg, x, *other );
+        return score;
+    };
+    std::vector<int64_t> chosen( legs.size() );
+    std::vector<PATH> placed;
+    auto others = [&]( size_t skipA, size_t skipB )
+    {
+        std::vector<const PATH*> result;
+        for( const auto& path : stored ) result.push_back( &path );
+        for( size_t i = 0; i < placed.size(); ++i ) if( i != skipA && i != skipB ) result.push_back( &placed[i] );
+        return result;
+    };
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        auto before = others( SIZE_MAX, SIZE_MAX );
+        std::optional<SCORE> best; int64_t bestX = legs[i].preferred;
+        for( int64_t x : legs[i].candidates )
+        {
+            SCORE score = cost( legs[i], x, before );
+            if( !best || score < *best || ( !( *best < score ) && x < bestX ) ) { best = score; bestX = x; }
+        }
+        chosen[i] = bestX; placed.push_back( pathOf( legs[i], bestX ) );
+    }
+    for( int round = 0; round < 4; ++round )
+    {
+        bool improved = false;
+        for( size_t a = 0; a < legs.size(); ++a )
+        {
+            if( cost( legs[a], chosen[a], others( a, SIZE_MAX ) ).conflicts == 0 ) continue;
+            for( size_t b = 0; b < legs.size(); ++b )
+            {
+                // Only a leg this one runs beside is laid out again with it.
+                if( b == a || ( against( legs[a], chosen[a], placed[b] ).conflicts == 0 && against( legs[b], chosen[b], placed[a] ).conflicts == 0 ) )
+                    continue;
+                const auto rest = others( a, b );
+                std::vector<SCORE> baseA, baseB;
+                for( int64_t x : legs[a].candidates ) baseA.push_back( cost( legs[a], x, rest ) );
+                for( int64_t x : legs[b].candidates ) baseB.push_back( cost( legs[b], x, rest ) );
+                auto total = [&]( size_t i, size_t j )
+                {
+                    int64_t xa = legs[a].candidates[i], xb = legs[b].candidates[j];
+                    return baseA[i] + against( legs[a], xa, pathOf( legs[b], xb ) ) + baseB[j] + against( legs[b], xb, pathOf( legs[a], xa ) );
+                };
+                const SCORE current = cost( legs[a], chosen[a], rest ) + against( legs[a], chosen[a], placed[b] )
+                                      + cost( legs[b], chosen[b], rest ) + against( legs[b], chosen[b], placed[a] );
+                std::optional<std::tuple<SCORE, size_t, size_t>> found;
+                for( size_t i = 0; i < legs[a].candidates.size(); ++i )
+                    for( size_t j = 0; j < legs[b].candidates.size(); ++j )
+                    {
+                        SCORE score = total( i, j );
+                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
+                    }
+                if( !found ) continue;
+                chosen[a] = legs[a].candidates[std::get<1>( *found )]; chosen[b] = legs[b].candidates[std::get<2>( *found )];
+                placed[a] = pathOf( legs[a], chosen[a] ); placed[b] = pathOf( legs[b], chosen[b] );
+                improved = true;
+                if( std::get<0>( *found ).conflicts == 0 ) break;
+            }
+        }
+        if( !improved ) break;
+    }
+    for( size_t i = 0; i < legs.size(); ++i ) m_paths[legs[i].key] = placed[i].points;
 }
 bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
 {
@@ -1043,6 +1224,9 @@ void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open 
     if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
     m_value = value; m_state = choice.state(); m_isOpen = open;
     SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
+    // The editor draws the row itself, so it tells assistive technology what the row is: a button named by its facet and
+    // value, which opens the facet's detail.
+    SetAccessibleRole( this, "button", GetLabel() );
     Refresh();
 }
 
@@ -1110,110 +1294,161 @@ namespace
 {
 /// The glyph size of every drawing tool, and the gap to its label (the toolbar's own tools leave 4 pixels).
 constexpr int GLYPH_DIP = 24;
-int glyphGap( TOOL_BUTTON::STYLE style ) { return style == TOOL_BUTTON::STYLE::STRIP ? 4 : 3; }
-/// Space or Enter presses a focused custom button; Tab moves on.
-bool pressKey( wxWindow* window, wxKeyEvent& event )
+int glyphGap( TOOL_STYLE style ) { return style == TOOL_STYLE::STRIP ? 4 : 3; }
+
+#if defined( __WXGTK__ )
+/// A GTK, GLib or ATK function of the toolkit this build already runs on, looked up at run time so no GTK header is needed.
+template <typename FUNCTION>
+FUNCTION toolkit( const char* aName )
 {
-    int key = event.GetKeyCode();
-    if( !event.HasAnyModifiers() && ( key == WXK_SPACE || key == WXK_RETURN || key == WXK_NUMPAD_ENTER ) ) return true;
-    if( key == WXK_TAB ) window->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward );
-    else event.Skip();
-    return false;
+    return reinterpret_cast<FUNCTION>( dlsym( RTLD_DEFAULT, aName ) );
 }
+constexpr unsigned GTK_STATE_ACTIVE = 1u << 0, GTK_STATE_PRELIGHT = 1u << 1;
+void* accessibleOf( wxWindow* window )
+{
+    static const auto get = toolkit<void* ( * )( void* )>( "gtk_widget_get_accessible" );
+    return get && window && window->GetHandle() ? get( window->GetHandle() ) : nullptr;
+}
+int drawButton( void* widget, void* cairo, void* painter )
+{
+    // GTK's own drawing of the button is replaced by the editor's: returning true ends the draw signal before GTK paints
+    // the theme's frame and label.
+    static const auto flagsOf = toolkit<unsigned ( * )( void* )>( "gtk_widget_get_state_flags" );
+    static const auto scaleOf = toolkit<int ( * )( void* )>( "gtk_widget_get_scale_factor" );
+    wxGraphicsRenderer* renderer = wxGraphicsRenderer::GetCairoRenderer();
+    wxGraphicsContext* context = renderer ? renderer->CreateContextFromNativeContext( cairo ) : nullptr;
+    if( !context ) return 0;
+    // As the toolkit's own paint DC does, one-pixel lines fall on whole pixels (at the display's own scale).
+    context->EnableOffset( !scaleOf || scaleOf( widget ) <= 1 );
+    unsigned flags = flagsOf ? flagsOf( widget ) : 0;
+    wxGCDC dc( context );
+    static_cast<BUTTON_PAINTER*>( painter )->PaintButton( dc, ( flags & GTK_STATE_PRELIGHT ) != 0, ( flags & GTK_STATE_ACTIVE ) != 0 );
+    return 1;
+}
+void redrawButton( void* widget, unsigned, void* )
+{
+    static const auto queue = toolkit<void ( * )( void* )>( "gtk_widget_queue_draw" );
+    if( queue ) queue( widget );
+}
+#endif
 }
 
-TOOL_BUTTON::TOOL_BUTTON( wxWindow* parent, const wxString& label, GLYPH glyph, STYLE style, const char* name, bool toggle,
-                          const wxString& toolTip, const wxSize& cell ) :
-        wxControl( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS | wxFULL_REPAINT_ON_RESIZE ),
-        m_label( label ), m_glyph( glyph ), m_style( style ), m_toggle( toggle ), m_cell( cell )
+void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter )
 {
-    SetName( name ); SetToolTip( toolTip );
-    if( style == STYLE::PALETTE )
+#if defined( __WXGTK__ )
+    using CONNECT = unsigned long ( * )( void*, const char*, void*, void*, void*, int );
+    static const auto connect = toolkit<CONNECT>( "g_signal_connect_data" );
+    static const auto focusOnClick = toolkit<void ( * )( void*, int )>( "gtk_widget_set_focus_on_click" );
+    static const auto provider = toolkit<void* ( * )()>( "gtk_css_provider_new" );
+    static const auto load = toolkit<int ( * )( void*, const char*, long, void** )>( "gtk_css_provider_load_from_data" );
+    static const auto styleOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_style_context" );
+    static const auto addProvider = toolkit<void ( * )( void*, void*, unsigned )>( "gtk_style_context_add_provider" );
+    static const auto unref = toolkit<void ( * )( void* )>( "g_object_unref" );
+    void* widget = aButton->GetHandle();
+    if( !widget || !connect ) return;
+    connect( widget, "draw", reinterpret_cast<void*>( &drawButton ), aPainter, nullptr, 0 );
+    connect( widget, "state-flags-changed", reinterpret_cast<void*>( &redrawButton ), nullptr, nullptr, 0 );
+    // Like the toolbar's own tools, a press leaves the keyboard focus where it was (the canvas); Tab still reaches the button.
+    if( focusOnClick ) focusOnClick( widget, 0 );
+    // Without the theme's button padding, border and minimum size, the button is exactly the size the editor draws.
+    if( provider && load && styleOf && addProvider && unref )
+        if( void* css = provider() )
+        {
+            static const char RESET[] = "* { padding: 0; margin: 0; border-width: 0; min-width: 0; min-height: 0; box-shadow: none; }";
+            if( load( css, RESET, -1, nullptr ) ) addProvider( styleOf( widget ), css, 800 );
+            unref( css );
+        }
+#else
+    wxUnusedVar( aButton ); wxUnusedVar( aPainter );
+#endif
+}
+
+void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName )
+{
+#if defined( __WXGTK__ )
+    static const auto roleFor = toolkit<int ( * )( const char* )>( "atk_role_for_name" );
+    static const auto setRole = toolkit<void ( * )( void*, int )>( "atk_object_set_role" );
+    static const auto setName = toolkit<void ( * )( void*, const char* )>( "atk_object_set_name" );
+    void* accessible = accessibleOf( aWindow );
+    if( !accessible ) return;
+    if( aRole && roleFor && setRole )
     {
-        // The palette is icon-first: a 9-point label under a 24 DIP glyph in a fixed-size cell (design QA P2-2).
-        wxFont small = GetFont(); small.SetPointSize( std::min( 9, small.GetPointSize() ) ); SetFont( small );
+        // ATK 2.36 renamed "push button" to "button"; an older ATK knows only the old name.
+        int role = roleFor( aRole );
+        if( role == 0 && std::string( aRole ) == "button" ) role = roleFor( "push button" );
+        if( role != 0 ) setRole( accessible, role );
     }
-    SetInitialSize( DoGetBestSize() );
-    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
-    Bind( wxEVT_LEFT_DOWN, [this]( wxMouseEvent& ) { if( !IsEnabled() ) return; m_down = true; if( !HasCapture() ) CaptureMouse(); Refresh(); } );
-    Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& event )
-          {
-              bool pressed = m_down; m_down = false;
-              if( HasCapture() ) ReleaseMouse();
-              Refresh();
-              if( pressed && GetClientRect().Contains( event.GetPosition() ) ) press();
-          } );
-    Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { m_down = false; Refresh(); } );
-    Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& ) { m_hover = true; Refresh(); } );
-    Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& ) { m_hover = false; Refresh(); } );
-    Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event ) { if( pressKey( this, event ) ) press(); } );
+    if( !aName.empty() && setName ) setName( accessible, aName.utf8_str() );
+#else
+    wxUnusedVar( aWindow ); wxUnusedVar( aRole ); wxUnusedVar( aName );
+#endif
 }
 
-void TOOL_BUTTON::SetValue( bool value )
+std::optional<ACCESSIBLE> AccessibleOf( wxWindow* aWindow )
 {
-    if( value == m_value ) return;
-    m_value = value; Refresh();
+#if defined( __WXGTK__ )
+    static const auto getRole = toolkit<int ( * )( void* )>( "atk_object_get_role" );
+    static const auto roleName = toolkit<const char* ( * )( int )>( "atk_role_get_name" );
+    static const auto getName = toolkit<const char* ( * )( void* )>( "atk_object_get_name" );
+    static const auto states = toolkit<void* ( * )( void* )>( "atk_object_ref_state_set" );
+    static const auto stateFor = toolkit<int ( * )( const char* )>( "atk_state_type_for_name" );
+    static const auto contains = toolkit<int ( * )( void*, int )>( "atk_state_set_contains_state" );
+    static const auto unref = toolkit<void ( * )( void* )>( "g_object_unref" );
+    void* accessible = accessibleOf( aWindow );
+    if( !accessible || !getRole || !roleName || !getName ) return std::nullopt;
+    ACCESSIBLE result;
+    if( const char* role = roleName( getRole( accessible ) ) ) result.role = role;
+    if( const char* name = getName( accessible ) ) result.name = name;
+    if( states && stateFor && contains && unref )
+        if( void* set = states( accessible ) )
+        {
+            result.checked = contains( set, stateFor( "checked" ) ) != 0;
+            unref( set );
+        }
+    return result;
+#else
+    wxUnusedVar( aWindow );
+    return std::nullopt;
+#endif
 }
 
-bool TOOL_BUTTON::Enable( bool enable )
+wxSize TOOL_FACE::BestSize( const wxWindow* aWindow ) const
 {
-    bool changed = wxControl::Enable( enable );
-    if( changed ) Refresh();
-    return changed;
+    const wxSize text = aWindow->GetTextExtent( label );
+    const int glyphSize = aWindow->FromDIP( GLYPH_DIP ), padding = aWindow->FromDIP( style == TOOL_STYLE::STRIP ? 5 : 6 );
+    return wxSize( std::max( glyphSize, text.x ) + 2 * aWindow->FromDIP( 8 ), glyphSize + aWindow->FromDIP( glyphGap( style ) ) + text.y + 2 * padding );
 }
 
-wxSize TOOL_BUTTON::DoGetBestSize() const
-{
-    const wxSize text = GetTextExtent( m_label );
-    const int glyph = FromDIP( GLYPH_DIP ), padding = FromDIP( m_style == STYLE::STRIP ? 5 : 6 );
-    wxSize best( std::max( glyph, text.x ) + 2 * FromDIP( 8 ), glyph + FromDIP( glyphGap( m_style ) ) + text.y + 2 * padding );
-    if( m_cell.x > 0 ) best.x = std::max( best.x, m_cell.x );
-    if( m_cell.y > 0 ) best.y = std::max( best.y, m_cell.y );
-    return best;
-}
-
-wxRect TOOL_BUTTON::GlyphRect() const
+wxRect TOOL_FACE::GlyphRect( const wxWindow* aWindow ) const
 {
     // The glyph and label are centred as one block, as the toolbar centres its own tools, so the strip's labels share their
     // baseline (design QA P2-2).
-    const wxSize area = GetClientSize(), text = GetTextExtent( m_label );
-    const int glyph = FromDIP( GLYPH_DIP ), top = ( area.y - ( glyph + FromDIP( glyphGap( m_style ) ) + text.y ) ) / 2;
-    return wxRect( ( area.x - glyph ) / 2, top, glyph, glyph );
+    const wxSize area = aWindow->GetClientSize(), text = aWindow->GetTextExtent( label );
+    const int glyphSize = aWindow->FromDIP( GLYPH_DIP ), top = ( area.y - ( glyphSize + aWindow->FromDIP( glyphGap( style ) ) + text.y ) ) / 2;
+    return wxRect( ( area.x - glyphSize ) / 2, top, glyphSize, glyphSize );
 }
 
-wxRect TOOL_BUTTON::LabelRect() const
+wxRect TOOL_FACE::LabelRect( const wxWindow* aWindow ) const
 {
-    const wxSize area = GetClientSize(), text = GetTextExtent( m_label );
-    const wxRect glyph = GlyphRect();
-    return wxRect( ( area.x - text.x ) / 2, glyph.GetBottom() + 1 + FromDIP( glyphGap( m_style ) ), text.x, text.y );
+    const wxSize area = aWindow->GetClientSize(), text = aWindow->GetTextExtent( label );
+    const wxRect box = GlyphRect( aWindow );
+    return wxRect( ( area.x - text.x ) / 2, box.GetBottom() + 1 + aWindow->FromDIP( glyphGap( style ) ), text.x, text.y );
 }
 
-void TOOL_BUTTON::press()
+void TOOL_FACE::Paint( wxDC& dc, const wxWindow* aWindow, bool aActive, bool aHover, bool aDown ) const
 {
-    if( !IsEnabled() ) return;
-    if( m_toggle ) SetValue( true );
-    wxCommandEvent event( m_toggle ? wxEVT_TOGGLEBUTTON : wxEVT_BUTTON, GetId() );
-    event.SetEventObject( this ); event.SetInt( m_value ? 1 : 0 );
-    ProcessWindowEvent( event );
-}
-
-void TOOL_BUTTON::paint()
-{
-    wxPaintDC dc( this );
-    const wxRect area( GetClientSize() );
-    const bool palette = m_style == STYLE::PALETTE;
+    const wxRect area( aWindow->GetClientSize() );
+    const bool palette = style == TOOL_STYLE::PALETTE, enabled = aWindow->IsEnabled();
     const wxColour surface = palette ? TOOL_PALETTE::Surface() : wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE );
     const bool dark = IsDark( surface );
     const wxColour highlight = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
-    wxColour content = IsEnabled() ? Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ), { surface }, 4.5 )
-                                   : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    wxColour content = enabled ? Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ), { surface }, 4.5 )
+                               : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
     // The palette cell paints the palette's one surface; the strip keeps the toolbar's own background.
     if( palette ) { dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( surface ) ); dc.DrawRectangle( area ); }
-    const wxRect tile = wxRect( area ).Deflate( FromDIP( palette ? 2 : 1 ) );
-    const int radius = FromDIP( palette ? 6 : 4 );
-    if( IsEnabled() && m_toggle && m_value )
+    const wxRect tile = wxRect( area ).Deflate( aWindow->FromDIP( palette ? 2 : 1 ) );
+    const int radius = aWindow->FromDIP( palette ? 6 : 4 );
+    if( enabled && aActive )
     {
         // The active tool (design QA P2-1): a solid accent cell with a white or dark label in the palette (sketch 2); a pale
         // accent tile with an accent border, glyph and label in the strip (sketch 1). Each reaches 3:1 for the tile and 4.5:1
@@ -1227,49 +1462,111 @@ void TOOL_BUTTON::paint()
         else
         {
             wxColour pale = mix( highlight, surface, dark ? 0.30 : 0.14 );
-            dc.SetPen( wxPen( Readable( highlight, { surface, pale }, 3.0 ), FromDIP( 1 ) ) ); dc.SetBrush( wxBrush( pale ) );
+            dc.SetPen( wxPen( Readable( highlight, { surface, pale }, 3.0 ), aWindow->FromDIP( 1 ) ) ); dc.SetBrush( wxBrush( pale ) );
             dc.DrawRoundedRectangle( tile, radius );
             content = Readable( highlight, { pale }, 4.5 );
         }
     }
-    else if( IsEnabled() && ( m_down || m_hover ) )
+    else if( enabled && ( aDown || aHover ) )
     {
         dc.SetPen( *wxTRANSPARENT_PEN );
-        dc.SetBrush( wxBrush( surface.ChangeLightness( dark ? ( m_down ? 140 : 122 ) : ( m_down ? 86 : 93 ) ) ) );
+        dc.SetBrush( wxBrush( surface.ChangeLightness( dark ? ( aDown ? 140 : 122 ) : ( aDown ? 86 : 93 ) ) ) );
         dc.DrawRoundedRectangle( tile, radius );
     }
-    DrawGlyph( dc, m_glyph, GlyphRect(), content );
-    dc.SetFont( GetFont() ); dc.SetTextForeground( content ); dc.DrawText( m_label, LabelRect().GetTopLeft() );
-    if( HasFocus() )
+    DrawGlyph( dc, glyph, GlyphRect( aWindow ), content );
+    dc.SetFont( aWindow->GetFont() ); dc.SetTextForeground( content ); dc.DrawText( label, LabelRect( aWindow ).GetTopLeft() );
+    if( aWindow->HasFocus() )
     {
         dc.SetPen( wxPen( Readable( highlight, { surface }, 3.0 ), 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
-        dc.DrawRoundedRectangle( wxRect( tile ).Deflate( FromDIP( 2 ) ), radius );
+        dc.DrawRoundedRectangle( wxRect( tile ).Deflate( aWindow->FromDIP( 2 ) ), radius );
     }
 }
 
-void TOOL_BUTTON::SetLabel( const wxString& label ) { m_label = label; InvalidateBestSize(); Refresh(); }
-wxString TOOL_BUTTON::GetLabel() const { return m_label; }
+namespace
+{
+/// The palette's cells are icon-first: a 9-point label under the 24 DIP glyph (design QA P2-2).
+void smallLabel( wxWindow* window, TOOL_STYLE style )
+{
+    if( style != TOOL_STYLE::PALETTE ) return;
+    wxFont small = window->GetFont(); small.SetPointSize( std::min( 9, small.GetPointSize() ) ); window->SetFont( small );
+}
+#if !defined( __WXGTK__ )
+/// Where the editor cannot paint a platform button itself, the button shows the tool's glyph above its label.
+wxBitmap glyphBitmap( wxWindow* window, GLYPH glyph )
+{
+    const int size = window->FromDIP( GLYPH_DIP );
+    wxImage image( size, size );
+    image.InitAlpha();
+    std::fill( image.GetAlpha(), image.GetAlpha() + size * size, static_cast<unsigned char>( 0 ) );
+    {
+        wxGCDC dc( wxGraphicsContext::Create( image ) );
+        DrawGlyph( dc, glyph, wxRect( 0, 0, size, size ), wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ) );
+    }
+    return wxBitmap( image );
+}
+#endif
+}
+
+TOOL_BUTTON::TOOL_BUTTON( wxWindow* parent, const wxString& label, GLYPH glyph, TOOL_STYLE style, const char* name, const wxString& toolTip ) :
+        wxToggleButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE, wxDefaultValidator, name ),
+        m_face{ label, glyph, style }
+{
+    // The platform's own toggle button, so assistive technology reads its role, its label as its name and whether it is
+    // pressed; on GTK the editor paints it (design QA P2-1 to P2-3).
+    SetToolTip( toolTip ); smallLabel( this, style );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#else
+    SetBitmap( glyphBitmap( this, glyph ) ); SetBitmapPosition( wxTOP );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void TOOL_BUTTON::PaintButton( wxDC& aDC, bool aHover, bool aDown ) { m_face.Paint( aDC, this, GetValue(), aHover, aDown ); }
+
+wxSize TOOL_BUTTON::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return m_face.BestSize( this );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
+}
+
+TOOL_ACTION::TOOL_ACTION( wxWindow* parent, const wxString& label, GLYPH glyph, TOOL_STYLE style, const char* name, const wxString& toolTip ) :
+        wxButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE, wxDefaultValidator, name ),
+        m_face{ label, glyph, style }
+{
+    SetToolTip( toolTip ); smallLabel( this, style );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#else
+    SetBitmap( glyphBitmap( this, glyph ) ); SetBitmapPosition( wxTOP );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void TOOL_ACTION::PaintButton( wxDC& aDC, bool aHover, bool aDown ) { m_face.Paint( aDC, this, false, aHover, aDown ); }
+
+wxSize TOOL_ACTION::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return m_face.BestSize( this );
+#else
+    return wxButton::DoGetBestSize();
+#endif
+}
 
 LINK_BUTTON::LINK_BUTTON( wxWindow* parent, const wxString& label, const char* name ) :
-        wxPanel( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS | wxFULL_REPAINT_ON_RESIZE ),
-        m_label( label )
+        wxButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxBU_EXACTFIT, wxDefaultValidator, name )
 {
-    SetName( name ); SetBackgroundStyle( wxBG_STYLE_PAINT ); SetCursor( wxCursor( wxCURSOR_HAND ) );
+    // A platform button that assistive technology announces as a link, with its label as its name (design QA P2-10).
+    SetCursor( wxCursor( wxCURSOR_HAND ) );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetAccessibleRole( this, "link", wxEmptyString );
     SetInitialSize( DoGetBestSize() );
-    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
-    Bind( wxEVT_LEFT_DOWN, [this]( wxMouseEvent& ) { if( !IsEnabled() ) return; m_down = true; if( !HasCapture() ) CaptureMouse(); } );
-    Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& event )
-          {
-              bool pressed = m_down; m_down = false;
-              if( HasCapture() ) ReleaseMouse();
-              if( pressed && GetClientRect().Contains( event.GetPosition() ) ) press();
-          } );
-    Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { m_down = false; } );
-    Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& ) { m_hover = true; Refresh(); } );
-    Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& ) { m_hover = false; Refresh(); } );
-    Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event ) { if( pressKey( this, event ) ) press(); } );
 }
 
 wxColour LINK_BUTTON::LinkColour( const wxColour& surface )
@@ -1280,34 +1577,32 @@ wxColour LINK_BUTTON::LinkColour( const wxColour& surface )
 
 wxSize LINK_BUTTON::DoGetBestSize() const
 {
-    return GetTextExtent( m_label ) + wxSize( 2 * FromDIP( 3 ), 2 * FromDIP( 3 ) );
+#if defined( __WXGTK__ )
+    return GetTextExtent( GetLabel() ) + wxSize( 2 * FromDIP( 3 ), 2 * FromDIP( 3 ) );
+#else
+    return wxButton::DoGetBestSize();
+#endif
 }
 
-void LINK_BUTTON::press()
+void LINK_BUTTON::SetLabel( const wxString& label )
 {
-    if( !IsEnabled() ) return;
-    wxCommandEvent event( wxEVT_BUTTON, GetId() ); event.SetEventObject( this );
-    ProcessWindowEvent( event );
+    wxButton::SetLabel( label ); InvalidateBestSize(); SetInitialSize( DoGetBestSize() ); Refresh();
 }
 
-void LINK_BUTTON::paint()
+void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
 {
-    wxAutoBufferedPaintDC dc( this );
     const wxColour background = GetParent()->GetBackgroundColour();
-    dc.SetBackground( wxBrush( background ) ); dc.Clear();
+    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( GetClientSize() ) );
     wxFont font = GetFont(); font.SetUnderlined( true ); dc.SetFont( font );
     wxColour colour = IsEnabled() ? LinkColour( background ) : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
-    if( IsEnabled() && m_hover ) colour = Readable( colour, { background }, 7.0 );
-    dc.SetTextForeground( colour ); dc.DrawText( m_label, FromDIP( 3 ), FromDIP( 3 ) );
+    if( IsEnabled() && aHover ) colour = Readable( colour, { background }, 7.0 );
+    dc.SetTextForeground( colour ); dc.DrawText( GetLabel(), FromDIP( 3 ), FromDIP( 3 ) );
     if( HasFocus() )
     {
         dc.SetPen( wxPen( colour, 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
         dc.DrawRectangle( wxRect( GetClientSize() ) );
     }
 }
-
-void LINK_BUTTON::SetLabel( const wxString& label ) { m_label = label; InvalidateBestSize(); SetInitialSize( DoGetBestSize() ); Refresh(); }
-wxString LINK_BUTTON::GetLabel() const { return m_label; }
 
 wxColour TOOL_PALETTE::Surface()
 {
@@ -1321,28 +1616,25 @@ TOOL_PALETTE::TOOL_PALETTE( wxWindow* parent, ACTIONS actions ) :
     SetName( "DiagramToolPalette" ); SetBackgroundStyle( wxBG_STYLE_PAINT );
     Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
     auto* column = new wxBoxSizer( wxVERTICAL );
-    auto button = [&]( const wxString& label, GLYPH glyph, const char* name, bool toggle, const wxString& tip )
-    {
-        auto* item = new TOOL_BUTTON( this, label, glyph, TOOL_BUTTON::STYLE::PALETTE, name, toggle, tip );
-        column->Add( item, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 6 ) );
-        return item;
-    };
+    auto add = [&]( wxWindow* item ) { column->Add( item, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 6 ) ); };
     auto tool = [&]( TOOL which, const wxString& label, GLYPH glyph, const char* name, const wxString& tip )
     {
-        auto* item = button( label, glyph, name, true, tip );
+        auto* item = new TOOL_BUTTON( this, label, glyph, TOOL_STYLE::PALETTE, name, tip );
         item->Bind( wxEVT_TOGGLEBUTTON, [this, which]( wxCommandEvent& ) { if( m_actions.choose ) m_actions.choose( which ); } );
-        m_tools.emplace_back( which, item );
+        add( item ); m_tools.emplace_back( which, item );
     };
     tool( TOOL::SELECT, _( "Select" ), GLYPH::SELECT, "DiagramPaletteSelect", _( "Select and move items (Esc)" ) );
     tool( TOOL::ADD_BLOCK, _( "Add block" ), GLYPH::ADD_BLOCK, "DiagramPaletteAddBlock", _( "Add a block where you click (B)" ) );
     tool( TOOL::CONNECT, _( "Connect" ), GLYPH::CONNECT, "DiagramPaletteConnect", _( "Connect two blocks or ports (C)" ) );
     tool( TOOL::ADD_PORT, _( "Place port" ), GLYPH::PORT, "DiagramPalettePlacePort", _( "Place a port on a block edge or the level boundary (P)" ) );
-    m_delete = button( _( "Delete" ), GLYPH::REMOVE, "DiagramPaletteDelete", false, _( "Delete the selection (Delete)" ) );
+    m_delete = new TOOL_ACTION( this, _( "Delete" ), GLYPH::REMOVE, TOOL_STYLE::PALETTE, "DiagramPaletteDelete", _( "Delete the selection (Delete)" ) );
     m_delete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { if( m_actions.remove ) m_actions.remove(); } );
+    add( m_delete );
     // Room for the one divider before Undo, drawn by paint().
     column->AddSpacer( FromDIP( 7 ) );
-    m_undo = button( _( "Undo" ), GLYPH::UNDO, "DiagramPaletteUndo", false, _( "Undo (Ctrl+Z)" ) );
+    m_undo = new TOOL_ACTION( this, _( "Undo" ), GLYPH::UNDO, TOOL_STYLE::PALETTE, "DiagramPaletteUndo", _( "Undo (Ctrl+Z)" ) );
     m_undo->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { if( m_actions.undo ) m_actions.undo(); } );
+    add( m_undo );
     column->AddSpacer( FromDIP( 6 ) );
     SetSizerAndFit( column );
 }
@@ -1839,48 +2131,64 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
             auto route = drawn.Route( link, i );
             if( route.size() < 2 ) continue;
             std::vector<wxPoint> points; for( const auto& point : route ) points.push_back( toScreen( point ) );
-            wxString text = Text( link.name ); wxSize extent = dc.GetTextExtent( text );
-            std::vector<wxRect> candidates;
-            if( auto label = drawn.RouteLabel( link.id, i ) ) candidates.emplace_back( toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 ), extent );
             std::vector<size_t> legs;
             for( size_t j = 1; j < points.size(); ++j ) if( points[j] != points[j - 1] ) legs.push_back( j );
             auto length = [&]( size_t j ) { return std::abs( points[j].x - points[j - 1].x ) + std::abs( points[j].y - points[j - 1].y ); };
             std::stable_sort( legs.begin(), legs.end(), [&]( size_t a, size_t b ) { return length( a ) > length( b ); } );
-            // Beside the point `shift` pixels from the middle of leg j, while that point is still on the leg.
-            auto beside = [&]( size_t j, int shift )
+            // The places for a text of aExtent: a stored route's caption position first, then the middle of every leg, then,
+            // when none is clear, places moved along the legs in 6-pixel steps, the nearest to a middle first.
+            auto places = [&]( const wxSize& extent )
             {
-                const wxPoint &a = points[j - 1], &b = points[j];
-                wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
-                if( a.y == b.y )
+                std::vector<wxRect> candidates;
+                if( auto label = drawn.RouteLabel( link.id, i ) ) candidates.emplace_back( toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 ), extent );
+                // Beside the point `shift` pixels from the middle of leg j, while that point is still on the leg.
+                auto beside = [&]( size_t j, int shift )
                 {
-                    int x = middle.x + shift;
-                    if( x < std::min( a.x, b.x ) || x > std::max( a.x, b.x ) ) return;
-                    candidates.emplace_back( wxPoint( x - extent.x / 2, a.y - extent.y - FromDIP( 4 ) ), extent );
-                    candidates.emplace_back( wxPoint( x - extent.x / 2, a.y + FromDIP( 4 ) ), extent );
-                }
-                else if( a.x == b.x )
-                {
-                    int y = middle.y + shift;
-                    if( y < std::min( a.y, b.y ) || y > std::max( a.y, b.y ) ) return;
-                    candidates.emplace_back( wxPoint( a.x + FromDIP( 6 ), y - extent.y / 2 ), extent );
-                    candidates.emplace_back( wxPoint( a.x - FromDIP( 6 ) - extent.x, y - extent.y / 2 ), extent );
-                }
+                    const wxPoint &a = points[j - 1], &b = points[j];
+                    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
+                    if( a.y == b.y )
+                    {
+                        int x = middle.x + shift;
+                        if( x < std::min( a.x, b.x ) || x > std::max( a.x, b.x ) ) return;
+                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y - extent.y - FromDIP( 4 ) ), extent );
+                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y + FromDIP( 4 ) ), extent );
+                    }
+                    else if( a.x == b.x )
+                    {
+                        int y = middle.y + shift;
+                        if( y < std::min( a.y, b.y ) || y > std::max( a.y, b.y ) ) return;
+                        candidates.emplace_back( wxPoint( a.x + FromDIP( 6 ), y - extent.y / 2 ), extent );
+                        candidates.emplace_back( wxPoint( a.x - FromDIP( 6 ) - extent.x, y - extent.y / 2 ), extent );
+                    }
+                };
+                int longest = 0;
+                for( size_t j : legs ) { beside( j, 0 ); longest = std::max( longest, length( j ) ); }
+                const int step = FromDIP( 6 );
+                for( int shift = step; shift <= longest / 2; shift += step )
+                    for( size_t j : legs ) { beside( j, shift ); beside( j, -shift ); }
+                return candidates;
             };
-            // The middle of every leg first; then, when none is clear, places moved along the legs in 6-pixel steps, the
-            // nearest to a middle first.
-            int longest = 0;
-            for( size_t j : legs ) { beside( j, 0 ); longest = std::max( longest, length( j ) ); }
-            const int step = FromDIP( 6 );
-            for( int shift = step; shift <= longest / 2; shift += step )
-                for( size_t j : legs ) { beside( j, shift ); beside( j, -shift ); }
-            if( candidates.empty() ) continue;
-            CAPTION_PLACE place{ link.id, text, candidates.front(), false };
-            for( const auto& candidate : candidates )
+            auto clear = [&]( const wxRect& candidate )
             {
-                if( !canvas.Contains( candidate ) || touchesWire( candidate ) ) continue;
-                if( std::any_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& other ) { return other.Intersects( candidate ); } ) ) continue;
-                place.rect = candidate; place.shown = true; break;
+                return canvas.Contains( candidate ) && !touchesWire( candidate )
+                       && std::none_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& other ) { return other.Intersects( candidate ); } );
+            };
+            // The whole caption where it has a clear place. Otherwise the longest shortening of it, ending in "…" and keeping at
+            // least four characters, that has one, as a block caption is shortened to its block's width; only a caption that
+            // has no clear place even so is left out (the inspector names it).
+            wxString full = Text( link.name );
+            CAPTION_PLACE place{ link.id, full, wxRect(), false };
+            for( size_t keep = full.length(); !place.shown && ( keep == full.length() || keep >= 4 ); --keep )
+            {
+                wxString text = keep == full.length() ? full : wxString( full.Left( keep ) ).Trim() + wxS( "…" );
+                if( keep < full.length() && text.length() >= full.length() ) continue;
+                auto candidates = places( dc.GetTextExtent( text ) );
+                if( keep == full.length() && !candidates.empty() ) place.rect = candidates.front();
+                for( const auto& candidate : candidates )
+                    if( clear( candidate ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
+                if( keep == 0 ) break;
             }
+            if( legs.empty() && !place.shown ) continue;
             if( place.shown ) obstacles.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
             result.push_back( std::move( place ) );
         }
@@ -1982,7 +2290,8 @@ void RECURSIVE_DIAGRAM_FRAME::removeSelection( bool detach )
 void RECURSIVE_DIAGRAM_FRAME::beginCaption( int kind, const wxRect& box, const wxString& value )
 {
     m_captionKind = kind;
-    // What to type, in the field itself (design QA P3 2).
+    // What to type, in the field itself where the platform shows a hint in a focused field (GTK 3 shows it only in an unfocused
+    // one, and this field always has the focus; there the status bar says what to type and how to finish, design QA P3 2).
     m_caption->SetHint( kind == 1 ? _( "Block name" ) : kind == 2 ? _( "Connection caption" ) : kind == 3 ? _( "Port name" ) : wxString() );
     int height = m_caption->GetBestSize().y;
     m_caption->SetSize( box.x, box.y, std::max( FromDIP( 140 ), box.width ), height );

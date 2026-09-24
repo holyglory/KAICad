@@ -408,11 +408,17 @@ public:
      * When the sheet number is used in annotation, each sheet annotation starts from sheet
      * number * 100.  In other words the first sheet uses 100 to 199, the second sheet uses
      * 200 to 299, and so on.
+     *
+     * Every annotation is staged in @a aCommit, which keeps the reference inventory from before
+     * it.  Repairing duplicate time stamps is not: it gives items new identities directly.
+     *
+     * @return the number of duplicated item identities replaced (always 0 unless
+     *         @a aRepairTimestamps).  The caller records them, as they lie outside @a aCommit.
      */
-    void AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope, ANNOTATE_ORDER_T aSortOption,
-                          ANNOTATE_ALGO_T aAlgoOption, bool aRecursive, int aStartNumber, bool aResetAnnotation,
-                          bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter,
-                          SYMBOL_FILTER aSymbolFilter );
+    int AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope, ANNOTATE_ORDER_T aSortOption,
+                         ANNOTATE_ALGO_T aAlgoOption, bool aRecursive, int aStartNumber, bool aResetAnnotation,
+                         bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter,
+                         SYMBOL_FILTER aSymbolFilter );
 
     /**
      * Check for annotation errors.

@@ -168,12 +168,12 @@ public sealed partial class NativeSessionTests
     /// make older AI requests stale, and cancelled or unchanged ones must not (p0bd2c0d9e475f181).
     /// Drives the rendered Symbol Properties dialog with its fields grid (also on a symbol that a
     /// duplication or a move still carries), the Sheet Properties dialog, the hierarchy pane's
-    /// top-level sheet actions, Page Settings, Schematic Setup, Annotate Schematic and Place >
-    /// Import Sheet, and compares the exact persisted state digest, journal revision and modified
-    /// flag after each action.  The change-tracking oracle requires every proven owner's OneChange
-    /// and Unchanged steps here, as statements this method always runs.  It also records what a
-    /// lifecycle read costs on this fixture; the comparisons on the largest demo design are
-    /// measured afterwards by the native test binary.
+    /// top-level sheet actions, Page Settings, Schematic Setup, Annotate Schematic (its settings
+    /// and Annotate itself) and Place > Import Sheet, and compares the exact persisted state
+    /// digest, journal revision and modified flag after each action.  The change-tracking oracle
+    /// requires every proven owner's OneChange and Unchanged steps here, as statements this method
+    /// always runs.  It also records what a lifecycle read costs on this fixture; the comparisons on
+    /// the largest demo design are measured afterwards by the native test binary.
     /// </summary>
     private static async Task VerifyDirectOwnerTracking(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, CancellationToken token)
@@ -297,8 +297,8 @@ public sealed partial class NativeSessionTests
             + $"min {samples[0]:F1} ms, max {samples[^1]:F1} ms. A whole-state tracker (Page Settings, Import Sheet "
             + "and design block placement, and the other whole-state owners) captures twice per action, a cancelled "
             + "one included; Schematic Setup and the simulation settings capture the project settings and the first "
-            + "top-level sheet twice; Symbol Properties, undoable Sheet Properties and the simulator tuner compare "
-            + "only their staged items.";
+            + "top-level sheet twice; Symbol Properties, undoable Sheet Properties, Annotate and the simulator tuner "
+            + "compare only their staged items (Annotate also the kept reference inventory).";
         Console.WriteLine("Native tracking cost: " + cost);
         await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-capture-cost.txt"), cost + Environment.NewLine, token);
 
@@ -373,9 +373,10 @@ public sealed partial class NativeSessionTests
         // Symbol Properties on a symbol that a duplication or a move still carries, with automatic
         // field placement on: the carrying tool owns the edit, so cancelling it must leave nothing,
         // not even an undo entry.  Placing from the symbol chooser needs a symbol library the fixture
-        // does not have; a duplicated symbol is placed by the same kind of carrying tool.  The probe's
-        // fields are first marked as automatically placed but left away from their automatic places,
-        // so placing them after the dialog really moves them.
+        // does not have, and it returns its designator through its own copy of the reference
+        // inventory rather than a commit, so it is not proven here (the change-tracking oracle lists
+        // it as unproven).  The probe's fields are first marked as automatically placed but left away
+        // from their automatic places, so placing them after the dialog really moves them.
         var carried = (await Settled(t => client.InvokeAsync<GetItemsById, GetItemsResponse>(symbolQuery, t)))
             .Items.Single().Unpack<SchematicSymbolInstance>();
         carried.FieldsAutoplaced = true;
@@ -393,22 +394,22 @@ public sealed partial class NativeSessionTests
             (await Settled(t => client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
                 new() { Document = document.Clone() }, t))).Data;
         var placingData = await ScreenData();
-        async Task SameScreen(string step)
+        async Task SameScreen(SchematicScreenData expected, string step)
         {
             // The sheet's items, cached definitions and settings, the reference inventory of handed
             // out designators included.  A difference is kept as evidence before it fails.
             var after = await ScreenData();
-            if (!placingData.Equals(after))
+            if (!expected.Equals(after))
             {
                 await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-expected.json"),
-                    SchematicJson.Formatter.Format(placingData), token);
+                    SchematicJson.Formatter.Format(expected), token);
                 await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-{step}-actual.json"),
                     SchematicJson.Formatter.Format(after), token);
             }
-            CollectionAssert.AreEqual(placingData.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>(),
+            CollectionAssert.AreEqual(expected.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>(),
                 after.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>(),
                 $"{step} must return every designator it handed out.");
-            Assert.AreEqual(placingData, after, $"{step} must leave the sheet exactly as it was (both states are kept as evidence).");
+            Assert.AreEqual(expected, after, $"{step} must leave the sheet exactly as it was (both states are kept as evidence).");
         }
         async Task EditWhileCarried(string carry, bool control, string step)
         {
@@ -429,10 +430,10 @@ public sealed partial class NativeSessionTests
             await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-cancelled.png"), token);
         }
         await EditWhileCarried("d", true, "duplicate-properties");
-        await SameScreen("duplicate-properties");
+        await SameScreen(placingData, "duplicate-properties");
         await Unchanged(placing, "Cancelling a duplicated symbol after editing its properties");
         await EditWhileCarried("m", false, "move-properties");
-        await SameScreen("move-properties");
+        await SameScreen(placingData, "move-properties");
         await Unchanged(placing, "Cancelling a symbol move after editing its properties");
         Assert.AreEqual(reference, await Reference());
         // Neither cancelled edit left an undo entry: the next undo reverts the field marking above
@@ -675,21 +676,124 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(cleanAnnotate.StateSha256, reannotated.StateSha256,
             "Choosing the original order again must return the exact saved state.");
 
+        // Annotate itself, from its rendered Annotate button (the modeless dialog stays open).  It
+        // also repairs item identities that two sheet files of a design repeat, from a hand edit or
+        // a merge (loading renumbers a repeat inside one file, not across files): the later
+        // duplicate gets a new identity outside the annotation commit.  A saved design whose symbols
+        // are all annotated gets a note on the root sheet and one on the shared child sheet with the
+        // same identity on disk and is reloaded; Annotate then has nothing to do but that repair,
+        // which must be exactly one "Annotate" revision that marks the design modified and changes
+        // nothing else on any sheet.
+        void PressAnnotate() => NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog,
+            false, true, 60, 25);
+        const string repeatedText = "Tracked repeated identity";
+        async Task<List<SchematicScreenData>> Sheets() => (await Settled(t =>
+                client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document.Clone() }, t)))
+            .Hierarchy.Data.Instances.ToList();
+        static bool IsRepeatedNote(Any item) =>
+            item.Is(SchematicText.Descriptor) && item.Unpack<SchematicText>().Text.Text_ == repeatedText;
+        // Each sheet file once: the shared child file is shown by two sheets.
+        static List<SchematicText> RepeatedNotes(List<SchematicScreenData> sheets) => sheets
+            .GroupBy(s => s.Metadata.ScreenId.Value).Select(g => g.First())
+            .SelectMany(s => s.Items).Where(IsRepeatedNote).Select(i => i.Unpack<SchematicText>()).ToList();
+        static SchematicScreenData WithoutRepeatedNotes(SchematicScreenData sheet)
+        {
+            var copy = sheet.Clone();
+            var others = copy.Items.Where(i => !IsRepeatedNote(i)).ToList();
+            copy.Items.Clear();
+            copy.Items.AddRange(others);
+            return copy;
+        }
+        static string WithoutIdentity(SchematicText note) { var copy = note.Clone(); copy.Id = null; return copy.ToString(); }
+
+        var annotatedDesign = await Saved();
+        string rootFile = Path.ChangeExtension(annotatedDesign.NativeFiles.Single(
+            f => f.EndsWith(".kicad_pro", StringComparison.Ordinal)), ".kicad_sch");
+        string childSheetFile = annotatedDesign.NativeFiles.Where(f => f.EndsWith(".kicad_sch", StringComparison.Ordinal)
+            && f != rootFile).OrderBy(f => f, StringComparer.Ordinal).First();
+        string savedRoot = await File.ReadAllTextAsync(rootFile, token);
+        string savedChild = await File.ReadAllTextAsync(childSheetFile, token);
+        int rootAt = savedRoot.IndexOf("(sheet_instances", StringComparison.Ordinal), childAt = savedChild.LastIndexOf(')');
+        Assert.IsGreaterThan(0, rootAt, "The saved root sheet must list its sheet instances.");
+        Assert.IsGreaterThan(0, childAt, "The saved child sheet must end its item list.");
+        string repeatedId = Guid.NewGuid().ToString("D");
+        string RepeatedNote(double y) =>
+            $"(text \"{repeatedText}\" (at 30.48 {y.ToString(System.Globalization.CultureInfo.InvariantCulture)} 0) "
+            + $"(effects (font (size 1.27 1.27))) (uuid {repeatedId}))\n";
+        await File.WriteAllTextAsync(rootFile, savedRoot.Insert(rootAt, RepeatedNote(35.56)), token);
+        await File.WriteAllTextAsync(childSheetFile, savedChild.Insert(childAt, RepeatedNote(40.64)), token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+        var duplicated = await State();
+        Assert.IsFalse(duplicated.NativeContentDirty, "The reloaded design must start unmodified.");
+        var duplicatedSheets = await Sheets();
+        var loadedNotes = RepeatedNotes(duplicatedSheets);
+        Assert.HasCount(2, loadedNotes, "Both sheet files' notes must be loaded.");
+        Assert.IsTrue(loadedNotes.All(n => n.Id.Value == repeatedId), "Loading must keep the repeated identity for Annotate to repair.");
+
+        await OpenAnnotate("annotate-repair");
+        PressAnnotate();
+        await Advanced(duplicated, "annotate-repair");
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-repaired.png"), token);
+        await Button(annotateDialog, false, "annotate-repair");
+        var repaired = await State();
+        await OneChange(duplicated, "Annotate", SchematicChange.Types.Kind.Commit);
+        Assert.AreNotEqual(duplicated.StateSha256, repaired.StateSha256, "The new identity must change the saved design.");
+        Assert.IsTrue(repaired.NativeContentDirty, "Repairing an identity must mark the design modified.");
+        var repairedSheets = await Sheets();
+        var repairedNotes = RepeatedNotes(repairedSheets);
+        Assert.HasCount(2, repairedNotes, "Repairing an identity must keep both notes.");
+        CollectionAssert.AllItemsAreUnique(repairedNotes.Select(n => n.Id.Value).ToList(), "Each note must have its own identity.");
+        Assert.AreEqual(1, repairedNotes.Count(n => n.Id.Value == repeatedId), "One note must keep the repeated identity.");
+        CollectionAssert.AreEquivalent(loadedNotes.Select(WithoutIdentity).ToList(), repairedNotes.Select(WithoutIdentity).ToList(),
+            "Only the identity of the renumbered note may change.");
+        var expectedSheets = duplicatedSheets.Select(WithoutRepeatedNotes).ToList();
+        var actualSheets = repairedSheets.Select(WithoutRepeatedNotes).ToList();
+        if (!expectedSheets.SequenceEqual(actualSheets))
+        {
+            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-repair-expected.json"),
+                expectedSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+            await File.WriteAllLinesAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate-repair-actual.json"),
+                actualSheets.Select(sheet => SchematicJson.Formatter.Format(sheet)), token);
+        }
+        CollectionAssert.AreEqual(expectedSheets, actualSheets, "Annotate had nothing else to do, so every other item, "
+            + "setting, cached definition and the reference inventory must be unchanged on every sheet (both are kept as evidence).");
+        Assert.AreEqual(reference, await Reference());
+
+        // Put the saved design back and annotate it: every symbol is annotated and no identity
+        // repeats, so Annotate has nothing to do and must leave no revision, saved change or
+        // modified flag.  The Close click is handled after Annotate's, so its window closing shows
+        // Annotate has run.
+        await File.WriteAllTextAsync(rootFile, savedRoot, token);
+        await File.WriteAllTextAsync(childSheetFile, savedChild, token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+        var reloaded = await State();
+        Assert.AreEqual(annotatedDesign.StateSha256, reloaded.StateSha256, "Reloading the saved design must restore it exactly.");
+        Assert.IsFalse(reloaded.NativeContentDirty);
+        await OpenAnnotate("annotate-nothing");
+        PressAnnotate();
+        await Task.Delay(1000, token);
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-nothing.png"), token);
+        await Button(annotateDialog, false, "annotate-nothing");
+        await Unchanged(reloaded, "Annotating an annotated schematic");
+        Assert.AreEqual(reference, await Reference());
+
         // Place > Import Sheet.  The first placement brings a child sheet with it.  Cancelling a later
         // placement must leave nothing when its file repeats no identity the design uses, and must
         // record exactly the change it leaves when it does: loading gives whichever duplicate comes
         // later in sheet order a new identity, and for an item on a sheet below the current one that
         // is the existing item, which keeps its new identity after the cancel.  Removing the placed
-        // items also removes cached library definitions only they used, so those never stay.
-        const string chooser = "Choose Schematic", childNoteText = "Tracked child note";
+        // items also removes cached library definitions only they used, so those never stay, and the
+        // designators annotating them handed out are returned.
+        const string chooser = "Choose Schematic", childNoteText = "Tracked child note",
+            libraryPrompt = "Continue Load Schematic";
         string importDirectory = Path.Combine(Path.GetTempPath(), "kicad-import-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(importDirectory);
         string childFile = Path.Combine(importDirectory, "child.kicad_sch");
         string placedFile = Path.Combine(importDirectory, "placed.kicad_sch");
         string freshFile = Path.Combine(importDirectory, "fresh.kicad_sch");
         string childNote = Guid.NewGuid().ToString("D"), placedRoot = Guid.NewGuid().ToString("D");
-        string Opening(string id) =>
-            $"(kicad_sch (version 20250114) (generator \"eeschema\") (uuid {id}) (paper \"A4\") (lib_symbols)";
+        string Opening(string id, string library = "") =>
+            $"(kicad_sch (version 20250114) (generator \"eeschema\") (uuid {id}) (paper \"A4\") (lib_symbols{library})";
         string Wiring() =>
             $" (wire (pts (xy 20.32 20.32) (xy 40.64 20.32)) (stroke (width 0) (type default)) (uuid {Guid.NewGuid():D}))"
             + $" (text \"Tracked import\" (at 20.32 25.4 0) (effects (font (size 1.27 1.27))) (uuid {Guid.NewGuid():D}))";
@@ -710,11 +814,28 @@ public sealed partial class NativeSessionTests
             + " (property \"Sheetfile\" \"child.kicad_sch\" (at 50.8 31.1 0) (effects (font (size 1.27 1.27)) (justify left top)))"
             + $" (instances (project \"import\" (path \"/{placedRoot}\" (page \"2\")))))"
             + " (sheet_instances (path \"/\" (page \"1\"))))", token);
-        await File.WriteAllTextAsync(freshFile, Opening(Guid.NewGuid().ToString("D")) + Wiring()
+        // The fresh file also holds an unannotated resistor with its own library definition, so the
+        // cancelled placement has a symbol that automatic annotation gives a designator while it is
+        // carried; the cancel must return that designator.
+        string freshRoot = Guid.NewGuid().ToString("D"), resistorId = Guid.NewGuid().ToString("D");
+        const string resistorLibrary = " (symbol \"Tracked:R\" (pin_names (offset 0)) (exclude_from_sim no) (in_bom yes) (on_board yes)"
+            + " (property \"Reference\" \"R\" (at 2.032 0 90) (effects (font (size 1.27 1.27))))"
+            + " (property \"Value\" \"R\" (at 0 0 90) (effects (font (size 1.27 1.27))))"
+            + " (symbol \"R_0_1\" (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254) (type default)) (fill (type none))))"
+            + " (symbol \"R_1_1\""
+            + " (pin passive line (at 0 3.81 270) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"1\" (effects (font (size 1.27 1.27)))))"
+            + " (pin passive line (at 0 -3.81 90) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"2\" (effects (font (size 1.27 1.27)))))))";
+        string resistor = $" (symbol (lib_id \"Tracked:R\") (at 30.48 33.02 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)"
+            + $" (uuid {resistorId})"
+            + " (property \"Reference\" \"R?\" (at 32.512 31.75 0) (effects (font (size 1.27 1.27)) (justify left)))"
+            + " (property \"Value\" \"R\" (at 32.512 34.29 0) (effects (font (size 1.27 1.27)) (justify left)))"
+            + $" (pin \"1\" (uuid {Guid.NewGuid():D})) (pin \"2\" (uuid {Guid.NewGuid():D}))"
+            + $" (instances (project \"import\" (path \"/{freshRoot}\" (reference \"R?\") (unit 1)))))";
+        await File.WriteAllTextAsync(freshFile, Opening(freshRoot, resistorLibrary) + Wiring() + resistor
             + " (sheet_instances (path \"/\" (page \"1\"))))", token);
         try
         {
-            async Task Import(string step, string file)
+            async Task Import(string step, string file, int libraryPrompts = 0)
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "Escape", controlKey: false, focusCanvas: true);
                 // Place menu, last item, then up to Import Sheet... past the eleven drawing items.
@@ -730,6 +851,38 @@ public sealed partial class NativeSessionTests
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-chooser.png"), token);
                 Key("Return", chooser);
                 await Window(chooser, false, step);
+                // A file from another project whose symbols come from a library this project does not
+                // have is loaded only once KiCad's two warnings (a file from a different project, then
+                // library names missing from that project's table) are answered with Continue Load, as
+                // a person importing it would.  Each GTK alert shows [Continue Load] [Cancel Load] across
+                // its bottom edge with Cancel Load as the default, so the left button is clicked.  The
+                // second opens as the first closes, so each is told apart by its window.
+                nuint? answered = null;
+                for (int prompt = 0; prompt < libraryPrompts; prompt++)
+                {
+                    using (var shown = CancellationTokenSource.CreateLinkedTokenSource(token))
+                    {
+                        shown.CancelAfter(TimeSpan.FromSeconds(5));
+                        try
+                        {
+                            while (!NativeKeyboard.HasWindow(display, processId, libraryPrompt, excludeWindow: answered))
+                                await Task.Delay(50, shown.Token);
+                        }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                        {
+                            await Failed(step, $"Library warning {prompt + 1} of {libraryPrompts} did not open during {step}.");
+                        }
+                    }
+                    nuint current = 0;
+                    NativeKeyboard.SchematicShortcut(display, processId, "", libraryPrompt, false, false,
+                        observeWindow: window => current = window, excludeWindow: answered);
+                    await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-library-{prompt}.png"), token);
+                    NativeKeyboard.SchematicShortcut(display, processId, "click", libraryPrompt, false, false,
+                        clickFromLeft: 130, clickFromBottom: 17, excludeWindow: answered);
+                    answered = current;
+                }
+                if (libraryPrompts > 0)
+                    await Window(libraryPrompt, false, step);
                 // The imported items now follow the pointer in the move tool.
                 await Task.Delay(1000, token);
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-{step}-moving.png"), token);
@@ -756,9 +909,19 @@ public sealed partial class NativeSessionTests
             // A saved baseline, so the cancelled placements are checked for the modified flag too.
             var placed = await Saved();
 
-            // Precision: nothing in this file is already in the design.
-            await Import("import-cancel", freshFile);
+            // Precision: nothing in this file is already in the design, and the designator automatic
+            // annotation gives its resistor while it is carried is returned.  Reading the carried
+            // resistor by its identity is allowed during the move; sheet reads wait for it to end.
+            var placedData = await ScreenData();
+            var placedInventory = placedData.Metadata?.ReferenceInventory?.Allocated.ToList() ?? new List<string>();
+            await Import("import-cancel", freshFile, libraryPrompts: 2);
+            var resistorQuery = new GetItemsById { Header = header.Clone() }; resistorQuery.Items.Add(new KIID { Value = resistorId });
+            string handedOut = (await Settled(t => client.InvokeAsync<GetItemsById, GetItemsResponse>(resistorQuery, t)))
+                .Items.Single().Unpack<SchematicSymbolInstance>().ReferenceField.Text.Text_;
+            StringAssert.Matches(handedOut, new Regex("^R[0-9]+$"), "Automatic annotation must give the carried resistor a designator.");
+            CollectionAssert.DoesNotContain(placedInventory, handedOut, "The carried resistor's designator must be newly handed out.");
             await CancelImport();
+            await SameScreen(placedData, "import-cancel");
             await Unchanged(placed, "Cancelling a sheet import");
 
             // Recall: the child sheet's own file repeats the identity of the note on the placed child
@@ -772,8 +935,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual((0, 1), await ChildNotes(),
                 "The child sheet must keep its one note, under the new identity the cancelled placement gave it.");
             await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-import-cancel.txt"),
-                "Cancelling an import whose file repeats no identity in the design left no saved change, no revision and "
-                + "no modified flag." + Environment.NewLine
+                "Cancelling an import whose file repeats no identity in the design, with an unannotated resistor that "
+                + $"automatic annotation gave the designator {handedOut} while it was carried, left the sheet and the reference "
+                + "inventory as they were: no saved change, no revision and no modified flag." + Environment.NewLine
                 + "Cancelling an import of the placed child sheet's own file left the child sheet's note renumbered; that "
                 + "saved change was recorded as one 'Import Schematic Sheet Content' revision and marked the design modified."
                 + Environment.NewLine, token);

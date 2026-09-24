@@ -83,7 +83,8 @@ public:
      * compared, each with the copy the commit saved when it was staged, in the form the
      * schematic writer saves; the rest of the design is never written.  An added or removed
      * item, or any staged setting, library cache, embedded file or ERC marker, counts as a
-     * change.
+     * change, and so does a reference inventory that differs from the one the commit kept
+     * (KeepReferenceInventory()): designators handed out are saved with the project.
      */
     bool PersistsChange( SCHEMATIC& aSchematic ) const;
 
@@ -100,6 +101,9 @@ public:
      * keeps them handed out.  Only the first call keeps a copy.
      */
     void KeepReferenceInventory();
+
+    /// KeepReferenceInventory() for @a aSchematic, when the commit has no schematic editor.
+    void KeepReferenceInventory( SCHEMATIC& aSchematic );
 
     /// A copy of @a aSchematic's reference inventory, or null when it has none.
     static std::unique_ptr<REFDES_TRACKER> CopyReferenceInventory( SCHEMATIC& aSchematic );

@@ -3011,8 +3011,10 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
                     // carries it: that tool's commit records the placed symbol, fields included,
                     // or discards it when the placement or move is cancelled.  A commit of its
                     // own here would push a symbol that is not placed yet and clear the flags
-                    // the carrying tool depends on.
+                    // the carrying tool depends on.  The placed fields are redrawn and their
+                    // bounding box refreshed like any other field placement.
                     symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                    m_frame->UpdateItem( symbol, false, true );
                 }
                 else if( now.epoch == started.epoch && now.sequence != started.sequence )
                 {

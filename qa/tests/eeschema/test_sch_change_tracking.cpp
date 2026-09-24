@@ -1849,6 +1849,8 @@ const std::string DRAWING_TOOLS = "eeschema/tools/sch_drawing_tools.cpp";
 const std::string EDITOR_CONTROL = "eeschema/tools/sch_editor_control.cpp";
 const std::string SETUP_CONFIG = "eeschema/eeschema_config.cpp";
 const std::string SIM_FRAME = "eeschema/sim/simulator_frame.cpp";
+const std::string ANNOTATE_DIALOG = "eeschema/dialogs/dialog_annotate.cpp";
+const std::string ANNOTATE_SOURCE = "eeschema/annotate.cpp";
 const std::string JOURNEY = "automation/tests/KiCad.Automation.Tests/NativeEventJourney.cs";
 const std::string JOURNEY_METHOD = "VerifyDirectOwnerTracking";
 
@@ -1941,8 +1943,13 @@ inline std::vector<OWNER> reviewedOwners()
           "Called only after a top-level sheet is added or removed inside a tracked change." },
 
         // Schematic dialogs.
-        { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "schFrame->", 1,
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "schFrame->", 1,
           DISPOSITION::ROUTED, { G_PROJECT }, {}, "Changed annotation settings record a committed change." },
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "m_Parent->", 1, DISPOSITION::ROUTED,
+          { G_SYMBOL, G_FIELD, G_SHEET, G_TEXT, G_LINE, G_JUNCTION, G_GROUP, G_PROJECT }, {},
+          "Annotate stages its symbols and keeps the reference inventory in a tracked commit; repairing "
+          "duplicated identities renumbers items of any kind outside it and is reported to the tracked "
+          "change, which then records the change once and marks it even when nothing was staged." },
         { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::TransferDataFromWindow", "m_parent->", 1,
           DISPOSITION::ROUTED, { G_SYMBOL, G_FIELD, G_PROJECT }, {}, "Field and BOM edits are pushed as a commit." },
         { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::onDeleteVariant", "m_parent->", 1, DISPOSITION::ROUTED,
@@ -2172,14 +2179,15 @@ inline std::vector<HELPER> reviewedHelpers()
 
     return {
         { "AnnotateSymbols", { "eeschema" },
-          { { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::OnAnnotateClick", 1,
-              CALLER_RULE::STAGED_COMMIT, {} },
+          { { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", 1, CALLER_RULE::ROUTED_CALL, {} },
             { drawing, "SCH_DRAWING_TOOLS::ImportSheet", 2, CALLER_RULE::STAGED_COMMIT, {} },
             { drawing, "SCH_DRAWING_TOOLS::DrawSheet", 2, CALLER_RULE::STAGED_COMMIT, {} },
             { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::RepeatDrawItem", 1, CALLER_RULE::STAGED_COMMIT,
               {} } },
           "Annotation edits the caller's commit, keeping the reference inventory in it so a cancelled "
-          "placement returns the designators it handed out; the caller's push marks the document modified." },
+          "placement returns the designators it handed out; the caller's push marks the document modified.  "
+          "Annotate Schematic declares a tracked change on that commit first, which pushes or reverts it and "
+          "records the identities annotation replaced outside it (see its tracker review)." },
         { "resyncAfterTopLevelSheetChange", { "eeschema/widgets/hierarchy_pane.cpp" },
           { { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, CALLER_RULE::ROUTED_CALL,
               {} } },
@@ -2239,6 +2247,21 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
           "Every persisted edit is staged: the symbol and the other units it synchronises, with the symbol's "
           "own definition (embedded files and pin maps are applied after the snapshot and the definition is "
           "compared with the item), and other symbols only on a real pin-map edit." },
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", 0, 1, 0,
+          "Annotation stages every symbol it annotates before annotating it, and the commit keeps the "
+          "reference inventory from before, which the staged comparison compares too, so designators handed "
+          "out are seen even when every symbol compares unchanged.  Repairing duplicated identities renumbers "
+          "items outside the commit; AnnotateSymbols returns how many it replaced and the dialog reports them "
+          "as a change outside the commit.",
+          { { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "AnnotateSymbols( &commit," },
+            { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "change.ChangedOutsideCommit()" },
+            { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "change.PushOrRevert( commit," },
+            { ANNOTATE_SOURCE, "SCH_EDIT_FRAME::AnnotateSymbols", "replaced = screens.ReplaceDuplicateTimeStamps()" },
+            { ANNOTATE_SOURCE, "SCH_EDIT_FRAME::AnnotateSymbols", "return replaced;" },
+            { ANNOTATE_SOURCE, "SCH_EDIT_FRAME::AnnotateSymbols", "aCommit->KeepReferenceInventory()" },
+            { ANNOTATE_SOURCE, "SCH_EDIT_FRAME::AnnotateSymbols",
+              "aCommit->Modify( symbol, sheet->LastScreen() ); ref.Annotate();" },
+            { "eeschema/sch_commit.cpp", "SCH_COMMIT::PersistsChange", "if( m_referenceInventoryKept )" } } },
         { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, 0, "" },
         { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, 0, "" },
         { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 0, 1, 0,
@@ -2313,6 +2336,16 @@ inline std::vector<UNPROVEN> unprovenRoutes()
         { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "SCH_ACTIONS::placeDesignBlock", 120,
           "Placing a design block shares the proven sheet-import placement, but its journey needs a design "
           "block library registered in the fixture project before the editor starts." },
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::PlaceSymbol", "RestoreReferenceInventory(", 110,
+          "Cancelling a symbol placed from the symbol chooser returns the designator its annotation handed out "
+          "through Place Symbol's own copy of the reference inventory, restored when the carried symbol is "
+          "dropped, not through a commit.  Its journey needs a symbol library registered in the fixture "
+          "project before the editor starts; only the copy and restore helpers are checked (unit level)." },
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "change.ChangedOutsideCommit()", 90,
+          "A Sheet Properties file change that is applied to the sheet's screen and then fails (the dialog "
+          "restores the file name field) is reported as a change outside the commit; the journey has no file "
+          "change that fails after it was applied, so only the staged tracker's report is checked (unit "
+          "level)." },
     };
 }
 
@@ -2354,8 +2387,12 @@ inline std::vector<PROOF> journeyProofs()
           { "Cancelling Page Settings", "Accepting unchanged Page Settings" } },
         { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "Edit Schematic Setup",
           { "Cancelling Schematic Setup", "Accepting unchanged Schematic Setup" } },
-        { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
           { "Closing unchanged Annotate Schematic" } },
+        // Annotate itself: repairing one duplicated identity with nothing else to annotate is one
+        // revision, and annotating an annotated schematic is none.
+        { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "Annotate",
+          { "Annotating an annotated schematic" } },
     };
 }
 
@@ -3780,6 +3817,47 @@ BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
     BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
     BOOST_CHECK_EQUAL( doc.ChangeJournal().ReadAfter( doc.ChangeJournal().Epoch(), 0 ).entries.at( 0 ).description,
                        "Changed outside the commit" );
+
+    // The reference inventory a commit kept before annotating is compared as well: designators
+    // handed out since then are saved with the project settings, so they are a change even when
+    // every staged symbol compares unchanged (Annotate with "Reset existing annotations" giving
+    // symbols back designators an explicit inventory clear removed).  The rendered journey
+    // reaches the unchanged side on every Annotate.  The changed side needs that reset option,
+    // which has no keyboard mnemonic, after clearing the inventory through the API, so it is
+    // checked here, on the comparison itself.
+    {
+        std::shared_ptr<REFDES_TRACKER>& live = doc.Settings().m_refDesTracker;
+
+        if( !live )
+            live = std::make_shared<REFDES_TRACKER>();
+
+        live->Insert( "R1" );
+
+        SCH_COMMIT commit( &manager );
+        commit.Modify( text, screen );
+        commit.KeepReferenceInventory( doc );
+
+        // Precision: nothing handed out since the inventory was kept.
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+
+        // Recall.  Only the first keep counts, so annotating again in the same commit still
+        // compares with the inventory from before the first annotation.
+        live->Insert( "R2" );
+        commit.KeepReferenceInventory( doc );
+        BOOST_CHECK( commit.PersistsChange( doc ) );
+
+        SCH_TRACKED_CHANGE change( doc, "Annotate", commit );
+        BOOST_CHECK( change.Complete() );
+
+        // Abandoning the commit drops the kept inventory with its items.
+        commit.Abandon();
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+        live->Clear();
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 2u );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().ReadAfter( doc.ChangeJournal().Epoch(), 1 ).entries.at( 0 ).description,
+                       "Annotate" );
 
     {
         // Only the staged form takes a report: the other forms compare what they may change.

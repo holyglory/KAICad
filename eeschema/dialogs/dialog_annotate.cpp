@@ -28,6 +28,7 @@
 #include <widgets/wx_html_report_panel.h>
 #include <schematic.h>
 #include <sch_commit.h>
+#include <api/api_sch_state_groups.h>
 
 // A window name for the annotate dialog to retrieve is if not destroyed
 #define DLG_WINDOW_NAME "DialogAnnotateWindowName"
@@ -247,6 +248,12 @@ void DIALOG_ANNOTATE::OnAnnotateClick( wxCommandEvent& event )
 {
     SCH_COMMIT commit( m_Parent );
 
+    // Annotation stages every symbol it annotates in the commit, and the commit keeps the
+    // reference inventory from before it, so only the staged symbols and the inventory are
+    // compared with what the commit saved, never the whole design.  Annotating with nothing to
+    // do leaves no undo entry, revision or modified flag.
+    SCH_TRACKED_CHANGE change( m_Parent->Schematic(), "Annotate", commit );
+
     m_MessageWindow->Clear();
     REPORTER& reporter = m_MessageWindow->Reporter();
     m_MessageWindow->SetLazyUpdate( true );     // Don't update after each message
@@ -254,11 +261,21 @@ void DIALOG_ANNOTATE::OnAnnotateClick( wxCommandEvent& event )
     bool resetAnnotation = m_rbReset_Annotations->GetValue();
     bool regroupUnits = resetAnnotation && m_checkRegroupUnits->GetValue();
 
-    m_Parent->AnnotateSymbols( &commit, GetScope(), GetSortOrder(), GetAnnotateAlgo(),
-                               m_checkRecursive->GetValue(), GetStartNumber(), resetAnnotation,
-                               regroupUnits, true, reporter, SYMBOL_FILTER_NON_POWER );
+    int replaced = m_Parent->AnnotateSymbols( &commit, GetScope(), GetSortOrder(), GetAnnotateAlgo(),
+                                              m_checkRecursive->GetValue(), GetStartNumber(),
+                                              resetAnnotation, regroupUnits, true, reporter,
+                                              SYMBOL_FILTER_NON_POWER );
 
-    commit.Push( _( "Annotate" ) );
+    // Repairing duplicated identities gives items new identities outside the commit, which
+    // saves the design differently even when every staged symbol is unchanged.
+    if( replaced > 0 )
+        change.ChangedOutsideCommit();
+
+    // A real change is pushed as one "Annotate" revision.  The push marks the design modified;
+    // when only identities were replaced and no symbol was staged, nothing is pushed and the
+    // tracked change records the revision, so the design is marked here.
+    if( change.PushOrRevert( commit, _( "Annotate" ) ) )
+        m_Parent->OnModify();
 
     m_MessageWindow->Flush( true ); // Now update to show all messages
 }

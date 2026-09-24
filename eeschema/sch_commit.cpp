@@ -175,11 +175,20 @@ void SCH_COMMIT::KeepReferenceInventory()
 {
     SCH_EDIT_FRAME* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
 
-    if( !frame || m_isLibEditor || m_referenceInventoryKept )
+    if( !frame || m_isLibEditor )
+        return;
+
+    KeepReferenceInventory( frame->Schematic() );
+}
+
+
+void SCH_COMMIT::KeepReferenceInventory( SCHEMATIC& aSchematic )
+{
+    if( m_referenceInventoryKept )
         return;
 
     m_referenceInventoryKept = true;
-    m_referenceInventory = CopyReferenceInventory( frame->Schematic() );
+    m_referenceInventory = CopyReferenceInventory( aSchematic );
 }
 
 

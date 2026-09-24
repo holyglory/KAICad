@@ -183,6 +183,7 @@ void SCH_COMMIT::SetPageSettings( SCH_SCREEN* aScreen, const PAGE_INFO& aPage,
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     DS_DATA_MODEL::GetTheInstance().SetPageLayout( aPreparedLayout.ToUTF8() );
     aScreen->SetPageSettings( aPage );
     BASE_SCREEN::m_DrawingSheetFileName = aDrawingSheet;
@@ -200,6 +201,7 @@ void SCH_COMMIT::SetTitleBlock( SCH_SCREEN* aScreen, const TITLE_BLOCK& aTitle )
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     aScreen->SetTitleBlock( aTitle );
     aScreen->SetContentModified();
 }
@@ -623,6 +625,15 @@ bool SCH_ERC_HISTORY::Restore( SCH_EDIT_FRAME* aFrame, const STATE& aState, STAT
 
     auto add = [&]( std::unique_ptr<SCH_MARKER> aMarker, SCH_SCREEN* aScreen )
     {
+        // A marker whose sheet path names no loaded screen stays out rather than moving to
+        // another sheet; its exclusion no longer applies to this schematic.
+        if( !aScreen )
+        {
+            wxLogTrace( wxT( "KICAD_SCH_TRACKING" ),
+                        wxS( "An ERC marker's sheet has no loaded screen; it is not restored" ) );
+            return;
+        }
+
         const KIID uuid = aMarker->m_Uuid;
         aFrame->AddToScreen( aMarker.release(), aScreen );
 
@@ -783,6 +794,7 @@ void SCH_COMMIT::SetRootInstance( SCH_SHEET* aSheet, const std::optional<wxStrin
         m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
         m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
     }
+    m_pageSettingsUndo->IncludePages();
     SCH_SHEET_INSTANCE record;
     if( aSheet->HasRootInstance() )
         record = aSheet->GetRootInstance();

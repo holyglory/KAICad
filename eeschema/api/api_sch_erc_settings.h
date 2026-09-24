@@ -86,11 +86,16 @@ inline MESSAGE Capture( SCHEMATIC& aSchematic )
 
 /// The loaded screen that owns a marker rebuilt from its exact references: the main item's
 /// sheet, then the sheet-specific path, then the screen holding the first item, else the root.
+/// An explicit sheet path names the owner: when it does not resolve to a loaded screen this
+/// returns nullptr, and the caller must not move the marker onto another sheet.  Only a marker
+/// without a sheet path falls back to the root screen, as loading the project does.
 inline SCH_SCREEN* OwnerScreen( const kiapi::schematic::ErcMarker& aMarker, const SCH_SHEET_LIST& aHierarchy,
                                 SCHEMATIC& aSchematic )
 {
     auto screenOf = [&]( const kiapi::common::types::SheetPath& aPath ) -> SCH_SCREEN*
     {
+        if( aPath.path_size() == 0 )
+            return nullptr;
         KIID_PATH ids;
         for( const auto& id : aPath.path() )
             ids.push_back( KIID( id.value() ) );
@@ -98,18 +103,21 @@ inline SCH_SCREEN* OwnerScreen( const kiapi::schematic::ErcMarker& aMarker, cons
         return path ? path->LastScreen() : nullptr;
     };
 
-    SCH_SCREEN* screen = nullptr;
     if( aMarker.has_main_item_sheet_path() )
-        screen = screenOf( aMarker.main_item_sheet_path() );
-    else if( aMarker.has_sheet_specific_path() )
-        screen = screenOf( aMarker.sheet_specific_path() );
-    else if( aMarker.items_size() )
+        return screenOf( aMarker.main_item_sheet_path() );
+
+    if( aMarker.has_sheet_specific_path() )
+        return screenOf( aMarker.sheet_specific_path() );
+
+    if( aMarker.items_size() )
     {
         SCH_SHEET_PATH owner;
         aHierarchy.ResolveItem( KIID( aMarker.items( 0 ).value() ), &owner );
-        screen = owner.LastScreen();
+        if( SCH_SCREEN* screen = owner.LastScreen() )
+            return screen;
     }
-    return screen ? screen : aSchematic.RootScreen();
+
+    return aSchematic.RootScreen();
 }
 
 struct EXCLUSION

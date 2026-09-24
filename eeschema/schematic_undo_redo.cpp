@@ -383,7 +383,19 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
 
             // swap current settings with stored settings
             DS_PROXY_UNDO_ITEM* item = static_cast<DS_PROXY_UNDO_ITEM*>( eda_item );
-            if( auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item ) )
+            auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item );
+
+            if( allPages && allPages->IncludesOnlyErc() )
+            {
+                // An ERC edit changed no page, title block, drawing sheet or hierarchy: restore
+                // only the ERC settings and markers.  Rebuilding the drawing sheet or the
+                // hierarchy here could overwrite state this entry never recorded.
+                SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
+                alternate.CopyProjectSettingsScope( *allPages );
+                allPages->RestoreErc( this, &alternate );
+                *allPages = std::move( alternate );
+            }
+            else if( allPages )
             {
                 if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
                         || allPages->IncludesNetChains() || allPages->IncludesSetup()
@@ -399,15 +411,17 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
                 // entry by identity, so it can reverse them without a marker pointer.
                 allPages->RestoreAll( this, false, &alternate );
                 *allPages = std::move( alternate );
+                refreshHierarchy = true;
+                rebuildHierarchyNavigator = true;
             }
             else
             {
                 DS_PROXY_UNDO_ITEM alternate( this );
                 item->Restore( this );
                 *item = std::move( alternate );
+                refreshHierarchy = true;
+                rebuildHierarchyNavigator = true;
             }
-            refreshHierarchy = true;
-            rebuildHierarchyNavigator = true;
         }
         else if( status == UNDO_REDO::REPEAT_ITEM )
         {

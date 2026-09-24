@@ -165,6 +165,8 @@ public sealed class NativeErcDialogTests
             await History("exclude-undo", "z", computedErc, 0, "");
             await History("exclude-redo", "y", excludedSnapshot, 1, "");
             const int ExcludedRow = 3;
+            // The notebook tabs of the retained 1280x900 dialog, grounded in its screenshots.
+            const int TabTop = 52, ViolationsTab = 70, IgnoredTab = 199;
             var stale = new ApplySchematicItemBatch
             {
                 Document = first.Document, DocumentEpoch = first.Baseline.DocumentEpoch,
@@ -244,6 +246,35 @@ public sealed class NativeErcDialogTests
             Assert.AreEqual(2, (await Markers(_ => true)).Count, "Undo restores the saved severity, never computed violations.");
             await History("ignore-redo", "y", ignoredErc, 0, "");
 
+            // The Ignored Tests tab's severity menu changes a saved severity too: one undoable
+            // "Edit ERC overrides" revision. Its list follows the rule order, so the ignored
+            // pin rule is its first row, above the rules ignored by default.
+            var beforeIgnoredTab = await Journal();
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", "Electrical Rules Checker", false,
+                clickFromLeft: IgnoredTab, clickFromTop: TabTop);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "ignored-tests-tab.png"), deadline.Token);
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "right-click", "Electrical Rules Checker", false,
+                clickFromLeft: 250, clickFromTop: Row(0));
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "ignored-rule-menu.png"), deadline.Token);
+            // The retained menu lists Error, Warning, then Ignore.
+            foreach (string key in new[] { "Home", "Return" })
+                NativeKeyboard.SchematicShortcut(display, first.ProcessId, key, "Electrical Rules Checker", false, false);
+            await Changed(beforeIgnoredTab);
+            var unignoredErc = await CapturedErc(0, "");
+            Assert.AreEqual(RuleSeverity.RsError, unignoredErc.RuleSeverities.Single(rule => (int)rule.RuleType == 3).Severity);
+            CollectionAssert.AreEqual(ignoredErc.RuleSeverities.Where(rule => (int)rule.RuleType != 3).ToList(),
+                unignoredErc.RuleSeverities.Where(rule => (int)rule.RuleType != 3).ToList(), "Only the selected ignored rule changes.");
+            CollectionAssert.AreEqual(ignoredErc.PinMap.ToList(), unignoredErc.PinMap.ToList());
+            Assert.AreEqual(2, (await Markers(_ => true)).Count, "Changing a severity computes no violations.");
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "ignored-rule-error.png"), deadline.Token);
+            await History("ignored-tab-undo", "z", ignoredErc, 0, "");
+            await History("ignored-tab-redo", "y", unignoredErc, 0, "");
+            // Return to the ignored rule the rest of this sequence expects, and to the violations.
+            await History("ignored-tab-undo-again", "z", ignoredErc, 0, "");
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", "Electrical Rules Checker", false,
+                clickFromLeft: ViolationsTab, clickFromTop: TabTop);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "violations-tab.png"), deadline.Token);
+
             // Deleting a computed violation changes nothing that is saved: no revision, no
             // unsaved flag and the same state digest. The next Run ERC computes it again.
             var beforeComputed = await Lifecycle();
@@ -298,6 +329,46 @@ public sealed class NativeErcDialogTests
                 first.Client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(failing, deadline.Token));
             Assert.AreEqual(beforeXml, await CapturedErc(0, ""));
             Assert.AreEqual(beforeXmlJournal.Sequence, (await Journal()).Sequence);
+
+            // A rejected batch that staged a title block, a page size and a root page number
+            // beside the ERC settings rolls every one of them back, not only the ERC settings:
+            // the same design data, revision, unsaved flag and state digest as before it.
+            await first.Client.InvokeAsync<SaveDocument, Empty>(new() { Document = first.Document }, deadline.Token);
+            var cleanBeforeRejection = await Lifecycle();
+            Assert.IsFalse(cleanBeforeRejection.NativeContentDirty);
+            var savedScreen = await Screen(deadline.Token);
+            Assert.AreEqual(nativeScreen.Revision, savedScreen.Revision, "Saving is not an edit.");
+            var pagesScreen = savedScreen.Data.Clone();
+            pagesScreen.Metadata.ErcSettings = fromXml.Clone();
+            pagesScreen.Metadata.TitleBlock.Title = "rolled back with its batch";
+            pagesScreen.Metadata.Page.PageSize = pagesScreen.Metadata.Page.PageSize == PageSize.PsA3 ? PageSize.PsA4 : PageSize.PsA3;
+            Assert.IsNotNull(pagesScreen.Metadata.RootInstance, "The root sheet reports its root-page record.");
+            pagesScreen.Metadata.RootInstance.PageNumber = pagesScreen.Metadata.RootInstance.PageNumber == "9" ? "8" : "9";
+            var pagesPlanned = SchematicItemDelta.Plan(savedScreen.Data, pagesScreen);
+            CollectionAssert.AreEqual(new[] { "SetErcSettings", "SetTitleBlock", "SetPageSettings", "SetRootInstance" },
+                pagesPlanned.Select(operation => operation.OperationCase.ToString()).ToArray());
+            var rejectedPages = new ApplySchematicItemBatch
+            {
+                Document = first.Document, DocumentEpoch = beforeXmlJournal.DocumentEpoch,
+                ExpectedRevision = new() { Epoch = beforeXmlJournal.DocumentEpoch, Sequence = beforeXmlJournal.Sequence },
+                OperationId = Guid.NewGuid().ToString("D"), Description = "Rejected ERC and page edit"
+            };
+            rejectedPages.Operations.Add(pagesPlanned);
+            var unloadable = pagesScreen.Metadata.Page.Clone();
+            unloadable.DrawingSheet = "missing-drawing-sheet.kicad_wks";
+            rejectedPages.Operations.Add(new SchematicItemOperation { SetPageSettings = unloadable });
+            var pageRejection = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                first.Client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(rejectedPages, deadline.Token));
+            StringAssert.Contains(pageRejection.Message, "Drawing sheet could not be loaded");
+            Assert.AreEqual(savedScreen, await Screen(deadline.Token),
+                "The rejected batch must restore the title block, page and root page as well as the ERC settings.");
+            Assert.AreEqual(originalTitle, await first.Client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+                new() { Document = first.Document }, deadline.Token));
+            var afterRejection = await Lifecycle();
+            Assert.AreEqual(cleanBeforeRejection.Revision, afterRejection.Revision);
+            Assert.IsFalse(afterRejection.NativeContentDirty, "A rejected batch leaves no unsaved edit behind.");
+            Assert.AreEqual(cleanBeforeRejection.StateSha256, afterRejection.StateSha256);
+            Assert.AreEqual(beforeXml, await CapturedErc(0, ""));
             await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "xml-rollback.png"), deadline.Token);
 
             var applied = await first.Client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(replace, deadline.Token);
@@ -409,6 +480,68 @@ public sealed class NativeErcDialogTests
                 while (NativeKeyboard.HasWindow(display, first.ProcessId, "Electrical Rules Checker"))
                     await Task.Delay(50, closed.Token);
             }
+
+            // Canvas edits of a marker use the same history, which keeps the marker as data and
+            // never as a pointer. Undoing Delete All Markers puts the excluded marker back.
+            await History("canvas-marker-restored", "z", desired, 1, "restored", dialog: false);
+            var excludedMarker = (await Markers(markers => markers.Count == 1)).Single();
+            Assert.IsTrue(excludedMarker.Excluded);
+            Assert.AreEqual("restored", excludedMarker.Comment);
+            Assert.AreEqual(desired.Exclusions[0].Marker, excludedMarker.Marker);
+
+            // Delete on the canvas removes the excluded marker in its own commit: one revision.
+            // Undo rebuilds it with the same identity, references, exclusion and comment; redo
+            // deletes it again by identity.
+            var beforeCanvasDelete = await Journal();
+            await SelectOnCanvas(excludedMarker.Id);
+            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "Delete", controlKey: false, focusCanvas: false);
+            await Changed(beforeCanvasDelete, "Delete");
+            await Markers(markers => markers.Count == 0);
+            Assert.AreEqual(deletedErc, await CapturedErc(0, ""));
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "canvas-marker-deleted.png"), deadline.Token);
+            await History("canvas-delete-undo", "z", desired, 1, "restored", dialog: false);
+            Assert.AreEqual(excludedMarker, (await Markers(markers => markers.Count == 1)).Single(),
+                "Undo rebuilds the deleted marker with its identity, references, exclusion and comment.");
+            await History("canvas-delete-redo", "y", deletedErc, 0, "", dialog: false);
+            await Markers(markers => markers.Count == 0);
+            await History("canvas-delete-undo-again", "z", desired, 1, "restored", dialog: false);
+            Assert.AreEqual(excludedMarker, (await Markers(markers => markers.Count == 1)).Single());
+
+            // Moving a selection that holds the marker stages the marker as a modification.
+            // Cancelling the move reverts the marker in place and records nothing.
+            var screenBeforeMove = await Screen(deadline.Token);
+            var movedSymbol = screenBeforeMove.Data.Items.First(item => item.Is(Kiapi.Schematic.Types.SchematicSymbolInstance.Descriptor))
+                .Unpack<Kiapi.Schematic.Types.SchematicSymbolInstance>();
+            var stateBeforeMove = await Lifecycle();
+            var journalBeforeMove = await Journal();
+            await SelectOnCanvas(excludedMarker.Id, movedSymbol.Id);
+            await MoveSelection("canvas-move-cancel", movedSymbol, finish: false);
+            Assert.AreEqual(screenBeforeMove, await Screen(deadline.Token), "Cancelling the move restores every moved item.");
+            Assert.AreEqual(excludedMarker, (await Markers(markers => markers.Count == 1)).Single(),
+                "Cancelling the move puts the marker back exactly.");
+            await Unrecorded(journalBeforeMove, stateBeforeMove, "Cancelling a move of the marker");
+
+            // A finished move is one revision; undo rebuilds the marker where it was, with its
+            // identity and exclusion, and redo returns it to the moved place.
+            await SelectOnCanvas(excludedMarker.Id, movedSymbol.Id);
+            await MoveSelection("canvas-move-finish", movedSymbol, finish: true);
+            await Changed(journalBeforeMove, "Move");
+            var movedMarker = (await Markers(markers => markers.Count == 1)).Single();
+            Assert.AreEqual(excludedMarker.Id, movedMarker.Id);
+            Assert.AreNotEqual(excludedMarker.Marker.Position, movedMarker.Marker.Position, "The marker moved with the selection.");
+            Assert.IsTrue(movedMarker.Excluded);
+            Assert.AreEqual("restored", movedMarker.Comment);
+            var movedErc = await CapturedErc(1, "restored");
+            Assert.AreEqual(movedMarker.Marker, movedErc.Exclusions[0].Marker);
+            await History("canvas-move-undo", "z", desired, 1, "restored", dialog: false);
+            Assert.AreEqual(excludedMarker, (await Markers(markers => markers.Count == 1)).Single(),
+                "Undo rebuilds the moved marker where it was, with its identity and exclusion.");
+            Assert.AreEqual(screenBeforeMove.Data, (await Screen(deadline.Token)).Data);
+            await History("canvas-move-redo", "y", movedErc, 1, "restored", dialog: false);
+            Assert.AreEqual(movedMarker, (await Markers(markers => markers.Count == 1)).Single());
+            await History("canvas-move-undo-again", "z", desired, 1, "restored", dialog: false);
+            Assert.AreEqual(excludedMarker, (await Markers(markers => markers.Count == 1)).Single());
+
             // Revert discards the unsaved deletion. This process keeps its project settings loaded,
             // so the saved exclusion returns from the stored exclusion list: every read-only capture
             // since the deletion must have left that list exactly as the last save wrote it.
@@ -437,7 +570,10 @@ public sealed class NativeErcDialogTests
                 revertRestoredSavedExclusion = true, exclusionUndoRedo = true, commentUndoRedo = true,
                 restoreUndoRedo = true, severityUndoRedo = true, ignoreRuleUndoRedo = true,
                 exclusionDeletionUndoable = true, computedDeletionUnrecorded = true, runErcRecomputedViolation = true,
-                deleteAllWithExclusionsUndoable = true, completeErcOverrideCoverage = false, trackingComplete = false
+                deleteAllWithExclusionsUndoable = true, ignoredTabSeverityUndoRedo = true,
+                rejectedBatchRestoredPagesTitleAndRootPage = true, canvasMarkerDeleteUndoRedo = true,
+                canvasMarkerMoveCancelReverted = true, canvasMarkerMoveUndoRedo = true,
+                completeErcOverrideCoverage = false, trackingComplete = false
             }), deadline.Token);
 
             Task<SchematicChangeJournal> Journal() => first.Client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
@@ -482,15 +618,124 @@ public sealed class NativeErcDialogTests
 
             // Keyboard undo or redo is exactly one journal entry and restores exactly the expected settings.
             async Task History(string stage, string key, Kiapi.Schematic.Types.SchematicErcSettings expected, int exclusions,
-                string comment)
+                string comment, bool dialog = true)
             {
                 var before = await Journal();
-                NativeKeyboard.SchematicShortcut(display, first.ProcessId, key);
+                // With the checker closed, click the canvas only when it lacks keyboard focus: two
+                // focus clicks on one spot are a double-click, which opens an item's properties.
+                if (dialog)
+                    NativeKeyboard.SchematicShortcut(display, first.ProcessId, key);
+                else
+                    await NativeSessionTests.FocusedSchematicShortcut(first.Client, first.Document, first.ProcessId,
+                        display, key, deadline.Token);
                 await Changed(before, key == "z" ? "Undo" : "Redo");
                 Assert.AreEqual(expected, await CapturedErc(exclusions, comment), stage + " must restore the exact ERC settings.");
                 Assert.IsFalse(Process.GetProcessById(first.ProcessId).HasExited);
-                NativeKeyboard.SchematicShortcut(display, first.ProcessId, "motion", "Electrical Rules Checker", false, false);
+                if (dialog)
+                    NativeKeyboard.SchematicShortcut(display, first.ProcessId, "motion", "Electrical Rules Checker", false, false);
+                else
+                    NativeKeyboard.SchematicShortcut(display, first.ProcessId, "motion", controlKey: false, focusCanvas: false);
                 await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, stage + ".png"), deadline.Token);
+            }
+
+            async Task<SchematicScreenDataSnapshot> Screen(CancellationToken token) =>
+                await first.Client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                    new() { Document = first.Document }, token);
+
+            // Give the canvas real keyboard focus, then select exactly these items through the
+            // editor's own selection. The canvas margin is clicked only when the canvas lacks focus:
+            // a second click on the same spot would be a double-click, which opens properties.
+            async Task SelectOnCanvas(params KIID[] items)
+            {
+                using (var focus = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token))
+                {
+                    focus.CancelAfter(TimeSpan.FromSeconds(10));
+                    bool clicked = false;
+                    while (true)
+                    {
+                        try
+                        {
+                            var observation = await first.Client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(
+                                new() { Document = first.Document }, focus.Token);
+                            if (observation.Preview.Viewport.CanvasHasKeyboardFocus) break;
+                            if (!clicked)
+                            {
+                                NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", controlKey: false);
+                                clicked = true;
+                            }
+                        }
+                        catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                        await Task.Delay(100, focus.Token);
+                    }
+                }
+                var itemHeader = new ItemHeader { Document = first.Document };
+                await first.Client.InvokeAsync<ClearSelection, Empty>(new() { Header = itemHeader }, deadline.Token);
+                var select = new AddToSelection { Header = itemHeader };
+                select.Items.Add(items.Select(item => item.Clone()));
+                await first.Client.InvokeAsync<AddToSelection, SelectionResponse>(select, deadline.Token);
+            }
+
+            // Move the selection with the real move tool until the symbol follows the pointer, then
+            // finish it with a click or cancel it with Escape, and wait for the edit to end.
+            async Task MoveSelection(string stage, Kiapi.Schematic.Types.SchematicSymbolInstance symbol, bool finish)
+            {
+                var itemHeader = new ItemHeader { Document = first.Document };
+                NativeKeyboard.SchematicShortcut(display, first.ProcessId, "m", controlKey: false, focusCanvas: false);
+                bool ended = false;
+                try
+                {
+                    using (var begin = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token))
+                    {
+                        begin.CancelAfter(TimeSpan.FromSeconds(10));
+                        while (true)
+                        {
+                            try { await Screen(begin.Token); }
+                            catch (NativeApiException error) when (error.Status == 7)
+                            { StringAssert.Contains(error.Message, "current schematic edit"); break; }
+                            await Task.Delay(100, begin.Token);
+                        }
+                    }
+                    // The move warps the pointer to the selection; a short physical path, as a
+                    // mouse produces, moves it. This raw item query only observes input progress.
+                    int pointerX = 620, pointerY = 460;
+                    var query = new GetItemsById { Header = itemHeader };
+                    query.Items.Add(symbol.Id.Clone());
+                    using (var motion = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token))
+                    {
+                        motion.CancelAfter(TimeSpan.FromSeconds(10));
+                        while (true)
+                        {
+                            NativeKeyboard.SchematicShortcut(display, first.ProcessId, "motion", controlKey: false,
+                                clickFromLeft: pointerX, clickFromTop: pointerY);
+                            await Task.Delay(100, motion.Token);
+                            var live = (await first.Client.InvokeAsync<GetItemsById, GetItemsResponse>(query, motion.Token))
+                                .Items.Single().Unpack<Kiapi.Schematic.Types.SchematicSymbolInstance>();
+                            if (!live.Position.Equals(symbol.Position)) break;
+                            pointerX = pointerX == 640 ? 620 : pointerX + 10;
+                            pointerY = pointerY == 480 ? 460 : pointerY + 10;
+                        }
+                    }
+                    await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, stage + ".png"), deadline.Token);
+                    if (finish)
+                        NativeKeyboard.SchematicShortcut(display, first.ProcessId, "click", controlKey: false,
+                            clickFromLeft: pointerX, clickFromTop: pointerY);
+                    else
+                        NativeKeyboard.SchematicShortcut(display, first.ProcessId, "Escape", controlKey: false, focusCanvas: false);
+                    ended = true;
+                }
+                finally
+                {
+                    // Never leave the editor inside a move for the remaining steps or cleanup.
+                    if (!ended)
+                        NativeKeyboard.SchematicShortcut(display, first.ProcessId, "Escape", controlKey: false, focusCanvas: false);
+                }
+                using var settle = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                settle.CancelAfter(TimeSpan.FromSeconds(10));
+                while (true)
+                {
+                    try { await Screen(settle.Token); break; }
+                    catch (NativeApiException error) when (error.Status == 7) { await Task.Delay(100, settle.Token); }
+                }
             }
 
             async Task<Kiapi.Schematic.Types.SchematicErcSettings> CapturedErc(int exclusions, string comment)
@@ -593,6 +838,18 @@ public sealed class NativeErcDialogTests
                 try { await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "failure-screen.png"), captureDeadline.Token); }
                 catch (Exception captureError)
                 { await File.WriteAllTextAsync(Path.Combine(evidence, "capture-failure.txt"), captureError.ToString()); }
+                // Name every window the editors show, such as a native alert that disabled a frame,
+                // and capture the screen again once such a window has had time to appear.
+                var windows = new List<string>();
+                try
+                {
+                    await Task.Delay(1000, captureDeadline.Token);
+                    foreach (var process in processes.Skip(1).Where(process => !process.HasExited))
+                        NativeKeyboard.HasWindow(display, process.Id, "\u0001", describe: windows.Add);
+                    await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "failure-screen-later.png"), captureDeadline.Token);
+                }
+                catch (Exception windowError) { windows.Add("Window inspection failed: " + windowError.Message); }
+                await File.WriteAllLinesAsync(Path.Combine(evidence, "failure-windows.txt"), windows);
             }
             throw;
         }

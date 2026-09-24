@@ -242,6 +242,10 @@ public:
     void IncludeReferenceInventory() { m_restoreReferenceInventory = true; }
     void IncludeErcPolicy() { m_restoreErcPolicy = true; }
     void IncludeErcMarkers() { m_restoreErcMarkers = true; }
+    /// A page size, drawing sheet, title block or root page number was changed by this entry.
+    /// The screens' page, title and root-page states are always restored; this records that
+    /// the entry is more than an ERC edit.
+    void IncludePages() { m_restorePages = true; }
     bool IncludesErcMarkers() const { return m_restoreErcMarkers; }
     SCH_ERC_HISTORY::STATE& ErcMarkers() { return m_ercMarkers; }
 
@@ -252,10 +256,13 @@ public:
         return SCH_ERC_SETTINGS::Capture( aSchematic ).SerializeAsString() != m_ercSaved;
     }
 
-    /// True when this entry restores nothing but the ERC settings and markers.
+    /// True when this entry restores nothing but the ERC settings and markers.  A change that also
+    /// staged a page, title block, drawing sheet or root page (IncludePages) is not ERC-only: its
+    /// rollback and undo must restore those too.
     bool IncludesOnlyErc() const
     {
-        return ( m_restoreErcPolicy || m_restoreErcMarkers ) && !m_restoreBusAliases && !m_restoreTextVariables
+        return ( m_restoreErcPolicy || m_restoreErcMarkers ) && !m_restorePages && !m_restoreBusAliases
+               && !m_restoreTextVariables
                && !m_restoreVariantDescriptions && !m_restoreVariantRegistry && !m_restoreNetChains
                && !m_restoreDrawingRatios && !m_restoreFormatting && !m_restoreAnnotation
                && !m_restoreFieldTemplates && !m_restoreSymbolComparison && !m_restoreBomSettings
@@ -420,6 +427,7 @@ public:
         m_restoreReferenceInventory = aOther.m_restoreReferenceInventory;
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreErcMarkers = aOther.m_restoreErcMarkers;
+        m_restorePages = aOther.m_restorePages;
         m_restoreSetup = aOther.m_restoreSetup;
         if( m_restoreSetup )
         {
@@ -489,6 +497,7 @@ private:
     std::unique_ptr<REFDES_TRACKER> m_referenceInventory;
     bool m_restoreErcPolicy = false;
     bool m_restoreErcMarkers = false;
+    bool m_restorePages = false;
     bool m_restoreSetup = false;
     std::optional<nlohmann::json> m_setupBefore;
     std::optional<nlohmann::json> m_setupAfter;

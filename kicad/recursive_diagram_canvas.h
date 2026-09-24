@@ -88,23 +88,37 @@ struct CHIP
     wxRect rect;
 };
 
+/// A chosen or candidate facet shown only as its state mark beside the caption, in canvas pixels.
+struct CHOICE_MARK
+{
+    int facet = 0;
+    D::DefinitionChoiceStateData state = D::DCSD_UNSPECIFIED;
+    wxRect rect;
+};
+
 /// What a block shows below its caption: one chip per chosen or candidate facet as far as they fit,
 /// a "+N more" chip for the rest, and the Review facets link. A caption-only block shows none of it.
 struct BLOCK_CHIPS
 {
     bool shown = false;
     std::vector<CHIP> chips;
+    /// Chosen or candidate facets without a chip; "+N more" or the state marks stand for them.
     unsigned hidden = 0;
     std::optional<wxRect> more;
     std::optional<wxRect> link;
     /// When no chip fits below the caption (a small or zoomed-out block), the hidden chips' state marks
     /// beside the caption, so the block still shows that it has choices.
-    std::vector<std::pair<D::DefinitionChoiceStateData, wxRect>> marks;
+    std::vector<CHOICE_MARK> marks;
+    /// The caption text as drawn, clipped to the block's content area.
+    wxRect caption;
 };
 
+/// The block caption's text rectangle inside aInner, the block's content area in canvas pixels, drawn with
+/// aCaptionFont and clipped to aInner. The canvas draws the caption there and the chips are laid out below it.
+wxRect CaptionRect( wxDC& aDC, const NODE& aNode, const wxRect& aInner, const wxFont& aCaptionFont );
 /// Lays out a block's chips inside aBox, the block's content area in canvas pixels, with aSmall, the chip font.
-/// aCaptionRight is where the block's caption text ends.
-BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, int aCaptionRight );
+/// aCaption is the caption as CaptionRect placed it.
+BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, const wxRect& aCaption );
 /// Draws the chips and link LayoutChips placed.
 void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool aDark,
                 const wxColour& aForeground, const wxColour& aLink );

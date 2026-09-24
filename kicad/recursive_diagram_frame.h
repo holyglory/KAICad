@@ -28,6 +28,7 @@ class wxToolBar;
 class wxScrolledWindow;
 class wxChoice;
 class wxRadioButton;
+class wxSplitterWindow;
 class wxSizer;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
 class PANEL_DIAGRAM_HISTORY;
@@ -122,8 +123,12 @@ private:
     void editComment();
     void fillComments();
     void revealField( int aField );
-    /// The one quiet add-detail action (owner decision n98a3f3c41084f0ed): a requirement box or a
-    /// component-choice facet that has no value yet.
+    /// Add requirement…: a requirement box that is not shown yet (owner decision n98a3f3c41084f0ed hides
+    /// empty requirement boxes until someone adds one).
+    void chooseRequirement();
+    /// Add detail…: a component-choice facet of the selected block that has no value yet (Round A4, owner
+    /// decision n0b2a908b00e78823). It sits beside Add requirement…, as the owner's A3 decision
+    /// nf53af9d74841b7d3 pairs "Add detail" and "Add requirement" so blocks and connections grow the same way.
     void chooseDetail();
     void save();
     void decline();
@@ -163,6 +168,10 @@ private:
     int facetStrength() const;
     void setFacetState( int aState );
     void setFacetStrength( int aStrength );
+    /// Shows the strength choices' full labels when they fit the inspector's width in one row, and their short
+    /// labels otherwise, so the row collapses its labels before it wraps.
+    /// Returns whether a label changed, so the caller lays out the inspector again.
+    bool fitFacetLabels();
     wxFont chipFont() const;
     wxColour linkColour() const;
     /// The chips of each drawn block of the viewed level, in canvas pixels.
@@ -255,9 +264,11 @@ private:
     wxStaticText* m_endpointHeading;
     wxTextCtrl* m_endpoints;
     wxScrolledWindow* m_inspectorScroll;
+    wxSplitterWindow* m_splitter;
     wxTextCtrl* m_comments;
     wxStaticText* m_commentTargetStatus;
     wxChoice* m_commentChoice;
+    wxButton* m_addRequirement;
     wxButton* m_addDetail;
     wxStaticText* m_facetHeading;
     std::array<RECURSIVE_DIAGRAM::FACET_ROW*, RECURSIVE_DIAGRAM::FACETS> m_facetRows;

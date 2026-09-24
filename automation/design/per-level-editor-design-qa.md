@@ -6,7 +6,7 @@ This record covers two items of the per-level diagram editor: the drawing tools 
 
 ## Round A1 — drawing tools (item a1-drawing-tools)
 
-The A4 item renamed the inspector's "Add requirement…" action to "Add detail…" (it now also gives a facet its first value) and fixed the block selection handles, which were drawn 8 pixels inside the block while dragging used its corners. The A1 text below describes the A1 runs as they were.
+The A4 item added a quiet "Add detail…" action beside the inspector's "Add requirement…" (Add detail gives a block's facet its first value; Add requirement is unchanged) and fixed the block selection handles, which were drawn 8 pixels inside the block while dragging used its corners. The A1 text below describes the A1 runs as they were.
 
 ### What is compared
 
@@ -170,19 +170,29 @@ The repairs:
 
 - The overview's label column fits the longest facet name, so every name is readable and every value starts at the same place.
 - A block too small for a chip shows its choices' state marks (a check for chosen, a ring for a candidate) beside its caption, and the editor still reports the chips as hidden.
-- The strength choices sit closer together. They still wrap in a narrow inspector or when its scroll bar shows (P3 below).
+- The strength choices sit closer together. They still wrapped in a narrow inspector or when its scroll bar showed; this was repaired after the review (see "Review repairs").
 
 Both themed sessions ran the whole choice journey without a failure (captures up to `…-choices-reopened.png` in both themes). The native-UI check then reached its 600 s limit while the later field-history, simulation and PCB tests were still running: the light recursive-editor session took 296 s on the loaded host, against 229–245 s before this item. The captures are copied, with their SHA-256 list (`SHA256SUMS`, itself `6158dc62afbdb2e8e06b27c2d1237ea8b5d55b8455a886581ed44ad6b61c5788`), to `/mnt/build-storage/codex/kicad/evidence/block-chips-088f6e/` (`editor-light` instance `d5480b87-8c37-439c-a51e-af5ca4ac6861`, `editor-dark` instance `83b15db9-1583-475b-8e53-3dc8b47022ff`). The sketch was opened together with the light and dark `add-facet`, `detail`, `compact` and `reopened` captures.
 
-This commit's gate run repeats the journey on the final source, which differs from `088f6e` only in this document and in the second project's shorter pass (see "Time limit").
+The first A4 commit (`ef60bb91c8`) was gated by `t20260924T063031Z-1c278d` (diagram-requirement-history) and `t20260924T064026Z-351396` (automation) on a source that differs from `088f6e` only in this document and in the second project's shorter pass (see "Time limit"). Its captures are at `/mnt/build-storage/codex/kicad/evidence/block-chips-1c278d/`.
+
+#### Review repairs
+
+An adversarial review of `ef60bb91c8` found these problems; the follow-up commit repairs them and its gate runs repeat the whole journey on its final source:
+
+- **P2, compact check proved nothing.** The observation reported only a hidden count that always added up, and the state marks and "+N more" chip were never reported. The editor now reports each block's marks (facet, state and rectangle), its "+N more" chip and its drawn caption, and the journey checks every chosen or candidate facet as described under "Compact window" below.
+- **P2, add actions.** The first commit replaced "Add requirement…" with one combined "Add detail…" and cited decision n98a3f3c41084f0ed for it. The quoted words ("show one quiet add-detail affordance") are in that decision's technical note, not its body, and they describe hiding empty requirement boxes; they do not ask to replace Add requirement. The owner's later A3 decision nf53af9d74841b7d3 pairs a "+ Add detail" and a "+ Add requirement" action, and its note asks the block inspector to use the same pair. The inspector now shows "Add requirement…" (unchanged from A1, for the hidden requirement boxes) and, beside it for a block, "Add detail…" (for a facet's first value).
+- **P3, strength row wrapped.** "Requirement" wrapped onto a second line in the default inspector. The choices now sit 2 DIP apart (each already pads its label), and when the full labels still do not fit the inspector's width they collapse to Info, Pref. and Req. (the full names stay in each choice's tooltip) and return when the inspector widens. The row wraps only if even the short labels do not fit.
+- **P2, the second instance's shorter pass.** Still open: see "Time limit".
 
 Step-linked captures (the same step names exist for both themes):
 
 | Step | Capture | What it shows |
 |---|---|---|
-| Add a first value | `…-choices-add-facet.png` | Add detail > Type opened the Type detail ready for a first chosen value: State (Chosen, Candidate, Unknown), Value with focus, Strength. The PSU still shows no chips. |
+| Add a first value | `…-choices-add-facet.png` | Add detail > Type opened the Type detail ready for a first chosen value: State (Chosen, Candidate, Unknown), Value with focus, Strength. The PSU still shows no chips. Add requirement… sits beside Add detail…. |
 | Detail | `…-choices-detail.png` | The facet overview lists Type, Manufacturer and Package, with Manufacturer's detail open as Unknown with its reason. The PSU shows the chosen Type chip, the candidate Package chip and Review facets. The CPU is only its caption. |
 | Saved | `…-choices-saved.png` | After Save the PSU shows the same two chips from its saved revision. |
+| Narrow inspector | `…-choices-strength-narrow.png` | With the inspector at its minimum width the strength choices read Info, Pref. and Req. in one row; Information stays selected. |
 | Compact | `…-choices-compact.png` | At 1100 × 760 the level is re-fitted. The smaller PSU has no room for a chip, so its two choices show as a check and a ring beside its caption; nothing is drawn clipped. |
 | Reopened | `…-choices-reopened.png` | After close and reopen, the chips come back from the file, and Manufacturer's detail shows its saved reason. |
 
@@ -190,36 +200,39 @@ Step-linked captures (the same step names exist for both themes):
 
 For each theme the journey proves the following through the real window:
 
-- **Caption-only.** A caption-only block has no chips and no Review facets link, and its inspector lists no facet.
-- **Add detail.** The one quiet Add detail menu lists the hidden requirement boxes and then the facets without a value. Choosing Type opens its detail ready for a first chosen value. Escape cancels without a change. Typing "linear regulator" stores a chosen value, Enter keeps it and returns to the overview with focus on its row, and the PSU shows the chip "Type: linear regulator" and Review facets. Enter on the row opens the detail again, and Escape returns.
+- **Caption-only.** A caption-only block has no chips and no Review facets link, and its inspector lists no facet. It offers Add requirement… and Add detail… side by side; a connection offers only Add requirement… (drawing journey).
+- **Add detail.** The Add detail menu lists only the block's facets without a value (Add requirement… keeps the hidden requirement boxes, as in A1). Choosing Type opens its detail ready for a first chosen value. Escape cancels without a change. Typing "linear regulator" stores a chosen value, Enter keeps it and returns to the overview with focus on its row, and the PSU shows the chip "Type: linear regulator" and Review facets. Enter on the row opens the detail again, and Escape returns.
 - **Candidate and strength.** Package takes "SOT-23-5" as a chosen value, then Preference, then Candidate: the value moves into the candidate list. Emptying the list shows "List the candidates, one per line.", keeps the last entry that could be stored, and Ctrl+S refuses with the same notice, sends nothing and writes nothing. Typing the candidate again clears the notice.
 - **Unknown.** Manufacturer becomes Unknown: "Say why this is unknown." until a reason is typed. An unknown facet is listed but has no chip; chosen and candidate chips are told apart by their state.
+- **Strength row width.** The strength choices stay in one row, unclipped and without overlap, at the default inspector width. Dragging the splitter to the inspector's minimum width collapses their labels to Info, Pref. and Req.; widening it restores Information, Preference and Requirement; the chosen strength and the open detail stay as they were, and the draft does not change. The splitter is then dragged back.
 - **Review facets.** With the CPU selected, the PSU's Review facets link selects the PSU and opens its first facet's detail.
 - **Return to unknown and back.** Type returns to Unknown with a reason and its chip goes. Back and Enter reopen it; Chosen asks for a value ("Type the chosen value, or choose another state.") until "linear regulator" is typed again.
 - **Clear.** Clear facet returns Package to unspecified: its row and chip go. Ctrl+Z brings it back with its strength.
 - **Save.** Ctrl+S writes one revision of the PSU with exactly the chosen type, the unknown manufacturer and the candidate package (Preference). Its Rail port, General requirement and absent component bindings and physical allocation are unchanged, and the CPU still has no definition.
 - **Decline.** A later strength change is discarded by Alt+D and the file stays byte-identical.
-- **Compact window.** Every chip is either drawn inside the canvas or reported as hidden; the state marks that stand for hidden chips were checked in the captures.
+- **Compact window.** The editor reports each block's chips, "+N more" chip, state marks and caption as drawn. The journey asserts that each chosen or candidate facet is a chip inside the canvas, or is behind a shown "+N more" chip, or has its own state mark (with its state) inside the canvas, right of the caption and level with it; that the hidden count is exactly the facets without a chip; and that marks appear only when no chip fits. The same check runs after Save and after reopening, where both chips are drawn and no mark is.
 - **Close and reopen.** Ctrl+W writes nothing; reopening shows the same chips and the same facets, and opening a facet's detail changes nothing.
 
-Controls pressed through the real window: Add detail (three facets), the Type, Manufacturer and Package overview rows (click and Enter), Back to facet overview, the Chosen, Candidate and Unknown state choices, the Value, Candidates and Reason entries, the Preference and Requirement strength choices, Clear facet and the canvas Review facets link.
+Controls pressed through the real window: Add detail (three facets), the Type, Manufacturer and Package overview rows (click and Enter), Back to facet overview, the Chosen, Candidate and Unknown state choices, the Value, Candidates and Reason entries, the Preference and Requirement strength choices, Clear facet, the canvas Review facets link and the splitter between the canvas and the inspector. Add requirement… is pressed in the drawing journey.
 
 #### Time limit
 
-The native-UI check has a 600 s limit, set in the parent-owned `.devcoordinator.toml`. It already took up to 567 s before this item, and the choice journey adds about 10 s per theme. On the loaded host the two recursive-editor sessions alone then took 552 s (`088f6e`: 296 s and 256 s) and 530 s (`t20260924T061606Z-01a656`: 246 s and 284 s), so the check reached its limit while the later field-history, simulation and PCB tests were still running, although every journey step had passed. The second project of each session now repeats the editor journey only up to the compact window: its own MCP attachment, file, window, observations, navigation, edits, saves, field history, comments, conflict dialog, implementation preview and compact window. The implementation management, whole-diagram history, agent tool and proposal steps after that do not depend on the instance and run once per session, in the first project. The parent is asked to raise the limit instead (seam request); the second project's full repeat can then return.
+The native-UI check has a 600 s limit, set in the parent-owned `.devcoordinator.toml`. It already took up to 567 s before this item, and the choice journey adds about 10 s per theme. On the loaded host the two recursive-editor sessions alone then took 552 s (`088f6e`: 296 s and 256 s) and 530 s (`t20260924T061606Z-01a656`: 246 s and 284 s), so the check reached its limit while the later field-history, simulation and PCB tests were still running, although every journey step had passed.
+
+As a temporary limit, the second project of each session repeats the editor journey only up to the compact window: its own MCP attachment, file, window, observations, navigation, edits, saves, field history, comments, conflict dialog, implementation preview and compact window. The steps after that (implementation duplicate, rename, remove and new dialogs, whole-diagram history, and the agent tools `kicad_diagram_manage_implementation`, proposal publish and select, `physical_allocation_set` and `refinement_input_record`) also act on the second instance, through its window and its own MCP attachment, so skipping them there is a real loss of coverage, not a duplicate. In the first commit's run they took 58 s (light) and 84 s (dark) per project. This is not accepted as final: the parent is asked to raise the native-UI limit to 900 s and delete the early return in `NativeRecursiveEditorJourney.cs` in the same integration, and to record the open outcome "Restore the second instance's full editor journey".
 
 ### Findings after repair
 
-The P2 findings above are repaired. What remains is P3 polish:
+The P2 findings above are repaired, except the second instance's shorter pass, which stays open until the parent's time-limit change (see "Time limit"). What remains otherwise is P3 polish:
 
-- **P3, strength row.** In the inspector's default width the three strength choices wrap "Requirement" onto a second line, most visibly when the inspector's scroll bar shows. Nothing is clipped and every choice works.
 - **P3, compact marks.** In the compact window the state marks sit close to the "Rail" port name inside the PSU; they do not overlap.
 - **P3, open-row highlight.** The open facet's overview row is highlighted in the theme's selection colour; the sketch does not highlight it.
 
 ### Accepted differences from the sketch
 
-- **Only defined facets.** The sketch lists all seven facets with Unspecified values. By decision n98a3f3c41084f0ed and the A4 decision's own note, only facets that have a value are listed, and a facet gets its first value through the one quiet Add detail action.
-- **One add-detail action.** Add requirement… became Add detail…: one quiet action for a requirement box or a facet's first value, as decision n98a3f3c41084f0ed asks ("one quiet add-detail affordance").
+- **Only defined facets.** The sketch lists all seven facets with Unspecified values. By decision n98a3f3c41084f0ed and the A4 decision's own note, only facets that have a value are listed, and a facet gets its first value through the quiet Add detail action.
+- **Add detail beside Add requirement.** The sketch has no add action because it lists every facet. Under n98a3f3c41084f0ed a facet gets its first value from a quiet "Add detail…" beside the existing "Add requirement…", the pair the owner chose for connections in A3 (nf53af9d74841b7d3, whose note asks blocks to grow the same way).
+- **Strength labels.** When the inspector is too narrow for Information, Preference and Requirement in one row, they show as Info, Pref. and Req. (standing UI rule: "Collapse action labels before wrapping").
 - **State and strength choices.** The sketch shows drop-down lists. The detail shows the three states and the three strengths as one-click choices, which the standing UI rule prefers for small fixed sets ("Use one-click choices … for small option sets"). It also shows every state a facet can return to, including Unknown.
 - **No inspector Review facets link.** The sketch repeats Review facets beside the overview heading. Each overview row already opens its facet, so the inspector does not repeat it; the canvas keeps the link.
 - **Caption and link alignment.** Captions stay left-aligned as in the approved A1 drawing tools, and the Review facets link sits at the block's lower left instead of centred.
@@ -229,15 +242,16 @@ The P2 findings above are repaired. What remains is P3 polish:
 
 ### Limits of this review
 
-The formal `product-design:audit` and `design-qa` skills are not available in this session, so the recorded final result stays blocked; this comparison opened the sketch and the captures side by side. In the compact window the chips do not fit a block, so the canvas shows state marks beside the caption there; the editor's observation reports those chips as hidden, and the marks themselves were checked only in the captures. Knowledge-class guidance, facet history and missing-library states named in ledger task peb041240f16fc59b are outside Round A4 option 3 and were not built here.
+The formal `product-design:audit` and `design-qa` skills are not available in this session, so the recorded final result stays blocked; this comparison opened the sketch and the captures side by side. Inherited knowledge-class guidance, quick facet history, missing-library handling and stale-change handling named in ledger task peb041240f16fc59b were not built in this item; they stay open, and the parent is asked to record each as its own open outcome under peb041240f16fc59b (lane agents do not write the ledger).
 
 ### Checklist
 
 - [x] The chosen sketch identified by path, sketch id and hash.
 - [x] Implementation identified by runs, manifest and instances; captures preserved with hashes.
 - [x] Light and dark captures for every choice step, including the compact window.
-- [x] Every new control pressed through the real window: Add detail (three facets), the overview rows (click and Enter), Back to facet overview, the three state choices, the Value, Candidates and Reason entries, two strength choices, Clear facet and the canvas Review facets link.
+- [x] Every new control pressed through the real window: Add detail (three facets), the overview rows (click and Enter), Back to facet overview, the three state choices, the Value, Candidates and Reason entries, two strength choices, Clear facet, the canvas Review facets link and the splitter (strength labels collapse and return); Add requirement… in the drawing journey.
 - [x] Cancel and error paths: Escape in a new facet, Escape and Back from a detail, an emptied candidate list, an unknown without a reason, a chosen state without a value, Save refused with a notice and nothing written.
 - [x] Save, Decline, undo of a cleared facet, close and reopen.
-- [x] P2 findings repaired and rechecked in the repaired captures (label column, compact marks, handles, two chip rows).
+- [x] P2 findings repaired and rechecked in the repaired captures (label column, compact marks, handles, two chip rows), and the review's findings repaired and asserted (compact visibility from the observation, Add requirement restored beside Add detail, one strength row).
+- [ ] The second instance's full editor journey (needs the parent's native-UI limit change; see "Time limit").
 - [ ] Formal design audit (skills unavailable, so the final result stays blocked).

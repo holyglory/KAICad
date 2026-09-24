@@ -609,11 +609,13 @@ public sealed partial class NativeSessionTests
             await VerifyExpandedCanvasContent(expandedCapture, token);
             if (!sessionWide)
             {
-                // The second project proves that a second KiCad instance's editor is independent: its own MCP attachment,
-                // file, window, observations, navigation, edits, saves, field history, comments, conflict dialog,
-                // implementation preview and compact window all ran above. The implementation management, whole-diagram
-                // history, agent tool and proposal steps below do not depend on the instance, so they run once per session in
-                // the first project; this keeps the native-UI check inside its limit on a shared host.
+                // TEMPORARY LIMIT, to be removed with the parent's native-UI time limit change: the second project must repeat
+                // the whole editor journey. Its own MCP attachment, file, window, observations, navigation, edits, saves, field
+                // history, comments, conflict dialog, implementation preview and compact window ran above. The steps below also
+                // act on this instance (its implementation dialogs, whole-diagram history and the agent tools through this
+                // instance's MCP attachment) but run only in the first project, because both full repeats do not fit the
+                // native-UI check's 600 s limit on a shared host. The parent is asked to raise that limit (.devcoordinator.toml,
+                // parent-owned) and delete this early return in the same integration; until then it is an open outcome.
                 Key("w", control: true);
                 using (var isolationClosed = CancellationTokenSource.CreateLinkedTokenSource(token))
                 {
@@ -926,7 +928,11 @@ public sealed partial class NativeSessionTests
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-diagram-history-stale.png"), token);
             Key("r", alt: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h && !string.IsNullOrEmpty(h.ErrorMessage));
             Assert.AreEqual(wholeSavedXml + "\n", await File.ReadAllTextAsync(source, token));
-            Key("Escape"); await Wait(s => s.DiagramHistory is null); Key("r", control: true); await Wait(s => !s.Busy && !s.Dirty);
+            // Reload reads the changed file, so it is finished only once the editor holds the new file's source token; an idle
+            // state read before the reload starts would let the next keys race with the reload's selection reset.
+            string staleToken = (await Read()).SourceToken;
+            Key("Escape"); await Wait(s => s.DiagramHistory is null); Key("r", control: true);
+            await Wait(s => !s.Busy && !s.Dirty && s.Ready && s.SourceToken != staleToken);
             Key("Escape"); Key("Right"); await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && !s.Busy);
             var childGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
@@ -1754,7 +1760,7 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(Tool(start, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
         Assert.IsTrue(start.PaletteShown); Assert.AreEqual(2U, start.StoredSchemaVersion); Assert.IsTrue(start.SourceWritable);
         Assert.AreEqual(root, start.LevelDraft.Scope.Baseline.BlockId);
-        Assert.IsTrue(Find(start, "RecursiveAddDetail").Shown, "One quiet way to add a requirement or a component choice.");
+        Assert.IsTrue(Find(start, "RecursiveAddRequirement").Shown, "One quiet way to add a requirement.");
         Assert.IsFalse(Find(start, "RecursiveToolDelete").Enabled, "Nothing is selected that can be removed.");
         await Capture("empty");
 
@@ -1939,9 +1945,11 @@ public sealed partial class NativeSessionTests
         await Wait("renamed", s => s.LevelDraft.NewChildren[1].Name == "CPU module");
         Key("z", control: true); await Wait("rename-undone", s => s.LevelDraft.NewChildren[1].Name == "CPU");
 
-        // The inspector grows with definition: one quiet Add detail, then the chosen box only.
+        // The inspector grows with definition: one quiet Add requirement, then the chosen box only. A block also offers Add
+        // detail for its component choices (VerifyBlockChoices drives it).
         await At(psuX, psuY); await Wait("psu-reselected", s => s.Draft.Baseline.BlockId == psu && s.ShownRequirementFields.Count == 0);
-        await Press("RecursiveAddDetail");
+        Assert.IsTrue(Find(await Read(), "RecursiveAddDetail").Shown, "A block offers Add detail beside Add requirement.");
+        await Press("RecursiveAddRequirement");
         using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
         {
             menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
@@ -1953,7 +1961,10 @@ public sealed partial class NativeSessionTests
         Type("Supply the CPU.");
         await Wait("general-typed", s => s.Draft.Fields.General == "Supply the CPU.");
         await Capture("inspector-requirement");
-        await ClickRoute(feed.Selection.ConnectionId); await Wait("feed-selected", s => s.ConnectionDraft?.Name == "Rail feed" && s.ShownRequirementFields.Count == 0);
+        await ClickRoute(feed.Selection.ConnectionId);
+        var feedSelected = await Wait("feed-selected", s => s.ConnectionDraft?.Name == "Rail feed" && s.ShownRequirementFields.Count == 0);
+        Assert.IsTrue(Find(feedSelected, "RecursiveAddRequirement").Shown, "A connection offers Add requirement.");
+        Assert.IsFalse(Find(feedSelected, "RecursiveAddDetail").Shown, "A connection has no component choices to add.");
         Key("4", control: true); Type("Feed the CPU from the rail.");
         await Wait("feed-comment", s => s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatConnection
             && n.TargetId == feed.Selection.ConnectionId && n.Text == "Feed the CPU from the rail."));
@@ -2211,8 +2222,41 @@ public sealed partial class NativeSessionTests
                 throw new AssertFailedException("The pressed control did not open its list; the state and screen are retained.");
             }
         }
-        // The Add detail menu lists hidden requirement boxes first, then the facets without a value.
+        // The Add detail menu lists the block's facets without a value, in facet order (requirement boxes are under Add requirement).
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
+        // The strength choices stay in one row, unclipped and without overlap, at every inspector width; brief tells which labels show.
+        string[] StrengthLabels(P.RecursiveDiagramEditorState at) =>
+            new[] { "Information", "Preference", "Requirement" }.Select(n => Find(at, "RecursiveFacetStrength" + n).Label).ToArray();
+        void StrengthRow(P.RecursiveDiagramEditorState at, string step, bool? brief)
+        {
+            var inspector = Find(at, "RecursiveInspector");
+            var row = new[] { "Information", "Preference", "Requirement" }.Select(n => Find(at, "RecursiveFacetStrength" + n)).ToArray();
+            Assert.IsTrue(row.All(c => c.Shown), step + ": every strength choice is shown.");
+            Assert.IsTrue(row.All(c => c.Y == row[0].Y), step + ": the strength choices stay in one row; their labels collapse before the row wraps.");
+            Assert.IsTrue(row[0].X + row[0].Width <= row[1].X && row[1].X + row[1].Width <= row[2].X, step + ": the strength choices do not overlap.");
+            Assert.IsTrue(row[0].X >= inspector.X && row[2].X + row[2].Width <= inspector.X + inspector.Width, step + ": no strength choice is clipped.");
+            string[] full = ["Information", "Preference", "Requirement"], shortLabels = ["Info", "Pref.", "Req."];
+            var labels = StrengthLabels(at);
+            if (brief is bool collapsed) CollectionAssert.AreEqual(collapsed ? shortLabels : full, labels, step + ": the strength labels.");
+            else Assert.IsTrue(labels.SequenceEqual(full) || labels.SequenceEqual(shortLabels), step + ": the strength labels are all full or all short.");
+        }
+        async Task<P.RecursiveDiagramEditorState> MoveSash(string step, int toX, Func<P.RecursiveDiagramEditorState, bool> reached)
+        {
+            var sash = Find(await Read(), "RecursiveInspectorSash");
+            Assert.IsTrue(sash.Shown, "The splitter between the canvas and the inspector is shown.");
+            int y = sash.Y + sash.Height / 2;
+            NativeKeyboard.SchematicShortcut(display, processId, "drag", title, false, true, clickFromLeft: sash.X + sash.Width / 2, clickFromTop: y,
+                dragToLeft: toX, dragToTop: y);
+            // The display plays the drag's motions and release with delays after the call returns, so the step is complete only once
+            // the sash has stopped moving; a next drag started earlier would press where the sash no longer is.
+            int? lastX = null; var since = DateTime.UtcNow;
+            return await Wait(step, s =>
+            {
+                int x = Find(s, "RecursiveInspectorSash").X;
+                if (lastX != x) { lastX = x; since = DateTime.UtcNow; return false; }
+                return DateTime.UtcNow - since >= TimeSpan.FromMilliseconds(400) && reached(s);
+            });
+        }
         Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
         async Task Closed()
         {
@@ -2240,6 +2284,32 @@ public sealed partial class NativeSessionTests
         string[] ChipTexts(P.RecursiveDiagramEditorState at, string block) => Chips(at, block)?.Chips.Select(c => c.Text).ToArray() ?? [];
         P.DefinitionTextChoiceData? Facet(P.RecursiveDiagramEditorState at, Func<P.BlockDefinitionData, P.DefinitionTextChoiceData?> facet) =>
             at.Draft.Definition is { } definition ? facet(definition) : null;
+        // Each chosen or candidate facet of a block is visible: a chip inside the canvas, or (when it has no chip) a state mark
+        // inside the canvas right of and beside the caption, or a shown "+N more" chip. The hidden count is exactly the facets
+        // without a chip, and marks appear only when no chip and no "+N more" chip fits.
+        void VerifyChoicesVisible(P.RecursiveDiagramEditorState at, string step, string blockId, params (string Facet, P.DefinitionChoiceStateData State)[] expected)
+        {
+            var block = Chips(at, blockId) ?? throw new AssertFailedException(step + ": the block reports its component choices.");
+            var caption = block.Caption;
+            Assert.IsTrue(caption.Shown && caption.Width > 0, step + ": the block's caption is drawn inside the canvas.");
+            Assert.IsTrue(block.Chips.All(c => c.Rect.Shown), step + ": drawn chips lie inside the canvas.");
+            var withoutChip = expected.Where(e => !block.Chips.Any(c => c.Facet == e.Facet && c.State == e.State)).ToArray();
+            Assert.AreEqual((uint)withoutChip.Length, block.HiddenChips, step + ": the hidden count is exactly the choices without a chip.");
+            Assert.AreEqual(expected.Length - withoutChip.Length, block.Chips.Count, step + ": no chip is drawn for anything else.");
+            bool more = block.More is { Shown: true };
+            if (block.Marks.Count != 0)
+                Assert.IsTrue(block.Chips.Count == 0 && block.More is null, step + ": marks stand in for chips only when no chip fits.");
+            foreach (var (facet, state) in withoutChip)
+            {
+                var mark = block.Marks.SingleOrDefault(m => m.Facet == facet);
+                if (mark is null) { Assert.IsTrue(more, step + ": " + facet + " is behind a shown \"+N more\" chip."); continue; }
+                Assert.AreEqual(state, mark.State, step + ": " + facet + "'s mark shows its state.");
+                Assert.IsTrue(mark.Rect.Shown, step + ": " + facet + "'s mark lies inside the canvas.");
+                Assert.IsTrue(mark.Rect.X >= caption.X + caption.Width, step + ": " + facet + "'s mark is right of the caption.");
+                int middle = mark.Rect.Y + mark.Rect.Height / 2;
+                Assert.IsTrue(middle >= caption.Y && middle <= caption.Y + caption.Height, step + ": " + facet + "'s mark is beside the caption.");
+            }
+        }
 
         var start = await Open("start");
         var level = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
@@ -2250,11 +2320,12 @@ public sealed partial class NativeSessionTests
         var psuSelected = await Read();
         Assert.IsEmpty(psuSelected.ShownFacets, "A block without component choices lists none.");
         Assert.IsFalse(Find(psuSelected, "RecursiveFacetRowType").Shown); Assert.IsFalse(Find(psuSelected, "RecursiveFacetStateChosen").Shown);
-        Assert.IsTrue(Find(psuSelected, "RecursiveAddDetail").Shown, "One quiet way to add a detail.");
+        Assert.IsTrue(Find(psuSelected, "RecursiveAddDetail").Shown, "A quiet Add detail gives a component choice its first value.");
+        Assert.IsTrue(Find(psuSelected, "RecursiveAddRequirement").Shown, "Add requirement stays beside it for the hidden requirement boxes.");
 
-        // Add detail > Type opens the detail ready for a first chosen value. Escape cancels without a change. The PSU already
-        // shows its General requirement, so the menu reads Schematic, Routing, then Purpose, Type, ...
-        await AddDetail("Home", "Down", "Down", "Down");
+        // Add detail > Type opens the detail ready for a first chosen value. Escape cancels without a change. The menu lists only
+        // the facets without a value: Purpose, Type, ...
+        await AddDetail("Home", "Down");
         var typeOpen = await Wait("type-open", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
         Assert.IsFalse(typeOpen.Dirty); Assert.IsEmpty(typeOpen.ShownFacets);
         Assert.IsFalse(Find(typeOpen, "RecursiveFacetClear").Shown, "A facet without a value has nothing to clear.");
@@ -2262,7 +2333,7 @@ public sealed partial class NativeSessionTests
         Key("Escape");
         var cancelled = await Wait("type-cancelled", s => s.FacetEditor == "");
         Assert.IsFalse(cancelled.Dirty); Assert.IsNull(cancelled.Draft.Definition, "A cancelled first value stores nothing.");
-        await AddDetail("Home", "Down", "Down", "Down");
+        await AddDetail("Home", "Down");
         await Wait("type-reopened", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
         Type("linear regulator");
         var typed = await Wait("type-typed", s => Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulator"]) == true && s.Dirty);
@@ -2305,8 +2376,9 @@ public sealed partial class NativeSessionTests
         await Wait("package-candidate-again", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
             && c.Values.SequenceEqual(["SOT-23-5"]) && s.FacetNotice == "" && s.Notice == "");
 
-        // Manufacturer returns to unknown with its reason; an unknown facet is listed but has no chip.
-        await AddDetail("Home", "Down", "Down", "Down");
+        // Manufacturer returns to unknown with its reason; an unknown facet is listed but has no chip. With Type and Package set, the
+        // Add detail menu reads Purpose, Manufacturer, ...
+        await AddDetail("Home", "Down");
         await Wait("manufacturer-open", s => s.FacetEditor == "manufacturer" && s.FocusedControl == "RecursiveFacetValue");
         await Press("RecursiveFacetStateUnknown");
         await Wait("manufacturer-needs-reason", s => s.FacetNotice == "Say why this is unknown." && s.FocusedControl == "RecursiveFacetReason");
@@ -2318,7 +2390,29 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(new[] { P.DefinitionChoiceStateData.DcsdSelected, P.DefinitionChoiceStateData.DcsdCandidates },
             Chips(unknown, psu)!.Chips.Select(c => c.State).ToArray(), "Chosen and candidate chips are told apart.");
         Assert.AreEqual(0U, Chips(unknown, psu)!.HiddenChips);
+        Assert.IsEmpty(Chips(unknown, psu)!.Marks, "Marks stand in for chips only when no chip fits.");
+        Assert.IsNull(Chips(unknown, psu)!.More, "No \"+N more\" chip while every chip is drawn.");
+        StrengthRow(unknown, "default-width", null);
         await Capture("detail");
+
+        // The strength labels collapse before the row would wrap and return when the inspector is wide enough, and the chosen
+        // strength stays selected. The narrowest inspector (its minimum width) shows the short labels; a wider one the full labels.
+        var defaultSash = Find(unknown, "RecursiveInspectorSash");
+        var narrow = await MoveSash("inspector-narrowest", defaultSash.X + 160, s => Find(s, "RecursiveInspectorSash").X > defaultSash.X
+            && StrengthLabels(s)[0] == "Info");
+        StrengthRow(narrow, "narrowest-inspector", true);
+        Assert.IsTrue(Find(narrow, "RecursiveFacetStrengthInformation").Active, "The chosen strength stays selected.");
+        await Capture("strength-narrow");
+        var wide = await MoveSash("inspector-wide", defaultSash.X - 160, s => Find(s, "RecursiveInspectorSash").X < defaultSash.X - 100
+            && StrengthLabels(s)[0] == "Information");
+        StrengthRow(wide, "wide-inspector", false);
+        Assert.IsTrue(Find(wide, "RecursiveFacetStrengthInformation").Active, "The chosen strength stays selected.");
+        Assert.AreEqual(unknown.FacetEditor, wide.FacetEditor, "The facet's detail stays open.");
+        Assert.IsTrue(Facet(wide, d => d.Manufacturer) is { State: P.DefinitionChoiceStateData.DcsdUnknown } kept && kept.UnknownReason == "No preference recorded."
+            && kept.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsInformation, "Resizing the inspector changes nothing in the draft.");
+        var restored = await MoveSash("inspector-default", defaultSash.X + defaultSash.Width / 2,
+            s => Math.Abs(Find(s, "RecursiveInspectorSash").X - defaultSash.X) <= 2);
+        StrengthRow(restored, "restored-width", null);
         await Press("RecursiveFacetBack");
         await Wait("manufacturer-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowManufacturer");
 
@@ -2380,6 +2474,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("Supply the CPU.", graph.Requirements(psuSaved.Selection).Requirements.General);
         Assert.IsNull(cpuSaved.Definition, "The CPU is still only its caption.");
         CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(saved, psu), "The saved level shows the same chips.");
+        VerifyChoicesVisible(saved, "saved", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
         await Capture("saved");
 
         // Decline discards a later change and writes nothing.
@@ -2392,14 +2487,13 @@ public sealed partial class NativeSessionTests
             && Facet(s, d => d.Type)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsInformation);
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
 
-        // A compact window re-fits the level. Chips that no longer fit a smaller block are counted, never drawn clipped.
+        // A compact window re-fits the level. Every chosen or candidate facet stays visible on its block: as a chip, behind a
+        // "+N more" chip, or as its state mark beside the caption when not even one chip fits. Nothing is drawn clipped.
         ulong beforeCompact = (await Read()).ViewRevision;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
         var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800);
-        var compactChips = Chips(compact, psu)!;
-        Assert.AreEqual(2, compactChips.Chips.Count + (int)compactChips.HiddenChips, "Every chip is drawn or counted.");
-        Assert.IsTrue(compactChips.Chips.All(c => c.Rect.Shown), "Drawn chips lie inside the canvas.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-compact.json"), SchematicJson.Formatter.Format(compact), token);
+        VerifyChoicesVisible(compact, "compact", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
         await Capture("compact");
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
         await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
@@ -2409,6 +2503,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
         var reopened = await Open("reopened");
         CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(reopened, psu));
+        VerifyChoicesVisible(reopened, "reopened", psu, ("type", P.DefinitionChoiceStateData.DcsdSelected), ("package", P.DefinitionChoiceStateData.DcsdCandidates));
         Assert.IsNull(Chips(reopened, cpu));
         await SelectBlock("psu-reopened", psu);
         CollectionAssert.AreEqual(new[] { "type", "manufacturer", "package" }, (await Read()).ShownFacets.ToArray());

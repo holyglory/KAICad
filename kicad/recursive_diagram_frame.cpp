@@ -58,6 +58,14 @@ void setField( D::RequirementFieldsData* fields, int which, const std::string& v
 void dropRestoration( google::protobuf::RepeatedPtrField<D::FieldRestorationData>* restores, int which )
 { for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == which + 1 ) restores->DeleteSubrange( n, 1 ); }
 const wxString FIELD_LABELS[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
+/// The gap between one-click choices, in DIP; each choice already pads its own label.
+constexpr int FACET_CHOICE_GAP = 2;
+/// The strength choices' full and short labels (StructuralGuidanceStrength Information, Preference, Requirement).
+std::array<wxString, 3> strengthLabels( bool brief )
+{
+    if( brief ) return { _( "Info" ), _( "Pref." ), _( "Req." ) };
+    return { _( "Information" ), _( "Preference" ), _( "Requirement" ) };
+}
 }
 
 RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::OpenRecursiveDiagramEditor& request ) :
@@ -97,7 +105,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_toolbar->AddControl( m_stripDelete );
     m_toolbar->Realize();
     auto* splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE );
-    splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 );
+    splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 ); m_splitter = splitter;
     auto* diagram = new wxPanel( splitter ); auto* main = new wxBoxSizer( wxVERTICAL );
     m_breadcrumb = new wxStaticText( diagram, wxID_ANY, _( "Loading diagram…" ), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
     m_breadcrumb->SetMinSize( FromDIP( wxSize( 80, -1 ) ) );
@@ -157,6 +165,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         auto* item = new wxStaticText( scroll, wxID_ANY, text );
         m_facetDetail->Add( item, 0, wxTOP, FromDIP( 6 ) ); return item;
     };
+    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first).
     auto choices = [&]( std::array<wxRadioButton*, 3>& buttons, const std::array<wxString, 3>& labels, const char* name,
                         const std::array<const char*, 3>& names )
     {
@@ -164,8 +173,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         for( int i = 0; i < 3; ++i )
         {
             buttons[i] = new wxRadioButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, i == 0 ? wxRB_GROUP : 0 );
-            buttons[i]->SetName( wxString( name ) + names[i] ); row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
-            if( i < 2 ) row->AddSpacer( FromDIP( 6 ) );
+            buttons[i]->SetName( wxString( name ) + names[i] ); buttons[i]->SetToolTip( labels[i] );
+            row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
+            if( i < 2 ) row->AddSpacer( FromDIP( FACET_CHOICE_GAP ) );
         }
         m_facetDetail->Add( row, 0, wxEXPAND );
     };
@@ -180,8 +190,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_facetReason = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
     m_facetReason->SetName( "RecursiveFacetReason" ); m_facetDetail->Add( m_facetReason, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     label( _( "Strength" ) );
-    choices( m_facetStrengths, { _( "Information" ), _( "Preference" ), _( "Requirement" ) }, "RecursiveFacetStrength",
-             { "Information", "Preference", "Requirement" } );
+    choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength", { "Information", "Preference", "Requirement" } );
     m_facetNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetNotice->SetName( "RecursiveFacetNotice" );
     m_facetDetail->Add( m_facetNotice, 0, wxEXPAND | wxTOP, FromDIP( 6 ) );
     m_facetClear = new wxButton( scroll, wxID_ANY, _( "Clear facet" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
@@ -226,11 +235,20 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
         m_history[i]->Bind( wxEVT_BUTTON, [this, i]( wxCommandEvent& ) { history( i ); } );
     }
-    // The one quiet add-detail action (owner decision n98a3f3c41084f0ed): a requirement box or a facet's first value.
+    // Two quiet add actions in one row. Add requirement… shows a requirement box that is hidden until someone adds it
+    // (owner decision n98a3f3c41084f0ed). Add detail… gives a block's component-choice facet its first value (Round A4,
+    // owner decision n0b2a908b00e78823); the owner's A3 decision nf53af9d74841b7d3 pairs Add detail with Add requirement
+    // so blocks and connections grow the same way.
+    auto* addRow = new wxBoxSizer( wxHORIZONTAL );
+    m_addRequirement = new wxButton( scroll, wxID_ANY, _( "Add requirement…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_addRequirement->SetName( "RecursiveAddRequirement" );
+    m_addRequirement->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseRequirement(); } );
+    addRow->Add( m_addRequirement, 0, wxRIGHT, FromDIP( 12 ) );
     m_addDetail = new wxButton( scroll, wxID_ANY, _( "Add detail…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
     m_addDetail->SetName( "RecursiveAddDetail" );
     m_addDetail->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseDetail(); } );
-    fields->Add( m_addDetail, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    addRow->Add( m_addDetail, 0 );
+    fields->Add( addRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
     commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
@@ -249,6 +267,12 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         { m_commentId = m_commentIds[chosen]; m_newComment = m_commentId.empty(); fillComments(); m_comments->SetFocus(); }
     } );
     scroll->SetSizer( fields ); properties->Add( scroll, 1, wxEXPAND ); inspector->SetSizer( properties );
+    // A wider or narrower inspector (the splitter, or its scroll bar showing) restores or collapses the strength labels.
+    scroll->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
+    {
+        event.Skip();
+        CallAfter( [this] { if( !m_closing && fitFacetLabels() ) { m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision; } } );
+    } );
     m_inspectorBook->AddPage( inspector, _( "Properties" ) );
     PANEL_DIAGRAM_HISTORY::ACTIONS historyActions;
     historyActions.load = [this]( unsigned offset ) { loadDiagramHistory( offset ); };
@@ -1009,7 +1033,8 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     bool facetsLeft = false;
     if( m_ready && !link ) if( const auto* definition = selectedDefinition() )
         for( int facet = 0; facet < R::FACETS; ++facet ) facetsLeft |= facet != m_facet && !R::HasValue( R::Facet( *definition, facet ) );
-    m_addDetail->Show( m_ready && ( anyHidden || facetsLeft ) ); m_addDetail->Enable( available );
+    m_addRequirement->Show( m_ready && anyHidden ); m_addRequirement->Enable( available );
+    m_addDetail->Show( m_ready && facetsLeft ); m_addDetail->Enable( available );
     m_openDiagram->Enable( available && child && !isNew );
     bool writable = m_document.source_writable() || !m_ready;
     m_save->Enable( available && m_dirty && writable ); m_decline->Enable( available && m_dirty );
@@ -1224,30 +1249,35 @@ void RECURSIVE_DIAGRAM_FRAME::revealField( int which )
     m_revealed[key][which] = true;
     refresh(); m_fields[which]->SetFocus();
 }
-void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
+void RECURSIVE_DIAGRAM_FRAME::chooseRequirement()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen ) return;
-    wxMenu menu; const int reserved = 3 + R::FACETS, first = wxWindow::NewControlId( reserved );
+    wxMenu menu; const int first = wxWindow::NewControlId( 3 );
     for( int i = 0; i < 3; ++i ) if( !m_fields[i]->IsShown() )
     {
         menu.Append( first + i, FIELD_LABELS[i] );
         menu.Bind( wxEVT_MENU, [this, i]( wxCommandEvent& ) { revealField( i ); }, first + i );
     }
-    // A block's facets that have no value yet; choosing one opens its detail to give it a first value.
-    if( m_connectionId.empty() ) if( const auto* definition = selectedDefinition() )
+    wxPoint position = ScreenToClient( m_addRequirement->ClientToScreen( wxPoint( 0, m_addRequirement->GetSize().y ) ) );
+    PopupMenu( &menu, position );
+    wxWindow::UnreserveControlId( first, 3 );
+}
+void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || !m_connectionId.empty() ) return;
+    const auto* definition = selectedDefinition();
+    if( !definition ) return;
+    // The block's facets that have no value yet; choosing one opens its detail to give it a first value.
+    wxMenu menu; const int first = wxWindow::NewControlId( R::FACETS );
+    for( int facet = 0; facet < R::FACETS; ++facet )
     {
-        bool separated = menu.GetMenuItemCount() == 0;
-        for( int facet = 0; facet < R::FACETS; ++facet )
-        {
-            if( facet == m_facet || R::HasValue( R::Facet( *definition, facet ) ) ) continue;
-            if( !separated ) { menu.AppendSeparator(); separated = true; }
-            menu.Append( first + 3 + facet, R::FacetLabel( facet ) );
-            menu.Bind( wxEVT_MENU, [this, facet]( wxCommandEvent& ) { openFacet( facet, false ); }, first + 3 + facet );
-        }
+        if( facet == m_facet || R::HasValue( R::Facet( *definition, facet ) ) ) continue;
+        menu.Append( first + facet, R::FacetLabel( facet ) );
+        menu.Bind( wxEVT_MENU, [this, facet]( wxCommandEvent& ) { openFacet( facet, false ); }, first + facet );
     }
     wxPoint position = ScreenToClient( m_addDetail->ClientToScreen( wxPoint( 0, m_addDetail->GetSize().y ) ) );
     PopupMenu( &menu, position );
-    wxWindow::UnreserveControlId( first, reserved );
+    wxWindow::UnreserveControlId( first, R::FACETS );
 }
 // ---- Component choices (Round A4) -----------------------------------------------------------
 // Owner decisions n0b2a908b00e78823 and n98a3f3c41084f0ed: a block shows a chip for each chosen or candidate
@@ -1365,7 +1395,7 @@ void RECURSIVE_DIAGRAM_FRAME::fillFacets( bool available )
         m_facetNotice->SetForegroundColour( dark ? wxColour( 255, 145, 135 ) : wxColour( 176, 0, 32 ) );
         m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
     }
-    showFacetFields();
+    showFacetFields(); fitFacetLabels();
     for( wxWindow* control : facetControls() ) control->Enable( available );
 }
 void RECURSIVE_DIAGRAM_FRAME::openFacet( int facet, bool focusState )
@@ -1435,6 +1465,25 @@ void RECURSIVE_DIAGRAM_FRAME::setFacetState( int state )
 void RECURSIVE_DIAGRAM_FRAME::setFacetStrength( int strength )
 {
     if( strength >= 0 && strength < 3 && !m_facetStrengths[strength]->GetValue() ) m_facetStrengths[strength]->SetValue( true );
+}
+bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
+{
+    // Measure the full labels in one row: each choice's indicator and padding plus its full label's text.
+    const auto full = strengthLabels( false ), brief = strengthLabels( true );
+    int available = m_inspectorScroll->GetClientSize().x - 2 * FromDIP( 12 ), needed = 2 * FromDIP( FACET_CHOICE_GAP );
+    for( int i = 0; i < 3; ++i )
+    {
+        wxRadioButton* button = m_facetStrengths[i]; button->InvalidateBestSize();
+        needed += button->GetBestSize().x - button->GetTextExtent( button->GetLabel() ).x + button->GetTextExtent( full[i] ).x;
+    }
+    bool collapse = needed > available, changed = false;
+    for( int i = 0; i < 3; ++i )
+    {
+        const wxString& label = collapse ? brief[i] : full[i];
+        if( m_facetStrengths[i]->GetLabel() == label ) continue;
+        m_facetStrengths[i]->SetLabel( label ); m_facetStrengths[i]->InvalidateBestSize(); changed = true;
+    }
+    return changed;
 }
 void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()
 {
@@ -1530,8 +1579,7 @@ std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::dra
     for( const auto& node : drawn.Nodes() )
     {
         wxRect inner = wxRect( toScreen( drawn.Rect( node.id ) ) ).Deflate( 8 );
-        dc.SetFont( caption ); int captionRight = inner.x + 10 + dc.GetTextExtent( Text( node.name ) ).x;
-        auto chips = R::LayoutChips( dc, node, inner, small, captionRight );
+        auto chips = R::LayoutChips( dc, node, inner, small, R::CaptionRect( dc, node, inner, caption ) );
         if( chips.shown ) result.emplace_back( node.id, std::move( chips ) );
     }
     return result;
@@ -2034,6 +2082,13 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 item->set_text( Utf8( chip.text ) ); place( item->mutable_rect(), "DiagramFacetChip", chip.rect, false );
             }
             if( chips.link ) place( row->mutable_review_facets(), "DiagramReviewFacets", *chips.link, usable );
+            for( const auto& mark : chips.marks )
+            {
+                auto* item = row->add_marks(); item->set_facet( R::FacetName( mark.facet ) ); item->set_state( mark.state );
+                place( item->mutable_rect(), "DiagramChoiceMark", mark.rect, false );
+            }
+            if( chips.more ) place( row->mutable_more(), "DiagramMoreChips", *chips.more, false );
+            place( row->mutable_caption(), "DiagramBlockCaption", chips.caption, false );
         }
         for( int facet = 0; facet < R::FACETS; ++facet ) if( m_facetRows[facet]->IsShown() ) result.add_shown_facets( R::FacetName( facet ) );
         result.set_facet_editor( m_facet >= 0 ? R::FacetName( m_facet ) : "" );
@@ -2075,13 +2130,14 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.
     wxPoint window = GetScreenPosition();
-    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active )
+    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label )
     {
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
+        row->set_label( Utf8( label ) );
     };
-    std::vector<wxWindow*> windows{ m_caption, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete, m_endpoints, m_comments,
-                                    m_inspectorScroll };
+    std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete,
+                                    m_endpoints, m_comments, m_inspectorScroll };
     for( auto& [tool, button] : m_strip ) windows.push_back( button );
     for( auto* child : m_palette->GetChildren() ) windows.push_back( child );
     for( int i = 0; i < 3; ++i ) { windows.push_back( m_fields[i] ); windows.push_back( m_history[i] ); }
@@ -2092,8 +2148,16 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
         auto* toggle = dynamic_cast<wxToggleButton*>( item );
         auto* radio = dynamic_cast<wxRadioButton*>( item );
+        bool labelled = radio || dynamic_cast<wxAnyButton*>( item );
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
-                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ) );
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), labelled ? item->GetLabel() : wxString() );
+    }
+    // The splitter's sash between the canvas and the inspector, which widens or narrows the inspector.
+    if( m_splitter->IsSplit() )
+    {
+        wxPoint sash = m_splitter->ClientToScreen( wxPoint( m_splitter->GetSashPosition(), 0 ) );
+        control( "RecursiveInspectorSash", wxRect( sash, wxSize( m_splitter->GetSashSize(), m_splitter->GetClientSize().y ) ),
+                 m_splitter->IsShownOnScreen(), m_splitter->IsEnabled(), false, wxString() );
     }
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( Utf8( focused->GetName() ) );

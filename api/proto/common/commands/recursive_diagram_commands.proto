@@ -168,14 +168,30 @@ message DiagramCanvasFacetChip {
   DiagramControlRect rect = 4;
 }
 
+// A chosen or candidate facet shown only as its state mark beside the block's caption, because the block has no
+// room for a chip or a "+N more" chip. Relative to the editor window, in pixels.
+message DiagramCanvasChoiceMark {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (a check) or DCSD_CANDIDATES (a ring).
+  DefinitionChoiceStateData state = 2;
+  DiagramControlRect rect = 3;
+}
+
 // The chips a block shows on the canvas and its Review facets link.
 message DiagramCanvasBlockChips {
   string block_id = 1;
   repeated DiagramCanvasFacetChip chips = 2;
-  // Chips that did not fit the block; a "+N more" chip stands for them when it fits.
+  // Chosen or candidate facets without a drawn chip. The "+N more" chip or the state marks stand for them.
   uint32 hidden_chips = 3;
   // The Review facets link as drawn; shown is false when the block is too small for it.
   DiagramControlRect review_facets = 4;
+  // The state marks drawn beside the caption when no chip fits the block; empty when chips are drawn.
+  repeated DiagramCanvasChoiceMark marks = 5;
+  // The "+N more" chip as drawn; absent when every chosen or candidate facet has a chip or a mark.
+  DiagramControlRect more = 6;
+  // The block's caption text as drawn (clipped to the block's content area).
+  DiagramControlRect caption = 7;
 }
 
 // One rendered control relative to the editor window, in pixels. active is the
@@ -189,6 +205,8 @@ message DiagramControlRect {
   bool shown = 6;
   bool enabled = 7;
   bool active = 8;
+  // The visible label of a button or one-click choice, as drawn (it may be a collapsed short label).
+  string label = 9;
 }
 
 // One diagram level's session viewport, in diagram units.

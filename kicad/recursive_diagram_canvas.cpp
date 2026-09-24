@@ -452,9 +452,17 @@ void DrawChoiceMark( wxDC& dc, const wxRect& box, D::DefinitionChoiceStateData s
     }
 }
 
-BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wxFont& small, int captionRight )
+wxRect CaptionRect( wxDC& dc, const NODE& node, const wxRect& inner, const wxFont& captionFont )
 {
-    BLOCK_CHIPS result;
+    dc.SetFont( captionFont );
+    wxSize extent = dc.GetTextExtent( Text( node.name ) );
+    return wxRect( wxPoint( inner.x + 10, inner.y + 24 ), extent ).Intersect( inner );
+}
+
+BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wxFont& small, const wxRect& caption )
+{
+    BLOCK_CHIPS result; result.caption = caption;
+    const int captionRight = caption.IsEmpty() ? box.x : caption.GetRight() + 1;
     std::vector<int> chosen;
     for( int facet = 0; facet < FACETS; ++facet )
     {
@@ -509,7 +517,7 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
         int x = box.GetRight() - static_cast<int>( chosen.size() ) * step;
         if( x >= std::max( captionRight + 6, left ) && box.y + 29 + size <= box.GetBottom() )
             for( size_t i = 0; i < chosen.size(); ++i )
-                result.marks.emplace_back( Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, box.y + 29, size, size ) );
+                result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, box.y + 29, size, size ) } );
     }
     return result;
 }
@@ -533,7 +541,7 @@ void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool da
         dc.DrawRoundedRectangle( *chips.more, 4 ); dc.SetTextForeground( foreground );
         dc.DrawText( wxString::Format( _( "+%u more" ), chips.hidden ), chips.more->x + 8, chips.more->y + ( chips.more->height - dc.GetCharHeight() ) / 2 );
     }
-    for( const auto& [state, rect] : chips.marks ) DrawChoiceMark( dc, rect, state, dark );
+    for( const auto& mark : chips.marks ) DrawChoiceMark( dc, mark.rect, mark.state, dark );
     if( chips.link )
     {
         wxFont underlined = small; underlined.SetUnderlined( true ); dc.SetFont( underlined ); dc.SetTextForeground( link );
@@ -1282,12 +1290,12 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         dc.SetBrush( wxBrush( selected ? accent.ChangeLightness( dark ? 60 : 175 ) : background.ChangeLightness( dark ? 120 : 97 ) ) ); dc.DrawRectangle( box );
         // The block's content sits inside an 8-pixel margin; the outline and its handles stay on the block's edges.
         wxRect inner = wxRect( box ).Deflate( 8 );
-        dc.SetClippingRegion( inner ); dc.SetFont( GetFont().Bold().Larger() );
-        dc.DrawText( Text( node.name ), inner.x + 10, inner.y + 24 );
-        int captionRight = inner.x + 10 + dc.GetTextExtent( Text( node.name ) ).x; dc.SetFont( GetFont() );
+        dc.SetClippingRegion( inner );
+        wxRect caption = R::CaptionRect( dc, node, inner, GetFont().Bold().Larger() );
+        dc.DrawText( Text( node.name ), inner.x + 10, inner.y + 24 ); dc.SetFont( GetFont() );
         // A block shows a chip for each chosen or candidate component choice once it has any (Round A4, owner
         // decision n0b2a908b00e78823); until then it is only its caption (owner decision n98a3f3c41084f0ed).
-        auto chips = R::LayoutChips( dc, node, inner, chipFont(), captionRight );
+        auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption );
         if( chips.shown ) R::DrawChips( dc, chips, chipFont(), dark, foreground, linkColour() );
         else if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), inner.x + 10, inner.y + 58 );
         dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );

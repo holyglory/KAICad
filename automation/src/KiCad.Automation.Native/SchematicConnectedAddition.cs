@@ -247,43 +247,128 @@ public static class SchematicConnectedAddition
     /// <summary>Whether the pending layout recorded in <paramref name="state"/> was produced
     /// by a connection-realization plan rather than a connected move or a rebuild. The executor
     /// routes by the lane recorded in the layout intent; this predicate only validates
-    /// that record and must never claim a layout another lane recorded.</summary>
+    /// that record and must never claim a layout another lane recorded: it holds only when the
+    /// recorded lane is connection realization and the journaled batch has the realization form of
+    /// cn1-wiring-intent.md §9.3 (b): creations, updates and library-cache replacements, at least one
+    /// creation or update, and exactly one connectivity assertion as the last operation.</summary>
     internal static bool IsRealization(DesignRecoveryState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        return false;
+        if (state.PendingLayout?.Lane != DesignLayoutIntent.ConnectionRealizationLane || state.PendingMutation is not { } batch
+            || batch.Operations.Count < 2)
+            return false;
+        var operations = batch.Operations;
+        return operations[^1].OperationCase == SchematicItemOperation.OperationOneofCase.AssertConnectivity
+            && operations.Take(operations.Count - 1).All(o => o.OperationCase is SchematicItemOperation.OperationOneofCase.Create
+                or SchematicItemOperation.OperationOneofCase.Update or SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache)
+            && operations.Any(o => o.OperationCase is SchematicItemOperation.OperationOneofCase.Create or SchematicItemOperation.OperationOneofCase.Update);
     }
 
     /// <summary>Check the <paramref name="session"/> handshake for the realization capability,
     /// measure the checkpoint natively and return the operations, ending with the connectivity
-    /// assertion, plus the exact design they plan to publish (§9.1 steps 2-3). The executor
-    /// builds, validates and journals the batch envelope.</summary>
+    /// assertion, plus the exact design they plan to publish (§9.1 steps 2-4). The executor
+    /// builds, validates and journals the batch envelope. A session that does not advertise
+    /// <see cref="NativeCapability"/> for the recorded instance is refused with
+    /// <c>native_capability_missing</c> before anything is measured, journaled or sent.</summary>
     internal static Task<SchematicPreparedRealization> RealizeAsync(NativeClient client, AutomationSession session,
         DesignRecoveryState state, SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)
-        => throw Unavailable();
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(plan);
+        RequireCapability(session, state);
+        ArgumentNullException.ThrowIfNull(client);
+        return RealizeAsync((request, cancellation) => client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation),
+            session, state, plan, checkpoint, token);
+    }
 
-    /// <summary>Check a realization receipt before generic handling (§9.2): abandon a
-    /// batch its own assertion rejected, and refuse a completion without verification.</summary>
-    internal static void CheckReceipt(DesignRecoveryStore store, StoredDesignRecovery saved,
-        CheckedSchematicBatchReceipt receipt) => throw Unavailable();
+    /// <summary><see cref="RealizeAsync(NativeClient, AutomationSession, DesignRecoveryState, SchematicSynchronizationPlan, CheckedSchematicState, CancellationToken)"/>
+    /// with an explicit measurement, bound to the checkpoint revision.</summary>
+    internal static async Task<SchematicPreparedRealization> RealizeAsync(
+        Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> measure, AutomationSession session,
+        DesignRecoveryState state, SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(plan);
+        RequireCapability(session, state);
+        ArgumentNullException.ThrowIfNull(measure);
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (plan.Connections is not { } intent || plan.Candidate is null)
+            throw new ArgumentException("Only a plan with a connection intent is realized here.", nameof(plan));
+        token.ThrowIfCancellationRequested();
+        // §9.1 step 3: the drawing policy comes from the checkpoint the batch will be admitted against.
+        var policy = SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical?.Hierarchy?.Data
+            ?? throw new AutomationException(SchematicConnectionErrors.RealizationGridUnavailable, "The native checkpoint has no captured hierarchy."));
+        var realization = await SchematicConnectionRealizer.RealizeAsync(intent, plan.Candidate, checkpoint, measure, policy, token);
+        // §9.1 step 4 and §6.8 step 3: the planned design, round-tripped with the saved knowledge libraries.
+        string xml = SchematicDesignXml.Write(realization.Design, state.KnowledgeLibraries);
+        if (SchematicDesignXml.Write(SchematicDesignXml.Read(xml, state.KnowledgeLibraries), state.KnowledgeLibraries) != xml)
+            throw new AutomationException(SchematicConnectionErrors.InconsistentDesignSerialization,
+                "The design with its generated connections does not round-trip through XML; nothing was changed.");
+        return new SchematicPreparedRealization(realization.Operations, System.Text.Encoding.UTF8.GetBytes(xml));
+    }
+
+    private static void RequireCapability(AutomationSession session, DesignRecoveryState state)
+    {
+        if (!Advertises(session, state.InstanceId))
+            throw new AutomationException(SchematicConnectionErrors.NativeCapabilityMissing,
+                "This KiCad does not report that it can draw and verify XML connections, so nothing was changed.");
+    }
+
+    /// <summary>Check a realization receipt before generic handling (§9.2). A batch its own assertion rejected
+    /// changed nothing in KiCad, so its pending request is abandoned through the recovery store and the operation
+    /// fails with <c>realization_connectivity_mismatch</c>, leaving the XML and baseline as they were. A completed
+    /// batch must carry the editor's confirmation that the assertion held, otherwise it fails with
+    /// <c>realization_assertion_unverified</c> and the pending state is kept. Any other receipt is left to the
+    /// executor's existing handling.</summary>
+    internal static void CheckReceipt(DesignRecoveryStore store, StoredDesignRecovery saved, CheckedSchematicBatchReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(saved);
+        ArgumentNullException.ThrowIfNull(receipt);
+        var batch = saved.State.PendingMutation;
+        if (receipt.Status == CheckedSchematicBatchStatus.CsbsRejected
+            && receipt.ErrorCode == SchematicConnectionErrors.ConnectivityPostconditionFailed)
+        {
+            // §9.3: accept only a verified rejection of exactly this batch that left KiCad unchanged: the editor's state
+            // before and after the rejected request must both be the state the request was journaled against.
+            var guard = saved.State.PendingNativeState;
+            if (batch is null || guard is null || saved.State.PendingPublication is not null || receipt.OperationId != batch.OperationId
+                || !Equals(receipt.Document, batch.Document) || !receipt.ExpectedRequestVerified || receipt.Result is not null
+                || !Equals(receipt.ObservedBefore, guard) || !Equals(receipt.ObservedAfter, guard)
+                || !IsRealization(saved.State))
+                throw new AutomationException(SchematicConnectionErrors.InvalidRealizationRejection,
+                    "KiCad reported a connection mismatch that does not prove the pending realization was left unapplied; the pending operation is kept for inspection.");
+            store.AbandonRejectedRealization(saved, receipt);
+            string detail = receipt.ErrorMessage.Length <= 2048 ? receipt.ErrorMessage : receipt.ErrorMessage[..2048];
+            throw new AutomationException(SchematicConnectionErrors.RealizationConnectivityMismatch,
+                "KiCad refused the generated connections because the result would not match the XML nets, so nothing was changed and no XML was published. "
+                + "KiCad reported: " + detail);
+        }
+        if (receipt.Status == CheckedSchematicBatchStatus.CsbsCompleted && receipt.Result?.ConnectivityAssertionVerified != true)
+            throw new AutomationException(SchematicConnectionErrors.RealizationAssertionUnverified,
+                "KiCad committed the connections without confirming their pin partition; the pending operation is kept for inspection.");
+    }
 
     /// <summary>Resolve a committed realization against the planned design (§9.4).</summary>
     internal static SchematicDesign Resolve(SchematicDesign planned, DesignRecoveryState state,
         SchematicElectricalState native, ApplySchematicItemBatch batch, CheckedSchematicBatchReceipt receipt,
-        CancellationToken token = default) => throw Unavailable();
-
-    internal static AutomationException Unavailable() => new(SchematicConnectionErrors.ConnectedAdditionUnavailable,
-        "Connected XML additions are not available in this build.");
+        CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(receipt);
+        return SchematicConnectionResolution.Resolve(planned, state.Observed, native, batch, receipt.Result, state.KnowledgeLibraries, token);
+    }
 }
 
 /// <summary>Prepare an admitted connected addition (cn1-wiring-intent.md §4.4).</summary>
 public static class SchematicConnectedAdditionPlanner
 {
     /// <summary>Run the creation guards in <c>PrepareCreation</c> order with its error codes, build the
-    /// pre-realization candidate and check its bindings. A refusal is a plan with no candidate, exactly
-    /// as the synchronization planner reports creation refusals. The connection intent (§4.4 step 4,
-    /// §5) is not delivered in this build, so an addition that passes every guard still stops with
-    /// <c>connected_addition_unavailable</c> and nothing reaches the editor.</summary>
+    /// pre-realization candidate, check its bindings, build the connection intent (§5) and require the
+    /// candidate to round-trip through XML. A refusal is a plan with no candidate, exactly as the
+    /// synchronization planner reports creation refusals. A success is a realization plan (§4.2): the
+    /// candidate, <see cref="SchematicSynchronizationPlan.Connections"/>, no publishable XML and no native
+    /// operations, because only the realizer measures the editor and produces those.</summary>
     public static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, SchematicDesign desired,
         SchematicHierarchyMergeResult hierarchy, SchematicConnectedAdditionClassification shape,
         List<HierarchyCoverageGap> gaps, CancellationToken token = default)
@@ -331,9 +416,18 @@ public static class SchematicConnectedAdditionPlanner
             if (!bindings.IdentitiesResolved)
                 return Failure(SchematicConnectionErrors.CreatedBindingInvalid, "The generated native identities do not resolve exactly.", bindings.Issues);
 
-            // Step 4 needs the connection intent (§5), which this build does not contain.
-            var unavailable = SchematicConnectedAddition.Unavailable();
-            return Failure(unavailable.Code, unavailable.Message);
+            // Step 4: the connection intent. Every §5 refusal is thrown here.
+            var intent = SchematicConnectionIntentBuilder.Build(state, candidate, shape, token);
+
+            // Step 5: the candidate must round-trip exactly; its XML is not a publishable preview.
+            string xml = SchematicDesignXml.Write(candidate, state.KnowledgeLibraries);
+            if (SchematicDesignXml.Write(SchematicDesignXml.Read(xml, state.KnowledgeLibraries), state.KnowledgeLibraries) != xml)
+                return Failure(SchematicConnectionErrors.InconsistentDesignSerialization, "The connected candidate must round-trip without information loss.");
+
+            // Step 6.
+            token.ThrowIfCancellationRequested();
+            return new(candidate, null, [], hierarchy, null, null, [], [], null, gaps.Distinct().ToArray(),
+                NativeConnectivityValidationRequired: true, NativeLayoutResolutionRequired: true, Connections: intent);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
 

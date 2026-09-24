@@ -24,8 +24,11 @@ public static class SchematicConnectionErrors
     public const string ConnectedLockedSheetSymbol = "connected_locked_sheet_symbol";
     public const string ConnectedScopeTooLarge = "connected_scope_too_large";
     public const string ConnectedInternalInconsistency = "connected_internal_inconsistency";
-    // Only the freeze stubs raise this. It disappears when lane 2A delivers.
-    public const string ConnectedAdditionUnavailable = "connected_addition_unavailable";
+    // Pins that one placed symbol's own definition draws at the same point are always one
+    // connection in KiCad, so XML that puts them on different nets can never be drawn. Raised
+    // by the creation projection and the connection intent, before any native change
+    // (decision kicad-stacked-pins-one-node-20260924).
+    public const string StackedPinsOnDifferentNets = "stacked_pins_on_different_nets";
 
     // Realization.
     public const string NativeCapabilityMissing = "native_capability_missing";

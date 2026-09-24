@@ -56,6 +56,10 @@ public static class SchematicPartSymbols
                     || pin.Id!.Value != id.ToString("D") || !ids.Add(id)
                     || pin.LibraryPinId is not null || pin.HasActiveAlternate)
                     throw Invalid("Definition pins require distinct owned UUIDs, not placement IDs or selected instance alternates.");
+                // KiCad reads a missing pin position as the symbol origin, which would silently stack every such pin at one
+                // point and join them (decision kicad-stacked-pins-one-node-20260924). Require the exact geometry instead.
+                if (pin.Position is null)
+                    throw Invalid("Definition pins require explicit local positions; KiCad joins pins drawn at one point.");
                 if (style == 0 || style == source.BodyStyle)
                     pins.Add((pin.Number, pin.Name, unit));
             }

@@ -18,6 +18,7 @@
 #include <sch_tablecell.h>
 #include <sch_textbox.h>
 #include <schematic.h>
+#include <schematic_settings.h>
 #include <view/view.h>
 #include <trigo.h>
 #include <algorithm>
@@ -25,6 +26,8 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace
 {
@@ -34,18 +37,10 @@ BOX2I measure( SCH_ITEM& item, const SCH_SHEET_PATH& path, const wxString& varia
 {
     // The caller owns private copies. Explicit field/text contexts must not
     // borrow the human editor's CurrentSheet() for a repeated instance.
+    // A symbol whose definition is unresolved is an obstacle of its own drawn bounds;
+    // its pins are reported incomplete (SPGIR_DEFINITION_UNRESOLVED), never guessed.
     if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( &item ) )
-    {
-        const LIB_SYMBOL* definition = symbol->GetEffectiveLibSymbol( &path );
-        if( !definition ) throw std::runtime_error( "A symbol has no resolved native definition" );
-        BOX2I bounds = definition->GetBodyBoundingBox( symbol->GetUnitSelection( &path ),
-                                                      symbol->GetBodyStyle(), true, false );
-        bounds = symbol->GetTransform().TransformCoordinate( bounds );
-        bounds.Normalize(); bounds.Offset( symbol->GetPosition() );
-        for( const SCH_FIELD& field : symbol->GetFields() )
-            if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
-        return bounds;
-    }
+        return MeasureSchematicSymbolBounds( *symbol, path, variant );
     if( auto* sheet = dynamic_cast<SCH_SHEET*>( &item ) )
     {
         BOX2I bounds = sheet->GetBodyBoundingBox();
@@ -95,6 +90,77 @@ BOX2I measure( SCH_ITEM& item, const SCH_SHEET_PATH& path, const wxString& varia
     }
     return item.GetBoundingBox();
 }
+
+
+using LABEL_PROTOTYPE = tl::expected<std::unique_ptr<SCH_LABEL_BASE>, std::string>;
+
+
+/// Decode one detached label prototype exactly as a batch creation would decode it, and
+/// never insert it. Returns the reason a prototype is refused instead of guessing.
+template <typename PROTO, typename LABEL, typename COORDINATE>
+LABEL_PROTOTYPE decodeLabelPrototype( const google::protobuf::Any& aPacked, SCH_SCREEN& aScreen,
+                                      const SCHEMATIC& aSchematic, const std::set<std::string>& aDocumentIds,
+                                      std::set<std::string>& aRequestIds, const COORDINATE& aCoordinate )
+{
+    const std::string invalid = "Item candidates need a distinct new canonical identity, a position on the "
+                                "100 nm quantum and single-line label text";
+    PROTO proto;
+    if( !aPacked.UnpackTo( &proto ) ) return tl::unexpected( invalid );
+    // Unknown fields inside a prototype fail closed exactly like unknown request fields.
+    PROTO known = proto;
+    known.DiscardUnknownFields();
+    if( known.ByteSizeLong() != proto.ByteSizeLong() )
+        return tl::unexpected( std::string( "Placement measurement contains unsupported fields" ) );
+    const std::string& id = proto.id().value();
+    if( !KIID::SniffTest( wxString::FromUTF8( id ) ) || KIID( id ) == niluuid || KIID( id ).AsStdString() != id
+            || aDocumentIds.contains( id ) || !aRequestIds.insert( id ).second || !proto.has_position()
+            || !aCoordinate( proto.position().x_nm() ) || !aCoordinate( proto.position().y_nm() )
+            || proto.text().attributes().multiline() || proto.text().text().find_first_of( "\r\n" ) != std::string::npos
+            || !SchematicFieldTextModesArePersistable( proto ) )
+        return tl::unexpected( invalid );
+    auto label = std::make_unique<LABEL>();
+    if( !label->Deserialize( aPacked ) ) return tl::unexpected( invalid );
+    label->SetParent( &aScreen );
+    if( auto* global = dynamic_cast<SCH_GLOBALLABEL*>( label.get() ) )
+    {
+        // A global label renders the automatic intersheet-references field native
+        // gives every global label, visible when the project shows references.
+        // A prototype without one is measured with the constructor default, and
+        // autoplaced as native autoplaces a newly shown field.
+        if( !std::as_const( *global ).GetField( FIELD_T::INTERSHEET_REFS ) )
+        {
+            const SCH_GLOBALLABEL fresh( global->GetPosition(), global->GetText() );
+            SCH_FIELD references( *fresh.GetField( FIELD_T::INTERSHEET_REFS ) );
+            references.SetParent( global );
+            global->GetFields().insert( global->GetFields().begin(), references );
+        }
+        SCH_FIELD* references = global->GetField( FIELD_T::INTERSHEET_REFS );
+        const bool show = aSchematic.Settings().m_IntersheetRefsShow;
+        references->SetVisible( show );
+        if( show && global->GetFields().size() == 1 && references->GetTextPos() == global->GetPosition() )
+            global->AutoplaceFields( &aScreen, AUTOPLACE_AUTO );
+    }
+    std::unique_ptr<SCH_LABEL_BASE> measured = std::move( label );
+    return LABEL_PROTOTYPE( std::move( measured ) );
+}
+
+
+template <typename COORDINATE>
+LABEL_PROTOTYPE measureLabelPrototype( const google::protobuf::Any& aPacked, SCH_SCREEN& aScreen,
+                                       const SCHEMATIC& aSchematic, const std::set<std::string>& aDocumentIds,
+                                       std::set<std::string>& aRequestIds, const COORDINATE& aCoordinate )
+{
+    using namespace kiapi::schematic::types;
+    if( aPacked.Is<LocalLabel>() )
+        return decodeLabelPrototype<LocalLabel, SCH_LABEL>( aPacked, aScreen, aSchematic, aDocumentIds, aRequestIds, aCoordinate );
+    if( aPacked.Is<GlobalLabel>() )
+        return decodeLabelPrototype<GlobalLabel, SCH_GLOBALLABEL>( aPacked, aScreen, aSchematic, aDocumentIds, aRequestIds,
+                                                                  aCoordinate );
+    if( aPacked.Is<HierarchicalLabel>() )
+        return decodeLabelPrototype<HierarchicalLabel, SCH_HIERLABEL>( aPacked, aScreen, aSchematic, aDocumentIds, aRequestIds,
+                                                                      aCoordinate );
+    return tl::unexpected( std::string( "Item candidates must be local, global or hierarchical label prototypes" ) );
+}
 }
 
 HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SCH::handleMeasurePlacement(
@@ -110,10 +176,6 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
     known.DiscardUnknownFields();
     if( known.ByteSizeLong() != aCtx.Request.ByteSizeLong() )
         return reject( "Placement measurement contains unsupported fields" );
-    // Label prototypes are declared for connected realization (contract CN-1) but not
-    // measured yet; they fail closed exactly as the unknown field did before.
-    if( aCtx.Request.item_candidates_size() > 0 )
-        return reject( "Placement measurement contains unsupported fields" );
     if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) ) return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
@@ -125,6 +187,8 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
             || aCtx.Request.expected_revision().sequence() != journal.Sequence() )
         return reject( "Placement geometry requires the exact observed document revision" );
     if( aCtx.Request.candidates_size() > 256 ) return reject( "Measure at most 256 symbol candidates per request" );
+    if( aCtx.Request.candidates_size() + aCtx.Request.item_candidates_size() > 256 )
+        return reject( "Measure at most 256 symbol and item candidates together per request" );
     auto* screen = path->LastScreen();
     auto* settings = static_cast<const SCH_RENDER_SETTINGS*>( m_frame->GetCanvas()->GetView()->GetPainter()->GetSettings() );
     const wxString variant = schematic()->GetCurrentVariant();
@@ -161,6 +225,12 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
             append( *copy, result.add_obstacles() );
         }
         std::set<std::string> ids;
+        auto coordinate = []( int64_t value )
+        {
+            const int64_t quantum = schIUScale.IUToNm( 1 );
+            return value % quantum == 0 && value / quantum >= std::numeric_limits<int>::min()
+                    && value / quantum <= std::numeric_limits<int>::max();
+        };
         for( const auto& proposed : aCtx.Request.candidates() )
         {
             if( !KIID::SniffTest( wxString::FromUTF8( proposed.id().value() ) ) ) return reject( "Invalid candidate identity" );
@@ -170,12 +240,6 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
                     || proposed.path().SerializeAsString() != aCtx.Request.document().sheet_path().SerializeAsString()
                     || !SchematicFieldTextModesArePersistable( proposed ) )
                 return reject( "Candidates need distinct new identities, exact target paths and complete native definitions" );
-            auto coordinate = []( int64_t value )
-            {
-                const int64_t quantum = schIUScale.IUToNm( 1 );
-                return value % quantum == 0 && value / quantum >= std::numeric_limits<int>::min()
-                        && value / quantum <= std::numeric_limits<int>::max();
-            };
             if( !proposed.has_position() || !coordinate( proposed.position().x_nm() )
                     || !coordinate( proposed.position().y_nm() ) || !proposed.has_unit()
                     || proposed.unit().unit() < 1 )
@@ -187,6 +251,28 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
             // register variants, create a commit or alter the displayed sheet.
             symbol.SetParent( screen );
             append( symbol, result.add_candidates() );
+        }
+        if( aCtx.Request.item_candidates_size() > 0 )
+        {
+            // Label prototypes for connected realization (contract CN-1 §6.2 round 2).
+            // Identities must be new to the whole document, not only this sheet,
+            // because a generated label may later be created on any instance.
+            std::set<std::string> documentIds;
+            for( const SCH_SHEET_PATH& loaded : schematic()->Hierarchy() )
+            {
+                for( SCH_ITEM* item : loaded.LastScreen()->Items() )
+                {
+                    documentIds.insert( item->m_Uuid.AsStdString() );
+                    item->RunOnChildren( [&]( SCH_ITEM* child ) { documentIds.insert( child->m_Uuid.AsStdString() ); },
+                                         RECURSE_MODE::RECURSE );
+                }
+            }
+            for( const google::protobuf::Any& packed : aCtx.Request.item_candidates() )
+            {
+                auto prototype = measureLabelPrototype( packed, *screen, *schematic(), documentIds, ids, coordinate );
+                if( !prototype ) return reject( prototype.error() );
+                append( **prototype, result.add_item_candidates() );
+            }
         }
     }
     catch( const std::exception& error ) { return reject( error.what() ); }

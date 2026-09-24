@@ -51,6 +51,15 @@ public static class SchematicInitialLayoutPlanner
         if (!added.Any(s => s.Placement is null))
             throw Error("no_missing_placement", "All new symbols already have positions; use scoped visual refinement to adjust them.");
         var sheets = state.Baseline.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), StringComparer.Ordinal);
+        // Identities need every occurrence of each definition. Creation always supplies them; the only other
+        // shape here, a new unit of an existing component, is refused by creation itself, so report exactly
+        // the synchronization plan's code for this record instead of computing any identity.
+        if (SchematicNativeCreationProjection.OmittedOccurrences(desired.Engineering.Circuit, added).Count != 0)
+        {
+            var refused = SchematicSynchronizationPlanner.Plan(state, token);
+            throw Error(refused.ErrorCode ?? "unsupported_layout_creation",
+                refused.ErrorMessage ?? "Initial placement requires component additions without changes to existing owners and parts.");
+        }
         // Seed exactly the physical symbols creation will make, including units placed on
         // another sheet than their component; an inconsistent placement is rejected here.
         var groups = SchematicNativeCreationProjection.PhysicalSymbols(state.Baseline, desired.Engineering.Circuit, added, token);

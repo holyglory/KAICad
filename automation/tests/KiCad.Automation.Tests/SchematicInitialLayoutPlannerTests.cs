@@ -168,7 +168,96 @@ public sealed class SchematicInitialLayoutPlannerTests
         var electrical = state.ObservedElectrical!.Clone(); electrical.Hierarchy.Data = observed.Clone();
         await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
             state with { Observed = observed, ObservedElectrical = electrical }, Policy, Regions(state), "", Measure));
+
+        // A new unit of an existing component beside a new component leaves that component's definition only
+        // partly supplied. The planner computes no identities for it and reports the ownership refusal that
+        // synchronization gives the same record, before measuring anything. The code is fixed, not taken from
+        // Plan, so a regression that made Plan ask for layout could not make layout refuse circularly.
+        // The saved design draws only unit 1 of both channel components: their shared unit-2 symbol is absent
+        // from KiCad and the model alike, and the drawn unit declares the undrawn unit's pins, so the record is
+        // aligned (a clean no-op plan) and creation's own checks decide.
+        var basis = SchematicSynchronizationPlanTests.Fixture();
+        var circuit = basis.Baseline.Engineering.Circuit;
+        var undrawn = circuit.Symbols.Where(s => s.Unit == 2).OrderBy(s => s.Id).ToArray();
+        var removedSymbols = basis.Baseline.SymbolBindings.Where(b => undrawn.Any(s => s.Id == b.SymbolOccurrenceId))
+            .Select(b => b.NativeObjectId.ToString("D")).ToHashSet(StringComparer.Ordinal);
+        Assert.HasCount(1, removedSymbols, "The repeated channels share one unit-2 symbol.");
+        var channelDefinition = circuit.Components.Single(c => c.Id == undrawn[0].ComponentId).DefinitionId;
+        var channelPart = circuit.Parts.Single(p => p.Id == circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == channelDefinition).PartId);
+        var unitTwoPins = channelPart.Pins.Where(p => p.Unit == 2).Select(p => p.Number).ToHashSet(StringComparer.Ordinal);
+        Assert.IsNotEmpty(unitTwoPins);
+        var declaredIds = new Dictionary<(string Symbol, string Pin), string>();
+        var undrawnBaseline = basis.Baseline with
+        {
+            Engineering = basis.Baseline.Engineering with { Circuit = circuit with { Symbols = circuit.Symbols.Where(s => s.Unit != 2).ToArray() } },
+            Schematic = Undraw(basis.Baseline.Schematic),
+            SymbolBindings = basis.Baseline.SymbolBindings.Where(b => undrawn.All(s => s.Id != b.SymbolOccurrenceId)).ToArray()
+        };
+        var partial = basis with { Baseline = undrawnBaseline, Observed = Undraw(basis.Observed),
+            BaselineElectrical = UndrawElectrical(basis.BaselineElectrical!), ObservedElectrical = UndrawElectrical(basis.ObservedElectrical!),
+            DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(undrawnBaseline, basis.KnowledgeLibraries)) };
+        var aligned = SchematicSynchronizationPlanner.Plan(partial);
+        Assert.IsTrue(aligned.CanPrepare, aligned.ErrorCode + ": " + aligned.ErrorMessage);
+        Assert.IsEmpty(aligned.NativeOperations);
+        var creation = SchematicNativeCreationProjectionTests.AddComponent(partial.Baseline, coordinateFree: true);
+        var redrawn = SchematicNetReconciliationTests.Desired(partial, creation with { Circuit = creation.Circuit with
+            { Symbols = [.. creation.Circuit.Symbols, undrawn[0] with { Placement = null }] } });
+        Assert.IsNotEmpty(SchematicNativeCreationProjection.OmittedOccurrences(DesignRecoveryStore.ReadDesired(redrawn).Engineering.Circuit,
+            [.. DesignRecoveryStore.ReadDesired(redrawn).Engineering.Circuit.Symbols.Where(x => !partial.Baseline.Engineering.Circuit.Symbols.Any(o => o.Id == x.Id))]));
+        var synchronization = SchematicSynchronizationPlanner.Plan(redrawn);
+        Assert.AreEqual(SchematicConnectionErrors.SymbolOwnerRequiresResolution, synchronization.ErrorCode, synchronization.ErrorMessage);
+        var refused = await Assert.ThrowsAsync<AutomationException>(() => SchematicInitialLayoutPlanner.ProposeMeasuredAsync(
+            redrawn, Policy, Regions(redrawn), "", Measure));
+        Assert.AreEqual(SchematicConnectionErrors.SymbolOwnerRequiresResolution, refused.Code, refused.Message);
         Assert.AreEqual(0, calls);
+
+        // Remove the unit-2 symbol and let each remaining unit declare the undrawn unit's pins as inactive
+        // children (their own stable identities, the library pin identities of the removed unit), as KiCad does.
+        SchematicHierarchyData Undraw(SchematicHierarchyData data)
+        {
+            var result = data.Clone();
+            foreach (var screen in result.Instances)
+            {
+                var symbols = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).ToArray();
+                var templates = symbols.Where(symbol => removedSymbols.Contains(symbol.Id.Value))
+                    .SelectMany(symbol => symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.Unpack<SchematicPin>()))
+                    .Where(pin => unitTwoPins.Contains(pin.Number)).GroupBy(pin => pin.Number).ToDictionary(g => g.Key, g => g.First());
+                if (!symbols.Any(symbol => removedSymbols.Contains(symbol.Id.Value))) continue;
+                Assert.IsTrue(unitTwoPins.SetEquals(templates.Keys), "Every channel sheet instance shows the whole shared unit-2 symbol.");
+                for (int i = screen.Items.Count - 1; i >= 0; i--)
+                {
+                    if (!screen.Items[i].Is(SchematicSymbolInstance.Descriptor)) continue;
+                    var symbol = screen.Items[i].Unpack<SchematicSymbolInstance>();
+                    if (removedSymbols.Contains(symbol.Id.Value)) { screen.Items.RemoveAt(i); continue; }
+                    foreach (var number in unitTwoPins.Order(StringComparer.Ordinal))
+                    {
+                        var pin = templates[number].Clone();
+                        if (!declaredIds.TryGetValue((symbol.Id.Value, number), out var id)) declaredIds.Add((symbol.Id.Value, number), id = Guid.NewGuid().ToString("D"));
+                        pin.Id = new() { Value = id };
+                        symbol.Definition.Items.Add(new SchematicSymbolChild { Unit = new() { Unit = 2 }, Item = Google.Protobuf.WellKnownTypes.Any.Pack(pin) });
+                    }
+                    screen.Items[i] = Google.Protobuf.WellKnownTypes.Any.Pack(symbol);
+                }
+            }
+            return result;
+        }
+
+        // The removed symbol's placed pins also leave KiCad's nets on each sheet instance.
+        SchematicElectricalState UndrawElectrical(SchematicElectricalState electrical)
+        {
+            var result = electrical.Clone();
+            foreach (var screen in result.Hierarchy.Data.Instances)
+            {
+                var pins = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                    .Where(symbol => removedSymbols.Contains(symbol.Id.Value))
+                    .SelectMany(symbol => symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.Unpack<SchematicPin>().Id.Value))
+                    .ToHashSet(StringComparer.Ordinal);
+                foreach (var sheet in result.Nets.SelectMany(n => n.Sheets).Where(sheet => sheet.Path.Equals(screen.Metadata.Document.SheetPath)))
+                    foreach (var pin in sheet.Items.Where(p => pins.Contains(p.Value)).ToArray()) sheet.Items.Remove(pin);
+            }
+            result.Hierarchy.Data = Undraw(result.Hierarchy.Data);
+            return result;
+        }
     }
 
     [TestMethod]

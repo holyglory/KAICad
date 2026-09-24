@@ -139,14 +139,27 @@ public sealed class SchematicNativeCreationProjectionTests
         {
             var native = screens[sheetPaths[symbol.Sheet]].Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
                 .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == bindings[symbol.Occurrence]);
-            Assert.AreEqual((symbol.Reference, symbol.Value, symbol.LibId, symbol.Unit),
-                (native.ReferenceField.Text.Text_, native.ValueField.Text.Text_, native.LibName, native.Unit.Unit), symbol.Sheet);
+            // Saved and reloaded form: the cache key equals the library identifier, so no separate alias is kept, and
+            // pin-name spacing stays on the definition, never on the placed symbol.
+            Assert.AreEqual((symbol.Reference, symbol.Value, symbol.LibId, symbol.Unit, "", 0L),
+                (native.ReferenceField.Text.Text_, native.ValueField.Text.Text_, native.LibraryId.LibraryNickname + ":" + native.LibraryId.EntryName,
+                    native.Unit.Unit, native.LibName, native.PinNameOffset.ValueNm), symbol.Sheet);
+            Assert.AreEqual(508000L, native.DefinitionPinNameOffset.ValueNm, symbol.Sheet);
             var record = native.InstanceRecords.Records.Single();
             Assert.AreEqual((sheetPaths[symbol.Sheet], symbol.Reference, symbol.Unit),
                 (string.Join('/', record.Path.Select(p => p.Value)), record.Reference, record.Unit));
             created.Add(symbol.Occurrence, native);
         }
         Assert.AreEqual(expected.Symbols.Count, screens.Values.Sum(s => s.Items.Count(i => i.Is(SchematicSymbolInstance.Descriptor))));
+        // Each sheet's library cache is in KiCad's own key order (the PSU sheet receives six definitions out of that order),
+        // so the published XML lists it as KiCad reports, saves and reloads it.
+        foreach (var sheet in expected.Sheets.Where(s => expected.Symbols.Any(x => x.Sheet == s.Key)))
+        {
+            var keys = screens[sheetPaths[sheet.Key]].CachedSymbols.Select(c => c.CacheKey).ToArray();
+            CollectionAssert.AreEqual(keys.Order(StringComparer.Ordinal).ToArray(), keys, sheet.Key);
+        }
+        CollectionAssert.AreEqual(new[] { "Battery_Management:LTC2959", "Connector_Generic:Conn_01x02", "Device:R", "MCU_ST_STM32C0:STM32C011J_4-6_Mx",
+            "Regulator_Linear:LP3982ILD-3.3", "Regulator_Switching:LM2595S-ADJ" }, screens[sheetPaths["PSU"]].CachedSymbols.Select(c => c.CacheKey).ToArray());
 
         // U5: one component, four native symbols on two sheets, one declared definition and exact unit pins.
         var u5 = circuit.Components.Single(c => c.Reference == "U5");
@@ -266,6 +279,26 @@ public sealed class SchematicNativeCreationProjectionTests
             Assert.AreEqual(bindings[occurrence.Id], ownBindings[occurrence.Id].ToString("D"));
         var retry = SchematicNativeCreationProjection.Project(moved.Baseline, moved.Desired, [moved.Library]);
         Assert.AreEqual(SchematicDesignXml.Write(result.Candidate, [moved.Library]), SchematicDesignXml.Write(retry.Candidate, [moved.Library]));
+
+        // Identity precondition: whether a unit gets the shared or a per-component identity depends on every
+        // occurrence of its definition, so a caller that supplies only some of them is refused as a defect
+        // before any identity is computed. Complete sets are accepted per definition and give the same groups.
+        var circuit = moved.Desired.Engineering.Circuit;
+        var channel = moved.Components.Where(c => c.SheetInstanceId != moved.Root).OrderBy(c => c.Id).ToArray();
+        foreach (var (problem, partial) in new (string, SymbolOccurrence[])[]
+        {
+            ("one channel component of the shared definition", [.. occurrences.Where(s => s.ComponentId != channel[0].Id)]),
+            ("only the moved units", units2),
+            ("one moved unit", [units2[0]]),
+            ("a channel component without its moved unit", [.. occurrences.Where(s => s.Id != units2[0].Id)])
+        })
+            Assert.ThrowsExactly<InvalidOperationException>(() => SchematicNativeCreationProjection.PhysicalSymbols(moved.Baseline, circuit, partial), problem);
+        var complete = SchematicNativeCreationProjection.PhysicalSymbols(moved.Baseline, circuit, occurrences).Select(g => g.Key).ToArray();
+        var rootDefinition = moved.Components.Single(c => c.SheetInstanceId == moved.Root).DefinitionId;
+        var perDefinition = new[] { rootDefinition, channel[0].DefinitionId }.SelectMany(definition => SchematicNativeCreationProjection.PhysicalSymbols(
+            moved.Baseline, circuit, occurrences.Where(s => moved.Components.Single(c => c.Id == s.ComponentId).DefinitionId == definition)))
+            .Select(g => g.Key).ToArray();
+        CollectionAssert.AreEquivalent(complete, perDefinition, "Each definition's identities depend only on its own complete occurrence set.");
     }
 
     [TestMethod]
@@ -347,11 +380,14 @@ public sealed class SchematicNativeCreationProjectionTests
     }
 
     /// <summary>Validating declarations for the fixture parts, built offline from the frozen
-    /// lib_symbols pins (numbers, units, body styles and K21 identities) with standard fields.
-    /// Native captures of the same pins are checked by the NativePsuCpuSeed journey.</summary>
+    /// lib_symbols pins (numbers, units, body styles, K21 identities and definition positions) with
+    /// standard fields. Native captures of the same pins are checked by the NativePsuCpuSeed journey.
+    /// The exact positions keep the LP3982's pins 1 and 4 stacked at one point, as KiCad draws them.</summary>
     private static SchematicPartSymbol[] PsuCpuDeclarations(Circuit circuit)
     {
-        var pins = PsuCpuFixtureBuilder.LibraryPins(PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr"));
+        string text = PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr");
+        var pins = PsuCpuFixtureBuilder.LibraryPins(text);
+        var positions = PsuCpuPinPositions(text);
         static SchematicField Field(string name, string text) => new() { Name = name,
             Text = new() { Text_ = text, Position = new(), Attributes = new() { Multiline = true } } };
         return [.. PsuCpuFixture.Parts().Where(p => circuit.Parts.Any(x => x.Id == p.Id)).Select(part =>
@@ -369,12 +405,28 @@ public sealed class SchematicNativeCreationProjectionTests
                 definition.BodyStyle.Add(new SchematicBodyStyle { Name = "Style " + style });
             foreach (var pin in own)
                 definition.Items.Add(new SchematicSymbolChild { Unit = new() { Unit = pin.Unit }, BodyStyle = new() { Style = pin.Style },
-                    Item = Any.Pack(new SchematicPin { Id = new() { Value = pin.Id }, Number = pin.Number, Position = new(),
+                    Item = Any.Pack(new SchematicPin { Id = new() { Value = pin.Id }, Number = pin.Number, Position = positions[pin.Id].Clone(),
                         Name = pin.Style is 0 or 1 ? names[(pin.Number, pin.Unit)] : pin.Name }) });
             return new SchematicPartSymbol(part.Id, new() { LibraryNickname = part.Library, EntryName = part.Entry },
                 new() { CacheKey = part.CacheKey, Definition = definition, ShowPinNames = true, ShowPinNumbers = true,
                     PinNameOffset = new() { ValueNm = 508000 } });
         })];
+    }
+
+    /// <summary>Each definition pin's symbol-local position in lib_symbols.kicad_sexpr, by its K21 identity,
+    /// in nanometres with KiCad's downward Y.</summary>
+    internal static IReadOnlyDictionary<string, Kiapi.Common.Types.Vector2> PsuCpuPinPositions(string libSymbols)
+    {
+        var result = new Dictionary<string, Kiapi.Common.Types.Vector2>(StringComparer.Ordinal);
+        foreach (var symbol in PsuCpuSexpr.Parse(libSymbols).Children("symbol"))
+            foreach (var body in symbol.Children("symbol"))
+                foreach (var pin in body.Children("pin"))
+                {
+                    var at = pin.Child("at");
+                    static long Nm(string mm) => (long)decimal.Round(decimal.Parse(mm, System.Globalization.CultureInfo.InvariantCulture) * 1_000_000m);
+                    result.Add(pin.Child("uuid").Value(1), new() { XNm = Nm(at.Value(1)), YNm = -Nm(at.Value(2)) });
+                }
+        return result;
     }
 
     /// <summary>The loaded S1 "Sheets" seed of contract §1.6.2 below a native-created root instance.</summary>

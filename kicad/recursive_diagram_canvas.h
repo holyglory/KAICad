@@ -7,6 +7,7 @@
 #include <wx/colour.h>
 #include <wx/control.h>
 #include <wx/panel.h>
+#include <wx/sizer.h>
 #include <wx/string.h>
 #include <wx/tglbtn.h>
 #include <cstdint>
@@ -382,6 +383,28 @@ public:
 
 protected:
     wxSize DoGetBestSize() const override;
+};
+
+/** A row of one-click choices, left to right, that continues on a new line only when the next choice does not fit the
+ * width it is given. The editor gives it that width before it lays the inspector out, and the lines it places are the
+ * lines its minimum height counts, so whatever follows the row moves down when the row wraps and never lies over a
+ * choice. (wxWrapSizer learns its width only during a layout and counts its lines for the next one, so for one layout
+ * a wrapped line can lie over what follows it.) */
+class CHOICE_FLOW : public wxSizer
+{
+public:
+    explicit CHOICE_FLOW( int aGap ) : m_gap( aGap ) {}
+    /// The width the choices wrap within, in pixels; 0 keeps them in one line. Returns whether it changed.
+    bool SetWrapWidth( int aWidth );
+    wxSize CalcMin() override;
+    void RepositionChildren( const wxSize& aMinSize ) override;
+
+private:
+    /// Where each shown choice goes, relative to the row's origin, and the extent they take together.
+    std::vector<std::pair<wxSizerItem*, wxRect>> arrange( wxSize& aExtent );
+
+    int m_gap;
+    int m_width = 0;
 };
 
 /** The canvas-edge palette (Round A1 option 2): the same drawing tools as the toolbar strip plus

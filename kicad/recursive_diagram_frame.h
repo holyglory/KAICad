@@ -178,8 +178,8 @@ private:
     void setFacetState( int aState );
     void setFacetStrength( int aStrength );
     /// Shows the strength choices' full labels when they fit the inspector's width in one row, and their short
-    /// labels otherwise, so the row collapses its labels before it wraps.
-    /// Returns whether a label changed, so the caller lays out the inspector again.
+    /// labels otherwise, so the row collapses its labels before it wraps; and gives the state and strength rows the
+    /// width they wrap within. Returns whether a label or that width changed, so the caller lays out the inspector again.
     bool fitFacetLabels();
     wxFont chipFont() const;
     wxColour linkColour() const;
@@ -377,6 +377,9 @@ private:
     wxStaticText* m_facetTitle;
     /// One-click choices (Chosen, Candidate, Unknown) and (Information, Preference, Requirement).
     std::array<wxRadioButton*, 3> m_facetStates;
+    /// The rows holding the state and strength choices; they wrap within the width fitFacetLabels gives them.
+    RECURSIVE_DIAGRAM::CHOICE_FLOW* m_facetStateRow;
+    RECURSIVE_DIAGRAM::CHOICE_FLOW* m_facetStrengthRow;
     wxStaticText* m_facetValueLabel;
     wxTextCtrl* m_facetValue;
     wxTextCtrl* m_facetCandidates;

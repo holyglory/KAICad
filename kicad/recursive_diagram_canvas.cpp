@@ -1604,6 +1604,43 @@ void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
     }
 }
 
+bool CHOICE_FLOW::SetWrapWidth( int width )
+{
+    width = std::max( 0, width );
+    if( width == m_width ) return false;
+    m_width = width; return true;
+}
+
+std::vector<std::pair<wxSizerItem*, wxRect>> CHOICE_FLOW::arrange( wxSize& extent )
+{
+    // The same arrangement serves the minimum size and the placement, so the row always takes the lines it counted.
+    std::vector<std::pair<wxSizerItem*, wxRect>> placed;
+    int x = 0, y = 0, line = 0; extent = wxSize( 0, 0 );
+    for( wxSizerItemList::compatibility_iterator node = m_children.GetFirst(); node; node = node->GetNext() )
+    {
+        wxSizerItem* item = node->GetData();
+        if( !item->IsShown() ) continue;
+        wxSize size = item->CalcMin();
+        if( x > 0 && m_width > 0 && x + m_gap + size.x > m_width ) { y += line; x = 0; line = 0; }
+        if( x > 0 ) x += m_gap;
+        placed.emplace_back( item, wxRect( wxPoint( x, y ), size ) );
+        x += size.x; line = std::max( line, size.y ); extent.x = std::max( extent.x, x );
+    }
+    extent.y = y + line;
+    return placed;
+}
+
+wxSize CHOICE_FLOW::CalcMin()
+{
+    wxSize extent; arrange( extent ); return extent;
+}
+
+void CHOICE_FLOW::RepositionChildren( const wxSize& )
+{
+    wxSize extent;
+    for( const auto& [item, rect] : arrange( extent ) ) item->SetDimension( m_position + rect.GetPosition(), rect.GetSize() );
+}
+
 wxColour TOOL_PALETTE::Surface()
 {
     wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );

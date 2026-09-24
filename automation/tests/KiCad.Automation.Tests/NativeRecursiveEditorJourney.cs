@@ -3017,6 +3017,61 @@ public sealed partial class NativeSessionTests
             if (brief is bool collapsed) CollectionAssert.AreEqual(collapsed ? shortLabels : full, labels, step + ": the strength labels.");
             else Assert.IsTrue(labels.SequenceEqual(full) || labels.SequenceEqual(shortLabels), step + ": the strength labels are all full or all short.");
         }
+        // The interactive controls of a facet's detail, where the editor drew them.
+        string[] detailNames = ["RecursiveFacetBack", "RecursiveFacetStateChosen", "RecursiveFacetStateCandidate", "RecursiveFacetStateUnknown",
+            "RecursiveFacetValue", "RecursiveFacetCandidates", "RecursiveFacetReason", "RecursiveFacetStrengthInformation",
+            "RecursiveFacetStrengthPreference", "RecursiveFacetStrengthRequirement", "RecursiveFacetClear"];
+        P.DiagramControlRect[] DetailControls(P.RecursiveDiagramEditorState at) => detailNames.Select(n => Find(at, n)).Where(c => c.Shown).ToArray();
+        async Task<P.RecursiveDiagramEditorState> DetailSettled()
+        {
+            // The inspector lays out again once a label collapses or its scroll bar shows; measure once two readings agree.
+            var at = await Read();
+            using var settle = CancellationTokenSource.CreateLinkedTokenSource(token); settle.CancelAfter(TimeSpan.FromSeconds(5));
+            while (true)
+            {
+                await Task.Delay(120, settle.Token);
+                var again = await Read();
+                if (DetailControls(again).SequenceEqual(DetailControls(at)) && Find(again, "RecursiveInspector").Equals(Find(at, "RecursiveInspector"))) return again;
+                at = again;
+            }
+        }
+        // Measured in one capture: no two of the detail's controls intersect and none is clipped at the inspector's sides. The
+        // entry lies below the state choices, the strength choices below the entry, and Clear facet below the strength choices,
+        // however those rows wrap or collapse their labels. Clear facet looks like an action (design QA P2-10).
+        void VerifyDetailLayout(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step)
+        {
+            static string Box(P.DiagramControlRect c) => $"{c.Name} ({c.X}, {c.Y}, {c.Width} x {c.Height})";
+            // The distance between two rectangles along the axis that separates them; negative when they intersect.
+            static int Gap(P.DiagramControlRect a, P.DiagramControlRect b) =>
+                Math.Max(Math.Max(b.X - (a.X + a.Width), a.X - (b.X + b.Width)), Math.Max(b.Y - (a.Y + a.Height), a.Y - (b.Y + b.Height)));
+            var inspector = Find(at, "RecursiveInspector");
+            var shown = DetailControls(at);
+            int closest = int.MaxValue;
+            for (int i = 0; i < shown.Length; ++i)
+                for (int j = i + 1; j < shown.Length; ++j)
+                {
+                    int gap = Gap(shown[i], shown[j]); closest = Math.Min(closest, gap);
+                    Assert.IsTrue(gap >= 0, $"{step}: {Box(shown[i])} and {Box(shown[j])} intersect.");
+                }
+            shot.Record("Facet detail: closest two interactive controls (px)", closest);
+            foreach (var control in shown)
+                Assert.IsTrue(control.Width > 0 && control.Height > 0 && control.X >= inspector.X && control.X + control.Width <= inspector.X + inspector.Width,
+                    $"{step}: {Box(control)} lies whole across the inspector ({inspector.X} to {inspector.X + inspector.Width}).");
+            var states = shown.Where(c => c.Name.StartsWith("RecursiveFacetState", StringComparison.Ordinal)).ToArray();
+            var strengths = shown.Where(c => c.Name.StartsWith("RecursiveFacetStrength", StringComparison.Ordinal)).ToArray();
+            var entries = shown.Where(c => c.Name is "RecursiveFacetValue" or "RecursiveFacetCandidates" or "RecursiveFacetReason").ToArray();
+            var clear = Find(at, "RecursiveFacetClear");
+            Assert.HasCount(3, states, step + ": the three state choices are shown.");
+            Assert.HasCount(3, strengths, step + ": the three strength choices are shown.");
+            Assert.HasCount(1, entries, step + ": the one entry the state asks for is shown.");
+            Assert.IsTrue(clear.Shown, step + ": Clear facet is shown for a facet with a value.");
+            var entry = entries[0];
+            Assert.IsTrue(entry.Y >= states.Max(c => c.Y + c.Height), $"{step}: {Box(entry)} lies below every state choice.");
+            Assert.IsTrue(strengths.Min(c => c.Y) >= entry.Y + entry.Height, $"{step}: the strength choices lie below {Box(entry)}.");
+            int below = shot.Record("Clear facet below the lowest strength choice (px)", clear.Y - strengths.Max(c => c.Y + c.Height));
+            Assert.IsTrue(below >= 4, $"{step}: {Box(clear)} starts {below} pixels below the lowest strength choice, at least 4.");
+            VerifyLink(shot, clear, Find(at, "RecursiveSavedVersion"), step, "Clear facet");
+        }
         async Task<P.RecursiveDiagramEditorState> MoveSash(string step, int toX, Func<P.RecursiveDiagramEditorState, bool> reached)
         {
             var sash = Find(await Read(), "RecursiveInspectorSash");
@@ -3251,16 +3306,41 @@ public sealed partial class NativeSessionTests
             && c.Values.SequenceEqual(["linear regulator"]) && s.FacetNotice == "");
         CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(chosenAgain, psu));
 
-        // Clear facet returns Package to unspecified: its row and chip go. Undo brings it back.
-        await Press("RecursiveFacetRowPackage");
-        await Wait("package-row", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetStateCandidate");
-        await Press("RecursiveFacetClear");
-        var cleared = await Wait("package-cleared", s => s.FacetEditor == "" && Facet(s, d => d.Package) is null);
-        CollectionAssert.AreEqual(new[] { "type", "manufacturer" }, cleared.ShownFacets.ToArray());
+        // Clear facet returns Package to unspecified: its row and chip go. Undo brings it back with its strength. The Package
+        // detail is measured and cleared through the rendered Clear facet at the default width, in the narrowest and a wide
+        // inspector, and in the compact window (below), in each theme's session.
+        async Task<P.RecursiveDiagramEditorState> ClearPackage(string step, bool? brief, string[] facetsLeft,
+            params (string Facet, P.DefinitionChoiceStateData State)[] choicesLeft)
+        {
+            bool dirty = (await Read()).Dirty;
+            await Press("RecursiveFacetRowPackage");
+            await Wait(step + "-package-row", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetStateCandidate");
+            var detail = await DetailSettled();
+            VerifyDetailLayout(await Shot(step + "-package-detail"), detail, step);
+            StrengthRow(detail, step, brief);
+            await Press("RecursiveFacetClear");
+            var gone = await Wait(step + "-package-cleared", s => s.FacetEditor == "" && Facet(s, d => d.Package) is null);
+            CollectionAssert.AreEqual(facetsLeft, gone.ShownFacets.ToArray(), step + ": the Package row leaves the facet overview.");
+            VerifyChoicesVisible(gone, step + "-cleared", psu, choicesLeft);
+            Assert.IsTrue(gone.Dirty, step + ": the cleared facet is a change to save.");
+            Key("z", control: true);
+            var back = await Wait(step + "-package-restored", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
+                && c.Values.SequenceEqual(["SOT-23-5"]) && c.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
+            Assert.AreEqual(dirty, back.Dirty, step + ": undo returns the draft to what it was before Clear facet.");
+            return gone;
+        }
+        var cleared = await ClearPackage("default-width", null, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
         CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
-        Key("z", control: true);
-        await Wait("package-restored", s => Facet(s, d => d.Package) is { State: P.DefinitionChoiceStateData.DcsdCandidates } c
-            && c.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);
+        // The narrowest inspector collapses the strength labels; a wide one shows them in full, the width at which they once
+        // wrapped under Clear facet.
+        var clearSash = Find(await Read(), "RecursiveInspectorSash");
+        await MoveSash("clear-inspector-narrowest", clearSash.X + 160, s => Find(s, "RecursiveInspectorSash").X > clearSash.X
+            && StrengthLabels(s)[0] == "Info");
+        await ClearPackage("narrowest-inspector", true, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
+        await MoveSash("clear-inspector-wide", clearSash.X - 160, s => Find(s, "RecursiveInspectorSash").X < clearSash.X - 100
+            && StrengthLabels(s)[0] == "Information");
+        await ClearPackage("wide-inspector", false, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
+        await MoveSash("clear-inspector-default", clearSash.X + clearSash.Width / 2, s => Math.Abs(Find(s, "RecursiveInspectorSash").X - clearSash.X) <= 2);
 
         // A third choice: Family takes the candidate "TLV755P" (Add detail now reads Purpose, Family, ...). The block has room for
         // two chips, so as many chips as fit are drawn and the rest is one "+N more" chip; the facet overview still lists every facet.
@@ -3398,6 +3478,10 @@ public sealed partial class NativeSessionTests
             ChoicesClear(compact, "choices-compact");
             VerifyInspectorScroll(shot, compact, "choices-compact");
         }
+        // The compact window keeps the Package detail's measured layout, and Clear facet still clears Package; undo leaves the
+        // declined draft clean again.
+        await ClearPackage("compact", null, ["type", "manufacturer", "family"], ("type", P.DefinitionChoiceStateData.DcsdSelected),
+            ("family", P.DefinitionChoiceStateData.DcsdCandidates));
         // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
         // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
         ulong beforeBetween = compact.ViewRevision;

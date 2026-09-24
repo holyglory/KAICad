@@ -256,7 +256,7 @@ For each theme the journey proves the following through the real window:
 - **Strength row width.** The strength choices stay in one row, unclipped and without overlap, at the default inspector width. Dragging the splitter to the inspector's minimum width collapses their labels to Info, Pref. and Req.; widening it restores Information, Preference and Requirement; the chosen strength and the open detail stay as they were, and the draft does not change. The splitter is then dragged back.
 - **Review facets.** With the CPU selected, the PSU's Review facets link selects the PSU and opens its first facet's detail.
 - **Return to unknown and back.** Type returns to Unknown with a reason and its chip goes. Back and Enter reopen it; Chosen asks for a value ("Type the chosen value, or choose another state.") until "linear regulator" is typed again.
-- **Clear.** Clear facet returns Package to unspecified: its row and chip go. Ctrl+Z brings it back with its strength.
+- **Clear.** Clear facet returns Package to unspecified: its row and chip go. Ctrl+Z brings it back with its strength. Since item clear-facet-overlap this is done at the default width, with the inspector at its minimum width and 160 pixels wider, and in the compact window, each time after the Package detail's layout is measured (see "Clear facet layout").
 - **Third choice.** Add detail > Family (the menu now reads Purpose, Family, …) takes "TLV755P" as a chosen value and then as a candidate. With three chosen or candidate facets, the PSU draws Type and Family as chips and one "+1 more" chip for Package. The hidden count is 1, and the overview lists Type, Manufacturer, Family and Package.
 - **Save.** Ctrl+S writes exactly one new PSU revision, which follows the revision the choices were made on. It holds exactly the chosen type, the unknown manufacturer, the candidate family and the candidate package (Preference). Every earlier PSU revision is kept, and the CPU keeps its saved revision. Its Rail port, General requirement and absent component bindings and physical allocation are unchanged, and the CPU still has no definition.
 - **History preview.** Ctrl+H opens the whole-diagram history on the saved revision, and Alt+P previews it. From the moment the history opens, and while a revision is previewed, the PSU keeps its chips but no Review facets link is drawn or reported, because the canvas takes no presses then and a preview is read only. Alt+C and Escape bring the link back, and nothing is written.
@@ -544,7 +544,7 @@ The P3 items also done:
 - One bold heading style for the inspector's sections (P3 19).
 - "Back to facet overview" hidden until there is an overview (P3 21).
 
-The strength choices now collapse their labels a few pixels before a row would be exactly full. A full row could wrap its last choice over Clear facet, as seen in the integration owner's capture `clear-facet-overlap-11e548`.
+The strength choices now collapse their labels a few pixels before a row would be exactly full. A row that wrapped all the same could still draw its last choice under Clear facet, as in the integration owner's capture `clear-facet-overlap-11e548`; "Clear facet layout" below records the repair.
 
 Not done:
 
@@ -618,3 +618,53 @@ What the rules cannot do, and this item does not claim: every computed leg keeps
 - [x] Review findings 1 to 7 answered (below the table); the tools, links and facet rows keep their accessible role, name and state (asserted).
 - [ ] Contract erratum for F2 and F4 (requested above): the owner's acceptance and the parent's record. Until then the routing part must not be merged.
 - [ ] Formal design QA rerun (integration owner).
+
+## Clear facet layout (item clear-facet-overlap)
+
+### What was wrong
+
+In the integration owner's native-acceptance run `t20260924T130539Z-11e548` the Package detail's strength row wrapped onto two lines, and Clear facet was drawn over "Information". The journey's click on Clear facet then missed, and the step `package-cleared` timed out (ledger outcome `p08ae7f7f9ddced63`; capture and state in `/mnt/build-storage/codex/kicad/evidence/clear-facet-overlap-11e548/`). A person clicking there could have changed the strength instead, or nothing at all.
+
+The cause was the kind of row, not the labels. The state and strength choices sat in `wxWrapSizer` rows. A `wxWrapSizer` learns the width it is given only while it is being laid out, and it counts its lines from the width of the layout before. So when the inspector became narrower (its scroll bar appearing, or the splitter moving), one layout placed the row on two lines while it placed everything below it for one line. The design QA fixes collapsed the labels 4 DIP earlier, which made this rarer but could not rule it out.
+
+### What changed
+
+- The state and strength choices are now `CHOICE_FLOW` rows (`kicad/recursive_diagram_canvas.h`). The editor gives both rows the width they wrap within before it lays the inspector out: on every change of the inspector's size and on every refresh (`fitFacetLabels`). One arrangement serves both the row's height and the places of its choices. A row that wraps is as tall as its lines, so the entry, the strength row, the notice and Clear facet move down with it, and no control lies over a choice.
+- The strength labels still collapse to Info, Pref. and Req. before the row would wrap, and return when there is room.
+- Each choice is now exactly as wide as its indicator and label. `wxWrapSizer` stretched the last choice of each line to the line's end; that did not show, but it made the empty space beside that choice part of it. The choices look the same as before.
+- Clear facet is unchanged: the platform push button of P2-10, drawn as an underlined link in the link colour 6 DIP below the strength choices, announced as a link, and pressed with the pointer, Space or Enter.
+
+### Measured
+
+In each theme's session, the component-choice journey opens the Package detail and measures it in four places: at the default width, with the inspector dragged to its minimum width (short labels), with the inspector dragged 160 pixels wider (full labels, the case that failed), and in the 1100 × 760 window. In each place it:
+
+- waits until two readings of the detail's controls agree, then captures the window;
+- asserts that no two of the detail's interactive controls intersect: Back to facet overview, the three state choices, the entry the state asks for, the three strength choices and Clear facet;
+- asserts that none of them is clipped at the inspector's sides, that the entry lies below the state choices and the strength choices below the entry, and that Clear facet starts at least 4 pixels below the lowest strength choice;
+- asserts that the strength choices stay in one row (short labels at the minimum width, full labels in the wide inspector);
+- asserts that Clear facet looks like an action: underlined, in the link colour at 4.5:1 or more on the inspector, coloured apart from the static text, and announced as a link;
+- presses Clear facet with the pointer, and asserts that Package leaves the facet overview and the block, that the other choices are still shown, and that the draft has changed; Ctrl+Z brings Package back as a candidate "SOT-23-5" with Preference, and returns the draft to what it was (clean again in the compact window, after Decline).
+
+The distances are written to `<instance>-design-measurements.tsv` next to the captures `…-choices-<place>-package-detail.png` (`default-width`, `narrowest-inspector`, `wide-inspector`, `compact`).
+
+| Place | Strength labels | Closest two controls | Clear facet below the lowest strength choice | Clear facet on the inspector (light / dark) |
+|---|---|---|---|---|
+| Default width, 1536 × 1024 | Info, Pref., Req. (the scroll bar takes their room) | 2 px | 6 px | 7.03 / 7.62 |
+| Inspector at its minimum width | Info, Pref., Req. | 2 px | 6 px | 7.03 / 7.62 |
+| Inspector 160 pixels wider | Information, Preference, Requirement | 2 px | 6 px | 7.03 / 7.62 |
+| Compact window, 1100 × 760 | Info, Pref., Req. | 2 px | 6 px | 7.03 / 7.62 |
+
+The distances are the same in both themes. The closest two controls are neighbouring choices in one row, 2 DIP apart. Clear facet keeps its 6 DIP gap below the strength choices in every place, and every press of it cleared Package.
+
+### Evidence
+
+Journey run: `t20260924T204631Z-7bf426` (graph `diagram-requirement-history`, complete, passed, `source_changed` false; source SHA-256 `039cd0c198ca8f12b72640ee87e563804e108583aa69454328023523cbc6cc5b`, which is the committed source apart from this record). Timings: build 21.2 s, contracts 140.6 s, native protocol 86.9 s, native UI 735.0 s against its 900 s limit (light session 5 min 31 s, dark session 5 min 12 s, against 4 min 24 s and 4 min 50 s in `t20260924T194044Z-6a7141` before this item, on a busier host), and PSU/CPU canvas 155.9 s. Artifact manifests: native UI `28fab9cf2691d48e0b112d9afb4da3d9c134cb10c6c5e7d789a69d37368cc786` (editor-light `12f46fbfa56c6d7dc9b20e6fb05492434b6c915d27939de924c9da7b2f4b5f57`, editor-dark `272f019add4774fb968bd462ca774376dd030f8ed184f9a6ac85faf5e9bfadec`).
+
+Hash-verified captures are materialized at `/mnt/build-storage/codex/kicad/evidence/lane-2B-clear-facet-overlap-7bf426/`. The editor instances of the choice journey are `b502ef76-3adc-41d2-85aa-a930de6d360a` (light) and `b9d82a13-39d9-4f13-b8e6-655d4cc9ddb4` (dark). The folder's SHA-256 list is `SHA256SUMS` (386 files; itself `deef14c3a9727cfad293dca216236b70a0045167552f9650b028a8ccdeecbb8e`). In `pairs/`, `package-detail-before-after-default-width.png` and `package-detail-before-after-wide-inspector.png` show the failing capture on the left and this run's light Package detail on the right. The Manufacturer detail of `…-choices-detail.png` looks the same as in `6a7141` (compared in the light theme).
+
+The runs of the committed source are named in the commit message.
+
+### Limits of this repair
+
+- **The wrap itself is not reached in a journey.** At every width the editor allows, the short strength labels and the state choices fit on one line: the inspector's minimum width is 380 DIP. A row wraps only with a larger system font or longer translated labels, and the journey can set neither. What the journey proves is that the rows collapse their labels, move with the inspector's width, and never meet the controls around them in the four places above, in both themes. That a wrapped row pushes Clear facet down follows from the one arrangement that sets both the row's height and its choices' places.
+- **The connection details still use `wxWrapSizer`.** The Direction, Domain and Type choices of a selected connection wrap in `wxWrapSizer` rows, as before. Their compact-window check (no choice clipped or overlapping) passes; they are outside this item.

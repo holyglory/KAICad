@@ -185,22 +185,25 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         auto* item = new wxStaticText( scroll, wxID_ANY, text );
         m_facetDetail->Add( item, 0, wxTOP, FromDIP( 6 ) ); return item;
     };
-    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first).
+    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first, and
+    // gives both rows the width they wrap within before the inspector is laid out, so what follows a wrapped row moves
+    // down with it).
     auto choices = [&]( std::array<wxRadioButton*, 3>& buttons, const std::array<wxString, 3>& labels, const char* name,
                         const std::array<const char*, 3>& names )
     {
-        auto* row = new wxWrapSizer( wxHORIZONTAL );
+        auto* row = new R::CHOICE_FLOW( FromDIP( FACET_CHOICE_GAP ) );
         for( int i = 0; i < 3; ++i )
         {
             buttons[i] = new wxRadioButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, i == 0 ? wxRB_GROUP : 0 );
             buttons[i]->SetName( wxString( name ) + names[i] ); buttons[i]->SetToolTip( labels[i] );
             row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
-            if( i < 2 ) row->AddSpacer( FromDIP( FACET_CHOICE_GAP ) );
         }
         m_facetDetail->Add( row, 0, wxEXPAND );
+        return row;
     };
     label( _( "State" ) );
-    choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState", { "Chosen", "Candidate", "Unknown" } );
+    m_facetStateRow = choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState",
+                               { "Chosen", "Candidate", "Unknown" } );
     m_facetValueLabel = label( _( "Value" ) );
     m_facetValue = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
     m_facetValue->SetName( "RecursiveFacetValue" ); m_facetDetail->Add( m_facetValue, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
@@ -212,7 +215,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     R::PadTextBox( m_facetReason, FromDIP( 8 ), FromDIP( 6 ) );
     m_facetReason->SetName( "RecursiveFacetReason" ); m_facetDetail->Add( m_facetReason, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     label( _( "Strength" ) );
-    choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength", { "Information", "Preference", "Requirement" } );
+    m_facetStrengthRow = choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength",
+                                  { "Information", "Preference", "Requirement" } );
     m_facetNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetNotice->SetName( "RecursiveFacetNotice" );
     m_facetDetail->Add( m_facetNotice, 0, wxEXPAND | wxTOP, FromDIP( 6 ) );
     m_facetClear = new R::LINK_BUTTON( scroll, _( "Clear facet" ), "RecursiveFacetClear" );
@@ -2040,8 +2044,7 @@ bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
         wxRadioButton* button = m_facetStrengths[i]; button->InvalidateBestSize();
         needed += button->GetBestSize().x - button->GetTextExtent( button->GetLabel() ).x + button->GetTextExtent( full[i] ).x;
     }
-    // A few pixels to spare: a row that fills the width exactly still wraps its last choice, and the wrapped row can
-    // overlap Clear facet until the next layout.
+    // A few pixels to spare, so the full labels show only where they fit with room left over.
     bool collapse = needed + FromDIP( 4 ) > available, changed = false;
     for( int i = 0; i < 3; ++i )
     {
@@ -2049,6 +2052,10 @@ bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
         if( m_facetStrengths[i]->GetLabel() == label ) continue;
         m_facetStrengths[i]->SetLabel( label ); m_facetStrengths[i]->InvalidateBestSize(); changed = true;
     }
+    // Both rows wrap within the width the inspector gives them. Set before the inspector is laid out, it makes each row
+    // as tall as the lines it places, so the controls below a row that wraps move down and none lies over a choice.
+    changed |= m_facetStateRow->SetWrapWidth( available );
+    changed |= m_facetStrengthRow->SetWrapWidth( available );
     return changed;
 }
 void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()

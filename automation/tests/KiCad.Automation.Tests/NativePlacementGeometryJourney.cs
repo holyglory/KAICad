@@ -349,7 +349,8 @@ public sealed partial class NativeSessionTests
     // each visible pin by the target it draws on an unconnected pin end (PinTargetReachNm), so a label on a pin always
     // overlaps its own symbol. The rule must still admit a label of each kind on this sheet, and may refuse one because
     // of its own symbol only where that symbol draws more than its pin target in front of the pin. On a pin that already
-    // has wires or labels, the same label must be refused once those are treated as another connection's items.
+    // has wires or labels, the same label must be refused once those are treated as another connection's items; the
+    // recorded count takes only labels the rule admitted before, and the root sheet (with its wired probe link) needs one.
     private static async Task VerifyAnchorLabels(NativeClient client, MeasureSchematicPlacement original, SchematicPlacementGeometry symbols,
         CheckedSchematicState before, KiCad.Automation.Model.DocumentRevision revision, Guid screen, SchematicConnectionPolicy policy,
         ConnectionLabelKind[] kinds, string evidence, string instanceId, CancellationToken token)
@@ -420,13 +421,14 @@ public sealed partial class NativeSessionTests
                         what + " is refused by its own symbol only where that symbol draws beyond its pin target: " + refusal);
                 if (refusal is null) admitted[kind]++;
                 // Must-catch on the same real geometry: for a pin that already has wires or labels, the same label is refused
-                // once those items are not taken as the pin's own connection (they would touch or run through it).
+                // once those items are not taken as the pin's own connection (they would touch or run through it). Only a label
+                // the rule admits with its own connection shows that treating those items as another connection's refuses it.
                 string? foreign = own.Length > 1 ? SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin,
                     measured.ItemCandidates[i].Bounds, [], policy) : null;
                 if (own.Length > 1)
                 {
                     Assert.IsNotNull(foreign, what + " would touch the items of its pin's connection if they belonged to another one.");
-                    refusedAsForeign++;
+                    if (refusal is null) refusedAsForeign++;
                 }
                 facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kind.ToString(), outward = new[] { outward.Dx, outward.Dy }, reach, behind,
                     admitted = refusal is null, whyNot = refusal, connectionItems = own.Length, whyNotIfForeign = foreign });
@@ -434,6 +436,9 @@ public sealed partial class NativeSessionTests
         }
         foreach (var kind in kinds)
             Assert.IsGreaterThan(0, admitted[kind], "The realizer's rule admits a " + kind + " label on some pin of this real sheet.");
+        // The root sheet always holds the wired probe link, so the must-catch above must actually have run there.
+        if (original.Document.SheetPath.Path.Count == 1)
+            Assert.IsGreaterThan(0, refusedAsForeign, "A label admitted on a wired pin of the root sheet is refused once its wires are another connection's.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-anchor-labels-" + original.Document.SheetPath.Path[^1].Value + ".json"),
             System.Text.Json.JsonSerializer.Serialize(new { skippedSymbols = skipped, checkedSymbols = owners.Length, checkedPins = probes.Length / kinds.Length,
                 admitted = admitted.ToDictionary(p => p.Key.ToString(), p => p.Value), refusedAsForeign, facts }), token);

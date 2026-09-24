@@ -324,7 +324,8 @@ public static class SchematicConnectionRealizer
         }
         // Symbols drawing a pin of this island exactly at the anchor (the owner's stacked pins, or another symbol's pin
         // stacked on it). Near the anchor their measured bounds are that pin and its target, which stop mattering once
-        // the pin is connected there.
+        // the pin is connected there. Only a join stub may start across another such symbol's target (rule 5); an anchor
+        // label on a pin another symbol shares is refused by rule 5, because that symbol's bounds hold the anchor.
         var stackedAtA = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == a && island.Same.Contains(p.Owner))
             .Select(p => p.OwnerSymbol).OfType<Guid>().ToHashSet();
         foreach (var (id, bounds) in screen.Obstacles)
@@ -342,9 +343,10 @@ public static class SchematicConnectionRealizer
             // point: every real label reaches a little behind its anchor (at most LabelBackToleranceNm, by the §6.2
             // orientation guard), over its own pin, and KiCad's measured bounds of the pin's symbol end PinTargetReachNm
             // past the pin, at the edge of the pin's target. So only the part of an anchor label more than PinTargetReachNm
-            // in front of the pin must be clear of the symbols drawing that pin (a CN-1 clarification requested from the
-            // integration owner); anything the symbol draws further in front of the pin refuses it.
-            bool ownPinSymbol = variant == Variant.AnchorLabel && (id == owner || stackedAtA.Contains(id));
+            // in front of the pin must be clear of its own symbol (a CN-1 clarification requested from the integration
+            // owner); anything that symbol draws further in front of the pin refuses it. Every other symbol, including
+            // one with a pin stacked on the anchor, must be clear of the whole label, as §6.4 rule 6 states.
+            bool ownPinSymbol = variant == Variant.AnchorLabel && id == owner;
             if (r is { } labelBox && (ownPinSymbol ? Beyond(labelBox, a, outward, PinTargetReachNm) : labelBox).InteriorMeets(bounds))
                 return ownPinSymbol ? "the label overlaps symbol " + id.ToString("D") + " more than the pin target in front of the pin"
                     : "the label overlaps item " + id.ToString("D");
@@ -610,13 +612,9 @@ public static class SchematicConnectionRealizer
             catch (NativeApiException error) when (error.Message.Contains("revision", StringComparison.Ordinal)
                 || error.Message.Contains("changed during", StringComparison.Ordinal) || error.Status is BusyStatus or NotReadyStatus)
             { throw Error(SchematicConnectionErrors.RealizationMeasurementStale, "The schematic changed or was busy before sheet " + sheet + " could be measured: " + error.Message); }
-            catch (NativeApiException error) when (error.Message.Contains("no resolved native definition", StringComparison.Ordinal))
-            {
-                // KiCad refuses to measure a sheet holding a symbol whose library definition it cannot resolve, so no
-                // pin on that sheet can be placed exactly, even when the unresolved symbol is not being connected.
-                throw Error(SchematicConnectionErrors.RealizationPinGeometryIncomplete, "KiCad cannot measure sheet " + sheet
-                    + " because a symbol there has no resolved library definition. Update or rescue that symbol in the schematic editor first: " + error.Message);
-            }
+            // A symbol whose library definition KiCad cannot resolve is measured by its own drawn bounds with its pins reported
+            // incomplete (SPGIR_DEFINITION_UNRESOLVED); that is refused (RequirePins, Anchor) only when a pin of that symbol is
+            // to be connected, so such a symbol no longer surfaces here as a refusal of the whole sheet.
             catch (NativeApiException error)
             { throw Error(SchematicConnectionErrors.RealizationMeasurementUnsupported, "KiCad refused to measure sheet " + sheet + " for generated connections: " + error.Message); }
         }

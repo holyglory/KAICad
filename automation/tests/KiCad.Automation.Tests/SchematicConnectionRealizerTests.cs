@@ -201,6 +201,27 @@ public sealed class SchematicConnectionRealizerTests
             Assert.AreEqual(candidates[0].PlacedPinId, (await flush.Realize()).Generated.Single(g => g.Role == GeneratedConnectionRole.AnchorLabel).PlacedPinId,
                 "Owner reaching " + reach + " nm past the pin.");
         }
+        // Must-catch: the other candidate's pin drawn on this one, so another symbol of the same connection shares the anchor.
+        // Only the owning symbol's bounds may hold the anchor (§6.4 rule 5) and only the owner gets the pin-target band, so
+        // the label is refused on both stacked pins, whether the other symbol's bounds stop exactly at the pin or reach just
+        // as far as its pin target; with their stubs blocked as well, the join has no anchor.
+        var sharer = candidates[1];
+        var sharing = anchored.Plan.Candidate!.Schematic.Instances.Single(s => Key(s) == sharer.SheetPathKey).Items
+            .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Single(x => Guid.Parse(x.Id.Value) == sharer.SymbolId);
+        foreach (long reach in new long[] { 0, SchematicConnectionRealizer.PinTargetReachNm })
+        {
+            var shared = anchored with { Geometry = anchored.Geometry.Copy() };
+            int above = 0;
+            foreach (var pin in SchematicPlacedPins.Active(sharing, sharing.Unit?.Unit ?? 1))
+            {
+                var pinId = Guid.Parse(pin.Id.Value);
+                shared.Geometry.Place[pinId] = pinId == sharer.PlacedPinId ? first : new(first.X, first.Y - 2 * Grid * ++above);
+            }
+            shared.Geometry.Body[sharer.SymbolId] = new(first.X - reach, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
+            await RequireRefusal(shared, SchematicConnectionErrors.RealizationNoJoinAnchor, "no existing pin of it has room",
+                "Another symbol of the connection stacked on the pin, reaching " + reach + " nm past it.");
+        }
 
         var blocked = scene.Obstacle(new(first.X - 12 * Grid, first.Y - Grid, first.X - Grid / 2, first.Y + Grid));
         var second = await blocked.Realize();
@@ -359,7 +380,6 @@ public sealed class SchematicConnectionRealizerTests
         // Every other native refusal of the measurement becomes a realization code as well, never a raw native error.
         foreach (var (status, message, code, detail) in new (int, string, string, string)[]
         {
-            (3, "A symbol has no resolved native definition", SchematicConnectionErrors.RealizationPinGeometryIncomplete, "no resolved library definition"),
             ((int)Kiapi.Common.ApiStatusCode.AsBusy, "KiCad is busy", SchematicConnectionErrors.RealizationMeasurementStale, "was busy"),
             ((int)Kiapi.Common.ApiStatusCode.AsNotReady, "Schematic connectivity is unavailable", SchematicConnectionErrors.RealizationMeasurementStale, "was busy"),
             ((int)Kiapi.Common.ApiStatusCode.AsUnhandled, "No handler for request", SchematicConnectionErrors.RealizationMeasurementUnsupported, "cannot measure"),
@@ -688,6 +708,25 @@ public sealed class SchematicConnectionRealizerTests
         var wire = StubOf(carried, stacked.PlacedPinId);
         Assert.AreEqual((at.X, at.Y), (wire.Start.XNm, wire.Start.YNm), "The stub starts on the existing connection it joins.");
         Assert.AreEqual(at.X - 2 * Grid, wire.End.XNm);
+
+        // KiCad's bounds of #LP0 reach past its pin by the target drawn on an unconnected pin end (PinTargetReachNm, as every
+        // visible pin of the live sheets does), towards the stub. Guard: a stub starting across exactly that target still
+        // carries the label. Must-catch: #LP0 drawing 100 nm further leaves the stub crossing #LP0 itself at every length,
+        // so nothing on the child sheet can carry the label and the refusal names the stacked pin.
+        var lp0 = alone.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.ScreenId == alone.Bench!.ScreenId(BenchSheet.Child))
+            .Members.Single(m => m.Role == ConnectionMemberRole.PowerCarrier).Pin.SymbolId;
+        Scene Reaching(long reach)
+        {
+            var reaching = alone with { Geometry = alone.Geometry.Copy() };
+            reaching.Geometry.Body[lp0] = new(at.X - reach, at.Y - 2 * Grid, at.X + 8 * Grid, at.Y + 2 * Grid);
+            return reaching;
+        }
+        var acrossTarget = await Reaching(SchematicConnectionRealizer.PinTargetReachNm).Realize();
+        Assert.AreEqual(stacked.PlacedPinId, Hierarchical(alone, acrossTarget).PlacedPinId, "#LP0 reaching exactly its pin target.");
+        var acrossWire = StubOf(acrossTarget, stacked.PlacedPinId);
+        Assert.AreEqual((at.X, at.Y, at.X - 2 * Grid), (acrossWire.Start.XNm, acrossWire.Start.YNm, acrossWire.End.XNm));
+        await RequireRefusal(Reaching(SchematicConnectionRealizer.PinTargetReachNm + 100), SchematicConnectionErrors.RealizationNoFreeStub,
+            "new pin " + stacked.Endpoint.ComponentId.ToString("D") + ".1 sits on an existing connection");
 
         // Must-catch: without room there, and with nothing else on the child sheet to carry it, the label cannot be drawn.
         // The refusal names the stacked pin (it used to surface as an internal inconsistency once the stub became optional).
@@ -1489,8 +1528,10 @@ public sealed class SchematicConnectionRealizerTests
             foreach (int multiple in SchematicConnectionPolicy.StubMultiples) everywhere = everywhere.WithJunction(Along(multiple * grid, policy.ClearanceNm), screen);
             await RequireRecordingRefusal(everywhere, SchematicConnectionErrors.RealizationNoFreeStub);
             // On a real sheet where an existing connection was named by a label on a join candidate's pin (no join stub had
-            // room): a junction one grid inside that label leaves it no room there, so the realizer names a later candidate
-            // or, with none left that has room, refuses with realization_no_join_anchor; it never draws over the junction.
+            // room): a junction one grid inside that label leaves it no room there, so the realizer never draws over the
+            // junction. In the recorded join-anchor-label scene the link is a U-shaped wire under both probe pins, so no
+            // join stub has room on either, and the live check admitted a label on each probe pin: the next candidate is
+            // named by a label on its own pin.
             if (realization.Generated.SingleOrDefault(g => g.Role == GeneratedConnectionRole.AnchorLabel) is { } anchor)
             {
                 var island = recording.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.JoinCandidates.Any(c => c.PlacedPinId == anchor.PlacedPinId));
@@ -1500,18 +1541,13 @@ public sealed class SchematicConnectionRealizerTests
                 var (fx, fy) = SchematicConnectionRealizer.Facing(label.SpinStyle);
                 var labelScreen = recording.Checkpoint.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(target)).Metadata.ScreenId;
                 var blockedLabel = recording.WithJunction(new() { XNm = label.Position.XNm + fx * grid, YNm = label.Position.YNm + fy * grid }, labelScreen);
-                try
-                {
-                    var renamed = await blockedLabel.Realize();
-                    var named = renamed.Generated.Single(g => island.JoinCandidates.Any(c => c.PlacedPinId == g.PlacedPinId)
-                        && g.Role is GeneratedConnectionRole.AnchorLabel or GeneratedConnectionRole.StubLabel);
-                    Assert.IsGreaterThan(at, island.JoinCandidates.ToList().FindIndex(c => c.PlacedPinId == named.PlacedPinId),
-                        recording.Scenario + ": a later join candidate is named.");
-                }
-                catch (AutomationException refusal)
-                {
-                    Assert.AreEqual(SchematicConnectionErrors.RealizationNoJoinAnchor, refusal.Code, recording.Scenario + ": " + refusal.Message);
-                }
+                Assert.IsLessThan(island.JoinCandidates.Count, at + 1, recording.Scenario + ": the recorded scene has a later join candidate.");
+                var renamed = await blockedLabel.Realize();
+                var named = renamed.Generated.Single(g => island.JoinCandidates.Any(c => c.PlacedPinId == g.PlacedPinId)
+                    && g.Role is GeneratedConnectionRole.AnchorLabel or GeneratedConnectionRole.StubLabel);
+                Assert.AreEqual(island.JoinCandidates[at + 1].PlacedPinId, named.PlacedPinId, recording.Scenario + ": the next join candidate is named.");
+                Assert.AreEqual(GeneratedConnectionRole.AnchorLabel, named.Role, recording.Scenario + ": by a label on its own pin.");
+                Assert.IsFalse(renamed.Generated.Any(g => g.PlacedPinId == anchor.PlacedPinId), recording.Scenario + ": nothing is drawn at the blocked pin.");
             }
         }
     }

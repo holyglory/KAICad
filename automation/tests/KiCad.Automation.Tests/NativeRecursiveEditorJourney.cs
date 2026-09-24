@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using ModelContextProtocol.Client;
@@ -10,11 +11,483 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
-    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9).
-    // Lane 2B replaces this body when it delivers the journey.
-    private static Task VerifyPsuCpuDiagramCanvas(NativeClient client, PsuCpuNativeContext context, int processId,
+    /// <summary>Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.5 and §1.9) through the rendered per-level
+    /// editor. An agent opens the fixture's schema 1 system.blocks.xml through the production MCP server. The person walks System,
+    /// PSU and CPU; each level draws the legacy fallback grid (contract rbg-v2 section 9.2 F1) and writes nothing. On the CPU level a
+    /// first drawn block is declined and the file stays the fixture's bytes. A move is undone and redone; the first layout edit stores
+    /// every unplaced block where it was drawn in the same undo step (F1a). The Processor is resized with its handle, a caption-only
+    /// block and a caption-only connection are drawn with the Round A1 tools (owner decisions n9f7cf92f32090daf, n98a3f3c41084f0ed),
+    /// and a component choice chip is set on the fixture's Memory block (Round A4, n0b2a908b00e78823). Save stores schema 2 with
+    /// every fixture fact and identity kept and exactly the drawn layout; a later edit is declined; and the level reopens from its
+    /// stored presentation view exactly while the other levels keep drawing their fallback grid.</summary>
+    private static async Task VerifyPsuCpuDiagramCanvas(NativeClient native, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
-        => throw new AssertInconclusiveException("Phase 2 lane 2B has not delivered this journey");
+    {
+        const string title = "Structural diagram";
+        static string S(Guid id) => id.ToString("D");
+        // Fixture identities (contract section 1.2): blocks K11, states K12, revisions K13.
+        var fixture = PsuCpuFixture.Graph();
+        var system = fixture.SelectedRoot; var systemRevision = fixture.Inspect(system);
+        var psu = systemRevision.Children[0]; var cpu = systemRevision.Children[1];
+        var psuRevision = fixture.Inspect(psu); var cpuRevision = fixture.Inspect(cpu);
+        var processor = cpuRevision.Children[0]; var memory = cpuRevision.Children[1];
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 1), PsuCpuIds.Id(0x12, 1), PsuCpuIds.Id(0x13, 1)), (system.BlockId, system.StateId, system.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 2), PsuCpuIds.Id(0x13, 2)), (psu.BlockId, psu.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 3), PsuCpuIds.Id(0x13, 3)), (cpu.BlockId, cpu.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 8), PsuCpuIds.Id(0x13, 8)), (processor.BlockId, processor.RevisionId));
+        Assert.AreEqual((PsuCpuIds.Id(0x11, 9), PsuCpuIds.Id(0x13, 9)), (memory.BlockId, memory.RevisionId));
+        string documentId = S(fixture.DocumentId), processorId = S(processor.BlockId), memoryId = S(memory.BlockId);
+        byte[] fixtureBytes = await File.ReadAllBytesAsync(Path.Combine(PsuCpuFixture.Directory, "system.blocks.xml"), token);
+        CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "The journey starts from the frozen schema 1 fixture file.");
+
+        var document = new P.ReadRecursiveDiagramEditor { DocumentId = documentId };
+        Task<P.RecursiveDiagramEditorState> Read() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(document, token);
+        async Task<P.RecursiveDiagramEditorState> Wait(string step, Func<P.RecursiveDiagramEditorState, bool> condition)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            P.RecursiveDiagramEditorState current = new();
+            try
+            {
+                while (true)
+                {
+                    current = await Read();
+                    // A step is complete once the editor is idle and any pointer drag has been released.
+                    if (!current.Busy && !current.Dragging && condition(current)) return current;
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-timeout-" + step + ".json"), SchematicJson.Formatter.Format(current), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The PSU/CPU canvas step '" + step + "' did not reach its expected state; its state and screen are retained.");
+            }
+        }
+        void Key(string key, bool control = false, bool alt = false) => NativeKeyboard.SchematicShortcut(display, processId, key, title, control, false, altKey: alt);
+        void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+        void Click(int x, int y) => NativeKeyboard.SchematicShortcut(display, processId, "click", title, false, true, clickFromLeft: x, clickFromTop: y);
+        P.DiagramControlRect Find(P.RecursiveDiagramEditorState at, string name) => at.Controls.Single(c => c.Name == name);
+        // A diagram point as a window pixel. The point must be drawn inside the canvas and right of the canvas-edge palette, so the
+        // press lands on the diagram element under it and nowhere else.
+        (int X, int Y) Pixel(P.RecursiveDiagramEditorState at, double x, double y)
+        {
+            int px = (int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale);
+            int py = (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale);
+            int paletteRight = at.Controls.Where(c => c.Name.StartsWith("DiagramPalette", StringComparison.Ordinal) && c.Shown)
+                .Select(c => c.X + c.Width).DefaultIfEmpty(at.CanvasWindowX).Max();
+            Assert.IsTrue(px > paletteRight && px < at.CanvasWindowX + (int)at.CanvasPixelWidth && py > at.CanvasWindowY
+                && py < at.CanvasWindowY + (int)at.CanvasPixelHeight, $"Diagram point ({x}, {y}) must be drawn inside the canvas, right of the palette.");
+            return (px, py);
+        }
+        async Task At(double x, double y) { var (px, py) = Pixel(await Read(), x, y); Click(px, py); }
+        async Task Drag(double x, double y, double toX, double toY)
+        {
+            var at = await Read(); var from = Pixel(at, x, y); var to = Pixel(at, toX, toY);
+            NativeKeyboard.SchematicShortcut(display, processId, "drag", title, false, true, clickFromLeft: from.X, clickFromTop: from.Y, dragToLeft: to.X, dragToTop: to.Y);
+        }
+        async Task Press(string name)
+        {
+            // The inspector re-lays out after a selection or a facet detail changes; press a control only where two readings agree.
+            var at = await Read(); var control = Find(at, name);
+            using (var settle = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                settle.CancelAfter(TimeSpan.FromSeconds(5));
+                while (true)
+                {
+                    await Task.Delay(120, settle.Token);
+                    var moved = Find(await Read(), name);
+                    if (moved.Equals(control)) break;
+                    control = moved;
+                }
+            }
+            Assert.IsTrue(control.Shown && control.Enabled, name + " must be shown and enabled before it is pressed.");
+            Click(control.X + control.Width / 2, control.Y + control.Height / 2);
+        }
+        async Task Popup()
+        {
+            using var menu = CancellationTokenSource.CreateLinkedTokenSource(token); menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+            while (count == 0);
+        }
+        bool Tool(P.RecursiveDiagramEditorState at, string tool, string strip, string palette) => at.CanvasTool == tool && Find(at, strip).Active && Find(at, palette).Active;
+        static P.DiagramPresentationViewData? View(P.RecursiveDiagramEditorState at) => at.LevelDraft?.Scope?.LocalDiagram?.Presentation;
+        static string[] Placed(P.RecursiveDiagramEditorState at) => View(at)?.Blocks.Select(b => b.BlockId).ToArray() ?? [];
+        static (string X, string Y, string W, string H) Rect(P.RecursiveDiagramEditorState at, string block) =>
+            View(at)?.Blocks.SingleOrDefault(b => b.BlockId == block)?.Rect is { } r ? (r.X, r.Y, r.Width, r.Height) : ("", "", "", "");
+        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-" + name + ".png"), token);
+        Task Retain(string name, P.RecursiveDiagramEditorState at) =>
+            File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+        async Task Closed()
+        {
+            using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        // The level as the fixture stores it: its exact revision, children, connections, ports and notes, no stored layout, nothing new.
+        void Level(P.RecursiveDiagramEditorState at, string step, BlockSelection scope, RecursiveBlockRevision revision)
+        {
+            Assert.AreEqual("", at.ErrorCode, step + ": the level opens without an error.");
+            Assert.AreEqual(S(scope.RevisionId), at.DiagramPath[^1].RevisionId, step + ": the level shown is the fixture's exact revision.");
+            Assert.AreEqual(S(scope.RevisionId), at.LevelDraft.Scope.Baseline.RevisionId);
+            CollectionAssert.AreEqual(revision.Children.Select(c => S(c.BlockId) + "/" + S(c.RevisionId)).ToArray(),
+                at.LevelDraft.Scope.Children.Select(c => c.BlockId + "/" + c.RevisionId).ToArray(), step + ": the children are the fixture's exact revisions.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + "/" + S(c.RevisionId)).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Connections.Select(c => c.ConnectionId + "/" + c.RevisionId).ToArray(), step + ": the connections are the fixture's.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select(i => S(i.Id) + " " + i.Name).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Interfaces.Select(i => i.Id + " " + i.Name).ToArray(), step + ": the boundary ports are the fixture's.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Notes.Select(n => S(n.Id)).ToArray(),
+                at.LevelDraft.Scope.LocalDiagram.Annotations.Select(n => n.Id).ToArray(), step + ": the notes are the fixture's.");
+            Assert.IsEmpty(Placed(at), step + ": a schema 1 level has no stored layout.");
+            Assert.IsFalse(at.Dirty, step + ": viewing and navigating change nothing.");
+            Assert.IsEmpty(at.LevelDraft.NewChildren); Assert.IsEmpty(at.LevelDraft.NewConnections); Assert.IsEmpty(at.LevelDraft.ChildDrafts);
+            // Each canvas note is drawn with its lines broken between words, so its shown lines read back as its text
+            // ("Keep sensing away from sw" / "itching nodes." once split a word that fitted the next line).
+            var canvasNotes = revision.LocalDiagram.Notes.Where(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas).ToArray();
+            CollectionAssert.AreEqual(canvasNotes.Select(n => S(n.Id)).ToArray(), at.CanvasNotes.Select(n => n.AnnotationId).ToArray(),
+                step + ": every canvas note is drawn.");
+            foreach (var (note, drawn) in canvasNotes.Zip(at.CanvasNotes))
+            {
+                Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
+                Assert.AreEqual(note.Text, string.Join(" ", drawn.Lines), step + ": the note's lines break between words.");
+            }
+        }
+
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        string stateRoot = Directory.CreateTempSubdirectory("kicad-psu-cpu-canvas-mcp-").FullName;
+        try
+        {
+            await using var mcp = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = "dotnet", Arguments = [Path.Combine(FindRoot(), "automation", "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll")],
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = stateRoot }
+            }), cancellationToken: token);
+            var attach = await mcp.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
+                { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
+            Assert.IsFalse(attach.IsError == true, "The MCP server attaches to this project's KiCad instance.");
+            async Task<P.RecursiveDiagramEditorState> Open(string step)
+            {
+                var opened = await mcp.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                    ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId }, cancellationToken: token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + step + "-open.json"), JsonSerializer.Serialize(opened), token);
+                Assert.IsFalse(opened.IsError == true, "The PSU/CPU diagram opens in the native per-level editor; the response is retained.");
+                return await Wait(step, s => s.Ready && s.Rendered && s.DiagramPath.Count == 1);
+            }
+            // The layout the editor actually drew for the viewed level (contract rbg-v2 section 9.2), as an agent observes it.
+            async Task<JsonElement> Observe(string label)
+            {
+                var at = await Read();
+                var observed = await mcp.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+                {
+                    ["instanceId"] = instanceId, ["documentId"] = documentId, ["expectedSourceToken"] = at.SourceToken,
+                    ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "level", pixelWidth = 800, pixelHeight = 600 } }
+                }, cancellationToken: token);
+                if (observed.IsError == true)
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation-error.json"), JsonSerializer.Serialize(observed), token);
+                Assert.IsFalse(observed.IsError == true, "The " + label + " level can be observed; the response is retained.");
+                var view = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation.json"), view.GetRawText(), token);
+                return view.GetProperty("resolvedLayout");
+            }
+            static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
+            static string Box(JsonElement rect) => string.Join(",", new[] { "x", "y", "width", "height" }.Select(p => rect.GetProperty(p).GetString()));
+            // Every block drawn where it is expected, in the level's child order, with where its position came from.
+            void Drawn(JsonElement layout, string step, params (Guid Block, string Rect, string Source)[] expected)
+            {
+                CollectionAssert.AreEqual(expected.Select(e => S(e.Block) + " " + e.Rect + " " + e.Source).ToArray(), layout.GetProperty("blocks").EnumerateArray()
+                    .Select(b => b.GetProperty("blockId").GetString() + " " + Box(b.GetProperty("rect")) + " " + b.GetProperty("source").GetString()).ToArray(),
+                    step + ": the blocks are drawn exactly where expected.");
+                Assert.AreEqual(0U, layout.GetProperty("dormantEntries").GetUInt32(), step + ": nothing stored is left undrawn.");
+            }
+            // Unplaced boundary ports sit at (40, 90 + 85k) on the left (rule F3), and the frame is computed, not stored.
+            void FallbackBoundary(JsonElement layout, string step, BlockSelection scope, RecursiveBlockRevision revision)
+            {
+                CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select((p, k) => S(p.Id) + " DPS_LEFT 40," + (90 + 85 * k) + " RPS_FALLBACK").ToArray(),
+                    layout.GetProperty("ports").EnumerateArray().Where(p => p.GetProperty("blockId").GetString() == S(scope.BlockId))
+                        .Select(p => p.GetProperty("interfaceId").GetString() + " " + p.GetProperty("side").GetString() + " " + Point(p.GetProperty("anchor"))
+                            + " " + p.GetProperty("source").GetString()).ToArray(), step + ": the boundary ports use the fallback column.");
+                Assert.AreEqual("RPS_FALLBACK", layout.GetProperty("frameSource").GetString(), step + ": no frame is stored.");
+            }
+            string[] Routes(JsonElement layout) => layout.GetProperty("routes").EnumerateArray()
+                .Select(r => r.GetProperty("connectionId").GetString() + " " + r.GetProperty("source").GetString()).ToArray();
+
+            // An agent opens the fixture's schema 1 file. The System level draws its two blocks on the legacy grid; opening writes nothing.
+            var opened = await Open("open");
+            Level(opened, "system", system, systemRevision);
+            Assert.AreEqual(1U, opened.StoredSchemaVersion, "The fixture file is schema 1."); Assert.IsTrue(opened.SourceWritable);
+            var systemLayout = await Observe("system");
+            Drawn(systemLayout, "system", (psu.BlockId, "140,110,240,145", "RPS_FALLBACK"), (cpu.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(systemLayout, "system", system, systemRevision);
+            CollectionAssert.AreEqual(systemRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(systemLayout));
+            await Capture("system");
+
+            // System -> PSU: the four PSU blocks on the two-column grid, every connection on its computed path.
+            Key("Escape"); Key("Right");
+            await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Return");
+            var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
+            Level(psuLevel, "psu", psu, psuRevision);
+            var psuLayout = await Observe("psu");
+            var psuChildren = psuRevision.Children;
+            Drawn(psuLayout, "psu", (psuChildren[0].BlockId, "140,110,240,145", "RPS_FALLBACK"), (psuChildren[1].BlockId, "510,110,240,145", "RPS_FALLBACK"),
+                (psuChildren[2].BlockId, "140,360,240,145", "RPS_FALLBACK"), (psuChildren[3].BlockId, "510,360,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(psuLayout, "psu", psu, psuRevision);
+            CollectionAssert.AreEqual(psuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(psuLayout));
+            await Capture("psu");
+
+            // PSU -> System (Backspace keeps the PSU selected, as the level was left) -> CPU.
+            Key("BackSpace");
+            await Wait("system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Right");
+            await Wait("cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
+            Key("Return");
+            var cpuLevel = await Wait("cpu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(cpu.BlockId));
+            Level(cpuLevel, "cpu", cpu, cpuRevision);
+            Assert.AreEqual(S(system.RevisionId), cpuLevel.DiagramPath[0].RevisionId);
+            var cpuLayout = await Observe("cpu");
+            Drawn(cpuLayout, "cpu", (processor.BlockId, "140,110,240,145", "RPS_FALLBACK"), (memory.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            FallbackBoundary(cpuLayout, "cpu", cpu, cpuRevision);
+            CollectionAssert.AreEqual(cpuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(cpuLayout));
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Opening and navigating never write.");
+            await Retain("cpu", cpuLevel); await Capture("cpu");
+
+            // Decline: a first drawn block stores the two unplaced blocks where they are drawn (F1a) and itself where it was put;
+            // Decline discards all of it and the file stays the fixture's schema 1 bytes.
+            await Press("DiagramPaletteAddBlock");
+            await Wait("palette-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+            await At(630, 430); await Wait("declined-caption", s => s.CaptionEditor == "block");
+            Type("Clock"); Key("Return");
+            var drafted = await Wait("declined-block-added", s => s.LevelDraft.NewChildren.Count == 1 && s.CaptionEditor == "" && s.Dirty);
+            string draftedId = drafted.LevelDraft.NewChildren[0].Selection.BlockId;
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, draftedId }, Placed(drafted), "The first layout edit keeps every block where it was drawn.");
+            Assert.AreEqual(("140", "110", "240", "145"), Rect(drafted, processorId)); Assert.AreEqual(("510", "110", "240", "145"), Rect(drafted, memoryId));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(drafted, draftedId), "A new block is placed where the person clicked.");
+            await Capture("before-decline");
+            ulong saves = drafted.CompletedSaveCount;
+            await Press("RecursiveDecline");
+            var declined = await Wait("declined", s => !s.Dirty && s.LevelDraft.NewChildren.Count == 0);
+            Assert.IsEmpty(Placed(declined), "Decline removes the stored positions with the drawn block.");
+            Assert.AreEqual(saves, declined.CompletedSaveCount, "Decline sends nothing to save.");
+            Assert.AreEqual(1U, declined.StoredSchemaVersion);
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Decline writes nothing.");
+
+            // Undo: moving the Memory stores both unplaced blocks in the same step, so one Undo returns the level to no stored layout.
+            await Drag(630, 182.5, 710, 222.5);
+            var moved = await Wait("memory-moved", s => s.Dirty && Rect(s, memoryId) == ("590", "150", "240", "145"));
+            Assert.AreEqual(memoryId, moved.Draft.Baseline.BlockId, "Dragging a block selects and moves it.");
+            CollectionAssert.AreEqual(new[] { processorId, memoryId }, Placed(moved));
+            Assert.AreEqual(("140", "110", "240", "145"), Rect(moved, processorId), "The Processor stays where it was drawn.");
+            Key("z", control: true);
+            var undone = await Wait("move-undone", s => !s.Dirty && Placed(s).Length == 0);
+            Assert.AreEqual("", undone.ErrorCode);
+            Key("y", control: true);
+            await Wait("move-redone", s => s.Dirty && Rect(s, memoryId) == ("590", "150", "240", "145") && Rect(s, processorId) == ("140", "110", "240", "145"));
+            await Capture("moved");
+
+            // Resize the Processor with its lower-right handle; the palette's Undo and Ctrl+Y undo and redo it.
+            await At(260, 182.5);
+            await Wait("processor-selected", s => s.Draft.Baseline.BlockId == processorId && s.ConnectionDraft is null);
+            await Drag(380, 255, 420, 285);
+            await Wait("processor-resized", s => Rect(s, processorId) == ("140", "110", "280", "175"));
+            await Press("DiagramPaletteUndo");
+            await Wait("resize-undone", s => Rect(s, processorId) == ("140", "110", "240", "145") && Rect(s, memoryId) == ("590", "150", "240", "145"));
+            Key("y", control: true);
+            var resized = await Wait("resize-redone", s => Rect(s, processorId) == ("140", "110", "280", "175"));
+            Assert.AreEqual(("590", "150", "240", "145"), Rect(resized, memoryId), "Resizing moves nothing else.");
+            await Capture("resized");
+
+            // The toolbar strip's Add block draws a caption-only block where the person clicks.
+            await Press("RecursiveToolAddBlock");
+            await Wait("strip-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+            await At(630, 430); await Wait("clock-caption", s => s.CaptionEditor == "block");
+            Type("Clock"); Key("Return");
+            var clockAdded = await Wait("clock-added", s => s.LevelDraft.NewChildren.Count == 1 && s.CaptionEditor == "" && s.Dirty);
+            var clockDraft = clockAdded.LevelDraft.NewChildren[0]; string clockId = clockDraft.Selection.BlockId;
+            Assert.AreEqual("Clock", clockDraft.Name); Assert.IsEmpty(clockDraft.Interfaces);
+            Assert.AreEqual(("", "", ""), (clockDraft.Fields?.General ?? "", clockDraft.Fields?.Schematic ?? "", clockDraft.Fields?.Routing ?? ""));
+            Assert.AreEqual("Clock", clockAdded.Draft.Name, "The new block is selected in the inspector.");
+            Assert.IsEmpty(clockAdded.ShownRequirementFields, "A new block shows only its caption."); Assert.IsEmpty(clockAdded.ShownFacets);
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, clockId }, Placed(clockAdded));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(clockAdded, clockId));
+            CollectionAssert.AreEqual(new[] { S(processor.BlockId), S(memory.BlockId), clockId }, clockAdded.LevelDraft.Scope.Children.Select(c => c.BlockId).ToArray());
+
+            // The palette's Connect draws a caption-only connection from the Clock to the Processor.
+            await Press("DiagramPaletteConnect");
+            await Wait("palette-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At(630, 430); await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+            await At(280, 197.5); await Wait("connection-caption", s => s.CaptionEditor == "connection");
+            Type("Clock feed"); Key("Return");
+            var connected = await Wait("connected", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+            var feedDraft = connected.LevelDraft.NewConnections[0]; string feedId = feedDraft.Selection.ConnectionId;
+            Assert.AreEqual("Clock feed", feedDraft.Name); Assert.AreEqual("Clock feed", connected.ConnectionDraft.Name, "The new connection is selected.");
+            CollectionAssert.AreEqual(new[] { (P.DiagramEndpointKind.DekUnresolved, clockId), (P.DiagramEndpointKind.DekUnresolved, processorId) },
+                feedDraft.Endpoints.Select(e => (e.Kind, e.BlockId)).ToArray());
+            Assert.IsEmpty(connected.ShownRequirementFields, "A new connection shows only its caption.");
+            Assert.IsEmpty(connected.ShownConnectionDetails, "A new connection shows no details yet.");
+            Assert.IsEmpty(View(connected)!.Routes, "The Clock feed's computed path runs along no other connection, so no route is stored.");
+            await Capture("connected");
+
+            // Round A4: a component choice chip on the fixture's Memory block. Add detail > Type gives it a first chosen value.
+            var (memoryX, memoryY) = (590 + 30, 150 + 36);
+            await Press("DiagramPaletteSelect"); await Wait("palette-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+            await At(memoryX, memoryY);
+            var memorySelected = await Wait("memory-selected", s => s.Draft.Baseline.BlockId == memoryId && s.ConnectionDraft is null && s.SelectedInterfaceId == "");
+            Assert.IsEmpty(memorySelected.ShownFacets, "The fixture's Memory has no component choices yet.");
+            Assert.IsNull(memorySelected.BlockChips.SingleOrDefault(b => b.BlockId == memoryId), "A block without choices shows no chips.");
+            await Press("RecursiveAddDetail"); await Popup(); Key("Home"); Key("Down"); Key("Return");
+            await Wait("type-open", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetValue");
+            Type("EEPROM");
+            await Wait("type-typed", s => s.Draft.Definition?.Type is { } type && type.Values.SequenceEqual(["EEPROM"]));
+            Key("Return");
+            var chosen = await Wait("type-kept", s => s.FacetEditor == "" && s.ShownFacets.SequenceEqual(["type"]));
+            var chips = chosen.BlockChips.Single(b => b.BlockId == memoryId);
+            CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, chips.Chips.Select(c => c.Text).ToArray(), "The Memory shows its chosen type as a chip.");
+            Assert.AreEqual(P.DefinitionChoiceStateData.DcsdSelected, chips.Chips[0].State);
+            Assert.IsTrue(chips.Chips[0].Rect.Shown, "The chip is drawn inside the canvas.");
+            Assert.IsNull(chosen.BlockChips.SingleOrDefault(b => b.BlockId == clockId), "The Clock is still only its caption.");
+            CollectionAssert.AreEqual(new[] { memoryId }, chosen.LevelDraft.ChildDrafts.Select(d => d.Baseline.BlockId).ToArray(), "Only the Memory's own definition changed.");
+            await Retain("before-save", chosen); await Capture("chip");
+
+            // Save stores everything in one save: schema 2, the drawn layout on the CPU level, and the Memory's choice.
+            saves = chosen.CompletedSaveCount;
+            await Press("RecursiveSave");
+            var saved = await Wait("saved", s => s.CompletedSaveCount > saves && !s.Dirty);
+            Assert.AreEqual("", saved.ErrorCode); Assert.AreEqual("", saved.ErrorMessage);
+            Assert.AreEqual(2U, saved.StoredSchemaVersion, "The first changed save stores schema 2 (contract rbg-v2 R4).");
+            await Retain("saved", saved); await Capture("saved");
+            string savedXml = await File.ReadAllTextAsync(context.BlocksPath, token);
+            var (stored, storedVersion) = RecursiveBlockGraphXml.ReadVersioned(savedXml);
+            Assert.AreEqual(2, storedVersion);
+            Assert.AreEqual(fixture.DocumentId, stored.DocumentId);
+
+            // Identities: System and CPU gain one revision each on top of the fixture's; the PSU and the Processor keep theirs.
+            var storedSystemSelection = stored.SelectedRoot; var storedSystem = stored.Inspect(storedSystemSelection);
+            Assert.AreEqual((system.BlockId, system.StateId), (storedSystemSelection.BlockId, storedSystemSelection.StateId));
+            Assert.AreEqual(system.RevisionId, storedSystem.ParentRevisionId, "System's new revision follows the fixture's.");
+            Assert.AreEqual(systemRevision.RequirementRevisionId, storedSystem.RequirementRevisionId);
+            Assert.HasCount(2, storedSystem.Children); Assert.AreEqual(psu, storedSystem.Children[0], "The PSU keeps its exact fixture revision.");
+            Assert.IsTrue(storedSystem.LocalDiagram.Layout.IsEmpty, "The System level still has no stored layout.");
+            var storedCpuSelection = storedSystem.Children[1]; var storedCpu = stored.Inspect(storedCpuSelection);
+            Assert.AreEqual((cpu.BlockId, cpu.StateId), (storedCpuSelection.BlockId, storedCpuSelection.StateId));
+            Assert.AreEqual(cpu.RevisionId, storedCpu.ParentRevisionId, "The CPU's new revision follows the fixture's.");
+            Assert.AreEqual(cpuRevision.Name, storedCpu.Name);
+            Assert.AreEqual(cpuRevision.RequirementRevisionId, storedCpu.RequirementRevisionId, "Unchanged requirements keep their fixture revision.");
+            CollectionAssert.AreEqual(new[] { S(system.BlockId) + "/" + S(storedSystemSelection.RevisionId), S(cpu.BlockId) + "/" + S(storedCpuSelection.RevisionId) },
+                saved.DiagramPath.Select(p => p.BlockId + "/" + p.RevisionId).ToArray(), "The editor now shows the saved revisions.");
+            Assert.HasCount(3, storedCpu.Children);
+            Assert.AreEqual(processor, storedCpu.Children[0], "The Processor keeps its exact fixture revision; only its position is the CPU level's.");
+            var storedMemorySelection = storedCpu.Children[1]; var storedMemory = stored.Inspect(storedMemorySelection); var memoryRevision = fixture.Inspect(memory);
+            Assert.AreEqual((memory.BlockId, memory.StateId, memory.RevisionId), (storedMemorySelection.BlockId, storedMemorySelection.StateId, storedMemory.ParentRevisionId));
+            Assert.AreEqual(memoryRevision.Name, storedMemory.Name);
+            Assert.AreEqual(memoryRevision.RequirementRevisionId, storedMemory.RequirementRevisionId);
+            Assert.IsTrue(memoryRevision.LocalDiagram.SameContents(storedMemory.LocalDiagram), "The Memory keeps its ports.");
+            Assert.IsTrue(memoryRevision.EffectiveComponentBindings.SameContents(storedMemory.EffectiveComponentBindings), "The Memory keeps its U6 binding.");
+            Assert.IsNull(memoryRevision.PhysicalAllocation); Assert.IsNull(storedMemory.PhysicalAllocation, "A chosen type adds no physical allocation.");
+            var memoryType = storedMemory.EffectiveDefinition.Get(BlockDefinitionFacet.Type);
+            Assert.AreEqual(DefinitionChoiceState.Selected, memoryType.State, "The chip's choice is saved as chosen.");
+            CollectionAssert.AreEqual(new[] { "EEPROM" }, memoryType.Values.ToArray());
+            foreach (var facet in Enum.GetValues<BlockDefinitionFacet>().Where(f => f != BlockDefinitionFacet.Type))
+                Assert.AreEqual(DefinitionChoiceState.Unspecified, storedMemory.EffectiveDefinition.Get(facet).State, facet + " stays unstated.");
+            var storedClockSelection = storedCpu.Children[2]; var storedClock = stored.Inspect(storedClockSelection);
+            Assert.AreEqual(clockId, S(storedClockSelection.BlockId), "The drawn block keeps the identity it was drawn with.");
+            Assert.IsFalse(fixture.States.Any(s => s.BlockId == storedClockSelection.BlockId), "The drawn block has a new identity.");
+            Assert.AreEqual("Clock", storedClock.Name); Assert.IsNull(storedClock.ParentRevisionId); Assert.IsEmpty(storedClock.Children);
+            Assert.IsNull(storedClock.Diagram, "A caption-only block stores no diagram.");
+            Assert.IsTrue(storedClock.EffectiveDefinition.SameContents(BlockDefinition.Empty), "A caption-only block stores no component choices.");
+            Assert.IsNull(storedClock.ComponentBindings); Assert.IsNull(storedClock.PhysicalAllocation);
+            Assert.AreEqual(DiagramRequirements.Empty, stored.Requirements(storedClockSelection).Requirements, "A caption-only block stores no requirements.");
+            Assert.AreEqual(fixture.Requirements(cpu).Requirements, stored.Requirements(storedCpuSelection).Requirements);
+            var archive = stored.Connections(cpu.BlockId);
+            CollectionAssert.AreEqual(cpuRevision.LocalDiagram.Connections.ToArray(), storedCpu.LocalDiagram.Connections.Take(4).ToArray(),
+                "The CPU level's fixture connections keep their exact revisions.");
+            Assert.HasCount(5, storedCpu.LocalDiagram.Connections);
+            var storedFeed = archive.Inspect(storedCpu.LocalDiagram.Connections[4]);
+            Assert.AreEqual(feedId, S(storedFeed.Selection.ConnectionId), "The drawn connection keeps the identity it was drawn with.");
+            Assert.AreEqual(("Clock feed", DiagramConnectionKind.Abstract), (storedFeed.Name, storedFeed.Kind));
+            Assert.IsNull(storedFeed.ParentRevisionId); Assert.IsEmpty(storedFeed.Members);
+            CollectionAssert.AreEqual(new[] { (DiagramEndpointKind.Unresolved, storedClockSelection.BlockId, (Guid?)null), (DiagramEndpointKind.Unresolved, processor.BlockId, (Guid?)null) },
+                storedFeed.Endpoints.Select(e => (e.Kind, e.BlockId, e.InterfaceId)).ToArray(), "The connection joins the Clock and the Processor, both still unresolved.");
+            Assert.AreEqual(DiagramRequirements.Empty, archive.Requirements(storedFeed.Selection).Requirements, "A caption-only connection stores no requirements.");
+
+            // The CPU level's layout is exactly what was drawn, in drawing order; no port, route or frame was placed.
+            var layout = storedCpu.LocalDiagram.Layout;
+            CollectionAssert.AreEqual(new[] {
+                    new DiagramBlockPlacement(processor.BlockId, new DiagramRect(140, 110, 280, 175)),
+                    new DiagramBlockPlacement(memory.BlockId, new DiagramRect(590, 150, 240, 145)),
+                    new DiagramBlockPlacement(storedClockSelection.BlockId, new DiagramRect(510, 360, 240, 140)) },
+                layout.BlockPlacements.ToArray(), "The saved presentation view holds exactly the drawn positions and sizes.");
+            Assert.IsEmpty(layout.PortPlacements); Assert.IsEmpty(layout.ConnectionRoutes); Assert.IsNull(layout.Frame);
+            Assert.IsTrue(stored.Inspect(psu).LocalDiagram.Layout.IsEmpty, "The PSU level still has no stored layout.");
+
+            // Every other fixture fact is kept exactly: each fixture revision (block, connection and requirement) is written unchanged,
+            // and each fixture state is unchanged except that System, CPU and Memory now point at their new revisions.
+            var before = XDocument.Parse(RecursiveBlockGraphXml.Write(fixture)); var after = XDocument.Parse(savedXml);
+            static Dictionary<string, XElement> Index(XDocument xml, string name) => xml.Descendants()
+                .Where(e => e.Name.LocalName == name && e.Attribute("id") is not null).ToDictionary(e => e.Attribute("id")!.Value, StringComparer.Ordinal);
+            var afterRevisions = Index(after, "revision"); var afterStates = Index(after, "state");
+            foreach (var (id, element) in Index(before, "revision"))
+                Assert.IsTrue(afterRevisions.TryGetValue(id, out var kept) && XNode.DeepEquals(element, kept), "Fixture revision " + id + " is kept exactly.");
+            var heads = new Dictionary<string, Guid> { [S(system.StateId)] = storedSystemSelection.RevisionId,
+                [S(cpu.StateId)] = storedCpuSelection.RevisionId, [S(memory.StateId)] = storedMemorySelection.RevisionId };
+            foreach (var (id, element) in Index(before, "state"))
+            {
+                var expected = new XElement(element);
+                if (heads.TryGetValue(id, out var head)) expected.SetAttributeValue("head", S(head));
+                Assert.IsTrue(afterStates.TryGetValue(id, out var kept) && XNode.DeepEquals(expected, kept), "Fixture state " + id + " is kept.");
+            }
+            Assert.HasCount(fixture.Revisions.Length + 4, stored.Revisions, "Only System, CPU, Memory and the Clock gained a revision.");
+            Assert.HasCount(fixture.States.Length + 1, stored.States);
+            Assert.HasCount(fixture.Connections(cpu.BlockId).Revisions.Length + 1, archive.Revisions, "Only the Clock feed was added to the CPU level.");
+            XElement Local(XDocument xml, Guid revision, string part) => xml.Descendants().Single(e => e.Name.LocalName == "revision" && e.Attribute("id")?.Value == S(revision))
+                .Descendants().Single(e => e.Name.LocalName == part && e.Parent?.Name.LocalName == "local-diagram");
+            foreach (string part in new[] { "interfaces", "annotations" })
+                Assert.IsTrue(XNode.DeepEquals(Local(before, cpu.RevisionId, part), Local(after, storedCpuSelection.RevisionId, part)),
+                    "The CPU level keeps its fixture " + part + ".");
+
+            // A later move is declined: nothing is written.
+            await Drag(630, 430, 630, 470);
+            await Wait("clock-moved", s => s.Dirty && Rect(s, clockId) == ("510", "400", "240", "140"));
+            Key("d", alt: true);
+            var declinedLater = await Wait("later-declined", s => !s.Dirty && Rect(s, clockId) == ("510", "360", "240", "140"));
+            Assert.AreEqual(saved.CompletedSaveCount, declinedLater.CompletedSaveCount);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Decline after a save writes nothing.");
+
+            // Close and reopen from the file. The System level still draws its fallback grid; the CPU level draws exactly the stored
+            // presentation view; the Clock feed follows its ends on the computed path (rule F4); the chip is back.
+            Key("w", control: true); await Closed();
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Closing a clean window writes nothing.");
+            var reopened = await Open("reopen");
+            Assert.IsFalse(reopened.Dirty); Assert.AreEqual(2U, reopened.StoredSchemaVersion); Assert.AreEqual(saved.SourceToken, reopened.SourceToken);
+            Assert.AreEqual(S(storedSystemSelection.RevisionId), reopened.DiagramPath.Single().RevisionId);
+            Assert.IsEmpty(Placed(reopened));
+            var reopenedSystem = await Observe("reopened-system");
+            Drawn(reopenedSystem, "reopened system", (psu.BlockId, "140,110,240,145", "RPS_FALLBACK"), (cpu.BlockId, "510,110,240,145", "RPS_FALLBACK"));
+            Key("Escape"); Key("Right"); await Wait("reopened-psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Right"); await Wait("reopened-cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
+            Key("Return");
+            var reopenedCpu = await Wait("reopened-cpu", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].RevisionId == S(storedCpuSelection.RevisionId));
+            Assert.IsFalse(reopenedCpu.Dirty);
+            CollectionAssert.AreEqual(new[] { processorId, memoryId, clockId }, Placed(reopenedCpu), "The stored presentation view is the level's layout.");
+            Assert.AreEqual(("140", "110", "280", "175"), Rect(reopenedCpu, processorId));
+            Assert.AreEqual(("590", "150", "240", "145"), Rect(reopenedCpu, memoryId));
+            Assert.AreEqual(("510", "360", "240", "140"), Rect(reopenedCpu, clockId));
+            var reopenedLayout = await Observe("reopened-cpu");
+            Drawn(reopenedLayout, "reopened cpu", (processor.BlockId, "140,110,280,175", "RPS_PLACED"), (memory.BlockId, "590,150,240,145", "RPS_PLACED"),
+                (storedClockSelection.BlockId, "510,360,240,140", "RPS_PLACED"));
+            FallbackBoundary(reopenedLayout, "reopened cpu", cpu, cpuRevision);
+            CollectionAssert.AreEqual(storedCpu.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(reopenedLayout));
+            // The Clock's end faces the Processor from its left edge at mid-height; the Processor's end, with no port named, sits on its
+            // right edge below its three ports (rule F2); the middle leg runs half-way between (F4).
+            var feedPath = reopenedLayout.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == feedId);
+            CollectionAssert.AreEqual(new[] { "510,430", "465,430", "465,285", "420,285" }, feedPath.GetProperty("points").EnumerateArray().Select(Point).ToArray(),
+                "The Clock feed is drawn from the stored positions.");
+            var reopenedChips = reopenedCpu.BlockChips.Single(b => b.BlockId == memoryId);
+            CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, reopenedChips.Chips.Select(c => c.Text).ToArray(), "The Memory's chip is back.");
+            Assert.IsNull(reopenedCpu.BlockChips.SingleOrDefault(b => b.BlockId == clockId));
+            await Retain("reopened", reopenedCpu); await Capture("reopened");
+            Key("w", control: true); await Closed();
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening and closing write nothing.");
+        }
+        finally { Directory.Delete(stateRoot, true); }
+    }
 
     private static async Task VerifyRecursiveEditor(NativeClient native, int processId, string display,
         string evidence, string instanceId, CancellationToken token)

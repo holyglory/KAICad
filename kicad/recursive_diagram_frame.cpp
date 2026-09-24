@@ -390,7 +390,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::motion, this );
-    m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& ) { release(); } );
+    // The release point ends a drag, even when the pointer's last motion before it arrived late or was merged away.
+    m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& event ) { dragTo( event.GetPosition() ); release(); } );
     m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { release(); } );
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
     { if( !canvasKey( event ) ) event.Skip(); } );
@@ -2653,6 +2654,18 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             if( auto frame = drawn.Frame() ) place( result.mutable_level_frame(), "DiagramLevelFrame", toScreen( *frame ), false );
             for( const auto& [name, rect] : boundaryNames( drawn ) )
             { auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", rect, false ); row->set_label( name ); }
+            // Each canvas note with the lines it shows, measured as the canvas paints them.
+            wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+            const auto& notes = visibleNotes();
+            for( int i = 0; i < notes.size(); ++i )
+            {
+                const auto& note = notes.Get( i );
+                if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+                wxRect box = noteRect( note, i );
+                auto* row = result.add_canvas_notes(); row->set_annotation_id( note.id() ); place( row->mutable_rect(), "DiagramCanvasNote", box, false );
+                box.Deflate( 8 );
+                for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y ) ) row->add_lines( R::Utf8( line ) );
+            }
         }
     }
     result.set_canvas_presses( m_canvasPresses );

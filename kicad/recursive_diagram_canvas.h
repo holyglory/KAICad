@@ -126,6 +126,10 @@ BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const
 /// Where a block port on aSide at aAt names itself just inside the block edge, as KiCad labels sheet pins, with
 /// aDC's font (the chip font).
 wxRect PortNameRect( wxDC& aDC, const wxString& aName, D::DiagramPortSide aSide, const wxPoint& aAt );
+/// The lines a canvas note shows in a text area of aWidth by aHeight pixels with aDC's font. Lines break between
+/// words (only a word wider than the note breaks inside it), the note's own line breaks are kept, and text that
+/// does not fit ends its last shown line with "…".
+std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight );
 /// Draws the chips and link LayoutChips placed.
 void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool aDark,
                 const wxColour& aForeground, const wxColour& aLink );

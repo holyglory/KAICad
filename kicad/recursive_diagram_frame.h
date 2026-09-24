@@ -243,6 +243,8 @@ private:
     void paint( wxDC& aDC );
     void click( wxMouseEvent& aEvent );
     void motion( wxMouseEvent& aEvent );
+    /// Applies the drag in progress with the pointer at aPoint (canvas pixels).
+    void dragTo( const wxPoint& aPoint );
     void release();
     bool canvasKey( wxKeyEvent& aEvent );
     wxRect noteRect( const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote, int aIndex ) const;

@@ -459,6 +459,35 @@ wxRect CaptionRect( wxDC& dc, const NODE& node, const wxRect& inner, const wxFon
     return wxRect( wxPoint( inner.x + 10, inner.y + 24 ), extent ).Intersect( inner );
 }
 
+std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height )
+{
+    std::vector<wxString> lines;
+    wxString value = text; int y = 0;
+    while( !value.empty() && y + dc.GetCharHeight() <= height )
+    {
+        size_t end = value.find( '\n' ); if( end == wxString::npos ) end = value.length();
+        size_t count = end;
+        while( count > 0 && dc.GetTextExtent( value.Left( count ) ).x > width ) --count;
+        // Keep words whole: break at the last space that fits. Only a word wider than the note breaks inside it.
+        bool wrapped = count < end;
+        if( wrapped )
+            if( size_t space = value.Left( count + 1 ).find_last_of( ' ' ); space != wxString::npos && space > 0 ) count = space;
+        if( count == 0 && value[0] != '\n' ) count = 1;
+        wxString line = value.Left( count ); value = value.Mid( count );
+        if( value.StartsWith( "\n" ) ) value = value.Mid( 1 );
+        else if( wrapped )
+        {
+            // The spaces a line breaks at are not drawn, and neither is a line break that follows them.
+            while( value.StartsWith( " " ) ) value = value.Mid( 1 );
+            if( value.StartsWith( "\n" ) ) value = value.Mid( 1 );
+        }
+        if( !value.empty() && y + dc.GetCharHeight() * 2 > height )
+        { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > width ) line.RemoveLast(); line += wxS( "…" ); }
+        lines.push_back( line ); y += dc.GetCharHeight();
+    }
+    return lines;
+}
+
 wxRect PortNameRect( wxDC& dc, const wxString& name, D::DiagramPortSide side, const wxPoint& at )
 {
     wxSize extent = dc.GetTextExtent( name );
@@ -1505,17 +1534,9 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         dc.SetPen( wxPen( note.id() == m_commentId ? accent : wxColour( 176, 142, 52 ), 1 ) );
         dc.SetBrush( wxBrush( dark ? wxColour( 76, 66, 34 ) : wxColour( 255, 247, 213 ) ) ); dc.DrawRectangle( box );
         box.Deflate( 8 ); dc.SetClippingRegion( box );
-        wxString value = Text( note.text() ); int y = box.y;
-        while( !value.empty() && y + dc.GetCharHeight() <= box.GetBottom() )
-        {
-            size_t count = value.find( '\n' ); if( count == wxString::npos ) count = value.length();
-            while( count > 0 && dc.GetTextExtent( value.Left( count ) ).x > box.width ) --count;
-            if( count == 0 && value[0] != '\n' ) count = 1;
-            wxString line = value.Left( count ); value = value.Mid( count ); if( value.StartsWith( "\n" ) ) value = value.Mid( 1 );
-            if( !value.empty() && y + dc.GetCharHeight() * 2 > box.GetBottom() )
-            { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > box.width ) line.RemoveLast(); line += wxS( "…" ); }
-            dc.DrawText( line, box.x, y ); y += dc.GetCharHeight();
-        }
+        int y = box.y;
+        for( const wxString& line : R::NoteLines( dc, Text( note.text() ), box.width, box.GetBottom() - box.y ) )
+        { dc.DrawText( line, box.x, y ); y += dc.GetCharHeight(); }
         dc.DestroyClippingRegion();
     }
     if( m_captionKind == 1 )
@@ -1662,6 +1683,13 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
         m_canvas->SetCursor( wxCursor( link ? wxCURSOR_HAND : wxCURSOR_ARROW ) );
     }
     if( m_drag == DRAG::NONE || !event.Dragging() || m_process ) return;
+    dragTo( m_pointer );
+}
+
+void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
+{
+    if( m_drag == DRAG::NONE || m_process ) return;
+    m_pointer = point;
     wxPoint delta = m_pointer - m_dragStart;
     if( !m_dragMoved && std::abs( delta.x ) + std::abs( delta.y ) < FromDIP( 4 ) ) return;
     m_dragMoved = true;

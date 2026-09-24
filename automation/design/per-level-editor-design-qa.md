@@ -146,7 +146,7 @@ None of these blocks use of the tools. They are left for a later styling pass ra
 
 ### Limits of this review
 
-The formal `product-design:audit` and `design-qa` skills are not available in this session. This comparison opened the sketches and captures side by side; it is not a formal audit, so the recorded final result stays blocked. The review covers only the drawing journey's states. Earlier editor states are covered in `design-qa.md`. The PSU/CPU fixture canvas journey (`VerifyPsuCpuDiagramCanvas`, category NativeDiagramCanvas) now runs in the diagram graph as the `psu-cpu-canvas` check. Its journey is still a stub that reports Inconclusive, so its light and dark cases are skipped and cover nothing yet.
+The formal `product-design:audit` and `design-qa` skills are not available in this session. This comparison opened the sketches and captures side by side; it is not a formal audit, so the recorded final result stays blocked. The review covers only the drawing journey's states. Earlier editor states are covered in `design-qa.md`. The PSU/CPU fixture canvas journey (`VerifyPsuCpuDiagramCanvas`, category NativeDiagramCanvas) runs in the diagram graph as the `psu-cpu-canvas` check; see the section "PSU/CPU fixture canvas" below.
 
 Each themed native session opens two projects. The session-wide checks run only in the first project of each session: the retired flat-editor tools, diagram creation over MCP, the schema-2 tool checks and this drawing journey. At the time of the A1 commits the second project repeated the whole core editor journey to prove that instances stay isolated, and the native-UI check took 449.8 s to 567 s of its 600 s limit, depending on host load. Before the first commit, the second project also ran the first three checks. The A4 item changed this split; see "Time limit" in the A4 section.
 
@@ -162,7 +162,7 @@ Each themed native session opens two projects. The session-wide checks run only 
 - [x] Second re-review findings repaired and asserted: a merged route another writer changed keeps its channel, and the read-only reason survives typing a comment, a requirement, a connection caption and a component choice.
 - [x] P2 findings repaired and asserted in the journey (first comparison and the review's connection and compact-window findings).
 - [ ] Formal design audit (skills unavailable, so the final result stays blocked).
-- [ ] PSU/CPU fixture canvas journey (registered as the `psu-cpu-canvas` check; its journey is still a stub).
+- [x] PSU/CPU fixture canvas journey (the `psu-cpu-canvas` check; see its own section below).
 
 ## Round A4 — component choices on blocks (item a4-block-chips)
 
@@ -417,4 +417,75 @@ The formal `product-design:audit` and `design-qa` skills are not available in th
 - [x] Differential pair saved and reopened with its signal controls unavailable.
 - [x] An agent-added detail arriving through the file, over MCP.
 - [x] Save, close and reopen.
+- [ ] Formal design audit (skills unavailable, so the final result stays blocked).
+
+## PSU/CPU fixture canvas (item psu-cpu-canvas)
+
+### What is proved
+
+The shared PSU/CPU acceptance design (`automation/tests/fixtures/psu-cpu/system.blocks.xml`, fixture version 1, contract `psu-cpu-fixture-and-ownership.md` §1.5) is opened, walked, drawn on, saved and reopened in the real per-level editor. The file is schema 1 and stores no layout, so every level first draws the legacy grid (contract rbg-v2 section 9.2 F1). This item adds no new control or visual element. It proves the Round A1 drawing tools (owner decision n9f7cf92f32090daf), the caption-only rule (n98a3f3c41084f0ed) and the Round A4 chips (n0b2a908b00e78823) on the shared design, and repairs the two defects the journey found (below): a note that split a word, and a quick drag that could stop short of where it was released.
+
+The journey is `VerifyPsuCpuDiagramCanvas` in `automation/tests/KiCad.Automation.Tests/NativeRecursiveEditorJourney.cs`, test `PerLevelCanvasEditsPersistLayout` (category NativeDiagramCanvas, check `psu-cpu-canvas` of the `diagram-requirement-history` graph). It runs in the light and the dark theme, and in each theme on both projects of the native session, from the fixture seed None. An agent opens the file through the production MCP server over STDIO (`kicad_instance_attach`, `kicad_diagram_open`) and reads what the editor drew through `kicad_diagram_observe`. The person's part uses real pointer and keyboard input on the rendered window, aimed through the editor's reported canvas geometry and control rectangles.
+
+### Interaction coverage
+
+For each theme and project the journey proves:
+
+- **Open.** The fixture file opens as schema 1 and writable, on the System level at the fixture's exact revision (K13:1), with its children, connections, boundary ports and notes. Opening writes nothing.
+- **System → PSU → CPU.** System draws PSU and CPU at (140, 110) and (510, 110), 240 × 145, both reported as fallback. Right and Enter open the PSU level: its four blocks sit on the two-column grid at (140, 110), (510, 110), (140, 360) and (510, 360), its three boundary ports at (40, 90 + 85k), and all nine connections on their computed paths. Backspace returns to System with the PSU still selected; Right and Enter open the CPU level (Processor and Memory on the grid, boundary ports Power and Telemetry at (40, 90) and (40, 175)). Every level shows the fixture's exact revisions and writes nothing, and each canvas note is drawn inside the canvas with its lines broken between words.
+- **Decline.** The palette's Add block draws "Clock" where the person clicks. This first layout edit also stores the Processor and the Memory where they were drawn (rule F1a). Decline removes all three positions and the block, sends nothing to save, and the file keeps the fixture's schema 1 bytes.
+- **Undo and redo.** Dragging the Memory by (80, 40) stores both blocks in one step; Ctrl+Z returns the level to no stored layout and a clean draft, and Ctrl+Y brings the move back. The Processor's lower-right handle resizes it to 280 × 175; the palette's Undo and Ctrl+Y undo and redo the resize without moving anything else.
+- **Caption-only block and connection.** The toolbar strip's Add block draws "Clock" at (510, 360), 240 × 140, showing only its caption. The palette's Connect draws "Clock feed" from the Clock to the Processor, with both ends unresolved, no details, no requirement box and no stored route (its path runs along no other connection).
+- **Component choice chip.** Add detail > Type on the fixture's Memory, "EEPROM" and Enter: the Memory shows the chosen chip "Type: EEPROM" and the facet overview lists only Type. Only the Memory's own definition changed.
+- **Save.** Save stores schema 2. System and CPU each gain one revision on top of the fixture's; the PSU and the Processor keep their exact fixture revisions; the Memory gains a revision that keeps its ports, its U6 binding and its requirement revision and adds only the chosen type; the Clock and Clock feed keep the identities they were drawn with and store no diagram, choices or requirements. The CPU level's presentation view holds exactly Processor (140, 110, 280, 175), Memory (590, 150, 240, 145) and Clock (510, 360, 240, 140), in drawing order, with no port, route or frame. Every other fixture revision (block, connection and requirement) is written unchanged, every fixture state is unchanged except the new heads of System, CPU and Memory, and the CPU level keeps its fixture ports and notes. The System and PSU levels still store no layout.
+- **Decline after Save.** A later move of the Clock is declined and nothing is written.
+- **Reopen.** Ctrl+W writes nothing. Reopening shows System on its fallback grid; the CPU level draws the stored presentation view exactly (every block reported as placed, nothing dormant), the boundary ports stay in the fallback column, Clock feed runs (510, 430) → (465, 430) → (465, 285) → (420, 285) (rules F2 and F4 applied to the stored positions), and the Memory's chip is back. Reopening and closing write nothing.
+
+### Evidence
+
+#### Journey run: `t20260924T124001Z-c2dbdc`
+
+A selected run of the `psu-cpu-canvas` check (proof `selected`, so not readiness evidence) on the journey without the note repair. Build 36.8 s, contracts 96.6 s, native protocol 61.6 s, native UI 540.6 s against its 900 s limit, and the canvas check 76.4 s against its 900 s limit: 2 passed, 0 skipped (light 37.7 s, dark 36.9 s; each project's journey took about 18 s). Source SHA-256 `03f131644a7a892dbaac8fb3273dfdd7737b6fd3e998a0e2516fb30fa6ecb7f6`, artifact manifest `84a7eaf61a9811937a7d1e7e115323045e14097bea3411a32a16a2aed0c566c8`. Hash-verified captures are materialized at `/mnt/build-storage/codex/kicad/evidence/lane-2B-psu-cpu-canvas-c2dbdc/canvas-light/` (instances `6fe3f631-9dcc-4460-8b12-56a95e049b38` and `26b5212c-a704-42a9-b2f5-90f05ed24ded`) and `…/canvas-dark/` (instances `e1fdfb86-c711-42ba-8b28-5bbcd41d941d` and `30f281be-4f85-4354-9065-e84a75db5ed7`); their SHA-256 list is `SHA256SUMS-canvas` (itself `60b48022796a54177b0ea28b2e213f095aea116f5d5ea98765d0419f64e7bfeb`). The run of the committed source, with both repairs below, is recorded in the commit message.
+
+#### Complete run with the note repair: `t20260924T125947Z-dbfa39` (failed)
+
+The complete graph on the journey with the note repair, before the drag repair. Build, contracts, native protocol and native UI (660.0 s against its 900 s limit) passed; the canvas check (143.7 s) passed its light case (62.5 s) and failed its dark case (76.9 s) in the dark session's second project, at the step `memory-moved`. The Memory had been dragged 80 pixels right and 40 down at scale 1 but was stored at (580, 150): the editor had applied the drag's second-to-last pointer motion and ended the drag at the button release without applying the release point. Its state and screen at the failure are `7e98a059-d0e5-46c8-a7ab-e130a86cbdde-canvas-timeout-memory-moved.json` and `.png`. Source SHA-256 `b43c10f006f4b3c92aff47c7e8c15ee1fd521d0c31258942046a11e1d338c9bc`, artifact manifest `18a8cf657ec3833d12830bbc980474aa2e02f50a5e0276b75e76f9de7d0fd334`. Hash-verified captures are materialized at `/mnt/build-storage/codex/kicad/evidence/lane-2B-psu-cpu-canvas-dbfa39/` (SHA-256 list `SHA256SUMS-canvas`, itself `42e45f0a95876bf5107c192ecf8ad260e96006a93284bcc7b44ba2f7610bc030`); its PSU captures show the repaired note, "Keep sensing away from" / "switching nodes.".
+
+Step-linked captures (the same names exist for every project and theme):
+
+| Step | Capture | What it shows |
+|---|---|---|
+| System | `…-canvas-system.png` | The System level on the legacy grid, with its canvas note. |
+| PSU | `…-canvas-psu.png` | The PSU level on the two-column grid with its nine connections and its canvas note. |
+| CPU | `…-canvas-cpu.png` | The CPU level on the grid, before any edit. |
+| Before Decline | `…-canvas-before-decline.png` | "Clock" just drawn and selected, showing only its caption; Save and Decline available. |
+| Moved | `…-canvas-moved.png` | The Memory moved (after undo and redo). |
+| Resized | `…-canvas-resized.png` | The Processor resized with its handles shown. |
+| Connected | `…-canvas-connected.png` | "Clock feed" drawn and selected, showing only its caption. |
+| Chip | `…-canvas-chip.png` | The Memory with its "Type: EEPROM" chip and Review facets link; the facet overview lists Type. |
+| Saved | `…-canvas-saved.png` | After Save: the same drawing, clean. |
+| Reopened | `…-canvas-reopened.png` | The CPU level after close and reopen, drawn from the stored presentation view. |
+
+### Findings
+
+- **P2, repaired: a note split a word.** In the PSU capture of `c2dbdc` the canvas note read "Keep sensing away from sw" / "itching nodes.": note lines were broken at the last character that fitted, even inside a word that fitted the next line. Notes now break between words (only a word wider than the note is broken inside it) and keep the "…" ending when the note is too short. The editor state reports each canvas note's box and shown lines (`RecursiveDiagramEditorState.canvas_notes`, field 223 of lane 2B's own `recursive_diagram_commands.proto`), and the journey asserts on every level it opens that each canvas note is shown inside the canvas and that its lines read back as its text.
+- **P2, repaired: a quick drag could stop short of where it was released.** A move, resize, port or note drag followed only the pointer's motion events, so when the last motion before the button release arrived late or was merged with the release, the element stayed one grid step short (run `dbfa39`, above). The release point now ends every drag, so a drag lands exactly where the person lets go; a press without a move still changes nothing. The journey's moves and resizes assert exact positions in both themes and both projects.
+- **P2, not repaired: the fixture's PSU note covers a block.** On the PSU level the note "Keep sensing away from switching nodes." sits at (40, 300), where the fixture places it (contract §1.5.3), and covers the left part of the Telemetry ADC block at its grid position (140, 360), including the start of its caption. Both positions are fixed by the frozen contracts (fixture §1.5.3 and rbg-v2 F1), so changing them is a contract revision for the integration owner. A person can drag the note or the block aside, and that layout is then saved.
+- **P3, not repaired: shared channels on computed paths.** On the PSU level several connections between the two columns run their middle legs down the same channel (rule F4 puts each at the midpoint of its ends), so their captions "Rail B sense" and "Fault" stack and "Measurements" is drawn over Telemetry MCU's version line. The editor moves a connection to its own channel only when it is drawn (the A1 rule for new connections); computed paths of stored connections are left as the contract defines them.
+- **P2, not repaired (outside this item): Comments with a block selected.** When a block is selected on a level that has a canvas note, the inspector's Comments box opens on that note (the list shows the level's canvas notes beside the block's own comments and selects the first), so typing there edits the level's note instead of commenting on the block. It shows in the Before Decline and Chip captures. This is existing behaviour of the comments control; it is reported to the integration owner rather than changed here.
+
+### Limits of this review
+
+The formal `product-design:audit` and `design-qa` skills are not available in this session, and this item has no sketch of its own: it proves the A1 and A4 controls, already compared with their sketches above, on the shared fixture. The project-manager entry (Round A2) is still awaiting the owner, so the journey opens the diagram the way an agent does, through `kicad_diagram_open`. The reference to the committed-source run lives in the commit message, because a commit cannot name the run that validates it.
+
+### Checklist
+
+- [x] Fixture, contract sections and owner decisions identified.
+- [x] Light and dark captures for every step, both projects of each session.
+- [x] System → PSU → CPU on the fallback grid, with exact identities and nothing written.
+- [x] Decline before the first save (the file keeps the fixture's schema 1 bytes) and after a save; undo and redo of a move (with F1a) and of a resize.
+- [x] Caption-only block and connection drawn with the strip and the palette; a component choice chip on a fixture block.
+- [x] Save to schema 2 with every fixture fact and identity kept and exactly the drawn layout; reopen from the stored presentation view.
+- [x] The note repair asserted through the reported note lines; the drag repair asserted through the exact positions of every move and resize.
+- [ ] Contract-fixed overlaps on the PSU level and the Comments default (reported to the integration owner).
 - [ ] Formal design audit (skills unavailable, so the final result stays blocked).

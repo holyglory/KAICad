@@ -173,6 +173,17 @@ message RecursiveDiagramEditorState {
   repeated DiagramControlRect boundary_port_names = 221;
   // Presses the canvas has received, so rendered input can tell a press that changed nothing from one not yet delivered.
   uint64 canvas_presses = 222;
+  // Each note placed on the viewed level's canvas, as drawn, in the level's note order.
+  repeated DiagramCanvasNote canvas_notes = 223;
+}
+
+// A note on the canvas as drawn: its box relative to the editor window, in pixels (shown is true when the whole box
+// lies inside the canvas), and the lines of text it shows. Lines break between words; only a word wider than the note
+// breaks inside it, and text that does not fit ends the last shown line with "…".
+message DiagramCanvasNote {
+  string annotation_id = 1;
+  DiagramControlRect rect = 2;
+  repeated string lines = 3;
 }
 
 // The arrowheads a connection shows on the canvas for its direction detail; a connection without a

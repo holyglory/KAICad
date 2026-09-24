@@ -2108,14 +2108,21 @@ int SCH_EDITOR_CONTROL::ShowCreateNetChain( const TOOL_EVENT& aEvent )
 
 
 /// True when an undo or redo command restores ERC markers.  An open ERC dialog lists marker
-/// pointers, so it must be rebuilt once the whole command is restored: a refresh from inside
-/// the command can run before its markers are added back or removed.
+/// pointers, so it is rebuilt once the whole command is restored.  History never holds a marker
+/// pointer (the ERC dialog deletes markers outside commits), so only its ERC settings record is
+/// inspected, never a marker.
 static bool restoresErcMarkers( const PICKED_ITEMS_LIST& aList )
 {
     for( unsigned ii = 0; ii < aList.GetCount(); ++ii )
     {
-        if( const EDA_ITEM* item = aList.GetPickedItem( ii ); item && item->Type() == SCH_MARKER_T )
+        if( aList.GetPickedItemStatus( ii ) != UNDO_REDO::PAGESETTINGS )
+            continue;
+
+        if( auto* settings = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( aList.GetPickedItem( ii ) );
+            settings && settings->IncludesErcMarkers() )
+        {
             return true;
+        }
     }
 
     return false;

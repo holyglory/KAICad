@@ -1317,20 +1317,6 @@ inline std::vector<OWNER> reviewedOwners()
         // Schematic dialogs.
         { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "schFrame->", 1,
           DISPOSITION::ROUTED, { G_PROJECT }, {}, "Changed annotation settings record a committed change." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::ExcludeMarker", "m_parent->", 1, DISPOSITION::ROUTED,
-          { G_PROJECT }, {}, "ERC exclusions record a committed change." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteOneClick", "m_parent->", 1, DISPOSITION::ROUTED,
-          { G_PROJECT }, {},
-          "Deleting an excluded violation deletes a saved exclusion; the whole-state tracker records it, and "
-          "deleting a computed violation records nothing." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", "m_parent->", 1, DISPOSITION::ROUTED,
-          { G_PROJECT }, {},
-          "Deleting the exclusions with every marker deletes saved exclusions; the whole-state tracker records "
-          "it, and deleting only computed violations records nothing." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnERCItemRClick", "m_parent->", 1,
-          DISPOSITION::ROUTED, { G_PROJECT }, {}, "ERC overrides record a committed change." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnIgnoredItemRClick", "m_parent->", 1,
-          DISPOSITION::ROUTED, { G_PROJECT }, {}, "ERC severities record a committed change." },
         { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::TransferDataFromWindow", "m_parent->", 1,
           DISPOSITION::ROUTED, { G_SYMBOL, G_FIELD, G_PROJECT }, {}, "Field and BOM edits are pushed as a commit." },
         { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::onDeleteVariant", "m_parent->", 1, DISPOSITION::ROUTED,
@@ -1611,8 +1597,6 @@ inline std::vector<TRACKER_SITE> reviewedTrackers()
 {
     return {
         { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 1, 0, "" },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteOneClick", 1, 0, "" },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", 1, 0, "" },
         { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, "" },
         { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, "" },
         { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 1, 0, "" },
@@ -1664,9 +1648,6 @@ inline std::vector<UNPROVEN> unprovenRoutes()
         { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup", ANY_ROUTE, 40,
           "An unchanged Page Settings OK still records a revision and an undo entry, because the shared page "
           "dialog marks the screen modified; needs no-op precision." },
-        { "eeschema/dialogs/dialog_erc.cpp", "DIALOG_ERC::OnDeleteAllClick", ANY_ROUTE, 40,
-          "Delete All Markers with exclusions needs the rendered 'Delete exclusions too?' choice; deleting one "
-          "excluded violation is proven by the rendered ERC dialog journey." },
         { "eeschema/eeschema_config.cpp", "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "RecordCommittedChange(", 30,
           "Schematic Setup compares only the project settings, without file metadata, instead of the shared "
           "whole-state groups: a Setup that changes a screen outside a commit, or whose project save rewrites "
@@ -1738,9 +1719,11 @@ inline std::vector<EXCLUSION_SITE> reviewedExclusionSites()
 
     return {
         { dialog, "DIALOG_ERC::OnDeleteOneClick", "DeleteCurrentItem", 1, EXCLUSION_RULE::RECORDED, {},
-          "Deleting an excluded violation is recorded by the whole-state tracker around the deletion." },
+          "Deleting an excluded violation pushes one undoable commit that keeps the exclusion by sort key; "
+          "deleting a computed violation reverts the unchanged commit and records nothing." },
         { dialog, "DIALOG_ERC::OnDeleteAllClick", "deleteAllMarkers", 1, EXCLUSION_RULE::RECORDED, {},
-          "Deleting the exclusions with every marker is recorded by the whole-state tracker." },
+          "Deleting the exclusions with every marker pushes one undoable commit; deleting only computed "
+          "violations records nothing." },
         { dialog, "DIALOG_ERC::OnRunERCClick", "deleteAllMarkers", 1, EXCLUSION_RULE::RERESOLVED,
           { { dialog, "DIALOG_ERC::OnRunERCClick", "RecordERCExclusions();deleteAllMarkers(true);" },
             { dialog, "DIALOG_ERC::OnRunERCClick", "testErc();" },
@@ -1753,11 +1736,11 @@ inline std::vector<EXCLUSION_SITE> reviewedExclusionSites()
         { dialog, "DIALOG_ERC::deleteAllMarkers", "DeleteAllMarkers", 1, EXCLUSION_RULE::HELPER, {},
           "Deletes the ERC markers for the helper's reviewed callers." },
         { dialog, "DIALOG_ERC::OnERCItemRClick", "setMarkerExcluded", 3, EXCLUSION_RULE::RECORDED, {},
-          "Exclusions, restorations and comments record 'Edit ERC overrides'." },
+          "Exclusions, restorations and comments push one undoable 'Edit ERC overrides' commit." },
         { dialog, "DIALOG_ERC::OnERCItemRClick", "DeleteMarkers", 1, EXCLUSION_RULE::RECORDED, {},
-          "Ignoring a rule deletes its markers, exclusions included, inside the recorded severity change." },
+          "Ignoring a rule deletes its markers, exclusions included, inside the undoable severity commit." },
         { dialog, "DIALOG_ERC::ExcludeMarker", "setMarkerExcluded", 1, EXCLUSION_RULE::RECORDED, {},
-          "The exclusion hotkey and canvas action record 'Edit ERC overrides'." },
+          "The exclusion hotkey and canvas action push one undoable 'Edit ERC overrides' commit." },
         { dialog, "setMarkerExcluded", "SetMarkerExcluded", 1, EXCLUSION_RULE::HELPER, {},
           "Routes the exclusion through the provider so its cached counts follow it." },
         { provider, "SHEETLIST_ERC_ITEMS_PROVIDER::SetMarkerExcluded", "SetExcluded", 2, EXCLUSION_RULE::HELPER,
@@ -1769,9 +1752,13 @@ inline std::vector<EXCLUSION_SITE> reviewedExclusionSites()
         { "eeschema/sch_screen.cpp", "SCH_SCREENS::DeleteAllMarkers", "DeleteMarkers", 1, EXCLUSION_RULE::HELPER,
           {}, "Deletes every marker of a type for its reviewed callers." },
         { commit, "SCH_COMMIT::SetErcSettings", "SetExcluded", 2, EXCLUSION_RULE::STAGED,
-          { { commit, "SCH_COMMIT::SetErcSettings", "Modify(marker,screen);marker->SetExcluded(" },
-            { commit, "SCH_COMMIT::SetErcSettings", "Added(marker,exclusion.screen);" } },
-          "An ERC replacement stages every changed or added marker in its commit before changing it." },
+          { { commit, "SCH_COMMIT::SetErcSettings", "if(!StageErcEdit())" },
+            { commit, "SCH_COMMIT::SetErcSettings", "history.created.insert(exclusion.marker->m_Uuid);" } },
+          "An ERC replacement captures the exclusions by sort key in its commit before changing a marker, "
+          "and records every marker it adds by identity; history never keeps a marker pointer." },
+        { commit, "SCH_ERC_HISTORY::Restore", "SetExcluded", 3, EXCLUSION_RULE::RESOLUTION, {},
+          "Undo, Redo and Revert return the markers to a history entry's exclusions; Undo and Redo record "
+          "their own journal entries and Revert discards a commit that was never pushed." },
         { "eeschema/schematic.cpp", "SCHEMATIC::ResolveERCExclusions", "SetExcluded", 2,
           EXCLUSION_RULE::RESOLUTION, {},
           "Restores the saved exclusions onto markers after a load or an ERC run." },

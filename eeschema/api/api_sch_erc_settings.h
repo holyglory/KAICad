@@ -84,6 +84,34 @@ inline MESSAGE Capture( SCHEMATIC& aSchematic )
     return result;
 }
 
+/// The loaded screen that owns a marker rebuilt from its exact references: the main item's
+/// sheet, then the sheet-specific path, then the screen holding the first item, else the root.
+inline SCH_SCREEN* OwnerScreen( const kiapi::schematic::ErcMarker& aMarker, const SCH_SHEET_LIST& aHierarchy,
+                                SCHEMATIC& aSchematic )
+{
+    auto screenOf = [&]( const kiapi::common::types::SheetPath& aPath ) -> SCH_SCREEN*
+    {
+        KIID_PATH ids;
+        for( const auto& id : aPath.path() )
+            ids.push_back( KIID( id.value() ) );
+        std::optional<SCH_SHEET_PATH> path = aHierarchy.GetSheetPathByKIIDPath( ids, true );
+        return path ? path->LastScreen() : nullptr;
+    };
+
+    SCH_SCREEN* screen = nullptr;
+    if( aMarker.has_main_item_sheet_path() )
+        screen = screenOf( aMarker.main_item_sheet_path() );
+    else if( aMarker.has_sheet_specific_path() )
+        screen = screenOf( aMarker.sheet_specific_path() );
+    else if( aMarker.items_size() )
+    {
+        SCH_SHEET_PATH owner;
+        aHierarchy.ResolveItem( KIID( aMarker.items( 0 ).value() ), &owner );
+        screen = owner.LastScreen();
+    }
+    return screen ? screen : aSchematic.RootScreen();
+}
+
 struct EXCLUSION
 {
     std::string key;
@@ -205,15 +233,7 @@ inline bool Prepare( const MESSAGE& aValue, SCHEMATIC& aSchematic, PREPARED& aPr
         if( !marker || ERC_EXCLUSION::FromMarker( *marker ).ToProto().marker().SerializeAsString()
                             != packed.SerializeAsString() )
             return reject( "ERC exclusion cannot be reconstructed without changing its references" );
-        SCH_SCREEN* screen = aSchematic.RootScreen();
-        if( packed.has_main_item_sheet_path() ) screen = path( packed.main_item_sheet_path() )->LastScreen();
-        else if( packed.has_sheet_specific_path() ) screen = path( packed.sheet_specific_path() )->LastScreen();
-        else if( packed.items_size() )
-        {
-            SCH_SHEET_PATH owner;
-            hierarchy.ResolveItem( KIID( packed.items( 0 ).value() ), &owner );
-            if( owner.LastScreen() ) screen = owner.LastScreen();
-        }
+        SCH_SCREEN* screen = OwnerScreen( packed, hierarchy, aSchematic );
         if( !screen ) return reject( "ERC exclusion has no loaded owner screen" );
         const std::string key = packed.SerializeAsString();
         if( !exclusions.emplace( key, EXCLUSION{ key, exclusion.comment(), std::move( marker ), screen } ).second )

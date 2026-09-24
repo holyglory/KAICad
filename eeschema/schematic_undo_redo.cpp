@@ -395,7 +395,9 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
                 SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
                 netSettingsChanged |= allPages->IncludesNetSettings();
                 alternate.CopyProjectSettingsScope( *allPages );
-                allPages->RestoreAll( this );
+                // ERC markers the restoration deletes or rebuilds are recorded in the opposite
+                // entry by identity, so it can reverse them without a marker pointer.
+                allPages->RestoreAll( this, false, &alternate );
                 *allPages = std::move( alternate );
             }
             else

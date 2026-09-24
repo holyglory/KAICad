@@ -23,6 +23,7 @@
 
 #include <api/api_handler_editor.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <api/common/commands/schematic_tracking_commands.pb.h>
 #include <api/sch_context.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/editor_commands.pb.h>
@@ -158,6 +159,8 @@ private:
     std::optional<ApiResponseStatus> checkForStableObservation();
     HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> handleReadChangeJournal(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicChangeJournal>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> handleReadErcMarkers(
+            const HANDLER_CONTEXT<kiapi::automation::v1::SchematicTrackingReadErcMarkers>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicPreview> handleCapturePreview(
             const HANDLER_CONTEXT<kiapi::automation::v1::CaptureSchematicPreview>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicViewSet> handleRenderViews(

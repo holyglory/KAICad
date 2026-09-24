@@ -203,6 +203,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleActivateSheet );
     registerHandler<kiapi::automation::v1::ReadSchematicChangeJournal, kiapi::automation::v1::SchematicChangeJournal>(
             &API_HANDLER_SCH::handleReadChangeJournal );
+    registerHandler<kiapi::automation::v1::SchematicTrackingReadErcMarkers,
+                    kiapi::automation::v1::SchematicTrackingErcMarkers>( &API_HANDLER_SCH::handleReadErcMarkers );
     registerHandler<SaveDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
@@ -2671,6 +2673,52 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> API_HANDLER_SCH::h
             break;
         }
     }
+
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> API_HANDLER_SCH::handleReadErcMarkers(
+        const HANDLER_CONTEXT<kiapi::automation::v1::SchematicTrackingReadErcMarkers>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForStableObservation() )
+        return tl::unexpected( *busy );
+
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    // Every loaded screen once, through the first sheet instance that shows it.
+    std::vector<std::pair<std::string, kiapi::automation::v1::SchematicTrackingErcMarker>> markers;
+    std::set<SCH_SCREEN*> seen;
+
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+
+        if( !screen || !seen.insert( screen ).second )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            const auto* marker = static_cast<SCH_MARKER*>( item );
+            kiapi::automation::v1::SchematicTrackingErcMarker entry;
+            entry.mutable_id()->set_value( marker->m_Uuid.AsStdString() );
+            *entry.mutable_marker() = ERC_EXCLUSION::FromMarker( *marker ).ToProto().marker();
+            entry.set_excluded( marker->IsExcluded() );
+            entry.set_comment( marker->GetComment().ToUTF8() );
+            entry.set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( marker->GetSeverity() ) );
+            kiapi::common::PackSheetPath( *entry.mutable_sheet(), path.Path() );
+            markers.emplace_back( entry.marker().SerializeAsString() + entry.id().value(), std::move( entry ) );
+        }
+    }
+
+    std::sort( markers.begin(), markers.end(),
+               []( const auto& a, const auto& b ) { return a.first < b.first; } );
+
+    kiapi::automation::v1::SchematicTrackingErcMarkers result;
+
+    for( auto& [key, entry] : markers )
+        result.add_markers()->Swap( &entry );
 
     return result;
 }

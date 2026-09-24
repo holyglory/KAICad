@@ -104,21 +104,55 @@ message RecursiveDiagramEditorState {
   uint32 canvas_pixel_height = 26;
   BlockRevisionData canvas_diagram = 27;
   uint32 resolved_canvas_children = 28;
-  // Schema 2 per-level editor (contract rbg-v2 section 9.1). Declared at the
-  // Phase 2 freeze and not produced yet: the editor leaves 29-34 unset and the
-  // MCP diagram tools omit them until the per-level editor implements them.
+  // Schema 2 per-level editor (contract rbg-v2 section 9.1).
   // On-disk format of the open file (1 or 2).
   uint32 stored_schema_version = 29;
   // False disables Save with an explanation.
   bool source_writable = 30;
-  // The authoritative level draft; draft (13) mirrors its scope and
-  // connection_draft (14) remains only for member-path edits.
+  // The authoritative level draft. draft (13) is the selected block's draft
+  // within it (the level's own draft when the level or a note is selected, a
+  // mirror for a block drawn in this draft), and connection_draft (14) is the
+  // selected connection's draft (a mirror for a connection drawn in this draft).
   LevelDraftData level_draft = 31;
   // Session-only pan and zoom per level; never saved and never dirties a draft.
   repeated DiagramLevelViewportState level_viewports = 32;
   // "select", "add-block", "connect", "add-port", "note" or "pan".
   string canvas_tool = 33;
   string selected_interface_id = 34;
+  // Lane 2B drawing tools (Round A1). The canvas's top-left corner relative to
+  // the editor window, in pixels, so rendered input can target diagram points.
+  int32 canvas_window_x = 200;
+  int32 canvas_window_y = 201;
+  // Whether the canvas-edge drawing palette is shown (View > Drawing palette).
+  bool palette_shown = 202;
+  // The open in-place caption editor: "", "block", "connection", "port" or "rename".
+  string caption_editor = 203;
+  // The canvas hint shared by the toolbar strip and the palette, for example
+  // "Click a port to finish connection".
+  string canvas_hint = 204;
+  // The effects of the last removal, as the editor showed them.
+  repeated LevelEditEffectData last_effects = 205;
+  // The requirement fields the inspector shows for the selected element.
+  repeated RequirementFieldKind shown_requirement_fields = 206;
+  // The owner of selected_interface_id (the level itself or a child block).
+  string selected_interface_owner_id = 207;
+  // A non-modal notice, for example layout positions a rebase replaced.
+  string notice = 208;
+  // The drawing and inspector controls as rendered, for rendered-input journeys.
+  repeated DiagramControlRect controls = 209;
+}
+
+// One rendered control relative to the editor window, in pixels. active is the
+// highlighted state of a tool (the toolbar strip and the palette share one tool).
+message DiagramControlRect {
+  string name = 1;
+  int32 x = 2;
+  int32 y = 3;
+  int32 width = 4;
+  int32 height = 5;
+  bool shown = 6;
+  bool enabled = 7;
+  bool active = 8;
 }
 
 // One diagram level's session viewport, in diagram units.

@@ -11,22 +11,20 @@ namespace KiCad.Automation.Native;
 
 /// <summary>Lossless shared C++/.NET messages. Unsupported fields and precision are
 /// rejected, not simplified into a success. No I/O or agent execution occurs here.
-/// Schema versions move together (contract rbg-v2 section 2.3): a schema 1 exchange never carries
-/// a schema 2 field and cannot describe a graph holding schema 2 content; both are refused.</summary>
-public static class RecursiveBlockCodec
+/// Schema versions move together (contract rbg-v2 section 2.3): the request, document, graph and native
+/// open messages are exactly schema 2 in this build, and every other version is refused before any
+/// file access.</summary>
+public static partial class RecursiveBlockCodec
 {
-    /// <summary>The newest diagram protocol schema this build speaks.</summary>
+    /// <summary>The diagram protocol schema this build speaks.</summary>
     public const uint SchemaVersion = 2;
-    /// <summary>The protocol schema the native per-level editor of this build speaks. The native
-    /// editor moves to schema 2 with its own (lane C) change; until then its exchanges stay schema 1.</summary>
-    public const uint NativeEditorSchemaVersion = 1;
+    /// <summary>The protocol schema the native per-level editor of this build speaks: the same schema 2
+    /// (contract rbg-v2 section 12, the version flip of the helper, the native editor and the MCP open tool).</summary>
+    public const uint NativeEditorSchemaVersion = SchemaVersion;
 
-    /// <summary>Interim schema 1 bridge. Contract rbg-v2 sections 2.3 and 2.4 require exactly schema 2;
-    /// schema 1 is still accepted only because the native editor of this build speaks it, and only for
-    /// documents without schema 2 content. It is removed here, in RecursiveEditorFiles.ExecuteAsync and
-    /// in kicad_diagram_open (NativeEditorSchemaVersion) in the section 12 version flip together with the
-    /// native per-level editor and project-manager entry.</summary>
-    public static bool IsSupportedSchema(uint schemaVersion) => schemaVersion is NativeEditorSchemaVersion or SchemaVersion;
+    /// <summary>Only schema 2 (contract rbg-v2 sections 2.3 and 2.4). An older editor would send a draft
+    /// without layout, realizations, domains or directions, and a save would erase them.</summary>
+    public static bool IsSupportedSchema(uint schemaVersion) => schemaVersion == SchemaVersion;
 
     public static P.RequirementMergeData Encode(M.RecursiveRequirementMerge merge,
         IEnumerable<M.DiagramRequirementResolution>? choices = null)
@@ -687,19 +685,13 @@ public static class RecursiveBlockCodec
         .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
     ];
 
-    // Schema 2 fields this build neither reads nor writes, even in a schema 2 exchange: the flat-diagram
-    // conversion receipt and conversion request, which are never implemented because legacy flat
-    // diagrams are discarded, not converted (owner decision n9af098253fec71da), and the per-level
-    // editor's state and resolved layout, which only the schema 2 native editor (lane C) produces.
+    // Schema 2 fields this build neither reads nor writes: the flat-diagram conversion receipt and
+    // conversion request, which are never implemented because legacy flat diagrams are discarded, not
+    // converted (owner decision n9af098253fec71da).
     private static readonly HashSet<FieldDescriptor> Unimplemented =
     [
         .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
         .. Declared(P.RecursiveFileRequest.Descriptor, P.RecursiveFileRequest.MigrateFieldNumber),
-        .. Declared(P.RecursiveDiagramEditorState.Descriptor, P.RecursiveDiagramEditorState.StoredSchemaVersionFieldNumber,
-            P.RecursiveDiagramEditorState.SourceWritableFieldNumber, P.RecursiveDiagramEditorState.LevelDraftFieldNumber,
-            P.RecursiveDiagramEditorState.LevelViewportsFieldNumber, P.RecursiveDiagramEditorState.CanvasToolFieldNumber,
-            P.RecursiveDiagramEditorState.SelectedInterfaceIdFieldNumber),
-        .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
     ];
 
     private static IEnumerable<FieldDescriptor> Declared(MessageDescriptor message, params int[] numbers) => numbers.Select(number =>

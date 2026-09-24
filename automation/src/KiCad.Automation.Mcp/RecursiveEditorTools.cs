@@ -424,8 +424,8 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         // an unspecified engineering fact. Keep these computed defaults explicit.
         var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
         var wire = JsonNode.Parse(formatter.Format(metadata))!.AsObject();
-        // The native editor speaks schema 1: keep its observation in that shape rather than report
-        // schema 2 defaults it never produced as facts.
+        // The native editor speaks schema 2 (level draft, tool, viewports and resolved layout); only the
+        // never-implemented flat-conversion fields are left out.
         RecursiveBlockCodec.OmitFieldsBeyondSchema(metadata, wire, RecursiveBlockCodec.NativeEditorSchemaVersion);
         foreach (var view in wire["views"]!.AsArray()) view!.AsObject().Remove("png");
         var structured = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = native.Epoch,
@@ -637,18 +637,13 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_open"),
-     Description("Open a native recursive diagram editor for one exact diagram document and attached KiCad instance. The compiled companion validates XML before displaying it. The returned ready/busy/error state is authoritative; opening is not proof of rendering, saving, or native electrical realization. Existing dirty windows are retained. The native editor in this build keeps only diagram schema 1 content, so a document with schema 2 facts (layout, realizations, domains, directions or harness targets) is refused with unsupported_diagram_file_request and nothing is opened or changed; read it with kicad_diagram_read.")]
+     Description("Open the native per-level diagram editor for one exact diagram document and attached KiCad instance. The compiled companion validates XML before displaying it. The editor speaks diagram schema 2, so per-level layout, realizations, domains and directions are kept; a version 1 file is upgraded only by its first changed save. The returned ready/busy/error state is authoritative; opening is not proof of rendering, saving, or native electrical realization. Existing dirty windows are retained.")]
     public Task<CallToolResult> Open(string instanceId, string repositoryRoot, string sourcePath,
         string documentId, CancellationToken cancellationToken) => Execute(async () =>
     {
         var native = registry.Client(instanceId);
         var loaded = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest
         { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId }, cancellationToken);
-        // The native editor of this build still speaks diagram schema 1 and could not keep a schema 2
-        // document's layout, realizations, domains or directions; refuse before opening any window.
-        if (RecursiveBlockGraphXml.RequiredSchemaVersion(RecursiveBlockCodec.Decode(loaded.Document.Graph)) > RecursiveBlockCodec.NativeEditorSchemaVersion)
-            throw new AutomationException("unsupported_diagram_file_request", "This diagram holds schema 2 content (per-level layout, realizations, domains, "
-                + "directions or harness targets) that the native editor in this build cannot keep yet; read it with kicad_diagram_read. Nothing was opened or changed.");
         string executable = Environment.ProcessPath ?? throw new AutomationException("missing_companion", "The compiled companion path is unavailable.");
         string helper = Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase)
             ? Assembly.GetEntryAssembly()!.Location : executable;

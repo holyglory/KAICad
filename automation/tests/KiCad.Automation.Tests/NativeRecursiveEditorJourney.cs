@@ -40,10 +40,13 @@ public sealed partial class NativeSessionTests
             var attach = await client.CallToolAsync("kicad_instance_attach", new Dictionary<string, object?>
                 { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, cancellationToken: token);
             Assert.IsFalse(attach.IsError == true);
-            await VerifyFlatEditorRetired(client, native, instanceId, evidence, token);
+            // Session-wide checks (tool list, diagram creation, schema 2 opening and the drawing tools) run in the first
+            // project of each themed session; the second project repeats the core editor journey for instance isolation.
+            bool sessionWide = FirstInSession(evidence, "recursive-editor-session-checks");
+            if (sessionWide) await VerifyFlatEditorRetired(client, native, instanceId, evidence, token);
             // Creating a new system diagram next to this session's project through the same production MCP server and
             // live instance (contract rbg-v2 section 8); the created diagram is opened in the real editor at the end.
-            var createdDiagram = await VerifyDiagramCreationOverMcp(client, native, source, graph, instanceId, evidence, token);
+            var createdDiagram = sessionWide ? await VerifyDiagramCreationOverMcp(client, native, source, graph, instanceId, evidence, token) : null;
             var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project,
                 ["sourcePath"] = source, ["documentId"] = graph.DocumentId.ToString("D") };
             var savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
@@ -137,7 +140,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), firstWholeHistory.GetProperty("context").GetProperty("revisionId").GetString());
             var invalidTargetArguments = new Dictionary<string, object?>(arguments) { ["blockId"] = graph.SelectedRoot.BlockId.ToString("D") };
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_read", invalidTargetArguments, cancellationToken: token)).IsError == true);
-            await VerifySchemaTwoDiagramTools(client, native, project, instanceId, evidence, token);
+            if (sessionWide) await VerifySchemaTwoDiagramTools(client, native, processId, display, project, instanceId, evidence, token);
             string openingBytes = await File.ReadAllTextAsync(source, token);
             var opened = await client.CallToolAsync("kicad_diagram_open", arguments, cancellationToken: token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-open.json"), JsonSerializer.Serialize(opened), token);
@@ -204,6 +207,21 @@ public sealed partial class NativeSessionTests
             }
             void Name(string value, string title)
             { Key("a", control: true, title: title); foreach (char character in value) Key(character.ToString(), title: title); Key("Return", title: title); }
+            // Canvas clicks target diagram points through the editor's reported canvas geometry, so the canvas-edge
+            // drawing palette and the fitted view never shift them onto another element.
+            async Task ClickDiagram(double x, double y)
+            {
+                var at = await Read();
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                    clickFromLeft: (int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale),
+                    clickFromTop: (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale));
+            }
+            async Task ClickBlankCanvas()
+            {
+                var at = await Read();
+                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
+                    clickFromLeft: at.CanvasWindowX + (int)at.CanvasPixelWidth - 40, clickFromTop: at.CanvasWindowY + (int)at.CanvasPixelHeight - 40);
+            }
             var initial = await Wait(s => s.Ready && !s.Busy && s.Rendered);
             Assert.AreEqual(graph.SelectedRoot.BlockId.ToString("D"), initial.DiagramPath.Single().BlockId);
             Assert.AreEqual(openingBytes, await File.ReadAllTextAsync(source, token));
@@ -232,19 +250,19 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(before.ViewRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), state.GetProperty("viewRevision").GetString());
                 Assert.AreEqual(before.SourceToken, state.GetProperty("sourceToken").GetString());
                 Assert.AreEqual(3, state.GetProperty("views").GetArrayLength());
-                // Declared schema 2 editor, layout and realization fields are not produced yet; the observation
-                // keeps its earlier shape instead of reporting computed defaults such as sourceWritable=false.
-                static IEnumerable<string> Names(JsonElement element) => element.ValueKind switch
-                {
-                    JsonValueKind.Object => element.EnumerateObject().SelectMany(p => Names(p.Value).Prepend(p.Name)),
-                    JsonValueKind.Array => element.EnumerateArray().SelectMany(Names),
-                    _ => Enumerable.Empty<string>()
-                };
-                var observed = Names(state).ToHashSet(StringComparer.Ordinal);
-                Assert.IsTrue(observed.Contains("viewRevision"), "The observation names were not collected.");
-                foreach (string key in new[] { "storedSchemaVersion", "sourceWritable", "levelDraft", "levelViewports", "canvasTool",
-                    "selectedInterfaceId", "resolvedLayout", "domain", "direction", "presentation", "interfaceRealizations", "realization" })
-                    Assert.IsFalse(observed.Contains(key), "The observation reports undeclared schema 2 field " + key + ".");
+                // The schema 2 per-level editor (contract rbg-v2 section 9.1) reports its stored format, writability, level draft,
+                // tool and viewports, and each view reports the layout it actually rendered (section 9.2).
+                var editorState = state.GetProperty("editor");
+                Assert.AreEqual(2, editorState.GetProperty("storedSchemaVersion").GetInt32(), "The journey's saves stored schema 2.");
+                Assert.IsTrue(editorState.GetProperty("sourceWritable").GetBoolean());
+                Assert.AreEqual("select", editorState.GetProperty("canvasTool").GetString());
+                Assert.IsTrue(editorState.GetProperty("levelDraft").TryGetProperty("scope", out _));
+                Assert.IsTrue(editorState.GetProperty("levelViewports").GetArrayLength() >= 1);
+                var renderedLayout = state.GetProperty("views")[0].GetProperty("resolvedLayout");
+                Assert.AreEqual(state.GetProperty("views")[0].GetProperty("children").GetArrayLength(), renderedLayout.GetProperty("blocks").GetArrayLength());
+                Assert.IsTrue(renderedLayout.GetProperty("blocks").EnumerateArray().All(b => b.GetProperty("source").GetString() == "RPS_FALLBACK"),
+                    "This level has no stored layout, so every block uses the legacy grid.");
+                Assert.AreEqual("RPS_FALLBACK", renderedLayout.GetProperty("frameSource").GetString());
                 var images = payload.GetProperty("content").EnumerateArray().Where(c => c.GetProperty("type").GetString() == "image").ToArray();
                 Assert.AreEqual(3, images.Length);
                 for (int i = 0; i < images.Length; ++i)
@@ -315,7 +333,8 @@ public sealed partial class NativeSessionTests
                 await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-arrow-failure.png"), token);
                 // Explicit rendered recovery preserves the original failed assertion,
                 // then permits independent editing/save/recovery observations.
-                NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 750, clickFromTop: 570);
+                // The CPU is the second block of the root's legacy grid: (510, 110, 240, 145).
+                await ClickDiagram(630, 182);
                 await Wait(s => s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             }
             Key("Return"); await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
@@ -387,7 +406,7 @@ public sealed partial class NativeSessionTests
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-connection.png"), token);
             // Select blank canvas space to return the inspector to the current
             // diagram, rather than accidentally editing a similarly named block.
-            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 60, clickFromTop: 220);
+            await ClickBlankCanvas();
             await Wait(s => s.ConnectionDraft is null && s.Draft.Baseline.BlockId == fixture.Blocks["CPU"].BlockId.ToString("D"));
             Key("4", control: true); Type("Prefer the cooler enclosure side."); await Wait(s => s.Dirty); await Save();
             var annotatedBlock = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
@@ -1065,8 +1084,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
                 clickFromLeft: 118, clickFromTop: 45);
             await Wait(s => !s.Busy && s.DiagramPath.Count == 1);
-            NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true,
-                clickFromLeft: 20, clickFromTop: 250);
+            await ClickBlankCanvas();
             await Wait(s => !s.Busy && s.Draft.Baseline.RevisionId == mappedGraph.SelectedRoot.RevisionId.ToString("D"));
             Key("h", control: true); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false });
             Key("Down"); await Wait(s => !s.Busy && s.DiagramHistory is { Busy: false } h
@@ -1253,18 +1271,24 @@ public sealed partial class NativeSessionTests
             selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
             await RejectedSelection("reselected-target", "proposal_target_changed");
             Key("w", control: true);
-            await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
+            if (createdDiagram is not null)
+                await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
+            else
+            {
+                using var closed = CancellationTokenSource.CreateLinkedTokenSource(token); closed.CancelAfter(TimeSpan.FromSeconds(15));
+                while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closed.Token);
+            }
         }
         finally { Directory.Delete(stateRoot, true); }
         if (interactionFailures.Count != 0) throw new AggregateException("Native input failures were preserved; the remaining safe editor journey was exercised.", interactionFailures);
     }
 
-    /// <summary>Schema 2 through the real MCP server and native instance (contract rbg-v2 sections 2.4 and 8):
+    /// <summary>Schema 2 through the real MCP server and native instance (contract rbg-v2 sections 2.4, 8 and 12):
     /// an agent reads a schema 2 level's layout, realizations, domains and directions; a changed write
-    /// upgrades a version 1 file and reports it (R4); and the native editor of this build, which still
-    /// speaks schema 1, is never opened on a schema 2 document, so nothing can be dropped or written.</summary>
-    private static async Task VerifySchemaTwoDiagramTools(McpClient client, NativeClient native, string project, string instanceId,
-        string evidence, CancellationToken token)
+    /// upgrades a version 1 file and reports it (R4); and the native editor, which speaks schema 2, opens
+    /// such a document with every fact of the viewed level in its draft and writes nothing until a save.</summary>
+    private static async Task VerifySchemaTwoDiagramTools(McpClient client, NativeClient native, int processId, string display, string project,
+        string instanceId, string evidence, CancellationToken token)
     {
         var f = SchemaTwoFixture.Create(); var psu = f.Linked.Blocks["PSU"];
         string layered = Path.Combine(project, "system.schema-two.design.xml"), layeredXml = RecursiveBlockGraphXml.Write(f.Graph);
@@ -1346,19 +1370,42 @@ public sealed partial class NativeSessionTests
         var definedAfter = JsonSerializer.SerializeToElement(await client.CallToolAsync("kicad_diagram_read", definedTarget, cancellationToken: token)).GetProperty("structuredContent");
         Assert.AreEqual(2, definedAfter.GetProperty("storedSchemaVersion").GetInt32());
         Assert.AreEqual(definedResult.GetProperty("sourceToken").GetString(), definedAfter.GetProperty("sourceToken").GetString());
-        // The schema 1 native editor is never opened on a schema 2 document: nothing is shown, dropped or written.
+        // The native editor speaks schema 2 (contract rbg-v2 section 12): it opens a schema 2 document with its layout and
+        // realizations kept, and opening, observing and closing a clean window write nothing.
         foreach (var (path, documentId, bytes) in new[] { (layered, f.Graph.DocumentId, layeredXml), (upgradedPath, plain.DocumentId, upgradedXml) })
         {
             var open = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?>(target) { ["sourcePath"] = path,
                 ["documentId"] = documentId.ToString("D") }, cancellationToken: token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-schema-two-open-" + Path.GetFileNameWithoutExtension(path) + ".json"),
                 JsonSerializer.Serialize(open), token);
-            Assert.IsTrue(open.IsError == true, "A schema 1 editor must not open a schema 2 document.");
-            Assert.AreEqual("unsupported_diagram_file_request", JsonSerializer.SerializeToElement(open).GetProperty("structuredContent").GetProperty("code").GetString());
-            var closed = await Assert.ThrowsAsync<NativeApiException>(() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(
-                new() { DocumentId = documentId.ToString("D") }, token));
-            Assert.IsFalse(string.IsNullOrEmpty(closed.Message));
-            Assert.AreEqual(bytes, await File.ReadAllTextAsync(path, token));
+            Assert.IsFalse(open.IsError == true, "The schema 2 editor opens a schema 2 document.");
+            P.RecursiveDiagramEditorState state = new();
+            using (var ready = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                ready.CancelAfter(TimeSpan.FromSeconds(20));
+                while (true)
+                {
+                    state = await native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(new() { DocumentId = documentId.ToString("D") }, token);
+                    if (state.Ready && !state.Busy && state.Rendered) break;
+                    await Task.Delay(50, ready.Token);
+                }
+            }
+            Assert.AreEqual("", state.ErrorMessage); Assert.IsFalse(state.Dirty);
+            Assert.AreEqual(2U, state.StoredSchemaVersion); Assert.IsTrue(state.SourceWritable);
+            Assert.AreEqual(state.DiagramPath.Single().RevisionId, state.LevelDraft.Scope.Baseline.RevisionId);
+            var saved = RecursiveBlockGraphXml.Read(bytes);
+            // Every schema 2 fact of the viewed level reaches the editor's level draft unchanged.
+            var draftLocal = state.LevelDraft.Scope.LocalDiagram ?? new P.BlockLocalDiagramData();
+            var savedLocal = RecursiveBlockCodec.Encode(saved).Revisions.Single(r => r.Selection.RevisionId == saved.SelectedRoot.RevisionId.ToString("D")).LocalDiagram
+                ?? new P.BlockLocalDiagramData();
+            Assert.AreEqual(savedLocal, draftLocal);
+            NativeKeyboard.SchematicShortcut(display, processId, "w", "Structural diagram", true, false);
+            using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                closing.CancelAfter(TimeSpan.FromSeconds(15));
+                while (NativeKeyboard.HasWindow(display, processId, "Structural diagram")) await Task.Delay(50, closing.Token);
+            }
+            Assert.AreEqual(bytes, await File.ReadAllTextAsync(path, token), "Opening and closing a clean schema 2 window writes nothing.");
         }
     }
 
@@ -1583,9 +1630,378 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(state.CanvasDiagram.Children, "A new diagram level has no blocks yet.");
         Assert.AreEqual(0U, state.ResolvedCanvasChildren);
         CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(created.Path, token), "Opening never writes.");
+        Assert.IsEmpty(state.ShownRequirementFields, "A caption-only root shows no empty requirement boxes.");
+        await VerifyDrawingTools(client, native, processId, display, created, instanceId, evidence, token);
+    }
+
+    /// <summary>The first project of a native session runs the session-wide checks; later projects skip them.</summary>
+    private static bool FirstInSession(string evidence, string name)
+    {
+        try { using var marker = new FileStream(Path.Combine(evidence, name + ".first"), FileMode.CreateNew); return true; }
+        catch (IOException) { return false; }
+    }
+
+    /// <summary>Round A1 (owner decision n9f7cf92f32090daf) through the rendered editor, on the caption-only diagram an agent
+    /// just created: blocks, connections and ports are drawn with both the toolbar strip and the canvas-edge palette, which
+    /// always highlight the same tool; drawn elements start as their caption (owner decision n98a3f3c41084f0ed); moving,
+    /// resizing, removing, undo and redo change only the level draft; Save stores the layout in the level's format 2
+    /// presentation, Decline and cancelled edits write nothing, and the saved level reopens exactly.</summary>
+    private static async Task VerifyDrawingTools(McpClient client, NativeClient native, int processId, string display, CreatedDiagram created,
+        string instanceId, string evidence, CancellationToken token)
+    {
+        const string title = "Structural diagram";
+        var document = new P.ReadRecursiveDiagramEditor { DocumentId = created.DocumentId };
+        Task<P.RecursiveDiagramEditorState> Read() => native.InvokeAsync<P.ReadRecursiveDiagramEditor, P.RecursiveDiagramEditorState>(document, token);
+        async Task<P.RecursiveDiagramEditorState> Wait(string step, Func<P.RecursiveDiagramEditorState, bool> condition)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            P.RecursiveDiagramEditorState current = new();
+            try
+            {
+                while (true)
+                {
+                    current = await Read();
+                    if (!current.Busy && condition(current)) return current;
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-timeout-" + step + ".json"), SchematicJson.Formatter.Format(current), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The drawing step '" + step + "' did not reach its expected state; its state and screen are retained.");
+            }
+        }
+        void Key(string key, bool control = false, bool alt = false, string target = title) =>
+            NativeKeyboard.SchematicShortcut(display, processId, key, target, control, false, altKey: alt);
+        void Type(string value) { foreach (char character in value) Key(character.ToString()); }
+        void Click(int x, int y, string target = title) => NativeKeyboard.SchematicShortcut(display, processId, "click", target, false, true, clickFromLeft: x, clickFromTop: y);
+        (int X, int Y) Screen(P.RecursiveDiagramEditorState at, double x, double y) =>
+            ((int)Math.Round(at.CanvasWindowX + (x - at.CanvasOriginX) * at.CanvasScale), (int)Math.Round(at.CanvasWindowY + (y - at.CanvasOriginY) * at.CanvasScale));
+        async Task At(double x, double y) { var (px, py) = Screen(await Read(), x, y); Click(px, py); }
+        async Task Drag(double x, double y, double toX, double toY)
+        {
+            var at = await Read(); var from = Screen(at, x, y); var to = Screen(at, toX, toY);
+            NativeKeyboard.SchematicShortcut(display, processId, "drag", title, false, true, clickFromLeft: from.X, clickFromTop: from.Y, dragToLeft: to.X, dragToTop: to.Y);
+        }
+        P.DiagramControlRect Find(P.RecursiveDiagramEditorState at, string name) => at.Controls.Single(c => c.Name == name);
+        async Task Press(string name)
+        {
+            var control = Find(await Read(), name);
+            Assert.IsTrue(control.Shown && control.Enabled, name + " must be shown and enabled before it is pressed.");
+            Click(control.X + control.Width / 2, control.Y + control.Height / 2);
+        }
+        // Both entry points drive one tool: exactly the chosen strip button and palette button are highlighted.
+        bool Tool(P.RecursiveDiagramEditorState at, string tool, string strip, string palette) => at.CanvasTool == tool
+            && Find(at, strip).Active && Find(at, palette).Active
+            && at.Controls.Count(c => (c.Name.StartsWith("RecursiveTool", StringComparison.Ordinal) || c.Name.StartsWith("DiagramPalette", StringComparison.Ordinal)) && c.Active) == 2;
+        P.DiagramRectData Placement(P.RecursiveDiagramEditorState at, string block) =>
+            at.LevelDraft.Scope.LocalDiagram.Presentation.Blocks.Single(b => b.BlockId == block).Rect;
+        (double X, double Y) Centre(P.RecursiveDiagramEditorState at, string block)
+        {
+            var rect = Placement(at, block);
+            return (double.Parse(rect.X, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Width, System.Globalization.CultureInfo.InvariantCulture) / 2,
+                double.Parse(rect.Y, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Height, System.Globalization.CultureInfo.InvariantCulture) / 2);
+        }
+        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-" + name + ".png"), token);
+        async Task<JsonElement> Route(P.RecursiveDiagramEditorState at, string connection)
+        {
+            var observed = await client.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentId"] = created.DocumentId, ["expectedSourceToken"] = at.SourceToken,
+                ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "canvas", pixelWidth = 800, pixelHeight = 600 } }
+            }, cancellationToken: token);
+            Assert.IsFalse(observed.IsError == true, "The drawn level can be observed.");
+            var observedView = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), observedView.GetRawText(), token);
+            return observedView.GetProperty("resolvedLayout").GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == connection);
+        }
+        async Task ClickRoute(string connection)
+        {
+            var route = await Route(await Read(), connection);
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            var (a, b) = (points[0], points[1]);
+            await At((a.Item1 + b.Item1) / 2, (a.Item2 + b.Item2) / 2);
+        }
+        string root = created.Root.BlockId.ToString("D");
+
+        // The empty level: Select is the one active tool in both entry points; nothing is defined but the caption.
+        var start = await Wait("start", s => s.Ready && s.Rendered);
+        Assert.IsTrue(Tool(start, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+        Assert.IsTrue(start.PaletteShown); Assert.AreEqual(2U, start.StoredSchemaVersion); Assert.IsTrue(start.SourceWritable);
+        Assert.AreEqual(root, start.LevelDraft.Scope.Baseline.BlockId);
+        Assert.IsTrue(Find(start, "RecursiveAddRequirement").Shown, "One quiet way to add a requirement.");
+        Assert.IsFalse(Find(start, "RecursiveToolDelete").Enabled, "Nothing is selected that can be removed.");
+        await Capture("empty");
+
+        // Toolbar strip: Add block. Cancel first (Escape), then a blank caption is refused, then a caption is kept.
+        await Press("RecursiveToolAddBlock");
+        await Wait("strip-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+        await At(260, 200); await Wait("caption-open", s => s.CaptionEditor == "block");
+        await Capture("block-caption");
+        Key("Escape"); var cancelled = await Wait("caption-cancelled", s => s.CaptionEditor == "");
+        Assert.IsEmpty(cancelled.LevelDraft.NewChildren); Assert.IsFalse(cancelled.Dirty);
+        await At(260, 200); await Wait("caption-reopen", s => s.CaptionEditor == "block");
+        Key("Return"); var blank = await Wait("caption-blank", s => s.CaptionEditor == "block" && s.Notice.Contains("caption", StringComparison.Ordinal));
+        Assert.IsEmpty(blank.LevelDraft.NewChildren, "A blank caption adds nothing.");
+        Type("PSU"); Key("Return");
+        var psuAdded = await Wait("psu-added", s => s.LevelDraft.NewChildren.Count == 1 && s.CaptionEditor == "" && s.Dirty);
+        string psu = psuAdded.LevelDraft.NewChildren[0].Selection.BlockId;
+        Assert.AreEqual("PSU", psuAdded.Draft.Name, "The new block is selected in the inspector.");
+        Assert.AreEqual(("140", "130", "240", "140"), (Placement(psuAdded, psu).X, Placement(psuAdded, psu).Y, Placement(psuAdded, psu).Width, Placement(psuAdded, psu).Height),
+            "A new block is placed where the user clicked.");
+        Assert.AreEqual("select", psuAdded.CanvasTool);
+        Assert.IsEmpty(psuAdded.ShownRequirementFields, "A new block shows only its caption.");
+        Assert.IsFalse(Find(psuAdded, "RecursiveOpenDiagram").Shown); Assert.IsFalse(Find(psuAdded, "RecursiveFieldHistory0").Shown);
+        await Capture("block-added");
+
+        // Canvas-edge palette: Add block.
+        await Press("DiagramPaletteAddBlock");
+        await Wait("palette-add-block", s => Tool(s, "add-block", "RecursiveToolAddBlock", "DiagramPaletteAddBlock"));
+        await At(620, 200); await Wait("cpu-caption", s => s.CaptionEditor == "block");
+        Type("CPU"); Key("Return");
+        var cpuAdded = await Wait("cpu-added", s => s.LevelDraft.NewChildren.Count == 2 && s.CaptionEditor == "");
+        string cpu = cpuAdded.LevelDraft.NewChildren[1].Selection.BlockId;
+        CollectionAssert.AreEqual(new[] { psu, cpu }, cpuAdded.LevelDraft.Scope.Children.Select(c => c.BlockId).ToArray());
+
+        // Palette Connect: the hint is shared; clicking empty space is refused; finishing on the CPU asks for a caption.
+        await Press("DiagramPaletteConnect");
+        await Wait("palette-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+        var (psuX, psuY) = Centre(cpuAdded, psu); var (cpuX, cpuY) = Centre(cpuAdded, cpu);
+        await At(psuX, psuY);
+        await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        await At(430, 420); await Wait("connect-empty", s => s.Notice.Contains("Finish the connection", StringComparison.Ordinal)
+            && s.CanvasHint == "Click a port to finish connection");
+        await Capture("connect-hint");
+        await At(cpuX, cpuY); await Wait("connection-caption", s => s.CaptionEditor == "connection");
+        Type("Power"); Key("Return");
+        var powerAdded = await Wait("power-added", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+        var power = powerAdded.LevelDraft.NewConnections[0];
+        Assert.AreEqual("Power", power.Name); Assert.AreEqual("Power", powerAdded.ConnectionDraft.Name, "The new connection is selected.");
+        CollectionAssert.AreEqual(new[] { (P.DiagramEndpointKind.DekUnresolved, psu), (P.DiagramEndpointKind.DekUnresolved, cpu) },
+            power.Endpoints.Select(e => (e.Kind, e.BlockId)).ToArray());
+        Assert.IsEmpty(powerAdded.ShownRequirementFields, "A new connection shows only its caption.");
+        Assert.IsFalse(Find(powerAdded, "RecursiveConnectionEndpoints").Shown);
+
+        // Toolbar Place port: on the level boundary, then on the PSU's right edge.
+        await Press("RecursiveToolPlacePort");
+        await Wait("strip-port", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+        await At(80, 200); await Wait("boundary-caption", s => s.CaptionEditor == "port");
+        Type("DC input"); Key("Return");
+        var boundary = await Wait("boundary-added", s => s.LevelDraft.Scope.LocalDiagram.Interfaces.Count == 1 && s.CaptionEditor == "");
+        string dcInput = boundary.LevelDraft.Scope.LocalDiagram.Interfaces[0].Id;
+        var view = boundary.LevelDraft.Scope.LocalDiagram.Presentation;
+        Assert.AreEqual(("100", "90", "680", "220"), (view.Frame.X, view.Frame.Y, view.Frame.Width, view.Frame.Height), "The first boundary port stores the frame around the drawing.");
+        var dcPort = view.Ports.Single(p => p.BlockId == root && p.InterfaceId == dcInput);
+        Assert.AreEqual((P.DiagramPortSide.DpsLeft, "110"), (dcPort.Side, dcPort.Offset));
+        Assert.AreEqual(root, boundary.SelectedInterfaceOwnerId); Assert.AreEqual(dcInput, boundary.SelectedInterfaceId);
+        await Press("RecursiveToolPlacePort"); await At(380, 180); await Wait("child-port-caption", s => s.CaptionEditor == "port");
+        Type("Rail"); Key("Return");
+        var railAdded = await Wait("child-port-added", s => s.LevelDraft.NewChildren[0].Interfaces.Count == 1 && s.CaptionEditor == "");
+        string rail = railAdded.LevelDraft.NewChildren[0].Interfaces[0].Id;
+        var railPort = railAdded.LevelDraft.Scope.LocalDiagram.Presentation.Ports.Single(p => p.BlockId == psu && p.InterfaceId == rail);
+        Assert.AreEqual((P.DiagramPortSide.DpsRight, "50"), (railPort.Side, railPort.Offset));
+
+        // Toolbar Connect from the new port to the CPU block.
+        await Press("RecursiveToolConnect");
+        await Wait("strip-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+        await At(380, 180); await Wait("port-connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        await At(cpuX, cpuY); await Wait("feed-caption", s => s.CaptionEditor == "connection");
+        Type("Rail feed"); Key("Return");
+        var feedAdded = await Wait("feed-added", s => s.LevelDraft.NewConnections.Count == 2 && s.CaptionEditor == "");
+        var feed = feedAdded.LevelDraft.NewConnections[1];
+        Assert.AreEqual((P.DiagramEndpointKind.DekInterface, psu, rail), (feed.Endpoints[0].Kind, feed.Endpoints[0].BlockId, feed.Endpoints[0].InterfaceId));
+
+        // Palette Select, then move and resize the CPU; Escape also returns to Select.
+        await Press("DiagramPaletteSelect"); await Wait("palette-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+        await Drag(cpuX, cpuY + 30, cpuX + 60, cpuY + 90);
+        var moved = await Wait("moved", s => Placement(s, cpu).X == "560" && Placement(s, cpu).Y == "190");
+        Assert.AreEqual(cpu, moved.Draft.Baseline.BlockId, "Dragging a block selects and moves it.");
+        (string, string, string, string) Frame(P.RecursiveDiagramEditorState at)
+        {
+            var frame = at.LevelDraft.Scope.LocalDiagram.Presentation.Frame;
+            return (frame.X, frame.Y, frame.Width, frame.Height);
+        }
+        Assert.AreEqual(("100", "90", "740", "280"), Frame(moved), "The level frame grows to keep the moved block inside it.");
+        Assert.AreEqual("110", moved.LevelDraft.Scope.LocalDiagram.Presentation.Ports.Single(p => p.InterfaceId == dcInput).Offset,
+            "The boundary port stays where it was drawn.");
+        // Fit brings the whole drawing into view before the resize handle is used.
+        ulong beforeFit = moved.ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "click", title, false, true, clickFromLeft: 377, clickFromTop: 45);
+        await Wait("fitted", s => s.ViewRevision > beforeFit && s.Rendered);
+        await Capture("selected-handles");
+        await Drag(800, 330, 840, 360);
+        await Wait("resized", s => Placement(s, cpu).Width == "280" && Placement(s, cpu).Height == "170" && Frame(s) == ("100", "90", "780", "310"));
+        Key("z", control: true); await Wait("resize-undone", s => Placement(s, cpu).Width == "240" && Frame(s) == ("100", "90", "740", "280"));
+        Key("y", control: true); await Wait("resize-redone", s => Placement(s, cpu).Width == "280" && Frame(s) == ("100", "90", "780", "310"));
+        // Moving a port along its block's edge.
+        await Drag(380, 180, 380, 230);
+        var portMoved = await Wait("port-moved", s => s.LevelDraft.Scope.LocalDiagram.Presentation.Ports.Single(p => p.InterfaceId == rail).Offset == "100");
+        Assert.AreEqual(rail, portMoved.SelectedInterfaceId);
+
+        // Removing: the connection (Delete key), the CPU block (toolbar Delete), the used port (palette Delete, asked first).
+        await ClickRoute(power.Selection.ConnectionId); await Wait("power-selected", s => s.ConnectionDraft?.Baseline.ConnectionId == power.Selection.ConnectionId);
+        Key("Delete");
+        var powerRemoved = await Wait("power-removed", s => s.LevelDraft.NewConnections.Count == 1 && s.LastEffects.Count > 0);
+        Assert.AreEqual(P.LevelEditEffectKind.LeekConnectionRemoved, powerRemoved.LastEffects.Single().Kind);
+        StringAssert.Contains(powerRemoved.Notice, "Power");
+        await Press("DiagramPaletteUndo"); await Wait("power-restored", s => s.LevelDraft.NewConnections.Count == 2);
+        Key("y", control: true); await Wait("power-removed-again", s => s.LevelDraft.NewConnections.Count == 1);
+        Key("z", control: true); var nothing = await Wait("power-restored-again", s => s.LevelDraft.NewConnections.Count == 2);
+        await At(Centre(nothing, cpu).X, Centre(nothing, cpu).Y); await Wait("cpu-selected", s => s.Draft.Baseline.BlockId == cpu);
+        await Press("RecursiveToolDelete");
+        var cpuRemoved = await Wait("cpu-removed", s => s.LevelDraft.NewChildren.Count == 1 && s.LastEffects.Count > 0);
+        Assert.AreEqual(cpu, cpuRemoved.LastEffects.Single(e => e.Kind == P.LevelEditEffectKind.LeekChildRemoved).ObjectId);
+        Assert.AreEqual(2, cpuRemoved.LastEffects.Count(e => e.Kind == P.LevelEditEffectKind.LeekConnectionRemoved), "Both connections end on the CPU.");
+        Assert.IsEmpty(cpuRemoved.LevelDraft.NewConnections);
+        Key("z", control: true); await Wait("cpu-restored", s => s.LevelDraft.NewChildren.Count == 2 && s.LevelDraft.NewConnections.Count == 2);
+        var restored = await Read();
+        var (railX, railY) = (380.0, 230.0);
+        await At(railX, railY); await Wait("port-selected", s => s.SelectedInterfaceId == rail);
+        await Press("DiagramPalettePlacePort"); Key("Escape"); await Wait("escape-select", s => s.CanvasTool == "select");
+        await At(railX, railY); await Wait("port-reselected", s => s.SelectedInterfaceId == rail);
+        await Press("DiagramPaletteDelete");
+        using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            modal.CancelAfter(TimeSpan.FromSeconds(20));
+            while (!NativeKeyboard.HasWindow(display, processId, "Remove port")) await Task.Delay(50, modal.Token);
+        }
+        await Capture("remove-port-question");
+        Key("Escape", target: "Remove port");
+        var kept = await Wait("port-kept", s => !NativeKeyboard.HasWindow(display, processId, "Remove port"));
+        Assert.AreEqual(1, kept.LevelDraft.NewChildren[0].Interfaces.Count); Assert.AreEqual("", kept.ErrorCode);
+        await Press("DiagramPaletteDelete");
+        using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            modal.CancelAfter(TimeSpan.FromSeconds(20));
+            while (!NativeKeyboard.HasWindow(display, processId, "Remove port")) await Task.Delay(50, modal.Token);
+        }
+        Key("r", alt: true, target: "Remove port");
+        var portRemoved = await Wait("port-removed", s => s.LevelDraft.NewChildren[0].Interfaces.Count == 0 && s.LastEffects.Count > 0);
+        CollectionAssert.IsSubsetOf(new[] { P.LevelEditEffectKind.LeekInterfaceRemoved, P.LevelEditEffectKind.LeekConnectionRemoved },
+            portRemoved.LastEffects.Select(e => e.Kind).ToArray());
+        Key("z", control: true); await Wait("port-restored", s => s.LevelDraft.NewChildren[0].Interfaces.Count == 1 && s.LevelDraft.NewConnections.Count == 2);
+
+        // Renaming in place (F2), with undo.
+        await At(Centre(restored, cpu).X, Centre(restored, cpu).Y); await Wait("cpu-reselected", s => s.Draft.Baseline.BlockId == cpu);
+        Key("F2"); await Wait("rename-open", s => s.CaptionEditor == "rename");
+        Key("End"); Type(" module"); Key("Return");
+        await Wait("renamed", s => s.LevelDraft.NewChildren[1].Name == "CPU module");
+        Key("z", control: true); await Wait("rename-undone", s => s.LevelDraft.NewChildren[1].Name == "CPU");
+
+        // The inspector grows with definition: one quiet Add requirement, then the chosen box only.
+        await At(psuX, psuY); await Wait("psu-reselected", s => s.Draft.Baseline.BlockId == psu && s.ShownRequirementFields.Count == 0);
+        await Press("RecursiveAddRequirement");
+        using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+            while (count == 0);
+        }
+        Key("Home"); Key("Return");
+        await Wait("general-revealed", s => s.ShownRequirementFields.SequenceEqual(new[] { P.RequirementFieldKind.RfkGeneral }) && s.FocusedControl == "RecursiveRequirements0");
+        Type("Supply the CPU.");
+        await Wait("general-typed", s => s.Draft.Fields.General == "Supply the CPU.");
+        await Capture("inspector-requirement");
+        await ClickRoute(feed.Selection.ConnectionId); await Wait("feed-selected", s => s.ConnectionDraft?.Name == "Rail feed" && s.ShownRequirementFields.Count == 0);
+        Key("4", control: true); Type("Feed the CPU from the rail.");
+        await Wait("feed-comment", s => s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetKind == P.DiagramAnnotationTargetKind.DatConnection
+            && n.TargetId == feed.Selection.ConnectionId && n.Text == "Feed the CPU from the rail."));
+
+        // Save stores everything in one level revision with the layout in the level's format 2 presentation.
+        ulong saves = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var saved = await Wait("saved", s => s.CompletedSaveCount > saves && !s.Dirty);
+        Assert.AreEqual("", saved.ErrorMessage);
+        string savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var (graph, version) = RecursiveBlockGraphXml.ReadVersioned(savedXml);
+        Assert.AreEqual(2, version);
+        var top = graph.Inspect(graph.SelectedRoot);
+        CollectionAssert.AreEqual(new[] { "PSU", "CPU" }, top.Children.Select(c => graph.Inspect(c).Name).ToArray());
+        var psuSaved = graph.Inspect(top.Children[0]); var cpuSaved = graph.Inspect(top.Children[1]);
+        Assert.AreEqual("Supply the CPU.", graph.Requirements(psuSaved.Selection).Requirements.General);
+        Assert.AreEqual(DiagramRequirements.Empty, graph.Requirements(cpuSaved.Selection).Requirements, "The CPU is still only its caption.");
+        Assert.IsNull(cpuSaved.Diagram, "A caption-only block stores no diagram.");
+        Assert.AreEqual("Rail", psuSaved.LocalDiagram.Interfaces.Single().Name);
+        Assert.AreEqual("DC input", top.LocalDiagram.Interfaces.Single().Name);
+        var layout = top.LocalDiagram.Layout;
+        Assert.AreEqual(new DiagramRect(140, 130, 240, 140), layout.Blocks.Single(b => b.BlockId.ToString("D") == psu).Rect);
+        Assert.AreEqual(new DiagramRect(560, 190, 280, 170), layout.Blocks.Single(b => b.BlockId.ToString("D") == cpu).Rect);
+        Assert.AreEqual(new DiagramRect(100, 90, 780, 310), layout.Frame);
+        Assert.AreEqual(new DiagramPortPlacement(Guid.Parse(psu), Guid.Parse(rail), DiagramPortSide.Right, 100), layout.Ports.Single(p => p.InterfaceId.ToString("D") == rail));
+        var archive = graph.Connections(graph.SelectedRoot.BlockId);
+        CollectionAssert.AreEqual(new[] { "Power", "Rail feed" }, top.LocalDiagram.Connections.Select(c => archive.Inspect(c).Name).ToArray());
+        Assert.IsTrue(top.LocalDiagram.Connections.All(c => archive.Requirements(c).Requirements == DiagramRequirements.Empty));
+        Assert.AreEqual("Feed the CPU from the rail.", top.LocalDiagram.Notes.Single().Text);
+        await Capture("saved");
+
+        // Decline discards a later layout edit and writes nothing.
+        await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
+        await Wait("psu-moved", s => s.Dirty && Placement(s, psu).X == "160");
+        Key("d", alt: true); await Wait("declined", s => !s.Dirty && Placement(s, psu).X == "140");
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // A compact window keeps the toolbar strip and the palette usable; View hides and restores the palette.
+        ulong beforeCompact = (await Read()).ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
+        var compact = await Wait("compact", s => s.Rendered && s.ViewRevision > beforeCompact);
+        var palette = Find(compact, "DiagramPaletteUndo");
+        Assert.IsTrue(palette.Shown && palette.Y + palette.Height <= compact.CanvasWindowY + (int)compact.CanvasPixelHeight, "The palette fits the compact canvas.");
+        Assert.IsTrue(Find(compact, "RecursiveToolDelete").Shown, "The toolbar strip stays visible in a compact window.");
+        await Capture("compact");
+        await Press("RecursiveToolConnect"); await Wait("compact-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+        await Press("RecursiveToolSelect"); await Wait("compact-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
+        Key("v", alt: true);
+        using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+            while (count == 0);
+        }
+        Key("p");
+        var hidden = await Wait("palette-hidden", s => !s.PaletteShown && !Find(s, "DiagramPaletteSelect").Shown);
+        await Capture("palette-hidden");
+        Key("v", alt: true);
+        using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+            do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+            while (count == 0);
+        }
+        Key("p"); await Wait("palette-shown", s => s.PaletteShown && Find(s, "DiagramPaletteSelect").Shown);
+        _ = hidden;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
+        await Wait("expanded", s => s.Rendered);
+
+        // Save and reopen: the level comes back exactly as saved, from its stored layout.
+        Key("w", control: true);
+        using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Closing a clean window writes nothing.");
+        var reopened = await client.CallToolAsync("kicad_diagram_open", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+            ["repositoryRoot"] = created.RepositoryRoot, ["sourcePath"] = created.Path, ["documentId"] = created.DocumentId }, cancellationToken: token);
+        Assert.IsFalse(reopened.IsError == true);
+        var again = await Wait("reopened", s => s.Ready && s.Rendered);
+        Assert.AreEqual(saved.SourceToken, again.SourceToken);
+        var resolved = (await Route(again, top.LocalDiagram.Connections[1].ConnectionId.ToString("D")));
+        Assert.AreEqual("RPS_FALLBACK", resolved.GetProperty("source").GetString(), "No route was drawn; the connection path is computed.");
+        var reopenedView = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), token)).RootElement
+            .GetProperty("resolvedLayout");
+        Assert.IsTrue(reopenedView.GetProperty("blocks").EnumerateArray().All(b => b.GetProperty("source").GetString() == "RPS_PLACED"));
+        Assert.AreEqual("RPS_PLACED", reopenedView.GetProperty("frameSource").GetString());
+        Assert.AreEqual(0U, reopenedView.GetProperty("dormantEntries").GetUInt32());
+        await Capture("reopened");
         NativeKeyboard.SchematicShortcut(display, processId, "w", title, true, false);
-        await WindowState(false);
-        CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(created.Path, token), "Closing a clean window never writes.");
+        using (var closing = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            closing.CancelAfter(TimeSpan.FromSeconds(15));
+            while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
+        }
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)
@@ -1603,7 +2019,8 @@ public sealed partial class NativeSessionTests
         // This acceptance fixture has two visible peer blocks. Inspect only its
         // canvas, excluding inspector, toolbar, other windows and the cursor at Save.
         var start = new ProcessStartInfo("ffmpeg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string arg in new[] { "-nostdin", "-loglevel", "error", "-i", path, "-vf", "crop=1000:760:20:180",
+        // The crop starts right of the canvas-edge drawing palette, so only diagram content counts.
+        foreach (string arg in new[] { "-nostdin", "-loglevel", "error", "-i", path, "-vf", "crop=900:760:120:180",
             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1" }) start.ArgumentList.Add(arg);
         using var process = Process.Start(start)!;
         using var pixels = new MemoryStream();
@@ -1611,7 +2028,7 @@ public sealed partial class NativeSessionTests
         try
         {
             await process.WaitForExitAsync(token); await copy; Assert.AreEqual(0, process.ExitCode, await diagnostics);
-            byte[] image = pixels.ToArray(); Assert.AreEqual(1000 * 760 * 3, image.Length);
+            byte[] image = pixels.ToArray(); Assert.AreEqual(900 * 760 * 3, image.Length);
             int ink = CountCanvasInk(image);
             Assert.IsTrue(ink > 250, $"The known populated diagram rendered as a blank canvas after expansion ({ink} differing pixels).");
         }

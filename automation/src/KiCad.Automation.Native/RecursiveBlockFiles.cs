@@ -108,6 +108,22 @@ public static class RecursiveBlockFiles
         return (await PublishAsync(loaded, saved.Graph, token), saved, loaded.Snapshot.Graph);
     }
 
+    /// <summary>Saves one level draft as one guarded write (contract rbg-v2 action 12): nothing is written
+    /// when nothing changed, and a changed write of a version 1 file stores schema 2 (R4).</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, RecursiveLevelSaveResult Result)> SaveLevelAsync(string repositoryRoot, string path,
+        Guid documentId, string expectedContentSha256, BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath, RecursiveLevelDraft draft,
+        LevelRevisionIds ids, RequirementRevisionOrigin origin, IReadOnlyCollection<DiagramRequirementResolution>? resolutions, bool selectImplementation,
+        CancellationToken token = default)
+    {
+        var loaded = await Load(repositoryRoot, path, documentId, token);
+        if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the level draft and compare it with the latest version.");
+        token.ThrowIfCancellationRequested();
+        var saved = loaded.Snapshot.Graph.SaveLevelDraft(expectedRoot, blockPath, draft, ids, origin, resolutions, selectImplementation);
+        if (!saved.Changed) return (loaded.Snapshot, saved);
+        return (await PublishAsync(loaded, saved.Graph, token), saved);
+    }
+
     /// <summary>Checks a move against the exact observed file; never writes (contract rbg-v2 action 14).</summary>
     public static async Task<(RecursiveBlockFileSnapshot Snapshot, ReparentPreview Preview)> PrepareReparentAsync(string repositoryRoot, string path,
         Guid documentId, string expectedContentSha256, ReparentRequest request, CancellationToken token = default)

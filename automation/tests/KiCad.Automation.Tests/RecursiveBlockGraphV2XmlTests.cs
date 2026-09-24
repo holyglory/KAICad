@@ -212,7 +212,7 @@ public sealed class RecursiveBlockGraphV2XmlTests
             .Replace(DiagramConnectionArchiveXml.Namespace, DiagramConnectionArchiveXml.NamespaceV1, StringComparison.Ordinal)
             .Replace("version=\"2\"", "version=\"1\"", StringComparison.Ordinal);
         Assert.AreEqual("invalid_recursive_block_graph_xml", Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockGraphXml.Read(relabelled)).Code);
-        // The schema 1 protocol, which the native editor of this build speaks, cannot carry the same content.
+        // Schema 1 is no longer spoken on the wire at all (contract rbg-v2 section 2.3), so it cannot carry this content either.
         var graph = RecursiveBlockGraphXml.Read(v2);
         Assert.AreEqual("invalid_recursive_diagram_data", Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Encode(graph, 1)).Code);
         var data = RecursiveBlockCodec.Encode(graph); data.SchemaVersion = 1;

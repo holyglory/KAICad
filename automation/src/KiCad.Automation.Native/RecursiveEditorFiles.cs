@@ -6,28 +6,20 @@ using P = KiCad.Automation.Protocol.Diagrams;
 namespace KiCad.Automation.Native;
 
 /// <summary>Finite operations used by the native editor. Reads and history queries cannot
-/// save or activate; the separate save action requires the exact file, root and draft baseline.
-/// Request, document and graph schema versions move together (contract rbg-v2 section 2.3):
-/// schema 2 carries every implemented schema 2 fact; schema 1, which the native editor of this
-/// build still speaks, works only on documents without schema 2 content and is refused otherwise.
-/// That schema 1 acceptance is the interim bridge described at RecursiveBlockCodec.IsSupportedSchema.
-/// Every changed write stores schema 2 (R4), also for a schema 1 exchange, whose schema 1 result
-/// cannot carry the upgrade report.</summary>
+/// save or activate; the separate save actions require the exact file, root and draft baseline.
+/// Request, document and graph schema versions move together (contract rbg-v2 section 2.3): every
+/// request is schema 2 and carries every implemented schema 2 fact; other versions are refused before
+/// any file access. Every changed write stores schema 2 (R4).</summary>
 public static class RecursiveEditorFiles
 {
     public static async Task<P.RecursiveFileResult> ExecuteAsync(P.RecursiveFileRequest request, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        // Actions 11-13 and their payloads (level draft, edit and rebase) are declared for contract rbg-v2
-        // but not implemented yet: they fail closed here, before any file access, exactly like the
-        // unknown values they were before the declaration. Flat-diagram conversion (actions 17 and 18 and
-        // the migrate payload) is never implemented: legacy flat diagrams are discarded, not converted
-        // (owner decision n9af098253fec71da). The move actions 14 and 15, create and discover (16 and 19)
-        // and every schema 2 field of the diagram data are implemented for schema 2.
+        // Flat-diagram conversion (actions 17 and 18 and the migrate payload) is never implemented: legacy flat
+        // diagrams are discarded, not converted (owner decision n9af098253fec71da). It fails closed here, before
+        // any file access, exactly like the unknown values it was before the declaration.
         if (request is null || !RecursiveBlockCodec.IsSupportedSchema(request.SchemaVersion) || !Enum.IsDefined(request.Action)
-            || !Implemented(request.Action, request.SchemaVersion)
-            || request.LevelEdit is not null || request.SaveLevel is not null || request.RebaseLevel is not null || request.Migrate is not null
-            || (request.Create is not null || request.Discover is not null || request.Reparent is not null) && request.SchemaVersion < 2
+            || !Implemented(request.Action) || request.Migrate is not null
             || RecursiveBlockCodec.CarriesFieldBeyondSchema(request, request.SchemaVersion)
             || !request.Equals(P.RecursiveFileRequest.Parser.ParseJson(JsonFormatter.Default.Format(request))))
             throw Invalid("unsupported_diagram_file_request", "Use a supported typed recursive diagram request without unknown fields.");
@@ -37,6 +29,7 @@ public static class RecursiveEditorFiles
         if (request.Action is P.RecursiveFileAction.RfaCreateDiagram or P.RecursiveFileAction.RfaDiscoverDiagrams)
             return await RecursiveDiagramFiles.ExecuteAsync(request, token);
         bool move = request.Action is P.RecursiveFileAction.RfaPrepareReparent or P.RecursiveFileAction.RfaReparentBlock;
+        bool level = request.Action is P.RecursiveFileAction.RfaPrepareLevelEdit or P.RecursiveFileAction.RfaSaveLevel or P.RecursiveFileAction.RfaRebaseLevel;
         if (request.Action == P.RecursiveFileAction.RfaRead && (request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
             || request.Action == P.RecursiveFileAction.RfaBlockFieldHistory && request.Connection is not null
@@ -47,14 +40,17 @@ public static class RecursiveEditorFiles
             || request.Action != P.RecursiveFileAction.RfaCompareDiagramHistory && request.InspectedBlock is not null
             || request.Action != P.RecursiveFileAction.RfaPrepareDiagramRestoration && request.Restoration is not null
             || !move && request.Reparent is not null
+            || request.Action != P.RecursiveFileAction.RfaPrepareLevelEdit && request.LevelEdit is not null
+            || request.Action != P.RecursiveFileAction.RfaSaveLevel && request.SaveLevel is not null
+            || request.Action != P.RecursiveFileAction.RfaRebaseLevel && request.RebaseLevel is not null
+            || level && (request.Block is not null || request.Connection is not null || request.Field != P.RequirementFieldKind.RfkUnknown
+                || request.Offset != 0 || request.Limit != 0)
             || request.Create is not null || request.Discover is not null
             || move && (request.Reparent is null || request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0))
             throw Invalid("ambiguous_diagram_file_request", "Use only the targets and paging fields belonging to the selected read operation.");
         Guid document = Id(request.DocumentId);
-        if (schema < 2 && request.ExpectedSourceToken.Length == 64 && request.Action is P.RecursiveFileAction.RfaSaveBlock
-                or P.RecursiveFileAction.RfaSaveImplementation or P.RecursiveFileAction.RfaSaveConnection or P.RecursiveFileAction.RfaManageImplementation)
-            await RequireSchemaOneFile(request, document, token);
+        if (level) return await ExecuteLevelAsync(request, document, token);
         if (move)
         {
             if (request.ExpectedSourceToken.Length != 64)
@@ -115,12 +111,10 @@ public static class RecursiveEditorFiles
                     Id(save.NewRevisionId), Id(save.NewRequirementRevisionId), save.AncestorRevisionIds.Select(Id).ToImmutableArray(),
                     RecursiveBlockCodec.DecodeOrigin(save.Origin), token: token);
             var savedResult = Describe(saved, schema);
-            // The save summary is a schema 2 result field; a schema 1 exchange keeps its schema 1 shape.
-            if (schema >= 2) savedResult.SaveSummary = RecursiveBlockCodec.Summary(before, saved.Graph, outcome);
+            savedResult.SaveSummary = RecursiveBlockCodec.Summary(before, saved.Graph, outcome);
             return savedResult;
         }
         var loaded = await RecursiveBlockFiles.ReadAsync(request.RepositoryRoot, request.SourcePath, document, token);
-        if (schema < 2) RequireSchemaOneContent(loaded.Graph);
         if (request.Action == P.RecursiveFileAction.RfaRebaseRequirements)
         {
             if (request.Rebase?.Draft is null || request.Block is not null || request.Connection is not null
@@ -183,25 +177,47 @@ public static class RecursiveEditorFiles
         return result;
     }
 
-    private static bool Implemented(P.RecursiveFileAction action, uint schema) => action <= P.RecursiveFileAction.RfaPrepareDiagramRestoration
-        || schema >= 2 && action is P.RecursiveFileAction.RfaPrepareReparent or P.RecursiveFileAction.RfaReparentBlock
-            or P.RecursiveFileAction.RfaCreateDiagram or P.RecursiveFileAction.RfaDiscoverDiagrams;
+    private static bool Implemented(P.RecursiveFileAction action) =>
+        action is not (P.RecursiveFileAction.RfaPrepareMigration or P.RecursiveFileAction.RfaMigrateFlatDiagram);
 
-    /// <summary>A schema 1 writer (the native editor of this build) would drop schema 2 facts it cannot
-    /// represent; it may act only on the exact observed bytes, and only when they hold none.</summary>
-    private static async Task RequireSchemaOneFile(P.RecursiveFileRequest request, Guid document, CancellationToken token)
+    /// <summary>Actions 11-13 (contract rbg-v2 section 7): a removal is prepared against the exact observed
+    /// file and never writes; a level save writes only when something changed; a level rebase compares the
+    /// retained draft with the latest file and never writes.</summary>
+    private static async Task<P.RecursiveFileResult> ExecuteLevelAsync(P.RecursiveFileRequest request, Guid document, CancellationToken token)
     {
-        var observed = await RecursiveBlockFiles.ReadAsync(request.RepositoryRoot, request.SourcePath, document, token);
-        if (observed.ContentSha256 != request.ExpectedSourceToken)
-            throw Invalid("recursive_block_file_changed", "The saved design changed; retain the draft and reload its saved context.");
-        RequireSchemaOneContent(observed.Graph);
-    }
-
-    private static void RequireSchemaOneContent(RecursiveBlockGraph graph)
-    {
-        if (RecursiveBlockGraphXml.RequiredSchemaVersion(graph) > 1)
-            throw Invalid("unsupported_diagram_file_request", "This diagram holds schema 2 content (per-level layout, realizations, domains, directions or harness targets); "
-                + "open it with an editor that speaks diagram schema 2. Nothing was read into the editor or changed.");
+        if (request.Action == P.RecursiveFileAction.RfaSaveLevel)
+        {
+            if (request.SaveLevel is not { } save || request.ExpectedSourceToken.Length != 64)
+                throw Invalid("invalid_level_save_request", "A level save needs the exact observed file token, root, level path, draft, revision identities and origin.");
+            var (root, path, draft, ids, origin, resolutions, choose) = RecursiveBlockCodec.Decode(save, document);
+            var (snapshot, saved) = await RecursiveBlockFiles.SaveLevelAsync(request.RepositoryRoot, request.SourcePath, document, request.ExpectedSourceToken,
+                root, path, draft, ids, origin, resolutions, choose, token);
+            var result = Describe(snapshot, request.SchemaVersion);
+            result.SaveSummary = RecursiveBlockCodec.Summary(saved);
+            return result;
+        }
+        var loaded = await RecursiveBlockFiles.ReadAsync(request.RepositoryRoot, request.SourcePath, document, token);
+        if (request.Action == P.RecursiveFileAction.RfaPrepareLevelEdit)
+        {
+            if (request.LevelEdit is not { } edit || request.ExpectedSourceToken.Length != 64)
+                throw Invalid("invalid_level_edit_request", "A removal needs the exact observed file token, root, level path, draft and command.");
+            if (request.ExpectedSourceToken != loaded.ContentSha256)
+                throw Invalid("recursive_block_file_changed", "The design file changed; save or reload the level before removing anything.");
+            var (root, path, draft, command) = RecursiveBlockCodec.Decode(edit, document);
+            if (root != loaded.Graph.SelectedRoot)
+                throw Invalid("stale_root_revision", "The selected design changed; reload it before removing anything.");
+            var (next, effects) = RecursiveLevelEdits.Apply(loaded.Graph, path, draft, command);
+            return new P.RecursiveFileResult { Success = true, SourceToken = loaded.ContentSha256, LevelEdit = RecursiveBlockCodec.Encode(next, effects) };
+        }
+        if (request.RebaseLevel is not { } rebase)
+            throw Invalid("invalid_level_rebase_request", "Provide the retained level draft and any exact requirement resolutions.");
+        var (retained, choices) = RecursiveBlockCodec.Decode(rebase, document);
+        if (choices.Length != 0 && request.ExpectedSourceToken != loaded.ContentSha256)
+            throw Invalid("stale_requirement_resolution", "The saved design changed again; preserve the resolution and compare the latest version.");
+        var merge = RecursiveLevelMerge.Prepare(loaded.Graph, retained);
+        var comparison = Describe(loaded, request.SchemaVersion);
+        comparison.LevelMerge = RecursiveBlockCodec.Encode(merge, merge.Inspect(choices));
+        return comparison;
     }
 
     internal static P.RecursiveFileResult Describe(RecursiveBlockFileSnapshot loaded, uint schema)

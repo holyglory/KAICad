@@ -3,9 +3,13 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
+/// <summary>UpgradedFromSchemaVersion is 1 when a resumed publication is complete and its retained
+/// preimage shows that it moved a version 1 diagram file to version 2 (contract rbg-v2 R4 and section 8);
+/// tools report it next to the observation, so it is not repeated inside it.</summary>
 public sealed record RefinementInputRecoveryObservation(RefinementInputPublicationReceipt Receipt,
     RefinementRecoveryDisposition Disposition, PublicationFileObservation Current,
-    PublicationFileObservation? Staged, PublicationFileObservation? Retained);
+    PublicationFileObservation? Staged, PublicationFileObservation? Retained,
+    [property: System.Text.Json.Serialization.JsonIgnore] int UpgradedFromSchemaVersion = 0);
 
 /// <summary>Recover only an evidenced original-input publication. Native designs
 /// are unaffected; conflicting or unreadable preimages remain for explicit review.</summary>
@@ -20,6 +24,15 @@ public static class RefinementInputRecovery
 
     public static async Task<RefinementInputRecoveryObservation> ResumeAsync(string repositoryRoot, string designPath,
         Guid documentId, Guid inputId, string stateDirectory, CancellationToken token = default)
+    {
+        var observed = await ResumeCoreAsync(repositoryRoot, designPath, documentId, inputId, stateDirectory, token);
+        return observed.Disposition != RefinementRecoveryDisposition.CompletedPreviously ? observed
+            : observed with { UpgradedFromSchemaVersion = RecursiveBlockFiles.UpgradedFromRetained(observed.Retained, observed.Receipt.BeforeSha256,
+                observed.Current, observed.Receipt.AfterSha256) };
+    }
+
+    private static async Task<RefinementInputRecoveryObservation> ResumeCoreAsync(string repositoryRoot, string designPath,
+        Guid documentId, Guid inputId, string stateDirectory, CancellationToken token)
     {
         var store = new RefinementInputReceipts(stateDirectory);
         // A prepared intent has not attempted replacement. The normal record path

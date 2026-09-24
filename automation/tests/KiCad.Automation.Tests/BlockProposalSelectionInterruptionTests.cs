@@ -59,7 +59,7 @@ public sealed class BlockProposalSelectionInterruptionTests
             Assert.AreNotEqual(graph.SelectedRoot, selected.SelectedRoot);
             Assert.HasCount(1, selected.Proposals); Assert.AreEqual(f.Proposal.Candidate, selected.Inspect(selected.SelectedRoot).Children[0]);
             var again = await BlockProposalRecovery.ResumeAsync(root, source, graph.DocumentId, operation, state);
-            Assert.AreEqual(recovered.Receipt, again.Receipt); Assert.AreEqual(RecursiveBlockGraphXml.Write(selected), await File.ReadAllTextAsync(source));
+            Assert.AreEqual(recovered.Receipt, again.Receipt); Assert.AreEqual(RecursiveBlockGraphXml.Write(selected, 2), await File.ReadAllTextAsync(source));
         }
         finally { Directory.Delete(root, true); }
     }

@@ -104,21 +104,109 @@ message RecursiveDiagramEditorState {
   uint32 canvas_pixel_height = 26;
   BlockRevisionData canvas_diagram = 27;
   uint32 resolved_canvas_children = 28;
-  // Schema 2 per-level editor (contract rbg-v2 section 9.1). Declared at the
-  // Phase 2 freeze and not produced yet: the editor leaves 29-34 unset and the
-  // MCP diagram tools omit them until the per-level editor implements them.
+  // Schema 2 per-level editor (contract rbg-v2 section 9.1).
   // On-disk format of the open file (1 or 2).
   uint32 stored_schema_version = 29;
   // False disables Save with an explanation.
   bool source_writable = 30;
-  // The authoritative level draft; draft (13) mirrors its scope and
-  // connection_draft (14) remains only for member-path edits.
+  // The authoritative level draft. draft (13) is the selected block's draft
+  // within it (the level's own draft when the level or a note is selected, a
+  // mirror for a block drawn in this draft), and connection_draft (14) is the
+  // selected connection's draft (a mirror for a connection drawn in this draft).
   LevelDraftData level_draft = 31;
   // Session-only pan and zoom per level; never saved and never dirties a draft.
   repeated DiagramLevelViewportState level_viewports = 32;
   // "select", "add-block", "connect", "add-port", "note" or "pan".
   string canvas_tool = 33;
   string selected_interface_id = 34;
+  // Lane 2B drawing tools (Round A1). The canvas's top-left corner relative to
+  // the editor window, in pixels, so rendered input can target diagram points.
+  int32 canvas_window_x = 200;
+  int32 canvas_window_y = 201;
+  // Whether the canvas-edge drawing palette is shown (View > Drawing palette).
+  bool palette_shown = 202;
+  // The open in-place caption editor: "", "block", "connection", "port" or "rename".
+  string caption_editor = 203;
+  // The canvas hint shared by the toolbar strip and the palette, for example
+  // "Click a port to finish connection".
+  string canvas_hint = 204;
+  // The effects of the last removal, as the editor showed them.
+  repeated LevelEditEffectData last_effects = 205;
+  // The requirement fields the inspector shows for the selected element.
+  repeated RequirementFieldKind shown_requirement_fields = 206;
+  // The owner of selected_interface_id (the level itself or a child block).
+  string selected_interface_owner_id = 207;
+  // A non-modal notice, for example layout positions a rebase replaced.
+  string notice = 208;
+  // The drawing and inspector controls as rendered, for rendered-input journeys.
+  repeated DiagramControlRect controls = 209;
+  // The status bar text as shown, for example why Save is unavailable.
+  string status_text = 210;
+  // Whether a pointer drag on the canvas (a move, resize, port or note drag) is still in progress.
+  bool dragging = 211;
+  // Round A4 (owner decision n0b2a908b00e78823): what each block of the viewed level shows of its
+  // component choices on the canvas, as drawn. A caption-only block has no entry.
+  repeated DiagramCanvasBlockChips block_chips = 212;
+  // The facets the inspector's facet overview lists for the selected block, in facet order:
+  // "purpose", "type", "manufacturer", "family", "model", "orderable-part" or "package".
+  // Only facets that have a value are listed.
+  repeated string shown_facets = 213;
+  // The facet whose detail the inspector shows, or "" when only the overview is shown.
+  string facet_editor = 214;
+  // Why the facet detail's entry cannot be kept yet, as shown beside it; "" when it can.
+  string facet_notice = 215;
+}
+
+// One component-choice chip on a block, relative to the editor window, in pixels.
+message DiagramCanvasFacetChip {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (chosen) or DCSD_CANDIDATES (candidate).
+  DefinitionChoiceStateData state = 2;
+  // The chip text as drawn, for example "Type: linear regulator".
+  string text = 3;
+  DiagramControlRect rect = 4;
+}
+
+// A chosen or candidate facet shown only as its state mark beside the block's caption, because the block has no
+// room for a chip or a "+N more" chip. Relative to the editor window, in pixels.
+message DiagramCanvasChoiceMark {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (a check) or DCSD_CANDIDATES (a ring).
+  DefinitionChoiceStateData state = 2;
+  DiagramControlRect rect = 3;
+}
+
+// The chips a block shows on the canvas and its Review facets link.
+message DiagramCanvasBlockChips {
+  string block_id = 1;
+  repeated DiagramCanvasFacetChip chips = 2;
+  // Chosen or candidate facets without a drawn chip. The "+N more" chip or the state marks stand for them.
+  uint32 hidden_chips = 3;
+  // The Review facets link as drawn; shown is false when the block is too small for it.
+  DiagramControlRect review_facets = 4;
+  // The state marks drawn beside the caption when no chip fits the block; empty when chips are drawn.
+  repeated DiagramCanvasChoiceMark marks = 5;
+  // The "+N more" chip as drawn; absent when every chosen or candidate facet has a chip or a mark.
+  DiagramControlRect more = 6;
+  // The block's caption text as drawn (clipped to the block's content area).
+  DiagramControlRect caption = 7;
+}
+
+// One rendered control relative to the editor window, in pixels. active is the
+// highlighted state of a tool (the toolbar strip and the palette share one tool).
+message DiagramControlRect {
+  string name = 1;
+  int32 x = 2;
+  int32 y = 3;
+  int32 width = 4;
+  int32 height = 5;
+  bool shown = 6;
+  bool enabled = 7;
+  bool active = 8;
+  // The visible label of a button or one-click choice, as drawn (it may be a collapsed short label).
+  string label = 9;
 }
 
 // One diagram level's session viewport, in diagram units.

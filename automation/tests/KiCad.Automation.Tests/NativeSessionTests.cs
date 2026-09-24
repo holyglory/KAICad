@@ -54,9 +54,6 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeXmlComponentCreation")]
     public Task XmlComponentsAreCreatedAndRestoredThroughNativeHistory() => RunNativeSessions(NativeJourney.ComponentCreation);
 
-    [TestMethod, TestCategory("NativeStructuralEditor")]
-    public Task StructuralEditorUsesRealNativeControlsAndXmlFiles() => RunNativeSessions(NativeJourney.StructuralEditor);
-
     [TestMethod, TestCategory("NativeRecursiveEditor")]
     [DataRow("light")]
     [DataRow("dark")]
@@ -85,9 +82,6 @@ public sealed partial class NativeSessionTests
     [DataRow("dark")]
     public Task PerLevelCanvasEditsPersistLayout(string theme) => RunNativeSessions(NativeJourney.DiagramCanvas, theme);
 
-    [TestMethod, TestCategory("NativeStructuralMigration")]
-    public Task FlatStructureConvertsOnceIntoARootBlock() => RunNativeSessions(NativeJourney.StructuralMigration);
-
     [TestMethod, TestCategory("NativeXmlRebuild")]
     public Task DeletedNativeSheetsRebuildFromXmlWithoutLoss() => RunNativeSessions(NativeJourney.XmlRebuild);
 
@@ -97,8 +91,8 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCrash")]
     public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, StructuralEditor, RecursiveEditor, Simulation, PcbItems,
-        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, StructuralMigration, XmlRebuild, OwnershipSync, NativeCrash }
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -118,7 +112,6 @@ public sealed partial class NativeSessionTests
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
                 NativeJourney.ComponentCreation => "native-xml-component-creation",
-                NativeJourney.StructuralEditor => "native-structural-editor",
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
@@ -126,7 +119,6 @@ public sealed partial class NativeSessionTests
                 NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
                 NativeJourney.ConnectedRealization => "native-connected-realization",
                 NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
-                NativeJourney.StructuralMigration => "native-structural-migration",
                 NativeJourney.XmlRebuild => "native-xml-rebuild",
                 NativeJourney.OwnershipSync => "native-ownership-sync",
                 NativeJourney.NativeCrash => "native-crash",
@@ -163,8 +155,8 @@ public sealed partial class NativeSessionTests
         try
         {
             var displayStart = new ProcessStartInfo("Xvfb") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            string screen = journey is NativeJourney.StructuralEditor or NativeJourney.RecursiveEditor
-                or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas or NativeJourney.StructuralMigration
+            string screen = journey is NativeJourney.RecursiveEditor
+                or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
                 ? "1600x1150x24" : "1280x900x24";
             foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", screen, "-nolisten", "tcp" })
                 displayStart.ArgumentList.Add(arg);
@@ -278,7 +270,7 @@ public sealed partial class NativeSessionTests
                     Path.ChangeExtension(launched.Single(p => p.Id != target.Id).Project, ".kicad_sch"),
                     evidence, target.Id, target.RootId, deadline.Token);
                 if (journey is NativeJourney.PsuCpuSeed or NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
-                    or NativeJourney.StructuralMigration or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync
+                    or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync
                     or NativeJourney.NativeCrash)
                 {
                     // PSU/CPU journeys seed the shared frozen fixture on this native-created
@@ -457,18 +449,6 @@ public sealed partial class NativeSessionTests
                             await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-offscreen-failure.txt"), error.ToString(), deadline.Token);
                             Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
                         }
-                    }
-                    else if (journey == NativeJourney.StructuralEditor)
-                    {
-                        try
-                        {
-                            await VerifyStructuralEditor(client, opened.Document, focusProcessId, ":" + displayNumber,
-                                evidence, target.Id, deadline.Token);
-                            await VerifyStructuralProperties(client, focusProcessId, ":" + displayNumber,
-                                evidence, target.Id, deadline.Token);
-                        }
-                        catch (Exception error) when (!deadline.IsCancellationRequested)
-                        { synchronizationFailures.Add(error); await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-structural-failure.txt"), error.ToString(), deadline.Token); }
                     }
                     else if (journey == NativeJourney.RecursiveEditor)
                     {
@@ -903,7 +883,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync
                 or NativeJourney.NativeCrash => PsuCpuSeed.Sheets,
             NativeJourney.XmlRebuild => PsuCpuSeed.RootOnly,
-            NativeJourney.DiagramCanvas or NativeJourney.StructuralMigration => PsuCpuSeed.None,
+            NativeJourney.DiagramCanvas => PsuCpuSeed.None,
             _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
         };
         var context = await PsuCpuFixture.PrepareNativeAsync(client, emptyRoot, projectDirectory, seed, evidence, token);
@@ -912,7 +892,6 @@ public sealed partial class NativeSessionTests
             NativeJourney.PsuCpuComponentCreation => VerifyPsuCpuComponentCreation(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.ConnectedRealization => VerifyPsuCpuConnectedRealization(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
-            NativeJourney.StructuralMigration => VerifyStructuralMigration(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
             _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)

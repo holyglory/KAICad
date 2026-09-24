@@ -4,9 +4,13 @@ using KiCad.Automation.Model;
 namespace KiCad.Automation.Native;
 
 public enum BlockProposalRecoveryDisposition { ResumePrepared, ConfirmPublication, CompletedPreviously, NeedsReview }
+/// <summary>UpgradedFromSchemaVersion is 1 when a resumed publication is complete and its retained
+/// preimage shows that it moved a version 1 diagram file to version 2 (contract rbg-v2 R4 and section 8);
+/// tools report it next to the observation, so it is not repeated inside it.</summary>
 public sealed record BlockProposalRecoveryObservation(BlockProposalPublicationReceipt Receipt,
     BlockProposalRecoveryDisposition Disposition, PublicationFileObservation Current,
-    PublicationFileObservation? Staged, PublicationFileObservation? Retained);
+    PublicationFileObservation? Staged, PublicationFileObservation? Retained,
+    [property: System.Text.Json.Serialization.JsonIgnore] int UpgradedFromSchemaVersion = 0);
 
 /// <summary>Recover a candidate XML publication only from its durable receipt and
 /// exact file preimage/postimage evidence. Selection and proposal publication use
@@ -22,6 +26,15 @@ public static class BlockProposalRecovery
 
     public static async Task<BlockProposalRecoveryObservation> ResumeAsync(string repositoryRoot, string designPath,
         Guid documentId, Guid operationId, string stateDirectory, CancellationToken token = default)
+    {
+        var observed = await ResumeCoreAsync(repositoryRoot, designPath, documentId, operationId, stateDirectory, token);
+        return observed.Disposition != BlockProposalRecoveryDisposition.CompletedPreviously ? observed
+            : observed with { UpgradedFromSchemaVersion = RecursiveBlockFiles.UpgradedFromRetained(observed.Retained, observed.Receipt.BeforeSha256,
+                observed.Current, observed.Receipt.AfterSha256, observed.Receipt.CandidateXml) };
+    }
+
+    private static async Task<BlockProposalRecoveryObservation> ResumeCoreAsync(string repositoryRoot, string designPath,
+        Guid documentId, Guid operationId, string stateDirectory, CancellationToken token)
     {
         var store = new BlockProposalReceipts(stateDirectory);
         using var operation = store.AcquireOperation(operationId);

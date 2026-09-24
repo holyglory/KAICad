@@ -2,20 +2,24 @@
 #ifndef KICAD_RECURSIVE_DIAGRAM_FRAME_H
 #define KICAD_RECURSIVE_DIAGRAM_FRAME_H
 
+#include "recursive_diagram_canvas.h"
 #include <api/common/commands/recursive_diagram_commands.pb.h>
 #include <api/api_handler.h>
 #include <wx/frame.h>
 #include <wx/geometry.h>
 #include <wx/process.h>
 #include <wx/timer.h>
+#include <wx/weakref.h>
 #include <array>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 class wxButton;
+class wxToggleButton;
 class wxDC;
 class wxPanel;
 class wxStaticText;
@@ -23,12 +27,17 @@ class wxTextCtrl;
 class wxToolBar;
 class wxScrolledWindow;
 class wxChoice;
+class wxRadioButton;
+class wxSplitterWindow;
+class wxSizer;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
 class PANEL_DIAGRAM_HISTORY;
 class wxSimplebook;
 
-/** One native diagram level with revision-bound requirement drafts. XML validation
- * and publication remain in the compiled companion. No action invokes an agent. */
+/** One native diagram level with one level draft (contract rbg-v2 section 9.1): the level itself,
+ * its children and connections, and the blocks, connections and ports drawn into it are edited
+ * together and saved or declined together. XML validation and publication remain in the compiled
+ * companion. No action invokes an agent. */
 class RECURSIVE_DIAGRAM_FRAME : public wxFrame
 {
 public:
@@ -46,10 +55,14 @@ private:
     using SELECTION = kiapi::automation::diagrams::v1::BlockSelectionData;
     using REVISION = kiapi::automation::diagrams::v1::BlockRevisionData;
     using DRAFT = kiapi::automation::diagrams::v1::BlockDraftData;
+    using LINK_DRAFT = kiapi::automation::diagrams::v1::ConnectionDraftData;
+    using LEVEL = kiapi::automation::diagrams::v1::LevelDraftData;
     using REQUEST = kiapi::automation::diagrams::v1::RecursiveFileRequest;
+    using TOOL = RECURSIVE_DIAGRAM::TOOL;
 
     const REVISION* revision( const SELECTION& aSelection ) const;
     const kiapi::automation::diagrams::v1::RequirementRevisionData* requirements( const REVISION& aRevision ) const;
+    /// The saved revision of the viewed level (or its history or implementation preview).
     const REVISION* current() const;
     int version( const REVISION& aRevision ) const;
     bool findPath( const std::string& aBlockId, std::vector<SELECTION>& aPath ) const;
@@ -57,23 +70,66 @@ private:
     void execute( REQUEST aRequest );
     void drain();
     void completed( wxProcessEvent& aEvent );
+    void levelResult( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult );
+    void rebaseResult( const kiapi::automation::diagrams::v1::RecursiveFileResult& aResult );
     void refresh();
+
+    // The level draft.
+    const kiapi::automation::diagrams::v1::ConnectionRevisionData* savedConnection( const std::string& aConnectionId ) const;
+    DRAFT draftFor( const REVISION& aRevision ) const;
+    LINK_DRAFT connectionDraftFor( const kiapi::automation::diagrams::v1::ConnectionRevisionData& aConnection ) const;
+    void resetLevel();
+    bool levelChanged() const;
+    bool hasChanges() const;
+    void pushUndo();
+    void changed();
+    /// The requirement draft of the selected block (the level itself or a child), created on first edit.
+    DRAFT* editBlock( bool aCreate );
+    const DRAFT* selectedBlockDraft() const;
+    kiapi::automation::diagrams::v1::NewBlockOccurrenceData* newChild( const std::string& aBlockId );
+    const kiapi::automation::diagrams::v1::NewBlockOccurrenceData* newChild( const std::string& aBlockId ) const;
+    kiapi::automation::diagrams::v1::NewConnectionData* newConnection( const std::string& aConnectionId );
+    const kiapi::automation::diagrams::v1::NewConnectionData* newConnection( const std::string& aConnectionId ) const;
+    LINK_DRAFT* editConnection( bool aCreate );
+    const LINK_DRAFT* connectionDraft( const std::string& aConnectionId ) const;
+    kiapi::automation::diagrams::v1::RequirementFieldsData selectedFields() const;
+    kiapi::automation::diagrams::v1::RequirementFieldsData savedFields() const;
+    bool selectionIsNew() const;
+    std::string selectedName() const;
+    kiapi::automation::diagrams::v1::DiagramPresentationViewData* presentation();
+    RECURSIVE_DIAGRAM::LEVEL_LAYOUT layout( const REVISION* aScope, bool aWithDraft ) const;
+    void materialize();
+    void materializeFrame();
+    void encloseInFrame( const RECURSIVE_DIAGRAM::RECT& aRect );
+    /// Stores a route for a new connection whose computed path would run along another one (rule F4).
+    void routeNewConnection( const std::string& aConnectionId );
+    /// Keeps each stored channel route's offset when its ends moved since aBefore.
+    void followRoutes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore );
+
+    // Selection and navigation.
     void select( const std::string& aBlockId );
     void selectConnection( const std::string& aConnectionId );
-    const kiapi::automation::diagrams::v1::ConnectionRevisionData* connection( const std::string& aConnectionId ) const;
+    void selectPort( const std::string& aOwnerId, const std::string& aInterfaceId );
     void navigate( std::string aBlockId, bool aRemember = true );
     void chooseImplementation();
     void previewImplementation( const std::string& aStateId );
     void manageImplementation( kiapi::automation::diagrams::v1::ImplementationActionKind aAction, std::string aStateId );
     void reloadSaved();
     void updateImplementationLabel();
-    bool hasChanges() const;
     bool confirmChange();
-    void makeDraft( const REVISION& aRevision );
-    DRAFT draftFor( const REVISION& aRevision ) const;
+
+    // Inspector.
     void edit();
     void editComment();
     void fillComments();
+    void revealField( int aField );
+    /// Add requirement…: a requirement box that is not shown yet (owner decision n98a3f3c41084f0ed hides
+    /// empty requirement boxes until someone adds one).
+    void chooseRequirement();
+    /// Add detail…: a component-choice facet of the selected block that has no value yet (Round A4, owner
+    /// decision n0b2a908b00e78823). It sits beside Add requirement…, as the owner's A3 decision
+    /// nf53af9d74841b7d3 pairs "Add detail" and "Add requirement" so blocks and connections grow the same way.
+    void chooseDetail();
     void save();
     void decline();
     void history( int aField );
@@ -89,17 +145,76 @@ private:
     void closeDiagramHistory();
     void undo( bool aRedo );
     void close( wxCloseEvent& aEvent );
+
+    // Component choices (Round A4, owner decision n0b2a908b00e78823): chips on blocks, the inspector's
+    // facet overview and one facet's detail. Edits change the level draft only.
+    const kiapi::automation::diagrams::v1::BlockDefinitionData* selectedDefinition() const;
+    /// Stores one facet of the selected block in the level draft; nullptr clears it (unspecified).
+    void storeFacet( int aFacet, const kiapi::automation::diagrams::v1::DefinitionTextChoiceData* aChoice );
+    void fillFacets( bool aAvailable );
+    void fillFacetForm();
+    void showFacetFields();
+    void openFacet( int aFacet, bool aFocusState );
+    void closeFacet( bool aFocusRow );
+    void facetStateChanged();
+    void facetEdited();
+    void clearFacet();
+    void reviewFacets( const std::string& aBlockId );
+    bool facetFromForm( kiapi::automation::diagrams::v1::DefinitionTextChoiceData& aChoice, wxString& aProblem ) const;
+    bool facetHasFocus() const;
+    /// The detail's controls, in tab order.
+    std::vector<wxWindow*> facetControls() const;
+    int facetState() const;
+    int facetStrength() const;
+    void setFacetState( int aState );
+    void setFacetStrength( int aStrength );
+    /// Shows the strength choices' full labels when they fit the inspector's width in one row, and their short
+    /// labels otherwise, so the row collapses its labels before it wraps.
+    /// Returns whether a label changed, so the caller lays out the inspector again.
+    bool fitFacetLabels();
+    wxFont chipFont() const;
+    wxColour linkColour() const;
+    /// The chips of each drawn block of the viewed level, in canvas pixels.
+    std::vector<std::pair<std::string, RECURSIVE_DIAGRAM::BLOCK_CHIPS>> drawnChips() const;
+
+    // Drawing tools (Round A1: toolbar strip and canvas-edge palette).
+    void setTool( TOOL aTool );
+    bool drawingAvailable() const;
+    bool canDelete() const;
+    void removeSelection( bool aDetach = false );
+    void beginCaption( int aKind, const wxRect& aBox, const wxString& aValue );
+    void finishCaption( bool aCommit );
+    void commitNewBlock( const std::string& aCaption );
+    void commitNewConnection( const std::string& aCaption );
+    void commitNewPort( const std::string& aCaption );
+    void renameNew( const std::string& aCaption );
+
+    // Canvas.
     void paint( wxDC& aDC );
     void click( wxMouseEvent& aEvent );
+    void motion( wxMouseEvent& aEvent );
+    void release();
     bool canvasKey( wxKeyEvent& aEvent );
-    void moveNote( wxMouseEvent& aEvent );
-    void finishNoteDrag();
     wxRect noteRect( const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote, int aIndex ) const;
+    std::vector<RECURSIVE_DIAGRAM::RECT> noteBoxes( const google::protobuf::RepeatedPtrField<
+            kiapi::automation::diagrams::v1::DiagramAnnotationData>& aNotes ) const;
+    const google::protobuf::RepeatedPtrField<kiapi::automation::diagrams::v1::DiagramAnnotationData>& visibleNotes() const;
     void fit();
-    wxRect2DDouble diagramBounds() const;
-    wxRect nodeRect( int aIndex ) const;
-    wxPoint endpoint( const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aEndpoint, bool aFirst ) const;
-    std::array<wxPoint, 4> connectionPath( const kiapi::automation::diagrams::v1::ConnectionRevisionData& aConnection, int aEndpoint ) const;
+    /// The canvas width the edge palette covers; the diagram fits beside it.
+    int paletteReserve() const;
+    /// Whether the whole level, with its margin and frame port names, is in view beside the palette.
+    bool drawingFits() const;
+    /// Pixels the names of ports on the level frame need beyond the frame on each side.
+    struct LABEL_ROOM { int left = 0, top = 0, right = 0, bottom = 0; };
+    LABEL_ROOM labelRoom( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    wxPoint toScreen( const RECURSIVE_DIAGRAM::POINT& aPoint ) const;
+    wxRect toScreen( const RECURSIVE_DIAGRAM::RECT& aRect ) const;
+    RECURSIVE_DIAGRAM::POINT toDiagram( const wxPoint& aPoint ) const;
+    int handleAt( const wxPoint& aPoint ) const;
+    const RECURSIVE_DIAGRAM::PORT* portAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    std::string blockAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    std::string connectionAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    void placePaletteAndEditor();
 
     kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor m_request;
     kiapi::automation::diagrams::v1::RecursiveEditorDocument m_document;
@@ -107,13 +222,8 @@ private:
     DIALOG_DIAGRAM_FIELD_HISTORY* m_historyDialog = nullptr;
     wxEvtHandler m_historyEvents;
     kiapi::automation::diagrams::v1::FieldHistoryPageData m_historyContext;
-    DRAFT m_draft, m_savedDraft;
-    std::optional<REVISION> m_draftView;
-    kiapi::automation::diagrams::v1::ConnectionDraftData m_connectionDraft, m_savedConnectionDraft;
-    std::vector<kiapi::automation::diagrams::v1::ConnectionDraftData> m_connectionUndo, m_connectionRedo;
-    std::string m_connectionId;
-    std::optional<std::string> m_pendingConnection;
-    std::vector<DRAFT> m_undo, m_redo;
+    LEVEL m_level, m_savedLevel;
+    std::vector<LEVEL> m_undo, m_redo;
     std::vector<SELECTION> m_path;
     std::optional<SELECTION> m_preview;
     bool m_diagramHistoryOpen = false;
@@ -121,13 +231,29 @@ private:
     REQUEST m_failedHistoryRequest;
     std::string m_pendingImplementation;
     std::vector<std::string> m_back;
-    std::string m_selected, m_pendingScope, m_pendingSelected, m_errorCode, m_error;
+    std::string m_selected, m_connectionId, m_portOwner, m_portId;
+    std::string m_pendingScope, m_pendingSelected, m_errorCode, m_error, m_notice;
+    std::optional<std::string> m_pendingConnection;
     bool m_rememberNavigation = true, m_closeAfterSave = false;
     bool m_ready = false, m_dirty = false, m_rendered = false, m_updating = false, m_closing = false;
     uint64_t m_viewRevision = 0, m_saveCount = 0;
     uint64_t m_navigationInputRevision = 0;
     unsigned m_rebaseAttempts = 0;
-    wxPanel* m_canvas;
+    bool m_rebasing = false;
+    LEVEL m_sentLevel, m_removalBefore;
+    google::protobuf::RepeatedPtrField<kiapi::automation::diagrams::v1::LevelEditEffectData> m_lastEffects;
+    /// A plain window, not a panel: a panel would pass keyboard focus on to the palette it contains.
+    wxWindow* m_canvas;
+    RECURSIVE_DIAGRAM::TOOL_PALETTE* m_palette;
+    std::vector<std::pair<TOOL, wxToggleButton*>> m_strip;
+    wxButton* m_stripDelete;
+    bool m_paletteShown = true;
+    wxTextCtrl* m_caption;
+    int m_captionKind = 0;
+    RECURSIVE_DIAGRAM::POINT m_pendingPoint;
+    std::string m_pendingOwner;
+    std::optional<kiapi::automation::diagrams::v1::DiagramEndpointBindingData> m_connectFrom, m_connectTo;
+    wxPoint m_pointer;
     wxStaticText* m_breadcrumb;
     wxButton* m_implementation;
     wxButton* m_diagramHistory;
@@ -138,23 +264,56 @@ private:
     wxStaticText* m_endpointHeading;
     wxTextCtrl* m_endpoints;
     wxScrolledWindow* m_inspectorScroll;
+    wxSplitterWindow* m_splitter;
     wxTextCtrl* m_comments;
     wxStaticText* m_commentTargetStatus;
     wxChoice* m_commentChoice;
+    wxButton* m_addRequirement;
+    wxButton* m_addDetail;
+    wxStaticText* m_facetHeading;
+    std::array<RECURSIVE_DIAGRAM::FACET_ROW*, RECURSIVE_DIAGRAM::FACETS> m_facetRows;
+    wxSizer* m_facetDetail;
+    wxButton* m_facetBack;
+    wxStaticText* m_facetTitle;
+    /// One-click choices (Chosen, Candidate, Unknown) and (Information, Preference, Requirement).
+    std::array<wxRadioButton*, 3> m_facetStates;
+    wxStaticText* m_facetValueLabel;
+    wxTextCtrl* m_facetValue;
+    wxTextCtrl* m_facetCandidates;
+    wxTextCtrl* m_facetReason;
+    std::array<wxRadioButton*, 3> m_facetStrengths;
+    wxButton* m_facetClear;
+    wxStaticText* m_facetNotice;
+    /// The facet whose detail is open (-1 for none) and the block it belongs to.
+    int m_facet = -1;
+    std::string m_facetOwner;
+    /// The detail holds an entry that is not in the draft because it cannot be kept yet, and why.
+    bool m_facetTouched = false;
+    wxString m_facetProblem;
     std::vector<std::string> m_commentIds;
     std::string m_commentId;
     bool m_newComment = false;
-    bool m_noteMode = false, m_draggingNote = false;
-    DRAFT m_noteDragBefore;
-    wxPoint m_noteDragStart;
+    TOOL m_tool = TOOL::SELECT;
+    enum class DRAG { NONE, NOTE, MOVE, RESIZE, PORT, CONNECT };
+    DRAG m_drag = DRAG::NONE;
+    LEVEL m_dragBefore;
+    wxPoint m_dragStart;
+    RECURSIVE_DIAGRAM::RECT m_dragRect;
+    int m_dragHandle = -1;
+    bool m_dragMoved = false;
     double m_noteStartX = 0, m_noteStartY = 0;
+    /// Requirement fields the user asked to add on an element whose fields are still empty.
+    std::map<std::string, std::array<bool, 3>> m_revealed;
     wxButton* m_openDiagram;
     wxButton* m_save;
     wxButton* m_decline;
     std::array<wxTextCtrl*, 3> m_fields;
     std::array<wxButton*, 3> m_history;
+    std::array<wxSizer*, 3> m_fieldHeadings;
     wxToolBar* m_toolbar;
     double m_scale = 1.0;
+    /// The view is the one fit() chose, not a restored per-level or history view.
+    bool m_fitted = false;
     wxPoint2DDouble m_origin{ 0, 0 };
     struct VIEW { double scale; wxPoint2DDouble origin; std::string selected; };
     std::optional<VIEW> m_historyView;
@@ -163,6 +322,30 @@ private:
     wxTimer m_ioTimer;
     long m_pid = 0;
     std::string m_stdout, m_stderr;
+};
+
+/** Serves the per-level diagram editor's native API commands for one project manager.
+ * It opens, reads and observes the diagram windows it created, nothing else. */
+class RECURSIVE_DIAGRAM_CONTROL : public API_HANDLER
+{
+public:
+    explicit RECURSIVE_DIAGRAM_CONTROL( wxWindow* aParent );
+    ~RECURSIVE_DIAGRAM_CONTROL() override;
+
+    /// Ask every open diagram window to close; false when one of them stays open.
+    bool CloseEditors();
+
+private:
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramEditorState> open(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::OpenRecursiveDiagramEditor>& aCtx );
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramEditorState> read(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ReadRecursiveDiagramEditor>& aCtx );
+    HANDLER_RESULT<kiapi::automation::diagrams::v1::RecursiveDiagramObservation> observe(
+        const HANDLER_CONTEXT<kiapi::automation::diagrams::v1::ObserveRecursiveDiagramEditor>& aCtx );
+    RECURSIVE_DIAGRAM_FRAME* openEditor( const std::string& aDocumentId ) const;
+
+    wxWindow* m_parent;
+    std::vector<wxWeakRef<RECURSIVE_DIAGRAM_FRAME>> m_editors;
 };
 
 #endif

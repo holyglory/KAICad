@@ -1,0 +1,282 @@
+using System.Collections.Immutable;
+
+namespace KiCad.Automation.Model;
+
+public enum LevelEditCommandKind { RemoveChild, RemoveConnection, RemoveInterface }
+
+/// <summary>A removal inside one level draft (contract rbg-v2 section 4.7). BlockId names the removed
+/// child, or the owner of the removed interface (the level itself or one of its children).</summary>
+public sealed record LevelEditCommand(LevelEditCommandKind Kind, Guid? BlockId, Guid? ConnectionId, Guid? InterfaceId,
+    bool DetachConnections, RequirementRevisionOrigin Origin);
+
+/// <summary>The one implementation of the removal cascade for level drafts (contract rbg-v2 section 4.7).
+/// It never writes: it returns the changed draft and every effect so the editor can show them and undo
+/// by restoring its previous draft. Nothing is inferred or retargeted: notes on removed targets become
+/// unresolved, realization records lose the removed targets, and layout entries of removed objects go.</summary>
+public static class RecursiveLevelEdits
+{
+    public static (RecursiveLevelDraft Draft, ImmutableArray<LevelEditEffect> Effects) Apply(RecursiveBlockGraph graph,
+        ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft, LevelEditCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        if (draft?.Scope?.Baseline is null || draft.ChildDrafts.IsDefault || draft.ConnectionDrafts.IsDefault || draft.NewChildren.IsDefault
+            || draft.NewConnections.IsDefault || command?.Origin is null || !Enum.IsDefined(command.Kind))
+            throw RecursiveBlockGraph.Level("Provide the complete level draft and one supported removal with its origin.");
+        command.Origin.Validate();
+        if (path.IsDefaultOrEmpty || path[0] != graph.SelectedRoot || path[^1].BlockId != draft.Scope.Baseline.BlockId)
+            throw RecursiveBlockGraph.Level("A removal names the exact selected path of the level it edits.");
+        for (int i = 0; i + 1 < path.Length; ++i)
+            if (!graph.Inspect(path[i]).Children.Contains(path[i + 1]))
+                throw RecursiveBlockGraph.Level("The level path is not part of the selected design.");
+        _ = graph.Inspect(draft.Scope.Baseline);
+        var level = new Level(graph, draft);
+        switch (command.Kind)
+        {
+            case LevelEditCommandKind.RemoveChild:
+                if (command.BlockId is not { } block || command.ConnectionId is not null || command.InterfaceId is not null
+                    || !draft.Scope.Children.Any(c => c.BlockId == block))
+                    throw Missing("The block to remove is not on this diagram level.");
+                level.RemoveChild(block, command.Origin);
+                break;
+            case LevelEditCommandKind.RemoveConnection:
+                if (command.ConnectionId is not { } connection || command.BlockId is not null || command.InterfaceId is not null
+                    || !draft.Scope.LocalDiagram.Connections.Any(c => c.ConnectionId == connection))
+                    throw Missing("The connection to remove is not a connection of this diagram level.");
+                level.RemoveConnections([connection], command.Origin);
+                break;
+            default:
+                if (command.BlockId is not { } owner || command.InterfaceId is not { } boundary || command.ConnectionId is not null)
+                    throw Missing("Name the block and the interface to remove.");
+                level.RemoveInterface(path, owner, boundary, command.DetachConnections, command.Origin);
+                break;
+        }
+        return (level.Result(), RecursiveLevelCascade.Ordered(level.Effects));
+    }
+
+    private static AutomationException Missing(string message) => new("level_edit_target_missing", message);
+
+    /// <summary>Mutable working copy of one level draft while a single removal cascades through it.</summary>
+    private sealed class Level(RecursiveBlockGraph graph, RecursiveLevelDraft draft)
+    {
+        private readonly Guid _scope = draft.Scope.Baseline.BlockId;
+        private readonly DiagramConnectionArchive? _archive = graph.ConnectionArchives.SingleOrDefault(a => a.OwnerBlockId == draft.Scope.Baseline.BlockId);
+        private ImmutableArray<BlockSelection> _children = draft.Scope.Children;
+        private BlockLocalDiagram _local = draft.Scope.LocalDiagram;
+        private readonly bool _hadDiagram = draft.Scope.Diagram is not null;
+        private readonly List<RecursiveBlockDraft> _childDrafts = [.. draft.ChildDrafts];
+        private readonly List<DiagramConnectionDraft> _connectionDrafts = [.. draft.ConnectionDrafts];
+        private readonly List<NewBlockOccurrence> _newChildren = [.. draft.NewChildren];
+        private readonly List<NewConnectionOccurrence> _newConnections = [.. draft.NewConnections];
+        public List<LevelEditEffect> Effects { get; } = [];
+
+        public RecursiveLevelDraft Result()
+        {
+            var presentation = _local.Presentation is { IsEmpty: true } ? null : _local.Presentation;
+            BlockLocalDiagram? diagram = _local with { Presentation = presentation };
+            if (!_hadDiagram && diagram.Interfaces.IsEmpty && diagram.Connections.IsEmpty && diagram.Notes.IsEmpty && presentation is null
+                && diagram.Realizations.IsEmpty) diagram = null;
+            return new(draft.Scope with { Children = _children, Diagram = diagram }, [.. _childDrafts], [.. _connectionDrafts],
+                [.. _newChildren], [.. _newConnections]);
+        }
+
+        /// <summary>The current endpoints of a root connection and all of its members as this draft sees them.</summary>
+        private IEnumerable<(Guid Connection, DiagramEndpointBinding Endpoint)> Endpoints(ConnectionSelection root)
+        {
+            if (_newConnections.FirstOrDefault(c => c.Selection == root) is { } added)
+                return added.Endpoints.Select(e => (root.ConnectionId, e));
+            if (_archive is null) return [];
+            var edited = _connectionDrafts.FirstOrDefault(c => c.Baseline == root);
+            return _archive.Walk([root]).SelectMany(member =>
+                (member == root && edited is not null ? edited.Endpoints : _archive.Inspect(member).Endpoints).Select(e => (member.ConnectionId, e)));
+        }
+
+        /// <summary>Every connection identity in the tree of this root (the root and its members).</summary>
+        private IEnumerable<Guid> Tree(ConnectionSelection root) =>
+            _newConnections.Any(c => c.Selection == root) || _archive is null ? [root.ConnectionId] : _archive.Walk([root]).Select(c => c.ConnectionId);
+
+        private string ConnectionName(ConnectionSelection root) =>
+            _newConnections.FirstOrDefault(c => c.Selection == root)?.Name ?? _connectionDrafts.FirstOrDefault(c => c.Baseline == root)?.Name
+                ?? _archive?.Inspect(root).Name ?? root.ConnectionId.ToString("D");
+
+        private string BlockName(Guid block) =>
+            _newChildren.FirstOrDefault(c => c.Selection.BlockId == block)?.Name ?? _childDrafts.FirstOrDefault(c => c.Baseline.BlockId == block)?.Name
+                ?? graph.Inspect(_children.Single(c => c.BlockId == block)).Name;
+
+        public void RemoveChild(Guid block, RequirementRevisionOrigin origin)
+        {
+            Effects.Add(new(LevelEditEffectKind.ChildRemoved, block, _scope, BlockName(block)));
+            var attached = _local.Connections.Where(root => Endpoints(root).Any(e => e.Endpoint.BlockId == block)).Select(r => r.ConnectionId).ToList();
+            _children = [.. _children.Where(c => c.BlockId != block)];
+            _childDrafts.RemoveAll(c => c.Baseline.BlockId == block);
+            _newChildren.RemoveAll(c => c.Selection.BlockId == block);
+            Cascade(block, attached, origin, t => t.Kind == InterfaceRealizationTargetKind.ChildInterface && t.BlockId == block);
+            var view = _local.Layout;
+            foreach (var placement in view.BlockPlacements.Where(b => b.BlockId == block))
+                Effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, placement.BlockId, _scope, DiagramPresentationView.Key(placement)));
+            foreach (var port in view.PortPlacements.Where(p => p.BlockId == block))
+                Effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, port.InterfaceId, _scope, DiagramPresentationView.Key(port)));
+            if (_local.Presentation is not null)
+                _local = _local with { Presentation = view with { Blocks = [.. view.BlockPlacements.Where(b => b.BlockId != block)],
+                    Ports = [.. view.PortPlacements.Where(p => p.BlockId != block)] } };
+        }
+
+        public void RemoveConnections(IReadOnlyCollection<Guid> roots, RequirementRevisionOrigin origin) =>
+            Cascade(null, roots, origin, _ => false);
+
+        /// <summary>Steps 2-5 of the cascade for the removed block (if any) and root connections.</summary>
+        private void Cascade(Guid? block, IReadOnlyCollection<Guid> roots, RequirementRevisionOrigin origin, Func<InterfaceRealizationTarget, bool> blockTarget)
+        {
+            var removedConnections = new HashSet<Guid>();
+            foreach (var root in _local.Connections.Where(c => roots.Contains(c.ConnectionId)).ToList())
+            {
+                Effects.Add(new(LevelEditEffectKind.ConnectionRemoved, root.ConnectionId, _scope, ConnectionName(root)));
+                removedConnections.UnionWith(Tree(root));
+                _connectionDrafts.RemoveAll(c => c.Baseline == root);
+                _newConnections.RemoveAll(c => c.Selection == root);
+            }
+            var notes = _local.Notes.Select(note =>
+            {
+                bool removed = note.Target.UnresolvedReason is null && note.Target.TargetId is { } target
+                    && (note.Target.Kind == DiagramAnnotationTargetKind.Block && target == block
+                        || note.Target.Kind == DiagramAnnotationTargetKind.Connection && removedConnections.Contains(target));
+                if (!removed) return note;
+                Effects.Add(new(LevelEditEffectKind.AnnotationUnresolved, note.Id, _scope, RecursiveLevelCascade.TargetRemoved));
+                return note with { Target = note.Target with { UnresolvedReason = RecursiveLevelCascade.TargetRemoved }, Origin = origin };
+            }).ToImmutableArray();
+            bool Removed(InterfaceRealizationTarget t) => blockTarget(t)
+                || t.Kind == InterfaceRealizationTargetKind.LocalConnection && removedConnections.Contains(t.ConnectionId!.Value);
+            var realizations = RemoveTargets(Removed);
+            var view = _local.Layout;
+            foreach (var route in view.ConnectionRoutes.Where(r => removedConnections.Contains(r.ConnectionId)))
+                Effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, route.ConnectionId, _scope, DiagramPresentationView.Key(route)));
+            _local = _local with
+            {
+                Connections = [.. _local.Connections.Where(c => !roots.Contains(c.ConnectionId))],
+                Annotations = _local.Annotations.IsDefault ? _local.Annotations : notes,
+                InterfaceRealizations = realizations,
+                Presentation = _local.Presentation is null ? null : view with { Routes = [.. view.ConnectionRoutes.Where(r => !removedConnections.Contains(r.ConnectionId))] }
+            };
+        }
+
+        /// <summary>Step 4: removes realization targets and downgrades the records that lose them.</summary>
+        private ImmutableArray<InterfaceRealization> RemoveTargets(Func<InterfaceRealizationTarget, bool> removed)
+        {
+            if (_local.InterfaceRealizations.IsDefault) return _local.InterfaceRealizations;
+            return [.. _local.InterfaceRealizations.Select(record =>
+            {
+                var kept = record.TargetList.Where(t => !removed(t)).ToImmutableArray();
+                if (kept.Length == record.TargetList.Length) return record;
+                foreach (var target in record.TargetList.Where(removed))
+                    Effects.Add(new(LevelEditEffectKind.RealizationTargetRemoved, record.InterfaceId, _scope, Describe(target)));
+                var next = kept.IsEmpty
+                    ? record with { State = DiagramRealizationState.Unknown, Targets = [], UnresolvedReason = RecursiveLevelCascade.RealizingElementRemoved }
+                    : record.State == DiagramRealizationState.Resolved
+                        ? record with { State = DiagramRealizationState.Partial, Targets = kept, UnresolvedReason = RecursiveLevelCascade.RealizingElementRemoved }
+                        : record with { Targets = kept };
+                if (next.State != record.State)
+                    Effects.Add(new(LevelEditEffectKind.RealizationStateChanged, record.InterfaceId, _scope, record.State + " -> " + next.State));
+                return next;
+            })];
+        }
+
+        public void RemoveInterface(ImmutableArray<BlockSelection> path, Guid owner, Guid boundary, bool detach, RequirementRevisionOrigin origin)
+        {
+            var uses = new List<AutomationErrorDetail>();
+            string name;
+            if (owner == _scope)
+            {
+                name = _local.Interfaces.FirstOrDefault(i => i.Id == boundary)?.Name
+                    ?? throw Missing("The interface to remove is not on this level's boundary.");
+                // The parent level still uses this boundary: the user detaches it there first.
+                if (path.Length >= 2)
+                {
+                    var parent = graph.Inspect(path[^2]);
+                    if (!parent.LocalDiagram.Connections.IsEmpty)
+                    {
+                        var archive = graph.Connections(parent.Selection.BlockId);
+                        foreach (var link in archive.Walk(parent.LocalDiagram.Connections).Select(archive.Inspect))
+                            if (link.Endpoints.Any(e => e.BlockId == owner && e.InterfaceId == boundary))
+                                uses.Add(new("connection", parent.Selection.BlockId, link.Selection.ConnectionId,
+                                    $"Connection '{link.Name}' of the containing level uses interface '{name}'."));
+                    }
+                    foreach (var record in parent.LocalDiagram.Realizations)
+                        if (record.TargetList.Any(t => t.Kind == InterfaceRealizationTargetKind.ChildInterface && t.BlockId == owner && t.InterfaceId == boundary))
+                            uses.Add(new("interface_realization", parent.Selection.BlockId, record.InterfaceId,
+                                $"The containing level's realization of interface {record.InterfaceId:D} uses interface '{name}'."));
+                    if (uses.Count != 0)
+                        throw new AutomationException("boundary_interface_in_use",
+                            "The containing level still uses this interface; detach it there first. Nothing was changed.", uses);
+                }
+            }
+            else
+            {
+                if (!_children.Any(c => c.BlockId == owner)) throw Missing("The interface owner is not on this diagram level.");
+                var added = _newChildren.FirstOrDefault(c => c.Selection.BlockId == owner);
+                var pinned = _children.Single(c => c.BlockId == owner);
+                var edited = _childDrafts.FirstOrDefault(c => c.Baseline.BlockId == owner);
+                var interfaces = added?.Interfaces ?? edited?.LocalDiagram.Interfaces ?? graph.Inspect(pinned).LocalDiagram.Interfaces;
+                name = interfaces.FirstOrDefault(i => i.Id == boundary)?.Name ?? throw Missing("The interface to remove is not on that block's boundary.");
+                if (added is null)
+                {
+                    // The child's own diagram still uses its boundary: detach inside the child first.
+                    var inner = graph.Inspect(pinned);
+                    if (!inner.LocalDiagram.Connections.IsEmpty)
+                    {
+                        var archive = graph.Connections(owner);
+                        foreach (var link in archive.Walk(inner.LocalDiagram.Connections).Select(archive.Inspect))
+                            if (link.Endpoints.Any(e => e.BlockId == owner && e.InterfaceId == boundary))
+                                uses.Add(new("connection", owner, link.Selection.ConnectionId,
+                                    $"Connection '{link.Name}' inside '{inner.Name}' uses interface '{name}'."));
+                    }
+                    if (uses.Count != 0)
+                        throw new AutomationException("boundary_interface_in_use",
+                            "This block's own diagram still uses the interface; detach it inside the block first. Nothing was changed.", uses);
+                }
+            }
+            var attached = _local.Connections.Where(root => Endpoints(root).Any(e => e.Endpoint.BlockId == owner && e.Endpoint.InterfaceId == boundary)).ToList();
+            if (attached.Count != 0 && !detach)
+                throw new AutomationException("boundary_interface_in_use", "Connections on this level use the interface; remove them together with it or keep the interface. Nothing was changed.",
+                    [.. attached.Select(root => new AutomationErrorDetail("connection", _scope, root.ConnectionId,
+                        $"Connection '{ConnectionName(root)}' uses interface '{name}'."))]);
+            Cascade(null, [.. attached.Select(r => r.ConnectionId)], origin,
+                t => owner != _scope && t.Kind == InterfaceRealizationTargetKind.ChildInterface && t.BlockId == owner && t.InterfaceId == boundary);
+            var view = _local.Layout;
+            foreach (var port in view.PortPlacements.Where(p => p.BlockId == owner && p.InterfaceId == boundary))
+                Effects.Add(new(LevelEditEffectKind.PresentationEntryRemoved, port.InterfaceId, _scope, DiagramPresentationView.Key(port)));
+            if (_local.Presentation is not null)
+                _local = _local with { Presentation = view with { Ports = [.. view.PortPlacements.Where(p => !(p.BlockId == owner && p.InterfaceId == boundary))] } };
+            Effects.Add(new(LevelEditEffectKind.InterfaceRemoved, boundary, _scope, name));
+            if (owner == _scope)
+            {
+                if (_local.Realizations.Any(r => r.InterfaceId == boundary))
+                    Effects.Add(new(LevelEditEffectKind.RealizationRemoved, boundary, _scope, name));
+                var records = _local.InterfaceRealizations.IsDefault ? _local.InterfaceRealizations
+                    : [.. _local.InterfaceRealizations.Where(r => r.InterfaceId != boundary)];
+                _local = _local with { Interfaces = [.. _local.Interfaces.Where(i => i.Id != boundary)], InterfaceRealizations = records };
+                return;
+            }
+            int index = _newChildren.FindIndex(c => c.Selection.BlockId == owner);
+            if (index >= 0)
+            {
+                _newChildren[index] = _newChildren[index] with { Interfaces = [.. _newChildren[index].Interfaces.Where(i => i.Id != boundary)] };
+                return;
+            }
+            int edit = _childDrafts.FindIndex(c => c.Baseline.BlockId == owner);
+            var child = edit >= 0 ? _childDrafts[edit] : graph.StartDraft(_children.Single(c => c.BlockId == owner));
+            var local = child.LocalDiagram;
+            if (local.Realizations.Any(r => r.InterfaceId == boundary))
+                Effects.Add(new(LevelEditEffectKind.RealizationRemoved, boundary, owner, name));
+            child = child with { Diagram = local with { Interfaces = [.. local.Interfaces.Where(i => i.Id != boundary)],
+                InterfaceRealizations = local.InterfaceRealizations.IsDefault ? local.InterfaceRealizations
+                    : [.. local.InterfaceRealizations.Where(r => r.InterfaceId != boundary)] } };
+            if (edit >= 0) _childDrafts[edit] = child; else _childDrafts.Add(child);
+        }
+
+        private static string Describe(InterfaceRealizationTarget target) => target.Kind switch
+        {
+            InterfaceRealizationTargetKind.ChildInterface => $"ChildInterface {target.BlockId:D}/{target.InterfaceId:D}",
+            InterfaceRealizationTargetKind.LocalConnection => $"LocalConnection {target.ConnectionId:D}",
+            _ => "Pin " + InterfaceRealizationTarget.PinKey(target.Pin)
+        };
+    }
+}

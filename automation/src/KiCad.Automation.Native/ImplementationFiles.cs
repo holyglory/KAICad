@@ -42,9 +42,9 @@ public static class ImplementationFiles
         }
         token.ThrowIfCancellationRequested();
         if (ReferenceEquals(graph, loaded.Snapshot.Graph)) return new(loaded.Snapshot, stateId);
-        byte[] bytes = Encoding.UTF8.GetBytes(RecursiveBlockGraphXml.Write(graph));
+        var (bytes, version) = RecursiveBlockFiles.Serialize(graph);
         string hash = await DesignFilePublisher.WriteIfUnchangedAsync(loaded.Snapshot.Path, loaded.Bytes, bytes, token);
-        return new(new(loaded.Snapshot.Path, hash, graph), stateId);
+        return new(RecursiveBlockFiles.Published(loaded.Snapshot, loaded.Snapshot.Path, hash, graph, version), stateId);
     }
 
     private static AutomationException Invalid(string code, string message) => new(code, message);

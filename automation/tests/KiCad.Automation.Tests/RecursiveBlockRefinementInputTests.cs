@@ -10,8 +10,10 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class RecursiveBlockRefinementInputTests
 {
-    internal static DiagramRefinementInput Input(RecursiveBlockGraph graph) => new(Guid.NewGuid(), graph.DocumentId,
-        Hash(RecursiveBlockGraphXml.Write(graph)), [graph.SelectedRoot], [], "  Original prompt\r\nΩ & <vision>\n ",
+    /// <summary>An original input captured against the file bytes <c>Write(graph, storedSchemaVersion)</c>; pass 1 for a
+    /// version 1 file as an earlier build stored it.</summary>
+    internal static DiagramRefinementInput Input(RecursiveBlockGraph graph, int storedSchemaVersion = RecursiveBlockGraphXml.SchemaVersion) => new(Guid.NewGuid(), graph.DocumentId,
+        Hash(RecursiveBlockGraphXml.Write(graph, storedSchemaVersion)), [graph.SelectedRoot], [], "  Original prompt\r\nΩ & <vision>\n ",
         RecursiveBlockFixture.Origin(), [new(Guid.NewGuid(), "Original drawing Ω.png", "assets/original.png", Hash("fixture bytes"),
             Encoding.UTF8.GetByteCount("fixture bytes"), "image/png", new("source-document", "r3", 7, "Table 2", "Variant B"))]);
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));

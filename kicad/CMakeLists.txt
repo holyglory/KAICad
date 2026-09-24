@@ -19,8 +19,6 @@ include_directories(
 set( KICAD_SRCS
     automation_update_client.cpp
     automation_update_windows.cpp
-    structural_editor_control.cpp
-    structural_editor_frame.cpp
     recursive_diagram_frame.cpp
     recursive_diagram_canvas.cpp
     dialogs/dialog_diagram_field_history.cpp

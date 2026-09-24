@@ -43,7 +43,9 @@ public sealed class RecursiveBlockCodecTests
     [DataRow("empty-parent")]
     [DataRow("unknown-root-field")]
     [DataRow("unknown-nested-field")]
-    // Declared schema 2 fields the codec does not implement yet stay as unsupported as before their declaration.
+    // Schema 1 graph messages are refused outright (contract rbg-v2 section 2.3), whatever they carry; a message
+    // decoded for schema 1 cannot carry any schema 2 field, each being refused as the unsupported field it is for
+    // that version. The flat-diagram conversion receipt is refused in every schema: flat diagrams are discarded.
     [DataRow("v2-interface-domain")]
     [DataRow("v2-interface-direction")]
     [DataRow("v2-level-presentation")]
@@ -60,6 +62,7 @@ public sealed class RecursiveBlockCodecTests
     public void UnknownFieldsBadTargetsMissingFieldsAndUnsupportedPrecisionAreRejected(string scenario)
     {
         bool schemaTwo = scenario.StartsWith("v2-", StringComparison.Ordinal);
+        bool schemaOneGraph = schemaTwo && scenario != "v2-migration" && !scenario.Contains("draft", StringComparison.Ordinal);
         var linked = LinkedDiagramFixture.Create();
         var data = RecursiveBlockCodec.Encode(schemaTwo ? linked.Graph : RecursiveBlockFixture.Create().Graph);
         var blockDraft = RecursiveBlockCodec.Encode(linked.Graph.StartDraft(linked.Blocks["PSU"]));
@@ -67,17 +70,18 @@ public sealed class RecursiveBlockCodecTests
         Guid document = linked.Graph.DocumentId;
         if (schemaTwo)
         {
-            // Precision: every carrier decodes while the declared fields keep their default values.
+            // Precision: the schema 2 graph and each draft decoded for schema 1 decode while the schema 2 fields keep their defaults.
             _ = RecursiveBlockCodec.Decode(data);
-            _ = RecursiveBlockCodec.Decode(blockDraft, document);
-            _ = RecursiveBlockCodec.Decode(connectionDraft, document);
+            _ = RecursiveBlockCodec.Decode(blockDraft, document, 1);
+            _ = RecursiveBlockCodec.Decode(connectionDraft, document, 1);
+            if (schemaOneGraph) data.SchemaVersion = 1;
         }
         P.BlockLocalDiagramData Level() => data.Revisions.First(r => r.LocalDiagram?.Interfaces.Count > 0).LocalDiagram;
         P.ConnectionRevisionData Link() => data.ConnectionArchives[0].Revisions[0];
         Action decode = () => RecursiveBlockCodec.Decode(data);
         switch (scenario)
         {
-            case "future-version": data.SchemaVersion = 2; break;
+            case "future-version": data.SchemaVersion = 3; break;
             case "wrong-target": data.SelectedRoot.BlockId = Guid.NewGuid().ToString("D"); break;
             case "noncanonical-identity": data.SelectedRoot.StateId = data.SelectedRoot.StateId.ToUpperInvariant(); break;
             case "missing-origin": data.Revisions[0].Origin = null; break;
@@ -106,21 +110,22 @@ public sealed class RecursiveBlockCodecTests
                 Link().Realization = new() { State = P.DiagramRealizationState.DrsUnknown, UnresolvedReason = "Test-only: not yet decided." }; break;
             case "v2-migration": data.Migration = new() { Id = Guid.NewGuid().ToString("D") }; break;
             case "v2-block-draft-interface-domain":
-                blockDraft.LocalDiagram.Interfaces[0].Domain = P.DiagramDomain.DdPower; decode = () => RecursiveBlockCodec.Decode(blockDraft, document); break;
+                blockDraft.LocalDiagram.Interfaces[0].Domain = P.DiagramDomain.DdPower; decode = () => RecursiveBlockCodec.Decode(blockDraft, document, 1); break;
             case "v2-block-draft-presentation":
-                blockDraft.LocalDiagram.Presentation = new(); decode = () => RecursiveBlockCodec.Decode(blockDraft, document); break;
+                blockDraft.LocalDiagram.Presentation = new(); decode = () => RecursiveBlockCodec.Decode(blockDraft, document, 1); break;
             case "v2-connection-draft-domain":
-                connectionDraft.Domain = P.DiagramDomain.DdPower; decode = () => RecursiveBlockCodec.Decode(connectionDraft, document); break;
+                connectionDraft.Domain = P.DiagramDomain.DdPower; decode = () => RecursiveBlockCodec.Decode(connectionDraft, document, 1); break;
             case "v2-connection-draft-direction":
                 connectionDraft.Direction = P.DiagramConnectionDirection.DcdrBidirectional;
-                decode = () => RecursiveBlockCodec.Decode(connectionDraft, document); break;
+                decode = () => RecursiveBlockCodec.Decode(connectionDraft, document, 1); break;
             case "v2-connection-draft-realization":
                 connectionDraft.Realization = new() { State = P.DiagramRealizationState.DrsUnknown, UnresolvedReason = "Test-only: not yet decided." };
-                decode = () => RecursiveBlockCodec.Decode(connectionDraft, document); break;
+                decode = () => RecursiveBlockCodec.Decode(connectionDraft, document, 1); break;
             default: throw new ArgumentOutOfRangeException(nameof(scenario));
         }
         var error = Assert.ThrowsExactly<AutomationException>(decode);
-        if (schemaTwo || scenario is "unknown-root-field" or "unknown-nested-field")
+        if (schemaOneGraph) Assert.AreEqual("Use the supported recursive diagram message version.", error.Message, scenario);
+        else if (schemaTwo || scenario is "unknown-root-field" or "unknown-nested-field")
             Assert.AreEqual("The recursive diagram message contains unsupported fields; no history was simplified.", error.Message, scenario);
     }
 
@@ -128,8 +133,10 @@ public sealed class RecursiveBlockCodecTests
     private static readonly byte[] UnknownField = [0xc0, 0x3e, 0x01];
 
     [TestMethod]
-    public void ObservationsOmitDeclaredSchemaTwoFieldsUntilTheyAreImplemented()
+    public void SchemaTwoObservationsReportTheEditorStateAndOmitOnlyFlatConversion()
     {
+        // The native per-level editor speaks schema 2 (contract rbg-v2 section 9.1): its level draft, tool, viewports and
+        // resolved layout are reported; only the never-implemented flat-conversion fields stay out.
         var linked = LinkedDiagramFixture.Create();
         var graph = RecursiveBlockCodec.Encode(linked.Graph);
         var diagram = graph.Revisions.First(r => r.LocalDiagram?.Interfaces.Count > 0).Clone();
@@ -145,21 +152,25 @@ public sealed class RecursiveBlockCodecTests
         observation.Editor.LevelViewports.Add(new P.DiagramLevelViewportState { BlockId = diagram.Selection.BlockId, Scale = 1 });
         var view = new P.RecursiveDiagramView { ViewId = "current", Units = "diagram-unit", Diagram = diagram, ResolvedLayout = new() { DormantEntries = 1 } };
         view.Connections.Add(link); observation.Views.Add(view);
-        Assert.IsTrue(RecursiveBlockCodec.CarriesUnimplementedField(observation));
+        Assert.IsFalse(RecursiveBlockCodec.CarriesUnimplementedField(observation), "The per-level editor produces its schema 2 state.");
+        Assert.IsTrue(RecursiveBlockCodec.CarriesFieldBeyondSchema(observation, 1), "Recall: schema 1 could not carry this state.");
         var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
-        var wire = System.Text.Json.Nodes.JsonNode.Parse(formatter.Format(observation))!.AsObject();
-        RecursiveBlockCodec.OmitUnimplementedFields(observation, wire);
-        string text = wire.ToJsonString();
-        foreach (string key in new[] { "storedSchemaVersion", "sourceWritable", "levelDraft", "levelViewports", "canvasTool", "selectedInterfaceId",
-            "resolvedLayout", "domain", "direction", "presentation", "interfaceRealizations", "realization" })
-            Assert.IsFalse(text.Contains("\"" + key + "\":", StringComparison.Ordinal), key + " must stay out of the observation.");
-        // Precision: implemented fields, including computed defaults, are still reported.
-        Assert.AreEqual("current", wire["views"]![0]!["viewId"]!.GetValue<string>());
-        Assert.AreEqual(diagram.LocalDiagram.Interfaces[0].Name,
-            wire["views"]![0]!["diagram"]!["localDiagram"]!["interfaces"]![0]!["name"]!.GetValue<string>());
-        Assert.AreEqual(link.Name, wire["views"]![0]!["connections"]![0]!["name"]!.GetValue<string>());
-        Assert.IsFalse(wire["editor"]!["dirty"]!.GetValue<bool>());
+        string[] editorFields = ["storedSchemaVersion", "sourceWritable", "levelDraft", "levelViewports", "canvasTool", "selectedInterfaceId", "resolvedLayout"];
+        var schemaTwo = System.Text.Json.Nodes.JsonNode.Parse(formatter.Format(observation))!.AsObject();
+        RecursiveBlockCodec.OmitFieldsBeyondSchema(observation, schemaTwo, RecursiveBlockCodec.NativeEditorSchemaVersion);
+        string two = schemaTwo.ToJsonString();
+        foreach (string key in editorFields)
+            Assert.IsTrue(two.Contains("\"" + key + "\":", StringComparison.Ordinal), key + " is reported by the schema 2 editor.");
+        Assert.AreEqual("DD_POWER", schemaTwo["views"]![0]!["diagram"]!["localDiagram"]!["interfaces"]![0]!["domain"]!.GetValue<string>());
+        Assert.AreEqual("DCDR_FROM_FIRST", schemaTwo["views"]![0]!["connections"]![0]!["direction"]!.GetValue<string>());
+        Assert.AreEqual(1U, schemaTwo["views"]![0]!["resolvedLayout"]!["dormantEntries"]!.GetValue<uint>());
+        Assert.IsFalse(schemaTwo["editor"]!["dirty"]!.GetValue<bool>());
+        // Precision of the remaining refusal: a flat-conversion receipt is still never produced or accepted.
+        var receipt = graph.Clone(); receipt.Migration = new();
+        Assert.IsTrue(RecursiveBlockCodec.CarriesUnimplementedField(receipt));
         Assert.IsFalse(RecursiveBlockCodec.CarriesUnimplementedField(RecursiveBlockCodec.Encode(linked.Graph)));
+        Assert.IsFalse(RecursiveBlockCodec.IsSupportedSchema(1));
+        Assert.AreEqual("invalid_recursive_diagram_data", Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Encode(linked.Graph, 1)).Code);
     }
 
     [TestMethod]

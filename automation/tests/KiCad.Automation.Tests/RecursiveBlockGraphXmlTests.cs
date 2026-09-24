@@ -7,6 +7,7 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class RecursiveBlockGraphXmlTests
 {
+    // Every write is schema 2 (contract rbg-v2 R4), also for a graph without schema 2 facts.
     private static readonly XNamespace Ns = RecursiveBlockGraphXml.Namespace;
 
     [TestMethod]
@@ -45,7 +46,14 @@ public sealed class RecursiveBlockGraphXmlTests
             var root = XElement.Parse(xml, LoadOptions.PreserveWhitespace); change(root);
             Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockGraphXml.Read(root.ToString(SaveOptions.DisableFormatting)));
         }
-        Reject(r => r.SetAttributeValue("version", 2));
+        Assert.AreEqual(Ns + "recursive-block-graph", XElement.Parse(xml).Name);
+        Reject(r => r.SetAttributeValue("version", 1));
+        // A version 1 document (the frozen fixture format) cannot claim version 2 either.
+        var v1 = XElement.Parse(RecursiveBlockGraphXml.Write(graph, 1), LoadOptions.PreserveWhitespace);
+        Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.NamespaceV1), v1.Name);
+        v1.SetAttributeValue("version", 2);
+        Assert.AreEqual("invalid_recursive_block_graph_xml", Assert.ThrowsExactly<AutomationException>(() =>
+            RecursiveBlockGraphXml.Read(v1.ToString(SaveOptions.DisableFormatting))).Code);
         Reject(r => r.SetAttributeValue("unknown", "must not drop"));
         Reject(r => r.Add(new XElement(Ns + "future-field", "must not drop")));
         Reject(r => r.Element(Ns + "selected-root")!.SetAttributeValue("revision", Guid.NewGuid()));

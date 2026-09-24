@@ -119,6 +119,11 @@ std::optional<std::string> CHECKED_SCHEMATIC_CONTROLLER::PrepareConnectivityAsse
         if( kind != SchematicItemOperation::kCreate && kind != SchematicItemOperation::kUpdate
                 && kind != SchematicItemOperation::kReplaceLibraryCache )
             return reject( index, "Only create, update and library cache operations can share a batch with a connectivity assertion" );
+        // CN-1 §1 keeps sheet creation out of realization. A new sheet would add sheet instances
+        // the partition captured before the batch cannot contain, so refuse it before staging.
+        if( kind == SchematicItemOperation::kCreate
+                && batch.operations( index ).create().Is<kiapi::schematic::types::SheetSymbol>() )
+            return reject( index, "A connectivity assertion cannot evaluate a batch that creates sheets" );
     }
     const auto& request = operation.assert_connectivity();
     auto known = request;
@@ -220,6 +225,19 @@ std::optional<std::string> CHECKED_SCHEMATIC_CONTROLLER::CheckConnectivity( cons
         for( const PIN_GROUP& group : after )
             if( !touches( group ) && !required.count( group ) )
             { category = "unaffected_group_changed"; keys.assign( group.begin(), group.end() ); break; }
+    }
+    if( category.empty() )
+    {
+        // Unreachable for a true partition (every pin in one group), but never report a
+        // mismatch without a category: name the first differing group of either side.
+        category = "unaffected_group_changed";
+        auto report = [&]( const PIN_PARTITION& from, const PIN_PARTITION& against )
+        {
+            for( const PIN_GROUP& group : from )
+                if( !against.count( group ) ) { keys.assign( group.begin(), group.end() ); return true; }
+            return false;
+        };
+        if( !report( required, after ) ) report( after, required );
     }
     constexpr size_t limit = 2048, reserve = 32;
     std::string message = fmt::format( "{}: expected={} mismatches={} first={}:", CONNECTIVITY_FAILURE,

@@ -1704,13 +1704,9 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             else if( operation.has_assert_connectivity() )
             {
                 // Admitted before the first operation: this is the last one, so every
-                // creation and update of the batch is staged. Measure the partition the
-                // commit would produce, with no cleanup, before anything is pushed.
-                for( const auto& [key, item] : createdItems )
-                {
-                    if( item->Type() == SCH_SHEET_T )
-                        return reject( prefix + "A connectivity assertion cannot evaluate a batch that creates sheets" );
-                }
+                // creation and update of the batch is staged, and admission already refused
+                // sheet creation. Measure the partition the commit would produce, with no
+                // cleanup, before anything is pushed.
                 connectivityEvaluated = true;
                 MOVE_PIN_PARTITIONS assertedAfter;
                 bool captured = false;

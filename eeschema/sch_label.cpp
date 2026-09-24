@@ -2173,9 +2173,23 @@ bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
     SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, kiapi::schematic::types::SchematicLabelShape>(
             label.shape() ) );
 
-    if( label.has_intersheet_refs_field() )
-        GetField( FIELD_T::INTERSHEET_REFS )->Deserialize( label.intersheet_refs_field(), schIUScale );
+    // Every native global label owns its intersheet reference field as its first field, as a
+    // label read from a file does: RecomputeIntersheetRefs() addresses it as fields[0]. The
+    // label fields were just replaced, so restore it from the request, or, when the request
+    // leaves it unset (CN-1 §6.6), exactly as the constructor gives a new label at this position.
+    SCH_FIELD refs( nullptr, FIELD_T::INTERSHEET_REFS,
+                    ::GetDefaultFieldName( FIELD_T::INTERSHEET_REFS, UNTRANSLATED ) );
+    refs.SetText( wxT( "${INTERSHEET_REFS}" ) );
+    refs.SetVisible( false );
+    refs.SetVertJustify( GR_TEXT_V_ALIGN_CENTER );
+    refs.SetTextPos( GetPosition() );
 
+    if( label.has_intersheet_refs_field()
+            && !refs.Deserialize( label.intersheet_refs_field(), schIUScale ) )
+        return false;
+
+    refs.SetParent( this );
+    m_fields.insert( m_fields.begin(), refs );
     return true;
 }
 

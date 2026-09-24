@@ -485,6 +485,15 @@ BOOST_AUTO_TEST_CASE( ConnectivityAssertionAdmissionFailsClosedBeforeAnyOperatio
     BOOST_CHECK( StartsWith( f.Rejection( mixed ), "Atomic operation 1 rejected: Only create, update and library cache" ) );
     auto missing = f.Batch(); missing.mutable_operations( 0 )->Clear();
     BOOST_CHECK( StartsWith( f.Rejection( missing ), "Atomic operation 0 rejected: Only create, update and library cache" ) );
+    // Must-catch: sheet creation (CN-1 §1 out of scope) is refused at admission, before staging.
+    auto sheet = f.Batch();
+    sheet.mutable_operations( 0 )->mutable_create()->PackFrom( kiapi::schematic::types::SheetSymbol() );
+    BOOST_CHECK( StartsWith( f.Rejection( sheet ), "Atomic operation 0 rejected: A connectivity assertion cannot evaluate a batch that creates sheets" ) );
+    // False positive: appending sheet pins updates an existing sheet and stays admitted (§6.8).
+    auto pins = f.Batch();
+    kiapi::schematic::types::SheetSymbol updated; updated.add_pins()->mutable_id()->set_value( KIID().AsStdString() );
+    pins.mutable_operations( 1 )->mutable_update()->PackFrom( updated );
+    BOOST_CHECK( !f.Prepare( pins, admitted ) ); BOOST_CHECK_EQUAL( admitted.index, 3 );
     // Fields reserved for a later contract revision fail closed until they are implemented.
     auto future = f.Batch();
     future.mutable_operations( 3 )->mutable_assert_connectivity()->GetReflection()->MutableUnknownFields(
@@ -536,6 +545,11 @@ BOOST_AUTO_TEST_CASE( ConnectivityPostconditionCatchesEveryMismatchAndAcceptsEqu
     first( check( { { "a", "b" }, { "c" }, { "d" }, { "x", "y", "n" } }, { { "a", "b" } } ), "unaffected_group_changed:x,y" );
     // Must-catch: a pin the batch created but did not assert.
     first( check( { { "a", "b" }, { "c" }, { "d" }, { "x", "y" }, { "n" } }, { { "a", "b" } } ), "unaffected_group_changed:n" );
+    // A malformed measurement (pin b in two groups) matches every asserted group and changes no
+    // unasserted group, yet still differs: the detail must still name a category and the group.
+    auto overlapping = check( { { "a" }, { "b" }, { "b", "z" }, { "c" }, { "d" }, { "x", "y" } }, { { "a" }, { "b" } } );
+    first( overlapping, "unaffected_group_changed:b,z" );
+    BOOST_CHECK( overlapping->find( "expected=2 mismatches=1 " ) != std::string::npos );
 
     // The detail stays bounded however many and however deep the reported pins are.
     PARTITION wide; GROUPS asserted{ {} };

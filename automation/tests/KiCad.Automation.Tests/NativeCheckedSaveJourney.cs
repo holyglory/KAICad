@@ -344,10 +344,10 @@ public sealed partial class NativeSessionTests
     // normal failed-start code (here the sibling fixture KiCad really holds its project's lock). A
     // project whose file was read-only when KiCad opened it, whose lock records another user, or
     // whose lock file is read-only opens read-only without a lock dialog nobody could answer, logs
-    // why, and refuses every save with that reason until it is reopened. A board and project file
-    // linked from another folder are written through the links. Each runs in a KiCad process
-    // started through the MCP server for this purpose; the fixture instances and their files are
-    // only read.
+    // why, and refuses every save with that reason until it is reopened. A project opened through
+    // a symbolic link, and a board opened through one, are written through the links. Each runs in
+    // a KiCad process started through the MCP server for this purpose; the fixture instances and
+    // their files are only read.
     private static async Task VerifyProjectOpeningRules(int processId, DocumentLifecycleState saved, SiblingKiCad sibling,
         string evidence, string instanceId, ISet<string> reportedCodes, CancellationToken token)
     {
@@ -372,7 +372,8 @@ public sealed partial class NativeSessionTests
             // Four copies of the saved document: in one the project file is read-only when KiCad
             // opens it; one keeps another user's lock record that nothing holds, as a shared folder
             // does after that user's KiCad ended; one keeps this user's own abandoned lock in a lock
-            // file KiCad cannot write; the last gets a board whose files are then linked from another folder.
+            // file KiCad cannot write; the last keeps its project file in another folder, linked
+            // back before KiCad starts, and gets a board that is linked the same way.
             string sourceProject = saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pro");
             string sourceDirectory = Path.GetDirectoryName(sourceProject)!;
             foreach (string folder in new[] { copy, foreignCopy, unwritableCopy, linkedCopy })
@@ -399,6 +400,8 @@ public sealed partial class NativeSessionTests
                 "This account must really be unable to write the read-only lock file.");
             byte[] foreignLockBytes = ReadWithoutLocking(foreignLock);
             byte[] unwritableLockBytes = ReadWithoutLocking(unwritableLock);
+            // KiCad opens the linked copy's project through its link.
+            var links = new Dictionary<string, string>(StringComparer.Ordinal) { [linkedProject] = LinkFromFolder(linkedProject, store) };
 
             // All five KiCads start at once: one on the project the sibling fixture KiCad holds,
             // one on each copy.
@@ -460,6 +463,13 @@ public sealed partial class NativeSessionTests
             // and write time (it ran there, as KiCad does).
             Assert.AreEqual(siblingFiles, SiblingFolder(), "The refused KiCad must leave the other project's folder untouched.");
             Console.WriteLine($"KiCad refused to open {siblingProject}, which the other fixture KiCad holds: {refusalMessage}");
+            // KiCad refuses the locked project at the point where the others finish starting and
+            // exits at once, so its start answers about as soon as theirs: when KiCad exits, not
+            // after a readiness request KiCad can no longer answer times out (15 s).
+            TimeSpan slowestStart = (await Task.WhenAll(answered.Where(entry => entry.Key != "locked").Select(entry => entry.Value))).Max();
+            Assert.IsLessThan(slowestStart + TimeSpan.FromSeconds(10), await answered["locked"],
+                $"The start on a project another KiCad holds must answer when KiCad exits, not after a request timeout "
+                + $"(the other starts answered within {slowestStart.TotalSeconds:F1}s).");
 
             // A project KiCad opened read-only refuses a save of real unsaved work: nothing is written,
             // no file is called blocked because every file is writable, and the reason says what to
@@ -554,12 +564,15 @@ public sealed partial class NativeSessionTests
             await LoggedReadOnly("read-only lock file", unwritableInstance, unwritableProject, unwritableReason);
             CollectionAssert.AreEqual(unwritableLockBytes, ReadWithoutLocking(unwritableLock), "The read-only lock file is unchanged.");
 
-            // 5. A board and project file kept in another folder and linked into the project folder,
-            // as when shared project files are linked into a working folder.
+            // 5. A project file and board kept in another folder and linked into the project folder,
+            // as when shared project files are linked into a working folder. KiCad opened the
+            // project through its link and names it by the link's own path.
             RequireToolSuccess(answers["linked"]);
             string linkedInstance = startedIds["linked"] ?? throw new AssertFailedException("KiCad did not start on the linked project.");
-            await VerifyLinkedBoardSave(mcp, linkedInstance, linkedProject, store, evidence, instanceId, token);
-            Console.WriteLine($"The board linked from another folder was saved in KiCad {linkedInstance} at {clock.Elapsed.TotalSeconds:F1}s.");
+            Assert.AreEqual(linkedProject, answers["linked"].GetProperty("structuredContent").GetProperty("projectPath").GetString(),
+                "KiCad opened the project through its link, under the link's own path.");
+            await VerifyLinkedBoardSave(mcp, linkedInstance, linkedProject, store, links, evidence, instanceId, token);
+            Console.WriteLine($"The project and board linked from another folder were saved in KiCad {linkedInstance} at {clock.Elapsed.TotalSeconds:F1}s.");
         }
         finally
         {
@@ -571,75 +584,131 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    // A board file that is a symbolic link into another folder, with its project file linked the
-    // same way. The board editor keeps the board's own name and its writer follows the link to its
-    // target (SavePcbFile, PRETTIFIED_FILE_OUTPUTFORMATTER), so the edit reaches the target through
-    // the link, both links stay links, and the save is confirmed: the board's loaded-file version is
-    // renewed under its own name.
+    // Moves a file into another folder and links it back under its own name, as when shared
+    // project files are linked into a working folder. Returns the link's target.
+    private static string LinkFromFolder(string file, string folder)
+    {
+        string target = Path.Combine(folder, Path.GetFileName(file));
+        File.Move(file, target);
+        File.CreateSymbolicLink(file, target);
+        Assert.AreEqual(target, new FileInfo(file).LinkTarget, "The file must now be a link to " + target);
+        return target;
+    }
+
+    // KiCad opened the project through a link to its project file in another folder. The board is
+    // created and saved as an ordinary file beside the link, then moved to that folder and linked
+    // back while the editor stays open: the same bytes behind the link are not a change, and an
+    // edit saves through the links. The clean board is then closed and opened again through its
+    // link, so its loaded-file versions are read through the links, and another edit saves
+    // through them. Every save keeps both links, puts the edit into the link's target and is
+    // confirmed under the names the board and project were opened with: the board editor keeps
+    // them and its writers follow a link to its target (SavePcbFile, PRETTIFIED_FILE_OUTPUTFORMATTER,
+    // KIPLATFORM::IO::AtomicWriteFile).
     private static async Task VerifyLinkedBoardSave(CancellableMcpClient mcp, string linkedInstance, string linkedProject,
-        string store, string evidence, string instanceId, CancellationToken token)
+        string store, Dictionary<string, string> links, string evidence, string instanceId, CancellationToken token)
     {
         string boardPath = Path.ChangeExtension(linkedProject, ".kicad_pcb");
-        var created = await mcp.Tool("kicad_pcb_create", new { instanceId = linkedInstance, path = boardPath });
-        RequireToolSuccess(created);
-        var board = SchematicJson.Parser.Parse<DocumentSpecifier>(created.GetProperty("content").EnumerateArray()
-            .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+        string[] documentFiles = [boardPath, linkedProject];
         var editor = new NativeClient(new NngTransport(),
             NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(linkedInstance), "api.sock")));
-        Task<JsonElement> Save(DocumentLifecycleState expected) => mcp.Tool("kicad_document_save", new { instanceId = linkedInstance,
+        DocumentSpecifier Opened(JsonElement reply)
+        {
+            RequireToolSuccess(reply);
+            return SchematicJson.Parser.Parse<DocumentSpecifier>(reply.GetProperty("content").EnumerateArray()
+                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+        }
+        Task<JsonElement> Checked(string tool, DocumentLifecycleState expected) => mcp.Tool(tool, new { instanceId = linkedInstance,
             expectedStateJson = SchematicJson.Formatter.Format(expected), operationId = Guid.NewGuid().ToString("D") });
+        void LinksKept(string phase)
+        {
+            foreach (var (link, target) in links)
+            {
+                Assert.AreEqual(target, new FileInfo(link).LinkTarget, $"{phase}: KiCad writes through a link, never over it: {link}");
+                Assert.IsNull(new FileInfo(target).LinkTarget, $"{phase}: the link's target stays an ordinary file: {target}");
+            }
+        }
+        // The board and its project file are known by the paths they were opened with, never by
+        // the links' targets, and each loaded-file version matches the target's bytes now.
+        void ConfirmedUnderLinkNames(DocumentLifecycleState state, string phase)
+        {
+            Assert.IsFalse(state.NativeContentDirty, $"{phase}: {state}");
+            Assert.AreEqual(state.StateSha256, state.CleanCheckpointSha256, $"{phase}: the editor is at its clean checkpoint.");
+            CollectionAssert.AreEquivalent(documentFiles, state.NativeFiles.ToArray(), $"{phase}: the board keeps the names it was opened with.");
+            foreach (string path in documentFiles)
+            {
+                var baseline = state.FileBaselines.Single(file => file.Path == path);
+                Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, baseline.Status, $"{phase}: {path}: {state}");
+                Assert.AreEqual(path, baseline.BaselinePath, $"{phase}: the loaded-file version belongs to {path}.");
+                string onDisk = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(links.GetValueOrDefault(path, path))));
+                Assert.AreEqual(onDisk, baseline.BaselineSha256, $"{phase}: the loaded-file version of {path} is the bytes on disk.");
+            }
+        }
+        // An edit is saved through the links and confirmed.
+        async Task SavedThroughLinks(DocumentSpecifier board, string phase)
+        {
+            var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, token);
+            title.Comment9 = $"Linked board work ({phase}) " + Guid.NewGuid().ToString("N");
+            await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = board, TitleBlock = title }, token);
+            var dirty = await ObserveLifecycleState(editor, board, token);
+            Assert.IsTrue(dirty.NativeContentDirty, $"{phase}: the edit must be unsaved work in the editor.");
+            CollectionAssert.AreEquivalent(documentFiles, dirty.NativeFiles.ToArray(), $"{phase}: the board is observed by its linked path.");
 
-        // The new board is saved once as an ordinary file, then it and the project file move to the
-        // other folder and are linked back. The same bytes behind the links are not a change.
-        var firstReply = await Save(await ObserveLifecycleState(editor, board, token));
+            var reply = await Checked("kicad_document_save", dirty);
+            RequireToolSuccess(reply);
+            var result = LifecycleResult(reply);
+            Assert.AreEqual(LifecycleOperationStatus.LosSaved, result.Status, $"{phase}: {result.ErrorMessage}");
+            Assert.AreEqual(board, result.Document);
+            CollectionAssert.Contains(result.WrittenFiles.ToArray(), boardPath, $"{phase}: the linked board is named as written, by its own path.");
+            CollectionAssert.IsSubsetOf(result.WrittenFiles.ToArray(), documentFiles, $"{phase}: {result}");
+            Assert.IsEmpty(result.BlockedFiles, result.ErrorMessage);
+            LinksKept(phase);
+            StringAssert.Contains(await File.ReadAllTextAsync(links[boardPath], token), title.Comment9, $"{phase}: the edit reached the linked board's target.");
+            ConfirmedUnderLinkNames(result.ObservedState, phase);
+            var after = await ObserveLifecycleState(editor, board, token);
+            Assert.AreEqual(result.ObservedState, after, $"{phase}: the editor shows the confirmed saved state.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-save-linked-board-{phase.Replace(' ', '-')}.json"),
+                SchematicJson.Formatter.Format(result), token);
+            Console.WriteLine($"Linked board saved through its links ({phase}) in KiCad {linkedInstance}: {result.Status}; "
+                + $"written [{string.Join(", ", result.WrittenFiles)}]; board still {boardPath}, versions renewed under the link names.");
+        }
+
+        // The new board is saved once as an ordinary file beside the project file's link.
+        var board = Opened(await mcp.Tool("kicad_pcb_create", new { instanceId = linkedInstance, path = boardPath }));
+        var firstReply = await Checked("kicad_document_save", await ObserveLifecycleState(editor, board, token));
         RequireToolSuccess(firstReply);
         var first = LifecycleResult(firstReply);
         Assert.AreEqual(LifecycleOperationStatus.LosSaved, first.Status, first.ErrorMessage);
         CollectionAssert.Contains(first.WrittenFiles.ToArray(), boardPath, "The new board was written.");
-        var links = new Dictionary<string, string>();
-        foreach (string file in new[] { boardPath, linkedProject })
-        {
-            string target = Path.Combine(store, Path.GetFileName(file));
-            File.Move(file, target);
-            File.CreateSymbolicLink(file, target);
-            links.Add(file, target);
-        }
+        LinksKept("new board");
+
+        // 1. The open board's file moves to the other folder and is linked back.
+        links.Add(boardPath, LinkFromFolder(boardPath, store));
         Assert.AreEqual(first.ObservedState, await ObserveLifecycleState(editor, board, token),
             "The same bytes behind a link are not a document change.");
+        await SavedThroughLinks(board, "linked while open");
 
-        var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, token);
-        title.Comment9 = "Linked board work " + Guid.NewGuid().ToString("N");
-        await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = board, TitleBlock = title }, token);
-        var dirty = await ObserveLifecycleState(editor, board, token);
-        Assert.IsTrue(dirty.NativeContentDirty, "The edit must be unsaved work in the editor.");
-        CollectionAssert.Contains(dirty.NativeFiles.ToArray(), boardPath, "The board is observed by its linked path.");
+        // 2. The clean board is closed and opened again through its link.
+        var clean = await ObserveLifecycleState(editor, board, token);
+        ConfirmedUnderLinkNames(clean, "before close");
+        var disk = links.Values.ToDictionary(target => target, target => (Bytes: File.ReadAllBytes(target), Written: File.GetLastWriteTimeUtc(target)));
+        var closeReply = await Checked("kicad_document_close", clean);
+        Assert.IsFalse(closeReply.TryGetProperty("isError", out var closeError) && closeError.GetBoolean(), closeReply.GetRawText());
+        Assert.AreEqual(LifecycleOperationStatus.LosClosed, LifecycleResult(closeReply).Status, closeReply.GetRawText());
+        await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+            editor.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = board }, token),
+            "The closed board is no longer open.");
+        LinksKept("closed");
+        foreach (var (target, before) in disk)
+        {
+            CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(target, token), $"Closing the clean board changed {target}.");
+            Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(target), $"Closing the clean board rewrote {target}.");
+        }
 
-        var reply = await Save(dirty);
-        RequireToolSuccess(reply);
-        var result = LifecycleResult(reply);
-        Assert.AreEqual(LifecycleOperationStatus.LosSaved, result.Status, result.ErrorMessage);
-        Assert.AreEqual(board, result.Document);
-        CollectionAssert.Contains(result.WrittenFiles.ToArray(), boardPath, "The linked board is named as written, by its own path.");
-        CollectionAssert.IsSubsetOf(result.WrittenFiles.ToArray(), new[] { boardPath, linkedProject }, result.ToString());
-        Assert.IsEmpty(result.BlockedFiles, result.ErrorMessage);
-        foreach (var (link, target) in links)
-            Assert.AreEqual(target, new FileInfo(link).LinkTarget, "Saving writes through a link, never over it: " + link);
-        StringAssert.Contains(await File.ReadAllTextAsync(links[boardPath], token), title.Comment9, "The edit reached the linked board's target.");
-        // The saved state is clean and confirmed under the board's own name: the loaded-file version
-        // was renewed at the link's path, which still names the board.
-        Assert.IsFalse(result.ObservedState.NativeContentDirty, result.ToString());
-        CollectionAssert.Contains(result.ObservedState.NativeFiles.ToArray(), boardPath, "The board keeps the name it was opened with.");
-        CollectionAssert.DoesNotContain(result.ObservedState.NativeFiles.ToArray(), links[boardPath], "The board is not renamed to the link's target.");
-        var baseline = result.ObservedState.FileBaselines.Single(file => file.Path == boardPath);
-        Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, baseline.Status, result.ToString());
-        Assert.AreEqual(boardPath, baseline.BaselinePath, result.ToString());
-        var after = await ObserveLifecycleState(editor, board, token);
-        Assert.AreEqual(result.ObservedState, after, "The editor shows the confirmed saved state.");
-        Assert.AreEqual(after.StateSha256, after.CleanCheckpointSha256, "The confirmed save is the editor's clean checkpoint.");
-        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-save-linked-board.json"),
-            SchematicJson.Formatter.Format(result), token);
-        Console.WriteLine($"Linked board saved through its links in KiCad {linkedInstance}: {result.Status}; "
-            + $"written [{string.Join(", ", result.WrittenFiles)}]; board still {boardPath}, version renewed at {baseline.BaselinePath}.");
+        var reopened = Opened(await mcp.Tool("kicad_pcb_open", new { instanceId = linkedInstance, path = boardPath }));
+        Assert.AreEqual(board, reopened, "The board opened through its link is the same project board.");
+        ConfirmedUnderLinkNames(await ObserveLifecycleState(editor, reopened, token), "opened through its link");
+        LinksKept("opened through its link");
+        await SavedThroughLinks(reopened, "opened through its link");
     }
 
     // The fixture KiCad process that serves this endpoint, found by the socket it was started with.

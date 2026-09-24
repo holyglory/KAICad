@@ -136,7 +136,26 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                         // Readiness probes do not hold the registry gate: separate
                         // projects must be able to start concurrently.
                         var probe = new NativeClient(transport, endpoint);
-                        var ready = await probe.HandshakeAsync(deadline.Token);
+                        AutomationSession ready;
+                        using (var attempt = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token))
+                        {
+                            // KiCad that ends while a probe waits for its reply (for example after
+                            // refusing a project another KiCad holds) never answers it. Stop waiting
+                            // when KiCad ends, so the start reports its exit at once instead of after
+                            // the probe's reply timeout.
+                            var handshake = probe.HandshakeAsync(attempt.Token);
+                            var exited = process.WaitForExitAsync(attempt.Token);
+                            bool ended = await Task.WhenAny(handshake, exited) != handshake;
+                            await attempt.CancelAsync();
+                            if (ended)
+                            {
+                                // The next pass reports KiCad's exit, or the start deadline.
+                                try { await handshake; }
+                                catch (Exception) { }
+                                continue;
+                            }
+                            ready = await handshake;
+                        }
                         await changes.WaitAsync(deadline.Token);
                         try
                         {

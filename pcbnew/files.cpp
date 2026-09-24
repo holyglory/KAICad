@@ -1080,8 +1080,9 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     rulesFile.SetExt( FILEEXT::DesignRulesFileExtension );
 
     // Tell a checked save why the project stops this save. KiCad's own read-only state is a
-    // refusal that writable files do not fix. A file the file system blocks is named as well,
-    // because a reported problem replaces the checked save's own check of every file.
+    // refusal that making the board's files writable does not fix. A file the file system blocks
+    // is named as well, because a reported problem replaces the checked save's own check of every
+    // file.
     auto reportProjectProblems = [&]()
     {
         using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;

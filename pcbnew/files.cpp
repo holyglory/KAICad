@@ -1080,13 +1080,6 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile, false ) ) )
     {
-        // A read-only file or folder is found by the checked save's own check of every file.
-        if( !projectFile.FileExists() )
-            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
-                    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM::SAVE_REFUSED, projectFile.GetFullPath(),
-                    wxS( "the project file does not exist, and automation saves a board only together with its "
-                         "project file" ) );
-
         reportFailure( "The project file is missing or not writable; the PCB was not saved" );
         return false;
     }
@@ -1097,20 +1090,6 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
         bool projectSaved = GetSettingsManager()->SaveProject();
         if( automation && !projectSaved )
         {
-            // Tell a checked save why: KiCad holds the project read-only, the file system blocks
-            // the file, or the settings writer failed without giving its system reason.
-            using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
-            const wxString path = projectFile.GetFullPath();
-
-            if( wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() ); !readOnly.empty() )
-                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, path, readOnly );
-            else if( wxString blocker = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( path ); !blocker.empty() )
-                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, path, blocker );
-            else
-                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
-                        SAVE_PROBLEM::WRITE_FAILED, path,
-                        wxS( "writing the project settings failed, and the settings writer gave no system reason" ) );
-
             reportFailure( "Project persistence failed; the PCB was not saved" );
             return false;
         }

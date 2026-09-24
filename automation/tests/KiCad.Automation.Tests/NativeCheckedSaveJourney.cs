@@ -285,18 +285,21 @@ public sealed partial class NativeSessionTests
     // KiCad decides that a project is read-only when it opens it. A project another KiCad holds is
     // never opened for automation: KiCad refuses it at startup and exits (here the sibling fixture
     // KiCad really holds its project's lock). A project whose file was read-only when KiCad opened
-    // it refuses every save, even once the file is writable again, until it is reopened. Both run in
-    // KiCad processes started through the MCP server for this purpose; the fixture instances and
-    // their files are only read.
+    // it refuses every save, even once the file is writable again, until it is reopened. A board
+    // and project file linked from another folder are written through the links. Each runs in a KiCad
+    // process started through the MCP server for this purpose; the fixture instances and their
+    // files are only read.
     private static async Task VerifyProjectOpeningRules(int processId, DocumentLifecycleState saved, SiblingKiCad sibling,
         string evidence, string instanceId, ISet<string> reportedCodes, CancellationToken token)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux process environment and file modes.");
         string copy = Directory.CreateTempSubdirectory("kicad-readonly-project-").FullName;
+        string linkedCopy = Directory.CreateTempSubdirectory("kicad-linked-project-").FullName;
+        string store = Directory.CreateTempSubdirectory("kicad-linked-store-").FullName;
         string state = Directory.CreateTempSubdirectory("kicad-readonly-project-mcp-").FullName;
         var runtimes = new List<string>();
         var modes = new Dictionary<string, UnixFileMode>();
-        string? started = null;
+        var started = new List<string>();
         try
         {
             // The same KiCad build on the same display as the instance under test, with its own settings.
@@ -312,21 +315,27 @@ public sealed partial class NativeSessionTests
             await using var mcp = await CancellableMcpClient.StartAsync(state,
                 Path.Combine(evidence, instanceId + "-project-opening-mcp.stderr.log"), token, environment);
 
-            // A copy of the saved document whose project file is read-only when KiCad opens it.
+            // Two copies of the saved document: in one the project file is read-only when KiCad
+            // opens it, the other gets a board whose files are then linked from another folder.
             string sourceProject = saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pro");
             string sourceDirectory = Path.GetDirectoryName(sourceProject)!;
-            foreach (string file in saved.NativeFiles)
+            foreach (string folder in new[] { copy, linkedCopy })
             {
-                string relative = Path.GetRelativePath(sourceDirectory, file);
-                Assert.IsFalse(relative.StartsWith("..", StringComparison.Ordinal), "Every document file lives in the project folder.");
-                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(copy, relative))!);
-                File.Copy(file, Path.Combine(copy, relative));
+                foreach (string file in saved.NativeFiles)
+                {
+                    string relative = Path.GetRelativePath(sourceDirectory, file);
+                    Assert.IsFalse(relative.StartsWith("..", StringComparison.Ordinal), "Every document file lives in the project folder.");
+                    Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(folder, relative))!);
+                    File.Copy(file, Path.Combine(folder, relative));
+                }
             }
             string project = Path.Combine(copy, Path.GetFileName(sourceProject));
             string root = Path.Combine(copy, Path.GetFileNameWithoutExtension(sourceProject) + ".kicad_sch");
+            string linkedProject = Path.Combine(linkedCopy, Path.GetFileName(sourceProject));
             KeepReadOnly(project, modes);
 
-            // Both KiCads start at once: one on the project the sibling fixture KiCad holds, one on the copy.
+            // All three KiCads start at once: one on the project the sibling fixture KiCad holds,
+            // one on each copy.
             string siblingProject = (await new NativeClient(new NngTransport(), sibling.Endpoint).HandshakeAsync(token)).ProjectPath;
             string siblingFolder = Path.GetDirectoryName(siblingProject)!;
             string[] SiblingFolder() => Directory.EnumerateFileSystemEntries(siblingFolder)
@@ -335,6 +344,7 @@ public sealed partial class NativeSessionTests
             var clock = Stopwatch.StartNew();
             var (_, lockedCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = siblingProject });
             var (_, readOnlyCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = project });
+            var (_, linkedCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = linkedProject });
             var lockedAnswered = lockedCall.ContinueWith(_ => clock.Elapsed, TaskScheduler.Default);
             var readOnlyAnswered = readOnlyCall.ContinueWith(_ => clock.Elapsed, TaskScheduler.Default);
             JsonElement Result(JsonElement message)
@@ -342,24 +352,36 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(message.TryGetProperty("error", out var protocolError), protocolError.ToString());
                 return message.GetProperty("result").Clone();
             }
+            string? Started(JsonElement answer)
+            {
+                if (answer.TryGetProperty("isError", out var startFailed) && startFailed.GetBoolean()) return null;
+                string id = answer.GetProperty("structuredContent").GetProperty("instanceId").GetString()!;
+                started.Add(id);
+                runtimes.Add(NativeIpcEndpoint.RuntimeDirectory(id));
+                return id;
+            }
             var locked = Result(await lockedCall.WaitAsync(TimeSpan.FromSeconds(60), token));
             var start = Result(await readOnlyCall.WaitAsync(TimeSpan.FromSeconds(60), token));
-            if (!(start.TryGetProperty("isError", out var startFailed) && startFailed.GetBoolean()))
-            {
-                started = start.GetProperty("structuredContent").GetProperty("instanceId").GetString()!;
-                runtimes.Add(NativeIpcEndpoint.RuntimeDirectory(started));
-            }
+            var linkedStart = Result(await linkedCall.WaitAsync(TimeSpan.FromSeconds(60), token));
+            string? readOnlyStarted = Started(start), linkedStarted = Started(linkedStart);
             Console.WriteLine($"The start on the locked project answered after {(await lockedAnswered).TotalSeconds:F1}s, "
-                + $"the start on the copy after {(await readOnlyAnswered).TotalSeconds:F1}s.");
+                + $"the start on the read-only copy after {(await readOnlyAnswered).TotalSeconds:F1}s.");
 
             // 1. KiCad refuses to open the project the other KiCad holds, names its lock, and exits.
             Assert.IsTrue(locked.GetProperty("isError").GetBoolean(), "KiCad must not open a project another KiCad holds. " + locked.GetRawText());
             var refusal = locked.GetProperty("structuredContent");
             Assert.AreEqual("start_failed", refusal.GetProperty("code").GetString(), locked.GetRawText());
-            var inspect = Regex.Match(refusal.GetProperty("message").GetString()!, @"inspect (/\S+)\.$");
+            // After refusing, KiCad crashes on its way out with a segmentation fault (exit code 139,
+            // 128 + SIGSEGV): kicad/kicad.cpp returns from a failed start after OnPgmExit() and leaves
+            // the manager frame to be torn down later (parent seam request 2). Only that known crash
+            // passes here; any other exit, including another signal, fails, so a change in how KiCad
+            // ends is seen. When seam request 2 lands this becomes the clean exit code.
+            var inspect = Regex.Match(refusal.GetProperty("message").GetString()!, @"^KiCad exited with code (\d+); inspect (/\S+)\.$");
             Assert.IsTrue(inspect.Success, locked.GetRawText());
-            runtimes.Add(inspect.Groups[1].Value);
-            string lockedLog = Path.Combine(inspect.Groups[1].Value, "native.log");
+            runtimes.Add(inspect.Groups[2].Value);
+            Assert.AreEqual("139", inspect.Groups[1].Value,
+                "KiCad refusing a locked project is expected to end with the known segmentation fault of seam request 2. " + locked.GetRawText());
+            string lockedLog = Path.Combine(inspect.Groups[2].Value, "native.log");
             File.Copy(lockedLog, Path.Combine(evidence, instanceId + "-locked-project-native.log"), true);
             string log = await File.ReadAllTextAsync(lockedLog, token);
             foreach (string text in new[] { siblingProject, "is already open by", "Automation project could not be loaded" })
@@ -370,7 +392,7 @@ public sealed partial class NativeSessionTests
 
             // 2. The project file was read-only when KiCad opened the project, and is writable again now.
             RequireToolSuccess(start);
-            string readOnlyInstance = started ?? throw new AssertFailedException("KiCad did not start on the copied project.");
+            string readOnlyInstance = readOnlyStarted ?? throw new AssertFailedException("KiCad did not start on the copied project.");
             RestoreModes(modes);
             var opened = await mcp.Tool("kicad_schematic_open", new { instanceId = readOnlyInstance, path = root });
             RequireToolSuccess(opened);
@@ -410,16 +432,94 @@ public sealed partial class NativeSessionTests
             reportedCodes.Add(result.ErrorCode);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-save-read-only-project.json"),
                 SchematicJson.Formatter.Format(result), token);
-            Console.WriteLine($"Save refused (project opened read-only) in KiCad {started} at {clock.Elapsed.TotalSeconds:F1}s: {result.ErrorMessage}");
+            Console.WriteLine($"Save refused (project opened read-only) in KiCad {readOnlyInstance} at {clock.Elapsed.TotalSeconds:F1}s: {result.ErrorMessage}");
+
+            // 3. A board and project file kept in another folder and linked into the project folder,
+            // as when shared project files are linked into a working folder.
+            RequireToolSuccess(linkedStart);
+            string linkedInstance = linkedStarted ?? throw new AssertFailedException("KiCad did not start on the linked project.");
+            await VerifyLinkedBoardSave(mcp, linkedInstance, linkedProject, store, evidence, instanceId, token);
+            Console.WriteLine($"The board linked from another folder was written in KiCad {linkedInstance} at {clock.Elapsed.TotalSeconds:F1}s.");
         }
         finally
         {
             RestoreModes(modes);
-            if (started is not null) await StopStartedKiCad(started);
+            foreach (string id in started) await StopStartedKiCad(id);
             foreach (string runtime in runtimes.Where(Directory.Exists)) Directory.Delete(runtime, true);
-            Directory.Delete(copy, true);
-            Directory.Delete(state, true);
+            foreach (string folder in new[] { copy, linkedCopy, store, state }) Directory.Delete(folder, true);
         }
+    }
+
+    // A board file that is a symbolic link into another folder. The board editor follows the link
+    // and writes its target (SavePcbFile), and the checked save counts that target as the observed
+    // board, so it is no longer refused as a file outside the document: the edit reaches the target
+    // through the link and both links stay links. The save still cannot be confirmed: SavePcbFile
+    // then renames the board to the link's target without renewing the board's loaded-file
+    // version, which stays at the link's path and old content. The result says exactly that
+    // (saved_state_not_confirmed) instead of claiming success; parent seam request 11 keeps the
+    // board's own name, and this save then becomes LOS_SAVED.
+    private static async Task VerifyLinkedBoardSave(CancellableMcpClient mcp, string linkedInstance, string linkedProject,
+        string store, string evidence, string instanceId, CancellationToken token)
+    {
+        string boardPath = Path.ChangeExtension(linkedProject, ".kicad_pcb");
+        var created = await mcp.Tool("kicad_pcb_create", new { instanceId = linkedInstance, path = boardPath });
+        RequireToolSuccess(created);
+        var board = SchematicJson.Parser.Parse<DocumentSpecifier>(created.GetProperty("content").EnumerateArray()
+            .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+        var editor = new NativeClient(new NngTransport(),
+            NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(linkedInstance), "api.sock")));
+        Task<JsonElement> Save(DocumentLifecycleState expected) => mcp.Tool("kicad_document_save", new { instanceId = linkedInstance,
+            expectedStateJson = SchematicJson.Formatter.Format(expected), operationId = Guid.NewGuid().ToString("D") });
+
+        // The new board is saved once as an ordinary file, then it and the project file move to the
+        // other folder and are linked back. The same bytes behind the links are not a change.
+        var firstReply = await Save(await ObserveLifecycleState(editor, board, token));
+        RequireToolSuccess(firstReply);
+        var first = LifecycleResult(firstReply);
+        Assert.AreEqual(LifecycleOperationStatus.LosSaved, first.Status, first.ErrorMessage);
+        CollectionAssert.Contains(first.WrittenFiles.ToArray(), boardPath, "The new board was written.");
+        var links = new Dictionary<string, string>();
+        foreach (string file in new[] { boardPath, linkedProject })
+        {
+            string target = Path.Combine(store, Path.GetFileName(file));
+            File.Move(file, target);
+            File.CreateSymbolicLink(file, target);
+            links.Add(file, target);
+        }
+        Assert.AreEqual(first.ObservedState, await ObserveLifecycleState(editor, board, token),
+            "The same bytes behind a link are not a document change.");
+
+        var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = board }, token);
+        title.Comment9 = "Linked board work " + Guid.NewGuid().ToString("N");
+        await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = board, TitleBlock = title }, token);
+        var dirty = await ObserveLifecycleState(editor, board, token);
+        Assert.IsTrue(dirty.NativeContentDirty, "The edit must be unsaved work in the editor.");
+        CollectionAssert.Contains(dirty.NativeFiles.ToArray(), boardPath, "The board is observed by its linked path.");
+
+        var reply = await Save(dirty);
+        Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), "An unconfirmed save must not report success. " + reply.GetRawText());
+        var result = LifecycleResult(reply);
+        // Not refused as a file outside the document: the target is the observed board.
+        Assert.AreEqual(LifecycleOperationStatus.LosIndeterminate, result.Status, result.ErrorMessage);
+        Assert.AreEqual("saved_state_not_confirmed", result.ErrorCode,
+            "Until seam request 11 lands, KiCad renames a linked board without renewing its file version. " + result.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { boardPath }, result.WrittenFiles.ToArray(), "The linked board is named as written, by its observed path.");
+        Assert.IsEmpty(result.BlockedFiles, result.ErrorMessage);
+        foreach (var (link, target) in links)
+            Assert.AreEqual(target, new FileInfo(link).LinkTarget, "Saving writes through a link, never over it: " + link);
+        StringAssert.Contains(await File.ReadAllTextAsync(links[boardPath], token), title.Comment9, "The edit reached the linked board's target.");
+        // What stops the confirmation, as the receipt shows it: KiCad now names the board by the
+        // file it wrote, while the board's loaded-file version still has the link's path.
+        string written = new FileInfo(boardPath).ResolveLinkTarget(true)!.FullName;
+        var baseline = result.ObservedState.FileBaselines.Single(file => file.Path == written);
+        Assert.AreEqual(NativeFileBaselineStatus.NfbsWrongPath, baseline.Status, result.ToString());
+        Assert.AreEqual(boardPath, baseline.BaselinePath, result.ToString());
+        Assert.AreEqual(title.Comment9, (await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+            new() { Document = board }, token)).Comment9, "The edit stays in the editor.");
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-save-linked-board.json"),
+            SchematicJson.Formatter.Format(result), token);
+        Console.WriteLine($"Linked board written through its links in KiCad {linkedInstance}: {result.ErrorCode}; "
+            + $"written [{string.Join(", ", result.WrittenFiles)}]; board now {written} with its version still at {baseline.BaselinePath}.");
     }
 
     // The fixture KiCad process that serves this endpoint, found by the socket it was started with.
@@ -867,27 +967,34 @@ public sealed partial class NativeSessionTests
     }
 
     // Everything an agent can observe about the other instance: its process epoch, its open
-    // schematics with their full native state, and the bytes of their files.
+    // schematics and boards with their full native state, and the bytes of their files. An
+    // editor kind that is not open is recorded as the same refusal both times.
     private static async Task<string> SiblingSnapshot(CancellableMcpClient mcp, SiblingKiCad sibling, CancellationToken token)
     {
         var text = new StringBuilder();
         var session = await new NativeClient(new NngTransport(), sibling.Endpoint).HandshakeAsync(token);
         Assert.AreEqual(sibling.Epoch, session.Epoch, "The other KiCad instance restarted.");
         text.AppendLine(session.InstanceId).AppendLine(session.Epoch);
-        var listed = await mcp.Tool("kicad_documents_list", new { instanceId = sibling.InstanceId, kind = "schematic" });
-        text.AppendLine(listed.GetRawText());
-        if (listed.TryGetProperty("isError", out var failed) && failed.GetBoolean()) return text.ToString();
-        var documents = SchematicJson.Parser.Parse<GetOpenDocumentsResponse>(listed.GetProperty("content").EnumerateArray()
-            .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
-        foreach (var document in documents.Documents)
+        var observed = new List<string>();
+        foreach (string kind in new[] { "schematic", "pcb" })
         {
-            var state = await mcp.Tool("kicad_document_state", new
-                { instanceId = sibling.InstanceId, documentJson = SchematicJson.Formatter.Format(document) });
-            RequireToolSuccess(state);
-            text.AppendLine(state.GetRawText());
-            foreach (string file in LifecycleResultState(state).NativeFiles)
-                text.Append(file).Append(' ').AppendLine(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(file, token))));
+            var listed = await mcp.Tool("kicad_documents_list", new { instanceId = sibling.InstanceId, kind });
+            text.Append(kind).Append(' ').AppendLine(listed.GetRawText());
+            if (listed.TryGetProperty("isError", out var failed) && failed.GetBoolean()) { observed.Add(kind + " editor not open"); continue; }
+            var documents = SchematicJson.Parser.Parse<GetOpenDocumentsResponse>(listed.GetProperty("content").EnumerateArray()
+                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+            observed.Add($"{documents.Documents.Count} {kind}");
+            foreach (var document in documents.Documents)
+            {
+                var state = await mcp.Tool("kicad_document_state", new
+                    { instanceId = sibling.InstanceId, documentJson = SchematicJson.Formatter.Format(document) });
+                RequireToolSuccess(state);
+                text.AppendLine(state.GetRawText());
+                foreach (string file in LifecycleResultState(state).NativeFiles)
+                    text.Append(file).Append(' ').AppendLine(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(file, token))));
+            }
         }
+        Console.WriteLine($"Other KiCad instance {sibling.InstanceId} observed: {string.Join(", ", observed)}.");
         return text.ToString();
     }
 

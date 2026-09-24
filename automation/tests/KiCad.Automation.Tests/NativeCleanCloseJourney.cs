@@ -277,8 +277,10 @@ public sealed partial class NativeSessionTests
             "The full disk stopped the board file's flush. " + string.Join(" | ", injected));
 
         // A design rule edit is also project settings, which the board editor writes first. Their
-        // writer keeps the system error to itself and the file stays writable, so KiCad names the
-        // file without calling it blocked: native_save_failed, with nothing written.
+        // writer keeps the system error to itself and the board editor reports only its own
+        // message, so the checked save names the file it saw KiCad begin to replace and leave
+        // unchanged, finds nothing that blocks it now, and never calls it blocked:
+        // native_save_failed, with nothing written and KiCad's own message quoted.
         var rules = await client.InvokeAsync<GetBoardDesignRules, BoardDesignRulesResponse>(new() { Board = document }, token);
         var widened = new Kiapi.Board.BoardDesignRules { Constraints = rules.Rules.Constraints.Clone() };
         widened.Constraints.MinClearance.ValueNm += 1000;
@@ -290,7 +292,9 @@ public sealed partial class NativeSessionTests
             Assert.HasCount(1, settingsFaults);
             StringAssert.Contains(settingsFaults[0], Path.GetFileName(project) + ".kicad-save-", "The fault hit the project file's flush.");
             Assert.IsEmpty(settings.BlockedFiles, "A failure without a found reason never marks a file blocked. " + settings.ErrorMessage);
-            foreach (string text in new[] { "KiCad could not write '" + Path.GetFileName(project) + "'", "gave no system reason", "check the disk" })
+            foreach (string text in new[] { "KiCad reported: PCB persistence failed",
+                         "KiCad could not write '" + Path.GetFileName(project) + "'", "while KiCad was replacing this file",
+                         "gave no system reason", "check the disk" })
                 StringAssert.Contains(settings.ErrorMessage, text, settings.ErrorMessage);
             Assert.IsFalse(settings.ErrorMessage.Contains("make the file or folder writable", StringComparison.Ordinal), settings.ErrorMessage);
         }

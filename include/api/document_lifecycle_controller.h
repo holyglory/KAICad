@@ -37,9 +37,10 @@ public:
 
     /**
      * Why KiCad holds @a aProject read-only and writes none of its files, or an empty string when
-     * it does not.  KiCad decides this when it opens the project (another KiCad holds the project
-     * lock, or the project file was read-only then), so the reason says what to change and that
-     * the project must then be reopened.
+     * it does not.  KiCad decides this when it opens the project (the project file was read-only
+     * then, or KiCad could not take the project lock), so the reason says what to change and that
+     * the project must then be reopened.  For the lock it looks at the lock file as it is now: it
+     * names the holder when another program holds it, and says so when nothing does.
      */
     static wxString ReadOnlyProjectReason( const PROJECT& aProject );
 

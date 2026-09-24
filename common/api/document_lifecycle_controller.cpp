@@ -67,6 +67,28 @@ std::string Truncated( const std::string& aText, size_t aLimit )
     return aText.substr( 0, end );
 }
 
+// The first entry whose path (aPathOf) names the file aPath: the same path if there is one,
+// otherwise the same file once symbolic links are followed.  Writers name the file they replace,
+// and the board editor follows a linked board to its target before it writes (SavePcbFile), so a
+// write to the file an observed link points to is a write of that observed file.
+template <typename ITER, typename PATH_OF>
+ITER FindFile( ITER aBegin, ITER aEnd, const wxString& aPath, PATH_OF aPathOf )
+{
+    ITER found = std::find_if( aBegin, aEnd, [&]( const auto& aEntry )
+                               { return FILE_CONTENT_BASELINE::SamePath( aPathOf( aEntry ), aPath ); } );
+
+    if( found != aEnd )
+        return found;
+
+    const wxString target = KIPLATFORM::IO::ResolveSymlinkTarget( aPath );
+
+    return std::find_if( aBegin, aEnd, [&]( const auto& aEntry )
+                         {
+                             return FILE_CONTENT_BASELINE::SamePath(
+                                     KIPLATFORM::IO::ResolveSymlinkTarget( aPathOf( aEntry ) ), target );
+                         } );
+}
+
 bool Uuid( const std::string& aValue )
 {
     if( aValue.size() != 36 ) return false;
@@ -241,20 +263,56 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
                     "project was opened; make the file writable, then reopen the project in KiCad" );
     }
 
-    // Without a lock KiCad could take, the project stays read-only (SETTINGS_MANAGER::LoadProject
-    // and KICAD_MANAGER_FRAME::ProjectChanged).
+    // A project whose lock KiCad could not take when it opened it stays read-only until it is
+    // reopened (SETTINGS_MANAGER::LoadProject, KICAD_MANAGER_FRAME::ProjectChanged). That happens
+    // when another program holds the lock, but also when the lock file could not be created or
+    // written, or records another user. Look at the lock as it is now, so the reason names what
+    // still stands in the way instead of guessing at what did then.
     const LOCKFILE* lock = aProject.GetProjectLock();
 
     if( !lock || !lock->Valid() )
-        return wxString::Format( wxS( "KiCad opened this project read-only because another KiCad holds the project "
-                                      "lock '%s'; close the project in that KiCad, then reopen it here" ),
-                                 LOCKFILE::LockPathFor( path ) );
+    {
+        const wxString lockPath = LOCKFILE::LockPathFor( path );
+        LOCKFILE       current = LOCKFILE::Inspect( path );
+        const wxString user = current.GetUsername();
+        const wxString host = current.GetHostname();
 
-    // A schematic opened on its own, without a project file, keeps its stand-in project read-only
-    // (SCH_EDIT_FRAME::OpenProjectFiles).
-    if( !wxFileName::FileExists( path ) )
-        return wxS( "KiCad opened this schematic without its project file and keeps the project read-only; "
-                    "open the schematic through its project" );
+        if( !current.Valid() )
+        {
+            const wxString owner = user.empty() && host.empty()
+                                           ? wxString( wxS( "its lock file does not say who" ) )
+                                           : wxString::Format( wxS( "its lock file names user '%s' on computer '%s'" ),
+                                                               user, host );
+
+            return wxString::Format( wxS( "KiCad opened this project read-only because another program holds its "
+                                          "project lock '%s' (%s); close the project there, then reopen it in "
+                                          "KiCad" ),
+                                     lockPath, owner );
+        }
+
+        // KiCad takes a lock by opening its file for writing (FILE_LOCK::Acquire).
+        if( wxFileName::FileExists( lockPath ) && !wxFileName::IsFileWritable( lockPath ) )
+            return wxString::Format( wxS( "KiCad opened this project read-only because it cannot write its project "
+                                          "lock file '%s' (the file is read-only), so it could not take the lock; "
+                                          "make the lock file writable or delete it, then reopen the project in "
+                                          "KiCad" ),
+                                     lockPath );
+
+        // An abandoned lock is taken over only when it is this user's own on this computer: another
+        // user's may still be in use on another computer that shares the folder.
+        if( !current.IsLockedByMe() )
+            return wxString::Format( wxS( "KiCad opened this project read-only because its project lock '%s' belongs "
+                                          "to user '%s' on computer '%s', and KiCad never takes over another user's "
+                                          "lock because that user may have the project open on another computer; "
+                                          "close the project there, or delete the lock file if nobody has the "
+                                          "project open, then reopen it in KiCad" ),
+                                     lockPath, user, host );
+
+        return wxString::Format( wxS( "KiCad could not take the project lock '%s' when it opened the project (for "
+                                      "example because the lock file could not be created), so it opened the project "
+                                      "read-only; nothing holds the lock now, so reopen the project in KiCad" ),
+                                 lockPath );
+    }
 
     return wxS( "KiCad holds this project read-only and writes none of its files; reopen the project in KiCad" );
 }
@@ -378,8 +436,10 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         return state;
     };
 
-    // Observed files this save replaced, and every problem the native savers reported.
+    // Observed files this save replaced, observed files the writer began to replace but left
+    // unchanged when the save failed, and every problem the native savers reported.
     std::vector<std::string> writtenFiles;
+    std::vector<std::string> interruptedFiles;
     std::vector<SAVE_PROBLEM_REPORT> saveProblems;
 
     // This controller's own refusal to let a writer replace a file. Savers report the exception
@@ -424,11 +484,10 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             if( aPath.empty() )
                 return {};
 
-            for( const std::string& file : aBefore.native_files() )
-                if( FILE_CONTENT_BASELINE::SamePath( wxString::FromUTF8( file ), aPath ) )
-                    return file;
+            const auto file = FindFile( aBefore.native_files().begin(), aBefore.native_files().end(), aPath,
+                                        []( const std::string& aFile ) { return wxString::FromUTF8( aFile ); } );
 
-            return Utf8( aPath );
+            return file != aBefore.native_files().end() ? *file : Utf8( aPath );
         };
         auto written = [&]( const std::string& aPath )
         {
@@ -490,6 +549,19 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
 
                 if( !reason.empty() )
                     add( blocked, file, Utf8( reason ) );
+            }
+
+            // The writer began replacing these files and the save failed before it confirmed
+            // them, while they still held their old content. With nothing found that blocks them
+            // they are named as the files KiCad could not write, never as blocked files.
+            for( const std::string& file : interruptedFiles )
+            {
+                if( !written( file ) && std::none_of( blocked.begin(), blocked.end(), [&]( const auto& cause )
+                                                      { return cause.first == file; } ) )
+                {
+                    add( failed, file, "the save failed while KiCad was replacing this file, and KiCad gave no "
+                                       "system reason" );
+                }
             }
         }
 
@@ -625,8 +697,8 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                               FILE_VERSION{ file.current_exists(), file.current_bytes(), file.current_sha256(), file.path() } );
         auto locate = [&]( const wxString& path )
         {
-            return std::find_if( accepted.begin(), accepted.end(), [&]( const auto& entry )
-                    { return FILE_CONTENT_BASELINE::SamePath( entry.first, path ); } );
+            return FindFile( accepted.begin(), accepted.end(), path,
+                             []( const auto& entry ) -> const wxString& { return entry.first; } );
         };
         // The file the writer was allowed to replace and has not confirmed yet, with its version
         // before. A writer can fail after the replacement itself, for example while flushing the
@@ -639,11 +711,17 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
 
             const auto current = FILE_CONTENT_BASELINE::Read( replacing->first );
             const FILE_VERSION& previous = replacing->second;
+            auto listed = []( const std::vector<std::string>& aFiles, const std::string& aPath )
+            { return std::find( aFiles.begin(), aFiles.end(), aPath ) != aFiles.end(); };
 
-            if( current.Known() && ( current.Exists() != previous.exists || current.Bytes() != previous.bytes
-                                     || current.Sha256() != previous.sha )
-                    && std::find( writtenFiles.begin(), writtenFiles.end(), previous.path ) == writtenFiles.end() )
-                writtenFiles.push_back( previous.path );
+            if( current.Known() && !listed( writtenFiles, previous.path ) )
+            {
+                if( current.Exists() != previous.exists || current.Bytes() != previous.bytes
+                        || current.Sha256() != previous.sha )
+                    writtenFiles.push_back( previous.path );
+                else if( !listed( interruptedFiles, previous.path ) )
+                    interruptedFiles.push_back( previous.path );
+            }
 
             replacing.reset();
         };

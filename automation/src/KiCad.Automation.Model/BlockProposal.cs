@@ -13,7 +13,10 @@ public sealed record ProposedBlock(BlockSelection Selection, BlockSelection? Bas
 public sealed record ProposedConnection(Guid OwnerBlockId, ConnectionSelection Selection, ConnectionSelection? BasedOn,
     string ImplementationName, string Name, DiagramConnectionKind Kind, Guid RequirementRevisionId,
     DiagramRequirements Requirements, ImmutableArray<DiagramEndpointBinding> Endpoints, ImmutableArray<ConnectionSelection> Members,
-    Guid? ForkRevisionId = null, Guid? ForkRequirementRevisionId = null);
+    Guid? ForkRevisionId = null, Guid? ForkRequirementRevisionId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DiagramDomain Domain = DiagramDomain.Unspecified,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DiagramConnectionDirection Direction = DiagramConnectionDirection.Unspecified,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] InterconnectRealization? Realization = null);
 public enum BlockProposalIssueKind { Unresolved, Conflicting, Unsupported }
 public sealed record BlockProposalIssue(Guid Id, BlockProposalIssueKind Kind, string Message, Guid? TargetId,
     ImmutableArray<SourceReference> Sources);
@@ -42,13 +45,7 @@ public static class BlockProposalCompiler
             throw Invalid("The proposed implementation belongs to the input's target block, not a replacement occurrence.");
         var originalScope = graph.Walk(proposal.BasePath[^1]).Select(s => s.BlockId).ToHashSet();
         var knownBlocks = graph.States.Select(s => s.BlockId).ToHashSet();
-        var used = graph.States.Select(s => s.Id).Concat(knownBlocks).Concat(graph.Revisions.Select(r => r.Selection.RevisionId))
-            .Concat(graph.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)))
-            .Concat(graph.ConnectionArchives.SelectMany(a => a.States.Select(s => s.ConnectionId).Concat(a.States.Select(s => s.Id))
-                .Concat(a.Revisions.Select(r => r.Selection.RevisionId)).Concat(a.RequirementHistories.SelectMany(h => h.Revisions.Select(r => r.Id)))))
-            .Concat(graph.Revisions.SelectMany(r => r.LocalDiagram.Interfaces.Select(i => i.Id).Concat(r.LocalDiagram.Notes.Select(n => n.Id))))
-            .Concat(graph.RefinementInputs.Select(i => i.Id)).Concat(graph.Proposals.Select(p => p.Id))
-            .Concat(graph.Proposals.SelectMany(p => p.Issues.Select(i => i.Id))).Append(graph.DocumentId).ToHashSet();
+        var used = graph.RetainedIdentities();
         Fresh(proposal.Id); var declaredBlocks = new HashSet<Guid>();
         var states = graph.States.ToBuilder(); var revisions = graph.Revisions.ToBuilder(); var histories = graph.RequirementHistories.ToBuilder();
         var origin = proposal.Origin with { InputIds = proposal.Origin.InputIds.Append(input.Id).Append(proposal.Id).Distinct().ToImmutableArray() };
@@ -57,7 +54,7 @@ public static class BlockProposalCompiler
         {
             if (block?.Selection is not { } selection || block.Requirements is null || block.Diagram is null || block.Children.IsDefault
                 || !declaredBlocks.Add(selection.BlockId)) throw Invalid("Declare each proposed block exactly once, with its complete local diagram and requirements.");
-            Text(block.ImplementationName); Text(block.Name); block.Requirements.Validate(); block.Diagram.Validate();
+            Text(block.ImplementationName); Text(block.Name); block.Requirements.Validate(); block.Diagram.Validate(selection.BlockId);
             block.PhysicalAllocation?.Validate();
             Fresh(selection.StateId); Fresh(selection.RevisionId); Fresh(block.RequirementRevisionId);
             if (names.Any(n => n.BlockId == selection.BlockId && string.Equals(n.Name, block.ImplementationName, StringComparison.OrdinalIgnoreCase)))
@@ -128,7 +125,8 @@ public static class BlockProposalCompiler
                     if (item.ForkRevisionId is not null || item.ForkRequirementRevisionId is not null) throw Invalid("A new connection cannot claim fork history.");
                 }
                 connectionStates.Add(new(selection.StateId, selection.ConnectionId, item.ImplementationName, selection.RevisionId));
-                connectionRevisions.Add(new(selection, item.ForkRevisionId, item.Name, item.Kind, item.Endpoints, item.RequirementRevisionId, item.Members, origin));
+                connectionRevisions.Add(new(selection, item.ForkRevisionId, item.Name, item.Kind, item.Endpoints, item.RequirementRevisionId, item.Members, origin,
+                    item.Domain, item.Direction, item.Realization));
                 requirementHistory = requirementHistory.Add(new(item.RequirementRevisionId, item.ForkRequirementRevisionId, item.Requirements, origin, []));
                 connectionHistories.Add(new(new(graph.DocumentId, selection.ConnectionId, selection.StateId), requirementHistory));
             }

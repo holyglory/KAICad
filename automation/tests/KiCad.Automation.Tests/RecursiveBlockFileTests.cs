@@ -90,7 +90,8 @@ public sealed class RecursiveBlockFileTests
                 graph.DocumentId, loaded.ContentSha256, graph.SelectedRoot, [graph.SelectedRoot], draft,
                 Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin(), token: cancelled.Token));
             Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
-            string invalid = xml.Replace("version=\"1\"", "version=\"999\"", StringComparison.Ordinal);
+            string invalid = xml.Replace("version=\"2\"", "version=\"999\"", StringComparison.Ordinal);
+            Assert.AreNotEqual(xml, invalid, "Every write is schema 2 (contract rbg-v2 R4).");
             await File.WriteAllTextAsync(path, invalid);
             await Assert.ThrowsExactlyAsync<AutomationException>(() => RecursiveBlockFiles.SaveDraftAsync(root, path,
                 graph.DocumentId, loaded.ContentSha256, graph.SelectedRoot, [graph.SelectedRoot], draft,

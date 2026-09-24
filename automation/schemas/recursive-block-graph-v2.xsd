@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Recursive block graph schema 2 (contract rbg-v2 section 5): version 1 plus interface domain and
+     direction, the revision-bound per-level layout, interface realizations, the Harness physical
+     allocation kind, connection archive schema 2 and the one-time conversion receipt. Version 1
+     stays frozen byte-for-byte; readers accept both, and every changed diagram file write emits 2
+     (R4), so a version 1 file keeps its bytes only until its first changed write. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:kicad:automation:recursive-block-graph:2"
+           xmlns="urn:kicad:automation:recursive-block-graph:2"
+           xmlns:h="urn:kicad:automation:requirement-history:1"
+           xmlns:c="urn:kicad:automation:connection-archive:2"
+           xmlns:d="urn:kicad:automation:block-definition:1"
+           xmlns:r="urn:kicad:automation:refinement-input:1" elementFormDefault="qualified">
+  <xs:import namespace="urn:kicad:automation:requirement-history:1"/>
+  <xs:import namespace="urn:kicad:automation:connection-archive:2"/>
+  <xs:import namespace="urn:kicad:automation:block-definition:1"/>
+  <xs:import namespace="urn:kicad:automation:refinement-input:1"/>
+  <xs:complexType name="selection">
+    <xs:attribute name="block" type="h:identity" use="required"/>
+    <xs:attribute name="state" type="h:identity" use="required"/>
+    <xs:attribute name="revision" type="h:identity" use="required"/>
+  </xs:complexType>
+  <xs:simpleType name="annotation-role"><xs:restriction base="xs:string">
+    <xs:enumeration value="Comment"/><xs:enumeration value="Instruction"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="implementation-change-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Rename"/><xs:enumeration value="Archive"/><xs:enumeration value="Restore"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="physical-allocation-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Component"/><xs:enumeration value="Board"/><xs:enumeration value="BoardStack"/><xs:enumeration value="Assembly"/>
+    <xs:enumeration value="Harness"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="physical-allocation-state"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unknown"/><xs:enumeration value="Partial"/><xs:enumeration value="Resolved"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="annotation-target"><xs:restriction base="xs:string">
+    <xs:enumeration value="Canvas"/><xs:enumeration value="Block"/><xs:enumeration value="Connection"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="annotation-point">
+    <xs:attribute name="x" type="xs:decimal" use="required"/><xs:attribute name="y" type="xs:decimal" use="required"/>
+  </xs:complexType>
+  <!-- Canonical presentation decimal: diagram units, quantum 0.001, no exponent, no '+', no "-0". -->
+  <xs:simpleType name="pdecimal"><xs:restriction base="xs:string">
+    <xs:pattern value="-?[1-9][0-9]{0,9}(\.[0-9]{0,2}[1-9])?|0(\.[0-9]{0,2}[1-9])?|-0\.[0-9]{0,2}[1-9]"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="true-flag"><xs:restriction base="xs:string"><xs:enumeration value="true"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="port-side"><xs:restriction base="xs:string">
+    <xs:enumeration value="Left"/><xs:enumeration value="Right"/><xs:enumeration value="Top"/><xs:enumeration value="Bottom"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="domain"><xs:restriction base="xs:string">
+    <xs:enumeration value="Power"/><xs:enumeration value="Data"/><xs:enumeration value="Control"/>
+    <xs:enumeration value="Analog"/><xs:enumeration value="Mechanical"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="interface-direction"><xs:restriction base="xs:string">
+    <xs:enumeration value="Input"/><xs:enumeration value="Output"/><xs:enumeration value="Bidirectional"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="realization-state"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unknown"/><xs:enumeration value="Partial"/><xs:enumeration value="Resolved"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="realization-target-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="ChildInterface"/><xs:enumeration value="LocalConnection"/><xs:enumeration value="Pin"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="sha256"><xs:restriction base="xs:string"><xs:pattern value="[0-9a-f]{64}"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="endpoint-index"><xs:restriction base="xs:int"><xs:minInclusive value="1"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="rgb"><xs:restriction base="xs:unsignedInt"><xs:maxInclusive value="16777215"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="migration-item-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Structure"/><xs:enumeration value="Block"/><xs:enumeration value="Port"/><xs:enumeration value="Connection"/>
+    <xs:enumeration value="ConnectionEndpoint"/><xs:enumeration value="BlockPurpose"/><xs:enumeration value="ComponentLink"/>
+    <xs:enumeration value="NetLink"/><xs:enumeration value="ConnectionDescription"/><xs:enumeration value="Statement"/>
+    <xs:enumeration value="Property"/><xs:enumeration value="UnresolvedNetBinding"/><xs:enumeration value="UnresolvedComponentReference"/>
+    <xs:enumeration value="BlockPlacement"/><xs:enumeration value="PortPlacement"/><xs:enumeration value="ConnectionPlacement"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="migration-outcome"><xs:restriction base="xs:string">
+    <xs:enumeration value="Converted"/><xs:enumeration value="Partial"/><xs:enumeration value="Retained"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="migration-target-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="None"/><xs:enumeration value="Block"/><xs:enumeration value="Interface"/><xs:enumeration value="Connection"/>
+    <xs:enumeration value="UnresolvedEndpoint"/><xs:enumeration value="DefinitionPurpose"/><xs:enumeration value="ComponentBinding"/>
+    <xs:enumeration value="InterconnectSegment"/><xs:enumeration value="ConnectionName"/><xs:enumeration value="BlockPlacement"/>
+    <xs:enumeration value="PortPlacement"/><xs:enumeration value="ConnectionRoute"/><xs:enumeration value="RetainedGuidance"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="migration-reason"><xs:restriction base="xs:string">
+    <xs:enumeration value="Exact"/><xs:enumeration value="NameDerivedFromPortNames"/><xs:enumeration value="NameFromDescriptionFirstLine"/>
+    <xs:enumeration value="CrossLevelEndpoint"/><xs:enumeration value="SameBlockConnection"/><xs:enumeration value="NoManifestSupplied"/>
+    <xs:enumeration value="DesignNotDeclaredInManifest"/><xs:enumeration value="GuidanceUnclassified"/>
+    <xs:enumeration value="UnresolvedReferenceRetained"/><xs:enumeration value="TargetIsElectrical"/>
+    <xs:enumeration value="NetCompletenessUnrecorded"/><xs:enumeration value="PurposeStrengthUnrecorded"/>
+    <xs:enumeration value="PlacementReusedAsFrame"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="migration-source-envelope"><xs:restriction base="xs:string">
+    <xs:enumeration value="EngineeringDesign"/><xs:enumeration value="NativeSchematicDesign"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="retained-guidance-kind"><xs:restriction base="xs:string">
+    <xs:enumeration value="Statement"/><xs:enumeration value="Property"/><xs:enumeration value="ConnectionDescription"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="statement-role"><xs:restriction base="xs:string">
+    <xs:enumeration value="Intent"/><xs:enumeration value="Interpretation"/><xs:enumeration value="Realization"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="guidance-strength"><xs:restriction base="xs:string">
+    <xs:enumeration value="Information"/><xs:enumeration value="Preference"/><xs:enumeration value="Requirement"/>
+  </xs:restriction></xs:simpleType>
+  <xs:complexType name="rect">
+    <xs:attribute name="x" type="pdecimal" use="required"/><xs:attribute name="y" type="pdecimal" use="required"/>
+    <xs:attribute name="width" type="pdecimal" use="required"/><xs:attribute name="height" type="pdecimal" use="required"/>
+  </xs:complexType>
+  <xs:complexType name="point">
+    <xs:attribute name="x" type="pdecimal" use="required"/><xs:attribute name="y" type="pdecimal" use="required"/>
+  </xs:complexType>
+  <xs:complexType name="source">
+    <xs:attribute name="document" type="xs:string" use="required"/>
+    <xs:attribute name="revision" type="xs:string" use="required"/>
+    <xs:attribute name="page" type="xs:positiveInteger"/><xs:attribute name="table" type="xs:string"/>
+    <xs:attribute name="part-variant" type="xs:string"/>
+  </xs:complexType>
+  <xs:complexType name="pin"><xs:sequence>
+    <xs:element name="sheet" minOccurs="1" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="instance" type="h:identity" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="design" type="h:identity" use="required"/>
+    <xs:attribute name="component" type="h:identity" use="required"/>
+    <xs:attribute name="pin" type="xs:string" use="required"/>
+  </xs:complexType>
+  <xs:complexType name="origin"><xs:sequence>
+    <xs:element name="summary" type="xs:string"/>
+    <xs:element name="source" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="document" type="xs:string" use="required"/>
+      <xs:attribute name="revision" type="xs:string" use="required"/>
+      <xs:attribute name="page" type="xs:positiveInteger"/>
+      <xs:attribute name="table" type="xs:string"/>
+      <xs:attribute name="part-variant" type="xs:string"/>
+    </xs:complexType></xs:element>
+    <xs:element name="input" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="ref" type="h:identity" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="actor-kind" type="h:actor" use="required"/>
+    <xs:attribute name="actor" type="xs:string" use="required"/>
+    <xs:attribute name="at" type="xs:dateTime" use="required"/>
+  </xs:complexType>
+  <xs:element name="recursive-block-graph"><xs:complexType><xs:sequence>
+    <xs:element name="selected-root" type="selection"/>
+    <xs:element name="states"><xs:complexType><xs:sequence>
+      <xs:element name="state" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="forked-from" type="selection" minOccurs="0"/>
+      </xs:sequence>
+        <xs:attribute name="id" type="h:identity" use="required"/>
+        <xs:attribute name="block" type="h:identity" use="required"/>
+        <xs:attribute name="name" type="xs:string" use="required"/>
+        <xs:attribute name="head" type="h:identity" use="required"/>
+        <xs:attribute name="archived" type="xs:boolean"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="revisions"><xs:complexType><xs:sequence>
+      <xs:element name="revision" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="origin" type="origin"/>
+        <xs:element name="children"><xs:complexType><xs:sequence>
+          <xs:element name="child" type="selection" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="restored-from" type="selection" minOccurs="0"/>
+        <xs:element name="local-diagram" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="interfaces"><xs:complexType><xs:sequence>
+            <xs:element name="interface" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="intent" type="xs:string"/>
+            </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/>
+              <xs:attribute name="name" type="xs:string" use="required"/>
+              <xs:attribute name="domain" type="domain"/>
+              <xs:attribute name="direction" type="interface-direction"/>
+            </xs:complexType></xs:element>
+          </xs:sequence></xs:complexType></xs:element>
+          <xs:element name="connections"><xs:complexType><xs:sequence>
+            <xs:element name="connection" type="c:selection" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence></xs:complexType></xs:element>
+          <xs:element name="annotations" minOccurs="0"><xs:complexType><xs:sequence>
+            <xs:element name="annotation" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="origin" type="origin"/>
+              <xs:element name="text" type="xs:string"/>
+              <xs:element name="target"><xs:complexType><xs:sequence>
+                <xs:element name="unresolved-reason" type="xs:string" minOccurs="0"/>
+              </xs:sequence><xs:attribute name="kind" type="annotation-target" use="required"/>
+                <xs:attribute name="ref" type="h:identity"/>
+              </xs:complexType></xs:element>
+              <xs:element name="position" type="annotation-point" minOccurs="0"/>
+              <xs:element name="strokes"><xs:complexType><xs:sequence>
+                <xs:element name="stroke" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+                  <xs:element name="point" type="annotation-point" minOccurs="2" maxOccurs="unbounded"/>
+                </xs:sequence></xs:complexType></xs:element>
+              </xs:sequence></xs:complexType></xs:element>
+            </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/>
+              <xs:attribute name="role" type="annotation-role" use="required"/>
+              <xs:attribute name="units" type="xs:string" use="required" fixed="diagram-unit"/>
+            </xs:complexType></xs:element>
+          </xs:sequence></xs:complexType></xs:element>
+          <xs:element name="presentation-view" minOccurs="0"><xs:complexType><xs:sequence>
+            <xs:element name="frame" type="rect" minOccurs="0"/>
+            <!-- Document order of blocks is z-order: later blocks paint on top. -->
+            <xs:element name="block" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+              <xs:attribute name="ref" type="h:identity" use="required"/>
+              <xs:attribute name="x" type="pdecimal" use="required"/><xs:attribute name="y" type="pdecimal" use="required"/>
+              <xs:attribute name="width" type="pdecimal" use="required"/><xs:attribute name="height" type="pdecimal" use="required"/>
+              <xs:attribute name="locked" type="true-flag"/>
+              <xs:attribute name="fill-rgb" type="rgb"/>
+            </xs:complexType></xs:element>
+            <xs:element name="port" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+              <xs:attribute name="block" type="h:identity" use="required"/>
+              <xs:attribute name="interface" type="h:identity" use="required"/>
+              <xs:attribute name="side" type="port-side" use="required"/>
+              <xs:attribute name="offset" type="pdecimal" use="required"/>
+            </xs:complexType></xs:element>
+            <xs:element name="route" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="point" type="point" minOccurs="0" maxOccurs="256"/>
+              <xs:element name="label" type="point" minOccurs="0"/>
+            </xs:sequence>
+              <xs:attribute name="connection" type="h:identity" use="required"/>
+              <xs:attribute name="endpoint" type="endpoint-index" use="required"/>
+              <xs:attribute name="locked" type="true-flag"/>
+            </xs:complexType></xs:element>
+          </xs:sequence>
+            <xs:attribute name="units" type="xs:string" use="required" fixed="diagram-unit"/>
+          </xs:complexType></xs:element>
+          <xs:element name="interface-realizations" minOccurs="0"><xs:complexType><xs:sequence>
+            <xs:element name="realization" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+              <xs:element name="unresolved-reason" type="xs:string" minOccurs="0"/>
+              <xs:element name="target" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+                <xs:element name="pin" type="pin" minOccurs="0"/>
+              </xs:sequence>
+                <xs:attribute name="kind" type="realization-target-kind" use="required"/>
+                <xs:attribute name="block" type="h:identity"/>
+                <xs:attribute name="interface" type="h:identity"/>
+                <xs:attribute name="connection" type="h:identity"/>
+              </xs:complexType></xs:element>
+              <xs:element name="source" type="source" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+              <xs:attribute name="interface" type="h:identity" use="required"/>
+              <xs:attribute name="state" type="realization-state" use="required"/>
+            </xs:complexType></xs:element>
+          </xs:sequence></xs:complexType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element ref="d:definition" minOccurs="0"/>
+        <xs:element name="component-bindings" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="component" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+            <xs:attribute name="design" type="h:identity" use="required"/>
+            <xs:attribute name="circuit" type="h:identity" use="required"/>
+            <xs:attribute name="id" type="h:identity" use="required"/>
+          </xs:complexType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="physical-allocation" minOccurs="0"><xs:complexType><xs:sequence>
+          <xs:element name="target" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+            <xs:attribute name="id" type="h:identity" use="required"/>
+            <xs:attribute name="kind" type="physical-allocation-kind" use="required"/>
+            <xs:attribute name="name" type="xs:string" use="required"/>
+            <xs:attribute name="reference" type="xs:string"/>
+            <xs:attribute name="repository-path" type="xs:string"/>
+            <xs:attribute name="parent" type="h:identity"/>
+          </xs:complexType></xs:element>
+          <xs:element name="unknown-reason" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+          <xs:attribute name="state" type="physical-allocation-state" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence>
+        <xs:attribute name="id" type="h:identity" use="required"/>
+        <xs:attribute name="block" type="h:identity" use="required"/>
+        <xs:attribute name="state" type="h:identity" use="required"/>
+        <xs:attribute name="parent" type="h:identity"/>
+        <xs:attribute name="name" type="xs:string" use="required"/>
+        <xs:attribute name="requirements" type="h:identity" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="requirement-histories"><xs:complexType><xs:sequence>
+      <xs:element ref="h:requirement-history" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="connection-archives" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element ref="c:connection-archive" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="implementation-changes" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="change" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="origin" type="origin"/>
+      </xs:sequence>
+        <xs:attribute name="id" type="h:identity" use="required"/><xs:attribute name="state" type="h:identity" use="required"/>
+        <xs:attribute name="kind" type="implementation-change-kind" use="required"/>
+        <xs:attribute name="before-name" type="xs:string" use="required"/><xs:attribute name="after-name" type="xs:string" use="required"/>
+        <xs:attribute name="before-archived" type="xs:boolean" use="required"/><xs:attribute name="after-archived" type="xs:boolean" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="refinement-inputs" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element ref="r:refinement-input" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="proposals" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="proposal" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element name="base-path"><xs:complexType><xs:sequence>
+          <xs:element name="block" type="selection" minOccurs="1" maxOccurs="unbounded"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="candidate" type="selection"/><xs:element name="origin" type="origin"/>
+        <xs:element name="issues"><xs:complexType><xs:sequence>
+          <xs:element name="issue" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+            <xs:element name="message" type="xs:string"/><xs:element name="source" type="r:source" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/><xs:attribute name="target" type="h:identity"/>
+            <xs:attribute name="kind" use="required"><xs:simpleType><xs:restriction base="xs:string">
+              <xs:enumeration value="Unresolved"/><xs:enumeration value="Conflicting"/><xs:enumeration value="Unsupported"/>
+            </xs:restriction></xs:simpleType></xs:attribute>
+          </xs:complexType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
+      </xs:sequence><xs:attribute name="id" type="h:identity" use="required"/><xs:attribute name="input" type="h:identity" use="required"/>
+        <xs:attribute name="request-sha256" type="r:sha256" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
+    <!-- One-time conversion receipt of a flat structural diagram (contract rbg-v2 section 4.12). -->
+    <xs:element name="migration" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="root" type="selection"/>
+      <xs:element name="origin" type="origin"/>
+      <xs:element name="items"><xs:complexType><xs:sequence>
+        <xs:element name="item" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+          <xs:element name="detail" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+          <xs:attribute name="kind" type="migration-item-kind" use="required"/>
+          <xs:attribute name="source" type="h:identity" use="required"/>
+          <xs:attribute name="source-key" type="xs:string"/>
+          <xs:attribute name="outcome" type="migration-outcome" use="required"/>
+          <xs:attribute name="target-kind" type="migration-target-kind" use="required"/>
+          <xs:attribute name="target" type="h:identity"/>
+          <xs:attribute name="scope" type="h:identity"/>
+          <xs:attribute name="reason" type="migration-reason" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="retained-guidance"><xs:complexType><xs:sequence>
+        <xs:element name="guidance" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+          <xs:element name="text" type="xs:string"/>
+        </xs:sequence>
+          <xs:attribute name="kind" type="retained-guidance-kind" use="required"/>
+          <xs:attribute name="source" type="h:identity" use="required"/>
+          <xs:attribute name="target" type="h:identity" use="required"/>
+          <xs:attribute name="scope" type="h:identity"/>
+          <xs:attribute name="role" type="statement-role"/>
+          <xs:attribute name="strength" type="guidance-strength"/>
+          <xs:attribute name="key" type="xs:string"/>
+          <xs:attribute name="category" type="xs:string"/>
+          <xs:attribute name="has-quantity" type="xs:boolean" use="required"/>
+          <xs:attribute name="has-pin-connection" type="xs:boolean" use="required"/>
+        </xs:complexType></xs:element>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="source-structure"><xs:complexType><xs:simpleContent><xs:extension base="xs:string">
+        <xs:attribute name="sha256" type="sha256" use="required"/>
+      </xs:extension></xs:simpleContent></xs:complexType></xs:element>
+    </xs:sequence>
+      <xs:attribute name="id" type="h:identity" use="required"/>
+      <xs:attribute name="source-path" type="xs:string" use="required"/>
+      <xs:attribute name="source-sha256" type="sha256" use="required"/>
+      <xs:attribute name="source-structure" type="h:identity" use="required"/>
+      <xs:attribute name="source-circuit" type="h:identity" use="required"/>
+      <xs:attribute name="source-envelope" type="migration-source-envelope" use="required"/>
+      <xs:attribute name="converter" type="xs:string" use="required" fixed="kicad-structural-migration/1"/>
+      <xs:attribute name="nanometres-per-diagram-unit" type="xs:long" use="required" fixed="100000"/>
+      <xs:attribute name="design" type="h:identity"/>
+      <xs:attribute name="manifest-path" type="xs:string"/>
+      <xs:attribute name="manifest-sha256" type="sha256"/>
+      <xs:attribute name="design-resolution" type="migration-reason" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence>
+    <xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="2"/>
+    <xs:attribute name="document" type="h:identity" use="required"/>
+  </xs:complexType></xs:element>
+</xs:schema>

@@ -3,13 +3,16 @@
 #include "dialogs/dialog_diagram_field_history.h"
 #include "dialogs/dialog_diagram_conflict.h"
 #include "dialogs/panel_diagram_history.h"
+#include <api/api_server.h>
 #include <bitmaps.h>
+#include <pgm_base.h>
 #include <kiid.h>
 #include <google/protobuf/util/json_util.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <wx/accel.h>
+#include <wx/arrstr.h>
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
@@ -17,41 +20,51 @@
 #include <wx/dcmemory.h>
 #include <wx/image.h>
 #include <wx/mstream.h>
-#include <set>
 #include <wx/filename.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/panel.h>
+#include <wx/radiobut.h>
 #include <wx/scrolwin.h>
 #include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/simplebook.h>
 #include <wx/splitter.h>
 #include <wx/stattext.h>
+#include <wx/statusbr.h>
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
+#include <wx/tglbtn.h>
 #include <wx/toolbar.h>
 #include <wx/weakref.h>
+#include <wx/wrapsizer.h>
 
 namespace D = kiapi::automation::diagrams::v1;
+namespace R = RECURSIVE_DIAGRAM;
+using R::Text;
+using R::Utf8;
+using R::FreshId;
+using R::EditorOrigin;
+
 namespace
 {
-enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE, DIAGRAM_HISTORY };
-wxString text( const std::string& value ) { return wxString::FromUTF8( value ); }
-std::string utf8( const wxString& value ) { return value.ToStdString( wxConvUTF8 ); }
-std::string freshId() { return utf8( KIID().AsString() ); }
+enum { BACK = wxID_HIGHEST + 3900, UP, FIT, NOTE, DIAGRAM_HISTORY, VIEW_PALETTE };
 bool same( const D::BlockSelectionData& a, const D::BlockSelectionData& b )
 { return a.block_id() == b.block_id() && a.state_id() == b.state_id() && a.revision_id() == b.revision_id(); }
 std::string field( const D::RequirementFieldsData& fields, int which )
 { return which == 0 ? fields.general() : which == 1 ? fields.schematic() : fields.routing(); }
 void setField( D::RequirementFieldsData* fields, int which, const std::string& value )
 { if( which == 0 ) fields->set_general( value ); else if( which == 1 ) fields->set_schematic( value ); else fields->set_routing( value ); }
-void editorOrigin( D::DiagramRevisionOriginData* origin, const std::string& summary )
+void dropRestoration( google::protobuf::RepeatedPtrField<D::FieldRestorationData>* restores, int which )
+{ for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == which + 1 ) restores->DeleteSubrange( n, 1 ); }
+const wxString FIELD_LABELS[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
+/// The gap between one-click choices, in DIP; each choice already pads its own label.
+constexpr int FACET_CHOICE_GAP = 2;
+/// The strength choices' full and short labels (StructuralGuidanceStrength Information, Preference, Requirement).
+std::array<wxString, 3> strengthLabels( bool brief )
 {
-    origin->set_kind( D::DAK_EDITOR ); origin->set_actor( "Native editor" ); origin->set_summary( summary );
-    auto now = std::chrono::system_clock::now().time_since_epoch(); auto seconds = std::chrono::duration_cast<std::chrono::seconds>( now );
-    origin->mutable_recorded_at()->set_seconds( seconds.count() );
-    origin->mutable_recorded_at()->set_nanos( static_cast<int>( std::chrono::duration_cast<std::chrono::nanoseconds>( now - seconds ).count() / 100 * 100 ) );
+    if( brief ) return { _( "Info" ), _( "Pref." ), _( "Req." ) };
+    return { _( "Information" ), _( "Preference" ), _( "Requirement" ) };
 }
 }
 
@@ -64,7 +77,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* menu = new wxMenuBar(); auto* file = new wxMenu();
     file->Append( wxID_SAVE, _( "Save\tCtrl+S" ) ); file->Append( wxID_REFRESH, _( "Reload saved diagram\tCtrl+R" ) );
     file->AppendSeparator(); file->Append( wxID_CLOSE, _( "Close\tCtrl+W" ) );
-    menu->Append( file, _( "File" ) ); SetMenuBar( menu );
+    menu->Append( file, _( "File" ) );
+    auto* view = new wxMenu(); view->AppendCheckItem( VIEW_PALETTE, _( "Drawing &palette" ) ); view->Check( VIEW_PALETTE, true );
+    menu->Append( view, _( "&View" ) ); SetMenuBar( menu );
     m_toolbar = CreateToolBar( wxTB_HORIZONTAL | wxTB_FLAT | wxTB_TEXT );
     m_toolbar->SetName( "RecursiveToolbar" );
     m_toolbar->AddTool( BACK, _( "Back" ), KiBitmap( BITMAPS::left ) );
@@ -72,9 +87,25 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_toolbar->AddTool( wxID_UNDO, _( "Undo" ), KiBitmap( BITMAPS::undo ) );
     m_toolbar->AddTool( wxID_REDO, _( "Redo" ), KiBitmap( BITMAPS::redo ) ); m_toolbar->AddSeparator();
     m_toolbar->AddTool( FIT, _( "Fit" ), KiBitmap( BITMAPS::zoom_fit_in_page ) );
-    m_toolbar->AddTool( NOTE, _( "Note" ), KiBitmap( BITMAPS::add_textbox ) ); m_toolbar->Realize();
+    m_toolbar->AddTool( NOTE, _( "Note" ), KiBitmap( BITMAPS::add_textbox ) ); m_toolbar->AddSeparator();
+    // Round A1 option 1: the drawing tools follow the approved commands as one compact strip. They
+    // are the same tool buttons as the canvas-edge palette, so both show the one active tool.
+    auto strip = [&]( TOOL tool, const wxString& label, BITMAPS bitmap, const char* name )
+    {
+        auto* button = R::ToolButton( m_toolbar, label, bitmap, name, true );
+        button->Bind( wxEVT_TOGGLEBUTTON, [this, tool]( wxCommandEvent& ) { setTool( tool ); m_canvas->SetFocus(); } );
+        m_toolbar->AddControl( button ); m_strip.emplace_back( tool, static_cast<wxToggleButton*>( button ) );
+    };
+    strip( TOOL::SELECT, _( "Select" ), BITMAPS::cursor, "RecursiveToolSelect" );
+    strip( TOOL::ADD_BLOCK, _( "Add block" ), BITMAPS::add_rectangle, "RecursiveToolAddBlock" );
+    strip( TOOL::CONNECT, _( "Connect" ), BITMAPS::add_line, "RecursiveToolConnect" );
+    strip( TOOL::ADD_PORT, _( "Place port" ), BITMAPS::add_hierar_pin, "RecursiveToolPlacePort" );
+    m_stripDelete = static_cast<wxButton*>( R::ToolButton( m_toolbar, _( "Delete" ), BITMAPS::trash, "RecursiveToolDelete", false ) );
+    m_stripDelete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeSelection(); } );
+    m_toolbar->AddControl( m_stripDelete );
+    m_toolbar->Realize();
     auto* splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE );
-    splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 );
+    splitter->SetMinimumPaneSize( FromDIP( 300 ) ); splitter->SetSashGravity( 1.0 ); m_splitter = splitter;
     auto* diagram = new wxPanel( splitter ); auto* main = new wxBoxSizer( wxVERTICAL );
     m_breadcrumb = new wxStaticText( diagram, wxID_ANY, _( "Loading diagram…" ), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE );
     m_breadcrumb->SetMinSize( FromDIP( wxSize( 80, -1 ) ) );
@@ -85,18 +116,96 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_diagramHistory = new wxButton( diagram, wxID_ANY, _( "History" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
     m_diagramHistory->SetName( "RecursiveDiagramHistory" ); pathRow->Add( m_diagramHistory, 0, wxLEFT, FromDIP( 12 ) );
     main->Add( pathRow, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
-    m_canvas = new wxPanel( diagram, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS | wxBORDER_NONE | wxFULL_REPAINT_ON_RESIZE );
+    m_canvas = new wxWindow( diagram, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS | wxBORDER_NONE | wxFULL_REPAINT_ON_RESIZE );
     m_canvas->SetName( "RecursiveDiagramCanvas" );
     m_canvas->SetBackgroundStyle( wxBG_STYLE_PAINT ); main->Add( m_canvas, 1, wxEXPAND ); diagram->SetSizer( main );
+    // Round A1 option 2: the same tools plus Undo on the canvas edge; hideable from View.
+    R::TOOL_PALETTE::ACTIONS paletteActions;
+    paletteActions.choose = [this]( TOOL tool ) { setTool( tool ); m_canvas->SetFocus(); };
+    paletteActions.remove = [this] { removeSelection(); };
+    paletteActions.undo = [this] { undo( false ); };
+    m_palette = new R::TOOL_PALETTE( m_canvas, std::move( paletteActions ) );
+    m_caption = new wxTextCtrl( m_canvas, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
+    m_caption->SetName( "DiagramCaptionEditor" ); m_caption->Hide();
+    m_caption->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { finishCaption( true ); } );
+    // Moving focus away keeps a typed caption and cancels a blank one, so focus is never pulled back.
+    m_caption->Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event )
+    {
+        event.Skip();
+        if( m_captionKind ) CallAfter( [this] { if( m_captionKind && wxWindow::FindFocus() != m_caption )
+            finishCaption( !m_caption->GetValue().Strip( wxString::both ).empty() ); } );
+    } );
     auto* inspectorRoot = new wxPanel( splitter ); inspectorRoot->SetMinSize( FromDIP( wxSize( 380, -1 ) ) );
     m_inspectorBook = new wxSimplebook( inspectorRoot );
     auto* inspector = new wxPanel( m_inspectorBook ); auto* properties = new wxBoxSizer( wxVERTICAL );
     auto* side = new wxBoxSizer( wxVERTICAL );
     auto* scroll = new wxScrolledWindow( inspector ); scroll->SetScrollRate( 0, FromDIP( 12 ) );
-    m_inspectorScroll = scroll;
+    m_inspectorScroll = scroll; scroll->SetName( "RecursiveInspector" );
     auto* fields = new wxBoxSizer( wxVERTICAL );
+    // Round A4 option 3 (owner decision n0b2a908b00e78823): the facet overview lists only the facets that have a
+    // value, and one facet's detail edits its state, value, reason and strength. Built first so it leads the
+    // scrolled inspector and its tab order.
+    m_facetHeading = new wxStaticText( scroll, wxID_ANY, _( "Facet overview" ) );
+    m_facetHeading->SetFont( GetFont().Bold() ); fields->Add( m_facetHeading, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        m_facetRows[facet] = new R::FACET_ROW( scroll, facet, [this]( int chosen ) { openFacet( chosen, true ); } );
+        fields->Add( m_facetRows[facet], 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
+    }
+    m_facetDetail = new wxBoxSizer( wxVERTICAL );
+    m_facetBack = new wxButton( scroll, wxID_ANY, wxS( "↑ " ) + _( "Back to facet overview" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_facetBack->SetName( "RecursiveFacetBack" );
+    m_facetBack->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { closeFacet( true ); } );
+    m_facetDetail->Add( m_facetBack, 0, wxTOP | wxBOTTOM, FromDIP( 6 ) );
+    m_facetTitle = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetTitle->SetFont( GetFont().Bold() );
+    m_facetTitle->SetName( "RecursiveFacetTitle" ); m_facetDetail->Add( m_facetTitle, 0, wxBOTTOM, FromDIP( 8 ) );
+    // State and strength are small fixed sets, so each is a row of one-click choices under its label.
+    auto label = [&]( const wxString& text )
+    {
+        auto* item = new wxStaticText( scroll, wxID_ANY, text );
+        m_facetDetail->Add( item, 0, wxTOP, FromDIP( 6 ) ); return item;
+    };
+    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first).
+    auto choices = [&]( std::array<wxRadioButton*, 3>& buttons, const std::array<wxString, 3>& labels, const char* name,
+                        const std::array<const char*, 3>& names )
+    {
+        auto* row = new wxWrapSizer( wxHORIZONTAL );
+        for( int i = 0; i < 3; ++i )
+        {
+            buttons[i] = new wxRadioButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, i == 0 ? wxRB_GROUP : 0 );
+            buttons[i]->SetName( wxString( name ) + names[i] ); buttons[i]->SetToolTip( labels[i] );
+            row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
+            if( i < 2 ) row->AddSpacer( FromDIP( FACET_CHOICE_GAP ) );
+        }
+        m_facetDetail->Add( row, 0, wxEXPAND );
+    };
+    label( _( "State" ) );
+    choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState", { "Chosen", "Candidate", "Unknown" } );
+    m_facetValueLabel = label( _( "Value" ) );
+    m_facetValue = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
+    m_facetValue->SetName( "RecursiveFacetValue" ); m_facetDetail->Add( m_facetValue, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    m_facetCandidates = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    m_facetCandidates->SetName( "RecursiveFacetCandidates" ); m_facetCandidates->SetHint( _( "One per line" ) );
+    m_facetDetail->Add( m_facetCandidates, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    m_facetReason = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    m_facetReason->SetName( "RecursiveFacetReason" ); m_facetDetail->Add( m_facetReason, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    label( _( "Strength" ) );
+    choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength", { "Information", "Preference", "Requirement" } );
+    m_facetNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetNotice->SetName( "RecursiveFacetNotice" );
+    m_facetDetail->Add( m_facetNotice, 0, wxEXPAND | wxTOP, FromDIP( 6 ) );
+    m_facetClear = new wxButton( scroll, wxID_ANY, _( "Clear facet" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_facetClear->SetName( "RecursiveFacetClear" ); m_facetDetail->Add( m_facetClear, 0, wxTOP, FromDIP( 6 ) );
+    m_facetClear->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { clearFacet(); } );
+    for( auto* button : m_facetStates ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetStateChanged(); } );
+    for( auto* button : m_facetStrengths ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetEdited(); } );
+    for( auto* entry : { m_facetValue, m_facetCandidates, m_facetReason } )
+        entry->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) facetEdited(); } );
+    // Enter keeps a typed value and returns to the overview.
+    m_facetValue->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { if( m_facetProblem.empty() ) closeFacet( true ); } );
+    fields->Add( m_facetDetail, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* header = new wxPanel( inspector ); auto* heading = new wxBoxSizer( wxVERTICAL );
     m_owner = new wxStaticText( header, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END );
+    m_owner->SetName( "RecursiveOwnerCaption" );
     m_owner->SetFont( GetFont().Bold().Larger() ); heading->Add( m_owner, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
     m_savedVersion = new wxStaticText( header, wxID_ANY, wxEmptyString );
     heading->Add( m_savedVersion, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
@@ -109,21 +218,37 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
             FromDIP( wxSize( 320, 125 ) ), wxTE_MULTILINE | wxTE_READONLY );
     m_endpoints->SetName( "RecursiveConnectionEndpoints" );
     fields->Add( m_endpoints, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
-    const wxString labels[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
     for( int i = 0; i < 3; ++i )
     {
-        auto* heading = new wxBoxSizer( wxHORIZONTAL );
-        heading->Add( new wxStaticText( scroll, wxID_ANY, labels[i] ), 1, wxALIGN_CENTER_VERTICAL );
+        // Each requirement appears only once it has text or the user adds it (owner decision n98a3f3c41084f0ed).
+        auto* row = new wxBoxSizer( wxVERTICAL );
+        auto* title = new wxBoxSizer( wxHORIZONTAL );
+        title->Add( new wxStaticText( scroll, wxID_ANY, FIELD_LABELS[i] ), 1, wxALIGN_CENTER_VERTICAL );
         m_history[i] = new wxButton( scroll, wxID_ANY, _( "History" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
         m_history[i]->SetName( wxString::Format( "RecursiveFieldHistory%d", i ) );
-        heading->Add( m_history[i], 0 ); fields->Add( heading, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
+        title->Add( m_history[i], 0 ); row->Add( title, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
         m_fields[i] = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
                 FromDIP( wxSize( 320, 90 ) ), wxTE_MULTILINE );
         m_fields[i]->SetName( wxString::Format( "RecursiveRequirements%d", i ) );
-        fields->Add( m_fields[i], 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+        row->Add( m_fields[i], 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+        fields->Add( row, 0, wxEXPAND ); m_fieldHeadings[i] = row;
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
         m_history[i]->Bind( wxEVT_BUTTON, [this, i]( wxCommandEvent& ) { history( i ); } );
     }
+    // Two quiet add actions in one row. Add requirement… shows a requirement box that is hidden until someone adds it
+    // (owner decision n98a3f3c41084f0ed). Add detail… gives a block's component-choice facet its first value (Round A4,
+    // owner decision n0b2a908b00e78823); the owner's A3 decision nf53af9d74841b7d3 pairs Add detail with Add requirement
+    // so blocks and connections grow the same way.
+    auto* addRow = new wxBoxSizer( wxHORIZONTAL );
+    m_addRequirement = new wxButton( scroll, wxID_ANY, _( "Add requirement…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_addRequirement->SetName( "RecursiveAddRequirement" );
+    m_addRequirement->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseRequirement(); } );
+    addRow->Add( m_addRequirement, 0, wxRIGHT, FromDIP( 12 ) );
+    m_addDetail = new wxButton( scroll, wxID_ANY, _( "Add detail…" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
+    m_addDetail->SetName( "RecursiveAddDetail" );
+    m_addDetail->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseDetail(); } );
+    addRow->Add( m_addDetail, 0 );
+    fields->Add( addRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
     commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
@@ -142,6 +267,12 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         { m_commentId = m_commentIds[chosen]; m_newComment = m_commentId.empty(); fillComments(); m_comments->SetFocus(); }
     } );
     scroll->SetSizer( fields ); properties->Add( scroll, 1, wxEXPAND ); inspector->SetSizer( properties );
+    // A wider or narrower inspector (the splitter, or its scroll bar showing) restores or collapses the strength labels.
+    scroll->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
+    {
+        event.Skip();
+        CallAfter( [this] { if( !m_closing && fitFacetLabels() ) { m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision; } } );
+    } );
     m_inspectorBook->AddPage( inspector, _( "Properties" ) );
     PANEL_DIAGRAM_HISTORY::ACTIONS historyActions;
     historyActions.load = [this]( unsigned offset ) { loadDiagramHistory( offset ); };
@@ -163,12 +294,18 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
     m_canvas->Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { wxAutoBufferedPaintDC dc( m_canvas ); paint( dc ); } );
     m_canvas->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
-    { m_rendered = false; ++m_viewRevision; updateImplementationLabel(); m_canvas->Refresh(); event.Skip(); } );
+    {
+        m_rendered = false; ++m_viewRevision; updateImplementationLabel(); placePaletteAndEditor();
+        // The canvas has no scrolling: a resized window re-fits while the view is still the fitted one, or
+        // whenever part of the level would otherwise be out of view.
+        if( m_ready && current() && !m_captionKind && m_drag == DRAG::NONE && ( m_fitted || !drawingFits() ) ) fit();
+        m_canvas->Refresh(); event.Skip();
+    } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
-    m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::moveNote, this );
-    m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& ) { finishNoteDrag(); } );
-    m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { finishNoteDrag(); } );
+    m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::motion, this );
+    m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& ) { release(); } );
+    m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { release(); } );
     m_canvas->Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
     { if( !canvasKey( event ) ) event.Skip(); } );
     m_openDiagram->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { navigate( m_selected ); } );
@@ -182,11 +319,12 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { save(); }, wxID_SAVE );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { reloadSaved(); }, wxID_REFRESH );
     Bind( wxEVT_MENU, [this]( wxCommandEvent& ) { Close(); }, wxID_CLOSE );
+    Bind( wxEVT_MENU, [this]( wxCommandEvent& event )
+    { m_paletteShown = event.IsChecked(); placePaletteAndEditor(); ++m_viewRevision; m_rendered = false; m_canvas->Refresh(); }, VIEW_PALETTE );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( !m_back.empty() ) { auto id = m_back.back(); navigate( id, false ); if( current() && current()->selection().block_id() == id ) m_back.pop_back(); refresh(); } }, BACK );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { if( m_path.size() > 1 ) navigate( m_path[m_path.size() - 2].block_id() ); }, UP );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { fit(); }, FIT );
-    Bind( wxEVT_TOOL, [this]( wxCommandEvent& )
-    { m_noteMode = true; m_canvas->SetFocus(); m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); }, NOTE );
+    Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { setTool( TOOL::NOTE ); }, NOTE );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { undo( false ); }, wxID_UNDO );
     Bind( wxEVT_TOOL, [this]( wxCommandEvent& ) { undo( true ); }, wxID_REDO );
     Bind( wxEVT_TIMER, [this]( wxTimerEvent& ) { drain(); }, m_ioTimer.GetId() );
@@ -194,18 +332,34 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     Bind( wxEVT_CLOSE_WINDOW, &RECURSIVE_DIAGRAM_FRAME::close, this );
     Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& event )
     {
+        // The in-place caption editor owns typing; Enter keeps and Escape cancels the caption.
+        if( m_captionKind && wxWindow::FindFocus() == m_caption )
+        {
+            if( event.GetKeyCode() == WXK_ESCAPE ) { finishCaption( false ); return; }
+            if( event.GetKeyCode() == WXK_RETURN || event.GetKeyCode() == WXK_NUMPAD_ENTER ) { finishCaption( true ); return; }
+            // Save keeps a typed caption first; a blank one refuses the save and stays open.
+            if( event.ControlDown() && event.GetKeyCode() == 'S' ) { save(); return; }
+            event.Skip(); return;
+        }
         if( event.GetKeyCode() == WXK_ESCAPE && m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
+        // Escape in a facet's detail returns to the overview and drops an entry that could not be kept.
+        if( event.GetKeyCode() == WXK_ESCAPE && m_facet >= 0 && facetHasFocus() ) { closeFacet( true ); return; }
+        // Tab moves between the detail's controls in order, the multi-line entries included.
+        if( event.GetKeyCode() == WXK_TAB && !event.ControlDown() && !event.AltDown() && m_facet >= 0 && facetHasFocus() )
+        { wxWindow::FindFocus()->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'H' ) { openDiagramHistory(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'I' ) { chooseImplementation(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'R' ) { reloadSaved(); return; }
         if( event.ControlDown() && event.GetKeyCode() >= '1' && event.GetKeyCode() <= '5' )
         { if( m_ready && !m_process && !m_diagramHistoryOpen ) { if( event.GetKeyCode() == '5' ) { if( m_commentChoice->IsShown() ) m_commentChoice->SetFocus(); }
-            else if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else m_fields[event.GetKeyCode() - '1']->SetFocus(); } return; }
+            else if( event.GetKeyCode() == '4' ) m_comments->SetFocus(); else revealField( event.GetKeyCode() - '1' ); } return; }
         if( event.AltDown() && event.GetKeyCode() == 'H' )
         { for( int i = 0; i < 3; ++i ) if( wxWindow::FindFocus() == m_fields[i] ) { history( i ); return; } }
         if( event.GetKeyCode() == WXK_ESCAPE && !m_process )
-        { if( m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
-            m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); finishNoteDrag(); m_canvas->SetFocus(); return; }
+        {
+            if( m_diagramHistoryOpen ) { closeDiagramHistory(); return; }
+            release(); m_connectFrom.reset(); setTool( TOOL::SELECT ); m_canvas->SetFocus(); return;
+        }
         if( event.ControlDown() && event.GetKeyCode() == 'S' ) { save(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'W' ) { Close(); return; }
         if( event.ControlDown() && event.GetKeyCode() == 'Z' ) { undo( false ); return; }
@@ -213,6 +367,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         if( wxWindow::FindFocus() == m_canvas && !event.ControlDown() && !event.AltDown() && canvasKey( event ) ) return;
         event.StopPropagation(); event.Skip();
     } );
+    placePaletteAndEditor();
     refresh(); CallAfter( [this, splitter]
     { splitter->SetSashPosition( splitter->GetClientSize().x - FromDIP( 400 ) ); load( m_request.expected_source_token() ); } );
 }
@@ -221,31 +376,6 @@ RECURSIVE_DIAGRAM_FRAME::~RECURSIVE_DIAGRAM_FRAME()
 {
     m_ioTimer.Stop();
     if( m_process ) { m_process->Detach(); wxProcess::Kill( m_pid, wxSIGTERM, wxKILL_CHILDREN ); }
-}
-
-bool RECURSIVE_DIAGRAM_FRAME::canvasKey( wxKeyEvent& event )
-{
-    if( !m_ready || m_process || !current() || m_diagramHistoryOpen ) return false;
-    if( event.GetKeyCode() == WXK_TAB )
-    { m_canvas->Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return true; }
-    int index = -1;
-    for( int i = 0; i < current()->children_size(); ++i ) if( current()->children( i ).block_id() == m_selected ) index = i;
-    if( event.GetKeyCode() == WXK_RIGHT || event.GetKeyCode() == WXK_DOWN )
-    { ++m_navigationInputRevision; if( current()->children_size() ) select( current()->children( ( index + 1 ) % current()->children_size() ).block_id() ); return true; }
-    if( event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_UP )
-    { ++m_navigationInputRevision; if( current()->children_size() ) select( current()->children( ( index + current()->children_size() - 1 ) % current()->children_size() ).block_id() ); return true; }
-    if( event.GetKeyCode() == WXK_RETURN ) { navigate( m_selected ); return true; }
-    if( event.GetKeyCode() == 'N' )
-    { m_noteMode = true; m_canvas->SetCursor( wxCursor( wxCURSOR_CROSS ) ); SetStatusText( _( "Click the diagram to place a comment." ) ); return true; }
-    if( event.GetKeyCode() == 'L' && current()->local_diagram().connections_size() )
-    {
-        int selected = -1;
-        for( int i = 0; i < current()->local_diagram().connections_size(); ++i )
-            if( current()->local_diagram().connections( i ).connection_id() == m_connectionId ) selected = i;
-        selectConnection( current()->local_diagram().connections( ( selected + 1 ) % current()->local_diagram().connections_size() ).connection_id() ); return true;
-    }
-    if( event.GetKeyCode() == WXK_BACK && m_path.size() > 1 ) { navigate( m_path[m_path.size() - 2].block_id() ); return true; }
-    return false;
 }
 
 const RECURSIVE_DIAGRAM_FRAME::REVISION* RECURSIVE_DIAGRAM_FRAME::revision( const SELECTION& selection ) const
@@ -262,23 +392,7 @@ const D::RequirementRevisionData* RECURSIVE_DIAGRAM_FRAME::requirements( const R
 const RECURSIVE_DIAGRAM_FRAME::REVISION* RECURSIVE_DIAGRAM_FRAME::current() const
 {
     if( m_historyPreview ) return revision( *m_historyPreview );
-    const REVISION* saved = m_preview ? revision( *m_preview ) : m_path.empty() ? nullptr : revision( m_path.back() );
-    return saved && m_draftView && same( saved->selection(), m_draftView->selection() ) ? &*m_draftView : saved;
-}
-bool RECURSIVE_DIAGRAM_FRAME::hasChanges() const
-{
-    return m_preview.has_value() || ( !m_connectionId.empty()
-        ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
-        : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString() );
-}
-const D::ConnectionRevisionData* RECURSIVE_DIAGRAM_FRAME::connection( const std::string& id ) const
-{
-    if( !current() ) return nullptr;
-    for( const auto& selected : current()->local_diagram().connections() ) if( selected.connection_id() == id )
-        for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
-            for( const auto& item : archive.revisions() ) if( item.selection().revision_id() == selected.revision_id()
-                && item.selection().connection_id() == selected.connection_id() && item.selection().state_id() == selected.state_id() ) return &item;
-    return nullptr;
+    return m_preview ? revision( *m_preview ) : m_path.empty() ? nullptr : revision( m_path.back() );
 }
 int RECURSIVE_DIAGRAM_FRAME::version( const REVISION& item ) const
 {
@@ -304,6 +418,162 @@ bool RECURSIVE_DIAGRAM_FRAME::findPath( const std::string& blockId, std::vector<
     return false;
 }
 
+// ---- The level draft ------------------------------------------------------------------------
+
+const D::ConnectionRevisionData* RECURSIVE_DIAGRAM_FRAME::savedConnection( const std::string& id ) const
+{
+    const REVISION* scope = current(); if( !scope ) return nullptr;
+    for( const auto& selected : scope->local_diagram().connections() ) if( selected.connection_id() == id )
+        for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
+            for( const auto& item : archive.revisions() ) if( item.selection().revision_id() == selected.revision_id()
+                && item.selection().connection_id() == selected.connection_id() && item.selection().state_id() == selected.state_id() ) return &item;
+    return nullptr;
+}
+RECURSIVE_DIAGRAM_FRAME::DRAFT RECURSIVE_DIAGRAM_FRAME::draftFor( const REVISION& item ) const
+{
+    DRAFT draft; auto* saved = requirements( item ); if( !saved ) return draft;
+    *draft.mutable_baseline() = item.selection(); draft.set_name( item.name() );
+    *draft.mutable_children() = item.children(); draft.set_baseline_requirement_revision_id( saved->id() );
+    *draft.mutable_baseline_fields() = saved->fields(); *draft.mutable_fields() = saved->fields();
+    if( item.has_local_diagram() ) *draft.mutable_local_diagram() = item.local_diagram();
+    if( item.has_definition() ) *draft.mutable_definition() = item.definition();
+    if( item.has_component_bindings() ) *draft.mutable_component_bindings() = item.component_bindings();
+    if( item.has_physical_allocation() ) *draft.mutable_physical_allocation() = item.physical_allocation();
+    return draft;
+}
+RECURSIVE_DIAGRAM_FRAME::LINK_DRAFT RECURSIVE_DIAGRAM_FRAME::connectionDraftFor( const D::ConnectionRevisionData& item ) const
+{
+    LINK_DRAFT draft; const REVISION* scope = current(); if( !scope ) return draft;
+    for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
+        for( const auto& history : archive.requirement_histories() ) if( history.state_id() == item.selection().state_id() )
+            for( const auto& row : history.revisions() ) if( row.id() == item.requirement_revision_id() )
+            {
+                *draft.mutable_baseline() = item.selection(); draft.set_name( item.name() ); draft.set_kind( item.kind() );
+                *draft.mutable_endpoints() = item.endpoints(); *draft.mutable_members() = item.members();
+                draft.set_baseline_requirement_revision_id( row.id() ); *draft.mutable_baseline_fields() = row.fields();
+                *draft.mutable_fields() = row.fields(); draft.set_domain( item.domain() ); draft.set_direction( item.direction() );
+                if( item.has_realization() ) *draft.mutable_realization() = item.realization();
+                return draft;
+            }
+    return draft;
+}
+void RECURSIVE_DIAGRAM_FRAME::resetLevel()
+{
+    m_level.Clear(); m_undo.clear(); m_redo.clear(); m_revealed.clear(); m_lastEffects.Clear();
+    m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear();
+    if( const REVISION* scope = current() ) *m_level.mutable_scope() = draftFor( *scope );
+    m_savedLevel = m_level;
+}
+bool RECURSIVE_DIAGRAM_FRAME::levelChanged() const
+{
+    if( m_level.scope().SerializeAsString() != m_savedLevel.scope().SerializeAsString()
+        || m_level.new_children_size() || m_level.new_connections_size() ) return true;
+    for( const auto& child : m_level.child_drafts() )
+        if( const REVISION* saved = revision( child.baseline() ); !saved || child.SerializeAsString() != draftFor( *saved ).SerializeAsString() ) return true;
+    for( const auto& link : m_level.connection_drafts() )
+        if( const auto* saved = savedConnection( link.baseline().connection_id() );
+            !saved || link.SerializeAsString() != connectionDraftFor( *saved ).SerializeAsString() ) return true;
+    return false;
+}
+bool RECURSIVE_DIAGRAM_FRAME::hasChanges() const { return m_preview.has_value() || levelChanged(); }
+void RECURSIVE_DIAGRAM_FRAME::pushUndo() { m_undo.push_back( m_level ); m_redo.clear(); }
+void RECURSIVE_DIAGRAM_FRAME::changed()
+{
+    m_dirty = hasChanges(); ++m_viewRevision; m_rendered = false; refresh();
+}
+D::NewBlockOccurrenceData* RECURSIVE_DIAGRAM_FRAME::newChild( const std::string& id )
+{
+    for( auto& child : *m_level.mutable_new_children() ) if( child.selection().block_id() == id ) return &child;
+    return nullptr;
+}
+const D::NewBlockOccurrenceData* RECURSIVE_DIAGRAM_FRAME::newChild( const std::string& id ) const
+{
+    for( const auto& child : m_level.new_children() ) if( child.selection().block_id() == id ) return &child;
+    return nullptr;
+}
+D::NewConnectionData* RECURSIVE_DIAGRAM_FRAME::newConnection( const std::string& id )
+{
+    for( auto& link : *m_level.mutable_new_connections() ) if( link.selection().connection_id() == id ) return &link;
+    return nullptr;
+}
+const D::NewConnectionData* RECURSIVE_DIAGRAM_FRAME::newConnection( const std::string& id ) const
+{
+    for( const auto& link : m_level.new_connections() ) if( link.selection().connection_id() == id ) return &link;
+    return nullptr;
+}
+RECURSIVE_DIAGRAM_FRAME::DRAFT* RECURSIVE_DIAGRAM_FRAME::editBlock( bool create )
+{
+    if( m_selected.empty() || m_selected == m_level.scope().baseline().block_id() ) return m_level.mutable_scope();
+    for( auto& child : *m_level.mutable_child_drafts() ) if( child.baseline().block_id() == m_selected ) return &child;
+    if( !create ) return nullptr;
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+        if( const REVISION* saved = revision( child ) ) { *m_level.add_child_drafts() = draftFor( *saved ); return m_level.mutable_child_drafts( m_level.child_drafts_size() - 1 ); }
+    return nullptr;
+}
+const RECURSIVE_DIAGRAM_FRAME::DRAFT* RECURSIVE_DIAGRAM_FRAME::selectedBlockDraft() const
+{
+    if( m_selected.empty() || m_selected == m_level.scope().baseline().block_id() ) return &m_level.scope();
+    for( const auto& child : m_level.child_drafts() ) if( child.baseline().block_id() == m_selected ) return &child;
+    return nullptr;
+}
+const RECURSIVE_DIAGRAM_FRAME::LINK_DRAFT* RECURSIVE_DIAGRAM_FRAME::connectionDraft( const std::string& id ) const
+{
+    for( const auto& link : m_level.connection_drafts() ) if( link.baseline().connection_id() == id ) return &link;
+    return nullptr;
+}
+RECURSIVE_DIAGRAM_FRAME::LINK_DRAFT* RECURSIVE_DIAGRAM_FRAME::editConnection( bool create )
+{
+    for( auto& link : *m_level.mutable_connection_drafts() ) if( link.baseline().connection_id() == m_connectionId ) return &link;
+    if( !create ) return nullptr;
+    if( const auto* saved = savedConnection( m_connectionId ) )
+    { *m_level.add_connection_drafts() = connectionDraftFor( *saved ); return m_level.mutable_connection_drafts( m_level.connection_drafts_size() - 1 ); }
+    return nullptr;
+}
+bool RECURSIVE_DIAGRAM_FRAME::selectionIsNew() const
+{
+    return !m_connectionId.empty() ? newConnection( m_connectionId ) != nullptr : newChild( m_selected ) != nullptr;
+}
+std::string RECURSIVE_DIAGRAM_FRAME::selectedName() const
+{
+    if( !m_connectionId.empty() )
+    {
+        if( const auto* added = newConnection( m_connectionId ) ) return added->name();
+        if( const auto* draft = connectionDraft( m_connectionId ) ) return draft->name();
+        if( const auto* saved = savedConnection( m_connectionId ) ) return saved->name();
+        return {};
+    }
+    if( const auto* added = newChild( m_selected ) ) return added->name();
+    if( const auto* draft = selectedBlockDraft() ) return draft->name();
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected ) if( const REVISION* saved = revision( child ) ) return saved->name();
+    return {};
+}
+D::RequirementFieldsData RECURSIVE_DIAGRAM_FRAME::selectedFields() const
+{
+    if( !m_connectionId.empty() )
+    {
+        if( const auto* added = newConnection( m_connectionId ) ) return added->fields();
+        if( const auto* draft = connectionDraft( m_connectionId ) ) return draft->fields();
+        return savedFields();
+    }
+    if( const auto* added = newChild( m_selected ) ) return added->fields();
+    if( const auto* draft = selectedBlockDraft() ) return draft->fields();
+    return savedFields();
+}
+D::RequirementFieldsData RECURSIVE_DIAGRAM_FRAME::savedFields() const
+{
+    if( !m_connectionId.empty() )
+    {
+        if( const auto* saved = savedConnection( m_connectionId ) ) return connectionDraftFor( *saved ).fields();
+        return {};
+    }
+    if( m_selected.empty() || m_selected == m_level.scope().baseline().block_id() ) return m_savedLevel.scope().fields();
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+        if( const REVISION* saved = revision( child ) ) if( const auto* text = requirements( *saved ) ) return text->fields();
+    return {};
+}
+
+// ---- Loading and the companion ------------------------------------------------------------
+
 void RECURSIVE_DIAGRAM_FRAME::load( const std::string& expected )
 {
     REQUEST request; request.set_action( D::RFA_READ ); request.set_expected_source_token( expected ); execute( std::move( request ) );
@@ -311,13 +581,14 @@ void RECURSIVE_DIAGRAM_FRAME::load( const std::string& expected )
 void RECURSIVE_DIAGRAM_FRAME::execute( REQUEST request )
 {
     if( m_process ) return;
-    request.set_schema_version( 1 ); request.set_repository_root( m_request.repository_root() );
+    // Contract rbg-v2 section 2.3: the editor and its companion speak exactly schema 2.
+    request.set_schema_version( 2 ); request.set_repository_root( m_request.repository_root() );
     request.set_source_path( m_request.source_path() ); request.set_document_id( m_request.document_id() );
     std::string json;
     if( !google::protobuf::util::MessageToJsonString( request, &json ).ok() ) return;
     m_activeRequest = std::move( request ); m_error.clear(); m_errorCode.clear(); m_stdout.clear(); m_stderr.clear();
     m_process = std::make_unique<wxProcess>( this ); m_process->Redirect();
-    wxString helper = text( m_request.helper_path() ), dotnet = "dotnet", mode = "--diagram-file";
+    wxString helper = Text( m_request.helper_path() ), dotnet = "dotnet", mode = "--diagram-file";
     const wxChar* binary[] = { helper.c_str(), mode.c_str(), nullptr };
     const wxChar* managed[] = { dotnet.c_str(), helper.c_str(), mode.c_str(), nullptr };
     m_pid = wxExecute( helper.EndsWith( ".dll" ) ? managed : binary, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, m_process.get() );
@@ -353,15 +624,17 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     { refresh(); if( m_diagramHistory->IsEnabled() ) m_diagramHistory->SetFocus(); return; }
     D::RecursiveFileResult result;
     bool parsed = google::protobuf::util::JsonStringToMessage( m_stdout, &result ).ok();
-    if( m_activeRequest.action() == D::RFA_SAVE_BLOCK || m_activeRequest.action() == D::RFA_SAVE_CONNECTION
-        || m_activeRequest.action() == D::RFA_SAVE_IMPLEMENTATION || m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION ) ++m_saveCount;
+    if( m_activeRequest.action() == D::RFA_SAVE_LEVEL || m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION ) ++m_saveCount;
     if( event.GetExitCode() != 0 || !parsed || !result.success() )
     {
         m_errorCode = parsed ? result.error_code() : "invalid_companion_response";
         m_error = parsed && !result.error_message().empty() ? result.error_message() : "The operation failed; the current draft remains open.";
+        // A companion of another version refuses this editor's schema 2 requests before reading anything.
+        if( m_errorCode == "unsupported_diagram_file_request" && m_activeRequest.action() == D::RFA_READ )
+        { m_errorCode = "companion_version_mismatch"; m_error = "The diagram companion of this installation speaks another diagram version; nothing was read or changed."; }
         if( diagramHistory )
         {
-            m_failedHistoryRequest = m_activeRequest; m_diagramHistoryPanel->Fail( text( m_error ) );
+            m_failedHistoryRequest = m_activeRequest; m_diagramHistoryPanel->Fail( Text( m_error ) );
             ++m_viewRevision; refresh(); return;
         }
         if( olderHistory )
@@ -371,11 +644,29 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
                 : _( "Could not load older changes. Try again." ) );
             refresh(); return;
         }
-        if( m_activeRequest.action() == D::RFA_SAVE_BLOCK && m_errorCode == "recursive_block_file_changed" && m_rebaseAttempts++ < 2 )
+        if( m_activeRequest.action() == D::RFA_SAVE_LEVEL && m_errorCode == "recursive_block_file_changed"
+            && !m_activeRequest.save_level().select_implementation() && m_rebaseAttempts++ < 2 )
         {
-            REQUEST compare; compare.set_action( D::RFA_REBASE_REQUIREMENTS );
-            *compare.mutable_rebase()->mutable_draft() = m_draft;
+            REQUEST compare; compare.set_action( D::RFA_REBASE_LEVEL );
+            *compare.mutable_rebase_level()->mutable_draft() = m_sentLevel;
             execute( std::move( compare ) ); return;
+        }
+        if( m_activeRequest.action() == D::RFA_PREPARE_LEVEL_EDIT )
+        {
+            const auto& edit = m_activeRequest.level_edit();
+            if( m_errorCode == "boundary_interface_in_use" && edit.kind() == D::LECK_REMOVE_INTERFACE && !edit.detach_connections()
+                && result.error_details_size() && std::all_of( result.error_details().begin(), result.error_details().end(),
+                       [&]( const auto& detail ) { return detail.kind() == "connection" && detail.scope_block_id() == m_level.scope().baseline().block_id(); } ) )
+            {
+                int uses = result.error_details_size();
+                wxString question = uses == 1 ? wxString( _( "A connection on this level uses this port. Remove it together with the port?" ) )
+                                              : wxString::Format( _( "%d connections on this level use this port. Remove them together with the port?" ), uses );
+                wxMessageDialog choice( this, question, _( "Remove port" ), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION );
+                choice.SetYesNoLabels( uses == 1 ? _( "&Remove port and connection" ) : _( "&Remove port and connections" ), _( "&Keep port" ) );
+                m_errorCode.clear(); m_error.clear();
+                if( choice.ShowModal() == wxID_YES ) { removeSelection( true ); return; }
+            }
+            refresh(); return;
         }
         m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_pendingImplementation.clear();
         if( m_pendingHistoryRestore )
@@ -407,75 +698,21 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             || !result.prepared_draft().has_restored_from() || !same( result.prepared_draft().restored_from(), historical->selection() )
             || result.prepared_draft().baseline_requirement_revision_id() != retained.baseline_requirement_revision_id() )
         { m_failedHistoryRequest = m_activeRequest; m_diagramHistoryPanel->Fail( _( "The restored draft does not match the requested history." ) ); refresh(); return; }
-        m_draft = result.prepared_draft(); m_savedDraft = retained; m_connectionId.clear();
-        m_selected = m_draft.baseline().block_id(); m_undo.clear(); m_undo.push_back( retained ); m_redo.clear();
+        resetLevel(); m_undo.push_back( m_level ); *m_level.mutable_scope() = result.prepared_draft();
+        m_selected = m_level.scope().baseline().block_id(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear();
         m_commentId.clear(); m_newComment = false; m_dirty = hasChanges(); closeDiagramHistory(); fit(); m_canvas->SetFocus(); return;
     }
-    if( m_activeRequest.action() == D::RFA_REBASE_REQUIREMENTS )
-    {
-        const auto& merge = result.merge();
-        if( !result.has_merge() || result.source_token().size() != 64 || !merge.has_original_draft()
-            || !result.has_document() || result.document().document_id() != DocumentId()
-            || result.document().source_path() != SourcePath() || result.document().source_token() != result.source_token()
-            || !same( merge.original_draft().baseline(), m_activeRequest.rebase().draft().baseline() )
-            || merge.original_draft().SerializeAsString() != m_activeRequest.rebase().draft().SerializeAsString() )
-        { m_errorCode = "requirement_comparison_mismatch"; m_error = "The comparison does not match the retained editing draft."; refresh(); return; }
-        if( merge.has_candidate() )
-        {
-            // Save the revalidated candidate against this exact new file token.
-            // The normal disk guard rejects another change between compare and save.
-            REQUEST save; save.set_action( D::RFA_SAVE_BLOCK ); save.set_expected_source_token( result.source_token() );
-            auto* candidate = save.mutable_save(); *candidate->mutable_draft() = merge.candidate();
-            *candidate->mutable_expected_root() = merge.expected_root(); *candidate->mutable_block_path() = merge.block_path();
-            candidate->set_new_revision_id( freshId() ); candidate->set_new_requirement_revision_id( freshId() );
-            for( int i = 1; i < merge.block_path_size(); ++i ) candidate->add_ancestor_revision_ids( freshId() );
-            auto* origin = candidate->mutable_origin(); origin->set_kind( D::DAK_EDITOR ); origin->set_actor( "Native editor" );
-            origin->set_summary( "Reconcile requirement edits" );
-            auto now = std::chrono::system_clock::now().time_since_epoch(); auto seconds = std::chrono::duration_cast<std::chrono::seconds>( now );
-            origin->mutable_recorded_at()->set_seconds( seconds.count() );
-            origin->mutable_recorded_at()->set_nanos( static_cast<int>( std::chrono::duration_cast<std::chrono::nanoseconds>( now - seconds ).count() / 100 * 100 ) );
-            std::string scope = current() ? current()->selection().block_id() : merge.expected_root().block_id();
-            m_document = result.document();
-            if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
-            m_savedDraft = merge.saved_draft(); m_draft = merge.candidate(); m_dirty = true;
-            execute( std::move( save ) ); return;
-        }
-        if( merge.conflicts_size() == 0 ) { m_error = "No savable comparison was returned; the draft remains open."; refresh(); return; }
-        DIALOG_DIAGRAM_CONFLICT dialog( this, m_owner->GetLabel(), merge );
-        if( dialog.ShowModal() != wxID_OK )
-        {
-            m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear();
-            m_errorCode = "requirement_conflict"; m_error = "The saved design changed. Your draft is still open."; refresh(); return;
-        }
-        REQUEST resolve; resolve.set_action( D::RFA_REBASE_REQUIREMENTS ); resolve.set_expected_source_token( result.source_token() );
-        *resolve.mutable_rebase()->mutable_draft() = merge.original_draft();
-        m_undo.push_back( m_draft ); m_redo.clear();
-        for( auto choice : dialog.Resolutions() )
-        {
-            choice.set_document_id( DocumentId() );
-            *resolve.mutable_rebase()->add_resolutions() = choice;
-            // Keep the user's chosen or composed text as draft work even if the
-            // saved file advances again before the companion can revalidate it.
-            int which = static_cast<int>( choice.field() ) - 1;
-            if( which >= 0 && which < 3 )
-            {
-                setField( m_draft.mutable_fields(), which, choice.text() );
-                auto* restored = m_draft.mutable_restored_fields();
-                for( int i = restored->size() - 1; i >= 0; --i )
-                    if( restored->Get( i ).field() == choice.field() ) restored->DeleteSubrange( i, 1 );
-            }
-        }
-        m_dirty = true; ++m_viewRevision; execute( std::move( resolve ) ); return;
-    }
+    if( m_activeRequest.action() == D::RFA_PREPARE_LEVEL_EDIT ) { levelResult( result ); return; }
+    if( m_activeRequest.action() == D::RFA_REBASE_LEVEL ) { rebaseResult( result ); return; }
     if( m_activeRequest.action() == D::RFA_BLOCK_FIELD_HISTORY || m_activeRequest.action() == D::RFA_CONNECTION_FIELD_HISTORY )
     {
         bool link = m_activeRequest.action() == D::RFA_CONNECTION_FIELD_HISTORY;
-        std::string ownerId = link ? m_connectionDraft.baseline().connection_id() : m_draft.baseline().block_id();
-        std::string stateId = link ? m_connectionDraft.baseline().state_id() : m_draft.baseline().state_id();
-        std::string revisionId = link ? m_connectionDraft.baseline().revision_id() : m_draft.baseline().revision_id();
+        const auto& target = link ? m_activeRequest.connection().connection_id() : m_activeRequest.block().block_id();
+        const auto& stateId = link ? m_activeRequest.connection().state_id() : m_activeRequest.block().state_id();
+        const auto& revisionId = link ? m_activeRequest.connection().revision_id() : m_activeRequest.block().revision_id();
         if( !result.has_history() || result.source_token() != m_document.source_token()
             || result.history().document_id() != DocumentId()
-            || result.history().owner_id() != ownerId || result.history().state_id() != stateId
+            || result.history().owner_id() != target || result.history().state_id() != stateId
             || result.history().context_revision_id() != revisionId
             || result.history().field() != m_activeRequest.field()
             || result.history().offset() != static_cast<unsigned>( m_activeRequest.offset() )
@@ -490,7 +727,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
         for( const auto& row : result.history().entries() )
             rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-                text( row.origin().actor() ), text( row.text() ), wxEmptyString, row.is_saved_text() } );
+                Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
         if( olderHistory )
         {
             if( !m_historyDialog->AppendPage( result.history().offset(), result.history().total(), std::move( rows ) ) )
@@ -507,9 +744,15 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
         { if( frame && !frame->IsClosing() ) frame->showHistory( result, query ); } );
         return;
     }
-    if( !result.has_document() || result.document().schema_version() != 1 || result.document().document_id() != DocumentId()
+    if( !result.has_document() || result.document().schema_version() != 2 || result.document().document_id() != DocumentId()
         || result.document().source_path() != SourcePath() || result.document().source_token().size() != 64 )
-    { m_errorCode = "diagram_target_mismatch"; m_error = "The loaded document does not match the requested diagram."; refresh(); return; }
+    {
+        bool version = result.has_document() && result.document().schema_version() != 2;
+        m_errorCode = version ? "companion_version_mismatch" : "diagram_target_mismatch";
+        m_error = version ? "The diagram companion of this installation speaks another diagram version; nothing was changed."
+                          : "The loaded document does not match the requested diagram.";
+        refresh(); return;
+    }
     if( m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION )
     {
         bool present = false;
@@ -522,13 +765,17 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     std::string scope = m_pendingScope.empty() ? current() ? current()->selection().block_id() : result.document().graph().selected_root().block_id() : m_pendingScope;
     std::string selected = m_pendingSelected.empty() ? m_selected : m_pendingSelected;
     std::string selectedConnection = m_pendingConnection.value_or( m_connectionId );
-    m_document = result.document(); m_preview.reset(); m_ready = true; m_dirty = false;
-    m_draftView.reset();
+    std::string portOwner = m_portOwner, portId = m_portId;
+    m_document = result.document(); m_preview.reset(); m_ready = true;
     if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
-    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_selected.clear(); m_connectionId.clear();
+    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset();
+    resetLevel(); m_dirty = false;
+    m_selected.clear(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_newComment = false;
     select( selected.empty() ? m_path.back().block_id() : selected );
     if( !selectedConnection.empty() ) selectConnection( selectedConnection );
+    else if( !portId.empty() ) selectPort( portOwner, portId );
     if( previousScope.empty() || previousScope != m_path.back().block_id() ) fit();
+    ++m_viewRevision; refresh();
     m_canvas->SetFocus();
     if( !m_pendingImplementation.empty() )
     { auto state = std::move( m_pendingImplementation ); m_pendingImplementation.clear(); previewImplementation( state ); }
@@ -536,41 +783,178 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
     if( m_closeAfterSave ) { m_closeAfterSave = false; Close(); }
 }
 
-RECURSIVE_DIAGRAM_FRAME::DRAFT RECURSIVE_DIAGRAM_FRAME::draftFor( const REVISION& item ) const
+void RECURSIVE_DIAGRAM_FRAME::levelResult( const D::RecursiveFileResult& result )
 {
-    DRAFT draft; auto* saved = requirements( item ); if( !saved ) return draft;
-    *draft.mutable_baseline() = item.selection(); draft.set_name( item.name() );
-    *draft.mutable_children() = item.children(); draft.set_baseline_requirement_revision_id( saved->id() );
-    *draft.mutable_baseline_fields() = saved->fields(); *draft.mutable_fields() = saved->fields();
-    if( item.has_local_diagram() ) *draft.mutable_local_diagram() = item.local_diagram();
-    if( item.has_definition() ) *draft.mutable_definition() = item.definition();
-    if( item.has_component_bindings() ) *draft.mutable_component_bindings() = item.component_bindings();
-    if( item.has_physical_allocation() ) *draft.mutable_physical_allocation() = item.physical_allocation();
-    return draft;
+    const auto& sent = m_activeRequest.level_edit();
+    if( !result.has_level_edit() || !result.level_edit().has_draft() || result.source_token() != m_document.source_token()
+        || !same( result.level_edit().draft().scope().baseline(), sent.draft().scope().baseline() ) )
+    { m_errorCode = "level_edit_mismatch"; m_error = "The removal result belongs to another diagram level; nothing was changed."; refresh(); return; }
+    m_undo.push_back( m_removalBefore ); m_redo.clear();
+    // A removed port changes where the remaining unresolved ends on its owner attach (rule F2).
+    auto before = layout( current(), true );
+    m_level = result.level_edit().draft(); m_lastEffects = result.level_edit().effects();
+    followRoutes( before );
+    // Show every effect of the removal in one line; Undo restores all of them.
+    wxArrayString removed; int unresolved = 0, realizations = 0;
+    for( const auto& effect : m_lastEffects )
+    {
+        if( effect.kind() == D::LEEK_CHILD_REMOVED || effect.kind() == D::LEEK_CONNECTION_REMOVED || effect.kind() == D::LEEK_INTERFACE_REMOVED )
+            removed.Add( wxS( "“" ) + Text( effect.detail() ) + wxS( "”" ) );
+        else if( effect.kind() == D::LEEK_ANNOTATION_UNRESOLVED ) ++unresolved;
+        else if( effect.kind() == D::LEEK_REALIZATION_STATE_CHANGED || effect.kind() == D::LEEK_REALIZATION_REMOVED ) ++realizations;
+    }
+    wxString summary = removed.empty() ? _( "Nothing was removed." ) : wxString::Format( _( "Removed %s." ), wxJoin( removed, ',' ) );
+    summary.Replace( ",", ", " );
+    if( unresolved ) summary += wxString::Format( _( " %d comments no longer have a target." ), unresolved );
+    if( realizations ) summary += wxString::Format( _( " %d realizations need review." ), realizations );
+    m_notice = Utf8( summary );
+    m_selected = m_level.scope().baseline().block_id(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear();
+    changed(); m_canvas->SetFocus();
 }
-void RECURSIVE_DIAGRAM_FRAME::makeDraft( const REVISION& item )
+
+void RECURSIVE_DIAGRAM_FRAME::rebaseResult( const D::RecursiveFileResult& result )
 {
-    m_draft = draftFor( item );
-    m_savedDraft = m_draft; m_undo.clear(); m_redo.clear(); m_dirty = m_preview.has_value();
-    m_commentId.clear(); m_newComment = false;
+    const auto& merge = result.level_merge();
+    if( !result.has_level_merge() || result.source_token().size() != 64 || !merge.has_original_draft()
+        || !result.has_document() || result.document().document_id() != DocumentId() || result.document().schema_version() != 2
+        || result.document().source_path() != SourcePath() || result.document().source_token() != result.source_token()
+        || merge.original_draft().SerializeAsString() != m_activeRequest.rebase_level().draft().SerializeAsString() )
+    { m_errorCode = "level_comparison_mismatch"; m_error = "The comparison does not match the retained level draft."; refresh(); return; }
+    if( merge.has_candidate() )
+    {
+        // Save the revalidated candidate against this exact new file token; the
+        // normal disk guard rejects another change between compare and save.
+        std::string scope = m_level.scope().baseline().block_id();
+        m_document = result.document();
+        if( !findPath( scope, m_path ) ) m_path = { m_document.graph().selected_root() };
+        LEVEL candidate = merge.candidate();
+        resetLevel(); m_level = std::move( candidate ); m_dirty = true;
+        if( int kept = merge.presentation_overrides_size(); kept == 1 )
+            m_notice = Utf8( _( "Your layout kept a position that was also moved in the saved design." ) );
+        else if( kept > 1 )
+            m_notice = Utf8( wxString::Format( _( "Your layout kept %d positions that were also moved in the saved design." ), kept ) );
+        m_rebasing = true; save(); return;
+    }
+    bool textOnly = merge.conflicts_size() > 0 && std::all_of( merge.conflicts().begin(), merge.conflicts().end(),
+                                                               []( const auto& c ) { return c.kind() == D::LCK_REQUIREMENT_TEXT; } );
+    if( !textOnly )
+    {
+        m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear();
+        wxString list;
+        for( const auto& conflict : merge.conflicts() ) list += wxS( "• " ) + Text( conflict.message() ) + wxS( "\n" );
+        wxMessageDialog( this, _( "The saved design changed in ways that conflict with this draft. Your draft is still open.\n\n" ) + list,
+                         _( "Resolve changes before saving" ), wxOK | wxICON_INFORMATION ).ShowModal();
+        m_errorCode = "level_conflict"; m_error = "The saved design changed in ways that conflict with this draft. Your draft is still open.";
+        refresh(); return;
+    }
+    // Text conflicts use the approved dialog, one owner at a time.
+    const auto& sent = m_activeRequest.rebase_level().draft();
+    D::RecursiveBlockGraphData latest = result.document().graph();
+    auto latestRevision = [&]( const std::string& block ) -> const REVISION*
+    {
+        std::vector<std::vector<SELECTION>> pending{ { latest.selected_root() } };
+        while( !pending.empty() )
+        {
+            auto path = std::move( pending.back() ); pending.pop_back();
+            for( const auto& item : latest.revisions() ) if( same( item.selection(), path.back() ) )
+            {
+                if( item.selection().block_id() == block ) return &item;
+                for( const auto& child : item.children() ) { auto next = path; next.push_back( child ); pending.push_back( std::move( next ) ); }
+            }
+        }
+        return nullptr;
+    };
+    auto blockText = [&]( const REVISION& item ) -> const D::RequirementRevisionData*
+    {
+        for( const auto& history : latest.requirement_histories() ) if( history.state_id() == item.selection().state_id() )
+            for( const auto& row : history.revisions() ) if( row.id() == item.requirement_revision_id() ) return &row;
+        return nullptr;
+    };
+    std::vector<std::string> owners;
+    for( const auto& conflict : merge.conflicts() )
+        if( std::find( owners.begin(), owners.end(), conflict.owner_id() ) == owners.end() ) owners.push_back( conflict.owner_id() );
+    std::vector<D::RequirementResolutionData> choices;
+    LEVEL chosen = m_level;
+    for( const auto& owner : owners )
+    {
+        D::RequirementMergeData view; wxString label; D::RequirementFieldsData savedText; std::string savedRevision;
+        view.set_base_context_version( merge.base_context_version() ); view.set_saved_context_version( merge.saved_context_version() );
+        if( merge.has_saved_origin() ) *view.mutable_saved_origin() = merge.saved_origin();
+        auto* original = view.mutable_original_draft();
+        const REVISION* scopeNow = latestRevision( sent.scope().baseline().block_id() );
+        if( owner == sent.scope().baseline().block_id() )
+        {
+            *original = sent.scope(); label = Text( sent.scope().name() );
+            if( scopeNow ) if( const auto* text = blockText( *scopeNow ) ) { savedText = text->fields(); savedRevision = text->id(); }
+        }
+        else if( const DRAFT* child = [&]() -> const DRAFT* { for( const auto& c : sent.child_drafts() ) if( c.baseline().block_id() == owner ) return &c; return nullptr; }() )
+        {
+            *original = *child; label = Text( child->name() );
+            if( scopeNow ) for( const auto& pin : scopeNow->children() ) if( pin.block_id() == owner )
+                for( const auto& item : latest.revisions() ) if( same( item.selection(), pin ) ) if( const auto* text = blockText( item ) )
+                { savedText = text->fields(); savedRevision = text->id(); view.set_saved_context_version( version( item ) ); }
+        }
+        else
+        {
+            for( const auto& link : sent.connection_drafts() ) if( link.baseline().connection_id() == owner )
+            {
+                original->mutable_baseline()->set_block_id( owner ); original->mutable_baseline()->set_state_id( link.baseline().state_id() );
+                original->mutable_baseline()->set_revision_id( link.baseline().revision_id() );
+                original->set_baseline_requirement_revision_id( link.baseline_requirement_revision_id() );
+                *original->mutable_baseline_fields() = link.baseline_fields(); *original->mutable_fields() = link.fields(); label = Text( link.name() );
+                if( scopeNow ) for( const auto& pin : scopeNow->local_diagram().connections() ) if( pin.connection_id() == owner )
+                    for( const auto& archive : latest.connection_archives() ) if( archive.owner_block_id() == scopeNow->selection().block_id() )
+                        for( const auto& item : archive.revisions() ) if( item.selection().revision_id() == pin.revision_id() )
+                            for( const auto& history : archive.requirement_histories() ) if( history.state_id() == item.selection().state_id() )
+                                for( const auto& row : history.revisions() ) if( row.id() == item.requirement_revision_id() )
+                                { savedText = row.fields(); savedRevision = row.id(); }
+            }
+        }
+        view.mutable_saved_draft()->set_baseline_requirement_revision_id( savedRevision ); *view.mutable_saved_draft()->mutable_fields() = savedText;
+        for( const auto& conflict : merge.conflicts() ) if( conflict.owner_id() == owner )
+        {
+            auto* row = view.add_conflicts(); row->set_field( conflict.field() ); row->set_baseline( conflict.baseline() );
+            row->set_draft( conflict.draft() ); row->set_saved( conflict.saved() );
+        }
+        DIALOG_DIAGRAM_CONFLICT dialog( this, label, view );
+        if( dialog.ShowModal() != wxID_OK )
+        {
+            m_closeAfterSave = false; m_pendingScope.clear(); m_pendingSelected.clear();
+            m_errorCode = "requirement_conflict"; m_error = "The saved design changed. Your draft is still open."; refresh(); return;
+        }
+        for( auto choice : dialog.Resolutions() )
+        {
+            choice.set_document_id( DocumentId() );
+            // Keep the user's chosen or composed text as draft work even if the
+            // saved file advances again before the companion can revalidate it.
+            int which = static_cast<int>( choice.field() ) - 1;
+            if( which >= 0 && which < 3 )
+            {
+                D::RequirementFieldsData* fields = nullptr; google::protobuf::RepeatedPtrField<D::FieldRestorationData>* restores = nullptr;
+                if( owner == chosen.scope().baseline().block_id() ) { fields = chosen.mutable_scope()->mutable_fields(); restores = chosen.mutable_scope()->mutable_restored_fields(); }
+                for( auto& c : *chosen.mutable_child_drafts() ) if( c.baseline().block_id() == owner ) { fields = c.mutable_fields(); restores = c.mutable_restored_fields(); }
+                for( auto& c : *chosen.mutable_connection_drafts() ) if( c.baseline().connection_id() == owner ) { fields = c.mutable_fields(); restores = c.mutable_restored_fields(); }
+                if( fields ) { setField( fields, which, choice.text() ); dropRestoration( restores, which ); }
+            }
+            choices.push_back( std::move( choice ) );
+        }
+    }
+    REQUEST resolve; resolve.set_action( D::RFA_REBASE_LEVEL ); resolve.set_expected_source_token( result.source_token() );
+    *resolve.mutable_rebase_level()->mutable_draft() = sent;
+    for( const auto& choice : choices ) *resolve.mutable_rebase_level()->add_resolutions() = choice;
+    m_undo.push_back( m_level ); m_redo.clear(); m_level = std::move( chosen );
+    m_dirty = true; ++m_viewRevision; execute( std::move( resolve ) );
 }
+
+// ---- Inspector ------------------------------------------------------------------------------
+
 void RECURSIVE_DIAGRAM_FRAME::refresh()
 {
-    m_draftView.reset();
-    const REVISION* visible = m_preview ? revision( *m_preview ) : m_path.empty() ? nullptr : revision( m_path.back() );
-    if( visible && !m_historyPreview && m_connectionId.empty() && same( visible->selection(), m_draft.baseline() ) )
-    {
-        m_draftView = *visible; m_draftView->set_name( m_draft.name() );
-        *m_draftView->mutable_children() = m_draft.children();
-        *m_draftView->mutable_local_diagram() = m_draft.local_diagram();
-        if( m_draft.has_definition() ) *m_draftView->mutable_definition() = m_draft.definition(); else m_draftView->clear_definition();
-        if( m_draft.has_component_bindings() ) *m_draftView->mutable_component_bindings() = m_draft.component_bindings(); else m_draftView->clear_component_bindings();
-        if( m_draft.has_physical_allocation() ) *m_draftView->mutable_physical_allocation() = m_draft.physical_allocation(); else m_draftView->clear_physical_allocation();
-    }
     m_updating = true; bool available = m_ready && !m_process && !m_diagramHistoryOpen;
     bool link = !m_connectionId.empty();
+    bool isNew = selectionIsNew();
     wxString path;
-    for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += text( item->name() ); }
+    for( const auto& step : m_path ) if( auto* item = revision( step ) ) { if( !path.empty() ) path += wxS( "  ›  " ); path += Text( item->name() ); }
     if( m_historyPreview ) if( auto* preview = revision( *m_historyPreview ) )
         path += wxS( " · " ) + wxString::Format( _( "Preview v%d — read only" ), version( *preview ) );
     m_breadcrumb->SetLabel( path.empty() ? _( "Loading diagram…" ) : path );
@@ -578,16 +962,24 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     updateImplementationLabel();
     m_implementation->Enable( available );
     m_diagramHistory->Enable( m_ready && !m_process && !m_diagramHistoryOpen );
-    m_owner->SetLabel( m_ready ? text( link ? m_connectionDraft.name() : m_draft.name() ) : wxString() );
+    m_owner->SetLabel( m_ready ? Text( selectedName() ) : wxString() );
     m_owner->SetToolTip( m_owner->GetLabel() );
-    auto* selected = m_ready ? revision( m_draft.baseline() ) : nullptr;
-    m_savedVersion->SetLabel( selected ? wxString::Format( m_preview ? _( "Preview design: v%d" ) : _( "Selected design: v%d" ), version( *selected ) ) : wxString() );
-    if( selected && m_draft.has_restored_from() ) if( auto* source = revision( m_draft.restored_from() ) )
+    // Grow with definition: a block or connection drawn in this draft shows only its caption.
+    m_savedVersion->SetLabel( wxString() );
+    const REVISION* selected = nullptr;
+    if( m_ready && !link && !isNew )
+    {
+        if( m_selected == m_level.scope().baseline().block_id() ) selected = revision( m_level.scope().baseline() );
+        else for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected ) selected = revision( child );
+    }
+    if( selected ) m_savedVersion->SetLabel( wxString::Format( m_preview && selected == current() ? _( "Preview design: v%d" ) : _( "Selected design: v%d" ), version( *selected ) ) );
+    if( selected && selected == current() && m_level.scope().has_restored_from() ) if( auto* source = revision( m_level.scope().restored_from() ) )
         m_savedVersion->SetLabel( wxString::Format( _( "Draft from v%d · Saved v%d" ), version( *source ), version( *selected ) ) );
-    if( link && current() )
+    const D::ConnectionRevisionData* savedLink = link && !isNew ? savedConnection( m_connectionId ) : nullptr;
+    if( savedLink && current() )
         for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
         {
-            auto* item = connection( m_connectionId ); int number = 1;
+            auto* item = savedLink; int number = 1;
             while( item && item->has_parent_revision_id() && number <= archive.revisions_size() )
             {
                 const D::ConnectionRevisionData* parent = nullptr;
@@ -596,38 +988,75 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
             }
             m_savedVersion->SetLabel( wxString::Format( _( "Selected connection: v%d" ), number ) ); break;
         }
-    m_openDiagram->Show( !link ); m_endpointHeading->Show( link ); m_endpoints->Show( link );
+    m_savedVersion->Show( !m_savedVersion->GetLabel().empty() );
+    bool child = !link && m_ready && current() && m_selected != current()->selection().block_id();
+    m_openDiagram->Show( child && !isNew );
+    m_endpointHeading->Show( savedLink != nullptr ); m_endpoints->Show( savedLink != nullptr );
     wxString endpoints;
-    if( link && current() )
-        for( const auto& item : m_connectionDraft.endpoints() )
+    if( savedLink && current() )
+    {
+        const LINK_DRAFT* draft = connectionDraft( m_connectionId );
+        const auto& items = draft ? draft->endpoints() : savedLink->endpoints();
+        for( const auto& item : items )
         {
             const REVISION* owner = item.block_id() == current()->selection().block_id() ? current() : nullptr;
-            for( const auto& child : current()->children() ) if( child.block_id() == item.block_id() ) owner = revision( child );
+            for( const auto& pinned : current()->children() ) if( pinned.block_id() == item.block_id() ) owner = revision( pinned );
             if( !endpoints.empty() ) endpoints += wxS( "\n\n" );
-            endpoints += owner ? text( owner->name() ) : _( "Unavailable endpoint" ); endpoints += wxS( "\n" );
+            endpoints += owner ? Text( owner->name() ) : _( "Unavailable endpoint" ); endpoints += wxS( "\n" );
             switch( item.kind() )
             {
             case D::DEK_UNRESOLVED: endpoints += _( "Endpoint unresolved." ); break;
             case D::DEK_COMPATIBLE: endpoints += _( "Compatible endpoint unresolved." ); break;
             case D::DEK_CANDIDATES: endpoints += wxString::Format( _( "Pin not selected (%d candidates)." ), item.candidates_size() ); break;
-            case D::DEK_PIN: endpoints += wxString::Format( _( "Selected pin: %s" ), text( item.pin().pin() ) ); break;
+            case D::DEK_PIN: endpoints += wxString::Format( _( "Selected pin: %s" ), Text( item.pin().pin() ) ); break;
             case D::DEK_INTERFACE:
                 if( owner ) for( const auto& boundary : owner->local_diagram().interfaces() )
-                    if( boundary.id() == item.interface_id() ) endpoints += wxString::Format( _( "Interface: %s" ), text( boundary.name() ) );
+                    if( boundary.id() == item.interface_id() ) endpoints += wxString::Format( _( "Interface: %s" ), Text( boundary.name() ) );
                 break;
             default: endpoints += _( "Endpoint type unavailable." ); break;
             }
         }
+    }
     m_endpoints->ChangeValue( endpoints );
-    for( int i = 0; i < 3; ++i ) { m_fields[i]->Enable( available ); m_history[i]->Enable( available ); m_fields[i]->ChangeValue( text( field( link ? m_connectionDraft.fields() : m_draft.fields(), i ) ) ); }
-    m_openDiagram->Enable( available && !link && current() && m_selected != current()->selection().block_id() );
-    m_save->Enable( available && m_dirty ); m_decline->Enable( available && m_dirty );
+    auto current_ = selectedFields(), saved = savedFields();
+    std::string key = link ? m_connectionId : m_selected;
+    bool anyHidden = false;
+    for( int i = 0; i < 3; ++i )
+    {
+        bool shown = m_ready && ( !field( current_, i ).empty() || !field( saved, i ).empty() || ( m_revealed.count( key ) && m_revealed.at( key )[i] ) );
+        if( m_fieldHeadings[i]->AreAnyItemsShown() != shown || !m_ready ) m_fieldHeadings[i]->ShowItems( shown );
+        anyHidden |= !shown;
+        m_fields[i]->Enable( available ); m_fields[i]->ChangeValue( Text( field( current_, i ) ) );
+        m_history[i]->Show( shown && !isNew ); m_history[i]->Enable( available );
+    }
+    fillFacets( available );
+    bool facetsLeft = false;
+    if( m_ready && !link ) if( const auto* definition = selectedDefinition() )
+        for( int facet = 0; facet < R::FACETS; ++facet ) facetsLeft |= facet != m_facet && !R::HasValue( R::Facet( *definition, facet ) );
+    m_addRequirement->Show( m_ready && anyHidden ); m_addRequirement->Enable( available );
+    m_addDetail->Show( m_ready && facetsLeft ); m_addDetail->Enable( available );
+    m_openDiagram->Enable( available && child && !isNew );
+    bool writable = m_document.source_writable() || !m_ready;
+    m_save->Enable( available && m_dirty && writable ); m_decline->Enable( available && m_dirty );
     m_toolbar->EnableTool( BACK, available && !m_back.empty() ); m_toolbar->EnableTool( UP, available && m_path.size() > 1 );
-    m_toolbar->EnableTool( wxID_UNDO, available && ( link ? !m_connectionUndo.empty() : !m_undo.empty() ) );
-    m_toolbar->EnableTool( wxID_REDO, available && ( link ? !m_connectionRedo.empty() : !m_redo.empty() ) );
+    m_toolbar->EnableTool( wxID_UNDO, available && !m_undo.empty() );
+    m_toolbar->EnableTool( wxID_REDO, available && !m_redo.empty() );
     m_toolbar->EnableTool( FIT, m_ready && !m_process );
-    m_toolbar->EnableTool( NOTE, available );
-    SetStatusText( !m_error.empty() ? text( m_error ) : m_process ? _( "Working…" ) : m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_toolbar->EnableTool( NOTE, available && !m_historyPreview );
+    bool drawing = drawingAvailable();
+    for( auto& [tool, button] : m_strip ) { button->SetValue( tool == m_tool ); button->Enable( drawing ); }
+    m_stripDelete->Enable( drawing && canDelete() );
+    m_palette->SetState( m_tool, drawing, canDelete(), available && !m_undo.empty() );
+    wxString status = !m_error.empty() ? Text( m_error ) : m_process ? _( "Working…" )
+        : !m_notice.empty() ? Text( m_notice )
+        : m_tool == TOOL::CONNECT && m_connectFrom ? _( "Click a port to finish connection" )
+        : m_tool == TOOL::CONNECT ? _( "Click a block or port to start a connection." )
+        : m_tool == TOOL::ADD_BLOCK ? _( "Click the diagram where the new block goes." )
+        : m_tool == TOOL::ADD_PORT ? _( "Click a block edge or the level boundary to place a port." )
+        : m_tool == TOOL::NOTE ? _( "Click the diagram to place a comment." )
+        : m_ready && !m_document.source_writable() ? _( "This diagram file is read-only; changes cannot be saved." )
+        : m_dirty ? _( "Unsaved changes" ) : wxString();
+    SetStatusText( status );
     fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
     m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
@@ -644,45 +1073,42 @@ bool RECURSIVE_DIAGRAM_FRAME::confirmChange()
     else { m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_pendingImplementation.clear(); }
     return false;
 }
-void RECURSIVE_DIAGRAM_FRAME::select( const std::string& id )
+void RECURSIVE_DIAGRAM_FRAME::select( const std::string& requested )
 {
+    // Selecting another element of the same level never prompts: they share one draft (section 9.1).
     if( !m_ready || m_process || !current() ) return;
-    const REVISION* target = current();
-    for( const auto& child : current()->children() ) if( child.block_id() == id ) target = revision( child );
-    if( !target ) return;
-    if( m_selected == target->selection().block_id() && m_connectionId.empty() ) return;
-    m_pendingScope = current()->selection().block_id(); m_pendingSelected = target->selection().block_id();
-    m_pendingConnection = "";
-    if( !confirmChange() ) return;
-    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_connectionId.clear();
-    m_selected = target->selection().block_id(); makeDraft( *target ); ++m_viewRevision; refresh();
+    std::string id = requested;
+    bool present = id == m_level.scope().baseline().block_id();
+    for( const auto& child : m_level.scope().children() ) present |= child.block_id() == id;
+    if( !present ) id = m_level.scope().baseline().block_id();
+    if( m_selected == id && m_connectionId.empty() && m_portId.empty() ) return;
+    // Another element's properties start at the top of the inspector, with its caption and component choices.
+    if( m_selected != id || !m_connectionId.empty() ) m_inspectorScroll->Scroll( 0, 0 );
+    m_selected = id; m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_newComment = false;
+    ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::selectConnection( const std::string& id )
 {
     if( !m_ready || m_process || !current() || m_connectionId == id ) return;
-    auto* item = connection( id ); if( !item ) return;
-    m_pendingScope = current()->selection().block_id(); m_pendingSelected = current()->selection().block_id(); m_pendingConnection = id;
-    if( !confirmChange() ) return;
-    const D::RequirementRevisionData* requirement = nullptr;
-    for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == current()->selection().block_id() )
-        for( const auto& history : archive.requirement_histories() ) if( history.state_id() == item->selection().state_id() )
-            for( const auto& row : history.revisions() ) if( row.id() == item->requirement_revision_id() ) requirement = &row;
-    if( !requirement ) { m_error = "The connection requirement history is unavailable."; refresh(); return; }
-    makeDraft( *current() ); m_selected = current()->selection().block_id();
-    m_connectionDraft.Clear(); *m_connectionDraft.mutable_baseline() = item->selection(); m_connectionDraft.set_name( item->name() );
-    m_connectionDraft.set_kind( item->kind() ); *m_connectionDraft.mutable_endpoints() = item->endpoints(); *m_connectionDraft.mutable_members() = item->members();
-    m_connectionDraft.set_baseline_requirement_revision_id( requirement->id() ); *m_connectionDraft.mutable_baseline_fields() = requirement->fields();
-    *m_connectionDraft.mutable_fields() = requirement->fields(); m_savedConnectionDraft = m_connectionDraft;
-    *m_connectionDraft.mutable_diagram_annotations()->mutable_annotations() = current()->local_diagram().annotations();
-    m_savedConnectionDraft = m_connectionDraft;
-    m_connectionId = id; m_connectionUndo.clear(); m_connectionRedo.clear();
-    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); ++m_viewRevision; refresh();
+    bool present = false;
+    for( const auto& root : m_level.scope().local_diagram().connections() ) present |= root.connection_id() == id;
+    if( !present || ( !newConnection( id ) && !savedConnection( id ) ) ) return;
+    m_inspectorScroll->Scroll( 0, 0 );
+    m_selected = m_level.scope().baseline().block_id(); m_connectionId = id; m_portOwner.clear(); m_portId.clear();
+    m_commentId.clear(); m_newComment = false; ++m_viewRevision; refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::selectPort( const std::string& owner, const std::string& id )
+{
+    if( !m_ready || m_process || !current() ) return;
+    select( owner );
+    m_portOwner = owner; m_portId = id; ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
 {
     // Callers commonly pass m_selected or a selection inside m_path. This
     // operation replaces both, so the destination must be owned, not borrowed.
-    if( !m_ready || m_process || !current() || m_diagramHistoryOpen || current()->selection().block_id() == id ) return;
+    if( !m_ready || m_process || !current() || m_diagramHistoryOpen || current()->selection().block_id() == id || newChild( id ) ) return;
+    finishCaption( false );
     if( m_preview )
     { m_pendingScope = id; m_pendingSelected = id; m_pendingConnection = ""; confirmChange(); return; }
     std::vector<SELECTION> path; if( !findPath( id, path ) ) return;
@@ -691,9 +1117,11 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
     if( !confirmChange() ) return;
     if( remember ) m_back.push_back( current()->selection().block_id() );
     m_views[current()->selection().block_id()] = { m_scale, m_origin, m_selected };
-    m_path = std::move( path ); m_selected.clear(); m_connectionId.clear(); m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset();
+    m_path = std::move( path ); m_selected.clear(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear();
+    m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_connectFrom.reset();
+    resetLevel(); m_dirty = false;
     select( id );
-    if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; select( saved->second.selected ); }
+    if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; m_fitted = false; select( saved->second.selected ); }
     else fit();
     ++m_viewRevision; refresh();
     CallAfter( [this] { if( !m_closing ) m_canvas->SetFocus(); } );
@@ -705,12 +1133,11 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
     int firstId = wxWindow::NewControlId( reserved ); int index = 0;
     for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() && !state.archived() )
     {
-        int id = firstId + index++; auto* item = menu.AppendCheckItem( id, wxString::Format( _( "Preview %s" ), text( state.name() ) ) );
+        int id = firstId + index++; auto* item = menu.AppendCheckItem( id, wxString::Format( _( "Preview %s" ), Text( state.name() ) ) );
         item->Check( current()->selection().state_id() == state.id() );
         menu.Bind( wxEVT_MENU, [this, stateId = state.id()]( wxCommandEvent& ) { previewImplementation( stateId ); }, id );
     }
-    bool clean = m_connectionId.empty() ? m_draft.SerializeAsString() == m_savedDraft.SerializeAsString()
-        : m_connectionDraft.SerializeAsString() == m_savedConnectionDraft.SerializeAsString();
+    bool clean = !levelChanged();
     menu.AppendSeparator();
     auto action = [&]( wxMenu& target, const wxString& label, D::ImplementationActionKind kind, const std::string& stateId, bool enabled )
     {
@@ -724,7 +1151,7 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
     action( menu, _( "Remo&ve implementation…" ), D::IAK_ARCHIVE, selectedState, clean && selectedState != m_path.back().state_id() );
     auto* removed = new wxMenu();
     for( const auto& state : m_document.graph().states() ) if( state.block_id() == current()->selection().block_id() && state.archived() )
-        action( *removed, text( state.name() ), D::IAK_RESTORE, state.id(), clean );
+        action( *removed, Text( state.name() ), D::IAK_RESTORE, state.id(), clean );
     if( removed->GetMenuItemCount() ) menu.AppendSubMenu( removed, _( "Restore re&moved implementation" ) ); else delete removed;
     wxPoint position = ScreenToClient( m_implementation->ClientToScreen( wxPoint( 0, m_implementation->GetSize().y ) ) );
     PopupMenu( &menu, position );
@@ -732,10 +1159,7 @@ void RECURSIVE_DIAGRAM_FRAME::chooseImplementation()
 }
 void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind action, std::string stateId )
 {
-    if( !m_ready || m_process || !current() ) return;
-    bool edited = m_connectionId.empty() ? m_draft.SerializeAsString() != m_savedDraft.SerializeAsString()
-        : m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString();
-    if( edited ) return;
+    if( !m_ready || m_process || !current() || levelChanged() ) return;
     const D::BlockDesignStateData* state = nullptr;
     for( const auto& item : m_document.graph().states() ) if( item.id() == stateId && item.block_id() == current()->selection().block_id() ) state = &item;
     if( !state ) return;
@@ -743,10 +1167,10 @@ void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind 
     if( action == D::IAK_NEW || action == D::IAK_DUPLICATE || action == D::IAK_RENAME )
     {
         wxString title = action == D::IAK_NEW ? _( "New implementation" ) : action == D::IAK_DUPLICATE ? _( "Duplicate implementation" ) : _( "Rename implementation" );
-        wxString initial = action == D::IAK_NEW ? _( "New implementation" ) : action == D::IAK_DUPLICATE ? text( state->name() ) + _( " copy" ) : text( state->name() );
+        wxString initial = action == D::IAK_NEW ? _( "New implementation" ) : action == D::IAK_DUPLICATE ? Text( state->name() ) + _( " copy" ) : Text( state->name() );
         if( !m_errorCode.empty() && m_activeRequest.action() == D::RFA_MANAGE_IMPLEMENTATION
             && m_activeRequest.implementation().action() == action && m_activeRequest.implementation().source().state_id() == stateId )
-            initial = text( m_activeRequest.implementation().name() );
+            initial = Text( m_activeRequest.implementation().name() );
         wxTextEntryDialog dialog( this, _( "Implementation name:" ), title, initial );
         dialog.SetName( "DiagramImplementationName" );
         while( true )
@@ -756,7 +1180,7 @@ void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind 
             if( name.empty() ) { wxMessageBox( _( "Enter an implementation name." ), _( "Invalid implementation name" ), wxOK | wxICON_ERROR, this ); continue; }
             bool duplicate = false;
             for( const auto& other : m_document.graph().states() )
-                if( other.block_id() == state->block_id() && ( action != D::IAK_RENAME || other.id() != stateId ) && name.CmpNoCase( text( other.name() ) ) == 0 ) duplicate = true;
+                if( other.block_id() == state->block_id() && ( action != D::IAK_RENAME || other.id() != stateId ) && name.CmpNoCase( Text( other.name() ) ) == 0 ) duplicate = true;
             if( duplicate ) { wxMessageBox( wxString::Format( _( "An implementation named \"%s\" already exists for this block. Choose another name." ), name ),
                     _( "Invalid implementation name" ), wxOK | wxICON_ERROR, this ); continue; }
             break;
@@ -764,7 +1188,7 @@ void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind 
     }
     else if( action == D::IAK_ARCHIVE )
     {
-        wxMessageDialog dialog( this, wxString::Format( _( "Remove \"%s\" from implementation choices? Its saved history will be kept." ), text( state->name() ) ),
+        wxMessageDialog dialog( this, wxString::Format( _( "Remove \"%s\" from implementation choices? Its saved history will be kept." ), Text( state->name() ) ),
                 _( "Remove implementation" ), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION );
         dialog.SetYesNoLabels( _( "&Remove" ), _( "&Cancel" ) ); if( dialog.ShowModal() != wxID_YES ) return;
     }
@@ -773,15 +1197,16 @@ void RECURSIVE_DIAGRAM_FRAME::manageImplementation( D::ImplementationActionKind 
     operation->mutable_source()->set_block_id( state->block_id() ); operation->mutable_source()->set_state_id( stateId );
     operation->mutable_source()->set_revision_id( state->head_revision_id() );
     if( action == D::IAK_NEW || action == D::IAK_DUPLICATE )
-    { operation->set_new_state_id( freshId() ); operation->set_new_revision_id( freshId() ); operation->set_new_requirement_revision_id( freshId() ); }
-    else operation->set_change_id( freshId() );
-    operation->set_name( utf8( name ) ); editorOrigin( operation->mutable_origin(), "Manage implementation" );
+    { operation->set_new_state_id( FreshId() ); operation->set_new_revision_id( FreshId() ); operation->set_new_requirement_revision_id( FreshId() ); }
+    else operation->set_change_id( FreshId() );
+    operation->set_name( Utf8( name ) ); EditorOrigin( operation->mutable_origin(), "Manage implementation" );
     m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_pendingScope; m_pendingConnection = "";
     execute( std::move( request ) );
 }
 void RECURSIVE_DIAGRAM_FRAME::reloadSaved()
 {
     if( m_process ) return;
+    finishCaption( false );
     if( m_diagramHistoryOpen ) closeDiagramHistory();
     if( !m_ready ) { load(); return; }
     m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_selected; m_pendingConnection = m_connectionId;
@@ -793,7 +1218,7 @@ void RECURSIVE_DIAGRAM_FRAME::updateImplementationLabel()
     if( !m_implementation ) return;
     wxString implementation;
     if( current() ) for( const auto& state : m_document.graph().states() ) if( state.id() == current()->selection().state_id() )
-    { implementation = text( state.name() ) + wxString::Format( " · v%d", version( *current() ) ); break; }
+    { implementation = Text( state.name() ) + wxString::Format( " · v%d", version( *current() ) ); break; }
     wxString full = m_preview ? _( "Preview: " ) + implementation : implementation.empty() ? _( "Implementation" ) : implementation;
     wxClientDC dc( m_implementation ); dc.SetFont( m_implementation->GetFont() );
     int maximum = std::max( FromDIP( 150 ), std::min( FromDIP( 450 ), m_implementation->GetParent()->GetClientSize().x / 2 ) );
@@ -809,145 +1234,498 @@ void RECURSIVE_DIAGRAM_FRAME::previewImplementation( const std::string& stateId 
     const D::BlockDesignStateData* alternative = nullptr;
     for( const auto& state : m_document.graph().states() ) if( state.id() == stateId && state.block_id() == current()->selection().block_id() && !state.archived() ) alternative = &state;
     if( !alternative ) return;
-    bool edited = !m_connectionId.empty() ? m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString()
-        : m_draft.SerializeAsString() != m_savedDraft.SerializeAsString();
-    if( edited )
+    if( levelChanged() )
     { m_pendingImplementation = stateId; m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_pendingScope; m_pendingConnection = ""; confirmChange(); return; }
     SELECTION selection; selection.set_block_id( alternative->block_id() ); selection.set_state_id( stateId ); selection.set_revision_id( alternative->head_revision_id() );
     auto* target = revision( selection ); if( !target ) return;
     if( same( selection, m_path.back() ) ) m_preview.reset(); else m_preview = selection;
-    m_connectionId.clear(); m_selected = selection.block_id(); makeDraft( *target );
+    m_connectionId.clear(); m_portOwner.clear(); m_portId.clear(); resetLevel(); m_selected = selection.block_id();
     m_dirty = hasChanges(); ++m_viewRevision; refresh(); fit(); m_canvas->SetFocus();
 }
+void RECURSIVE_DIAGRAM_FRAME::revealField( int which )
+{
+    if( which < 0 || which > 2 || !m_ready ) return;
+    std::string key = m_connectionId.empty() ? m_selected : m_connectionId;
+    m_revealed[key][which] = true;
+    refresh(); m_fields[which]->SetFocus();
+}
+void RECURSIVE_DIAGRAM_FRAME::chooseRequirement()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen ) return;
+    wxMenu menu; const int first = wxWindow::NewControlId( 3 );
+    for( int i = 0; i < 3; ++i ) if( !m_fields[i]->IsShown() )
+    {
+        menu.Append( first + i, FIELD_LABELS[i] );
+        menu.Bind( wxEVT_MENU, [this, i]( wxCommandEvent& ) { revealField( i ); }, first + i );
+    }
+    wxPoint position = ScreenToClient( m_addRequirement->ClientToScreen( wxPoint( 0, m_addRequirement->GetSize().y ) ) );
+    PopupMenu( &menu, position );
+    wxWindow::UnreserveControlId( first, 3 );
+}
+void RECURSIVE_DIAGRAM_FRAME::chooseDetail()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || !m_connectionId.empty() ) return;
+    const auto* definition = selectedDefinition();
+    if( !definition ) return;
+    // The block's facets that have no value yet; choosing one opens its detail to give it a first value.
+    wxMenu menu; const int first = wxWindow::NewControlId( R::FACETS );
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        if( facet == m_facet || R::HasValue( R::Facet( *definition, facet ) ) ) continue;
+        menu.Append( first + facet, R::FacetLabel( facet ) );
+        menu.Bind( wxEVT_MENU, [this, facet]( wxCommandEvent& ) { openFacet( facet, false ); }, first + facet );
+    }
+    wxPoint position = ScreenToClient( m_addDetail->ClientToScreen( wxPoint( 0, m_addDetail->GetSize().y ) ) );
+    PopupMenu( &menu, position );
+    wxWindow::UnreserveControlId( first, R::FACETS );
+}
+// ---- Component choices (Round A4) -----------------------------------------------------------
+// Owner decisions n0b2a908b00e78823 and n98a3f3c41084f0ed: a block shows a chip for each chosen or candidate
+// facet; the inspector lists only the facets that have a value; one facet's detail edits its state, value,
+// reason and strength; a facet can return to unknown or be cleared. A chosen name never creates pins, a
+// footprint or a native component (decision na7aa99408263431e): only the definition in the draft changes.
+
+const D::BlockDefinitionData* RECURSIVE_DIAGRAM_FRAME::selectedDefinition() const
+{
+    if( !m_ready || !m_connectionId.empty() || !current() ) return nullptr;
+    if( const auto* added = newChild( m_selected ) ) return &added->definition();
+    if( const auto* draft = selectedBlockDraft() ) return &draft->definition();
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+        if( const REVISION* saved = revision( child ) ) return &saved->definition();
+    return nullptr;
+}
+void RECURSIVE_DIAGRAM_FRAME::storeFacet( int facet, const D::DefinitionTextChoiceData* choice )
+{
+    auto store = []( auto* owner, int which, const D::DefinitionTextChoiceData* value )
+    {
+        if( value ) { *R::MutableFacet( owner->mutable_definition(), which ) = *value; return; }
+        if( !owner->has_definition() ) return;
+        R::ClearFacet( owner->mutable_definition(), which );
+        // A definition that records nothing is no definition, as the saved block had none.
+        if( R::EmptyDefinition( owner->definition() ) ) owner->clear_definition();
+    };
+    if( auto* added = newChild( m_selected ) ) store( added, facet, choice );
+    else if( DRAFT* draft = editBlock( true ) ) store( draft, facet, choice );
+}
+bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice, wxString& problem ) const
+{
+    const auto* definition = selectedDefinition();
+    const auto* base = definition && m_facet >= 0 ? R::Facet( *definition, m_facet ) : nullptr;
+    int state = facetState(), strength = facetStrength();
+    choice.Clear();
+    choice.set_strength( static_cast<kiapi::automation::structure::v1::StructuralGuidanceStrength>( strength ) );
+    // Conditions and sources recorded with the facet stay with it.
+    if( base ) { choice.set_applicability( base->applicability() ); *choice.mutable_sources() = base->sources(); }
+    if( state == 0 )
+    {
+        wxString value = m_facetValue->GetValue().Strip( wxString::both );
+        if( value.empty() ) { problem = _( "Type the chosen value, or choose another state." ); return false; }
+        choice.set_state( D::DCSD_SELECTED ); choice.add_values( R::Utf8( value ) );
+    }
+    else if( state == 1 )
+    {
+        choice.set_state( D::DCSD_CANDIDATES );
+        wxArrayString lines = wxSplit( m_facetCandidates->GetValue(), '\n', '\0' );
+        for( auto line : lines )
+        {
+            line = line.Strip( wxString::both ); std::string value = R::Utf8( line );
+            if( !value.empty() && std::find( choice.values().begin(), choice.values().end(), value ) == choice.values().end() ) choice.add_values( value );
+        }
+        if( choice.values().empty() ) { problem = _( "List the candidates, one per line." ); return false; }
+    }
+    else
+    {
+        wxString reason = m_facetReason->GetValue().Strip( wxString::both );
+        if( reason.empty() ) { problem = _( "Say why this is unknown." ); return false; }
+        choice.set_state( D::DCSD_UNKNOWN ); choice.set_unknown_reason( R::Utf8( reason ) );
+    }
+    // A changed state or value is no longer the one that was verified.
+    bool same = base && base->state() == choice.state() && base->values().size() == choice.values().size()
+                && std::equal( base->values().begin(), base->values().end(), choice.values().begin() );
+    choice.set_verification( same ? base->verification() : kiapi::automation::structure::v1::SV_UNVERIFIED );
+    problem.clear(); return true;
+}
+void RECURSIVE_DIAGRAM_FRAME::fillFacetForm()
+{
+    // The detail shows the draft's facet, or a first chosen value for a facet that has none yet.
+    const auto* definition = selectedDefinition();
+    const auto* choice = definition && m_facet >= 0 ? R::Facet( *definition, m_facet ) : nullptr;
+    if( !R::HasValue( choice ) ) return;
+    bool wasUpdating = m_updating; m_updating = true;
+    int state = choice->state() == D::DCSD_SELECTED ? 0 : choice->state() == D::DCSD_CANDIDATES ? 1 : 2;
+    setFacetState( state ); setFacetStrength( static_cast<int>( choice->strength() ) );
+    auto set = []( wxTextCtrl* control, const wxString& value ) { if( control->GetValue() != value ) control->ChangeValue( value ); };
+    if( state == 0 ) set( m_facetValue, R::ChoiceValue( *choice, wxS( "\n" ) ) );
+    if( state == 1 ) set( m_facetCandidates, R::ChoiceValue( *choice, wxS( "\n" ) ) );
+    if( state == 2 ) set( m_facetReason, R::Text( choice->unknown_reason() ) );
+    m_updating = wasUpdating;
+}
+void RECURSIVE_DIAGRAM_FRAME::showFacetFields()
+{
+    bool open = m_facet >= 0; int state = facetState();
+    m_facetValue->Show( open && state == 0 ); m_facetCandidates->Show( open && state == 1 ); m_facetReason->Show( open && state == 2 );
+    m_facetValueLabel->SetLabel( state == 1 ? _( "Candidates" ) : state == 2 ? _( "Reason" ) : _( "Value" ) );
+}
+void RECURSIVE_DIAGRAM_FRAME::fillFacets( bool available )
+{
+    const auto* definition = selectedDefinition();
+    // The detail belongs to one block: selecting anything else closes it and drops an entry that could not be kept.
+    if( m_facet >= 0 && ( !definition || m_selected != m_facetOwner ) )
+    { m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear(); }
+    bool any = false;
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        const auto* choice = definition ? R::Facet( *definition, facet ) : nullptr;
+        bool shown = R::HasValue( choice );
+        if( shown ) m_facetRows[facet]->SetChoice( *choice, facet == m_facet );
+        if( m_facetRows[facet]->IsShown() != shown ) m_facetRows[facet]->Show( shown );
+        m_facetRows[facet]->Enable( available ); any |= shown;
+    }
+    m_facetHeading->Show( any );
+    bool open = m_facet >= 0;
+    m_facetDetail->ShowItems( open );
+    if( open )
+    {
+        if( !m_facetTouched ) fillFacetForm();
+        m_facetTitle->SetLabel( R::FacetLabel( m_facet ) );
+        const auto* choice = R::Facet( *definition, m_facet );
+        m_facetClear->Show( R::HasValue( choice ) );
+        m_facetNotice->SetLabel( m_facetProblem ); m_facetNotice->Show( !m_facetProblem.empty() );
+        bool dark = [&] { wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ); return window.Red() + window.Green() + window.Blue() < 384; }();
+        m_facetNotice->SetForegroundColour( dark ? wxColour( 255, 145, 135 ) : wxColour( 176, 0, 32 ) );
+        m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
+    }
+    showFacetFields(); fitFacetLabels();
+    for( wxWindow* control : facetControls() ) control->Enable( available );
+}
+void RECURSIVE_DIAGRAM_FRAME::openFacet( int facet, bool focusState )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || !m_connectionId.empty() || facet < 0 || facet >= R::FACETS || !selectedDefinition() ) return;
+    finishCaption( false );
+    m_facet = facet; m_facetOwner = m_selected; m_facetTouched = false; m_facetProblem.clear();
+    const auto* choice = R::Facet( *selectedDefinition(), facet );
+    bool wasUpdating = m_updating; m_updating = true;
+    // A facet without a value opens ready for its first chosen value.
+    m_facetValue->ChangeValue( wxEmptyString ); m_facetCandidates->ChangeValue( wxEmptyString ); m_facetReason->ChangeValue( wxEmptyString );
+    setFacetState( 0 ); setFacetStrength( 0 );
+    m_updating = wasUpdating;
+    ++m_viewRevision; refresh();
+    // Focus moves once the click or menu that opened the detail has finished with it.
+    bool state = focusState && R::HasValue( choice );
+    CallAfter( [this, facet, state]
+               {
+                   if( m_closing || m_facet != facet ) return;
+                   if( state ) m_facetStates[facetState()]->SetFocus();
+                   else if( m_facetValue->IsShown() ) m_facetValue->SetFocus();
+                   else if( m_facetCandidates->IsShown() ) m_facetCandidates->SetFocus();
+                   else m_facetReason->SetFocus();
+               } );
+}
+void RECURSIVE_DIAGRAM_FRAME::closeFacet( bool focusRow )
+{
+    if( m_facet < 0 ) return;
+    int facet = m_facet;
+    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) m_notice.clear();
+    m_facet = -1; m_facetOwner.clear(); m_facetTouched = false; m_facetProblem.clear();
+    ++m_viewRevision; refresh();
+    if( !focusRow ) return;
+    if( m_facetRows[facet]->IsShown() ) m_facetRows[facet]->SetFocus();
+    else if( m_addDetail->IsShown() ) m_addDetail->SetFocus();
+    else m_canvas->SetFocus();
+}
+bool RECURSIVE_DIAGRAM_FRAME::facetHasFocus() const
+{
+    wxWindow* focus = wxWindow::FindFocus();
+    for( wxWindow* control : facetControls() ) if( focus == control ) return true;
+    return false;
+}
+std::vector<wxWindow*> RECURSIVE_DIAGRAM_FRAME::facetControls() const
+{
+    std::vector<wxWindow*> controls{ m_facetBack };
+    controls.insert( controls.end(), m_facetStates.begin(), m_facetStates.end() );
+    controls.insert( controls.end(), { m_facetValue, m_facetCandidates, m_facetReason } );
+    controls.insert( controls.end(), m_facetStrengths.begin(), m_facetStrengths.end() );
+    controls.push_back( m_facetClear );
+    return controls;
+}
+int RECURSIVE_DIAGRAM_FRAME::facetState() const
+{
+    for( int i = 0; i < 3; ++i ) if( m_facetStates[i]->GetValue() ) return i;
+    return 0;
+}
+int RECURSIVE_DIAGRAM_FRAME::facetStrength() const
+{
+    for( int i = 0; i < 3; ++i ) if( m_facetStrengths[i]->GetValue() ) return i;
+    return 0;
+}
+void RECURSIVE_DIAGRAM_FRAME::setFacetState( int state )
+{
+    if( state >= 0 && state < 3 && !m_facetStates[state]->GetValue() ) m_facetStates[state]->SetValue( true );
+}
+void RECURSIVE_DIAGRAM_FRAME::setFacetStrength( int strength )
+{
+    if( strength >= 0 && strength < 3 && !m_facetStrengths[strength]->GetValue() ) m_facetStrengths[strength]->SetValue( true );
+}
+bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
+{
+    // Measure the full labels in one row: each choice's indicator and padding plus its full label's text.
+    const auto full = strengthLabels( false ), brief = strengthLabels( true );
+    int available = m_inspectorScroll->GetClientSize().x - 2 * FromDIP( 12 ), needed = 2 * FromDIP( FACET_CHOICE_GAP );
+    for( int i = 0; i < 3; ++i )
+    {
+        wxRadioButton* button = m_facetStrengths[i]; button->InvalidateBestSize();
+        needed += button->GetBestSize().x - button->GetTextExtent( button->GetLabel() ).x + button->GetTextExtent( full[i] ).x;
+    }
+    bool collapse = needed > available, changed = false;
+    for( int i = 0; i < 3; ++i )
+    {
+        const wxString& label = collapse ? brief[i] : full[i];
+        if( m_facetStrengths[i]->GetLabel() == label ) continue;
+        m_facetStrengths[i]->SetLabel( label ); m_facetStrengths[i]->InvalidateBestSize(); changed = true;
+    }
+    return changed;
+}
+void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()
+{
+    if( m_facet < 0 ) return;
+    int state = facetState();
+    bool wasUpdating = m_updating; m_updating = true;
+    // Switching between chosen and candidate carries the value across; an unknown facet needs its own reason.
+    wxString value = m_facetValue->GetValue().Strip( wxString::both ), candidates = m_facetCandidates->GetValue().Strip( wxString::both );
+    if( state == 1 && candidates.empty() ) m_facetCandidates->ChangeValue( value );
+    if( state == 0 && value.empty() ) m_facetValue->ChangeValue( candidates.BeforeFirst( '\n' ).Strip( wxString::both ) );
+    m_updating = wasUpdating;
+    showFacetFields(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    facetEdited();
+    // Focus moves to the entry the state asks for once the drop-down list has closed and returned focus.
+    CallAfter( [this, state]
+               {
+                   if( m_closing || m_facet < 0 || facetState() != state ) return;
+                   if( state == 0 ) m_facetValue->SetFocus(); else if( state == 1 ) m_facetCandidates->SetFocus(); else m_facetReason->SetFocus();
+               } );
+}
+void RECURSIVE_DIAGRAM_FRAME::facetEdited()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_facet < 0 || !selectedDefinition() ) return;
+    D::DefinitionTextChoiceData choice; wxString problem;
+    if( !facetFromForm( choice, problem ) )
+    {
+        // Nothing is stored until the entry can be kept; the detail says what is missing.
+        m_facetTouched = true; m_facetProblem = problem;
+        m_facetNotice->SetLabel( problem ); m_facetNotice->Show();
+        m_facetNotice->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
+        m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); ++m_viewRevision; return;
+    }
+    if( !m_facetProblem.empty() && m_notice == Utf8( m_facetProblem ) ) { m_notice.clear(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); }
+    m_facetTouched = false; m_facetProblem.clear();
+    if( m_facetNotice->IsShown() ) { m_facetNotice->Hide(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); }
+    const auto* existing = R::Facet( *selectedDefinition(), m_facet );
+    if( existing && existing->SerializeAsString() == choice.SerializeAsString() ) return;
+    LEVEL before = m_level;
+    storeFacet( m_facet, &choice );
+    if( before.SerializeAsString() == m_level.SerializeAsString() ) return;
+    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
+    // Like requirement text, do not refill the detail while typing: it would move the caret.
+    bool wasUpdating = m_updating; m_updating = true;
+    const auto* definition = selectedDefinition(); bool any = false;
+    for( int facet = 0; facet < R::FACETS; ++facet )
+    {
+        const auto* item = R::Facet( *definition, facet ); bool shown = R::HasValue( item );
+        if( shown ) m_facetRows[facet]->SetChoice( *item, facet == m_facet );
+        if( m_facetRows[facet]->IsShown() != shown ) m_facetRows[facet]->Show( shown );
+        any |= shown;
+    }
+    m_facetHeading->Show( any ); m_facetClear->Show( true );
+    m_updating = wasUpdating;
+    m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
+    SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_rendered = false; m_canvas->Refresh();
+}
+void RECURSIVE_DIAGRAM_FRAME::clearFacet()
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_facet < 0 || !selectedDefinition() ) return;
+    if( !R::HasValue( R::Facet( *selectedDefinition(), m_facet ) ) ) { closeFacet( true ); return; }
+    pushUndo(); storeFacet( m_facet, nullptr );
+    m_dirty = hasChanges(); closeFacet( false ); changed();
+    if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_canvas->SetFocus();
+}
+void RECURSIVE_DIAGRAM_FRAME::reviewFacets( const std::string& block )
+{
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview ) return;
+    finishCaption( false ); select( block );
+    if( m_selected != block ) return;
+    if( const auto* definition = selectedDefinition() )
+        for( int facet = 0; facet < R::FACETS; ++facet )
+            if( R::HasValue( R::Facet( *definition, facet ) ) ) { openFacet( facet, true ); return; }
+}
+wxFont RECURSIVE_DIAGRAM_FRAME::chipFont() const
+{
+    wxFont small = GetFont(); small.SetPointSize( std::max( 8, small.GetPointSize() - 2 ) ); return small;
+}
+wxColour RECURSIVE_DIAGRAM_FRAME::linkColour() const
+{
+    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    return accent.ChangeLightness( window.Red() + window.Green() + window.Blue() < 384 ? 170 : 62 );
+}
+std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::drawnChips() const
+{
+    std::vector<std::pair<std::string, R::BLOCK_CHIPS>> result;
+    if( !m_ready || !current() ) return result;
+    auto drawn = layout( current(), !m_historyPreview );
+    wxClientDC dc( m_canvas ); wxFont small = chipFont(), caption = GetFont().Bold().Larger();
+    for( const auto& node : drawn.Nodes() )
+    {
+        wxRect inner = wxRect( toScreen( drawn.Rect( node.id ) ) ).Deflate( 8 );
+        auto chips = R::LayoutChips( dc, node, inner, small, R::CaptionRect( dc, node, inner, caption ) );
+        if( chips.shown ) result.emplace_back( node.id, std::move( chips ) );
+    }
+    return result;
+}
+
 void RECURSIVE_DIAGRAM_FRAME::edit()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen ) return;
-    if( !m_connectionId.empty() )
+    LEVEL before = m_level;
+    auto current_ = selectedFields();
+    for( int i = 0; i < 3; ++i )
     {
-        auto before = m_connectionDraft;
-        for( int i = 0; i < 3; ++i ) if( field( m_connectionDraft.fields(), i ) != utf8( m_fields[i]->GetValue() ) )
+        std::string value = Utf8( m_fields[i]->GetValue() );
+        if( field( current_, i ) == value ) continue;
+        if( !m_connectionId.empty() )
         {
-            setField( m_connectionDraft.mutable_fields(), i, utf8( m_fields[i]->GetValue() ) );
-            auto* restores = m_connectionDraft.mutable_restored_fields();
-            for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == i + 1 ) restores->DeleteSubrange( n, 1 );
+            if( auto* added = newConnection( m_connectionId ) ) setField( added->mutable_fields(), i, value );
+            else if( auto* draft = editConnection( true ) ) { setField( draft->mutable_fields(), i, value ); dropRestoration( draft->mutable_restored_fields(), i ); }
         }
-        if( before.SerializeAsString() == m_connectionDraft.SerializeAsString() ) return;
-        m_connectionUndo.push_back( std::move( before ) ); m_connectionRedo.clear();
-        m_dirty = hasChanges(); ++m_viewRevision;
-        m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
-        SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() ); return;
+        else if( auto* added = newChild( m_selected ) ) setField( added->mutable_fields(), i, value );
+        else if( auto* draft = editBlock( true ) ) { setField( draft->mutable_fields(), i, value ); dropRestoration( draft->mutable_restored_fields(), i ); }
     }
-    DRAFT before = m_draft;
-    for( int i = 0; i < 3; ++i ) if( field( m_draft.fields(), i ) != utf8( m_fields[i]->GetValue() ) )
-    {
-        setField( m_draft.mutable_fields(), i, utf8( m_fields[i]->GetValue() ) );
-        auto* restores = m_draft.mutable_restored_fields();
-        for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == i + 1 ) restores->DeleteSubrange( n, 1 );
-    }
-    if( before.SerializeAsString() == m_draft.SerializeAsString() ) return;
+    if( before.SerializeAsString() == m_level.SerializeAsString() ) return;
     m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
     // Do not refill text controls while typing: it would move the caret.
-    m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
     SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
 }
 void RECURSIVE_DIAGRAM_FRAME::fillComments()
 {
     bool wasUpdating = m_updating; m_updating = true;
     bool link = !m_connectionId.empty();
-    const auto& notes = link ? m_connectionDraft.diagram_annotations().annotations() : m_draft.local_diagram().annotations();
-    const std::string target = link ? m_connectionId : m_draft.baseline().block_id();
+    const auto& notes = m_historyPreview && current() ? current()->local_diagram().annotations() : m_level.scope().local_diagram().annotations();
+    const std::string target = link ? m_connectionId : m_selected;
     D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
     m_commentIds.clear(); m_commentChoice->Clear();
-    const D::DiagramAnnotationData* selected = nullptr;
+    const D::DiagramAnnotationData* selectedNote = nullptr;
     for( const auto& note : notes ) if( ( note.target_kind() == kind && note.target_id() == target )
         || ( !link && ( note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason() ) ) )
     {
         if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
-        wxString title = text( note.text() ).BeforeFirst( '\n' );
+        wxString title = Text( note.text() ).BeforeFirst( '\n' );
         if( title.length() > 36 ) title = title.Left( 36 ) + wxS( "…" );
         if( title.empty() ) title = _( "Sketch comment" );
         if( note.has_unresolved_reason() ) title = _( "Unresolved target: " ) + title;
         m_commentChoice->Append( title ); m_commentIds.push_back( note.id() );
-        if( note.id() == m_commentId ) { selected = &note; m_commentChoice->SetSelection( m_commentIds.size() - 1 ); }
+        if( note.id() == m_commentId ) { selectedNote = &note; m_commentChoice->SetSelection( m_commentIds.size() - 1 ); }
     }
     m_commentChoice->Append( _( "New comment" ) ); m_commentIds.emplace_back();
-    if( !selected ) m_commentChoice->SetSelection( m_commentIds.size() - 1 );
-    wxString value = selected ? text( selected->text() ) : wxString();
-    m_commentTargetStatus->Show( selected && selected->has_unresolved_reason() );
-    m_commentTargetStatus->SetLabel( selected && selected->has_unresolved_reason() ? text( selected->unresolved_reason() ) : wxString() );
+    if( !selectedNote ) m_commentChoice->SetSelection( m_commentIds.size() - 1 );
+    wxString value = selectedNote ? Text( selectedNote->text() ) : wxString();
+    m_commentTargetStatus->Show( selectedNote && selectedNote->has_unresolved_reason() );
+    m_commentTargetStatus->SetLabel( selectedNote && selectedNote->has_unresolved_reason() ? Text( selectedNote->unresolved_reason() ) : wxString() );
     m_commentTargetStatus->Wrap( std::max( FromDIP( 200 ), m_inspectorScroll->GetClientSize().x - FromDIP( 24 ) ) );
     if( m_comments->GetValue() != value ) m_comments->ChangeValue( value );
-    m_comments->Enable( m_ready && !m_process && !m_diagramHistoryOpen ); m_commentChoice->Enable( m_ready && !m_process && !m_diagramHistoryOpen );
+    bool available = m_ready && !m_process && !m_diagramHistoryOpen && !m_historyPreview;
+    m_comments->Enable( available ); m_commentChoice->Enable( available );
     m_commentChoice->Show( m_commentIds.size() > 1 );
     m_updating = wasUpdating;
 }
 void RECURSIVE_DIAGRAM_FRAME::editComment()
 {
-    if( !m_ready || m_process || m_diagramHistoryOpen ) return;
+    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview ) return;
     bool link = !m_connectionId.empty();
-    DRAFT blockBefore = m_draft; auto connectionBefore = m_connectionDraft;
-    auto* notes = link ? m_connectionDraft.mutable_diagram_annotations()->mutable_annotations()
-                      : m_draft.mutable_local_diagram()->mutable_annotations();
-    D::DiagramAnnotationData* selected = nullptr; int index = -1;
-    for( int i = 0; i < notes->size(); ++i ) if( notes->Get( i ).id() == m_commentId ) { selected = notes->Mutable( i ); index = i; break; }
-    std::string value = utf8( m_comments->GetValue() );
-    if( ( selected && selected->text() == value ) || ( !selected && value.empty() ) ) return;
-    if( selected && value.empty() && selected->strokes_size() == 0 )
+    LEVEL before = m_level;
+    auto* notes = m_level.mutable_scope()->mutable_local_diagram()->mutable_annotations();
+    D::DiagramAnnotationData* selectedNote = nullptr; int index = -1;
+    for( int i = 0; i < notes->size(); ++i ) if( notes->Get( i ).id() == m_commentId ) { selectedNote = notes->Mutable( i ); index = i; break; }
+    std::string value = Utf8( m_comments->GetValue() );
+    if( ( selectedNote && selectedNote->text() == value ) || ( !selectedNote && value.empty() ) ) return;
+    if( selectedNote && value.empty() && selectedNote->strokes_size() == 0 )
     { notes->DeleteSubrange( index, 1 ); m_commentId.clear(); m_newComment = true; }
     else
     {
-        if( !selected )
+        if( !selectedNote )
         {
-            selected = notes->Add(); selected->set_id( freshId() ); selected->set_role( D::DAR_COMMENT ); selected->set_units( "diagram-unit" );
-            selected->set_target_kind( link ? D::DAT_CONNECTION : D::DAT_BLOCK );
-            selected->set_target_id( link ? m_connectionId : m_draft.baseline().block_id() ); m_commentId = selected->id(); m_newComment = false;
+            selectedNote = notes->Add(); selectedNote->set_id( FreshId() ); selectedNote->set_role( D::DAR_COMMENT ); selectedNote->set_units( "diagram-unit" );
+            selectedNote->set_target_kind( link ? D::DAT_CONNECTION : D::DAT_BLOCK );
+            selectedNote->set_target_id( link ? m_connectionId : m_selected ); m_commentId = selectedNote->id(); m_newComment = false;
         }
-        selected->set_text( value ); editorOrigin( selected->mutable_origin(), "Edit diagram comment" );
+        selectedNote->set_text( value ); EditorOrigin( selectedNote->mutable_origin(), "Edit diagram comment" );
     }
-    if( link )
-    { m_connectionUndo.push_back( std::move( connectionBefore ) ); m_connectionRedo.clear(); m_dirty = hasChanges(); }
-    else
-    { m_undo.push_back( std::move( blockBefore ) ); m_redo.clear(); m_dirty = hasChanges(); }
-    ++m_viewRevision; m_save->Enable( m_dirty ); m_decline->Enable( m_dirty ); m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
+    m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges();
+    ++m_viewRevision; m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); SetStatusText( m_dirty ? _( "Unsaved changes" ) : wxString() );
+    m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::save()
 {
-    if( !m_ready || m_process || !m_dirty || ( m_diagramHistoryOpen && !m_pendingHistoryRestore ) ) return;
-    m_rebaseAttempts = 0;
-    if( !m_connectionId.empty() )
+    if( !m_ready || m_process || ( m_diagramHistoryOpen && !m_pendingHistoryRestore ) ) return;
+    // A caption being typed is part of the draft. A blank one cannot be kept, so nothing is saved and the
+    // caption editor stays open with its notice.
+    if( m_captionKind ) { finishCaption( true ); if( m_captionKind ) return; }
+    // A facet entry that cannot be kept yet is part of what the person is doing: nothing is saved and the
+    // detail stays open with its notice, as for a blank caption.
+    if( m_facet >= 0 && m_facetTouched && !m_facetProblem.empty() )
     {
-        REQUEST request; request.set_action( D::RFA_SAVE_CONNECTION ); request.set_expected_source_token( m_document.source_token() );
-        auto* save = request.mutable_save_connection(); *save->mutable_expected_root() = m_document.graph().selected_root();
-        for( const auto& step : m_path ) *save->add_block_path() = step;
-        *save->add_connection_path() = m_connectionDraft.baseline(); *save->mutable_draft() = m_connectionDraft;
-        save->set_new_connection_revision_id( freshId() ); save->set_new_requirement_revision_id( freshId() );
-        save->set_new_block_revision_id( freshId() ); save->set_new_block_requirement_revision_id( freshId() );
-        for( size_t i = 1; i < m_path.size(); ++i ) save->add_block_ancestor_revision_ids( freshId() );
-        editorOrigin( save->mutable_origin(), "Edit connection requirements" ); execute( std::move( request ) ); return;
+        m_notice = Utf8( m_facetProblem ); refresh();
+        if( m_facetValue->IsShown() ) m_facetValue->SetFocus(); else if( m_facetCandidates->IsShown() ) m_facetCandidates->SetFocus(); else m_facetReason->SetFocus();
+        return;
     }
-    REQUEST request; request.set_action( m_preview ? D::RFA_SAVE_IMPLEMENTATION : D::RFA_SAVE_BLOCK ); request.set_expected_source_token( m_document.source_token() );
-    auto* save = request.mutable_save(); *save->mutable_expected_root() = m_document.graph().selected_root(); *save->mutable_draft() = m_draft;
-    std::vector<SELECTION> path; if( !findPath( m_draft.baseline().block_id(), path ) ) return;
+    if( !m_dirty ) return;
+    if( !m_document.source_writable() )
+    { m_errorCode = "diagram_file_read_only"; m_error = "This diagram file is read-only; changes cannot be saved."; refresh(); return; }
+    // A save the user asks for may rebase again; the automatic save of a rebased candidate may not.
+    if( !m_rebasing ) m_rebaseAttempts = 0;
+    m_rebasing = false;
+    std::vector<SELECTION> path; if( !findPath( m_level.scope().baseline().block_id(), path ) ) return;
+    // Only edited children and connections travel; an unchanged draft creates nothing.
+    LEVEL sent = m_level; sent.clear_child_drafts(); sent.clear_connection_drafts();
+    for( const auto& child : m_level.child_drafts() )
+        if( const REVISION* saved = revision( child.baseline() ); !saved || child.SerializeAsString() != draftFor( *saved ).SerializeAsString() )
+            *sent.add_child_drafts() = child;
+    for( const auto& link : m_level.connection_drafts() )
+        if( const auto* saved = savedConnection( link.baseline().connection_id() ); !saved || link.SerializeAsString() != connectionDraftFor( *saved ).SerializeAsString() )
+            *sent.add_connection_drafts() = link;
+    REQUEST request; request.set_action( D::RFA_SAVE_LEVEL ); request.set_expected_source_token( m_document.source_token() );
+    auto* save = request.mutable_save_level(); *save->mutable_expected_root() = m_document.graph().selected_root(); *save->mutable_draft() = sent;
     for( const auto& step : path ) *save->add_block_path() = step;
-    for( size_t i = 1; i < path.size(); ++i ) save->add_ancestor_revision_ids( freshId() );
-    save->set_new_revision_id( freshId() ); save->set_new_requirement_revision_id( freshId() );
-    auto* origin = save->mutable_origin(); origin->set_kind( D::DAK_EDITOR ); origin->set_actor( "Native editor" ); origin->set_summary( "Edit requirements" );
-    auto now = std::chrono::system_clock::now().time_since_epoch(); auto seconds = std::chrono::duration_cast<std::chrono::seconds>( now );
-    origin->mutable_recorded_at()->set_seconds( seconds.count() );
-    origin->mutable_recorded_at()->set_nanos( static_cast<int>( std::chrono::duration_cast<std::chrono::nanoseconds>( now - seconds ).count() / 100 * 100 ) );
+    for( size_t i = 1; i < path.size(); ++i ) save->add_ancestor_revision_ids( FreshId() );
+    save->set_new_revision_id( FreshId() ); save->set_new_requirement_revision_id( FreshId() );
+    for( const auto& child : sent.child_drafts() )
+    { auto* ids = save->add_child_revisions(); ids->set_object_id( child.baseline().block_id() ); ids->set_new_revision_id( FreshId() ); ids->set_new_requirement_revision_id( FreshId() ); }
+    for( const auto& link : sent.connection_drafts() )
+    { auto* ids = save->add_connection_revisions(); ids->set_object_id( link.baseline().connection_id() ); ids->set_new_revision_id( FreshId() ); ids->set_new_requirement_revision_id( FreshId() ); }
+    save->set_select_implementation( m_preview.has_value() );
+    EditorOrigin( save->mutable_origin(), m_preview ? "Choose implementation" : "Edit diagram level" );
+    m_sentLevel = sent;
     execute( std::move( request ) );
 }
 void RECURSIVE_DIAGRAM_FRAME::decline()
-{ if( m_ready && !m_process && m_dirty && !m_diagramHistoryOpen ) { m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_selected; load(); } }
+{
+    if( m_ready && !m_process && m_dirty && !m_diagramHistoryOpen )
+    { finishCaption( false ); m_notice.clear(); m_pendingScope = current()->selection().block_id(); m_pendingSelected = m_selected; load(); }
+}
 
 void RECURSIVE_DIAGRAM_FRAME::openDiagramHistory()
 {
     if( !m_ready || m_process || m_diagramHistoryOpen || !current() ) return;
-    finishNoteDrag(); m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) );
+    release(); finishCaption( false ); setTool( TOOL::SELECT );
     SELECTION context = current()->selection(); const auto* saved = revision( context ); if( !saved ) return;
     m_diagramHistoryOpen = true; m_failedHistoryRequest.Clear();
-    m_diagramHistoryPanel->Begin( context, text( saved->name() ), version( *saved ) );
+    m_diagramHistoryPanel->Begin( context, Text( saved->name() ), version( *saved ) );
     m_inspectorBook->SetSelection( 1 ); ++m_viewRevision; loadDiagramHistory( 0 );
 }
 void RECURSIVE_DIAGRAM_FRAME::loadDiagramHistory( unsigned offset )
@@ -975,7 +1753,7 @@ void RECURSIVE_DIAGRAM_FRAME::returnFromHistoryPreview()
 {
     if( !m_historyPreview ) return;
     m_historyPreview.reset();
-    if( m_historyView ) { m_scale = m_historyView->scale; m_origin = m_historyView->origin; m_historyView.reset(); }
+    if( m_historyView ) { m_scale = m_historyView->scale; m_origin = m_historyView->origin; m_fitted = false; m_historyView.reset(); }
     m_diagramHistoryPanel->SetPreviewing( false ); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::closeDiagramHistory()
@@ -991,9 +1769,7 @@ void RECURSIVE_DIAGRAM_FRAME::restoreDiagramHistory( SELECTION selected )
 {
     if( !m_diagramHistoryOpen || m_process ) return;
     m_pendingHistoryRestore = std::move( selected );
-    bool edited = m_connectionId.empty() ? m_draft.SerializeAsString() != m_savedDraft.SerializeAsString()
-        : m_connectionDraft.SerializeAsString() != m_savedConnectionDraft.SerializeAsString();
-    if( edited )
+    if( levelChanged() )
     {
         wxMessageDialog choice( this, _( "Save your existing edits before preparing the earlier diagram?" ),
             _( "Unsaved changes" ), wxYES_NO | wxCANCEL | wxICON_QUESTION );
@@ -1021,10 +1797,19 @@ void RECURSIVE_DIAGRAM_FRAME::prepareDiagramRestoration()
 }
 void RECURSIVE_DIAGRAM_FRAME::history( int which )
 {
-    if( !m_ready || m_process || m_diagramHistoryOpen ) return;
+    if( !m_ready || m_process || m_diagramHistoryOpen || selectionIsNew() ) return;
     REQUEST request; request.set_expected_source_token( m_document.source_token() );
-    if( m_connectionId.empty() ) { request.set_action( D::RFA_BLOCK_FIELD_HISTORY ); *request.mutable_block() = m_draft.baseline(); }
-    else { request.set_action( D::RFA_CONNECTION_FIELD_HISTORY ); *request.mutable_block() = m_path.back(); *request.mutable_connection() = m_connectionDraft.baseline(); }
+    if( m_connectionId.empty() )
+    {
+        SELECTION target = m_level.scope().baseline();
+        for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected ) target = child;
+        request.set_action( D::RFA_BLOCK_FIELD_HISTORY ); *request.mutable_block() = target;
+    }
+    else
+    {
+        const auto* saved = savedConnection( m_connectionId ); if( !saved ) return;
+        request.set_action( D::RFA_CONNECTION_FIELD_HISTORY ); *request.mutable_block() = m_path.back(); *request.mutable_connection() = saved->selection();
+    }
     request.set_field( static_cast<D::RequirementFieldKind>( which + 1 ) ); request.set_limit( 200 ); execute( std::move( request ) );
 }
 
@@ -1033,19 +1818,16 @@ void RECURSIVE_DIAGRAM_FRAME::showHistory( const D::RecursiveFileResult& result,
     if( m_process || m_historyDialog || m_closing ) return;
     bool link = query.action() == D::RFA_CONNECTION_FIELD_HISTORY;
     const auto& page = result.history();
-    std::string owner = link ? m_connectionDraft.baseline().connection_id() : m_draft.baseline().block_id();
-    std::string state = link ? m_connectionDraft.baseline().state_id() : m_draft.baseline().state_id();
-    std::string revisionId = link ? m_connectionDraft.baseline().revision_id() : m_draft.baseline().revision_id();
+    std::string owner = link ? query.connection().connection_id() : query.block().block_id();
     int which = static_cast<int>( page.field() ) - 1;
-    if( result.source_token() != m_document.source_token() || page.owner_id() != owner || page.state_id() != state
-        || page.context_revision_id() != revisionId || which < 0 || which > 2 ) return;
+    bool stillSelected = link ? m_connectionId == owner : m_connectionId.empty() && m_selected == owner;
+    if( result.source_token() != m_document.source_token() || page.owner_id() != owner || !stillSelected || which < 0 || which > 2 ) return;
     std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
     for( const auto& row : page.entries() )
         rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-            text( row.origin().actor() ), text( row.text() ), wxEmptyString, row.is_saved_text() } );
-    const wxString labels[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
-    DIALOG_DIAGRAM_FIELD_HISTORY dialog( this, labels[which], m_owner->GetLabel(),
-            wxString::Format( "v%u", page.context_version() ), text( page.saved_text() ), std::move( rows ) );
+            Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
+    DIALOG_DIAGRAM_FIELD_HISTORY dialog( this, FIELD_LABELS[which], m_owner->GetLabel(),
+            wxString::Format( "v%u", page.context_version() ), Text( page.saved_text() ), std::move( rows ) );
     m_historyContext = page;
     dialog.ConfigurePaging( page.total(), [this, next = query]( size_t offset ) mutable
     { next.set_offset( static_cast<int>( offset ) ); execute( next ); } );
@@ -1055,14 +1837,17 @@ void RECURSIVE_DIAGRAM_FRAME::showHistory( const D::RecursiveFileResult& result,
     if( action == wxID_OK && dialog.RestoredEntry() )
     {
         const auto& row = *dialog.RestoredEntry();
-        if( field( link ? m_connectionDraft.fields() : m_draft.fields(), which ) != utf8( row.text ) )
+        if( field( selectedFields(), which ) != Utf8( row.text ) )
         {
-            if( link ) { m_connectionUndo.push_back( m_connectionDraft ); m_connectionRedo.clear(); }
-            else { m_undo.push_back( m_draft ); m_redo.clear(); }
-            setField( link ? m_connectionDraft.mutable_fields() : m_draft.mutable_fields(), which, utf8( row.text ) );
-            auto* restores = link ? m_connectionDraft.mutable_restored_fields() : m_draft.mutable_restored_fields();
-            for( int i = restores->size() - 1; i >= 0; --i ) if( restores->Get( i ).field() == page.field() ) restores->DeleteSubrange( i, 1 );
-            auto* restored = restores->Add(); restored->set_field( page.field() ); restored->set_source_revision_id( row.revisionId );
+            pushUndo();
+            D::RequirementFieldsData* fields = nullptr; google::protobuf::RepeatedPtrField<D::FieldRestorationData>* restores = nullptr;
+            if( link ) { if( auto* draft = editConnection( true ) ) { fields = draft->mutable_fields(); restores = draft->mutable_restored_fields(); } }
+            else if( auto* draft = editBlock( true ) ) { fields = draft->mutable_fields(); restores = draft->mutable_restored_fields(); }
+            if( fields )
+            {
+                setField( fields, which, Utf8( row.text ) ); dropRestoration( restores, which );
+                auto* restored = restores->Add(); restored->set_field( page.field() ); restored->set_source_revision_id( row.revisionId );
+            }
             m_dirty = hasChanges(); ++m_viewRevision;
         }
     }
@@ -1072,241 +1857,38 @@ void RECURSIVE_DIAGRAM_FRAME::showHistory( const D::RecursiveFileResult& result,
 void RECURSIVE_DIAGRAM_FRAME::undo( bool redo )
 {
     if( m_process || m_diagramHistoryOpen ) return;
+    finishCaption( false ); release();
+    auto& from = redo ? m_redo : m_undo; auto& to = redo ? m_undo : m_redo;
+    if( from.empty() ) return; to.push_back( m_level ); m_level = std::move( from.back() ); from.pop_back();
+    // Keep the selection only while its element still exists in the restored draft.
     if( !m_connectionId.empty() )
     {
-        auto& from = redo ? m_connectionRedo : m_connectionUndo; auto& to = redo ? m_connectionUndo : m_connectionRedo;
-        if( from.empty() ) return; to.push_back( m_connectionDraft ); m_connectionDraft = std::move( from.back() ); from.pop_back();
-        m_dirty = hasChanges(); ++m_viewRevision; refresh(); return;
+        bool present = false;
+        for( const auto& root : m_level.scope().local_diagram().connections() ) present |= root.connection_id() == m_connectionId;
+        if( !present ) m_connectionId.clear();
     }
-    auto& from = redo ? m_redo : m_undo; auto& to = redo ? m_undo : m_redo;
-    if( from.empty() ) return; to.push_back( m_draft ); m_draft = std::move( from.back() ); from.pop_back();
+    bool block = m_selected == m_level.scope().baseline().block_id();
+    for( const auto& child : m_level.scope().children() ) block |= child.block_id() == m_selected;
+    if( !block ) { m_selected = m_level.scope().baseline().block_id(); m_portOwner.clear(); m_portId.clear(); }
+    m_notice.clear(); m_lastEffects.Clear();
+    if( m_facet >= 0 )
+    {
+        const auto* definition = selectedDefinition();
+        m_facetTouched = false; m_facetProblem.clear();
+        if( !definition || !R::HasValue( R::Facet( *definition, m_facet ) ) ) { m_facet = -1; m_facetOwner.clear(); }
+    }
     m_dirty = hasChanges(); ++m_viewRevision; refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::close( wxCloseEvent& event )
 {
     if( m_diagramHistoryOpen && event.CanVeto() ) { closeDiagramHistory(); event.Veto(); return; }
     if( m_process ) { event.Veto(); return; }
+    finishCaption( false );
     if( m_dirty && event.CanVeto() ) { m_closeAfterSave = true; if( !confirmChange() ) { if( !m_process ) m_closeAfterSave = false; event.Veto(); return; } }
     m_closing = true; Destroy();
 }
 
-wxRect RECURSIVE_DIAGRAM_FRAME::nodeRect( int index ) const
-{
-    int count = current() ? current()->children_size() : 0; int columns = std::max( 1, static_cast<int>( std::ceil( std::sqrt( count ) ) ) );
-    return { static_cast<int>( ( 140 + ( index % columns ) * 370 - m_origin.m_x ) * m_scale ),
-             static_cast<int>( ( 110 + ( index / columns ) * 250 - m_origin.m_y ) * m_scale ),
-             static_cast<int>( 240 * m_scale ), static_cast<int>( 145 * m_scale ) };
-}
-wxPoint RECURSIVE_DIAGRAM_FRAME::endpoint( const D::DiagramEndpointBindingData& value, bool first ) const
-{
-    auto* scope = current(); if( !scope ) return {};
-    if( value.block_id() == scope->selection().block_id() )
-    {
-        int index = 0; for( const auto& port : scope->local_diagram().interfaces() ) { if( port.id() == value.interface_id() ) break; ++index; }
-        return { static_cast<int>( ( 40 - m_origin.m_x ) * m_scale ), static_cast<int>( ( 90 + index * 85 - m_origin.m_y ) * m_scale ) };
-    }
-    for( int i = 0; i < scope->children_size(); ++i ) if( scope->children( i ).block_id() == value.block_id() )
-    {
-        auto box = nodeRect( i ); auto* child = revision( scope->children( i ) ); int index = 0;
-        if( child ) for( const auto& port : child->local_diagram().interfaces() ) { if( port.id() == value.interface_id() ) break; ++index; }
-        int count = child ? child->local_diagram().interfaces_size() : 0;
-        return { first ? box.GetRight() : box.GetLeft(), box.GetTop() + ( index + 1 ) * box.GetHeight() / std::max( 2, count + 1 ) };
-    }
-    return {};
-}
-std::array<wxPoint, 4> RECURSIVE_DIAGRAM_FRAME::connectionPath( const D::ConnectionRevisionData& link, int index ) const
-{
-    auto center = [&]( const D::DiagramEndpointBindingData& e )
-    { auto left = endpoint( e, false ), right = endpoint( e, true ); return ( left.x + right.x ) / 2; };
-    const auto& first = link.endpoints( 0 ); const auto& second = link.endpoints( index );
-    wxPoint from = endpoint( first, center( first ) < center( second ) );
-    wxPoint to = endpoint( second, center( second ) < center( first ) );
-    int middle = ( from.x + to.x ) / 2;
-    return { from, wxPoint( middle, from.y ), wxPoint( middle, to.y ), to };
-}
-wxRect RECURSIVE_DIAGRAM_FRAME::noteRect( const D::DiagramAnnotationData& note, int index ) const
-{
-    double x = 60 + index * 260, y = 420;
-    if( note.has_position() ) { text( note.position().x() ).ToDouble( &x ); text( note.position().y() ).ToDouble( &y ); }
-    return { static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ),
-             static_cast<int>( 240 * m_scale ), static_cast<int>( 100 * m_scale ) };
-}
-void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
-{
-    wxColour background = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
-    wxColour foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
-    dc.SetBackground( wxBrush( background ) ); dc.Clear(); dc.SetTextForeground( foreground );
-    auto* scope = current(); if( !m_ready || !scope ) { dc.DrawText( m_error.empty() ? _( "Loading diagram…" ) : text( m_error ), 24, 24 ); return; }
-    dc.SetPen( wxPen( wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT ) ) );
-    for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
-        for( const auto& selected : scope->local_diagram().connections() )
-            for( const auto& connection : archive.revisions() ) if( connection.selection().revision_id() == selected.revision_id() && connection.endpoints_size() >= 2 )
-            {
-                bool highlighted = selected.connection_id() == m_connectionId;
-                dc.SetPen( wxPen( wxSystemSettings::GetColour( highlighted ? wxSYS_COLOUR_HIGHLIGHT : wxSYS_COLOUR_GRAYTEXT ), highlighted ? 2 : 1 ) );
-                for( int i = 1; i < connection.endpoints_size(); ++i )
-                {
-                    // Port side is a presentation choice toward the peer, not an
-                    // inferred electrical signal direction. Boundary links must
-                    // not exit through the far side of a child and cross its body.
-                    const auto& first = connection.endpoints( 0 ); const auto& second = connection.endpoints( i );
-                    auto route = connectionPath( connection, i );
-                    wxPoint from = route.front(), to = route.back();
-                    for( size_t segment = 1; segment < route.size(); ++segment ) dc.DrawLine( route[segment - 1], route[segment] );
-                    // A boundary already names its interface. Avoid duplicating
-                    // the relationship title on top of that boundary label.
-                    if( first.block_id() != scope->selection().block_id() && second.block_id() != scope->selection().block_id() )
-                        dc.DrawText( text( connection.name() ), std::min( from.x, to.x ) + 8, from.y - 24 );
-                }
-            }
-    bool dark = background.Red() + background.Green() + background.Blue() < 384;
-    for( int i = 0; i < scope->children_size(); ++i ) if( auto* child = revision( scope->children( i ) ) )
-    {
-        auto box = nodeRect( i ); bool selected = child->selection().block_id() == m_selected;
-        wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
-        dc.SetPen( wxPen( selected ? accent : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT ), selected ? 2 : 1 ) );
-        dc.SetBrush( wxBrush( selected ? accent.ChangeLightness( dark ? 60 : 175 ) : background.ChangeLightness( dark ? 120 : 97 ) ) ); dc.DrawRectangle( box );
-        dc.SetClippingRegion( box.Deflate( 8 ) ); dc.SetFont( GetFont().Bold().Larger() );
-        dc.DrawText( text( child->name() ), box.x + 10, box.y + 24 ); dc.SetFont( GetFont() );
-        dc.DrawText( wxString::Format( "v%d", version( *child ) ), box.x + 10, box.y + 58 ); dc.DestroyClippingRegion();
-    }
-    for( const auto& port : scope->local_diagram().interfaces() )
-    { D::DiagramEndpointBindingData value; value.set_block_id( scope->selection().block_id() ); value.set_interface_id( port.id() ); auto point = endpoint( value, true ); dc.DrawRectangle( point.x - 4, point.y - 4, 8, 8 ); dc.DrawText( text( port.name() ), point.x + 12, point.y - 24 ); }
-    const auto& notes = m_historyPreview ? scope->local_diagram().annotations() : !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
-        : m_draft.baseline().block_id() == scope->selection().block_id() ? m_draft.local_diagram().annotations() : scope->local_diagram().annotations();
-    for( int i = 0; i < notes.size(); ++i )
-    {
-        const auto& note = notes.Get( i );
-        dc.SetPen( wxPen( wxSystemSettings::GetColour( note.id() == m_commentId ? wxSYS_COLOUR_HIGHLIGHT : wxSYS_COLOUR_WINDOWTEXT ), 2 ) );
-        for( const auto& stroke : note.strokes() )
-        {
-            std::optional<wxPoint> previous;
-            for( const auto& point : stroke.points() )
-            {
-                double x = 0, y = 0; text( point.x() ).ToDouble( &x ); text( point.y() ).ToDouble( &y );
-                wxPoint now( static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ) );
-                if( previous ) dc.DrawLine( *previous, now ); previous = now;
-            }
-        }
-        if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
-        wxRect box = noteRect( note, i );
-        dc.SetPen( wxPen( note.id() == m_commentId ? wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ) : wxColour( 176, 142, 52 ), 1 ) );
-        dc.SetBrush( wxBrush( dark ? wxColour( 76, 66, 34 ) : wxColour( 255, 247, 213 ) ) ); dc.DrawRectangle( box );
-        box.Deflate( 8 ); dc.SetClippingRegion( box );
-        wxString value = text( note.text() ); int y = box.y;
-        while( !value.empty() && y + dc.GetCharHeight() <= box.GetBottom() )
-        {
-            size_t count = value.find( '\n' ); if( count == wxString::npos ) count = value.length();
-            while( count > 0 && dc.GetTextExtent( value.Left( count ) ).x > box.width ) --count;
-            if( count == 0 && value[0] != '\n' ) count = 1;
-            wxString line = value.Left( count ); value = value.Mid( count ); if( value.StartsWith( "\n" ) ) value = value.Mid( 1 );
-            if( !value.empty() && y + dc.GetCharHeight() * 2 > box.GetBottom() )
-            { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > box.width ) line.RemoveLast(); line += wxS( "…" ); }
-            dc.DrawText( line, box.x, y ); y += dc.GetCharHeight();
-        }
-        dc.DestroyClippingRegion();
-    }
-    m_rendered = true;
-}
-void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
-{
-    if( !m_ready || m_process || !current() || m_diagramHistoryOpen ) return;
-    m_canvas->SetFocus();
-    if( m_noteMode )
-    {
-        select( current()->selection().block_id() );
-        if( m_process || !m_connectionId.empty() || m_draft.baseline().block_id() != current()->selection().block_id() ) return;
-        m_undo.push_back( m_draft ); m_redo.clear(); auto* note = m_draft.mutable_local_diagram()->add_annotations();
-        note->set_id( freshId() ); note->set_role( D::DAR_COMMENT ); note->set_target_kind( D::DAT_CANVAS ); note->set_units( "diagram-unit" );
-        note->mutable_position()->set_x( std::to_string( event.GetX() / m_scale + m_origin.m_x ) );
-        note->mutable_position()->set_y( std::to_string( event.GetY() / m_scale + m_origin.m_y ) );
-        editorOrigin( note->mutable_origin(), "Place diagram comment" ); m_commentId = note->id(); m_newComment = false;
-        m_noteMode = false; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); m_dirty = true; ++m_viewRevision; refresh(); m_comments->SetFocus(); return;
-    }
-    const auto& visibleNotes = m_draft.baseline().block_id() == current()->selection().block_id() && m_connectionId.empty()
-        ? m_draft.local_diagram().annotations() : current()->local_diagram().annotations();
-    for( int i = visibleNotes.size() - 1; i >= 0; --i )
-    {
-        const auto& note = visibleNotes.Get( i );
-        if( note.target_kind() != D::DAT_CANVAS || !noteRect( note, i ).Contains( event.GetPosition() ) ) continue;
-        std::string id = note.id();
-        select( current()->selection().block_id() );
-        if( m_process || !m_connectionId.empty() || m_draft.baseline().block_id() != current()->selection().block_id() ) return;
-        m_commentId = id; m_newComment = false; refresh();
-        if( event.LeftDClick() ) { m_comments->SetFocus(); return; }
-        for( const auto& item : m_draft.local_diagram().annotations() ) if( item.id() == id )
-        {
-            wxRect box = noteRect( item, i ); m_noteStartX = box.x / m_scale + m_origin.m_x; m_noteStartY = box.y / m_scale + m_origin.m_y;
-            m_noteDragStart = event.GetPosition(); m_noteDragBefore = m_draft; m_draggingNote = true;
-            if( !m_canvas->HasCapture() ) m_canvas->CaptureMouse(); return;
-        }
-    }
-    for( int i = 0; i < current()->children_size(); ++i ) if( nodeRect( i ).Contains( event.GetPosition() ) )
-    { auto id = current()->children( i ).block_id(); if( event.LeftDClick() ) navigate( id ); else select( id ); return; }
-    for( const auto& selected : current()->local_diagram().connections() ) if( auto* link = connection( selected.connection_id() ) )
-        for( int i = 1; i < link->endpoints_size(); ++i )
-        {
-            auto route = connectionPath( *link, i ); wxPoint point = event.GetPosition();
-            for( size_t j = 1; j < route.size(); ++j )
-            {
-                int x = std::clamp( point.x, std::min( route[j - 1].x, route[j].x ), std::max( route[j - 1].x, route[j].x ) );
-                int y = std::clamp( point.y, std::min( route[j - 1].y, route[j].y ), std::max( route[j - 1].y, route[j].y ) );
-                if( std::abs( point.x - x ) + std::abs( point.y - y ) <= FromDIP( 6 ) ) { selectConnection( selected.connection_id() ); return; }
-            }
-        }
-    select( current()->selection().block_id() );
-}
-void RECURSIVE_DIAGRAM_FRAME::moveNote( wxMouseEvent& event )
-{
-    if( !m_draggingNote || !event.Dragging() || m_process ) return;
-    for( auto& note : *m_draft.mutable_local_diagram()->mutable_annotations() ) if( note.id() == m_commentId )
-    {
-        note.mutable_position()->set_x( std::to_string( m_noteStartX + ( event.GetX() - m_noteDragStart.x ) / m_scale ) );
-        note.mutable_position()->set_y( std::to_string( m_noteStartY + ( event.GetY() - m_noteDragStart.y ) / m_scale ) );
-        m_rendered = false; m_canvas->Refresh(); return;
-    }
-}
-void RECURSIVE_DIAGRAM_FRAME::finishNoteDrag()
-{
-    if( !m_draggingNote ) return; m_draggingNote = false;
-    if( m_canvas->HasCapture() ) m_canvas->ReleaseMouse();
-    if( m_draft.SerializeAsString() != m_noteDragBefore.SerializeAsString() )
-    {
-        for( auto& note : *m_draft.mutable_local_diagram()->mutable_annotations() ) if( note.id() == m_commentId ) editorOrigin( note.mutable_origin(), "Move diagram comment" );
-        m_undo.push_back( m_noteDragBefore ); m_redo.clear(); m_dirty = true; ++m_viewRevision;
-    }
-    refresh();
-}
-wxRect2DDouble RECURSIVE_DIAGRAM_FRAME::diagramBounds() const
-{
-    if( !current() ) return { 0, 0, 1, 1 };
-    int count = std::max( 1, current()->children_size() ), columns = static_cast<int>( std::ceil( std::sqrt( count ) ) ), rows = ( count + columns - 1 ) / columns;
-    double left = 0, top = 0, right = 140 + columns * 370, bottom = 110 + rows * 250;
-    const auto& notes = m_historyPreview ? current()->local_diagram().annotations() : !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
-        : m_draft.baseline().block_id() == current()->selection().block_id() ? m_draft.local_diagram().annotations() : current()->local_diagram().annotations();
-    auto include = [&]( double x, double y ) { left = std::min( left, x - 20 ); top = std::min( top, y - 20 ); right = std::max( right, x + 20 ); bottom = std::max( bottom, y + 20 ); };
-    for( int i = 0; i < notes.size(); ++i )
-    {
-        const auto& note = notes.Get( i );
-        if( note.target_kind() == D::DAT_CANVAS || note.has_position() )
-        {
-            double x = 60 + i * 260, y = 420;
-            if( note.has_position() ) { text( note.position().x() ).ToDouble( &x ); text( note.position().y() ).ToDouble( &y ); }
-            include( x, y ); include( x + 240, y + 100 );
-        }
-        for( const auto& stroke : note.strokes() ) for( const auto& point : stroke.points() )
-        { double x = 0, y = 0; text( point.x() ).ToDouble( &x ); text( point.y() ).ToDouble( &y ); include( x, y ); }
-    }
-    return { left, top, right - left, bottom - top };
-}
-void RECURSIVE_DIAGRAM_FRAME::fit()
-{
-    if( !current() ) return;
-    auto bounds = diagramBounds(); double width = bounds.m_width, height = bounds.m_height;
-    auto area = m_canvas->GetClientSize(); m_scale = std::max( 0.000000001, std::min( { 1.0, area.x / width, area.y / height } ) );
-    m_origin = { bounds.m_x - ( area.x / m_scale - width ) / 2, bounds.m_y - ( area.y / m_scale - height ) / 2 };
-    ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
-}
+// ---- Observation --------------------------------------------------------------------------
 
 HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe( const D::ObserveRecursiveDiagramEditor& request )
 {
@@ -1320,7 +1902,7 @@ HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe(
     if( known.SerializeAsString() != request.SerializeAsString() || request.document_id() != DocumentId()
         || request.expected_source_token().size() != 64 || request.views_size() < 1 || request.views_size() > 8 )
         return failure( kiapi::common::AS_BAD_REQUEST, "Provide this exact diagram, observed source/view revision and one to eight supported view requests" );
-    if( !m_ready || m_process || m_draggingNote || m_closing || !current() )
+    if( !m_ready || m_process || m_drag != DRAG::NONE || m_captionKind || m_closing || !current() )
         return failure( kiapi::common::AS_BUSY, "The diagram is not at an idle rendering checkpoint" );
     if( request.expected_source_token() != m_document.source_token() || request.expected_view_revision() != m_viewRevision )
         return failure( kiapi::common::AS_BAD_REQUEST, "The diagram view changed; inspect its current source token and view revision before observing it" );
@@ -1351,14 +1933,15 @@ HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe(
         double scale;
         wxPoint2DDouble origin;
         std::optional<SELECTION> historical;
-        std::string selected, connection, comment;
+        std::string selected, connection, comment, portOwner, port;
         bool rendered;
         ~RESTORE_VIEW()
         {
             frame.m_scale = scale; frame.m_origin = origin; frame.m_historyPreview = historical;
-            frame.m_selected = selected; frame.m_connectionId = connection; frame.m_commentId = comment; frame.m_rendered = rendered;
+            frame.m_selected = selected; frame.m_connectionId = connection; frame.m_commentId = comment;
+            frame.m_portOwner = portOwner; frame.m_portId = port; frame.m_rendered = rendered;
         }
-    } restore{ *this, m_scale, m_origin, m_historyPreview, m_selected, m_connectionId, m_commentId, m_rendered };
+    } restore{ *this, m_scale, m_origin, m_historyPreview, m_selected, m_connectionId, m_commentId, m_portOwner, m_portId, m_rendered };
     D::RecursiveDiagramObservation result;
     result.set_document_id( DocumentId() ); result.set_source_token( m_document.source_token() ); result.set_view_revision( m_viewRevision );
     *result.mutable_editor() = State();
@@ -1368,19 +1951,23 @@ HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe(
         m_selected = view.has_selection() ? "" : restore.selected;
         m_connectionId = view.has_selection() ? "" : restore.connection;
         m_commentId = view.has_selection() ? "" : restore.comment;
+        m_portOwner = view.has_selection() ? "" : restore.portOwner; m_portId = view.has_selection() ? "" : restore.port;
         auto* scope = current(); if( !scope ) return failure( kiapi::common::AS_BAD_REQUEST, "The requested diagram revision is unavailable" );
-        auto bounds = view.has_viewport() ? wxRect2DDouble( view.viewport().x(), view.viewport().y(), view.viewport().width(), view.viewport().height() ) : diagramBounds();
+        bool draft = !m_historyPreview;
+        auto drawn = layout( scope, draft );
+        R::RECT extent = drawn.Bounds();
+        auto bounds = view.has_viewport() ? wxRect2DDouble( view.viewport().x(), view.viewport().y(), view.viewport().width(), view.viewport().height() )
+            : wxRect2DDouble( extent.x / double( R::QUANTUM ), extent.y / double( R::QUANTUM ), extent.w / double( R::QUANTUM ), extent.h / double( R::QUANTUM ) );
         m_scale = std::min( view.pixel_width() / bounds.m_width, view.pixel_height() / bounds.m_height );
         m_origin = { bounds.m_x - ( view.pixel_width() / m_scale - bounds.m_width ) / 2,
                      bounds.m_y - ( view.pixel_height() / m_scale - bounds.m_height ) / 2 };
         // The wxDC backend accepts integer device coordinates. Reject an
         // unrepresentable zoom instead of overflowing and drawing false geometry.
-        auto extent = diagramBounds();
         auto representable = [&]( double x, double y )
         { return std::isfinite( ( x - m_origin.m_x ) * m_scale ) && std::isfinite( ( y - m_origin.m_y ) * m_scale )
             && std::abs( ( x - m_origin.m_x ) * m_scale ) < 10000000 && std::abs( ( y - m_origin.m_y ) * m_scale ) < 10000000; };
-        if( !std::isfinite( m_scale ) || m_scale <= 0 || !representable( extent.m_x, extent.m_y )
-            || !representable( extent.m_x + extent.m_width, extent.m_y + extent.m_height ) )
+        if( !std::isfinite( m_scale ) || m_scale <= 0 || !representable( extent.x / double( R::QUANTUM ), extent.y / double( R::QUANTUM ) )
+            || !representable( extent.Right() / double( R::QUANTUM ), extent.Bottom() / double( R::QUANTUM ) ) )
             return failure( kiapi::common::AS_BAD_REQUEST, "This zoom exceeds the native drawing range; request a wider viewport" );
         wxBitmap bitmap( static_cast<int>( view.pixel_width() ), static_cast<int>( view.pixel_height() ), 32 );
         if( !bitmap.IsOk() ) return failure( kiapi::common::AS_BAD_REQUEST, "The native image buffer could not be created" );
@@ -1395,14 +1982,18 @@ HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_FRAME::Observe(
         rendered->mutable_viewport()->set_width( view.pixel_width() / m_scale ); rendered->mutable_viewport()->set_height( view.pixel_height() / m_scale );
         rendered->set_pixel_width( view.pixel_width() ); rendered->set_pixel_height( view.pixel_height() ); rendered->set_png( std::move( png ) );
         *rendered->mutable_diagram() = *scope;
-        const auto& notes = m_historyPreview ? scope->local_diagram().annotations() : !m_connectionId.empty() ? m_connectionDraft.diagram_annotations().annotations()
-            : m_draft.baseline().block_id() == scope->selection().block_id() ? m_draft.local_diagram().annotations() : scope->local_diagram().annotations();
-        *rendered->mutable_diagram()->mutable_local_diagram()->mutable_annotations() = notes;
-        if( auto* fields = requirements( *scope ) ) *rendered->mutable_requirements() = fields->fields();
-        if( !view.has_selection() && !m_historyPreview && same( m_draft.baseline(), scope->selection() ) )
-            *rendered->mutable_requirements() = m_draft.fields();
-        rendered->set_contains_unsaved_draft( !view.has_selection() && !m_historyPreview && m_dirty );
-        for( const auto& child : scope->children() ) if( auto* item = revision( child ) ) *rendered->add_children() = *item;
+        if( draft && same( m_level.scope().baseline(), scope->selection() ) )
+        {
+            // The current canvas includes its unsaved level draft.
+            rendered->mutable_diagram()->set_name( m_level.scope().name() );
+            *rendered->mutable_diagram()->mutable_children() = m_level.scope().children();
+            *rendered->mutable_diagram()->mutable_local_diagram() = m_level.scope().local_diagram();
+            *rendered->mutable_requirements() = m_level.scope().fields();
+        }
+        else if( auto* fields = requirements( *scope ) ) *rendered->mutable_requirements() = fields->fields();
+        rendered->set_contains_unsaved_draft( draft && m_dirty );
+        drawn.Report( rendered->mutable_resolved_layout() );
+        for( const auto& child : draft ? m_level.scope().children() : scope->children() ) if( auto* item = revision( child ) ) *rendered->add_children() = *item;
         for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
         {
             std::vector<D::ConnectionSelectionData> pending( scope->local_diagram().connections().begin(), scope->local_diagram().connections().end() );
@@ -1423,18 +2014,99 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_ready( m_ready ); result.set_busy( m_process != nullptr ); result.set_dirty( m_dirty ); result.set_rendered( m_rendered );
     result.set_view_revision( m_viewRevision ); result.set_completed_save_count( m_saveCount ); result.set_error_code( m_errorCode ); result.set_error_message( m_error );
     for( const auto& step : m_path ) *result.add_diagram_path() = step;
-    if( m_ready ) *result.mutable_draft() = m_draft;
-    if( !m_connectionId.empty() ) *result.mutable_connection_draft() = m_connectionDraft;
+    if( m_ready )
+    {
+        *result.mutable_level_draft() = m_level;
+        // draft (13) is the selected block's draft; connection_draft (14) the selected connection's.
+        if( const auto* added = m_connectionId.empty() ? newChild( m_selected ) : nullptr )
+        {
+            auto* mirror = result.mutable_draft(); *mirror->mutable_baseline() = added->selection(); mirror->set_name( added->name() );
+            mirror->set_baseline_requirement_revision_id( added->requirement_revision_id() );
+            mirror->mutable_baseline_fields(); *mirror->mutable_fields() = added->fields();
+            *mirror->mutable_local_diagram()->mutable_interfaces() = added->interfaces();
+            if( added->has_definition() ) *mirror->mutable_definition() = added->definition();
+        }
+        else if( const auto* draft = m_connectionId.empty() ? selectedBlockDraft() : &m_level.scope() ) *result.mutable_draft() = *draft;
+        else for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+            if( const REVISION* saved = revision( child ) ) *result.mutable_draft() = draftFor( *saved );
+        if( !m_connectionId.empty() )
+        {
+            if( const auto* added = newConnection( m_connectionId ) )
+            {
+                auto* mirror = result.mutable_connection_draft(); *mirror->mutable_baseline() = added->selection(); mirror->set_name( added->name() );
+                mirror->set_kind( added->kind() ); *mirror->mutable_endpoints() = added->endpoints();
+                mirror->set_baseline_requirement_revision_id( added->requirement_revision_id() ); mirror->mutable_baseline_fields();
+                *mirror->mutable_fields() = added->fields(); mirror->set_domain( added->domain() ); mirror->set_direction( added->direction() );
+            }
+            else if( const auto* draft = connectionDraft( m_connectionId ) ) *result.mutable_connection_draft() = *draft;
+            else if( const auto* saved = savedConnection( m_connectionId ) ) *result.mutable_connection_draft() = connectionDraftFor( *saved );
+        }
+        result.set_stored_schema_version( m_document.stored_schema_version() );
+        result.set_source_writable( m_document.source_writable() );
+    }
     result.set_selected_annotation_id( m_commentId );
     result.set_implementation_preview( m_preview.has_value() );
     result.set_navigation_input_revision( m_navigationInputRevision );
     result.set_canvas_origin_x( m_origin.m_x ); result.set_canvas_origin_y( m_origin.m_y ); result.set_canvas_scale( m_scale );
     result.set_canvas_pixel_width( std::max( 0, m_canvas->GetClientSize().x ) );
     result.set_canvas_pixel_height( std::max( 0, m_canvas->GetClientSize().y ) );
+    wxPoint corner = m_canvas->GetScreenPosition() - GetScreenPosition();
+    result.set_canvas_window_x( corner.x ); result.set_canvas_window_y( corner.y );
+    result.set_canvas_tool( R::ToolName( m_tool ) );
+    result.set_selected_interface_id( m_portId ); result.set_selected_interface_owner_id( m_portOwner );
+    result.set_palette_shown( m_paletteShown );
+    static const char* CAPTIONS[] = { "", "block", "connection", "port", "rename" };
+    result.set_caption_editor( m_captionKind >= 0 && m_captionKind <= 4 ? CAPTIONS[m_captionKind] : "" );
+    if( m_tool == TOOL::CONNECT && m_connectFrom ) result.set_canvas_hint( "Click a port to finish connection" );
+    *result.mutable_last_effects() = m_lastEffects;
+    for( int i = 0; i < 3; ++i ) if( m_ready && m_fields[i]->IsShown() ) result.add_shown_requirement_fields( static_cast<D::RequirementFieldKind>( i + 1 ) );
+    result.set_notice( m_notice );
+    if( auto* status = GetStatusBar() ) result.set_status_text( Utf8( status->GetStatusText() ) );
+    result.set_dragging( m_drag != DRAG::NONE );
+    // Round A4: chips and Review facets links as drawn, the facet overview and the open detail.
+    {
+        wxPoint origin = m_canvas->GetScreenPosition() - GetScreenPosition();
+        wxRect visible( wxPoint( 0, 0 ), m_canvas->GetClientSize() );
+        bool usable = m_ready && !m_process && !m_diagramHistoryOpen && !m_historyPreview;
+        auto place = [&]( D::DiagramControlRect* out, const std::string& name, const wxRect& rect, bool enabled )
+        {
+            out->set_name( name ); out->set_x( origin.x + rect.x ); out->set_y( origin.y + rect.y );
+            out->set_width( rect.width ); out->set_height( rect.height ); out->set_shown( visible.Contains( rect ) ); out->set_enabled( enabled );
+        };
+        for( const auto& [block, chips] : drawnChips() )
+        {
+            auto* row = result.add_block_chips(); row->set_block_id( block ); row->set_hidden_chips( chips.hidden );
+            for( const auto& chip : chips.chips )
+            {
+                auto* item = row->add_chips(); item->set_facet( R::FacetName( chip.facet ) ); item->set_state( chip.state );
+                item->set_text( Utf8( chip.text ) ); place( item->mutable_rect(), "DiagramFacetChip", chip.rect, false );
+            }
+            if( chips.link ) place( row->mutable_review_facets(), "DiagramReviewFacets", *chips.link, usable );
+            for( const auto& mark : chips.marks )
+            {
+                auto* item = row->add_marks(); item->set_facet( R::FacetName( mark.facet ) ); item->set_state( mark.state );
+                place( item->mutable_rect(), "DiagramChoiceMark", mark.rect, false );
+            }
+            if( chips.more ) place( row->mutable_more(), "DiagramMoreChips", *chips.more, false );
+            place( row->mutable_caption(), "DiagramBlockCaption", chips.caption, false );
+        }
+        for( int facet = 0; facet < R::FACETS; ++facet ) if( m_facetRows[facet]->IsShown() ) result.add_shown_facets( R::FacetName( facet ) );
+        result.set_facet_editor( m_facet >= 0 ? R::FacetName( m_facet ) : "" );
+        result.set_facet_notice( Utf8( m_facetProblem ) );
+    }
+    for( const auto& [block, view] : m_views )
+    { auto* row = result.add_level_viewports(); row->set_block_id( block ); row->set_origin_x( view.origin.m_x ); row->set_origin_y( view.origin.m_y ); row->set_scale( view.scale ); }
     if( auto* canvas = current() )
     {
+        if( !m_views.count( canvas->selection().block_id() ) )
+        { auto* row = result.add_level_viewports(); row->set_block_id( canvas->selection().block_id() ); row->set_origin_x( m_origin.m_x ); row->set_origin_y( m_origin.m_y ); row->set_scale( m_scale ); }
         *result.mutable_canvas_diagram() = *canvas; unsigned resolved = 0;
-        for( const auto& child : canvas->children() ) if( revision( child ) ) ++resolved;
+        if( !m_historyPreview && m_ready && same( m_level.scope().baseline(), canvas->selection() ) )
+        {
+            *result.mutable_canvas_diagram()->mutable_children() = m_level.scope().children();
+            *result.mutable_canvas_diagram()->mutable_local_diagram() = m_level.scope().local_diagram();
+        }
+        for( const auto& child : result.canvas_diagram().children() ) if( revision( child ) || newChild( child.block_id() ) ) ++resolved;
         result.set_resolved_canvas_children( resolved );
     }
     if( m_diagramHistoryOpen )
@@ -1453,10 +2125,113 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         history->set_loaded_count( static_cast<unsigned>( m_historyDialog->LoadedCount() ) );
         history->set_total_count( static_cast<unsigned>( m_historyDialog->TotalCount() ) );
         history->set_inspected_revision_id( m_historyDialog->InspectedRevision() );
-        history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( utf8( m_historyDialog->PageError() ) );
+        history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( Utf8( m_historyDialog->PageError() ) );
     }
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
+    // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.
+    wxPoint window = GetScreenPosition();
+    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label )
+    {
+        auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
+        row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
+        row->set_label( Utf8( label ) );
+    };
+    std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete,
+                                    m_endpoints, m_comments, m_inspectorScroll };
+    for( auto& [tool, button] : m_strip ) windows.push_back( button );
+    for( auto* child : m_palette->GetChildren() ) windows.push_back( child );
+    for( int i = 0; i < 3; ++i ) { windows.push_back( m_fields[i] ); windows.push_back( m_history[i] ); }
+    for( auto* row : m_facetRows ) windows.push_back( row );
+    for( wxWindow* detail : facetControls() ) windows.push_back( detail );
+    for( auto* item : windows )
+    {
+        if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
+        auto* toggle = dynamic_cast<wxToggleButton*>( item );
+        auto* radio = dynamic_cast<wxRadioButton*>( item );
+        bool labelled = radio || dynamic_cast<wxAnyButton*>( item );
+        control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), labelled ? item->GetLabel() : wxString() );
+    }
+    // The splitter's sash between the canvas and the inspector, which widens or narrows the inspector.
+    if( m_splitter->IsSplit() )
+    {
+        wxPoint sash = m_splitter->ClientToScreen( wxPoint( m_splitter->GetSashPosition(), 0 ) );
+        control( "RecursiveInspectorSash", wxRect( sash, wxSize( m_splitter->GetSashSize(), m_splitter->GetClientSize().y ) ),
+                 m_splitter->IsShownOnScreen(), m_splitter->IsEnabled(), false, wxString() );
+    }
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
-        result.set_focused_control( utf8( focused->GetName() ) );
+        result.set_focused_control( Utf8( focused->GetName() ) );
     return result;
+}
+
+namespace
+{
+auto controlFailure( kiapi::common::ApiStatusCode code, const std::string& message )
+{
+    kiapi::common::ApiResponseStatus error; error.set_status( code ); error.set_error_message( message );
+    return tl::unexpected( error );
+}
+}
+
+RECURSIVE_DIAGRAM_CONTROL::RECURSIVE_DIAGRAM_CONTROL( wxWindow* parent ) : m_parent( parent )
+{
+    registerHandler<D::OpenRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &RECURSIVE_DIAGRAM_CONTROL::open );
+    registerHandler<D::ReadRecursiveDiagramEditor, D::RecursiveDiagramEditorState>( &RECURSIVE_DIAGRAM_CONTROL::read );
+    registerHandler<D::ObserveRecursiveDiagramEditor, D::RecursiveDiagramObservation>( &RECURSIVE_DIAGRAM_CONTROL::observe );
+    Pgm().GetApiServer().RegisterHandler( this );
+}
+
+RECURSIVE_DIAGRAM_CONTROL::~RECURSIVE_DIAGRAM_CONTROL()
+{
+    Pgm().GetApiServer().DeregisterHandler( this );
+}
+
+bool RECURSIVE_DIAGRAM_CONTROL::CloseEditors()
+{
+    for( auto& editor : m_editors )
+        if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && !editor->Close() )
+            return false;
+    return true;
+}
+
+RECURSIVE_DIAGRAM_FRAME* RECURSIVE_DIAGRAM_CONTROL::openEditor( const std::string& documentId ) const
+{
+    for( const auto& editor : m_editors )
+        if( editor && !editor->IsClosing() && !editor->IsBeingDeleted() && editor->DocumentId() == documentId )
+            return editor.get();
+    return nullptr;
+}
+
+HANDLER_RESULT<D::RecursiveDiagramEditorState> RECURSIVE_DIAGRAM_CONTROL::open( const HANDLER_CONTEXT<D::OpenRecursiveDiagramEditor>& ctx )
+{
+    const auto& request = ctx.Request;
+    auto known = request; known.DiscardUnknownFields();
+    // Contract rbg-v2 section 2.4: only schema 2 opens; an older MCP gets AS_BAD_REQUEST.
+    if( known.ByteSizeLong() != request.ByteSizeLong() || request.schema_version() != 2
+        || !KIID::SniffTest( wxString::FromUTF8( request.document_id() ) ) || request.expected_source_token().size() != 64
+        || !wxFileName( wxString::FromUTF8( request.source_path() ) ).IsAbsolute()
+        || !wxFileName( wxString::FromUTF8( request.helper_path() ) ).IsAbsolute()
+        || !wxFileName::FileExists( wxString::FromUTF8( request.helper_path() ) )
+        || !wxFileName::DirExists( wxString::FromUTF8( request.repository_root() ) ) )
+        return controlFailure( kiapi::common::AS_BAD_REQUEST, "An exact schema 2 diagram target and compiled companion are required" );
+    if( auto* editor = openEditor( request.document_id() ) )
+    {
+        if( editor->SourcePath() != request.source_path() )
+            return controlFailure( kiapi::common::AS_BUSY, "This diagram is already open from another source" );
+        editor->Show(); editor->Raise(); return editor->State();
+    }
+    auto* frame = new RECURSIVE_DIAGRAM_FRAME( m_parent, request );
+    m_editors.emplace_back( frame ); frame->Show(); frame->Raise(); return frame->State();
+}
+
+HANDLER_RESULT<D::RecursiveDiagramEditorState> RECURSIVE_DIAGRAM_CONTROL::read( const HANDLER_CONTEXT<D::ReadRecursiveDiagramEditor>& ctx )
+{
+    if( auto* editor = openEditor( ctx.Request.document_id() ) ) return editor->State();
+    return controlFailure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
+}
+
+HANDLER_RESULT<D::RecursiveDiagramObservation> RECURSIVE_DIAGRAM_CONTROL::observe( const HANDLER_CONTEXT<D::ObserveRecursiveDiagramEditor>& ctx )
+{
+    if( auto* editor = openEditor( ctx.Request.document_id() ) ) return editor->Observe( ctx.Request );
+    return controlFailure( kiapi::common::AS_BAD_REQUEST, "The explicitly identified recursive diagram is not open" );
 }

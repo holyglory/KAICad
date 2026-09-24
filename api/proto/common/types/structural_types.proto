@@ -1,50 +1,12 @@
-/* KiCad native structural editor data. GPL-3.0-or-later. */
+/* KiCad engineering statement and source types shared by the diagram protocol. GPL-3.0-or-later. */
 syntax = "proto3";
 package kiapi.automation.structure.v1;
 option csharp_namespace = "KiCad.Automation.Protocol.Structural";
 
-// This is a typed editable view of the existing engineering model, not another
-// authoritative file format. Electrical realization is always explicit.
-message StructuralDiagramData {
-  string id = 1;
-  repeated StructuralBlockData blocks = 2;
-  repeated StructuralPortData ports = 3;
-  repeated StructuralConnectionData connections = 4;
-  repeated StructuralStatementData statements = 5;
-  repeated StructuralUnresolvedNet unresolved_nets = 6;
-  repeated StructuralUnresolvedComponent unresolved_components = 7;
-  repeated StructuralPropertyData properties = 8;
-  StructuralPresentationData presentation = 9;
-}
-
-message StructuralBlockData {
-  string id = 1;
-  string name = 2;
-  optional string parent_id = 3;
-  repeated string component_ids = 4;
-  string purpose = 5;
-}
-message StructuralPortData { string id = 1; string block_id = 2; string name = 3; }
-enum StructuralLinkKind {
-  SLK_UNSPECIFIED = 0; SLK_POWER = 1; SLK_DATA = 2; SLK_CONTROL = 3;
-  SLK_ANALOG = 4; SLK_MECHANICAL = 5;
-}
-enum StructuralLinkDirection {
-  SLD_UNSPECIFIED = 0; SLD_FIRST_TO_SECOND = 1; SLD_SECOND_TO_FIRST = 2; SLD_BIDIRECTIONAL = 3;
-}
-message StructuralConnectionData {
-  string id = 1;
-  string first_port_id = 2;
-  string second_port_id = 3;
-  StructuralLinkKind kind = 4;
-  string description = 5;
-  repeated string net_ids = 6;
-  StructuralLinkDirection direction = 7;
-}
+// Statement, guidance and source vocabulary carried by per-level diagram
+// requirements, definitions, refinement inputs and proposals.
 enum StructuralStatementRole { SSR_INTENT = 0; SSR_INTERPRETATION = 1; SSR_REALIZATION = 2; }
 enum StructuralGuidanceStrength { SGS_INFORMATION = 0; SGS_PREFERENCE = 1; SGS_REQUIREMENT = 2; }
-message StructuralPinEndpoint { string component_id = 1; string pin = 2; }
-message StructuralPinConnection { StructuralPinEndpoint first = 1; StructuralPinEndpoint second = 2; }
 message StructuralSourceReference {
   string document_id = 1;
   string revision = 2;
@@ -52,129 +14,7 @@ message StructuralSourceReference {
   optional string table = 4;
   optional string part_variant = 5;
 }
-message StructuralStatementData {
-  string id = 1;
-  string target_id = 2;
-  StructuralStatementRole role = 3;
-  optional StructuralGuidanceStrength strength = 4;
-  string text = 5;
-  StructuralPinConnection connection = 6;
-  repeated string derived_from = 7;
-  repeated StructuralSourceReference sources = 8;
-}
-enum StructuralNetChange { SNC_SPLIT = 0; SNC_MERGED = 1; SNC_REMOVED = 2; SNC_REIDENTIFIED = 3; }
-message StructuralUnresolvedNet {
-  string owner_id = 1;
-  string former_net_id = 2;
-  StructuralNetChange change = 3;
-  string reason = 4;
-  repeated string candidate_net_ids = 5;
-}
-enum StructuralReferenceSlot {
-  SRS_STATEMENT_TARGET = 0; SRS_FIRST_PIN = 1; SRS_SECOND_PIN = 2; SRS_BLOCK_REALIZATION = 3;
-}
-enum StructuralComponentChange { SCC_REMOVED = 0; SCC_REIDENTIFIED = 1; }
-message StructuralComponentTarget { string component_id = 1; optional string pin_number = 2; }
-message StructuralUnresolvedComponent {
-  string owner_id = 1;
-  StructuralReferenceSlot slot = 2;
-  StructuralComponentTarget former_target = 3;
-  StructuralComponentChange change = 4;
-  string reason = 5;
-  repeated StructuralComponentTarget candidate_targets = 6;
-}
 enum StructuralVerification {
   SV_UNKNOWN = 0; SV_UNVERIFIED = 1; SV_VERIFIED = 2; SV_VIOLATED = 3;
   SV_UNSUPPORTED = 4; SV_CONFLICTING = 5;
-}
-enum StructuralParameterKind {
-  SPK_UNCLASSIFIED = 0; SPK_NOMINAL = 1; SPK_OPERATING_LIMIT = 2;
-  SPK_ABSOLUTE_MAXIMUM = 3; SPK_MEASUREMENT = 4;
-}
-enum StructuralToleranceKind { STK_ABSOLUTE = 0; STK_PERCENT = 1; }
-message StructuralTolerance {
-  StructuralToleranceKind kind = 1;
-  // Invariant decimal strings preserve the .NET model without binary rounding.
-  string minus = 2;
-  string plus = 3;
-}
-message StructuralQuantity {
-  StructuralParameterKind kind = 1;
-  string unit = 2;
-  optional string nominal = 3;
-  optional string minimum = 4;
-  optional string maximum = 5;
-  StructuralTolerance tolerance = 6;
-  optional string unknown_reason = 7;
-}
-message StructuralPropertyData {
-  string id = 1;
-  string owner_id = 2;
-  string key = 3;
-  string category = 4;
-  string text = 5;
-  optional StructuralGuidanceStrength strength = 6;
-  string applicability = 7;
-  repeated StructuralSourceReference sources = 8;
-  StructuralVerification verification = 9;
-  StructuralQuantity quantity = 10;
-  // Component-class replacement is not a structural-property operation.
-}
-message StructuralPoint { int64 x_nm = 1; int64 y_nm = 2; }
-enum StructuralPortSide { SPS_LEFT = 0; SPS_RIGHT = 1; SPS_TOP = 2; SPS_BOTTOM = 3; }
-message StructuralBlockPlacement {
-  string block_id = 1;
-  StructuralPoint position = 2;
-  int64 width_nm = 3;
-  int64 height_nm = 4;
-  bool locked = 5;
-  optional uint32 fill_rgb = 6;
-}
-message StructuralPortPlacement { string port_id = 1; StructuralPortSide side = 2; int64 offset_nm = 3; }
-message StructuralConnectionPlacement {
-  string connection_id = 1;
-  repeated StructuralPoint waypoints = 2;
-  StructuralPoint label = 3;
-  bool locked = 4;
-}
-message StructuralPresentationData {
-  // Structural-canvas nanometres at the native 100 nm quantum, not PCB geometry.
-  repeated StructuralBlockPlacement blocks = 1;
-  repeated StructuralPortPlacement ports = 2;
-  repeated StructuralConnectionPlacement connections = 3;
-}
-
-// Read-only context for the view. The .NET model remains responsible for
-// engineering XML, dependency validation and exact source-token publication.
-message StructuralEditorDocument {
-  uint32 schema_version = 1;
-  string document_id = 2;
-  string display_name = 3;
-  string source_path = 4;
-  string source_token = 5;
-  StructuralDiagramData diagram = 6;
-  repeated StructuralComponentDisplay components = 7;
-}
-message StructuralComponentDisplay {
-  string component_id = 1;
-  string reference = 2;
-  string part_name = 3;
-}
-
-// One finite invocation of the existing compiled companion. No persistent
-// broker, shell evaluation or native C++ reimplementation of XML validation.
-enum StructuralFileAction { SFA_READ = 0; SFA_SAVE = 1; }
-message StructuralFileRequest {
-  uint32 schema_version = 1;
-  StructuralFileAction action = 2;
-  string repository_root = 3;
-  string source_path = 4;
-  string expected_source_token = 5;
-  StructuralDiagramData diagram = 6;
-}
-message StructuralFileResult {
-  bool success = 1;
-  StructuralEditorDocument document = 2;
-  string error_code = 3;
-  string error_message = 4;
 }

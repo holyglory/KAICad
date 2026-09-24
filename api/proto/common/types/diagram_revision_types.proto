@@ -811,6 +811,8 @@ enum LevelEditEffectKind {
   LEEK_REALIZATION_REMOVED = 7;
   LEEK_PRESENTATION_ENTRY_REMOVED = 8;
   // -- lane 2B (200-299) --
+  // A note whose exact target returns to this level becomes resolved again (a block moved back).
+  LEEK_ANNOTATION_RESOLVED = 200;
   // -- end lane 2B --
 }
 message LevelEditEffectData { LevelEditEffectKind kind = 1; string object_id = 2; string scope_block_id = 3; string detail = 4; }

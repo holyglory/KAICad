@@ -118,7 +118,7 @@ public sealed class DiagramAnnotationTests
         Assert.ThrowsExactly<AutomationException>(() => initial.SaveDraft(initial.SelectedRoot, [initial.SelectedRoot, cpu], childDraft,
             Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()));
         var positioned = Save(graph, [note with { Position = new(1m, 2m) }]);
-        XNamespace ns = RecursiveBlockGraphXml.Namespace;
+        XNamespace ns = RecursiveBlockGraphXml.Namespace; // Every write is schema 2 (contract rbg-v2 R4).
         var xml = XElement.Parse(RecursiveBlockGraphXml.Write(positioned));
         xml.Descendants(ns + "position").Single().SetAttributeValue("x", "0.123456789012345678901234567891");
         Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockGraphXml.Read(xml.ToString()));

@@ -249,7 +249,7 @@ internal static partial class PsuCpuFixtureBuilder
         ["hardware.xml"] = HardwareRepositoryXml.Write(Hardware()),
         ["design.engineering.xml"] = EngineeringDesignXml.Write(Engineering(parts), []),
         ["flat-structure.engineering.xml"] = EngineeringDesignXml.Write(FlatStructure(parts), []),
-        ["system.blocks.xml"] = RecursiveBlockGraphXml.Write(Graph()),
+        ["system.blocks.xml"] = RecursiveBlockGraphXml.Write(Graph(), 1),
     };
 
     /// <summary>Git's blob identity of exact file bytes.</summary>

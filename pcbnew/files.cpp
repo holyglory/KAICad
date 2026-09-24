@@ -83,7 +83,7 @@
 #include <widgets/filedlg_import_non_kicad.h>
 #include <widgets/kistatusbar.h>
 #include <widgets/wx_html_report_box.h>
-#include <wx_filename.h>  // For ::ResolvePossibleSymlinks()
+#include <wx_filename.h>
 #include <kiplatform/io.h>
 
 #include <wx/stdpaths.h>
@@ -1055,11 +1055,12 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     if( pcbFileName.GetExt() == FILEEXT::LegacyPcbFileExtension )
         pcbFileName.SetExt( FILEEXT::KiCadPcbFileExtension );
 
-    // A checked save names the board as the document spells it, before following a link.
+    // A checked save names the board as the document spells it.
     const wxString documentPath = pcbFileName.GetFullPath();
 
-    // Write through symlinks, don't replace them
-    WX_FILENAME::ResolvePossibleSymlinks( pcbFileName );
+    // The board writer follows a symbolic link to its target itself and never replaces the link
+    // (PRETTIFIED_FILE_OUTPUTFORMATTER), so the board keeps the name it was opened with: its loaded
+    // file version is renewed under that name, and its project file is the one beside it.
 
     if( !IsWritable( pcbFileName, !automation ) )
     {
@@ -1078,8 +1079,41 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     projectFile.SetExt( FILEEXT::ProjectFileExtension );
     rulesFile.SetExt( FILEEXT::DesignRulesFileExtension );
 
+    // Tell a checked save why the project stops this save. KiCad's own read-only state is a
+    // refusal that writable files do not fix. A file the file system blocks is named as well,
+    // because a reported problem replaces the checked save's own check of every file.
+    auto reportProjectProblems = [&]()
+    {
+        using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+
+        if( !projectFile.FileExists() )
+        {
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    SAVE_PROBLEM::SAVE_REFUSED, projectFile.GetFullPath(),
+                    wxS( "the project file does not exist, and automation saves a board only together with its "
+                         "project file" ) );
+        }
+
+        if( const wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() );
+            !readOnly.empty() )
+        {
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED,
+                                                              Prj().GetProjectFullName(), readOnly );
+        }
+
+        for( const wxString& path : { documentPath, projectFile.GetFullPath() } )
+        {
+            if( const wxString blocker = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( path );
+                !blocker.empty() && wxFileName::FileExists( path ) )
+            {
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, path, blocker );
+            }
+        }
+    };
+
     if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile, false ) ) )
     {
+        reportProjectProblems();
         reportFailure( "The project file is missing or not writable; the PCB was not saved" );
         return false;
     }
@@ -1087,9 +1121,16 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     if( projectFile.FileExists() )
     {
         StoreProjectEditorState();
-        bool projectSaved = GetSettingsManager()->SaveProject();
+
+        // A project KiCad holds read-only writes nothing, so its settings writer never starts.
+        const bool refused = automation && Prj().IsReadOnly();
+        bool       projectSaved = GetSettingsManager()->SaveProject();
+
         if( automation && !projectSaved )
         {
+            if( refused )
+                reportProjectProblems();
+
             reportFailure( "Project persistence failed; the PCB was not saved" );
             return false;
         }

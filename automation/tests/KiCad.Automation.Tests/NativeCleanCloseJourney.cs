@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
@@ -187,7 +188,8 @@ public sealed partial class NativeSessionTests
     // The board editor holds an unsaved edit. With every document file read-only, a save through the
     // MCP server is refused before anything is written and names every file. With a full disk (strace
     // makes every flush of KiCad's main thread fail with ENOSPC), the board write fails and KiCad
-    // reports the exact system error. Each time the editor keeps exactly the unsaved edit, and the
+    // reports the exact system error. Beside one instance, a board of a project KiCad opened
+    // read-only is refused as well. Each time the editor keeps exactly the unsaved edit, and the
     // schematic open in the same KiCad and the other KiCad instance stay unchanged. The edit is then
     // undone by restoring the title block, so the fixture stays as it was.
     private static async Task VerifyRefusedSaveKeepsUnsavedWork(CancellableMcpClient mcp, NativeClient client,
@@ -209,6 +211,7 @@ public sealed partial class NativeSessionTests
         var disk = dirty.NativeFiles.ToDictionary(path => path,
             path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
         string board = dirty.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pcb");
+        var reportedCodes = new SortedSet<string>(StringComparer.Ordinal);
 
         // The editor keeps exactly the unsaved edit, and no document file changed.
         async Task<DocumentLifecycleState> WorkKept(string phase)
@@ -239,6 +242,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(await WorkKept(phase), failed.ObservedState, $"{phase}: the receipt shows the editor after the failure.");
             await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-{kind}-save-{phase}.json"), SchematicJson.Formatter.Format(failed), token);
             Console.WriteLine($"{phase} {kind} save with unsaved work failed for {instanceId}: {failed.ErrorMessage}");
+            reportedCodes.Add(failed.ErrorCode);
             return failed;
         }
 
@@ -306,11 +310,107 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(rules.Rules.Constraints, (await client.InvokeAsync<GetBoardDesignRules, BoardDesignRulesResponse>(
             new() { Board = document }, token)).Rules.Constraints, "The design rules are restored.");
 
+        // A board save in a project KiCad opened read-only needs a KiCad process of its own, so it
+        // runs beside one of the two fixture instances (the one whose socket sorts first).
+        bool readOnlyProject = string.CompareOrdinal(client.Endpoint, sibling.Endpoint) < 0;
+        if (readOnlyProject)
+            await VerifyReadOnlyProjectBoardSave(client, dirty, instanceId, evidence, reportedCodes, token);
+        RequireExactSaveFailureCodes("board", instanceId,
+            readOnlyProject ? BoardSaveFailureCodes.Concat(ReadOnlyProjectBoardSaveFailureCodes) : BoardSaveFailureCodes, reportedCodes);
+
         Assert.AreEqual(otherBefore, await ObserveLifecycleState(client, otherDocument, token), $"Failed {kind} saves must leave the other open document unchanged.");
         foreach (var (path, bytes) in otherDisk)
             CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token), path + " of the other document changed on disk.");
         Assert.AreEqual(siblingBefore, await SiblingSnapshot(mcp, sibling, token), $"Failed {kind} saves must leave the other KiCad instance untouched.");
         await client.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = original }, token);
+    }
+
+    // A board in a project whose file was read-only when KiCad opened it. KiCad keeps the project
+    // read-only after the file is writable again, so the board editor refuses the save with that
+    // reason (native_save_refused): no file is called blocked because every file is writable,
+    // nothing is written, and the editor keeps the unsaved edit. It runs in a KiCad started through
+    // the MCP server on a copy of this instance's saved board and project file; the fixture's own
+    // files are only read.
+    private static async Task VerifyReadOnlyProjectBoardSave(NativeClient client, DocumentLifecycleState saved,
+        string instanceId, string evidence, ISet<string> reportedCodes, CancellationToken token)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux process environment and file modes.");
+        string settings = Directory.CreateTempSubdirectory("kicad-readonly-board-settings-").FullName;
+        string copy = Directory.CreateTempSubdirectory("kicad-readonly-board-project-").FullName;
+        string state = Directory.CreateTempSubdirectory("kicad-readonly-board-mcp-").FullName;
+        var modes = new Dictionary<string, UnixFileMode>();
+        string? started = null;
+        try
+        {
+            var (executable, environment) = await FixtureKiCadLaunch(FixtureProcessId(client), settings, token);
+            await using var mcp = await CancellableMcpClient.StartAsync(state,
+                Path.Combine(evidence, instanceId + "-read-only-board-mcp.stderr.log"), token, environment);
+            string board = Path.Combine(copy, Path.GetFileName(saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pcb")));
+            string project = Path.Combine(copy, Path.GetFileName(saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pro")));
+            foreach (string file in saved.NativeFiles) File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
+            KeepReadOnly(project, modes);
+            var clock = Stopwatch.StartNew();
+            var start = await mcp.Tool("kicad_instance_start", new { executable, projectPath = project });
+            RequireToolSuccess(start);
+            started = start.GetProperty("structuredContent").GetProperty("instanceId").GetString()!;
+            Console.WriteLine($"KiCad {started} started on the read-only project copy after {clock.Elapsed.TotalSeconds:F1}s.");
+            RestoreModes(modes);
+
+            var opened = await mcp.Tool("kicad_pcb_open", new { instanceId = started, path = board });
+            RequireToolSuccess(opened);
+            var document = SchematicJson.Parser.Parse<DocumentSpecifier>(opened.GetProperty("content").EnumerateArray()
+                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+            var editor = new NativeClient(new NngTransport(),
+                NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(started), "api.sock")));
+            var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token);
+            title.Comment9 = "Unsaved read-only project board work " + Guid.NewGuid().ToString("N");
+            await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = title }, token);
+            var dirty = await ObserveLifecycleState(editor, document, token);
+            Assert.IsTrue(dirty.NativeContentDirty, "The board edit must be unsaved work in the editor.");
+            CollectionAssert.AreEquivalent(new[] { board, project }, dirty.NativeFiles.ToArray(), "The copied board and project file are the document.");
+            var disk = dirty.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+
+            var reply = await mcp.Tool("kicad_document_save", new { instanceId = started,
+                expectedStateJson = SchematicJson.Formatter.Format(dirty), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), "A refused board save must not report success. " + reply.GetRawText());
+            var result = LifecycleResult(reply);
+            Assert.AreEqual(LifecycleOperationStatus.LosFailed, result.Status, result.ErrorMessage);
+            Assert.AreEqual("native_save_refused", result.ErrorCode, result.ErrorMessage);
+            Assert.IsEmpty(result.BlockedFiles, "Every file is writable; KiCad's own state refuses the save. " + result.ErrorMessage);
+            Assert.IsEmpty(result.WrittenFiles, result.ErrorMessage);
+            foreach (string text in new[] { "KiCad refused to save", Path.GetFileName(project),
+                         "read-only because its project file was read-only when the project was opened", "the file is writable now",
+                         "reopen the project in KiCad", "making the document's files writable does not help",
+                         "KiCad replaced none of the document's files.", "The editor still holds all unsaved changes." })
+                StringAssert.Contains(result.ErrorMessage, text, result.ErrorMessage);
+            // The refusal is the explanation, not KiCad's generic failure or a guessed file problem.
+            foreach (string text in new[] { "KiCad reported", "KiCad cannot write", "KiCad could not write", "project lock" })
+                Assert.IsFalse(result.ErrorMessage.Contains(text, StringComparison.Ordinal), $"Must not say '{text}'. {result.ErrorMessage}");
+            Assert.AreEqual(dirty, result.ObservedState, "The receipt shows the editor after the refusal.");
+            Assert.AreEqual(dirty, await ObserveLifecycleState(editor, document, token), "The board editor state changed.");
+            Assert.AreEqual(title.Comment9, (await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+                new() { Document = document }, token)).Comment9, "The unsaved board edit was lost.");
+            foreach (var (path, before) in disk)
+            {
+                CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
+                Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was rewritten by a refused save.");
+            }
+            reportedCodes.Add(result.ErrorCode);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-save-read-only-project.json"),
+                SchematicJson.Formatter.Format(result), token);
+            Console.WriteLine($"Board save refused (project opened read-only) in KiCad {started}: {result.ErrorMessage}");
+        }
+        finally
+        {
+            RestoreModes(modes);
+            if (started is not null)
+            {
+                await StopStartedKiCad(started);
+                string runtime = NativeIpcEndpoint.RuntimeDirectory(started);
+                if (Directory.Exists(runtime)) Directory.Delete(runtime, true);
+            }
+            foreach (string folder in new[] { settings, copy, state }) Directory.Delete(folder, true);
+        }
     }
 
     // An agent cancels a close while KiCad is not answering. KiCad never receives it: the editor

@@ -70,7 +70,8 @@ public sealed partial class NativeSessionTests
             string[] features = NativeFeatureContracts.Verify(session);
             // A manager with no editor open lists exactly what it dispatches in handled_requests: its
             // own requests and the automation controllers, but no schematic editor request until an
-            // editor opens.
+            // editor opens. It opens and closes documents but has no close-all, so that request is
+            // neither dispatched nor listed.
             string[] managerOnly = await NativeCapabilityProbe.VerifyHandshakeAsync(recovered.Client(attached.InstanceId),
                 Path.Combine(evidence, "startup-recovery.capabilities.json"), token);
             foreach (string type in new[] { GetAutomationSession.Descriptor.FullName, GetVersion.Descriptor.FullName,
@@ -78,6 +79,8 @@ public sealed partial class NativeSessionTests
                          CheckedSchematicBatch.Descriptor.FullName })
                 CollectionAssert.Contains(managerOnly, type);
             CollectionAssert.DoesNotContain(managerOnly, ReadSchematicScreenData.Descriptor.FullName);
+            CollectionAssert.DoesNotContain(managerOnly, CloseAllDocuments.Descriptor.FullName,
+                "The desktop manager has no close-all callback, so it must not dispatch or list CloseAllDocuments.");
             // The clean-close journey proves that opening and closing editors leaves them unchanged.
             CollectionAssert.AreEqual(features, (await recovered.Client(attached.InstanceId).HandshakeAsync(token)).Capabilities.ToArray(),
                 "A repeated handshake of the same manager must name the same feature contracts.");

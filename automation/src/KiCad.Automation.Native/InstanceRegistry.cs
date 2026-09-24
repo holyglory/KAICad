@@ -130,7 +130,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 {
                     deadline.Token.ThrowIfCancellationRequested();
                     if (process.HasExited)
-                        throw new AutomationException("start_failed", $"KiCad exited with code {process.ExitCode}; inspect {runtime}.");
+                        throw new AutomationException("start_failed", StartFailure(process.ExitCode, runtime));
                     try
                     {
                         // Readiness probes do not hold the registry gate: separate
@@ -195,6 +195,30 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         await WriteRecordAsync(record, cancellationToken);
         connections[record.InstanceId] = connection;
         return record;
+    }
+
+    // KiCad logs why a start failed ("Error: ..." lines in its automation log, for example a
+    // project another KiCad holds), so the answer repeats those reasons instead of only pointing
+    // at the files. The log is written by the exited process and read here once, bounded.
+    private static string StartFailure(int exitCode, string runtime)
+    {
+        var reasons = new List<string>();
+        try
+        {
+            foreach (string line in File.ReadLines(Path.Combine(runtime, "native.log")))
+            {
+                int error = line.IndexOf(": Error: ", StringComparison.Ordinal);
+                if (error < 0) continue;
+                string reason = line[(error + ": Error: ".Length)..].Trim();
+                if (reason.Length == 0) continue;
+                reasons.Add(reason.Length > 400 ? reason[..400] + "..." : reason);
+                if (reasons.Count > 5) reasons.RemoveAt(0);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        if (reasons.Count == 0) return $"KiCad exited with code {exitCode}; inspect {runtime}.";
+        string logged = string.Join(" ", reasons.Select(reason => reason.EndsWith('.') ? reason : reason + "."));
+        return $"KiCad exited with code {exitCode}: {logged} Inspect {runtime}.";
     }
 
     private static async Task CaptureAsync(StreamReader source, string path)

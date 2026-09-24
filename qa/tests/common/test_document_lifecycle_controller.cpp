@@ -11,7 +11,13 @@
 #include <richio.h>
 #include <file_write_observer.h>
 #include <iterator>
+#include <json_common.h>
+#include <kiplatform/io.h>
+#include <lockfile.h>
+#include <project.h>
+#include <settings/settings_manager.h>
 #include <wx/filename.h>
+#include <wx/utils.h>
 
 namespace
 {
@@ -443,7 +449,7 @@ BOOST_AUTO_TEST_CASE( OnlyWriteBlockedProblemsMarkFilesNotWritable )
             // A refusal is not a write problem: no blocked file, and no advice to make files writable.
             BOOST_CHECK_EQUAL( result.error_code(), "native_save_refused" );
             BOOST_CHECK( result.blocked_files().empty() );
-            BOOST_CHECK( Contains( message, "making files writable does not help" ) );
+            BOOST_CHECK( Contains( message, "making the document's files writable does not help" ) );
             BOOST_CHECK( !Contains( message, "make the file or folder writable" ) );
         }
         if( variant == 1 || variant == 3 )
@@ -626,6 +632,177 @@ BOOST_AUTO_TEST_CASE( UnknownOperationRefusalStartsWithTheFixedMarker )
     BOOST_CHECK_EQUAL( reply.error().error_message().rfind(
                                std::string( DOCUMENT_LIFECYCLE_CONTROLLER::UNKNOWN_OPERATION_MARKER ) + ":", 0 ), 0u );
     BOOST_CHECK_EQUAL( fixture.reads + fixture.saves + fixture.closes, 0u );
+}
+
+// KiCad opens a project read-only when it cannot take the project lock (SETTINGS_MANAGER::
+// LoadProject), and the manager then keeps a lock object of its own for it
+// (KICAD_MANAGER_FRAME::ProjectChanged). The real-editor journeys prove the reasons a checked save
+// gives for another user's lock and for a read-only lock file; this proves every lock state with
+// real locks, including the ones a journey cannot stage reliably: another program holding the
+// lock, that program letting go, and KiCad's own lock object holding the lock file itself. Each
+// reason names what stands in the way now, never guesses, and says to reopen the project.
+BOOST_AUTO_TEST_CASE( LockedProjectReasonNamesWhatHoldsTheLockNow )
+{
+    namespace fs = std::filesystem;
+    struct FOLDER
+    {
+        fs::path path = fs::temp_directory_path() / ( "lifecycle-lock-" + KIID().AsStdString() );
+        FOLDER() { fs::create_directory( path ); }
+        ~FOLDER() { std::error_code error; fs::remove_all( path, error ); }
+    } folder;
+
+    // A loadable project whose lock file records aOwner.
+    auto seed = [&]( const std::string& aName, const nlohmann::json& aOwner )
+    {
+        const fs::path pro = folder.path / ( aName + ".kicad_pro" );
+        {
+            std::ofstream out( pro.string() );
+            out << R"({"meta": {"filename": ")" << aName << R"(.kicad_pro", "version": 3}})";
+        }
+        std::ofstream lock( LOCKFILE::LockPathFor( wxString( pro.string() ) ).ToStdString() );
+        lock << aOwner.dump();
+        return wxString( pro.string() );
+    };
+    auto owner = []( const wxString& aUser, const wxString& aHost )
+    {
+        nlohmann::json record;
+        record["username"] = std::string( aUser.mb_str() );
+        record["hostname"] = std::string( aHost.mb_str() );
+        record["token"] = "0123456789abcdef0123456789abcdef";
+        return record;
+    };
+    auto text = []( const wxString& aText ) { return aText.ToStdString( wxConvUTF8 ); };
+    // Loads the project the way KiCad does; it opens read-only and without a lock of its own.
+    auto load = []( SETTINGS_MANAGER& aManager, const wxString& aPath ) -> PROJECT&
+    {
+        BOOST_REQUIRE( aManager.LoadProject( aPath ) );
+        PROJECT* project = aManager.GetProject( aPath );
+        BOOST_REQUIRE( project );
+        BOOST_REQUIRE( project->IsReadOnly() );
+        BOOST_REQUIRE( project->GetProjectLock() == nullptr );
+        return *project;
+    };
+    auto reason = [&]( const PROJECT& aProject )
+    {
+        return text( DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( aProject ) );
+    };
+    const std::string me = "names user '" + text( wxGetUserId() ) + "' on computer '" + text( wxGetHostName() ) + "'";
+    const auto        self = owner( wxGetUserId(), wxGetHostName() );
+
+    // 1. Another open lock holds it (a second open file description, as another process has).
+    {
+        const wxString    path = seed( "held", self );
+        const std::string lockPath = text( LOCKFILE::LockPathFor( path ) );
+        {
+            KIPLATFORM::IO::FILE_LOCK holder;
+            bool created = false;
+            BOOST_REQUIRE( holder.Acquire( LOCKFILE::LockPathFor( path ), created )
+                           == KIPLATFORM::IO::FILE_LOCK::STATE::HELD );
+            SETTINGS_MANAGER manager;
+            PROJECT&         project = load( manager, path );
+            const std::string held = reason( project );
+            BOOST_CHECK( Contains( held, "another program holds its project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( held, me ) );
+            BOOST_CHECK( Contains( held, "close the project there, then reopen it in KiCad" ) );
+            BOOST_CHECK( !Contains( held, "nothing holds the lock now" ) );
+
+            // 2. The manager keeps a lock object of its own, as KICAD_MANAGER_FRAME::ProjectChanged
+            // does, while the other program still holds the lock: that object holds nothing, but
+            // KiCad never calls the holder another program once it keeps an object. It names the
+            // record and says to close the project in the other KiCad.
+            project.SetProjectLock( new LOCKFILE( path ) );
+            BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+            const std::string kept = reason( project );
+            BOOST_CHECK( Contains( kept, "could not take the project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( kept, me ) );
+            BOOST_CHECK( Contains( kept, "close the project in any other KiCad that has it open, then reopen it in KiCad" ) );
+            BOOST_CHECK( !Contains( kept, "another program holds" ) );
+            project.SetProjectLock( nullptr );
+
+            // 3. The holder lets go: the same read-only project now says nothing holds the lock,
+            // without guessing why KiCad could not take it when it opened the project.
+            holder.Release();
+            const std::string released = reason( project );
+            BOOST_CHECK( Contains( released, "could not take the project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( released, "nothing holds the lock now, so reopen the project in KiCad" ) );
+            BOOST_CHECK( !Contains( released, "another program holds" ) );
+            BOOST_CHECK( !Contains( released, "for example" ) );
+        }
+
+        // Reopening the project, as the reason advises, really takes the lock.
+        SETTINGS_MANAGER reopened;
+        BOOST_REQUIRE( reopened.LoadProject( path ) );
+        BOOST_CHECK( !reopened.GetProject( path )->IsReadOnly() );
+        BOOST_CHECK( DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( *reopened.GetProject( path ) ).empty() );
+    }
+
+    // 4. Another user's record with nobody holding it: KiCad never takes it over.
+    {
+        const wxString    path = seed( "foreign", owner( wxS( "someone-else" ), wxS( "another-host" ) ) );
+        const std::string lockPath = text( LOCKFILE::LockPathFor( path ) );
+        SETTINGS_MANAGER  manager;
+        PROJECT&          project = load( manager, path );
+
+        for( bool kept : { false, true } )
+        {
+            // 5. The manager keeps its own lock object for that record (ProjectChanged). The
+            // object holds the lock file's system lock itself, so an inspection of the lock sees it
+            // held; the reason still names the other user, never another program.
+            if( kept )
+            {
+                project.SetProjectLock( new LOCKFILE( path ) );
+                BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+                BOOST_REQUIRE_MESSAGE( !LOCKFILE::Inspect( path ).Valid(),
+                                       "KiCad's own lock object must hold the lock file for this case" );
+            }
+
+            const std::string foreign = reason( project );
+            BOOST_TEST_CONTEXT( ( kept ? "with" : "without" ) << " KiCad's own lock object" )
+            {
+                BOOST_CHECK( Contains( foreign, "project lock '" + lockPath + "' belongs to user 'someone-else' on "
+                                                "computer 'another-host'" ) );
+                BOOST_CHECK( Contains( foreign, "never takes over another user's lock" ) );
+                BOOST_CHECK( Contains( foreign, "delete the lock file if nobody has the project open, then reopen "
+                                                "it in KiCad" ) );
+                BOOST_CHECK( !Contains( foreign, "another program holds" ) );
+                BOOST_CHECK( !Contains( foreign, "nothing holds the lock now" ) );
+            }
+        }
+    }
+
+    // 6. The lock file is read-only, so KiCad cannot take even its own abandoned lock, with and
+    // without the manager's own lock object.
+    {
+        const wxString path = seed( "unwritable", self );
+        const fs::path lock( text( LOCKFILE::LockPathFor( path ) ) );
+        fs::permissions( lock, fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write,
+                         fs::perm_options::remove );
+        // Like the native journeys, this needs an account that file modes really restrict.
+        BOOST_REQUIRE_MESSAGE( !wxFileName::IsFileWritable( LOCKFILE::LockPathFor( path ) ),
+                               "This account can write read-only files, so the case cannot be staged" );
+        SETTINGS_MANAGER manager;
+        PROJECT&         project = load( manager, path );
+
+        for( bool kept : { false, true } )
+        {
+            if( kept )
+            {
+                project.SetProjectLock( new LOCKFILE( path ) );
+                BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+            }
+
+            const std::string unwritable = reason( project );
+            BOOST_TEST_CONTEXT( ( kept ? "with" : "without" ) << " KiCad's own lock object" )
+            {
+                BOOST_CHECK( Contains( unwritable, "cannot write its project lock file '" + lock.string()
+                                                           + "' (the file is read-only)" ) );
+                BOOST_CHECK( Contains( unwritable, "make the lock file writable or delete it, then reopen the project "
+                                                   "in KiCad" ) );
+                BOOST_CHECK( !Contains( unwritable, "another program holds" ) );
+                BOOST_CHECK( !Contains( unwritable, "nothing holds the lock now" ) );
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -96,9 +96,12 @@ public sealed partial class NativeSessionTests
             string[] advertised = await NativeCapabilityProbe.VerifyHandshakeAsync(direct,
                 Directory.Exists(artifacts) ? Path.Combine(artifacts, instanceId + "-editor-capabilities.json") : null, token);
             // With the schematic editor open, its handler and both automation controllers are dispatched.
+            // Opening an editor adds no close-all request to the desktop manager.
             foreach (string type in new[] { GetAutomationSession.Descriptor.FullName, GetVersion.Descriptor.FullName,
                          ReadSchematicScreenData.Descriptor.FullName, CheckedSchematicBatch.Descriptor.FullName, CheckedSaveDocument.Descriptor.FullName })
                 CollectionAssert.Contains(advertised, type);
+            CollectionAssert.DoesNotContain(advertised, CloseAllDocuments.Descriptor.FullName,
+                "The desktop manager has no close-all callback, so it must not dispatch or list CloseAllDocuments.");
             var documents = SchematicJson.Parser.Parse<GetOpenDocumentsResponse>((await Call("kicad_documents_list",
                 new { instanceId, kind = "schematic" })).GetProperty("content")[0].GetProperty("text").GetString()!);
             CollectionAssert.Contains(documents.Documents.ToArray(), document);

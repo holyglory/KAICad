@@ -98,6 +98,41 @@ public sealed partial class NativeSessionTests
     private static readonly string[] SaveFailureCodes = ["file_not_writable", "native_save_refused", "native_save_failed",
         "partial_save", "file_changed_during_save", "file_unreadable_during_save", "save_outside_document"];
 
+    // The codes the real-editor save journeys prove, exactly, on each fixture instance. The
+    // schematic journey (native-checked-batch) proves the first set on both instances; the instance
+    // that also runs the project opening rules adds a refusal. The board journey
+    // (native-net-settings) proves its set on both instances; the instance that also saves a board
+    // of a project opened read-only adds that refusal.
+    private static readonly string[] SchematicSaveFailureCodes =
+        ["file_changed_during_save", "file_not_writable", "file_unreadable_during_save", "partial_save"];
+    private static readonly string[] ProjectOpeningSaveFailureCodes = ["native_save_refused"];
+    private static readonly string[] BoardSaveFailureCodes = ["file_not_writable", "native_save_failed"];
+    private static readonly string[] ReadOnlyProjectBoardSaveFailureCodes = ["native_save_refused"];
+
+    // No real editor save can return this code, so only the checked save controller's own test
+    // proves it (ctest qa_document_lifecycle_controller, ControllerRefusalsKeepTheirOwnCodeAndNeverBlockFiles).
+    private const string UnitTestOnlySaveFailureCode = "save_outside_document";
+    private const string UnitTestOnlySaveFailureReason = "a checked save stops a writer that tries to replace a design file "
+        + "which is not one of the observed document's files, but KiCad's schematic and board editors write only the files "
+        + "kicad_document_state lists for the document (a linked file counts as the file it links to), so it guards against "
+        + "a future writer and no real save reaches it";
+
+    // Together the journeys and the controller's test prove every described code, and each proves
+    // exactly the codes it names.
+    private static void RequireExactSaveFailureCodes(string journey, string instanceId, IEnumerable<string> expected,
+        IEnumerable<string> reported)
+    {
+        CollectionAssert.AreEquivalent(SaveFailureCodes, SchematicSaveFailureCodes.Concat(ProjectOpeningSaveFailureCodes)
+            .Concat(BoardSaveFailureCodes).Concat(ReadOnlyProjectBoardSaveFailureCodes).Append(UnitTestOnlySaveFailureCode)
+            .Distinct().ToArray(), "Every described save failure code is proven by a real-editor journey or named as unit-test-only.");
+        string[] wanted = expected.Distinct().Order(StringComparer.Ordinal).ToArray();
+        string[] actual = reported.Distinct().Order(StringComparer.Ordinal).ToArray();
+        CollectionAssert.AreEqual(wanted, actual, $"The {journey} save journey for {instanceId} proves exactly [{string.Join(", ", wanted)}].");
+        CollectionAssert.DoesNotContain(actual, UnitTestOnlySaveFailureCode);
+        Console.WriteLine($"{journey} save failure codes returned by real editors for {instanceId}: {string.Join(", ", actual)}; "
+            + $"{UnitTestOnlySaveFailureCode} is proven only by the controller's unit test because {UnitTestOnlySaveFailureReason}.");
+    }
+
     // Real persistence failures and a cancelled save through the compiled MCP server. A refused or
     // cancelled save never reports success, replaces no file it does not name, keeps the unsaved
     // edit in the editor and leaves the other KiCad instance alone; after the cause is fixed, the
@@ -254,7 +289,8 @@ public sealed partial class NativeSessionTests
 
             // 7. The project rules need KiCad processes of their own, so they run beside one of the
             // two fixture instances (the one whose socket sorts first) within the journey's time.
-            if (string.CompareOrdinal(client.Endpoint, sibling.Endpoint) < 0)
+            bool openingRules = string.CompareOrdinal(client.Endpoint, sibling.Endpoint) < 0;
+            if (openingRules)
             {
                 var opening = Stopwatch.StartNew();
                 await VerifyProjectOpeningRules(processId, await ObserveLifecycleState(client, document, token), sibling,
@@ -262,10 +298,10 @@ public sealed partial class NativeSessionTests
                 Console.WriteLine($"Project opening rules beside {instanceId} took {opening.Elapsed.TotalSeconds:F1}s.");
             }
 
-            CollectionAssert.IsSubsetOf(reportedCodes.ToArray(), SaveFailureCodes, "Every failure code the editors returned is described.");
+            RequireExactSaveFailureCodes("schematic", instanceId,
+                openingRules ? SchematicSaveFailureCodes.Concat(ProjectOpeningSaveFailureCodes) : SchematicSaveFailureCodes, reportedCodes);
             Assert.AreEqual(siblingBefore, await SiblingSnapshot(mcp, sibling, token),
                 "Failures and cancellations in one KiCad instance must leave the other instance untouched.");
-            Console.WriteLine($"Save failure codes returned by real editors for {instanceId}: {string.Join(", ", reportedCodes)}.");
             Console.WriteLine($"Save failure and cancellation journey for {instanceId} took {elapsed.Elapsed.TotalSeconds:F1}s.");
         }
         finally
@@ -282,44 +318,64 @@ public sealed partial class NativeSessionTests
         }
     }
 
+    // A KiCad started through the MCP server beside a fixture KiCad: the same build on the same
+    // display, with settings of its own below the given folder.
+    private static async Task<(string Executable, Dictionary<string, string> Environment)> FixtureKiCadLaunch(int processId,
+        string settings, CancellationToken token)
+    {
+        string executable = new FileInfo($"/proc/{processId}/exe").ResolveLinkTarget(true)!.FullName;
+        var inherited = (await File.ReadAllTextAsync($"/proc/{processId}/environ", token))
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(entry => entry.Split('=', 2))
+            .Where(pair => pair.Length == 2).GroupBy(pair => pair[0]).ToDictionary(group => group.Key, group => group.Last()[1]);
+        var environment = new Dictionary<string, string>
+            { ["XDG_CONFIG_HOME"] = Path.Combine(settings, "config"), ["XDG_CACHE_HOME"] = Path.Combine(settings, "cache") };
+        foreach (string name in new[] { "DISPLAY", "KICAD_RUN_FROM_BUILD_DIR", "GTK_THEME" })
+            if (inherited.TryGetValue(name, out var value)) environment[name] = value;
+        Assert.IsTrue(environment.ContainsKey("DISPLAY"), "The instance under test runs on the fixture's display.");
+        return (executable, environment);
+    }
+
+    // KiCad's project lock file for a project file: "~<name>.kicad_pro.lck" beside it (LOCKFILE::LockPathFor).
+    private static string ProjectLockFile(string project) =>
+        Path.Combine(Path.GetDirectoryName(project)!, "~" + Path.GetFileName(project) + ".lck");
+
     // KiCad decides that a project is read-only when it opens it. A project another KiCad holds is
-    // never opened for automation: KiCad refuses it at startup and exits (here the sibling fixture
-    // KiCad really holds its project's lock). A project whose file was read-only when KiCad opened
-    // it refuses every save, even once the file is writable again, until it is reopened. A board
-    // and project file linked from another folder are written through the links. Each runs in a KiCad
-    // process started through the MCP server for this purpose; the fixture instances and their
-    // files are only read.
+    // never opened for automation: KiCad refuses it at startup, names the lock and exits with its
+    // normal failed-start code (here the sibling fixture KiCad really holds its project's lock). A
+    // project whose file was read-only when KiCad opened it, whose lock records another user, or
+    // whose lock file is read-only opens read-only without a lock dialog nobody could answer, logs
+    // why, and refuses every save with that reason until it is reopened. A board and project file
+    // linked from another folder are written through the links. Each runs in a KiCad process
+    // started through the MCP server for this purpose; the fixture instances and their files are
+    // only read.
     private static async Task VerifyProjectOpeningRules(int processId, DocumentLifecycleState saved, SiblingKiCad sibling,
         string evidence, string instanceId, ISet<string> reportedCodes, CancellationToken token)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux process environment and file modes.");
+        string settings = Directory.CreateTempSubdirectory("kicad-project-opening-settings-").FullName;
         string copy = Directory.CreateTempSubdirectory("kicad-readonly-project-").FullName;
+        string foreignCopy = Directory.CreateTempSubdirectory("kicad-foreign-lock-project-").FullName;
+        string unwritableCopy = Directory.CreateTempSubdirectory("kicad-readonly-lock-project-").FullName;
         string linkedCopy = Directory.CreateTempSubdirectory("kicad-linked-project-").FullName;
         string store = Directory.CreateTempSubdirectory("kicad-linked-store-").FullName;
         string state = Directory.CreateTempSubdirectory("kicad-readonly-project-mcp-").FullName;
         var runtimes = new List<string>();
         var modes = new Dictionary<string, UnixFileMode>();
+        var lockModes = new Dictionary<string, UnixFileMode>();
         var started = new List<string>();
         try
         {
-            // The same KiCad build on the same display as the instance under test, with its own settings.
-            string executable = new FileInfo($"/proc/{processId}/exe").ResolveLinkTarget(true)!.FullName;
-            var inherited = (await File.ReadAllTextAsync($"/proc/{processId}/environ", token))
-                .Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(entry => entry.Split('=', 2))
-                .Where(pair => pair.Length == 2).GroupBy(pair => pair[0]).ToDictionary(group => group.Key, group => group.Last()[1]);
-            var environment = new Dictionary<string, string>
-                { ["XDG_CONFIG_HOME"] = Path.Combine(copy, "config"), ["XDG_CACHE_HOME"] = Path.Combine(copy, "cache") };
-            foreach (string name in new[] { "DISPLAY", "KICAD_RUN_FROM_BUILD_DIR", "GTK_THEME" })
-                if (inherited.TryGetValue(name, out var value)) environment[name] = value;
-            Assert.IsTrue(environment.ContainsKey("DISPLAY"), "The instance under test runs on the fixture's display.");
+            var (executable, environment) = await FixtureKiCadLaunch(processId, settings, token);
             await using var mcp = await CancellableMcpClient.StartAsync(state,
                 Path.Combine(evidence, instanceId + "-project-opening-mcp.stderr.log"), token, environment);
 
-            // Two copies of the saved document: in one the project file is read-only when KiCad
-            // opens it, the other gets a board whose files are then linked from another folder.
+            // Four copies of the saved document: in one the project file is read-only when KiCad
+            // opens it; one keeps another user's lock record that nothing holds, as a shared folder
+            // does after that user's KiCad ended; one keeps this user's own abandoned lock in a lock
+            // file KiCad cannot write; the last gets a board whose files are then linked from another folder.
             string sourceProject = saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pro");
             string sourceDirectory = Path.GetDirectoryName(sourceProject)!;
-            foreach (string folder in new[] { copy, linkedCopy })
+            foreach (string folder in new[] { copy, foreignCopy, unwritableCopy, linkedCopy })
             {
                 foreach (string file in saved.NativeFiles)
                 {
@@ -329,24 +385,38 @@ public sealed partial class NativeSessionTests
                     File.Copy(file, Path.Combine(folder, relative));
                 }
             }
-            string project = Path.Combine(copy, Path.GetFileName(sourceProject));
-            string root = Path.Combine(copy, Path.GetFileNameWithoutExtension(sourceProject) + ".kicad_sch");
-            string linkedProject = Path.Combine(linkedCopy, Path.GetFileName(sourceProject));
+            string ProjectIn(string folder) => Path.Combine(folder, Path.GetFileName(sourceProject));
+            string project = ProjectIn(copy), foreignProject = ProjectIn(foreignCopy);
+            string unwritableProject = ProjectIn(unwritableCopy), linkedProject = ProjectIn(linkedCopy);
             KeepReadOnly(project, modes);
+            string LockRecord(string user, string host) => JsonSerializer.Serialize(new { username = user, hostname = host,
+                token = Guid.NewGuid().ToString("N") });
+            string foreignLock = ProjectLockFile(foreignProject), unwritableLock = ProjectLockFile(unwritableProject);
+            await File.WriteAllTextAsync(foreignLock, LockRecord("someone-else", "another-host"), token);
+            await File.WriteAllTextAsync(unwritableLock, LockRecord(Environment.UserName, Environment.MachineName), token);
+            KeepReadOnly(unwritableLock, lockModes);
+            Assert.ThrowsExactly<UnauthorizedAccessException>(() => new FileStream(unwritableLock, FileMode.Open, FileAccess.Write).Dispose(),
+                "This account must really be unable to write the read-only lock file.");
+            byte[] foreignLockBytes = ReadWithoutLocking(foreignLock);
+            byte[] unwritableLockBytes = ReadWithoutLocking(unwritableLock);
 
-            // All three KiCads start at once: one on the project the sibling fixture KiCad holds,
+            // All five KiCads start at once: one on the project the sibling fixture KiCad holds,
             // one on each copy.
-            string siblingProject = (await new NativeClient(new NngTransport(), sibling.Endpoint).HandshakeAsync(token)).ProjectPath;
+            var siblingSession = await new NativeClient(new NngTransport(), sibling.Endpoint).HandshakeAsync(token);
+            string siblingProject = siblingSession.ProjectPath;
             string siblingFolder = Path.GetDirectoryName(siblingProject)!;
-            string[] SiblingFolder() => Directory.EnumerateFileSystemEntries(siblingFolder)
-                .Select(entry => Path.GetFileName(entry)).Order(StringComparer.Ordinal).ToArray();
-            string[] siblingEntries = SiblingFolder();
+            string SiblingFolder() => FolderSnapshot(siblingFolder, SocketPath(sibling.Endpoint), SocketPath(siblingSession.EventEndpoint));
+            string siblingFiles = SiblingFolder();
             var clock = Stopwatch.StartNew();
-            var (_, lockedCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = siblingProject });
-            var (_, readOnlyCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = project });
-            var (_, linkedCall) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = linkedProject });
-            var lockedAnswered = lockedCall.ContinueWith(_ => clock.Elapsed, TaskScheduler.Default);
-            var readOnlyAnswered = readOnlyCall.ContinueWith(_ => clock.Elapsed, TaskScheduler.Default);
+            var calls = new Dictionary<string, Task<JsonElement>>(StringComparer.Ordinal);
+            var answered = new Dictionary<string, Task<TimeSpan>>(StringComparer.Ordinal);
+            foreach (var (name, path) in new[] { ("locked", siblingProject), ("read-only project", project),
+                         ("foreign lock", foreignProject), ("read-only lock file", unwritableProject), ("linked", linkedProject) })
+            {
+                var (_, call) = mcp.StartTool("kicad_instance_start", new { executable, projectPath = path });
+                calls.Add(name, call);
+                answered.Add(name, call.ContinueWith(_ => clock.Elapsed, TaskScheduler.Default));
+            }
             JsonElement Result(JsonElement message)
             {
                 Assert.IsFalse(message.TryGetProperty("error", out var protocolError), protocolError.ToString());
@@ -360,104 +430,152 @@ public sealed partial class NativeSessionTests
                 runtimes.Add(NativeIpcEndpoint.RuntimeDirectory(id));
                 return id;
             }
-            var locked = Result(await lockedCall.WaitAsync(TimeSpan.FromSeconds(60), token));
-            var start = Result(await readOnlyCall.WaitAsync(TimeSpan.FromSeconds(60), token));
-            var linkedStart = Result(await linkedCall.WaitAsync(TimeSpan.FromSeconds(60), token));
-            string? readOnlyStarted = Started(start), linkedStarted = Started(linkedStart);
-            Console.WriteLine($"The start on the locked project answered after {(await lockedAnswered).TotalSeconds:F1}s, "
-                + $"the start on the read-only copy after {(await readOnlyAnswered).TotalSeconds:F1}s.");
+            var answers = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            foreach (var (name, call) in calls) answers.Add(name, Result(await call.WaitAsync(TimeSpan.FromSeconds(60), token)));
+            var startedIds = answers.Where(answer => answer.Key != "locked")
+                .ToDictionary(answer => answer.Key, answer => Started(answer.Value), StringComparer.Ordinal);
+            foreach (var (name, time) in answered)
+                Console.WriteLine($"The start on the {name} project answered after {(await time).TotalSeconds:F1}s.");
 
-            // 1. KiCad refuses to open the project the other KiCad holds, names its lock, and exits.
+            // 1. KiCad refuses to open the project the other KiCad holds, says why, and exits with its
+            // normal failed-start code (wxWidgets returns -1 when initialization fails), not a crash.
+            var locked = answers["locked"];
             Assert.IsTrue(locked.GetProperty("isError").GetBoolean(), "KiCad must not open a project another KiCad holds. " + locked.GetRawText());
             var refusal = locked.GetProperty("structuredContent");
             Assert.AreEqual("start_failed", refusal.GetProperty("code").GetString(), locked.GetRawText());
-            // After refusing, KiCad crashes on its way out with a segmentation fault (exit code 139,
-            // 128 + SIGSEGV): kicad/kicad.cpp returns from a failed start after OnPgmExit() and leaves
-            // the manager frame to be torn down later (parent seam request 2). Only that known crash
-            // passes here; any other exit, including another signal, fails, so a change in how KiCad
-            // ends is seen. When seam request 2 lands this becomes the clean exit code.
-            var inspect = Regex.Match(refusal.GetProperty("message").GetString()!, @"^KiCad exited with code (\d+); inspect (/\S+)\.$");
-            Assert.IsTrue(inspect.Success, locked.GetRawText());
-            runtimes.Add(inspect.Groups[2].Value);
-            Assert.AreEqual("139", inspect.Groups[1].Value,
-                "KiCad refusing a locked project is expected to end with the known segmentation fault of seam request 2. " + locked.GetRawText());
-            string lockedLog = Path.Combine(inspect.Groups[2].Value, "native.log");
+            string refusalMessage = refusal.GetProperty("message").GetString()!;
+            var inspect = Regex.Match(refusalMessage, @"^KiCad exited with code (\d+): (.+) Inspect (/\S+)\.$");
+            Assert.IsTrue(inspect.Success, "The start answer names KiCad's reason and its diagnostics: " + locked.GetRawText());
+            runtimes.Add(inspect.Groups[3].Value);
+            Assert.AreEqual("255", inspect.Groups[1].Value,
+                "KiCad refusing a locked project ends with its normal failed-start exit code, never a signal such as a crash. " + locked.GetRawText());
+            foreach (string text in new[] { $"Project '{siblingProject}' is already open by '", "Automation project could not be loaded: " + siblingProject })
+                StringAssert.Contains(inspect.Groups[2].Value, text, "The start answer names the other KiCad's lock as the reason.");
+            string lockedLog = Path.Combine(inspect.Groups[3].Value, "native.log");
             File.Copy(lockedLog, Path.Combine(evidence, instanceId + "-locked-project-native.log"), true);
             string log = await File.ReadAllTextAsync(lockedLog, token);
             foreach (string text in new[] { siblingProject, "is already open by", "Automation project could not be loaded" })
                 StringAssert.Contains(log, text, "KiCad names the other KiCad's lock as the reason.");
-            // The refused KiCad left nothing in the other project's folder (it ran there, as KiCad does).
-            CollectionAssert.AreEqual(siblingEntries, SiblingFolder(), "The refused KiCad must leave the other project's folder untouched.");
-            Console.WriteLine($"KiCad refused to open {siblingProject}, which the other fixture KiCad holds: {refusal.GetProperty("message").GetString()}");
+            // The refused KiCad left the other project's folder exactly as it was: every file's bytes
+            // and write time (it ran there, as KiCad does).
+            Assert.AreEqual(siblingFiles, SiblingFolder(), "The refused KiCad must leave the other project's folder untouched.");
+            Console.WriteLine($"KiCad refused to open {siblingProject}, which the other fixture KiCad holds: {refusalMessage}");
+
+            // A project KiCad opened read-only refuses a save of real unsaved work: nothing is written,
+            // no file is called blocked because every file is writable, and the reason says what to
+            // change and that the project must be reopened.
+            async Task RefusedProjectSave(string phase, string instance, string folder, string[] mentions, string[] absent)
+            {
+                string projectFile = ProjectIn(folder);
+                var opened = await mcp.Tool("kicad_schematic_open", new { instanceId = instance,
+                    path = Path.Combine(folder, Path.GetFileNameWithoutExtension(projectFile) + ".kicad_sch") });
+                RequireToolSuccess(opened);
+                var document = SchematicJson.Parser.Parse<DocumentSpecifier>(opened.GetProperty("content").EnumerateArray()
+                    .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+                var editor = new NativeClient(new NngTransport(),
+                    NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(instance), "api.sock")));
+                var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token);
+                title.Title = $"Unsaved {phase} work " + Guid.NewGuid().ToString("N");
+                await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = title }, token);
+                var dirty = await ObserveLifecycleState(editor, document, token);
+                Assert.IsTrue(dirty.NativeContentDirty, $"{phase}: the edit must be unsaved work in the editor.");
+                var disk = dirty.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+                var reply = await mcp.Tool("kicad_document_save", new { instanceId = instance,
+                    expectedStateJson = SchematicJson.Formatter.Format(dirty), operationId = Guid.NewGuid().ToString("D") });
+                Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), $"{phase}: a refused save must not report success. {reply.GetRawText()}");
+                var result = LifecycleResult(reply);
+                Assert.AreEqual(LifecycleOperationStatus.LosFailed, result.Status, result.ErrorMessage);
+                Assert.AreEqual("native_save_refused", result.ErrorCode, $"{phase}: {result.ErrorMessage}");
+                Assert.IsEmpty(result.BlockedFiles, $"{phase}: every file is writable; KiCad's own state refuses the save. {result.ErrorMessage}");
+                Assert.IsEmpty(result.WrittenFiles, result.ErrorMessage);
+                foreach (string text in new[] { "KiCad refused to save", Path.GetFileName(projectFile),
+                             "making the document's files writable does not help", "KiCad replaced none of the document's files.",
+                             "The editor still holds all unsaved changes." }.Concat(mentions))
+                    StringAssert.Contains(result.ErrorMessage, text, $"{phase}: {result.ErrorMessage}");
+                foreach (string text in absent)
+                    Assert.IsFalse(result.ErrorMessage.Contains(text, StringComparison.Ordinal), $"{phase}: must not say '{text}'. {result.ErrorMessage}");
+                Assert.AreEqual(dirty, result.ObservedState, $"{phase}: the receipt shows the editor after the refusal.");
+                Assert.AreEqual(dirty, await ObserveLifecycleState(editor, document, token), $"{phase}: the editor state changed.");
+                Assert.AreEqual(title.Title, (await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+                    new() { Document = document }, token)).Title, $"{phase}: the unsaved edit was lost.");
+                foreach (var (path, before) in disk)
+                {
+                    CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), $"{phase}: {path} changed on disk.");
+                    Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), $"{phase}: {path} was rewritten by a refused save.");
+                }
+                reportedCodes.Add(result.ErrorCode);
+                await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-save-{phase.Replace(' ', '-')}.json"),
+                    SchematicJson.Formatter.Format(result), token);
+                Console.WriteLine($"Save refused ({phase}) in KiCad {instance} at {clock.Elapsed.TotalSeconds:F1}s: {result.ErrorMessage}");
+            }
+            // KiCad logged why it opened the project read-only instead of asking in a dialog.
+            async Task LoggedReadOnly(string phase, string instance, string projectFile, string reason)
+            {
+                string nativeLog = Path.Combine(NativeIpcEndpoint.RuntimeDirectory(instance), "native.log");
+                File.Copy(nativeLog, Path.Combine(evidence, $"{instanceId}-{phase.Replace(' ', '-')}-native.log"), true);
+                StringAssert.Contains(await File.ReadAllTextAsync(nativeLog, token),
+                    $"Error: Automation opened project '{projectFile}' read-only: {reason}", $"{phase}: KiCad logs why the project is read-only.");
+            }
 
             // 2. The project file was read-only when KiCad opened the project, and is writable again now.
-            RequireToolSuccess(start);
-            string readOnlyInstance = readOnlyStarted ?? throw new AssertFailedException("KiCad did not start on the copied project.");
+            RequireToolSuccess(answers["read-only project"]);
+            string readOnlyInstance = startedIds["read-only project"] ?? throw new AssertFailedException("KiCad did not start on the copied project.");
             RestoreModes(modes);
-            var opened = await mcp.Tool("kicad_schematic_open", new { instanceId = readOnlyInstance, path = root });
-            RequireToolSuccess(opened);
-            var document = SchematicJson.Parser.Parse<DocumentSpecifier>(opened.GetProperty("content").EnumerateArray()
-                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
-            var editor = new NativeClient(new NngTransport(),
-                NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(readOnlyInstance), "api.sock")));
-            var title = await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(new() { Document = document }, token);
-            title.Title = "Unsaved read-only project work " + Guid.NewGuid().ToString("N");
-            await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = title }, token);
-            var dirty = await ObserveLifecycleState(editor, document, token);
-            Assert.IsTrue(dirty.NativeContentDirty, "The edit must be unsaved work in the editor.");
-            var disk = dirty.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
-            var reply = await mcp.Tool("kicad_document_save", new { instanceId = readOnlyInstance,
-                expectedStateJson = SchematicJson.Formatter.Format(dirty), operationId = Guid.NewGuid().ToString("D") });
-            Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), "A refused save must not report success. " + reply.GetRawText());
-            var result = LifecycleResult(reply);
-            Assert.AreEqual(LifecycleOperationStatus.LosFailed, result.Status, result.ErrorMessage);
-            Assert.AreEqual("native_save_refused", result.ErrorCode, result.ErrorMessage);
-            Assert.IsEmpty(result.BlockedFiles, "Every file is writable; KiCad's own state refuses the save. " + result.ErrorMessage);
-            Assert.IsEmpty(result.WrittenFiles, result.ErrorMessage);
-            foreach (string text in new[] { "KiCad refused to save", Path.GetFileName(project),
-                         "read-only because its project file was read-only when the project was opened",
-                         "the file is writable now", "reopen the project in KiCad", "making files writable does not help",
-                         "KiCad replaced none of the document's files.", "The editor still holds all unsaved changes." })
-                StringAssert.Contains(result.ErrorMessage, text, result.ErrorMessage);
-            Assert.IsFalse(result.ErrorMessage.Contains("project lock", StringComparison.Ordinal), "No lock is involved. " + result.ErrorMessage);
-            Assert.AreEqual(dirty, result.ObservedState, "The receipt shows the editor after the refusal.");
-            Assert.AreEqual(dirty, await ObserveLifecycleState(editor, document, token), "The editor state changed.");
-            Assert.AreEqual(title.Title, (await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
-                new() { Document = document }, token)).Title, "The unsaved edit was lost.");
-            foreach (var (path, before) in disk)
-            {
-                CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
-                Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was rewritten by a refused save.");
-            }
-            reportedCodes.Add(result.ErrorCode);
-            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-save-read-only-project.json"),
-                SchematicJson.Formatter.Format(result), token);
-            Console.WriteLine($"Save refused (project opened read-only) in KiCad {readOnlyInstance} at {clock.Elapsed.TotalSeconds:F1}s: {result.ErrorMessage}");
+            await RefusedProjectSave("read-only project", readOnlyInstance, copy,
+                ["read-only because its project file was read-only when the project was opened", "the file is writable now",
+                    "reopen the project in KiCad"],
+                ["project lock"]);
 
-            // 3. A board and project file kept in another folder and linked into the project folder,
+            // 3. Another user's lock record that nothing holds. KiCad never takes it over and, in
+            // automation, never asks in a dialog: it opens the project read-only and says to close
+            // the project there or delete the lock file. KiCad holds that lock file itself meanwhile,
+            // so the reason must not blame another program.
+            RequireToolSuccess(answers["foreign lock"]);
+            string foreignInstance = startedIds["foreign lock"] ?? throw new AssertFailedException("KiCad did not start on the project with another user's lock.");
+            string foreignReason = $"KiCad opened this project read-only because its project lock '{foreignLock}' belongs to user "
+                + "'someone-else' on computer 'another-host', and KiCad never takes over another user's lock because that user may have "
+                + "the project open on another computer; close the project there, or delete the lock file if nobody has the project "
+                + "open, then reopen it in KiCad";
+            await RefusedProjectSave("foreign lock", foreignInstance, foreignCopy, [foreignReason],
+                ["another program holds", "nothing holds the lock now"]);
+            await LoggedReadOnly("foreign lock", foreignInstance, foreignProject, foreignReason);
+            CollectionAssert.AreEqual(foreignLockBytes, ReadWithoutLocking(foreignLock), "KiCad must not take over another user's lock.");
+
+            // 4. This user's own abandoned lock in a lock file KiCad cannot write: KiCad cannot take
+            // it, opens the project read-only without a dialog, and says to make the lock file
+            // writable or delete it.
+            RequireToolSuccess(answers["read-only lock file"]);
+            string unwritableInstance = startedIds["read-only lock file"] ?? throw new AssertFailedException("KiCad did not start on the project with a read-only lock file.");
+            string unwritableReason = $"KiCad opened this project read-only because it cannot write its project lock file '{unwritableLock}' "
+                + "(the file is read-only), so it could not take the lock; make the lock file writable or delete it, then reopen the "
+                + "project in KiCad";
+            await RefusedProjectSave("read-only lock file", unwritableInstance, unwritableCopy, [unwritableReason],
+                ["another program holds", "nothing holds the lock now"]);
+            await LoggedReadOnly("read-only lock file", unwritableInstance, unwritableProject, unwritableReason);
+            CollectionAssert.AreEqual(unwritableLockBytes, ReadWithoutLocking(unwritableLock), "The read-only lock file is unchanged.");
+
+            // 5. A board and project file kept in another folder and linked into the project folder,
             // as when shared project files are linked into a working folder.
-            RequireToolSuccess(linkedStart);
-            string linkedInstance = linkedStarted ?? throw new AssertFailedException("KiCad did not start on the linked project.");
+            RequireToolSuccess(answers["linked"]);
+            string linkedInstance = startedIds["linked"] ?? throw new AssertFailedException("KiCad did not start on the linked project.");
             await VerifyLinkedBoardSave(mcp, linkedInstance, linkedProject, store, evidence, instanceId, token);
-            Console.WriteLine($"The board linked from another folder was written in KiCad {linkedInstance} at {clock.Elapsed.TotalSeconds:F1}s.");
+            Console.WriteLine($"The board linked from another folder was saved in KiCad {linkedInstance} at {clock.Elapsed.TotalSeconds:F1}s.");
         }
         finally
         {
             RestoreModes(modes);
+            RestoreModes(lockModes);
             foreach (string id in started) await StopStartedKiCad(id);
             foreach (string runtime in runtimes.Where(Directory.Exists)) Directory.Delete(runtime, true);
-            foreach (string folder in new[] { copy, linkedCopy, store, state }) Directory.Delete(folder, true);
+            foreach (string folder in new[] { settings, copy, foreignCopy, unwritableCopy, linkedCopy, store, state }) Directory.Delete(folder, true);
         }
     }
 
-    // A board file that is a symbolic link into another folder. The board editor follows the link
-    // and writes its target (SavePcbFile), and the checked save counts that target as the observed
-    // board, so it is no longer refused as a file outside the document: the edit reaches the target
-    // through the link and both links stay links. The save still cannot be confirmed: SavePcbFile
-    // then renames the board to the link's target without renewing the board's loaded-file
-    // version, which stays at the link's path and old content. The result says exactly that
-    // (saved_state_not_confirmed) instead of claiming success; parent seam request 11 keeps the
-    // board's own name, and this save then becomes LOS_SAVED.
+    // A board file that is a symbolic link into another folder, with its project file linked the
+    // same way. The board editor keeps the board's own name and its writer follows the link to its
+    // target (SavePcbFile, PRETTIFIED_FILE_OUTPUTFORMATTER), so the edit reaches the target through
+    // the link, both links stay links, and the save is confirmed: the board's loaded-file version is
+    // renewed under its own name.
     private static async Task VerifyLinkedBoardSave(CancellableMcpClient mcp, string linkedInstance, string linkedProject,
         string store, string evidence, string instanceId, CancellationToken token)
     {
@@ -497,29 +615,31 @@ public sealed partial class NativeSessionTests
         CollectionAssert.Contains(dirty.NativeFiles.ToArray(), boardPath, "The board is observed by its linked path.");
 
         var reply = await Save(dirty);
-        Assert.IsTrue(reply.GetProperty("isError").GetBoolean(), "An unconfirmed save must not report success. " + reply.GetRawText());
+        RequireToolSuccess(reply);
         var result = LifecycleResult(reply);
-        // Not refused as a file outside the document: the target is the observed board.
-        Assert.AreEqual(LifecycleOperationStatus.LosIndeterminate, result.Status, result.ErrorMessage);
-        Assert.AreEqual("saved_state_not_confirmed", result.ErrorCode,
-            "Until seam request 11 lands, KiCad renames a linked board without renewing its file version. " + result.ErrorMessage);
-        CollectionAssert.AreEqual(new[] { boardPath }, result.WrittenFiles.ToArray(), "The linked board is named as written, by its observed path.");
+        Assert.AreEqual(LifecycleOperationStatus.LosSaved, result.Status, result.ErrorMessage);
+        Assert.AreEqual(board, result.Document);
+        CollectionAssert.Contains(result.WrittenFiles.ToArray(), boardPath, "The linked board is named as written, by its own path.");
+        CollectionAssert.IsSubsetOf(result.WrittenFiles.ToArray(), new[] { boardPath, linkedProject }, result.ToString());
         Assert.IsEmpty(result.BlockedFiles, result.ErrorMessage);
         foreach (var (link, target) in links)
             Assert.AreEqual(target, new FileInfo(link).LinkTarget, "Saving writes through a link, never over it: " + link);
         StringAssert.Contains(await File.ReadAllTextAsync(links[boardPath], token), title.Comment9, "The edit reached the linked board's target.");
-        // What stops the confirmation, as the receipt shows it: KiCad now names the board by the
-        // file it wrote, while the board's loaded-file version still has the link's path.
-        string written = new FileInfo(boardPath).ResolveLinkTarget(true)!.FullName;
-        var baseline = result.ObservedState.FileBaselines.Single(file => file.Path == written);
-        Assert.AreEqual(NativeFileBaselineStatus.NfbsWrongPath, baseline.Status, result.ToString());
+        // The saved state is clean and confirmed under the board's own name: the loaded-file version
+        // was renewed at the link's path, which still names the board.
+        Assert.IsFalse(result.ObservedState.NativeContentDirty, result.ToString());
+        CollectionAssert.Contains(result.ObservedState.NativeFiles.ToArray(), boardPath, "The board keeps the name it was opened with.");
+        CollectionAssert.DoesNotContain(result.ObservedState.NativeFiles.ToArray(), links[boardPath], "The board is not renamed to the link's target.");
+        var baseline = result.ObservedState.FileBaselines.Single(file => file.Path == boardPath);
+        Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, baseline.Status, result.ToString());
         Assert.AreEqual(boardPath, baseline.BaselinePath, result.ToString());
-        Assert.AreEqual(title.Comment9, (await editor.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
-            new() { Document = board }, token)).Comment9, "The edit stays in the editor.");
+        var after = await ObserveLifecycleState(editor, board, token);
+        Assert.AreEqual(result.ObservedState, after, "The editor shows the confirmed saved state.");
+        Assert.AreEqual(after.StateSha256, after.CleanCheckpointSha256, "The confirmed save is the editor's clean checkpoint.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-save-linked-board.json"),
             SchematicJson.Formatter.Format(result), token);
-        Console.WriteLine($"Linked board written through its links in KiCad {linkedInstance}: {result.ErrorCode}; "
-            + $"written [{string.Join(", ", result.WrittenFiles)}]; board now {written} with its version still at {baseline.BaselinePath}.");
+        Console.WriteLine($"Linked board saved through its links in KiCad {linkedInstance}: {result.Status}; "
+            + $"written [{string.Join(", ", result.WrittenFiles)}]; board still {boardPath}, version renewed at {baseline.BaselinePath}.");
     }
 
     // The fixture KiCad process that serves this endpoint, found by the socket it was started with.
@@ -901,6 +1021,23 @@ public sealed partial class NativeSessionTests
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int SignalProcess(int processId, int signal);
 
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenFile([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    // The bytes of a file another process may hold an exclusive lock on, such as a running KiCad's
+    // project or API lock file. .NET takes a shared advisory lock (flock) whenever it opens a file
+    // itself, which such a lock refuses, so the file is opened directly and only read.
+    private static byte[] ReadWithoutLocking(string path)
+    {
+        const int ReadOnly = 0, CloseOnExec = 0x80000;
+        int descriptor = OpenFile(path, ReadOnly | CloseOnExec);
+        if (descriptor < 0) throw new IOException($"Cannot open {path}: error {Marshal.GetLastPInvokeError()}.");
+        using var stream = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(descriptor, true), FileAccess.Read, 1);
+        using var bytes = new MemoryStream();
+        stream.CopyTo(bytes);
+        return bytes.ToArray();
+    }
+
     private static char ProcessState(int processId)
     {
         string stat = File.ReadAllText($"/proc/{processId}/stat");
@@ -967,14 +1104,17 @@ public sealed partial class NativeSessionTests
     }
 
     // Everything an agent can observe about the other instance: its process epoch, its open
-    // schematics and boards with their full native state, and the bytes of their files. An
-    // editor kind that is not open is recorded as the same refusal both times.
+    // schematics and boards with their full native state, and the bytes and write time of every
+    // file in its project folder (its documents, lock, settings and anything else KiCad keeps
+    // there). An editor kind that is not open is recorded as the same refusal both times.
     private static async Task<string> SiblingSnapshot(CancellableMcpClient mcp, SiblingKiCad sibling, CancellationToken token)
     {
         var text = new StringBuilder();
         var session = await new NativeClient(new NngTransport(), sibling.Endpoint).HandshakeAsync(token);
         Assert.AreEqual(sibling.Epoch, session.Epoch, "The other KiCad instance restarted.");
         text.AppendLine(session.InstanceId).AppendLine(session.Epoch);
+        string folder = Path.GetDirectoryName(session.ProjectPath)!;
+        text.Append(FolderSnapshot(folder, SocketPath(sibling.Endpoint), SocketPath(session.EventEndpoint)));
         var observed = new List<string>();
         foreach (string kind in new[] { "schematic", "pcb" })
         {
@@ -994,7 +1134,33 @@ public sealed partial class NativeSessionTests
                     text.Append(file).Append(' ').AppendLine(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(file, token))));
             }
         }
-        Console.WriteLine($"Other KiCad instance {sibling.InstanceId} observed: {string.Join(", ", observed)}.");
+        Console.WriteLine($"Other KiCad instance {sibling.InstanceId} observed: {string.Join(", ", observed)}; "
+            + $"{Directory.EnumerateFiles(folder, "*", AllEntries).Count()} files in {folder}.");
+        return text.ToString();
+    }
+
+    private static readonly EnumerationOptions AllEntries = new()
+        { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+
+    private static string SocketPath(string endpoint) =>
+        endpoint.StartsWith("ipc://", StringComparison.Ordinal) ? endpoint["ipc://".Length..] : endpoint;
+
+    // Every entry below a folder: each file with its write time and the SHA-256 of its bytes, each
+    // link with its target and each folder by name, in ordinal order, so any file another KiCad
+    // creates, changes, touches or removes there shows. Sockets (named in skip) have no bytes.
+    private static string FolderSnapshot(string folder, params string[] skip)
+    {
+        var text = new StringBuilder();
+        foreach (string path in Directory.EnumerateFileSystemEntries(folder, "*", AllEntries).Order(StringComparer.Ordinal))
+        {
+            if (skip.Contains(path, StringComparer.Ordinal)) continue;
+            string relative = Path.GetRelativePath(folder, path);
+            if (new FileInfo(path).LinkTarget is { } target) text.Append(relative).Append(" -> ").AppendLine(target);
+            else if (Directory.Exists(path)) text.Append(relative).AppendLine("/");
+            else
+                text.Append(relative).Append(' ').Append(File.GetLastWriteTimeUtc(path).ToString("O"))
+                    .Append(' ').AppendLine(Convert.ToHexStringLower(SHA256.HashData(ReadWithoutLocking(path))));
+        }
         return text.ToString();
     }
 

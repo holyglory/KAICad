@@ -172,6 +172,26 @@ static void packSymbolVariants( kiapi::schematic::types::SchematicSymbolVariants
 }
 
 
+BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
+                                    const wxString& variant )
+{
+    // SCH_SYMBOL::GetBoundingBox() draws an unresolved symbol as the placeholder
+    // LIB_SYMBOL::GetDummy(); measure exactly that, but at the explicit sheet
+    // instance rather than the editor's current sheet.
+    const LIB_SYMBOL* definition = symbol.GetEffectiveLibSymbol( &path );
+    if( !definition )
+        definition = LIB_SYMBOL::GetDummy();
+    BOX2I bounds = definition->GetBodyBoundingBox( symbol.GetUnitSelection( &path ),
+                                                   symbol.GetBodyStyle(), true, false );
+    bounds = symbol.GetTransform().TransformCoordinate( bounds );
+    bounds.Normalize();
+    bounds.Offset( symbol.GetPosition() );
+    for( const SCH_FIELD& field : symbol.GetFields() )
+        if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
+    return bounds;
+}
+
+
 void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
                               const wxString& variant,
                               kiapi::automation::v1::SchematicSymbolPinGeometry& output )

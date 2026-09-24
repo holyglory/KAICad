@@ -238,6 +238,7 @@ public sealed partial class NativeSessionTests
         Guid screen = Guid.Parse(symbols.ScreenId.Value);
         var origin = original.Candidates[0].Position;
         var kinds = new[] { ConnectionLabelKind.Local, ConnectionLabelKind.Global, ConnectionLabelKind.Hierarchical };
+        Assert.AreEqual(1_270_000L, policy.TextSizeNm, "The realizer tests' label back extents are measured with 1.27 mm text.");
         var spins = new[] { SchematicLabelSpinStyle.SlssRight, SchematicLabelSpinStyle.SlssLeft, SchematicLabelSpinStyle.SlssUp, SchematicLabelSpinStyle.SlssBottom };
         MeasureSchematicPlacement Prototypes(long dx, long dy)
         {
@@ -277,6 +278,9 @@ public sealed partial class NativeSessionTests
             long behind = fx > 0 ? -box.L : fx < 0 ? box.R : fy > 0 ? -box.T : box.B;
             long ahead = fx > 0 ? box.R : fx < 0 ? -box.L : fy > 0 ? box.B : -box.T;
             Assert.IsLessThanOrEqualTo(policy.LabelBackToleranceNm, behind, kinds[i / spins.Length] + " " + spin + " reaches too far behind its anchor.");
+            // The realizer tests draw every label kind exactly as far behind its anchor as KiCad does here.
+            Assert.AreEqual(SchematicConnectionRealizerTests.Geometry.MeasuredBehind[prototype.Value.GetType()], behind,
+                kinds[i / spins.Length] + " " + spin + " back extent differs from the one the realizer tests draw.");
             Assert.IsGreaterThan(policy.TextSizeNm, ahead, kinds[i / spins.Length] + " " + spin + " must extend in the direction it faces.");
         }
         // Local, global and hierarchical labels of one text are measured with their own shapes.
@@ -290,7 +294,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(relative[i], (body.Bounds.Position.XNm - body.Anchor.XNm, body.Bounds.Position.YNm - body.Anchor.YNm,
                 body.Bounds.Position.XNm + body.Bounds.Size.XNm - body.Anchor.XNm, body.Bounds.Position.YNm + body.Bounds.Size.YNm - body.Anchor.YNm));
         }
-        await VerifyAnchorLabels(client, original, symbols, revision, screen, policy, kinds, evidence, instanceId, token);
+        await VerifyAnchorLabels(client, original, symbols, before, revision, screen, policy, kinds, evidence, instanceId, token);
         // Symbols and prototypes measure together, sharing the request's limit and identities.
         var combined = original.Clone(); combined.ItemCandidates.Add(first.ItemCandidates);
         var both = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(combined, token);
@@ -337,77 +341,102 @@ public sealed partial class NativeSessionTests
         return (first, measured);
     }
 
-    // A label placed on a pin itself (the anchor label that names an existing connection, cn1-wiring-intent.md §6.3 (a))
-    // on this real sheet. KiCad's bounds of a symbol include its pins up to their connection point and anything drawn
-    // there, and every label reaches a little behind its anchor, so a label of any kind on a pin always overlaps its
-    // own symbol: a rule refusing any overlap with the owning symbol could never admit it. For every symbol whose
-    // bounds end within half a grid past one of its pins (recorded as `reach`), the realizer's rule, which ignores
-    // only the part of the label within half a grid of the pin's end, finds the rest of the label clear of the symbol.
+    // Labels on pins themselves (the anchor label that names an existing connection, cn1-wiring-intent.md §6.3 (a)) on
+    // this real sheet. A label of every kind is measured on every visible pin of every symbol whose pins KiCad reports
+    // completely, and the realizer's own §6.4 rule decides on the whole measured sheet whether it could name an existing
+    // connection there; the verdict, and the rule that refuses it, is recorded for each pin and kind, with the number of
+    // symbols skipped. Every label reaches behind its anchor over its own pin, and KiCad's bounds of a symbol reach past
+    // each visible pin by the target it draws on an unconnected pin end (PinTargetReachNm), so a label on a pin always
+    // overlaps its own symbol. The rule must still admit a label of each kind on this sheet, and may refuse one because
+    // of its own symbol only where that symbol draws more than its pin target in front of the pin. On a pin that already
+    // has wires or labels, the same label must be refused once those are treated as another connection's items.
     private static async Task VerifyAnchorLabels(NativeClient client, MeasureSchematicPlacement original, SchematicPlacementGeometry symbols,
-        KiCad.Automation.Model.DocumentRevision revision, Guid screen, SchematicConnectionPolicy policy, ConnectionLabelKind[] kinds,
-        string evidence, string instanceId, CancellationToken token)
+        CheckedSchematicState before, KiCad.Automation.Model.DocumentRevision revision, Guid screen, SchematicConnectionPolicy policy,
+        ConnectionLabelKind[] kinds, string evidence, string instanceId, CancellationToken token)
     {
         static (long L, long T, long R, long B) Box(Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
         static bool Overlap((long L, long T, long R, long B) a, (long L, long T, long R, long B) b) =>
             a.L < a.R && a.T < a.B && b.L < b.R && b.T < b.B && a.L < b.R && b.L < a.R && a.T < b.B && b.T < a.B;
-        long band = policy.LabelBackToleranceNm;
-        var owners = new List<(SchematicPlacementBounds Owner, SchematicPinAnchor Pin, (int Dx, int Dy) Outward, long Reach)>();
-        foreach (var owner in symbols.Obstacles.Concat(symbols.Candidates).Where(o => o.SymbolPins is { Complete: true }).OrderBy(o => o.Id.Value, StringComparer.Ordinal))
-        {
-            var bounds = Box(owner.Bounds);
-            foreach (var pin in owner.SymbolPins.Pins.Where(p => p.Visible).OrderBy(p => p.Id.Value, StringComparer.Ordinal))
+        var native = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(original.Document));
+        // Each pin's existing connection on this sheet, as KiCad reports it; an unconnected pin is alone.
+        var connection = new Dictionary<string, Guid[]>(StringComparer.Ordinal);
+        foreach (var net in before.Electrical.Nets)
+            foreach (var sheet in net.Sheets.Where(s => s.Path.Equals(original.Document.SheetPath)))
             {
+                var items = sheet.Items.Select(i => Guid.Parse(i.Value)).ToArray();
+                foreach (var item in sheet.Items) connection[item.Value] = items;
+            }
+        var measuredSymbols = symbols.Obstacles.Concat(symbols.Candidates).Where(o => o.SymbolPins is not null).ToArray();
+        var owners = measuredSymbols.Where(o => o.SymbolPins.Complete && o.SymbolPins.Pins.Any(p => p.Visible)).OrderBy(o => o.Id.Value, StringComparer.Ordinal).ToArray();
+        int skipped = measuredSymbols.Length - owners.Length;
+        var probes = owners.SelectMany(o => o.SymbolPins.Pins.Where(p => p.Visible).OrderBy(p => p.Id.Value, StringComparer.Ordinal)
+            .SelectMany(p => kinds.Select(k => (Owner: o, Pin: p, Kind: k)))).ToArray();
+        Assert.IsNotEmpty(probes, "This sheet has visible pins to check.");
+        var facts = new List<object>();
+        var admitted = kinds.ToDictionary(k => k, _ => 0);
+        int refusedAsForeign = 0;
+        foreach (var chunk in probes.Chunk(SchematicConnectionRealizer.MaxMeasuredCandidates))
+        {
+            var request = original.Clone(); request.Candidates.Clear();
+            foreach (var (_, pin, kind) in chunk)
+            {
+                var spin = SchematicConnectionGeometry.Spin(SchematicConnectionGeometry.Outward(pin));
+                var shape = kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
+                // One probe identity per pin: the symbol-probe form keyed by the placed pin.
+                var id = SchematicConnectionIdentity.Probe(revision, screen, SchematicConnectionRealizer.Descriptor(kind), "PROBE_ANCHOR", spin, shape,
+                    Guid.Parse(pin.Id.Value), 0);
+                request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, id, pin.Position.Clone(), "PROBE_ANCHOR", spin, policy)));
+            }
+            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+            Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
+            Assert.AreEqual(symbols.Obstacles, measured.Obstacles, "One revision measures the same existing items with or without anchor labels.");
+            for (int i = 0; i < chunk.Length; i++)
+            {
+                var (owner, pin, kind) = chunk[i];
                 var outward = SchematicConnectionGeometry.Outward(pin);
+                string what = kind + " label on pin " + pin.Number + " of " + owner.Id.Value;
+                var label = Box(measured.ItemCandidates[i].Bounds);
+                var body = Box(owner.Bounds);
+                Assert.AreEqual(pin.Position, measured.ItemCandidates[i].Anchor, what);
                 long reach = outward switch
                 {
-                    (-1, 0) => pin.Position.XNm - bounds.L, (1, 0) => bounds.R - pin.Position.XNm,
-                    (0, -1) => pin.Position.YNm - bounds.T, _ => bounds.B - pin.Position.YNm
+                    (-1, 0) => pin.Position.XNm - body.L, (1, 0) => body.R - pin.Position.XNm,
+                    (0, -1) => pin.Position.YNm - body.T, _ => body.B - pin.Position.YNm
                 };
-                Assert.IsGreaterThanOrEqualTo(0L, reach, "A symbol's bounds include its visible pins up to their ends.");
-                if (reach > band) continue;
-                owners.Add((owner, pin, outward, reach));
-                break;
+                long behind = outward switch { (-1, 0) => label.R - pin.Position.XNm, (1, 0) => pin.Position.XNm - label.L,
+                    (0, -1) => label.B - pin.Position.YNm, _ => pin.Position.YNm - label.T };
+                // KiCad's bounds include every visible pin up to its end and, on a pin that can be left unconnected, the target
+                // drawn around that end.
+                bool target = pin.ElectricalType is not (ElectricalPinType.EptNoConnect or ElectricalPinType.EptFree);
+                Assert.IsGreaterThanOrEqualTo(target ? SchematicConnectionRealizer.PinTargetReachNm : 0L, reach, what + ": the symbol's bounds past the pin.");
+                Assert.AreEqual(SchematicConnectionRealizerTests.Geometry.MeasuredBehind[SchematicConnectionRealizer.Descriptor(kind).ClrType], behind,
+                    what + " reaches behind its anchor as the realizer tests draw it.");
+                Assert.IsTrue(Overlap(label, body), what + " overlaps its own symbol's bounds at the pin.");
+                var own = connection.GetValueOrDefault(pin.Id.Value) ?? [];
+                var refusal = SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin, measured.ItemCandidates[i].Bounds,
+                    own, policy);
+                if (refusal is not null && refusal.StartsWith("the label overlaps symbol " + owner.Id.Value, StringComparison.Ordinal))
+                    Assert.IsGreaterThan(SchematicConnectionRealizer.PinTargetReachNm, reach,
+                        what + " is refused by its own symbol only where that symbol draws beyond its pin target: " + refusal);
+                if (refusal is null) admitted[kind]++;
+                // Must-catch on the same real geometry: for a pin that already has wires or labels, the same label is refused
+                // once those items are not taken as the pin's own connection (they would touch or run through it).
+                string? foreign = own.Length > 1 ? SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin,
+                    measured.ItemCandidates[i].Bounds, [], policy) : null;
+                if (own.Length > 1)
+                {
+                    Assert.IsNotNull(foreign, what + " would touch the items of its pin's connection if they belonged to another one.");
+                    refusedAsForeign++;
+                }
+                facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kind.ToString(), outward = new[] { outward.Dx, outward.Dy }, reach, behind,
+                    admitted = refusal is null, whyNot = refusal, connectionItems = own.Length, whyNotIfForeign = foreign });
             }
         }
-        Assert.IsNotEmpty(owners, "This sheet has a symbol whose bounds end within half a grid past one of its pins.");
-        var request = original.Clone(); request.Candidates.Clear();
-        foreach (var (owner, pin, outward, _) in owners)
         foreach (var kind in kinds)
-        {
-            var spin = SchematicConnectionGeometry.Spin(outward);
-            var shape = kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
-            // One probe identity per owning symbol: the symbol-probe form with the symbol's own (unrotated) frame.
-            var id = SchematicConnectionIdentity.Probe(revision, screen, SchematicConnectionRealizer.Descriptor(kind), "PROBE_ANCHOR", spin, shape,
-                Guid.Parse(owner.Id.Value), 0);
-            request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, id, pin.Position.Clone(), "PROBE_ANCHOR", spin, policy)));
-        }
-        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
-        Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
-        var facts = new List<object>();
-        for (int i = 0; i < measured.ItemCandidates.Count; i++)
-        {
-            var (owner, pin, outward, reach) = owners[i / kinds.Length];
-            string what = kinds[i % kinds.Length] + " label on pin " + pin.Number + " of " + owner.Id.Value;
-            var label = Box(measured.ItemCandidates[i].Bounds);
-            var body = Box(owner.Bounds);
-            Assert.AreEqual(pin.Position, measured.ItemCandidates[i].Anchor, what);
-            long behind = outward switch { (-1, 0) => label.R - pin.Position.XNm, (1, 0) => pin.Position.XNm - label.L,
-                (0, -1) => label.B - pin.Position.YNm, _ => pin.Position.YNm - label.T };
-            Assert.IsGreaterThan(0L, behind, what + " reaches behind its anchor.");
-            Assert.IsLessThanOrEqualTo(band, behind, what);
-            Assert.IsTrue(Overlap(label, body), what + " overlaps its own symbol's bounds at the pin.");
-            var beyond = outward switch
-            {
-                (-1, 0) => (label.L, label.T, Math.Min(label.R, pin.Position.XNm - band), label.B),
-                (1, 0) => (Math.Max(label.L, pin.Position.XNm + band), label.T, label.R, label.B),
-                (0, -1) => (label.L, label.T, label.R, Math.Min(label.B, pin.Position.YNm - band)),
-                _ => (label.L, Math.Max(label.T, pin.Position.YNm + band), label.R, label.B)
-            };
-            Assert.IsFalse(Overlap(beyond, body), what + " is clear of its own symbol beyond half a grid from the pin's end.");
-            facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kinds[i % kinds.Length].ToString(), reach, behind });
-        }
+            Assert.IsGreaterThan(0, admitted[kind], "The realizer's rule admits a " + kind + " label on some pin of this real sheet.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-anchor-labels-" + original.Document.SheetPath.Path[^1].Value + ".json"),
-            System.Text.Json.JsonSerializer.Serialize(facts), token);
+            System.Text.Json.JsonSerializer.Serialize(new { skippedSymbols = skipped, checkedSymbols = owners.Length, checkedPins = probes.Length / kinds.Length,
+                admitted = admitted.ToDictionary(p => p.Key.ToString(), p => p.Value), refusedAsForeign, facts }), token);
     }
 
     // The public MCP measurement tool must return exactly the native geometry for every measured

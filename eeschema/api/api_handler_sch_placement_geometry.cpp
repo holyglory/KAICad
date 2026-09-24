@@ -37,18 +37,10 @@ BOX2I measure( SCH_ITEM& item, const SCH_SHEET_PATH& path, const wxString& varia
 {
     // The caller owns private copies. Explicit field/text contexts must not
     // borrow the human editor's CurrentSheet() for a repeated instance.
+    // A symbol whose definition is unresolved is an obstacle of its own drawn bounds;
+    // its pins are reported incomplete (SPGIR_DEFINITION_UNRESOLVED), never guessed.
     if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( &item ) )
-    {
-        const LIB_SYMBOL* definition = symbol->GetEffectiveLibSymbol( &path );
-        if( !definition ) throw std::runtime_error( "A symbol has no resolved native definition" );
-        BOX2I bounds = definition->GetBodyBoundingBox( symbol->GetUnitSelection( &path ),
-                                                      symbol->GetBodyStyle(), true, false );
-        bounds = symbol->GetTransform().TransformCoordinate( bounds );
-        bounds.Normalize(); bounds.Offset( symbol->GetPosition() );
-        for( const SCH_FIELD& field : symbol->GetFields() )
-            if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
-        return bounds;
-    }
+        return MeasureSchematicSymbolBounds( *symbol, path, variant );
     if( auto* sheet = dynamic_cast<SCH_SHEET*>( &item ) )
     {
         BOX2I bounds = sheet->GetBodyBoundingBox();

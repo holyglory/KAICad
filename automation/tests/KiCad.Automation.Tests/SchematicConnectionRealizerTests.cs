@@ -158,9 +158,9 @@ public sealed class SchematicConnectionRealizerTests
         // Must-catch and guards: with the first candidate's stub room blocked but room at the pin itself, the label
         // sits on the pin; with that blocked too the next candidate is used; with no room anywhere the join fails.
         // Labels reach as far behind their anchor as KiCad draws them, so a label on the pin lies a little over its
-        // own symbol's pin, and KiCad's bounds of the symbol may reach a little past the pin's end (the live sheets'
-        // symbols reach 381,100 nm past it). Within half a grid of the pin's end the label may lie on its own symbol,
-        // never further in front.
+        // own symbol's pin, and KiCad's bounds of the symbol reach past the pin's end by the target it draws on an
+        // unconnected pin (PinTargetReachNm, 381,100 nm on every visible pin of the live sheets). Within that target
+        // the label may lie on its own symbol, never further in front.
         var scene = Link();
         var candidates = scene.Intent.Screens.Single().Islands.Single().JoinCandidates;
         Assert.HasCount(2, candidates);
@@ -184,13 +184,17 @@ public sealed class SchematicConnectionRealizerTests
         var next = await fronted.Realize();
         Assert.IsFalse(next.Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId), "The label would overlap its own symbol in front of the pin.");
         Assert.IsTrue(next.Generated.Any(g => g.PlacedPinId == candidates[1].PlacedPinId && g.Role == GeneratedConnectionRole.StubLabel));
-        // Must-catch: just beyond half a grid in front of the pin is already too far.
-        var beyond = anchored with { Geometry = anchored.Geometry.Copy() };
-        beyond.Geometry.Body[owner] = new(first.X - Policy.LabelBackToleranceNm - 100, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
-        Assert.IsFalse((await beyond.Realize()).Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId));
-        // Guards: the symbol ending exactly at the pin, reaching past it as far as the live sheets' symbols do, or
-        // reaching exactly half a grid past it, admits the label on the pin.
-        foreach (long reach in new long[] { 0, 381_100, Policy.LabelBackToleranceNm })
+        // Must-catch: 100 nm beyond the pin's target in front of the pin is already too far, and so is half a grid (the
+        // band an earlier rule allowed, which let a label cover text drawn up to 0.25 mm past the target).
+        foreach (long reach in new[] { SchematicConnectionRealizer.PinTargetReachNm + 100, Policy.LabelBackToleranceNm })
+        {
+            var beyond = anchored with { Geometry = anchored.Geometry.Copy() };
+            beyond.Geometry.Body[owner] = new(first.X - reach, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
+            Assert.IsFalse((await beyond.Realize()).Generated.Any(g => g.PlacedPinId == candidates[0].PlacedPinId), "Owner reaching " + reach + " nm past the pin.");
+        }
+        // Guards: the symbol ending exactly at the pin, or reaching past it exactly as far as its pin target (as every
+        // visible pin of the live sheets does), admits the label on the pin.
+        foreach (long reach in new long[] { 0, SchematicConnectionRealizer.PinTargetReachNm })
         {
             var flush = anchored with { Geometry = anchored.Geometry.Copy() };
             flush.Geometry.Body[owner] = new(first.X - reach, first.Y - 3 * Grid, first.X + 8 * Grid, first.Y + 3 * Grid);
@@ -380,14 +384,27 @@ public sealed class SchematicConnectionRealizerTests
         scene.Geometry.Incomplete[member.Pin.SymbolId] = SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing;
         await RequireRefusal(scene, SchematicConnectionErrors.RealizationPinGeometryIncomplete, "cannot report exact pin positions");
         scene.Geometry.Incomplete.Clear();
-        // Guard: an unrelated existing symbol with incomplete pins is allowed; its whole body stays an obstacle.
+        // Guard: an unrelated existing symbol with incomplete pins is allowed; its whole body stays an obstacle. That now
+        // includes a symbol whose library definition KiCad cannot resolve: KiCad measures it by its own bounds, with no
+        // pins and SPGIR_DEFINITION_UNRESOLVED, instead of refusing to measure the whole sheet.
         var unrelated = SymbolId(scene, "R9");
         Assert.IsFalse(scene.Intent.Screens.Single().Islands.SelectMany(i => i.Members).Any(m => m.Pin.SymbolId == unrelated));
-        foreach (var reason in new[] { SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing, SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved })
+        foreach (var reason in new[] { SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing, SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved,
+            SchematicPinGeometryIncompleteReason.SpgirDefinitionUnresolved })
         {
             scene.Geometry.Incomplete[unrelated] = reason;
-            await scene.Realize();
+            Assert.HasCount(3, Generated<LocalLabel>(await scene.Realize()), reason.ToString());
         }
+        // Must-catch: the unresolved symbol's whole body is a keep-out. Drawn across TP1's stub room, it leaves TP1 no stub.
+        var tp1 = Member(scene, "TP1").Pin;
+        var at = scene.PinAt(tp1);
+        var covering = scene with { Geometry = scene.Geometry.Copy() };
+        covering.Geometry.Body[unrelated] = new(at.X - 9 * Grid, at.Y - Grid, at.X - Grid / 2, at.Y + Grid);
+        await RequireRefusal(covering, SchematicConnectionErrors.RealizationNoFreeStub, "Pin " + tp1.Endpoint.ComponentId.ToString("D") + ".1");
+        // Guard: the same body clear of the stub room admits it.
+        var clear = scene with { Geometry = scene.Geometry.Copy() };
+        clear.Geometry.Body[unrelated] = new(at.X - 9 * Grid, at.Y + 2 * Grid, at.X - Grid / 2, at.Y + 4 * Grid);
+        Assert.HasCount(3, Generated<LocalLabel>(await clear.Realize()));
         scene.Geometry.Incomplete.Clear();
         // Must-catch: a new symbol with no connection at all must still report its pins, which must be proven to touch
         // no existing connection point; guard: reported completely, it is simply created.
@@ -596,6 +613,154 @@ public sealed class SchematicConnectionRealizerTests
         // Must-catch: with R5.1 alone, its only stub attaches, so nothing on the child sheet can carry the label.
         var alone = Local(second: false);
         await RequireRefusal(alone, SchematicConnectionErrors.RealizationNoFreeStub, "every new stub there ends on one of its power symbols");
+    }
+
+    [TestMethod]
+    public async Task ANewPinStackedOnAnExistingConnectionCarriesTheHierarchicalLabelOnlyWhenItHasRoom()
+    {
+        // VLOC is named on the child sheet by the local power symbol #LP0. The XML creates R5 on the child sheet with R5.1
+        // drawn exactly on #LP0's pin, so KiCad joins R5.1 to VLOC by that contact alone, and joins root R1.1 to VLOC: the
+        // child's island needs a hierarchical label. With `later`, it also creates R6 and joins R6.1 there; with `grand`,
+        // R7.1 on the grandchild sheet joins as well, so the child sheet gains a new sheet pin with its own stub.
+        (Scene Scene, ConnectionPlacedPin Stacked, ConnectionPlacedPin? Later, Point At) Build(bool later, bool grand)
+        {
+            var bench = new Bench();
+            Guid r = bench.Part("R", Passive("1"), Passive("2"));
+            Guid local = bench.Part("LOCAL", SchematicSymbolType.SstLocalPower, new BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+            Guid lp0 = bench.Component(local, "#LP0", BenchSheet.Child, value: "VLOC");
+            Guid r1 = bench.Component(r, "R1");
+            Guid r7 = grand ? bench.Component(r, "R7", BenchSheet.Grand) : Guid.Empty;
+            var vloc = new CircuitNet(Guid.NewGuid(), "VLOC", [new(lp0, "1")]);
+            var state = WithFormatting(bench.State([vloc]));
+            var r5 = bench.Create(state.Baseline, r, "R5", BenchSheet.Child);
+            var r6 = later ? bench.Create(r5.Design, r, "R6", BenchSheet.Child) : r5;
+            PinEndpoint[] added = [new(r5.Component, "1"), .. later ? [new PinEndpoint(r6.Component, "1")] : Array.Empty<PinEndpoint>(), new(r1, "1"),
+                .. grand ? [new PinEndpoint(r7, "1")] : Array.Empty<PinEndpoint>()];
+            var scene = Scene.Of(bench, state, design => WithNets(Adopt(design, r6.Design), vloc with { Pins = [.. vloc.Pins, .. added] }));
+            var island = scene.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.ScreenId == bench.ScreenId(BenchSheet.Child));
+            Assert.IsNotNull(island.UplinkSheetSymbolId);
+            Assert.IsFalse(island.JoinRequired, "#LP0 already names VLOC on the child sheet.");
+            var carrier = island.Members.Single(m => m.Role == ConnectionMemberRole.PowerCarrier);
+            Assert.IsTrue(carrier.AlreadyConnected);
+            // With two new pins the one drawn first sits on #LP0's pin, so the other one is the later stub.
+            var stubbed = island.Members.Where(m => m.RequiresStub).Select(m => m.Pin).ToArray();
+            Assert.HasCount(later ? 2 : 1, stubbed);
+            Assert.IsTrue(stubbed.All(p => p.CreatedSymbol));
+            // The new resistor drawn first puts its pin 1 exactly on #LP0's pin, pointing left like it, with its body to the
+            // right and pin 2 two grids below; the other one is drawn the same way eight grids further down.
+            var at = scene.PinAt(carrier.Pin);
+            void Draw(ConnectionPlacedPin pin, Point p1)
+            {
+                var symbol = scene.Plan.Candidate!.Schematic.Instances.First(x => Key(x) == pin.SheetPathKey).Items
+                    .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                    .Single(x => Guid.Parse(x.Id.Value) == pin.SymbolId);
+                var pin2 = symbol.Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).Single(p => p.Number == "2");
+                scene.Geometry.Place[pin.PlacedPinId] = p1;
+                scene.Geometry.Place[Guid.Parse(pin2.Id.Value)] = new(p1.X, p1.Y + 2 * Grid);
+                scene.Geometry.Body[pin.SymbolId] = new(p1.X, p1.Y - Grid, p1.X + 4 * Grid, p1.Y + 3 * Grid);
+            }
+            Draw(stubbed[0], at);
+            if (later) Draw(stubbed[1], new(at.X, at.Y + 8 * Grid));
+            return (scene, stubbed[0], later ? stubbed[1] : null, at);
+        }
+        GeneratedConnectionItem Hierarchical(Scene scene, SchematicConnectionRealization realization) => realization.Generated.Single(g =>
+            g.ScreenId == scene.Bench!.ScreenId(BenchSheet.Child) && g.TypeUrl == Any.Pack(new HierarchicalLabel()).TypeUrl);
+        // The stub room to the left of the stacked pins on the child sheet: a keep-out over every stub length and its label.
+        static Scene Boxed(Scene scene, Point at)
+        {
+            var id = Guid.NewGuid();
+            var child = scene.Bench!.ScreenId(BenchSheet.Child).ToString("D");
+            var copy = scene.Edited(data => data.Instances.Single(s => s.Metadata.ScreenId.Value == child).Items.Add(Any.Pack(new SchematicText
+            {
+                Id = new() { Value = id.ToString("D") }, Locked = LockedState.LsUnlocked,
+                Text = new() { Text_ = "keep out", Position = new() { XNm = at.X - 9 * Grid, YNm = at.Y - Grid }, Attributes = new() { Multiline = true } }
+            })));
+            copy.Geometry.Sized[id] = new(at.X - 9 * Grid, at.Y - Grid, at.X - Grid / 2, at.Y + Grid);
+            return copy;
+        }
+
+        // With room, the stacked pin's stub starts on #LP0's pin and carries the hierarchical label.
+        var (alone, stacked, _, at) = Build(later: false, grand: false);
+        var carried = await alone.Realize();
+        var label = Hierarchical(alone, carried);
+        Assert.AreEqual(stacked.PlacedPinId, label.PlacedPinId);
+        Assert.AreEqual(GeneratedConnectionRole.StubLabel, label.Role);
+        var wire = StubOf(carried, stacked.PlacedPinId);
+        Assert.AreEqual((at.X, at.Y), (wire.Start.XNm, wire.Start.YNm), "The stub starts on the existing connection it joins.");
+        Assert.AreEqual(at.X - 2 * Grid, wire.End.XNm);
+
+        // Must-catch: without room there, and with nothing else on the child sheet to carry it, the label cannot be drawn.
+        // The refusal names the stacked pin (it used to surface as an internal inconsistency once the stub became optional).
+        var boxed = Boxed(alone, at);
+        await RequireRefusal(boxed, SchematicConnectionErrors.RealizationNoFreeStub, "new pin " + stacked.Endpoint.ComponentId.ToString("D") + ".1 sits on an existing connection");
+
+        // Guard: without room for the stacked pin's stub, the later new pin's stub carries the label, and the stacked pin
+        // gets nothing: KiCad joins it through the contact.
+        var (withLater, first, second, laterAt) = Build(later: true, grand: false);
+        var byLater = await Boxed(withLater, laterAt).Realize();
+        Assert.AreEqual(second!.PlacedPinId, Hierarchical(withLater, byLater).PlacedPinId);
+        Assert.IsFalse(byLater.Generated.Any(g => g.PlacedPinId == first.PlacedPinId));
+        Assert.IsTrue(byLater.Outcomes.All(o => o.FallbackReason is null));
+
+        // Guard: without room for the stacked pin's stub, the child sheet's new sheet pin for the grandchild carries it.
+        var (withGrand, onCarrier, _, grandAt) = Build(later: false, grand: true);
+        var bySheetPin = await Boxed(withGrand, grandAt).Realize();
+        var sheetLabel = Hierarchical(withGrand, bySheetPin);
+        Assert.AreEqual(GeneratedConnectionRole.SheetPinLabel, sheetLabel.Role);
+        Assert.AreEqual(withGrand.Bench!.ScreenId(BenchSheet.Child), sheetLabel.ScreenId);
+        Assert.IsFalse(bySheetPin.Generated.Any(g => g.PlacedPinId == onCarrier.PlacedPinId));
+    }
+
+    [TestMethod]
+    public async Task ALibraryCacheIsReplacedOnlyToAddDefinitionsOnASheetReceivingANewSymbol()
+    {
+        // The batch check (I6): a sheet's library cache may change only on a sheet that receives a new symbol, and only by
+        // adding definitions. Every definition KiCad already holds there must stay exactly as it is.
+        static SchematicCachedSymbol Entry(SchematicHierarchyData data, string reference)
+        {
+            var symbol = data.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .First(s => s.ReferenceField.Text.Text_ == reference);
+            // As KiCad keeps a cached definition: every child names its unit and body style.
+            var definition = symbol.Definition.Clone();
+            foreach (var child in definition.Items) { child.Unit ??= new(); child.BodyStyle ??= new(); }
+            return new SchematicCachedSymbol { CacheKey = symbol.Definition.Id.LibraryNickname + ":" + symbol.Definition.Id.EntryName,
+                Definition = definition, ShowPinNames = true, ShowPinNumbers = true };
+        }
+        SchematicCachedSymbol[] Replacements(SchematicConnectionRealization realization) =>
+            [.. realization.Operations.Where(o => o.ReplaceLibraryCache is not null).SelectMany(o => o.ReplaceLibraryCache.Definitions)];
+
+        // Guard: R2 is created on the root sheet, whose cache the checkpoint lacks R's definition for; the batch adds it.
+        var scene = RootAddition();
+        var entry = Entry(scene.Saved.Observed, "R1");
+        var cached = scene.Edited(data => Root(data).CachedSymbols.Add(entry.Clone()));
+        var adding = cached.InCheckpoint(data => Root(data).CachedSymbols.Clear());
+        var added = Replacements(await adding.Realize());
+        Assert.AreEqual(entry.CacheKey, added.Single().CacheKey, "The new symbol's definition is added.");
+        // Guard: the cache holding it already is kept as KiCad holds it.
+        Assert.IsTrue(SchematicLibraryCacheEquivalence.Equal(entry, Replacements(await cached.Realize()).Single()));
+
+        // Must-catch: KiCad holds another version of that definition; the replacement would silently change it.
+        var changed = cached.InCheckpoint(data => Root(data).CachedSymbols[0].Definition.Keywords = "edited in KiCad");
+        await RequireRefusal(changed, SchematicConnectionErrors.ConnectedInternalInconsistency, "would change the library definition '" + entry.CacheKey + "'");
+        // Must-catch: KiCad holds a definition the plan does not; the replacement would drop it.
+        var extra = Entry(scene.Saved.Observed, "TP1");
+        var dropped = cached.InCheckpoint(data => Root(data).CachedSymbols.Add(extra.Clone()));
+        await RequireRefusal(dropped, SchematicConnectionErrors.ConnectedInternalInconsistency, "would drop the library definition '" + extra.CacheKey + "'");
+
+        // Must-catch: U1 is created on the child sheet only, yet the root sheet's cache would be replaced (an earlier rule
+        // accepted any replacement once some symbol was created anywhere).
+        var crossing = HierarchyCrossing();
+        var rootEntry = Entry(crossing.Saved.Observed, "R5");
+        var elsewhere = crossing.InCheckpoint(data => Root(data).CachedSymbols.Add(rootEntry.Clone()));
+        await RequireRefusal(elsewhere, SchematicConnectionErrors.ConnectedInternalInconsistency, "which receives no new symbol");
+        // Must-catch: with no new symbol at all, no cache may be replaced.
+        var link = Link();
+        var linkEntry = Entry(link.Saved.Observed, "R1");
+        await RequireRefusal(link.InCheckpoint(data => Root(data).CachedSymbols.Add(linkEntry.Clone())),
+            SchematicConnectionErrors.ConnectedInternalInconsistency, "which receives no new symbol");
+        // Guards: unchanged caches are never replaced where nothing is created.
+        Assert.IsEmpty(Replacements(await crossing.Realize()).Where(d => d.CacheKey == rootEntry.CacheKey));
+        Assert.IsEmpty(Replacements(await link.Realize()));
     }
 
     [TestMethod]
@@ -1094,7 +1259,10 @@ public sealed class SchematicConnectionRealizerTests
                     long half = Math.Max(1, pins.Length) * Grid + Grid;
                     var box = Body.TryGetValue(id, out var body) ? body
                         : new Rect(symbol.Position.XNm - 4 * Grid, symbol.Position.YNm - half, symbol.Position.XNm + 4 * Grid, symbol.Position.YNm + half);
-                    foreach (var pin in pins) box = new(Math.Min(box.L, pin.At.X), Math.Min(box.T, pin.At.Y), Math.Max(box.R, pin.At.X), Math.Max(box.B, pin.At.Y));
+                    // KiCad draws a symbol whose definition it cannot resolve without pins, and measures it by its own bounds.
+                    bool unresolved = Incomplete.TryGetValue(id, out var missing) && missing == SchematicPinGeometryIncompleteReason.SpgirDefinitionUnresolved;
+                    if (!unresolved)
+                        foreach (var pin in pins) box = new(Math.Min(box.L, pin.At.X), Math.Min(box.T, pin.At.Y), Math.Max(box.R, pin.At.X), Math.Max(box.B, pin.At.Y));
                     result.Anchor = symbol.Position.Clone(); result.Bounds = Box(box);
                     var geometry = new SchematicSymbolPinGeometry();
                     if (Incomplete.TryGetValue(id, out var reason)) { geometry.IncompleteReason = reason; geometry.Limitations.Add("Synthetic incomplete pins"); }
@@ -1168,17 +1336,20 @@ public sealed class SchematicConnectionRealizerTests
 
     // ---- recorded live measurements ----
 
-    /// <summary>A realization recording: the planned revision's nets and exact desired-file digest, the checkpoint,
-    /// every measurement request with the editor's reply in order, and the operations and generated items the
-    /// realizer produced from them. The recovery record the revision was planned from is kept once beside it.</summary>
+    /// <summary>A realization recording: the planned revision's circuit (its nets listed again for reading) and exact
+    /// desired-file digest, the checkpoint, every measurement request with the editor's reply in order, and the operations
+    /// and generated items the realizer produced from them. The recovery record the revision was planned from is kept once
+    /// beside it, under the name <paramref name="recovery"/> that the recording carries.</summary>
     internal static string FormatRecording(string scenario, DesignRecoveryState revision, CheckedSchematicState checkpoint,
-        IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> measurements, SchematicConnectionRealization realization)
+        IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> measurements, SchematicConnectionRealization realization,
+        string recovery = "editor.recovery.json")
     {
         static System.Text.Json.Nodes.JsonNode Proto(IMessage message) => System.Text.Json.Nodes.JsonNode.Parse(SchematicJson.Formatter.Format(message))!;
-        var nets = DesignRecoveryStore.ReadDesired(revision).Engineering.Circuit.Nets;
+        var circuit = DesignRecoveryStore.ReadDesired(revision).Engineering.Circuit;
+        var nets = circuit.Nets;
         var root = new System.Text.Json.Nodes.JsonObject
         {
-            ["fixture"] = "connection-realization", ["version"] = 1, ["scenario"] = scenario,
+            ["fixture"] = "connection-realization", ["version"] = 1, ["scenario"] = scenario, ["recovery"] = recovery,
             ["desiredSha256"] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(revision.DesiredFileBytes)),
             ["nets"] = new System.Text.Json.Nodes.JsonArray([.. nets.Select(n => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject
             {
@@ -1186,6 +1357,7 @@ public sealed class SchematicConnectionRealizerTests
                 ["pins"] = new System.Text.Json.Nodes.JsonArray([.. n.Pins.Select(p => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject
                     { ["component"] = p.ComponentId.ToString("D"), ["number"] = p.Pin })])
             })]),
+            ["circuit"] = CircuitXml.Write(circuit),
             ["checkpoint"] = Proto(checkpoint),
             ["measurements"] = new System.Text.Json.Nodes.JsonArray([.. measurements.Select(m =>
                 (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject { ["request"] = Proto(m.Request), ["response"] = Proto(m.Reply) })]),
@@ -1284,7 +1456,7 @@ public sealed class SchematicConnectionRealizerTests
                 return reply;
             }), SchematicConnectionErrors.RealizationImplicitPowerMismatch);
             // On the real sheet: a foreign junction beside the recorded stub end, within the clearance, moves that stub
-            // one grid further out, and junctions beside every stub end leave no room at all.
+            // further out, and junctions beside every stub end leave no room at all.
             var policy = SchematicConnectionPolicy.FromSnapshot(recording.Checkpoint.Electrical.Hierarchy.Data);
             long grid = policy.GridNm;
             var stubbedPin = Guid.Parse(recording.Generated.First(g => g!["role"]!.GetValue<string>() == nameof(GeneratedConnectionRole.StubWire))!["placedPin"]!.GetValue<string>());
@@ -1295,21 +1467,58 @@ public sealed class SchematicConnectionRealizerTests
             var (dx, dy) = (Math.Sign(recordedWire.Line.End.XNm - recordedWire.Line.Start.XNm), Math.Sign(recordedWire.Line.End.YNm - recordedWire.Line.Start.YNm));
             Kiapi.Common.Types.Vector2 Along(long length, long aside = 0) => new()
                 { XNm = recordedWire.Line.Start.XNm + dx * length - dy * aside, YNm = recordedWire.Line.Start.YNm + dy * length + dx * aside };
-            Assert.AreEqual(Along(SchematicConnectionPolicy.StubMultiples[0] * grid), recordedWire.Line.End, "The recorded stub has the shortest length.");
-            var blocked = recording.WithJunction(Along(SchematicConnectionPolicy.StubMultiples[0] * grid, policy.ClearanceNm), screen);
-            var moved = await blocked.Realize();
-            var movedWire = moved.Operations.Where(o => o.Create is not null && o.Create.Is(SchematicLine.Descriptor)).Select(o => o.Create.Unpack<SchematicLine>())
-                .Single(l => moved.Generated.Any(g => g.PlacedPinId == stubbedPin && g.Role == GeneratedConnectionRole.StubWire && g.Id.ToString("D") == l.Id.Value));
-            Assert.AreEqual(Along(SchematicConnectionPolicy.StubMultiples[1] * grid), movedWire.End, recording.Scenario);
+            // The recorded stub has one of the policy's lengths: the shortest one with room on the real sheet.
+            long recordedLength = Math.Abs(recordedWire.Line.End.XNm - recordedWire.Line.Start.XNm) + Math.Abs(recordedWire.Line.End.YNm - recordedWire.Line.Start.YNm);
+            int shortest = Array.IndexOf(SchematicConnectionPolicy.StubMultiples, (int)(recordedLength / grid));
+            Assert.IsTrue(recordedLength % grid == 0 && shortest >= 0, recording.Scenario + ": the recorded stub has one of the policy's lengths.");
+            Assert.AreEqual(Along(recordedLength), recordedWire.Line.End, recording.Scenario);
+            if (shortest + 1 < SchematicConnectionPolicy.StubMultiples.Length)
+            {
+                var blocked = recording.WithJunction(Along(recordedLength, policy.ClearanceNm), screen);
+                var moved = await blocked.Realize();
+                var movedWire = moved.Operations.Where(o => o.Create is not null && o.Create.Is(SchematicLine.Descriptor)).Select(o => o.Create.Unpack<SchematicLine>())
+                    .Single(l => moved.Generated.Any(g => g.PlacedPinId == stubbedPin && g.Role == GeneratedConnectionRole.StubWire && g.Id.ToString("D") == l.Id.Value));
+                long movedLength = Math.Abs(movedWire.End.XNm - movedWire.Start.XNm) + Math.Abs(movedWire.End.YNm - movedWire.Start.YNm);
+                Assert.IsTrue(movedLength > recordedLength && SchematicConnectionPolicy.StubMultiples.Contains((int)(movedLength / grid)),
+                    recording.Scenario + ": the stub moves to a longer policy length.");
+                Assert.AreEqual(Along(movedLength), movedWire.End, recording.Scenario);
+                if (shortest == 0)
+                    Assert.AreEqual(SchematicConnectionPolicy.StubMultiples[1] * grid, movedLength, recording.Scenario + ": the next length has room.");
+            }
             var everywhere = recording;
             foreach (int multiple in SchematicConnectionPolicy.StubMultiples) everywhere = everywhere.WithJunction(Along(multiple * grid, policy.ClearanceNm), screen);
             await RequireRecordingRefusal(everywhere, SchematicConnectionErrors.RealizationNoFreeStub);
+            // On a real sheet where an existing connection was named by a label on a join candidate's pin (no join stub had
+            // room): a junction one grid inside that label leaves it no room there, so the realizer names a later candidate
+            // or, with none left that has room, refuses with realization_no_join_anchor; it never draws over the junction.
+            if (realization.Generated.SingleOrDefault(g => g.Role == GeneratedConnectionRole.AnchorLabel) is { } anchor)
+            {
+                var island = recording.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.JoinCandidates.Any(c => c.PlacedPinId == anchor.PlacedPinId));
+                int at = island.JoinCandidates.ToList().FindIndex(c => c.PlacedPinId == anchor.PlacedPinId);
+                var (target, label) = realization.Operations.Where(o => o.Create?.Is(LocalLabel.Descriptor) == true)
+                    .Select(o => (o.TargetDocument, Label: o.Create.Unpack<LocalLabel>())).Single(x => x.Label.Id.Value == anchor.Id.ToString("D"));
+                var (fx, fy) = SchematicConnectionRealizer.Facing(label.SpinStyle);
+                var labelScreen = recording.Checkpoint.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(target)).Metadata.ScreenId;
+                var blockedLabel = recording.WithJunction(new() { XNm = label.Position.XNm + fx * grid, YNm = label.Position.YNm + fy * grid }, labelScreen);
+                try
+                {
+                    var renamed = await blockedLabel.Realize();
+                    var named = renamed.Generated.Single(g => island.JoinCandidates.Any(c => c.PlacedPinId == g.PlacedPinId)
+                        && g.Role is GeneratedConnectionRole.AnchorLabel or GeneratedConnectionRole.StubLabel);
+                    Assert.IsGreaterThan(at, island.JoinCandidates.ToList().FindIndex(c => c.PlacedPinId == named.PlacedPinId),
+                        recording.Scenario + ": a later join candidate is named.");
+                }
+                catch (AutomationException refusal)
+                {
+                    Assert.AreEqual(SchematicConnectionErrors.RealizationNoJoinAnchor, refusal.Code, recording.Scenario + ": " + refusal.Message);
+                }
+            }
         }
     }
 
     /// <summary>One recorded live realization (automation/tests/fixtures/connection-realization), optionally with a
     /// fault injected into the editor's recorded answers.</summary>
-    internal sealed record Recording(string Scenario, DesignRecoveryState Saved, IReadOnlyList<CircuitNet> Nets, DesignRecoveryState State,
+    internal sealed record Recording(string Scenario, DesignRecoveryState Saved, Circuit Desired, DesignRecoveryState State,
         SchematicSynchronizationPlan Plan, CheckedSchematicState Checkpoint,
         IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> Measurements, IReadOnlyList<SchematicItemOperation> Operations,
         IReadOnlyList<System.Text.Json.Nodes.JsonNode?> Generated, Func<MeasureSchematicPlacement, SchematicPlacementGeometry, SchematicPlacementGeometry>? Fault = null)
@@ -1329,7 +1538,7 @@ public sealed class SchematicConnectionRealizerTests
                 foreach (var copy in data.Instances.Where(s => s.Metadata.ScreenId.Equals(screen))) copy.Items.Add(item.Clone());
             }
             var saved = SchematicConnectionRealizerTests.Edited(Saved, Add);
-            var state = Revision(saved, Nets);
+            var state = Revision(saved, Desired);
             var plan = SchematicConnectionIntentBuilderTests.Plan(state);
             _ = RequireRealizationPlan(plan);
             var checkpoint = Checkpoint.Clone();
@@ -1344,10 +1553,11 @@ public sealed class SchematicConnectionRealizerTests
             } };
         }
 
-        /// <summary>The revision the journey planned: the saved record with only its nets replaced.</summary>
-        public static DesignRecoveryState Revision(DesignRecoveryState saved, IReadOnlyList<CircuitNet> nets)
+        /// <summary>The revision the journey planned: the saved record with only its circuit replaced (its nets, and any
+        /// component the revision adds).</summary>
+        public static DesignRecoveryState Revision(DesignRecoveryState saved, Circuit circuit)
         {
-            var design = saved.Baseline with { Engineering = saved.Baseline.Engineering with { Circuit = saved.Baseline.Engineering.Circuit with { Nets = nets } } };
+            var design = saved.Baseline with { Engineering = saved.Baseline.Engineering with { Circuit = circuit } };
             return saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, saved.KnowledgeLibraries)) };
         }
 
@@ -1372,17 +1582,23 @@ public sealed class SchematicConnectionRealizerTests
             var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!;
             Assert.AreEqual("connection-realization", root["fixture"]!.GetValue<string>());
             Assert.AreEqual(1, root["version"]!.GetValue<int>());
-            // Every scenario was planned from the same saved record with only its nets replaced, exactly as the journey did.
-            var saved = new DesignRecoveryStore(Path.Combine(RecordingDirectory, "editor.recovery.json")).Read()!.State;
+            // Every scenario was planned from its saved record (shared by the scenarios of one editor state) with only its
+            // nets replaced, exactly as the journey did. Recordings made before records were named use editor.recovery.json.
+            string record = root["recovery"]?.GetValue<string>() ?? "editor.recovery.json";
+            Assert.AreEqual(Path.GetFileName(record), record);
+            var saved = new DesignRecoveryStore(Path.Combine(RecordingDirectory, record)).Read()!.State;
             var nets = root["nets"]!.AsArray().Select(n => new CircuitNet(Guid.Parse(n!["id"]!.GetValue<string>()), n["name"]!.GetValue<string>(),
                 [.. n["pins"]!.AsArray().Select(p => new PinEndpoint(Guid.Parse(p!["component"]!.GetValue<string>()), p["number"]!.GetValue<string>()))])).ToArray();
-            var state = Recording.Revision(saved, nets);
+            // Recordings made before the circuit was kept changed only the nets.
+            var circuit = root["circuit"] is { } kept ? CircuitXml.Read(kept.GetValue<string>()) : saved.Baseline.Engineering.Circuit with { Nets = nets };
+            CollectionAssert.AreEqual(nets.Select(n => n.Id).ToArray(), circuit.Nets.Select(n => n.Id).ToArray());
+            var state = Recording.Revision(saved, circuit);
             Assert.AreEqual(root["desiredSha256"]!.GetValue<string>(), Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(state.DesiredFileBytes)),
                 "The recorded revision is reconstructed byte for byte.");
             var plan = SchematicConnectionIntentBuilderTests.Plan(state);
             _ = RequireRealizationPlan(plan);
             T Parse<T>(System.Text.Json.Nodes.JsonNode node) where T : IMessage<T>, new() => SchematicJson.Parser.Parse<T>(node.ToJsonString());
-            result.Add(new(root["scenario"]!.GetValue<string>(), saved, nets, state, plan, Parse<CheckedSchematicState>(root["checkpoint"]!),
+            result.Add(new(root["scenario"]!.GetValue<string>(), saved, circuit, state, plan, Parse<CheckedSchematicState>(root["checkpoint"]!),
                 [.. root["measurements"]!.AsArray().Select(m => (Parse<MeasureSchematicPlacement>(m!["request"]!), Parse<SchematicPlacementGeometry>(m!["response"]!)))],
                 [.. root["operations"]!.AsArray().Select(o => Parse<SchematicItemOperation>(o!))], [.. root["generated"]!.AsArray()]));
         }

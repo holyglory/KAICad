@@ -4,12 +4,14 @@
  */
 // Exact pin identities of alternate symbol variants, and the pin facts connected
 // realization measures (contract CN-1 §6.2 and §11): why a symbol's pin geometry is
-// incomplete, each pin's effective electrical type, and the implicit power connection
-// the connection graph gives it.
+// incomplete, each pin's effective electrical type, the implicit power connection the
+// connection graph gives it, and the bounds a placement measurement reports for a symbol.
 #include <boost/test/unit_test.hpp>
 #include <api/api_sch_utils.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <lib_symbol.h>
+#include <math/util.h>
+#include <sch_field.h>
 #include <sch_pin.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
@@ -173,6 +175,77 @@ BOOST_AUTO_TEST_CASE( PinsReportTheirImplicitPowerConnection )
     BOOST_CHECK_EQUAL( pins["1"].power_scope(), SPPS_NONE );
     BOOST_CHECK( pins["1"].power_net().empty() );
     BOOST_CHECK_EQUAL( pins["1"].electrical_type(), kiapi::common::types::EPT_POWER_OUTPUT );
+}
+
+
+BOOST_AUTO_TEST_CASE( UnresolvedSymbolsAreMeasuredByTheirOwnBounds )
+{
+    // KiCad draws a symbol whose library definition it cannot resolve as its placeholder
+    // body, without pins. A placement measurement reports exactly those bounds, as KiCad's
+    // own bounding box does, and its pins as incomplete, instead of refusing the sheet.
+    PLACED placed( wxS( "Resolved" ) );
+    AddPin( placed.library, wxS( "1" ), wxS( "A" ), ELECTRICAL_PINTYPE::PT_PASSIVE, true );
+    placed.Place();
+    SCH_SYMBOL unresolved;
+    unresolved.SetPosition( VECTOR2I( schIUScale.mmToIU( 25.4 ), schIUScale.mmToIU( 12.7 ) ) );
+    unresolved.SetOrientation( SYM_ORIENT_90 );
+    for( SCH_FIELD& field : unresolved.GetFields() )
+        field.SetVisible( false );
+    const BOX2I bounds = MeasureSchematicSymbolBounds( unresolved, placed.path, wxEmptyString );
+    BOOST_CHECK( bounds == unresolved.GetBodyAndPinsBoundingBox() );
+    BOOST_CHECK_GT( bounds.GetWidth(), 0 );
+    BOOST_CHECK_GT( bounds.GetHeight(), 0 );
+    BOOST_CHECK( bounds.Contains( unresolved.GetPosition() ) );
+    SchematicSymbolPinGeometry output;
+    PackSchematicPinGeometry( unresolved, placed.path, wxEmptyString, output );
+    BOOST_CHECK( !output.complete() );
+    BOOST_CHECK_EQUAL( output.pins_size(), 0 );
+    BOOST_CHECK_EQUAL( output.incomplete_reason(), SPGIR_DEFINITION_UNRESOLVED );
+
+    // A visible field of the unresolved symbol is part of its bounds, as KiCad draws it.
+    SCH_FIELD* reference = unresolved.GetField( FIELD_T::REFERENCE );
+    BOOST_REQUIRE( reference );
+    reference->SetText( wxS( "X1" ) );
+    reference->SetPosition( unresolved.GetPosition() + VECTOR2I( schIUScale.mmToIU( 20 ), 0 ) );
+    reference->SetVisible( true );
+    const BOX2I withField = MeasureSchematicSymbolBounds( unresolved, placed.path, wxEmptyString );
+    BOOST_CHECK( withField.Contains( bounds ) );
+    BOOST_CHECK( withField.Contains( reference->GetBoundingBox( &placed.path, wxEmptyString ) ) );
+
+    // False-positive guard: the resolved symbol is measured by its own definition, with its pin.
+    const BOX2I resolved = MeasureSchematicSymbolBounds( *placed.symbol, placed.path, wxEmptyString );
+    BOOST_CHECK( resolved.Contains( placed.symbol->GetPins( &placed.path ).front()->GetPosition() ) );
+    placed.Measure( output );
+}
+
+
+BOOST_AUTO_TEST_CASE( VisiblePinBoundsReachThePinTarget )
+{
+    // A symbol's measured bounds reach past the end of every visible pin by the target KiCad
+    // draws on an unconnected pin end (TARGET_PIN_RADIUS, 15 mil) plus the pin box's one-unit
+    // inflation: 381,100 nm. Library pins, which the measurement reads, are never connected.
+    // The reach does not come from fields: with every field hidden and empty it remains. The
+    // realizer lets a label on a pin cover its own symbol only that far in front of the pin.
+    auto reach = []( ELECTRICAL_PINTYPE aType )
+    {
+        PLACED placed( wxS( "Reach" ) );
+        AddPin( placed.library, wxS( "1" ), wxS( "A" ), aType, true );
+        placed.Place();
+        for( SCH_FIELD& field : placed.symbol->GetFields() )
+        {
+            field.SetText( wxEmptyString );
+            field.SetVisible( false );
+        }
+        const BOX2I bounds = MeasureSchematicSymbolBounds( *placed.symbol, placed.path, wxEmptyString );
+        const SCH_PIN* pin = placed.symbol->GetPins( &placed.path ).front();
+        // The default pin runs right from its connection point into the body, so it faces left.
+        BOOST_REQUIRE( pin->PinDrawOrient( placed.symbol->GetTransform() ) == PIN_ORIENTATION::PIN_RIGHT );
+        return pin->GetPosition().x - bounds.GetLeft();
+    };
+    BOOST_CHECK_EQUAL( reach( ELECTRICAL_PINTYPE::PT_PASSIVE ), TARGET_PIN_RADIUS + 1 );
+    BOOST_CHECK_EQUAL( KiROUND( schIUScale.IUTomm( TARGET_PIN_RADIUS + 1 ) * 1e6 ), 381100 );
+    // A no-connect pin is never drawn dangling, so its bounds end one unit past it.
+    BOOST_CHECK_EQUAL( reach( ELECTRICAL_PINTYPE::PT_NC ), 1 );
 }
 
 

@@ -1018,6 +1018,8 @@ public sealed partial class NativeSessionTests
             RequireToolSuccess(await publicHost.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId }));
         }
         await VerifyCreatedFieldLayout(client, document, store, path, createdIds, evidence, instanceId, processId, display, token);
+        var anchorLabelJoin = await RequireAnchorLabelJoin();
+        var unresolvedSymbol = await RequireUnresolvedSymbolMeasured();
         var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document.Clone() }, token);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-creation-render.png"), image.Preview.Png.ToByteArray(), token);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-creation-window.png"), token);
@@ -1029,11 +1031,288 @@ public sealed partial class NativeSessionTests
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
             selectedBodyStyle = declaration?.BodyStyle, crossSheetUnits = crossSheet.Length,
-            crossSheetRejection, connectionGate,
+            crossSheetRejection, connectionGate, anchorLabelJoin, unresolvedSymbol,
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+        // A sheet holding a symbol whose library definition KiCad cannot resolve (here its cache entry is missing, as in a
+        // project copied without its libraries) is still measured for generated connections: KiCad reports that symbol as
+        // an obstacle of its own drawn bounds, exactly the bounds KiCad itself gives the item, with its pins incomplete
+        // (SPGIR_DEFINITION_UNRESOLVED), and every other symbol on the sheet as before. Earlier the whole sheet was refused.
+        // The root sheet file is saved, given such a symbol on disk, reloaded, measured, then restored and reloaded again.
+        async Task<object> RequireUnresolvedSymbolMeasured()
+        {
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+            string rootFile = Path.Combine(document.Project.Path, document.Project.Name + ".kicad_sch");
+            byte[] original = await File.ReadAllBytesAsync(rootFile, token);
+            string text = Encoding.UTF8.GetString(original);
+            string unresolvedId = Guid.NewGuid().ToString("D");
+            string rootPath = "/" + document.SheetPath.Path[0].Value;
+            string symbol = $$"""
+                (symbol (lib_id "Unavailable:Unresolved") (at 266.7 25.4 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
+                  (uuid "{{unresolvedId}}")
+                  (property "Reference" "X1" (at 266.7 20.32 0) (effects (font (size 1.27 1.27))))
+                  (property "Value" "Unresolved" (at 266.7 30.48 0) (effects (font (size 1.27 1.27))))
+                  (instances (project "{{document.Project.Name}}" (path "{{rootPath}}" (reference "X1") (unit 1)))))
+
+                """;
+            int at = text.IndexOf("(sheet_instances", StringComparison.Ordinal);
+            Assert.IsGreaterThan(0, at, "The saved root sheet lists its sheet instances.");
+            Assert.IsFalse(text.Contains("\"Unavailable:Unresolved\"", StringComparison.Ordinal));
+            await File.WriteAllTextAsync(rootFile, text.Insert(at, symbol), new UTF8Encoding(false), token);
+            try
+            {
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+                var loaded = await Capture();
+                var rootDocument = loaded.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1).Metadata.Document;
+                var request = new MeasureSchematicPlacement { Document = rootDocument.Clone(), ExpectedRevision = loaded.State.Revision.Clone() };
+                var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-measure-unresolved-symbol.json"), SchematicJson.Formatter.Format(measured), token);
+                Assert.AreEqual(loaded.State.Revision, measured.Revision);
+                Assert.IsTrue(measured.PinGeometryAvailable);
+                var unresolved = measured.Obstacles.Single(o => o.Id.Value == unresolvedId);
+                Assert.IsNotNull(unresolved.SymbolPins, "An unresolved symbol is still reported as a symbol.");
+                Assert.IsFalse(unresolved.SymbolPins.Complete);
+                Assert.AreEqual(SchematicPinGeometryIncompleteReason.SpgirDefinitionUnresolved, unresolved.SymbolPins.IncompleteReason);
+                Assert.IsEmpty(unresolved.SymbolPins.Pins);
+                Assert.IsTrue(unresolved.Bounds.Size.XNm > 0 && unresolved.Bounds.Size.YNm > 0);
+                // Exactly the bounds KiCad itself gives that item on the displayed sheet.
+                await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = rootDocument.Clone() }, token);
+                var query = new GetBoundingBox { Header = new() { Document = rootDocument.Clone() }, Mode = BoundingBoxMode.BbmItemAndChildText };
+                query.Items.Add(unresolved.Id.Clone());
+                var own = await client.InvokeAsync<GetBoundingBox, GetBoundingBoxResponse>(query, token);
+                Assert.AreEqual(own.Boxes.Single(), unresolved.Bounds, "The unresolved symbol is measured by its own drawn bounds.");
+                // Every other item of the sheet is measured as before, every other symbol with its complete pins.
+                var others = measured.Obstacles.Where(o => o.Id.Value != unresolvedId).ToArray();
+                CollectionAssert.AreEquivalent(SchematicItemDelta.Index(loaded.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(rootDocument)).Items)
+                    .Where(p => p.Value is not Group).Select(p => p.Key.ToString("D")).ToArray(), measured.Obstacles.Select(o => o.Id.Value).ToArray());
+                Assert.IsTrue(others.Where(o => o.SymbolPins is not null).All(o => o.SymbolPins.Complete), "Resolved symbols keep their exact pins.");
+                return new { unresolvedSymbol = unresolvedId, measuredWithoutRefusal = true, reason = unresolved.SymbolPins.IncompleteReason.ToString(),
+                    ownBoundsMatchKiCad = true, otherSymbols = others.Count(o => o.SymbolPins is not null) };
+            }
+            finally
+            {
+                await File.WriteAllBytesAsync(rootFile, original, CancellationToken.None);
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, CancellationToken.None);
+                await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, CancellationToken.None);
+            }
+        }
+
+        // CN-1 §6.3 (a) on this editor: a connection KiCad already shows without a label is named where it is. The editor
+        // first reloads its saved sheets. In one native step, TP1 and TP2 move together to free room if they must, the probe
+        // link is redrawn as a U-shaped wire under them and its SIGNAL label is removed, so the wire leaves each probe pin
+        // straight in the direction a stub from it would take: no join stub has room (it would run along that wire), and
+        // the realizer puts the label on a probe pin itself: the first one its rule finds room on. The XML revision
+        // names the link LINK and adds a new probe TP900, placed where KiCad's measurement shows free room, to it. The realization is measured live and
+        // not applied (lane 2C's native assertion is still missing), kept as the join-anchor-label replay fixture, and the
+        // redraw is then undone natively in one step.
+        async Task<object> RequireAnchorLabelJoin()
+        {
+            var session = await client.HandshakeAsync(token);
+            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var current = store.Read()!;
+            Assert.IsFalse(current.State.HasPendingWork);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+            var before = await Capture();
+            Assert.IsFalse(before.State.NativeContentDirty);
+            var data = before.Electrical.Hierarchy.Data;
+            var rootScreen = data.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+            var rootDocument = rootScreen.Metadata.Document;
+            var policy = SchematicConnectionPolicy.FromSnapshot(data);
+            long grid = policy.GridNm;
+            var circuit = current.State.Baseline.Engineering.Circuit;
+            var link = circuit.Nets.Single(n => n.Pins.Count == 2 && n.Pins.All(p => !createdIds.Contains(p.ComponentId)));
+            var keys = SchematicConnectionIntentBuilderTests.Keys(current.State.Baseline, [.. link.Pins.Select(p => (p.ComponentId, p.Pin))]);
+            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = rootDocument.Clone(), ExpectedRevision = before.State.Revision.Clone() }, token);
+            var probes = keys.Select(k => measured.Obstacles.Where(o => o.SymbolPins is not null)
+                .SelectMany(o => o.SymbolPins.Pins.Select(p => (Owner: o, Pin: p))).Single(x => x.Pin.Id.Value == k.PlacedPinId.ToString("D"))).ToArray();
+            var outward = SchematicConnectionGeometry.Outward(probes[0].Pin);
+            Assert.AreEqual(outward, SchematicConnectionGeometry.Outward(probes[1].Pin), "Both fixture probes face the same way.");
+            long Along(Vector2 v) => outward.Dx * v.XNm + outward.Dy * v.YNm;
+            Assert.AreEqual(Along(probes[0].Pin.Position), Along(probes[1].Pin.Position), "Both fixture probe pins lie on one line.");
+            var oldWire = rootScreen.Items.Where(i => i.Is(SchematicLine.Descriptor)).Select(i => i.Unpack<SchematicLine>()).Single();
+            var oldLabel = rootScreen.Items.Where(i => i.Is(LocalLabel.Descriptor)).Select(i => i.Unpack<LocalLabel>()).Single(l => l.Text.Text_ == "SIGNAL");
+            // Free room: a rectangle keeping a clearance from everything KiCad measured on the root sheet but the listed items,
+            // inside the fixture's usable region (10 mm page inset, bottom 50 mm kept for the title block).
+            static (long L, long T, long R, long B) Rect(Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
+            bool Free((long L, long T, long R, long B) area, ISet<string> ignored) =>
+                area.L >= 10_000_000 && area.T >= 10_000_000 && area.R <= measured.PageBounds.Size.XNm - 10_000_000 && area.B <= measured.PageBounds.Size.YNm - 50_000_000
+                && measured.Obstacles.Where(o => !ignored.Contains(o.Id.Value)).All(o =>
+                {
+                    var box = Rect(o.Bounds);
+                    return area.R + policy.ClearanceNm < box.L || area.L - policy.ClearanceNm > box.R || area.B + policy.ClearanceNm < box.T || area.T - policy.ClearanceNm > box.B;
+                });
+            static bool Apart((long L, long T, long R, long B) a, (long L, long T, long R, long B) b) => a.R < b.L || a.L > b.R || a.B < b.T || a.T > b.B;
+            // The scene: TP1 and TP2 (whose model leaves their placement to the editor) keep their relative placement and move
+            // together, if they must, to the first spot where both, the U six grids under their pins and room for a label on
+            // either pin keep clear of everything else on the root sheet. Fields dragged far from their symbols by earlier
+            // checks make wide bounds elsewhere on this sheet, and a label may not overlap any bounds.
+            long depth = 6 * grid;
+            var linkItems = new HashSet<string>(StringComparer.Ordinal) { probes[0].Owner.Id.Value, probes[1].Owner.Id.Value, oldWire.Id.Value, oldLabel.Id.Value };
+            var (b0, b1) = (Rect(probes[0].Owner.Bounds), Rect(probes[1].Owner.Bounds));
+            (long L, long T, long R, long B) Scene(long dx, long dy)
+            {
+                long reach = depth + 4 * grid, margin = 2 * grid;
+                return (Math.Min(b0.L, b1.L) + dx - (outward.Dx < 0 ? reach : 0) - margin, Math.Min(b0.T, b1.T) + dy - (outward.Dy < 0 ? reach : 0) - margin,
+                    Math.Max(b0.R, b1.R) + dx + (outward.Dx > 0 ? reach : 0) + margin, Math.Max(b0.B, b1.B) + dy + (outward.Dy > 0 ? reach : 0) + margin);
+            }
+            var shifts = new List<(long Dx, long Dy)> { (0, 0) };
+            for (long y = 30_480_000; y <= 130_000_000; y += 5_080_000)
+                for (long x = 20_320_000; x <= 260_000_000; x += 5_080_000)
+                    shifts.Add((x - probes[0].Pin.Position.XNm, y - probes[0].Pin.Position.YNm));
+            var shift = shifts.Cast<(long Dx, long Dy)?>().FirstOrDefault(s => Free(Scene(s!.Value.Dx, s.Value.Dy), linkItems))
+                ?? throw new AssertFailedException("The root sheet has no free room for the redrawn probe link.");
+            var scene = Scene(shift.Dx, shift.Dy);
+            Vector2 Moved(Vector2 v) => new() { XNm = v.XNm + shift.Dx, YNm = v.YNm + shift.Dy };
+            Vector2 Out(Vector2 v, long length) => new() { XNm = v.XNm + outward.Dx * length, YNm = v.YNm + outward.Dy * length };
+            var (p0, p1) = (Moved(probes[0].Pin.Position), Moved(probes[1].Pin.Position));
+            var path = new[] { p0, Out(p0, depth), Out(p1, depth), p1 };
+            // A free spot for the new probe, on the fixture grid: every unit (15.24 mm apart, like TP899's) with its fields,
+            // and the room below its pin for a stub and label, away from the scene.
+            var template = Rect(probes[0].Owner.Bounds);
+            var anchor0 = probes[0].Owner.Anchor;
+            long unitPitch = 15_240_000;
+            (long X, long Y)? spot = null;
+            for (long y = 25_400_000; spot is null && y <= 140_000_000; y += 5_080_000)
+                for (long x = 30_480_000; spot is null && x <= 260_000_000; x += 5_080_000)
+                {
+                    var area = (L: x + template.L - anchor0.XNm - grid, T: y + template.T - anchor0.YNm - grid,
+                        R: x + template.R - anchor0.XNm + grid, B: y + (part.Units - 1) * unitPitch + template.B - anchor0.YNm + 10 * grid);
+                    if (Apart(area, scene) && Free(area, linkItems)) spot = (x, y);
+                }
+            Assert.IsNotNull(spot, "The root sheet has free room for one more probe.");
+
+            SchematicSymbolInstance Shifted(string id)
+            {
+                var symbol = rootScreen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                    .Single(x => x.Id.Value == id).Clone();
+                symbol.Position = Moved(symbol.Position);
+                foreach (var field in new[] { symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField }
+                    .Concat(symbol.UserFields).Where(f => f?.Text?.Position is not null))
+                    field.Text.Position = Moved(field.Text.Position);
+                return symbol;
+            }
+            var wires = Enumerable.Range(0, 3).Select(i => new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = path[i].Clone(),
+                End = path[i + 1].Clone(), Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked }).ToArray();
+            var batch = new ApplySchematicItemBatch { Document = document.Clone(), DocumentEpoch = before.State.Revision.Epoch,
+                ExpectedRevision = before.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), Description = "Redraw the probe link without its label" };
+            if (shift != (0, 0))
+                foreach (var owner in probes.Select(p => p.Owner.Id.Value).Distinct())
+                    batch.Operations.Add(new SchematicItemOperation { TargetDocument = rootDocument.Clone(), Update = Any.Pack(Shifted(owner)) });
+            batch.Operations.Add(new SchematicItemOperation { TargetDocument = rootDocument.Clone(), Remove = oldLabel.Id.Clone() });
+            batch.Operations.Add(new SchematicItemOperation { TargetDocument = rootDocument.Clone(), Remove = oldWire.Id.Clone() });
+            batch.Operations.Add(wires.Select(w => new SchematicItemOperation { TargetDocument = rootDocument.Clone(), Create = Any.Pack(w) }));
+            var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = batch, ExpectedState = before.State.Clone() }, token);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status, receipt.ErrorCode + ": " + receipt.ErrorMessage);
+            var linked = await Capture();
+            // KiCad itself joins exactly the two probes through the new wire, and nothing names that connection.
+            var native = linked.Electrical.Nets.Single(n => n.Sheets.SelectMany(s => s.Items).Any(i => i.Value == probes[0].Pin.Id.Value));
+            CollectionAssert.AreEquivalent(new[] { probes[0].Pin.Id.Value, probes[1].Pin.Id.Value }.Concat(wires.Select(w => w.Id.Value)).ToArray(),
+                native.Sheets.SelectMany(s => s.Items).Select(i => i.Value).ToArray(), "The redrawn link joins exactly the two probes.");
+            var placed = probes.Select(p => (p.Owner, Pin: new SchematicPinAnchor(p.Pin) { Position = Moved(p.Pin.Position) })).ToArray();
+
+            // The record a synchronized editor holds for this redraw: the same model, KiCad's redrawn sheets. It plans settled.
+            var baseline = current.State.Baseline with { Schematic = linked.Electrical.Hierarchy.Data.Clone() };
+            var adopted = current.State with { NativeRevision = new(linked.State.Revision.Epoch, linked.State.Revision.Sequence),
+                TrackingComplete = linked.Electrical.Hierarchy.TrackingComplete, Baseline = baseline,
+                DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])), Observed = linked.Electrical.Hierarchy.Data.Clone(),
+                BaselineElectrical = linked.Electrical.Clone(), ObservedElectrical = linked.Electrical.Clone(), LastSynchronization = null };
+            var settled = SchematicSynchronizationPlanner.Plan(adopted, advertised, token);
+            Assert.IsTrue(settled.CanPrepare, settled.ErrorCode + ": " + settled.ErrorMessage);
+            Assert.IsEmpty(settled.NativeOperations, "The adopted redraw is settled.");
+
+            // The XML names the link LINK and adds the new probe TP900 to it.
+            Guid probeId = Guid.NewGuid(), probeDefinition = Guid.NewGuid();
+            var drawnPin = part.Pins.Where(p => p.Unit is 0 or 1).OrderBy(p => p.Number, StringComparer.Ordinal).First();
+            var named = link with { Name = "LINK", Pins = [.. link.Pins, new PinEndpoint(probeId, drawnPin.Number)] };
+            var desiredDesign = baseline with { Engineering = baseline.Engineering with { Circuit = circuit with
+            {
+                Components = [.. circuit.Components, new(probeId, probeDefinition, rootInstance.Id, "TP900")],
+                Sheets = circuit.Sheets.Select(s => s.Id == rootInstance.DefinitionId
+                    ? s with { Components = [.. s.Components, new(probeDefinition, part.Id, "XML join probe")] } : s).ToArray(),
+                Symbols = [.. circuit.Symbols, .. Enumerable.Range(1, part.Units).Select(unit => new SymbolOccurrence(Guid.NewGuid(), probeId, unit,
+                    new(spot.Value.X / 1_000_000m, (spot.Value.Y + (unit - 1) * unitPitch) / 1_000_000m, 0, false, false, false)))],
+                Nets = [.. circuit.Nets.Select(n => n.Id == link.Id ? named : n)]
+            } } };
+            var revision = adopted with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(desiredDesign, [])) };
+            Assert.IsNull(SchematicSynchronizationPlanner.Plan(revision, session, token).Connections, "This editor's own handshake admits no wiring.");
+            var plan = SchematicSynchronizationPlanner.Plan(revision, advertised, token);
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+            var island = intent.Screens.Single().Islands.Single();
+            Assert.AreEqual("LINK", island.LabelText);
+            Assert.IsFalse(island.AnchorHasMatchingDriver, "Nothing names the redrawn link.");
+            Assert.IsTrue(island.JoinRequired);
+            CollectionAssert.AreEquivalent(keys.Select(k => k.PlacedPinId).ToArray(), island.JoinCandidates.Select(p => p.PlacedPinId).ToArray());
+            var added = island.Members.Single(m => m.RequiresStub).Pin;
+            Assert.AreEqual(new PinEndpoint(probeId, drawnPin.Number), added.Endpoint);
+            Assert.IsTrue(added.CreatedSymbol);
+            var realization = await RealizeLive("join-anchor-label", adopted, revision, plan, advertised, "join-anchor-label.recovery.json");
+            var anchor = realization.Generated.Single(g => g.Role == GeneratedConnectionRole.AnchorLabel);
+            Assert.IsFalse(realization.Generated.Any(g => g.Role == GeneratedConnectionRole.StubWire && island.JoinCandidates.Any(c => c.PlacedPinId == g.PlacedPinId)),
+                "No join stub had room: each would run along the redrawn link.");
+            // The candidate named is the first one on which the realizer's own §6.4 rule admits a label on the pin, judged on a
+            // fresh live measurement of the same sheet (with the new probe as a candidate and the label measured on each pin):
+            // every earlier candidate's label is refused, and the reason is recorded.
+            var created = plan.Candidate!.Schematic.Instances.Single(x => x.Metadata.Document.Equals(rootDocument)).Items
+                .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Where(x => intent.CreatedSymbolIds.Contains(Guid.Parse(x.Id.Value))).ToArray();
+            Assert.HasCount(part.Units, created);
+            var judged = new MeasureSchematicPlacement { Document = rootDocument.Clone(), ExpectedRevision = linked.State.Revision.Clone() };
+            judged.Candidates.Add(created.Select(c => c.Clone()));
+            var revisionModel = new KiCad.Automation.Model.DocumentRevision(linked.State.Revision.Epoch, linked.State.Revision.Sequence);
+            var screenId = Guid.Parse(rootScreen.Metadata.ScreenId.Value);
+            foreach (var candidate in island.JoinCandidates)
+            {
+                var pin = placed.Single(p => p.Pin.Id.Value == candidate.PlacedPinId.ToString("D")).Pin;
+                var spin = SchematicConnectionGeometry.Spin(SchematicConnectionGeometry.Outward(pin));
+                var id = SchematicConnectionIdentity.Probe(revisionModel, screenId, LocalLabel.Descriptor, "LINK", spin, SchematicLabelShape.SlshUnknown, candidate.PlacedPinId, 0);
+                judged.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Local, id, pin.Position.Clone(), "LINK", spin, policy)));
+            }
+            var judgedGeometry = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(judged, token);
+            var linkedRoot = linked.Electrical.Hierarchy.Data.Instances.Single(x => x.Metadata.Document.Equals(rootDocument));
+            var islandItems = island.AnchorItemIds.Concat(island.Members.Select(m => m.Pin.PlacedPinId)).ToArray();
+            var verdicts = island.JoinCandidates.Select((c, i) => (Candidate: c, Refusal: SchematicConnectionRealizer.AnchorLabelRefusal(linkedRoot, judgedGeometry, c.SymbolId,
+                judgedGeometry.Obstacles.Single(o => Guid.Parse(o.Id.Value) == c.SymbolId).SymbolPins.Pins.Single(p => Guid.Parse(p.Id.Value) == c.PlacedPinId),
+                judgedGeometry.ItemCandidates[i].Bounds, islandItems, policy))).ToArray();
+            int admittedAt = Array.FindIndex(verdicts, v => v.Refusal is null);
+            Assert.IsGreaterThanOrEqualTo(0, admittedAt, "Some probe pin has room for the label: " + string.Join("; ", verdicts.Select(v => v.Refusal)));
+            var first = island.JoinCandidates[admittedAt];
+            Assert.AreEqual(first.PlacedPinId, anchor.PlacedPinId, "The realizer names the first candidate its own rule admits a label on.");
+            var label = realization.Operations.Where(o => o.Create?.Is(LocalLabel.Descriptor) == true).Select(o => o.Create.Unpack<LocalLabel>())
+                .Single(l => l.Id.Value == anchor.Id.ToString("D"));
+            var firstPin = placed.Single(p => p.Pin.Id.Value == first.PlacedPinId.ToString("D")).Pin;
+            Assert.AreEqual(firstPin.Position, label.Position, "The label sits on the probe pin itself.");
+            Assert.AreEqual(SchematicConnectionGeometry.Spin(outward), label.SpinStyle);
+            Assert.AreEqual("LINK", label.Text.Text_);
+            CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
+                realization.Generated.Where(g => g.PlacedPinId == added.PlacedPinId).Select(g => g.Role).ToArray(), "The new probe gets its own stub and label.");
+            Assert.HasCount(3, realization.Generated);
+            Assert.AreEqual(part.Units, realization.Operations.Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true), "The new probe is created with it.");
+            Assert.IsTrue(realization.Diagnostics.Any(d => d.Code == SchematicConnectionErrors.ExistingNetNamedByRealization && d.NetId == link.Id));
+
+            // One native undo restores the probe link as it was.
+            await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+            using (var wait = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                wait.CancelAfter(TimeSpan.FromSeconds(20));
+                while (true)
+                {
+                    var now = (await Capture()).Electrical.Hierarchy.Data;
+                    if (SchematicHierarchyDelta.Plan(data, now, token).Count == 0 && SchematicHierarchyDelta.Plan(now, data, token).Count == 0) break;
+                    await Task.Delay(250, wait.Token);
+                }
+            }
+            var result = new { depthNm = depth, linkMoved = new { shift.Dx, shift.Dy }, probeAt = new { spot.Value.X, spot.Value.Y }, joinCandidate = first.PlacedPinId, anchorLabel = anchor.Id,
+                candidates = verdicts.Select(v => new { pin = v.Candidate.PlacedPinId, admitted = v.Refusal is null, whyNot = v.Refusal }).ToArray(),
+                labelPosition = new { label.Position.XNm, label.Position.YNm }, spin = label.SpinStyle.ToString(),
+                generated = realization.Generated.Select(g => g.Role.ToString()).ToArray(), undone = true };
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-join-anchor-label.json"), JsonSerializer.Serialize(result), token);
+            return result;
+        }
+
 
         // Each moved unit is a native symbol on the root sheet with the component's own reference, the
         // same declared definition as its sibling unit on the channel sheet, and exactly its unit's pins.
@@ -1273,7 +1552,7 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(pairIntent.CreatedSymbolIds);
             // CN-1 §6: the label-stub realizer measures this editor and draws the pair: one shared hierarchical label on
             // the repeated channel sheet, and on the root one new sheet pin per channel with its own stub and label.
-            var pairRealization = await RealizeLive("channel-pair", pair.Revision, pair.Realizing);
+            var pairRealization = await RealizeLive("channel-pair", state, pair.Revision, pair.Realizing, advertised);
             var channelItems = pairRealization.Generated.Where(g => g.ScreenId == channelScreen.ScreenId).ToArray();
             CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
                 channelItems.Select(g => g.Role).ToArray(), "The shared channel pin gets one stub and one label for both channels.");
@@ -1305,7 +1584,7 @@ public sealed partial class NativeSessionTests
             SchematicConnectionIntentBuilderTests.RequireGroups(joinIntent, [SchematicConnectionIntentBuilderTests.Keys(state.Baseline,
                 [.. link.Pins.Select(p => (p.ComponentId, p.Pin)), (rootProbe.Id, drawnPin.Number)])]);
             // The new root probe pin gets one stub and a local label reusing the link's own name.
-            var joinRealization = await RealizeLive("join-existing-link", joined.Revision, joined.Realizing);
+            var joinRealization = await RealizeLive("join-existing-link", state, joined.Revision, joined.Realizing, advertised);
             CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
                 joinRealization.Generated.Select(g => g.Role).ToArray());
             var joinLabel = joinRealization.Operations.Where(o => o.Create is not null && o.Create.Is(LocalLabel.Descriptor))
@@ -1334,54 +1613,55 @@ public sealed partial class NativeSessionTests
             return new { channelPairIslands = channelScreen.Islands.Count, channelPairPorts = pairIntent.Ports.Count, joinLabel = joinIsland.LabelText,
                 joinAnchorItems = joinIsland.AnchorItemIds.Count, rootAndOneChannel = mixed.Realizing.ErrorCode,
                 channelPairGenerated = pairRealization.Generated.Count, joinExistingLinkGenerated = joinRealization.Generated.Count };
+        }
 
-            // Realize a planned intent against this editor's own measurements without applying anything (the native
-            // connectivity assertion that would admit the batch is lane 2C's). The lane entry point must turn the same
-            // recorded measurements into the identical batch, and the recording is kept as a replay fixture.
-            async Task<SchematicConnectionRealization> RealizeLive(string name, DesignRecoveryState revision, SchematicSynchronizationPlan plan)
+        // Realize a planned intent against this editor's own measurements without applying anything (the native
+        // connectivity assertion that would admit the batch is lane 2C's). The lane entry point must turn the same
+        // recorded measurements into the identical batch, and the recording is kept as a replay fixture beside the saved
+        // record the revision was planned from (<instance>-realization-<record>; committed as <record>).
+        async Task<SchematicConnectionRealization> RealizeLive(string name, DesignRecoveryState saved, DesignRecoveryState revision,
+            SchematicSynchronizationPlan plan, AutomationSession advertised, string record = "editor.recovery.json")
+        {
+            var checkpoint = await Capture();
+            Assert.AreEqual(revision.NativeRevision.Epoch, checkpoint.State.Revision.Epoch);
+            Assert.AreEqual(revision.NativeRevision.Sequence, checkpoint.State.Revision.Sequence);
+            Assert.AreEqual(revision.Observed, checkpoint.Electrical.Hierarchy.Data, "The executor realizes only the observed checkpoint.");
+            var recorded = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
+            async Task<SchematicPlacementGeometry> Live(MeasureSchematicPlacement request, CancellationToken cancellation)
             {
-                var checkpoint = await Capture();
-                Assert.AreEqual(revision.NativeRevision.Epoch, checkpoint.State.Revision.Epoch);
-                Assert.AreEqual(revision.NativeRevision.Sequence, checkpoint.State.Revision.Sequence);
-                Assert.AreEqual(revision.Observed, checkpoint.Electrical.Hierarchy.Data, "The executor realizes only the observed checkpoint.");
-                var recorded = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
-                async Task<SchematicPlacementGeometry> Live(MeasureSchematicPlacement request, CancellationToken cancellation)
-                {
-                    var reply = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation);
-                    recorded.Add((request.Clone(), reply.Clone()));
-                    return reply;
-                }
-                var policy = SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical.Hierarchy.Data);
-                var realization = await SchematicConnectionRealizer.RealizeAsync(plan.Connections!, plan.Candidate!, checkpoint, Live, policy, token);
-                Assert.IsNotNull(realization.Operations[^1].AssertConnectivity);
-                Assert.IsTrue(recorded.Any(r => r.Request.ItemCandidates.Count != 0), "Label prototypes are measured natively.");
-                foreach (var screen in plan.Connections!.Screens)
-                foreach (var path in screen.InstancePathKeys)
-                    Assert.IsTrue(recorded.Any(r => string.Join('/', r.Request.Document.SheetPath.Path.Select(p => p.Value)) == path),
-                        "Every instance path of every realized screen is measured: " + path);
-                // Every generated connection point lies inside the measured page inset.
-                foreach (var operation in realization.Operations.Where(o => o.Create is not null))
-                {
-                    var created = SchematicItemDelta.Index([operation.Create]).Single().Value;
-                    var point = created switch { SchematicLine line => line.End, LocalLabel label => label.Position, GlobalLabel label => label.Position,
-                        HierarchicalLabel label => label.Position, _ => null };
-                    if (point is null) continue;
-                    var page = recorded.First(r => r.Request.Document.Equals(operation.TargetDocument)).Reply.PageBounds;
-                    Assert.IsTrue(point.XNm >= page.Position.XNm + policy.PageInsetNm && point.XNm <= page.Position.XNm + page.Size.XNm - policy.PageInsetNm
-                        && point.YNm >= page.Position.YNm + policy.PageInsetNm && point.YNm <= page.Position.YNm + page.Size.YNm - policy.PageInsetNm, name);
-                }
-                var prepared = await SchematicConnectedAddition.RealizeAsync(SchematicConnectionRealizerTests.Replay(recorded), advertised, revision, plan, checkpoint, token);
-                CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), prepared.Operations.Select(o => o.ToByteString()).ToArray(),
-                    "The same measurements give the same batch (I9).");
-                Assert.AreEqual(SchematicDesignXml.Write(realization.Design, []), Encoding.UTF8.GetString(prepared.PlannedDesignFileBytes));
-                // Replay fixture (automation/tests/fixtures/connection-realization): this scenario's nets and measurements,
-                // planned from the saved record kept once as <instance>-realization-editor.recovery.json.
-                string shared = Path.Combine(evidence, instanceId + "-realization-editor.recovery.json");
-                if (!File.Exists(shared)) new DesignRecoveryStore(shared).Save(state with { LastSynchronization = null }, null);
-                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-realization-" + name + ".measurement.json"),
-                    SchematicConnectionRealizerTests.FormatRecording(name, revision, checkpoint, recorded, realization), token);
-                return realization;
+                var reply = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation);
+                recorded.Add((request.Clone(), reply.Clone()));
+                return reply;
             }
+            var policy = SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical.Hierarchy.Data);
+            var realization = await SchematicConnectionRealizer.RealizeAsync(plan.Connections!, plan.Candidate!, checkpoint, Live, policy, token);
+            Assert.IsNotNull(realization.Operations[^1].AssertConnectivity);
+            Assert.IsTrue(recorded.Any(r => r.Request.ItemCandidates.Count != 0), "Label prototypes are measured natively.");
+            foreach (var screen in plan.Connections!.Screens)
+            foreach (var instance in screen.InstancePathKeys)
+                Assert.IsTrue(recorded.Any(r => string.Join('/', r.Request.Document.SheetPath.Path.Select(p => p.Value)) == instance),
+                    "Every instance path of every realized screen is measured: " + instance);
+            // Every generated connection point lies inside the measured page inset.
+            foreach (var operation in realization.Operations.Where(o => o.Create is not null))
+            {
+                var created = SchematicItemDelta.Index([operation.Create]).Single().Value;
+                var point = created switch { SchematicLine line => line.End, LocalLabel label => label.Position, GlobalLabel label => label.Position,
+                    HierarchicalLabel label => label.Position, _ => null };
+                if (point is null) continue;
+                var page = recorded.First(r => r.Request.Document.Equals(operation.TargetDocument)).Reply.PageBounds;
+                Assert.IsTrue(point.XNm >= page.Position.XNm + policy.PageInsetNm && point.XNm <= page.Position.XNm + page.Size.XNm - policy.PageInsetNm
+                    && point.YNm >= page.Position.YNm + policy.PageInsetNm && point.YNm <= page.Position.YNm + page.Size.YNm - policy.PageInsetNm, name);
+            }
+            var prepared = await SchematicConnectedAddition.RealizeAsync(SchematicConnectionRealizerTests.Replay(recorded), advertised, revision, plan, checkpoint, token);
+            CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), prepared.Operations.Select(o => o.ToByteString()).ToArray(),
+                "The same measurements give the same batch (I9).");
+            Assert.AreEqual(SchematicDesignXml.Write(realization.Design, []), Encoding.UTF8.GetString(prepared.PlannedDesignFileBytes));
+            // Replay fixture (automation/tests/fixtures/connection-realization): this scenario's nets and measurements.
+            string kept = Path.Combine(evidence, instanceId + "-realization-" + record);
+            if (!File.Exists(kept)) new DesignRecoveryStore(kept).Save(saved with { LastSynchronization = null }, null);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-realization-" + name + ".measurement.json"),
+                SchematicConnectionRealizerTests.FormatRecording(name, revision, checkpoint, recorded, realization, record), token);
+            return realization;
         }
 
         async Task RequireAgreement(int count, bool afterReload = false)

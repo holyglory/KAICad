@@ -190,6 +190,227 @@ public static class SchematicConnectionRealizer
         return cross == 0;
     }
 
+    private static string PathOf(SheetPath path) => string.Join('/', path.Path.Select(id => id.Value));
+
+    private static bool TryId(KIID? value, out Guid id) => Guid.TryParseExact(value?.Value, "D", out id) && id != Guid.Empty && value!.Value == id.ToString("D");
+
+    private static Guid Id(KIID? value) => TryId(value, out var id) ? id
+        : throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "Native geometry and snapshots need canonical non-empty identities.");
+
+    // ---- measured sheet geometry (§6.2, §6.4) ----
+
+    private static void Merge(PathView view, SchematicPlacementGeometry measured)
+    {
+        var page = Box.Of(measured.PageBounds);
+        if (view.Page is { } known && known != page)
+            throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One sheet reported two page sizes.");
+        view.Page = page;
+        foreach (var obstacle in measured.Obstacles)
+        {
+            var id = Id(obstacle.Id);
+            if (view.Obstacles.TryGetValue(id, out var prior) && !prior.Equals(obstacle))
+                throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One revision measured item " + id.ToString("D") + " twice differently.");
+            view.Obstacles[id] = obstacle;
+            if (obstacle.SymbolPins is not null) view.Pins[id] = obstacle.SymbolPins;
+        }
+        foreach (var measuredCandidate in measured.Candidates)
+        {
+            var id = Id(measuredCandidate.Id);
+            view.Candidates[id] = measuredCandidate;
+            if (measuredCandidate.SymbolPins is not null) view.Pins[id] = measuredCandidate.SymbolPins;
+        }
+    }
+
+    // Union of every instance path: obstacles, connection points and connection segments of the one physical screen.
+    private static void BuildGeometry(Screen screen, SchematicConnectionPolicy policy)
+    {
+        screen.Page = screen.Views[0].Page!.Value;
+        if (screen.Views.Any(v => v.Page != screen.Page))
+            throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "Instances of one sheet reported different pages.");
+        long inset = policy.PageInsetNm;
+        screen.Usable = new(screen.Page.L + inset, screen.Page.T + inset, screen.Page.R - inset, screen.Page.B - inset);
+        var points = new HashSet<ForeignPoint>();
+        var segments = new HashSet<ForeignSegment>();
+        foreach (var view in screen.Views)
+        {
+            foreach (var (id, bounds) in view.Obstacles.Concat(view.Candidates))
+            {
+                var box = Box.Of(bounds.Bounds);
+                screen.Obstacles[id] = screen.Obstacles.TryGetValue(id, out var prior) ? prior.Union(box) : box;
+            }
+            foreach (var (symbol, pins) in view.Pins)
+                foreach (var pin in pins.Pins)
+                    points.Add(new(Pt.Of(pin.Position), PointKind.Pin, Id(pin.Id), symbol));
+            foreach (var (id, item) in SchematicItemDelta.Index(view.Native.Items))
+            {
+                switch (item)
+                {
+                    case SchematicLine line when line.Type is SchematicLineType.SltWire or SchematicLineType.SltBus:
+                        points.Add(new(Pt.Of(line.Start), PointKind.WireEnd, id, null));
+                        points.Add(new(Pt.Of(line.End), PointKind.WireEnd, id, null));
+                        segments.Add(new(Pt.Of(line.Start), Pt.Of(line.End), id));
+                        break;
+                    case Junction junction: points.Add(new(Pt.Of(junction.Position), PointKind.Junction, id, null)); break;
+                    case NoConnectMarker marker: points.Add(new(Pt.Of(marker.Position), PointKind.NoConnect, id, null)); break;
+                    case BusEntry entry:
+                        points.Add(new(Pt.Of(entry.Position), PointKind.BusEntry, id, null));
+                        points.Add(new(new(checked(entry.Position.XNm + (entry.Size?.XNm ?? 0)), checked(entry.Position.YNm + (entry.Size?.YNm ?? 0))),
+                            PointKind.BusEntry, id, null));
+                        break;
+                    case LocalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
+                    case GlobalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
+                    case HierarchicalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
+                    case DirectiveLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
+                    case SheetSymbol sheet:
+                        foreach (var pin in sheet.Pins)
+                            points.Add(new(Pt.Of(pin.Position), PointKind.SheetPin, Id(pin.Id), id));
+                        break;
+                }
+            }
+        }
+        screen.Points.AddRange(points.OrderBy(p => p.Position.X).ThenBy(p => p.Position.Y).ThenBy(p => p.Owner));
+        screen.Segments.AddRange(segments.OrderBy(s => s.Owner));
+    }
+
+    /// <summary>How far KiCad's measured bounds of a symbol reach past the end of each of its visible pins: the target KiCad
+    /// draws on a pin end that nothing connects to (TARGET_PIN_RADIUS, 15 mil = 381,000 nm) plus the pin box's one-unit
+    /// (100 nm) inflation in PIN_LAYOUT_CACHE::GetPinBoundingBox. Placement measurement reads a symbol's library pins, which
+    /// are never connected, so every visible pin's bounds reach this far past its connection point whatever else the symbol
+    /// draws, and a connected pin loses the target. The reach comes from each pin's own bounds, not from the symbol's
+    /// fields, so leaving empty fields out of the measurement would not remove it.</summary>
+    internal const long PinTargetReachNm = 381_100;
+
+    // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier):
+    // null when admitted, otherwise the rule that refuses it.
+    private static string? Refusal(SchematicConnectionPolicy policy, Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward,
+        Box? r, Guid? ownPin, Guid owner, Guid? carrierPin, Guid? carrierSymbol, Variant variant)
+    {
+        // 1. Inside the page inset.
+        if (!screen.Usable.Contains(e) || (r is { } inside && !inside.Within(screen.Usable))) return "outside the page inset";
+        var stub = Box.Segment(a, e);
+        bool Excepted(ForeignPoint p) => (ownPin is { } own && p.Owner == own && p.Position == a)
+            || (carrierPin is { } carrier && p.Owner == carrier && p.Position == e)
+            || (p.Position == a && island.Same.Contains(p.Owner) && p.Kind != PointKind.Generated);
+        foreach (var point in screen.Points)
+        {
+            if (Excepted(point)) continue;
+            // 2. Nothing foreign on the stub or within the clearance of its end.
+            if (stub.Contains(point.Position)) return Describe(point) + " lies on the stub";
+            if (Math.Abs(point.Position.X - e.X) <= policy.ClearanceNm && Math.Abs(point.Position.Y - e.Y) <= policy.ClearanceNm)
+                return Describe(point) + " lies within the clearance of the stub end";
+            // 3. Nothing foreign inside the label.
+            if (r is { } label && label.Contains(point.Position)) return Describe(point) + " lies inside the label";
+        }
+        var reach = stub.Inflate(policy.ClearanceNm);
+        foreach (var segment in screen.Segments)
+        {
+            bool sameAtA = island.Same.Contains(segment.Owner) && (segment.A == a || segment.B == a);
+            // An anchor label may overlap same-island wires that end at its anchor (rules 4 and 6).
+            if (sameAtA && variant == Variant.AnchorLabel) continue;
+            if (sameAtA && variant == Variant.JoinStub)
+            {
+                // A join stub may start on a same-island wire ending at its anchor, but not run along it.
+                var other = segment.A == a ? segment.B : segment.A;
+                var (dx, dy) = (e.X - a.X, e.Y - a.Y);
+                if ((Int128)dx * (other.Y - a.Y) - (Int128)dy * (other.X - a.X) == 0
+                    && (Int128)dx * (other.X - a.X) + (Int128)dy * (other.Y - a.Y) > 0)
+                    return "the stub would run along wire " + segment.Owner.ToString("D") + " of the connection it joins";
+            }
+            // 4. No foreign segment on or near the stub; 6. none through the label.
+            else if (SegmentMeets(segment.A, segment.B, reach, open: false))
+                return "wire " + segment.Owner.ToString("D") + " runs on or within the clearance of the stub";
+            if (r is { } label && SegmentMeets(segment.A, segment.B, label, open: true))
+                return "wire " + segment.Owner.ToString("D") + " runs through the label";
+        }
+        // Symbols drawing a pin of this island exactly at the anchor (the owner's stacked pins, or another symbol's pin
+        // stacked on it). Near the anchor their measured bounds are that pin and its target, which stop mattering once
+        // the pin is connected there.
+        var stackedAtA = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == a && island.Same.Contains(p.Owner))
+            .Select(p => p.OwnerSymbol).OfType<Guid>().ToHashSet();
+        foreach (var (id, bounds) in screen.Obstacles)
+        {
+            bool sameWireAtA = variant == Variant.AnchorLabel && island.Same.Contains(id)
+                && screen.Segments.Any(s => s.Owner == id && (s.A == a || s.B == a));
+            if (sameWireAtA) continue;
+            // 5. The stub crosses no obstacle but its own symbol (and, attaching, the carrier's). A join stub may start on
+            // same-island items that sit exactly at its anchor, and pass a stacked same-island pin's target.
+            if (id != owner && id != carrierSymbol && SegmentMeets(a, e, bounds, open: false)
+                && !(variant == Variant.JoinStub && ((island.Same.Contains(id) && OnlyWithin(a, e, bounds, 0))
+                    || (stackedAtA.Contains(id) && OnlyWithin(a, e, bounds, PinTargetReachNm)))))
+                return (a == e ? "the pin lies inside the bounds of item " : "the stub crosses item ") + id.ToString("D");
+            // 6. The label overlaps no obstacle, including its own symbol. An anchor label sits on its pin's connection
+            // point: every real label reaches a little behind its anchor (at most LabelBackToleranceNm, by the §6.2
+            // orientation guard), over its own pin, and KiCad's measured bounds of the pin's symbol end PinTargetReachNm
+            // past the pin, at the edge of the pin's target. So only the part of an anchor label more than PinTargetReachNm
+            // in front of the pin must be clear of the symbols drawing that pin (a CN-1 clarification requested from the
+            // integration owner); anything the symbol draws further in front of the pin refuses it.
+            bool ownPinSymbol = variant == Variant.AnchorLabel && (id == owner || stackedAtA.Contains(id));
+            if (r is { } labelBox && (ownPinSymbol ? Beyond(labelBox, a, outward, PinTargetReachNm) : labelBox).InteriorMeets(bounds))
+                return ownPinSymbol ? "the label overlaps symbol " + id.ToString("D") + " more than the pin target in front of the pin"
+                    : "the label overlaps item " + id.ToString("D");
+        }
+        foreach (var envelope in screen.Envelopes)
+        {
+            if (SegmentMeets(a, e, envelope, open: false)) return "the stub crosses an earlier generated label";
+            if (r is { } label && label.InteriorsOverlap(envelope)) return "the label overlaps an earlier generated label";
+        }
+        return null;
+
+        static string Describe(ForeignPoint point) => point.Kind switch
+        {
+            PointKind.Pin => "pin " + point.Owner.ToString("D") + " of symbol " + point.OwnerSymbol?.ToString("D"),
+            PointKind.Generated => "a generated connection point",
+            _ => point.Kind.ToString().ToLowerInvariant() + " point of " + point.Owner.ToString("D")
+        };
+    }
+
+    // The part of rectangle r at least `band` in front of a along the outward direction.
+    private static Box Beyond(Box r, Pt a, (int Dx, int Dy) outward, long band) => outward switch
+    {
+        (1, 0) => r with { L = Math.Max(r.L, checked(a.X + band)) },
+        (-1, 0) => r with { R = Math.Min(r.R, checked(a.X - band)) },
+        (0, 1) => r with { T = Math.Max(r.T, checked(a.Y + band)) },
+        (0, -1) => r with { B = Math.Min(r.B, checked(a.Y - band)) },
+        _ => throw Error(SchematicConnectionErrors.RealizationPinGeometryMismatch, "A generated label faces along one schematic axis.")
+    };
+
+    // Whether the axis-aligned stub from a to e meets the rectangle only within `band` of a.
+    private static bool OnlyWithin(Pt a, Pt e, Box box, long band)
+    {
+        var toward = new Pt(Math.Sign(e.X - a.X), Math.Sign(e.Y - a.Y));
+        long length = Math.Abs(e.X - a.X) + Math.Abs(e.Y - a.Y);
+        if (length <= band) return true;
+        return !SegmentMeets(new Pt(checked(a.X + toward.X * (band + 1)), checked(a.Y + toward.Y * (band + 1))), e, box, open: false);
+    }
+
+    /// <summary>The §6.4 verdict for a label placed on a measured pin itself (the anchor label that names an existing
+    /// connection, §6.3 (a)) on a real measured sheet: null when the realizer admits it, otherwise the rule that refuses
+    /// it. <paramref name="native"/> is the checkpoint's copy of the sheet, <paramref name="measured"/> the editor's
+    /// measurement of it, <paramref name="label"/> the label's measured envelope at the pin, and
+    /// <paramref name="connection"/> the identities of the pin's existing connection on this sheet. The placement-geometry
+    /// journey applies the realizer's own rule with it to every visible pin of a live sheet.</summary>
+    internal static string? AnchorLabelRefusal(SchematicScreenData native, SchematicPlacementGeometry measured, Guid owner,
+        SchematicPinAnchor pin, Box2 label, IReadOnlyCollection<Guid> connection, SchematicConnectionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(native);
+        ArgumentNullException.ThrowIfNull(measured);
+        ArgumentNullException.ThrowIfNull(pin);
+        ArgumentNullException.ThrowIfNull(label);
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(policy);
+        var view = new PathView { Path = PathOf(native.Metadata.Document.SheetPath), Native = native, Planned = native };
+        Merge(view, measured);
+        var screenId = Id(measured.ScreenId);
+        var screen = new Screen { Record = new(screenId, [view.Path], []), Views = [view] };
+        BuildGeometry(screen, policy);
+        var island = new IslandState(new ConnectionIsland(Guid.Empty, Guid.Empty, view.Path, screenId, ConnectionScope.Local, "",
+            [], [.. connection], false, true, [], null, []));
+        island.Same.Add(Id(pin.Id));
+        var a = Pt.Of(pin.Position);
+        return Refusal(policy, screen, island, a, a, SchematicConnectionGeometry.Outward(pin), Box.Of(label), Id(pin.Id), owner, null, null,
+            Variant.AnchorLabel);
+    }
+
     // ---- one realization ----
 
     private enum PointKind { Pin, WireEnd, Junction, NoConnect, BusEntry, Label, SheetPin, Generated }
@@ -225,6 +446,8 @@ public static class SchematicConnectionRealizer
         public bool Attached { get; set; }
         public bool Joined { get; set; }
         public bool UplinkLabelled { get; set; }
+        /// <summary>New pins stacked on an existing connection whose optional stub for the hierarchical label had no room.</summary>
+        public List<ConnectionPlacedPin> UplinkRefused { get; } = [];
     }
 
     private sealed class Screen
@@ -318,7 +541,7 @@ public static class SchematicConnectionRealizer
                     Merge(view, measured);
                 }
             }
-            BuildGeometry(screen);
+            BuildGeometry(screen, policy);
             var islands = record.Islands.OrderBy(i => i.NetId).ThenBy(i => i.SheetPathKey, StringComparer.Ordinal)
                 .Select(i => new IslandState(i)).ToList();
             foreach (var island in islands)
@@ -341,10 +564,17 @@ public static class SchematicConnectionRealizer
             {
                 // §6.3 (d) with (e): the island's first stub carries its hierarchical label unless that stub attaches
                 // to a same-net power symbol, which leaves no room for a label (the power pin sits on the stub's line,
-                // so every longer stub runs through it); then the next labelled stub carries it. When every stub
-                // attaches, no stub can carry it (a CN-1 clarification requested from the integration owner).
+                // so every longer stub runs through it), or is the optional stub of a new pin stacked on an existing
+                // connection that has no room; then the next labelled stub carries it. When no stub can carry it, the
+                // refusal names why (a CN-1 clarification requested from the integration owner).
                 if (UplinkPending(island))
-                    throw island.Attached
+                    throw island.UplinkRefused.Count != 0
+                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                            + island.Island.SheetPathKey + ", but new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
+                            + " sits on an existing connection with no free room for a stub carrying that label, and no other new stub or sheet pin there "
+                            + "can carry it" + (island.Attached ? " (every other new stub ends on one of its power symbols)" : "")
+                            + ". Clear the space next to that pin in the schematic editor.")
+                        : island.Attached
                         ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
                             + island.Island.SheetPathKey + ", but every new stub there ends on one of its power symbols, so none has room for the label. "
                             + "Move a power symbol away from the new pins in the schematic editor.")
@@ -423,79 +653,6 @@ public static class SchematicConnectionRealizer
             if (!measured.PinGeometryAvailable)
                 throw Error(SchematicConnectionErrors.RealizationMeasurementUnsupported, "This KiCad does not report exact pin geometry.");
             foreach (var limitation in measured.Limitations) limitations.Add(limitation);
-        }
-
-        private static void Merge(PathView view, SchematicPlacementGeometry measured)
-        {
-            var page = Box.Of(measured.PageBounds);
-            if (view.Page is { } known && known != page)
-                throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One sheet reported two page sizes.");
-            view.Page = page;
-            foreach (var obstacle in measured.Obstacles)
-            {
-                var id = Id(obstacle.Id);
-                if (view.Obstacles.TryGetValue(id, out var prior) && !prior.Equals(obstacle))
-                    throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One revision measured item " + id.ToString("D") + " twice differently.");
-                view.Obstacles[id] = obstacle;
-                if (obstacle.SymbolPins is not null) view.Pins[id] = obstacle.SymbolPins;
-            }
-            foreach (var measuredCandidate in measured.Candidates)
-            {
-                var id = Id(measuredCandidate.Id);
-                view.Candidates[id] = measuredCandidate;
-                if (measuredCandidate.SymbolPins is not null) view.Pins[id] = measuredCandidate.SymbolPins;
-            }
-        }
-
-        // Union of every instance path: obstacles, connection points and connection segments of the one physical screen.
-        private void BuildGeometry(Screen screen)
-        {
-            screen.Page = screen.Views[0].Page!.Value;
-            if (screen.Views.Any(v => v.Page != screen.Page))
-                throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "Instances of one sheet reported different pages.");
-            long inset = policy.PageInsetNm;
-            screen.Usable = new(screen.Page.L + inset, screen.Page.T + inset, screen.Page.R - inset, screen.Page.B - inset);
-            var points = new HashSet<ForeignPoint>();
-            var segments = new HashSet<ForeignSegment>();
-            foreach (var view in screen.Views)
-            {
-                foreach (var (id, bounds) in view.Obstacles.Concat(view.Candidates))
-                {
-                    var box = Box.Of(bounds.Bounds);
-                    screen.Obstacles[id] = screen.Obstacles.TryGetValue(id, out var prior) ? prior.Union(box) : box;
-                }
-                foreach (var (symbol, pins) in view.Pins)
-                    foreach (var pin in pins.Pins)
-                        points.Add(new(Pt.Of(pin.Position), PointKind.Pin, Id(pin.Id), symbol));
-                foreach (var (id, item) in SchematicItemDelta.Index(view.Native.Items))
-                {
-                    switch (item)
-                    {
-                        case SchematicLine line when line.Type is SchematicLineType.SltWire or SchematicLineType.SltBus:
-                            points.Add(new(Pt.Of(line.Start), PointKind.WireEnd, id, null));
-                            points.Add(new(Pt.Of(line.End), PointKind.WireEnd, id, null));
-                            segments.Add(new(Pt.Of(line.Start), Pt.Of(line.End), id));
-                            break;
-                        case Junction junction: points.Add(new(Pt.Of(junction.Position), PointKind.Junction, id, null)); break;
-                        case NoConnectMarker marker: points.Add(new(Pt.Of(marker.Position), PointKind.NoConnect, id, null)); break;
-                        case BusEntry entry:
-                            points.Add(new(Pt.Of(entry.Position), PointKind.BusEntry, id, null));
-                            points.Add(new(new(checked(entry.Position.XNm + (entry.Size?.XNm ?? 0)), checked(entry.Position.YNm + (entry.Size?.YNm ?? 0))),
-                                PointKind.BusEntry, id, null));
-                            break;
-                        case LocalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
-                        case GlobalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
-                        case HierarchicalLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
-                        case DirectiveLabel label: points.Add(new(Pt.Of(label.Position), PointKind.Label, id, null)); break;
-                        case SheetSymbol sheet:
-                            foreach (var pin in sheet.Pins)
-                                points.Add(new(Pt.Of(pin.Position), PointKind.SheetPin, Id(pin.Id), id));
-                            break;
-                    }
-                }
-            }
-            screen.Points.AddRange(points.OrderBy(p => p.Position.X).ThenBy(p => p.Position.Y).ThenBy(p => p.Owner));
-            screen.Segments.AddRange(segments.OrderBy(s => s.Owner));
         }
 
         // §6.2: the pins realization draws from or confirms must be completely measured and identical on every instance.
@@ -752,12 +909,23 @@ public static class SchematicConnectionRealizer
             var a = Pt.Of(anchor.Position);
             // A pin stacked exactly on an earlier stub's pin of the same island is joined by that contact.
             if (island.Anchored.Contains(a)) return;
-            // So is a pin stacked on an already connected pin of the same island, unless the island still needs its
-            // hierarchical label: then this pin's stub carries it, starting on the existing connection like a join stub.
-            bool stacked = island.Island.Members.Any(m => m != member && m.AlreadyConnected && At(screen, m.Pin) == a);
-            if (stacked && !UplinkPending(island)) return;
             var outward = SchematicConnectionGeometry.Outward(anchor);
-            if (!TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, stacked ? Variant.JoinStub : Variant.Stub,
+            if (island.Island.Members.Any(m => m != member && m.AlreadyConnected && At(screen, m.Pin) == a))
+            {
+                // So is a pin stacked on an already connected pin of the same island: it needs nothing of its own. While
+                // the island still needs its hierarchical label, a stub from this pin may carry it, starting on the
+                // existing connection like a join stub and never ending on a power symbol (which would carry no label).
+                // Without room for it, a later stub or sheet-pin stub carries the label; the attempt is kept so that the
+                // final check names this pin when nothing does.
+                if (!UplinkPending(island)) return;
+                if (TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.JoinStub,
+                        ConnectionLabelKind.Hierarchical, out var carrier, allowAttach: false))
+                    Accept(screen, island, carrier, GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel,
+                        SchematicConnectionIdentity.PinAnchorKey(member.Pin.PlacedPinId), member.Pin.PlacedPinId, null);
+                else island.UplinkRefused.Add(member.Pin);
+                return;
+            }
+            if (!TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.Stub,
                     KindFor(island), out var stub))
                 throw Error(SchematicConnectionErrors.RealizationNoFreeStub, "Pin " + Describe(member.Pin) + " of net '" + NetName(island)
                     + "' has no free room for a connection stub and label on sheet " + island.Island.SheetPathKey
@@ -794,88 +962,8 @@ public static class SchematicConnectionRealizer
 
         // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier).
         private bool Admit(Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward, Box? r, Guid? ownPin, Guid owner,
-            Guid? carrierPin, Guid? carrierSymbol, Variant variant)
-        {
-            // 1. Inside the page inset.
-            if (!screen.Usable.Contains(e) || (r is { } inside && !inside.Within(screen.Usable))) return false;
-            var stub = Box.Segment(a, e);
-            bool Excepted(ForeignPoint p) => (ownPin is { } own && p.Owner == own && p.Position == a)
-                || (carrierPin is { } carrier && p.Owner == carrier && p.Position == e)
-                || (p.Position == a && island.Same.Contains(p.Owner) && p.Kind != PointKind.Generated);
-            foreach (var point in screen.Points)
-            {
-                if (Excepted(point)) continue;
-                // 2. Nothing foreign on the stub or within the clearance of its end.
-                if (stub.Contains(point.Position)) return false;
-                if (Math.Abs(point.Position.X - e.X) <= policy.ClearanceNm && Math.Abs(point.Position.Y - e.Y) <= policy.ClearanceNm) return false;
-                // 3. Nothing foreign inside the label.
-                if (r is { } label && label.Contains(point.Position)) return false;
-            }
-            var reach = stub.Inflate(policy.ClearanceNm);
-            foreach (var segment in screen.Segments)
-            {
-                bool sameAtA = island.Same.Contains(segment.Owner) && (segment.A == a || segment.B == a);
-                // An anchor label may overlap same-island wires that end at its anchor (rules 4 and 6).
-                if (sameAtA && variant == Variant.AnchorLabel) continue;
-                if (sameAtA && variant == Variant.JoinStub)
-                {
-                    // A join stub may start on a same-island wire ending at its anchor, but not run along it.
-                    var other = segment.A == a ? segment.B : segment.A;
-                    var (dx, dy) = (e.X - a.X, e.Y - a.Y);
-                    if ((Int128)dx * (other.Y - a.Y) - (Int128)dy * (other.X - a.X) == 0
-                        && (Int128)dx * (other.X - a.X) + (Int128)dy * (other.Y - a.Y) > 0)
-                        return false;
-                }
-                // 4. No foreign segment on or near the stub; 6. none through the label.
-                else if (SegmentMeets(segment.A, segment.B, reach, open: false)) return false;
-                if (r is { } label && SegmentMeets(segment.A, segment.B, label, open: true)) return false;
-            }
-            foreach (var (id, bounds) in screen.Obstacles)
-            {
-                bool sameWireAtA = variant == Variant.AnchorLabel && island.Same.Contains(id)
-                    && screen.Segments.Any(s => s.Owner == id && (s.A == a || s.B == a));
-                if (sameWireAtA) continue;
-                // 5. The stub crosses no obstacle but its own symbol (and, attaching, the carrier's).
-                if (id != owner && id != carrierSymbol && SegmentMeets(a, e, bounds, open: false))
-                {
-                    // A join stub may start on same-island items that sit exactly at its anchor.
-                    if (!(variant == Variant.JoinStub && island.Same.Contains(id) && OnlyAtStart(a, e, bounds))) return false;
-                }
-                // 6. The label overlaps no obstacle, including its own symbol. An anchor label sits on its own pin's
-                // connection point. Every real label reaches a little behind its anchor (at most LabelBackToleranceNm,
-                // by the §6.2 orientation guard), and KiCad's measured bounds of the owner include the pin up to that
-                // point and anything drawn on it (live sheets show fields at the symbol origin reaching 0.38 mm past the
-                // tip). So only the part of the label more than LabelBackToleranceNm in front of the anchor must be
-                // clear of its own symbol (a CN-1 clarification requested from the integration owner).
-                if (r is { } label && (variant == Variant.AnchorLabel && id == owner ? Beyond(label, a, outward, policy.LabelBackToleranceNm) : label)
-                        .InteriorMeets(bounds))
-                    return false;
-            }
-            foreach (var envelope in screen.Envelopes)
-            {
-                if (SegmentMeets(a, e, envelope, open: false)) return false;
-                if (r is { } label && label.InteriorsOverlap(envelope)) return false;
-            }
-            return true;
-        }
-
-        // The part of rectangle r at least `band` in front of a along the outward direction.
-        private static Box Beyond(Box r, Pt a, (int Dx, int Dy) outward, long band) => outward switch
-        {
-            (1, 0) => r with { L = Math.Max(r.L, checked(a.X + band)) },
-            (-1, 0) => r with { R = Math.Min(r.R, checked(a.X - band)) },
-            (0, 1) => r with { T = Math.Max(r.T, checked(a.Y + band)) },
-            (0, -1) => r with { B = Math.Min(r.B, checked(a.Y - band)) },
-            _ => throw Error(SchematicConnectionErrors.RealizationPinGeometryMismatch, "A generated label faces along one schematic axis.")
-        };
-
-        // Whether the stub from a to e meets the rectangle only at a.
-        private static bool OnlyAtStart(Pt a, Pt e, Box box)
-        {
-            if (a == e) return true;
-            var toward = new Pt(Math.Sign(e.X - a.X), Math.Sign(e.Y - a.Y));
-            return !SegmentMeets(new Pt(a.X + toward.X, a.Y + toward.Y), e, box, open: false);
-        }
+            Guid? carrierPin, Guid? carrierSymbol, Variant variant) =>
+            Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant) is null;
 
         // §6.5: which side of sheet symbol K a new pin goes on, and that side's x.
         private (SheetSide Side, long X) Side(Screen screen, IslandState island, SheetSymbol sheet)
@@ -1057,6 +1145,7 @@ public static class SchematicConnectionRealizer
             var expected = generated.Where(g => g.Role != GeneratedConnectionRole.SheetPin).Select(g => g.Id).Concat(created).ToHashSet();
             var createdOnce = new HashSet<Guid>();
             var updated = new HashSet<Guid>();
+            var replacedCaches = new HashSet<Guid>();
             foreach (var operation in operations)
             {
                 switch (operation.OperationCase)
@@ -1088,7 +1177,8 @@ public static class SchematicConnectionRealizer
                         updated.Add(id);
                         break;
                     }
-                    case SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache when created.Count != 0:
+                    case SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache:
+                        RequireCacheExtension(operation, replacedCaches);
                         break;
                     default:
                         throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections may only create items, add sheet pins "
@@ -1097,6 +1187,34 @@ public static class SchematicConnectionRealizer
             }
             if (!createdOnce.SetEquals(expected) || !updated.SetEquals(sheetPins.Keys))
                 throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The native edits do not carry every new symbol and generated connection item.");
+        }
+
+        // A library cache may be replaced only on a sheet that receives a new symbol, once, and only by adding the
+        // definitions new symbols bring: every definition KiCad already holds on that sheet stays exactly as it is
+        // (compared as KiCad keeps it, ignoring only the order of its drawn children).
+        private void RequireCacheExtension(SchematicItemOperation operation, HashSet<Guid> replaced)
+        {
+            var state = operation.ReplaceLibraryCache;
+            var path = operation.TargetDocument?.SheetPath is { } target ? PathOf(target) : "";
+            if (!native.TryGetValue(path, out var screen) || !planned.TryGetValue(path, out var desired)
+                || !TryId(state.ScreenId, out var screenId) || screenId != Id(screen.Metadata.ScreenId) || !replaced.Add(screenId))
+                throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace a library cache that is not "
+                    + "exactly one checkpoint sheet's (sheet " + path + ").");
+            bool receivesSymbol = desired.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Any(i => TryId(i.Unpack<SchematicSymbolInstance>().Id, out var id) && created.Contains(id));
+            if (!receivesSymbol)
+                throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace the library cache of sheet "
+                    + path + ", which receives no new symbol.");
+            var replacement = new Dictionary<string, SchematicCachedSymbol>(StringComparer.Ordinal);
+            foreach (var definition in state.Definitions)
+                if (!replacement.TryAdd(definition.CacheKey, definition))
+                    throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would give sheet " + path
+                        + " two library definitions named '" + definition.CacheKey + "'.");
+            foreach (var kept in screen.CachedSymbols)
+                if (!replacement.TryGetValue(kept.CacheKey, out var after) || !SchematicLibraryCacheEquivalence.Equal(kept, after))
+                    throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would "
+                        + (after is null ? "drop" : "change") + " the library definition '" + kept.CacheKey + "' KiCad already holds on sheet " + path
+                        + "; only definitions for new symbols may be added.");
         }
 
         // ---- helpers ----
@@ -1117,13 +1235,6 @@ public static class SchematicConnectionRealizer
         private static Vector2? PositionOf(IMessage message) => message.Descriptor.FindFieldByName("position")?.Accessor.GetValue(message) as Vector2;
 
         private static bool ValidBox(Box2? box) => box?.Position is not null && box.Size is not null && box.Size.XNm >= 0 && box.Size.YNm >= 0;
-
-        private static string PathOf(SheetPath path) => string.Join('/', path.Path.Select(id => id.Value));
-
-        private static bool TryId(KIID? value, out Guid id) => Guid.TryParseExact(value?.Value, "D", out id) && id != Guid.Empty && value!.Value == id.ToString("D");
-
-        private static Guid Id(KIID? value) => TryId(value, out var id) ? id
-            : throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "Native geometry and snapshots need canonical non-empty identities.");
 
         // Every identity already present anywhere in a schematic: items, placed and library pins, sheet pins and fields.
         private static void Collect(IMessage message, ISet<Guid> ids)

@@ -41,7 +41,53 @@ coverage are still being qualified; native Mac Setup evidence and full automatic
 XML synchronization remain open. The authoritative completion state is in
 DevCoordinator, not this usage guide.
 
-## Linux preview — September 23, 2026
+## Linux preview — September 24, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-source.tar.gz)
+identify `3f023fc2aa358dfef4002fd5df52e7f9dfcd3c92`, signed preview sequence 23.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 22 it adds, as preliminary features:
+
+- **Per-level diagram editor.** `kicad_diagram_create` makes a new system diagram whose
+  root is only its caption, and `kicad_diagram_discover` finds a project's diagrams. At
+  every level you can add caption-only blocks, connect ports and blocks, place level
+  ports, move, resize, delete and undo, from the toolbar or the canvas-edge palette, with
+  layout saved per level through Save and Decline. Blocks and connections grow with
+  "+ Add detail" and "+ Add requirement": connections gain signals, direction, domain and
+  type; blocks show chips for decided or candidate component choices with Review facets.
+  Diagram files use format 2 (format 1 files upgrade on their first change). The older
+  flat structural editor and its `kicad_structure_*` tools are removed.
+- **XML component creation** of parts whose units sit on different sheets and of parts
+  with stacked pins (KiCad's join of a symbol's stacked pins counts as one point).
+- **ERC settings** (severities, pin map, exclusions with comments) synchronize both ways
+  through automatic synchronization; ERC dialog edits are undoable.
+- **Stale AI edits are refused** after more native changes (symbol and sheet properties,
+  Page Settings, Setup, Annotate, sheet import), and these checks stay fast on large designs.
+- **Capability truth.** `kicad_instance_capabilities` lists each running KiCad's feature
+  flags and the requests it handles right now; `kicad_service_capabilities` describes the
+  MCP server without contacting KiCad.
+- **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
+  `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
+
+Groundwork for turning XML connections into wires is included but switched off: KiCad
+does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
+diagram editor's dark-theme selection and other design-QA polish are still being fixed,
+Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
+from the project manager is not built yet.
+
+Every gate ran on the exact commit before publication: the composed native acceptance
+(19 checks, `t20260924T160501Z-67b01b`), a cold checkout's Setup, DRC contracts,
+component creation including the PSU/CPU fixture, the per-level editor and canvas,
+fixture and library suites, and the installed-package journey. Public run
+`t20260924T182746Z-f2a26d` verified the downloads, the signed caption update from
+sequence 22 and the landing page; delivery receipts `t20260924T183807Z-fbb632`. Mac and
+Windows builds remain on hold until the XML editing workflow is complete; their existing
+downloads stay available.
+
+### Earlier Linux preview — September 23, 2026
 
 [Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-debian13-x64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-source.tar.gz)

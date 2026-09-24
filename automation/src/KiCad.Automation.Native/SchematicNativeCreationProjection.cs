@@ -460,7 +460,12 @@ internal static class SchematicNativeCreationProjection
         var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == entry.CacheKey);
         if (existing is not null && !SchematicLibraryCacheEquivalence.Equal(existing, entry))
             throw Invalid("created_symbol_cache_conflict", "The target screen has a different definition for the selected library key.");
-        if (existing is null) target.CachedSymbols.Add(entry.Clone());
+        if (existing is not null) return;
+        // KiCad keeps a screen's library cache ordered by key and always reports it in that order, so the created cache
+        // entry takes its place there: the published XML then lists the cache exactly as KiCad shows, saves and reloads it.
+        int index = 0;
+        while (index < target.CachedSymbols.Count && string.CompareOrdinal(target.CachedSymbols[index].CacheKey, entry.CacheKey) < 0) ++index;
+        target.CachedSymbols.Insert(index, entry);
     }
 
     /// <summary>Partition created occurrences into the physical native symbols they will occupy.

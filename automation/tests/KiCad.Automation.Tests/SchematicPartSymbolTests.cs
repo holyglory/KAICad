@@ -114,7 +114,8 @@ public sealed class SchematicPartSymbolTests
     {
         foreach (string problem in new[] { "unknown-part", "duplicate-part", "unit-count", "missing-pin", "pin-name",
             "pin-unit", "negative-unit", "foreign-style", "duplicate-pin-id", "placed-pin", "active-alternate", "pin-name-space", "pin-number-space",
-            "empty-pin-id", "noncanonical-pin-id", "sheet-coordinates", "body-style", "library-id", "future-library-id", "spacing", "empty-child" })
+            "empty-pin-id", "noncanonical-pin-id", "sheet-coordinates", "body-style", "library-id", "future-library-id", "spacing", "empty-child",
+            "pin-position" })
         {
             var (design, library) = Fixture();
             string before = SchematicDesignXml.Write(design, [library]);
@@ -145,6 +146,8 @@ public sealed class SchematicPartSymbolTests
                     [.. source.LibraryId.ToByteArray(), 0xf8, 0x3e, 0x01]) }; break;
                 case "spacing": source.Symbol.PinNameOffset.ValueNm = 1; break;
                 case "empty-child": definition.Items.Add(new SchematicSymbolChild()); break;
+                // KiCad would read the missing position as the origin and join the pin to every other pin there.
+                case "pin-position": first.Position = null; break;
             }
             if (problem != "missing-pin") definition.Items[0].Item = Any.Pack(first);
             var invalid = design with { PartSymbols = problem == "duplicate-part" ? [source, source] : [source] };

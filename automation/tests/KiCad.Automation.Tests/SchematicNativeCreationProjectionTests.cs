@@ -151,6 +151,15 @@ public sealed class SchematicNativeCreationProjectionTests
             created.Add(symbol.Occurrence, native);
         }
         Assert.AreEqual(expected.Symbols.Count, screens.Values.Sum(s => s.Items.Count(i => i.Is(SchematicSymbolInstance.Descriptor))));
+        // Each sheet's library cache is in KiCad's own key order (the PSU sheet receives six definitions out of that order),
+        // so the published XML lists it as KiCad reports, saves and reloads it.
+        foreach (var sheet in expected.Sheets.Where(s => expected.Symbols.Any(x => x.Sheet == s.Key)))
+        {
+            var keys = screens[sheetPaths[sheet.Key]].CachedSymbols.Select(c => c.CacheKey).ToArray();
+            CollectionAssert.AreEqual(keys.Order(StringComparer.Ordinal).ToArray(), keys, sheet.Key);
+        }
+        CollectionAssert.AreEqual(new[] { "Battery_Management:LTC2959", "Connector_Generic:Conn_01x02", "Device:R", "MCU_ST_STM32C0:STM32C011J_4-6_Mx",
+            "Regulator_Linear:LP3982ILD-3.3", "Regulator_Switching:LM2595S-ADJ" }, screens[sheetPaths["PSU"]].CachedSymbols.Select(c => c.CacheKey).ToArray());
 
         // U5: one component, four native symbols on two sheets, one declared definition and exact unit pins.
         var u5 = circuit.Components.Single(c => c.Reference == "U5");

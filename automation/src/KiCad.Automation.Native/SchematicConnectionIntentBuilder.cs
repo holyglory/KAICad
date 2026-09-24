@@ -37,27 +37,13 @@ internal static class SchematicPlacedPins
         }
     }
 
-    /// <summary>The groups of <see cref="Active"/> pins that <paramref name="symbol"/>'s own definition draws at one
-    /// point for <paramref name="unit"/>: two or more pins with exactly the same definition position. KiCad joins pins
-    /// that meet at one point into one connection whatever their visibility, so hidden pins count. A no-connect pin
-    /// passes no connection on in KiCad and is left out, and a pin without a recorded position is never grouped: no
-    /// stacking is inferred without exact geometry. Pins of other symbols or other units are never grouped here, even
-    /// where they happen to touch. Groups and their pins keep definition order.</summary>
-    internal static IReadOnlyList<IReadOnlyList<SchematicPin>> Stacked(SchematicSymbolInstance symbol, int unit) =>
-        [.. Active(symbol, unit).Where(pin => pin.Position is not null && EffectiveType(pin) != ElectricalPinType.EptNoConnect)
-            .GroupBy(pin => (pin.Position.XNm, pin.Position.YNm)).Where(group => group.Count() > 1)
-            .Select(group => (IReadOnlyList<SchematicPin>)group.ToArray())];
-
-    /// <summary>The electrical type KiCad uses for <paramref name="pin"/>: its active alternate's type when one is
-    /// selected, otherwise its own.</summary>
-    internal static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
-        ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
-        : pin.ElectricalType;
-
-    /// <summary>Refuse <paramref name="design"/> when its nets put pins that one placed symbol stacks at one point
-    /// (<see cref="Stacked"/>) on different nets: KiCad always joins them, so no drawing can realize those nets. Pins
-    /// the XML leaves out of every net are no conflict. Occurrences without an exact bound native symbol are left to the
-    /// binding checks. Throws <see cref="SchematicConnectionErrors.StackedPinsOnDifferentNets"/>.</summary>
+    /// <summary>Refuse <paramref name="design"/> when its nets put pins of one stacked-pin node on different nets: KiCad
+    /// always joins the pins one placed symbol's own definition draws at one point, so no drawing can realize those nets
+    /// (decision kicad-stacked-pins-one-node-20260924). The nodes are exactly the ones the electrical comparison uses
+    /// (<see cref="SchematicElectricalComparison.StackedPinNodes"/>), so pins that different units each stack on one pin
+    /// they share are checked together. Pins the XML leaves out of every net are no conflict. Occurrences without an exact
+    /// bound native symbol are left to the binding checks. Throws
+    /// <see cref="SchematicConnectionErrors.StackedPinsOnDifferentNets"/>.</summary>
     internal static void RequireStackedPinsOnOneNet(SchematicDesign design, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(design);
@@ -66,45 +52,19 @@ internal static class SchematicPlacedPins
         foreach (var net in circuit.Nets)
             foreach (var pin in net.Pins) netOf.TryAdd(pin, net);
         if (netOf.Count == 0) return;
-        var components = new Dictionary<Guid, ComponentInstance>();
-        foreach (var component in circuit.Components) components.TryAdd(component.Id, component);
-        var definitions = new Dictionary<Guid, ComponentDefinition>();
-        foreach (var definition in circuit.Sheets.SelectMany(s => s.Components)) definitions.TryAdd(definition.Id, definition);
-        var parts = new Dictionary<Guid, PartDefinition>();
-        foreach (var part in circuit.Parts) parts.TryAdd(part.Id, part);
-        var paths = new Dictionary<Guid, string>();
-        foreach (var binding in design.SheetBindings) paths.TryAdd(binding.SheetInstanceId, SchematicDesignBindings.PathKey(binding.NativePath));
-        var natives = new Dictionary<Guid, string>();
-        foreach (var binding in design.SymbolBindings) natives.TryAdd(binding.SymbolOccurrenceId, binding.NativeObjectId.ToString("D"));
-        var symbols = new Dictionary<(string Path, string Id), SchematicSymbolInstance>();
-        foreach (var screen in design.Schematic.Instances)
+        foreach (var node in SchematicElectricalComparison.StackedPinNodes(design, token))
         {
-            string path = string.Join('/', screen.Metadata?.Document?.SheetPath?.Path.Select(id => id.Value) ?? []);
-            foreach (var packed in screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)))
-            {
-                var symbol = packed.Unpack<SchematicSymbolInstance>();
-                if (symbol.Id?.Value is { } id) symbols.TryAdd((path, id), symbol);
-            }
-        }
-        foreach (var occurrence in circuit.Symbols.OrderBy(s => s.Id))
-        {
-            token.ThrowIfCancellationRequested();
-            if (!components.TryGetValue(occurrence.ComponentId, out var component) || !definitions.TryGetValue(component.DefinitionId, out var definition)
-                || !parts.TryGetValue(definition.PartId, out var part) || !paths.TryGetValue(occurrence.EffectiveSheetInstanceId(component), out var path)
-                || !natives.TryGetValue(occurrence.Id, out var native) || !symbols.TryGetValue((path, native), out var symbol))
-                continue;
-            foreach (var group in Stacked(symbol, occurrence.Unit))
-            {
-                var numbers = group.Select(pin => pin.Number).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-                var connected = numbers.Where(number => part.Pins.Any(p => p.Number == number && (p.Unit == 0 || p.Unit == occurrence.Unit)))
-                    .Select(number => new PinEndpoint(component.Id, number)).Where(netOf.ContainsKey).ToArray();
-                if (connected.Select(pin => netOf[pin].Id).Distinct().Count() < 2) continue;
-                throw new AutomationException(SchematicConnectionErrors.StackedPinsOnDifferentNets, "Pins "
-                    + string.Join(", ", numbers.Select(number => component.Reference + "." + number))
-                    + " of " + component.Reference + " (" + part.Name + ") are drawn at the same point in its symbol, so KiCad always connects them, but the XML puts "
-                    + string.Join(" and ", connected.Select(pin => component.Reference + "." + pin.Pin + " in net '" + netOf[pin].Name + "'"))
-                    + ". Put these pins in one net, or leave the extra ones out of every net; nothing was changed.");
-            }
+            var connected = node.Where(netOf.ContainsKey).ToArray();
+            if (connected.Select(pin => netOf[pin].Id).Distinct().Count() < 2) continue;
+            var component = circuit.Components.First(c => c.Id == node[0].ComponentId);
+            var definition = circuit.Sheets.SelectMany(s => s.Components).First(d => d.Id == component.DefinitionId);
+            var part = circuit.Parts.First(p => p.Id == definition.PartId);
+            string Name(PinEndpoint pin) => component.Reference + "." + pin.Pin;
+            throw new AutomationException(SchematicConnectionErrors.StackedPinsOnDifferentNets, "Pins " + string.Join(", ", node.Select(Name))
+                + " of " + component.Reference + " (" + part.Name + ") are always one connection in KiCad, because its symbol draws them at the same point"
+                + (part.Units > 1 ? ", directly or through a pin its units share" : "") + ", but the XML puts "
+                + string.Join(" and ", connected.Select(pin => Name(pin) + " in net '" + netOf[pin].Name + "'"))
+                + ". Put these pins in one net, or leave the extra ones out of every net; nothing was changed.");
         }
     }
 }
@@ -884,7 +844,7 @@ public static partial class SchematicConnectionIntentBuilder
             foreach (var symbol in created.GroupBy(p => (p.Pin.SheetPathKey, p.Pin.SymbolId, p.Pin.SymbolOccurrenceId)))
             {
                 var first = symbol.First();
-                foreach (var stack in SchematicPlacedPins.Stacked(first.Symbol, units[first.Pin.SymbolOccurrenceId]))
+                foreach (var stack in SchematicElectricalComparison.StackedDefinitionPins(first.Symbol, units[first.Pin.SymbolOccurrenceId]))
                 {
                     var keys = new List<ItemKey>();
                     foreach (var pin in stack)
@@ -1065,7 +1025,9 @@ public static partial class SchematicConnectionIntentBuilder
         private static string CarrierName(SchematicSymbolInstance symbol) => symbol.ValueField?.Text?.Text_ ?? "";
 
         // KiCad applies an active alternate's electrical type and name.
-        private static ElectricalPinType EffectiveType(SchematicPin pin) => SchematicPlacedPins.EffectiveType(pin);
+        private static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
+            ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
+            : pin.ElectricalType;
 
         private static string ImplicitName(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0 ? pin.ActiveAlternate : pin.Name;
 

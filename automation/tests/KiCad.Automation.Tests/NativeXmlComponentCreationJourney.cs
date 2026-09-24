@@ -41,10 +41,14 @@ public sealed partial class NativeSessionTests
         string path = context.DesignPath;
         string Evidence(string name) => Path.Combine(evidence, instanceId + "-psu-cpu-" + name);
         var store = new DesignRecoveryStore(Evidence("recovery.json"));
-        // The harness writes the S1 sheet files directly, so KiCad has never saved this project and its project file does not
-        // list the PSU, CPU and CPU_POWER sheets yet. Save it once in KiCad first, as every project a user opens has been saved:
-        // otherwise the apply's own save also writes that sheet list, and publication refuses a save that changed the project
-        // settings (native_save_not_confirmed), which is a separate synchronization defect reported to its owners.
+        // Workaround for a tracked defect, not a claim about users' projects. The harness writes the S1 sheet files directly,
+        // so KiCad has never saved this project: its project file has no sheet list and none of KiCad's schematic settings. The
+        // apply's own save then writes both into the project file, the saved state no longer matches the state recorded before
+        // saving, and publication refuses the apply after KiCad has already saved (native_save_not_confirmed; runs
+        // t20260924T063222Z-849a5a and t20260924T064900Z-59a396, recorded in the nativeSave observation of apply-connectivity.json).
+        // Any project whose project file KiCad has not yet written in its own form would hit the same refusal. That defect belongs
+        // to the synchronization and seed owners (lanes 2C/2D and the parent) and is reported for a ledger outcome; saving once
+        // here keeps it out of this creation journey.
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
         Assert.IsFalse((await Capture()).State.NativeContentDirty, "The S1 seed is saved by KiCad before XML creation.");
         var saved = await PsuCpuFixture.InitializeRecoveryAsync(client, context, store.StatePath, token);
@@ -198,7 +202,7 @@ public sealed partial class NativeSessionTests
         Assert.AreNotEqual(created.State.Revision.Epoch, reloaded.State.Revision.Epoch, "Revert reloads a new native document.");
         var afterReload = RequireCreated(reloaded, "after reload");
 
-        // The recovery record adopts the reloaded editor unchanged, and nothing is left to apply.
+        // The recovery record adopts the reloaded editor unchanged, and the settled plan sends nothing to the editor.
         var beforeReattach = store.Read()!;
         var reattach = await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = beforeReattach.RevisionToken, expectedDocumentEpoch = reloaded.State.Revision.Epoch });
@@ -209,18 +213,47 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(settled);
         Assert.AreEqual(0, settled.GetProperty("structuredContent").GetProperty("nativeOperationsJson").GetArrayLength(), settled.GetRawText());
         Assert.AreEqual(reloaded, await Capture());
-        // Recorded, not asserted: whether the settled preview would also publish nothing. The general reconciliation path
-        // (lane 2C) may take KiCad's join of U2's stacked pins for a native edit and add a generated net to the XML.
+        // What the settled preview would publish, asserted exactly. Two differences from the published XML are expected:
+        // 1. Loaded-format provenance. The S1 seed files were written in an older format, KiCad saved them in its own, and the
+        //    reload records that; by design such a reload is published to the XML, never sent to KiCad (the executor's
+        //    Equivalent rule). Every screen's provenance must be exactly what the reloaded editor reports.
+        // 2. A tracked lane 2C defect, not intended behaviour: the general reconciliation (SchematicNetReconciliation) still
+        //    reads KiCad's join of U2's stacked pins as a native edit and adds a generated net holding exactly that pair, so an
+        //    apply or automatic synchronization would add a net the user never wrote although KiCad shows exactly what the XML
+        //    describes (decision kicad-stacked-pins-one-node-20260924; reported for a ledger outcome linked to
+        //    p95e0c19e6143deb6). When lane 2C's fix lands, the added nets below must become empty.
+        // Nothing else may differ: not the library cache order, not any object, field or net.
         byte[] published = await File.ReadAllBytesAsync(path, token);
-        string? settledXml = settled.GetProperty("structuredContent").TryGetProperty("candidateDesignXml", out var candidateXml) ? candidateXml.GetString() : null;
-        IReadOnlyList<CircuitNet> settledNets = settledXml is null ? [] : SchematicDesignXml.Read(settledXml, []).Engineering.Circuit.Nets;
+        string publishedText = await File.ReadAllTextAsync(path, token);
+        Assert.AreEqual(publishedXml, publishedText, "Save, reload and reattachment leave the published XML file untouched.");
+        var settledContent = settled.GetProperty("structuredContent");
+        Assert.IsTrue(settledContent.GetProperty("canPrepare").GetBoolean(), settled.GetRawText());
+        Assert.AreEqual(0, settledContent.GetProperty("netChanges").GetArrayLength(), "No published net loses its identity.");
+        Assert.AreEqual(0, settledContent.GetProperty("electricalConflicts").GetArrayLength(), "The settled plan has no electrical conflict.");
+        string settledXml = settledContent.GetProperty("candidateDesignXml").GetString()
+            ?? throw new AssertFailedException("The settled plan must preview its candidate XML.");
+        var settledDesign = SchematicDesignXml.Read(settledXml, []);
+        var publishedNets = publishedDesign.Engineering.Circuit.Nets.Select(n => n.Id).ToHashSet();
+        var references = synchronized.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
+        var addedNets = settledDesign.Engineering.Circuit.Nets.Where(n => !publishedNets.Contains(n.Id)).ToArray();
+        CollectionAssert.AreEquivalent(expected.JoinedPins.Select(g => string.Join(",", g.Select(p => p.Reference + "." + p.Number).Order(StringComparer.Ordinal))).ToArray(),
+            addedNets.Select(n => string.Join(",", n.Pins.Select(p => references[p.ComponentId] + "." + p.Pin).Order(StringComparer.Ordinal))).ToArray(),
+            "Tracked lane 2C defect: the settled plan adds exactly one generated net for each group of stacked pins KiCad joins. "
+            + "Once lane 2C merges the comparison's stacked pins into the model partitions, no net may be added.");
+        var reloadedProvenance = reloaded.Electrical.Hierarchy.Data.Instances.ToDictionary(s => s.Metadata.Document, s => s.Metadata.LoadedNativeFormatVersion);
+        var provenanceUpdates = publishedDesign.Schematic.Instances.Count(s => s.Metadata.LoadedNativeFormatVersion != reloadedProvenance[s.Metadata.Document]);
+        var expectedSettled = publishedDesign with { Schematic = publishedDesign.Schematic.Clone() };
+        foreach (var screen in expectedSettled.Schematic.Instances)
+            screen.Metadata.LoadedNativeFormatVersion = reloadedProvenance[screen.Metadata.Document];
+        Assert.AreEqual(publishedText, SchematicDesignXml.Write(publishedDesign, []), "The published XML reads and writes back unchanged.");
+        Assert.AreEqual(SchematicDesignXml.Write(expectedSettled, []), SchematicDesignXml.Write(settledDesign with { Engineering = settledDesign.Engineering with { Circuit =
+                settledDesign.Engineering.Circuit with { Nets = [.. settledDesign.Engineering.Circuit.Nets.Where(n => publishedNets.Contains(n.Id))] } } }, []),
+            "Apart from the reloaded files' provenance and the generated nets, the settled candidate is exactly the published XML.");
         var settledPlan = new
         {
-            nativeOperations = 0, keepsPublishedXml = settledXml == Encoding.UTF8.GetString(published),
-            addedNets = settledNets.Where(n => !synchronized.Engineering.Circuit.Nets.Any(x => x.Id == n.Id)).Select(n => new
-            {
-                n.Name, pins = n.Pins.Select(p => synchronized.Engineering.Circuit.Components.Single(c => c.Id == p.ComponentId).Reference + "." + p.Pin).ToArray()
-            }).ToArray()
+            nativeOperations = 0, keepsPublishedXml = settledXml == publishedText, provenanceUpdates,
+            addedNets = addedNets.Select(n => new { n.Name, pins = n.Pins.Select(p => references[p.ComponentId] + "." + p.Pin).ToArray() }).ToArray(),
+            onlyOtherDifferences = "loaded-format provenance of the reloaded screens"
         };
 
         // The published XML is retained in the recovery record; the proof names it by length and SHA-256.

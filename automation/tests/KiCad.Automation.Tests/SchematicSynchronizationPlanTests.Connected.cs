@@ -698,6 +698,44 @@ public sealed partial class SchematicSynchronizationPlanTests
             Assert.ThrowsExactly<AutomationException>(() => SchematicPlacedPins.RequireStackedPinsOnOneNet(other)).Code);
         SchematicPlacedPins.RequireStackedPinsOnOneNet(f.Design with { Engineering = f.Design.Engineering with { Circuit = circuit with
             { Nets = [circuit.Nets[0] with { Pins = [.. circuit.Nets[0].Pins, new(u1, "1"), new(u2, "1")] }] } } });
+
+        // Unit 2 now also draws pin 7 on the common pin 8. Pin 8 is one physical pin, so KiCad joins pin 1 (stacked on it in
+        // unit 1) and pin 7 (stacked on it in unit 2) through it: each component has one node 1+7+8, and planning checks
+        // exactly the nodes the comparison uses.
+        Place(2, "7", 5_080_000);
+        // VCC keeps its identity (the structural diagram realizes it) but loses pin 8, so pin 8 is in no net unless listed.
+        SchematicDesign WithNets(params CircuitNet[] nets) => f.Design with { Engineering = f.Design.Engineering with { Circuit = circuit with
+            { Nets = [circuit.Nets[0] with { Pins = [] }, .. nets] } } };
+        CircuitNet Both(string name, params string[] numbers) => new(Guid.NewGuid(), name, [.. numbers.SelectMany(n => new PinEndpoint[] { new(u1, n), new(u2, n) })]);
+        var shared = WithNets(Both("OUT_A", "1"), Both("OUT_B", "7"));
+        var nodes = SchematicElectricalComparison.StackedPinNodes(shared);
+        Assert.AreEqual(2, nodes.Count);
+        Assert.IsTrue(nodes.All(n => n.Select(p => p.ComponentId).Distinct().Count() == 1 && n.Select(p => p.Pin).SequenceEqual(["1", "7", "8"])),
+            string.Join("; ", nodes.Select(n => string.Join(",", n.Select(p => p.Pin)))));
+        CollectionAssert.AreEquivalent(new[] { u1, u2 }, nodes.Select(n => n[0].ComponentId).ToArray());
+        var compared = SchematicElectricalComparison.Compare(shared, f.State, [f.Library]);
+        Assert.IsTrue(compared.PinBindingsComplete);
+        CollectionAssert.AreEqual(nodes.SelectMany(n => n).ToArray(), compared.StackedPins!.SelectMany(n => n).ToArray(),
+            "The comparison joins the same nodes that planning checks.");
+        // The premise: on its own, each unit stacks just one of the listed pins on the unlisted pin 8, so a check per unit
+        // passes this XML; KiCad would then need pin 8 in both nets, which only fails after the editor has changed.
+        var unitScreen = f.Design.Schematic.Instances.First(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)));
+        foreach (var unit in new[] { 1, 2 })
+        {
+            var symbol = unitScreen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Unit.Unit == unit);
+            var stack = SchematicElectricalComparison.StackedDefinitionPins(symbol, unit).Single();
+            CollectionAssert.AreEquivalent(new[] { unit == 1 ? "1" : "7", "8" }, stack.Select(p => p.Number).ToArray());
+        }
+        // Must-catch: pins 1 and 7 on different nets through the shared pin 8 are refused before anything changes.
+        var refused = Assert.ThrowsExactly<AutomationException>(() => SchematicPlacedPins.RequireStackedPinsOnOneNet(shared));
+        Assert.AreEqual(SchematicConnectionErrors.StackedPinsOnDifferentNets, refused.Code);
+        StringAssert.Matches(refused.Message, new System.Text.RegularExpressions.Regex(
+            @"Pins (U[12])\.1, \1\.7, \1\.8 of \1 \(Dual amplifier\) are always one connection in KiCad, because its symbol draws them at the same point, "
+            + @"directly or through a pin its units share, but the XML puts \1\.1 in net 'OUT_A' and \1\.7 in net 'OUT_B'\."));
+        // False positives: pin 1 alone in a net (7 and 8 left out), or the whole node in one net, is no conflict.
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(WithNets(Both("OUT_A", "1")));
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(WithNets(Both("OUT", "1", "7")));
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(WithNets(Both("SUPPLY", "1", "7", "8")));
     }
 
     [TestMethod]

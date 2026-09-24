@@ -13,8 +13,8 @@ namespace KiCad.Automation.Tests;
 
 // CN-1 connection intent (cn1-wiring-intent.md §5) on small hand-built schematics: the contract's own examples
 // (§15), every §13 planning refusal, and the limits. These are unit tests of pure planning logic on purpose: no
-// editor can reach this code until KiCad advertises schematic.connection-realization.v1, and the realizer and
-// native assertion that would turn an intent into drawn wires do not exist yet. The nearest higher-level
+// editor can reach this code until KiCad advertises schematic.connection-realization.v1, and the native assertion
+// that must admit the realizer's wires (lane 2C) does not exist yet. The nearest higher-level
 // coverage is extended instead where it can run today: SchematicSynchronizationPlanTests.Connected checks the
 // same planner on the frozen PSU/CPU fixture and the repeated-sheet fixture, and the NativeXmlComponentCreation
 // and NativePsuCpuComponentCreation journeys build intents from real editor captures without applying them.

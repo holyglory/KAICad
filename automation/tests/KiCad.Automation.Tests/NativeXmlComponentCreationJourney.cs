@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -1093,11 +1094,11 @@ public sealed partial class NativeSessionTests
             var channels = mine.Where(c => c.SheetInstanceId != rootSheet.Id).OrderBy(c => c.Id).ToArray();
             var rootProbe = mine.Single(c => c.SheetInstanceId == rootSheet.Id);
             Assert.HasCount(2, channels);
-            (SchematicSynchronizationPlan Real, SchematicSynchronizationPlan Realizing) PlanNets(IEnumerable<CircuitNet> nets)
+            (SchematicSynchronizationPlan Real, SchematicSynchronizationPlan Realizing, DesignRecoveryState Revision) PlanNets(IEnumerable<CircuitNet> nets)
             {
                 var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with { Nets = [.. nets] } } };
                 var revision = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, [])) };
-                return (SchematicSynchronizationPlanner.Plan(revision, session, token), SchematicSynchronizationPlanner.Plan(revision, advertised, token));
+                return (SchematicSynchronizationPlanner.Plan(revision, session, token), SchematicSynchronizationPlanner.Plan(revision, advertised, token), revision);
             }
 
             // The two channel probes share one physical pin, so joining them draws one hierarchical label on the
@@ -1120,6 +1121,23 @@ public sealed partial class NativeSessionTests
             SchematicConnectionIntentBuilderTests.RequireGroups(pairIntent,
                 [SchematicConnectionIntentBuilderTests.Keys(state.Baseline, [.. channels.Select(c => (c.Id, drawnPin.Number))])]);
             Assert.IsEmpty(pairIntent.CreatedSymbolIds);
+            // CN-1 §6: the label-stub realizer measures this editor and draws the pair: one shared hierarchical label on
+            // the repeated channel sheet, and on the root one new sheet pin per channel with its own stub and label.
+            var pairRealization = await RealizeLive("channel-pair", pair.Revision, pair.Realizing);
+            var channelItems = pairRealization.Generated.Where(g => g.ScreenId == channelScreen.ScreenId).ToArray();
+            CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
+                channelItems.Select(g => g.Role).ToArray(), "The shared channel pin gets one stub and one label for both channels.");
+            Assert.AreEqual(Any.Pack(new HierarchicalLabel()).TypeUrl, channelItems.Single(g => g.Role == GeneratedConnectionRole.StubLabel).TypeUrl);
+            var rootItems = pairRealization.Generated.Where(g => g.ScreenId != channelScreen.ScreenId).ToArray();
+            Assert.HasCount(2, rootItems.Where(g => g.Role == GeneratedConnectionRole.SheetPin).ToArray());
+            Assert.HasCount(2, rootItems.Where(g => g.Role == GeneratedConnectionRole.SheetPinWire).ToArray());
+            Assert.HasCount(2, rootItems.Where(g => g.Role == GeneratedConnectionRole.SheetPinLabel).ToArray());
+            CollectionAssert.AreEquivalent(rootIsland.ChildSheetSymbolIds.ToArray(), rootItems.Where(g => g.Role == GeneratedConnectionRole.SheetPin)
+                .Select(g => g.SheetSymbolId!.Value).ToArray());
+            var sheetUpdates = pairRealization.Operations.Where(o => o.Update is not null && o.Update.Is(SheetSymbol.Descriptor))
+                .Select(o => o.Update.Unpack<SheetSymbol>()).ToArray();
+            Assert.HasCount(2, sheetUpdates);
+            Assert.IsTrue(sheetUpdates.All(u => u.Pins.Count(p => p.Text.Text_ == "XML_CHANNEL_PAIR") == 1));
 
             // The root probe joins the existing probe link: the link's own label names it and only the new pin is drawn.
             var link = circuit.Nets.Single();
@@ -1136,6 +1154,13 @@ public sealed partial class NativeSessionTests
             CollectionAssert.Contains(joinIsland.AnchorItemIds.ToArray(), Guid.Parse(signal.Id.Value), "The anchor is the editor's own connection.");
             SchematicConnectionIntentBuilderTests.RequireGroups(joinIntent, [SchematicConnectionIntentBuilderTests.Keys(state.Baseline,
                 [.. link.Pins.Select(p => (p.ComponentId, p.Pin)), (rootProbe.Id, drawnPin.Number)])]);
+            // The new root probe pin gets one stub and a local label reusing the link's own name.
+            var joinRealization = await RealizeLive("join-existing-link", joined.Revision, joined.Realizing);
+            CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
+                joinRealization.Generated.Select(g => g.Role).ToArray());
+            var joinLabel = joinRealization.Operations.Where(o => o.Create is not null && o.Create.Is(LocalLabel.Descriptor))
+                .Select(o => o.Create.Unpack<LocalLabel>()).Single();
+            Assert.AreEqual("SIGNAL", joinLabel.Text.Text_);
 
             // The root probe with one channel probe cannot be drawn on the shared channel sheet for one instance only.
             var mixed = PlanNets([.. circuit.Nets, new CircuitNet(Guid.NewGuid(), "XML_MIXED",
@@ -1149,13 +1174,64 @@ public sealed partial class NativeSessionTests
             var result = new
             {
                 channelPair = SchematicConnectionIntentBuilder.Summary(pairIntent),
+                channelPairRealization = pairRealization.Generated.Select(g => new { id = g.Id, role = g.Role.ToString(), screen = g.ScreenId }).ToArray(),
                 joinExistingLink = SchematicConnectionIntentBuilder.Summary(joinIntent),
+                joinExistingLinkRealization = joinRealization.Generated.Select(g => new { id = g.Id, role = g.Role.ToString(), screen = g.ScreenId }).ToArray(),
                 joinAnchorItems = joinIsland.AnchorItemIds.Count,
                 rootAndOneChannel = new { errorCode = mixed.Realizing.ErrorCode, errorMessage = mixed.Realizing.ErrorMessage }
             };
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-intents.json"), JsonSerializer.Serialize(result), token);
             return new { channelPairIslands = channelScreen.Islands.Count, channelPairPorts = pairIntent.Ports.Count, joinLabel = joinIsland.LabelText,
-                joinAnchorItems = joinIsland.AnchorItemIds.Count, rootAndOneChannel = mixed.Realizing.ErrorCode };
+                joinAnchorItems = joinIsland.AnchorItemIds.Count, rootAndOneChannel = mixed.Realizing.ErrorCode,
+                channelPairGenerated = pairRealization.Generated.Count, joinExistingLinkGenerated = joinRealization.Generated.Count };
+
+            // Realize a planned intent against this editor's own measurements without applying anything (the native
+            // connectivity assertion that would admit the batch is lane 2C's). The lane entry point must turn the same
+            // recorded measurements into the identical batch, and the recording is kept as a replay fixture.
+            async Task<SchematicConnectionRealization> RealizeLive(string name, DesignRecoveryState revision, SchematicSynchronizationPlan plan)
+            {
+                var checkpoint = await Capture();
+                Assert.AreEqual(revision.NativeRevision.Epoch, checkpoint.State.Revision.Epoch);
+                Assert.AreEqual(revision.NativeRevision.Sequence, checkpoint.State.Revision.Sequence);
+                Assert.AreEqual(revision.Observed, checkpoint.Electrical.Hierarchy.Data, "The executor realizes only the observed checkpoint.");
+                var recorded = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
+                async Task<SchematicPlacementGeometry> Live(MeasureSchematicPlacement request, CancellationToken cancellation)
+                {
+                    var reply = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation);
+                    recorded.Add((request.Clone(), reply.Clone()));
+                    return reply;
+                }
+                var policy = SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical.Hierarchy.Data);
+                var realization = await SchematicConnectionRealizer.RealizeAsync(plan.Connections!, plan.Candidate!, checkpoint, Live, policy, token);
+                Assert.IsNotNull(realization.Operations[^1].AssertConnectivity);
+                Assert.IsTrue(recorded.Any(r => r.Request.ItemCandidates.Count != 0), "Label prototypes are measured natively.");
+                foreach (var screen in plan.Connections!.Screens)
+                foreach (var path in screen.InstancePathKeys)
+                    Assert.IsTrue(recorded.Any(r => string.Join('/', r.Request.Document.SheetPath.Path.Select(p => p.Value)) == path),
+                        "Every instance path of every realized screen is measured: " + path);
+                // Every generated connection point lies inside the measured page inset.
+                foreach (var operation in realization.Operations.Where(o => o.Create is not null))
+                {
+                    var created = SchematicItemDelta.Index([operation.Create]).Single().Value;
+                    var point = created switch { SchematicLine line => line.End, LocalLabel label => label.Position, GlobalLabel label => label.Position,
+                        HierarchicalLabel label => label.Position, _ => null };
+                    if (point is null) continue;
+                    var page = recorded.First(r => r.Request.Document.Equals(operation.TargetDocument)).Reply.PageBounds;
+                    Assert.IsTrue(point.XNm >= page.Position.XNm + policy.PageInsetNm && point.XNm <= page.Position.XNm + page.Size.XNm - policy.PageInsetNm
+                        && point.YNm >= page.Position.YNm + policy.PageInsetNm && point.YNm <= page.Position.YNm + page.Size.YNm - policy.PageInsetNm, name);
+                }
+                var prepared = await SchematicConnectedAddition.RealizeAsync(SchematicConnectionRealizerTests.Replay(recorded), advertised, revision, plan, checkpoint, token);
+                CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), prepared.Operations.Select(o => o.ToByteString()).ToArray(),
+                    "The same measurements give the same batch (I9).");
+                Assert.AreEqual(SchematicDesignXml.Write(realization.Design, []), Encoding.UTF8.GetString(prepared.PlannedDesignFileBytes));
+                // Replay fixture (automation/tests/fixtures/connection-realization): this scenario's nets and measurements,
+                // planned from the saved record kept once as <instance>-realization-editor.recovery.json.
+                string shared = Path.Combine(evidence, instanceId + "-realization-editor.recovery.json");
+                if (!File.Exists(shared)) new DesignRecoveryStore(shared).Save(state with { LastSynchronization = null }, null);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-realization-" + name + ".measurement.json"),
+                    SchematicConnectionRealizerTests.FormatRecording(name, revision, checkpoint, recorded, realization), token);
+                return realization;
+            }
         }
 
         async Task RequireAgreement(int count, bool afterReload = false)

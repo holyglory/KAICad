@@ -13,10 +13,10 @@ namespace KiCad.Automation.Tests;
 
 // CN-1 classification, preparation guards and connection intent (cn1-wiring-intent.md §4.1, §4.4 and §5).
 // These are unit tests of isolated pure logic: no editor can exercise an admitted connected addition until
-// native advertises schematic.connection-realization.v1, which it does not yet, and nothing can draw the
-// planned connections before the realizer and the native assertion exist. The rendered NativeXmlComponentCreation
-// and NativePsuCpuComponentCreation journeys check the same gate and build intents from real handshakes and
-// captured states without applying them, and the existing plan tests here pin the unchanged general-path results.
+// native advertises schematic.connection-realization.v1, which it does not yet, and nothing can apply the
+// realizer's wires before lane 2C's native assertion exists. The rendered NativeXmlComponentCreation journey checks
+// the same gate, builds intents from real handshakes and captured states and realizes them against the editor's own
+// measurements without applying them; the existing plan tests here pin the unchanged general-path results.
 public sealed partial class SchematicSynchronizationPlanTests
 {
     [TestMethod]
@@ -78,28 +78,40 @@ public sealed partial class SchematicSynchronizationPlanTests
     }
 
     [TestMethod]
-    public void ARealizationPlanStopsBeforeTheEditorUntilTheRealizerExists()
+    public void ARealizationPlanIsMeasuredOnlyByAnEditorThatAdvertisesRealization()
     {
         // The executor hands a realization plan to the lane entry point (§9.1 steps 2-3). Without the capability for
-        // the recorded instance it is refused with native_capability_missing; with it, this build still has no
-        // label-stub realizer, so it stops with connected_addition_unavailable. Both happen before any measurement,
-        // journal entry or native request, which is why the editor and checkpoint are never touched here.
+        // the recorded instance it is refused with native_capability_missing before anything is measured, journaled
+        // or sent. With it, the entry point measures the exact checkpoint first: a measurement that answers for
+        // another revision stops it with realization_measurement_stale, still before any native change.
         var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit;
         var (saved, _) = ConnectedRevision(state, c => c with { Nets = [.. c.Nets,
             new(Guid.NewGuid(), "SIG", [new(circuit.Components[0].Id, "1"), new(circuit.Components[1].Id, "1")])] });
         var plan = SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true));
         Assert.IsNotNull(plan.Connections, plan.ErrorCode + " " + plan.ErrorMessage);
-        foreach (var (problem, session, code) in new (string, AutomationSession, string)[]
+        foreach (var (problem, session) in new (string, AutomationSession)[]
         {
-            ("today's editor", ConnectedSession(saved.InstanceId, realization: false), SchematicConnectionErrors.NativeCapabilityMissing),
-            ("another instance's handshake", ConnectedSession(Guid.NewGuid(), realization: true), SchematicConnectionErrors.NativeCapabilityMissing),
-            ("a realizing editor", ConnectedSession(saved.InstanceId, realization: true), SchematicConnectionErrors.ConnectedAdditionUnavailable)
+            ("today's editor", ConnectedSession(saved.InstanceId, realization: false)),
+            ("another instance's handshake", ConnectedSession(Guid.NewGuid(), realization: true))
         })
         {
-            var error = Assert.ThrowsExactly<AutomationException>(() => { _ = SchematicConnectedAddition.RealizeAsync(null!, session, saved, plan, null!); }, problem);
-            Assert.AreEqual(code, error.Code, problem + ": " + error.Message);
+            var error = Assert.ThrowsExactly<AutomationException>(() => { _ = SchematicConnectedAddition.RealizeAsync((NativeClient)null!, session, saved, plan, null!); }, problem);
+            Assert.AreEqual(SchematicConnectionErrors.NativeCapabilityMissing, error.Code, problem + ": " + error.Message);
             StringAssert.Contains(error.Message, "nothing was changed", problem);
         }
+        var checkpoint = SchematicConnectionRealizerTests.Checkpoint(saved);
+        var requests = new List<MeasureSchematicPlacement>();
+        var stale = Assert.ThrowsExactly<AutomationException>(() => SchematicConnectedAddition.RealizeAsync((request, _) =>
+        {
+            requests.Add(request.Clone());
+            var reply = new SchematicPlacementGeometry { Document = request.Document.Clone(), Revision = request.ExpectedRevision.Clone() };
+            reply.Revision.Sequence++;
+            return Task.FromResult(reply);
+        }, ConnectedSession(saved.InstanceId, realization: true), saved, plan, checkpoint).GetAwaiter().GetResult());
+        Assert.AreEqual(SchematicConnectionErrors.RealizationMeasurementStale, stale.Code, stale.Message);
+        Assert.HasCount(1, requests, "The realizer measures before it decides anything.");
+        var measuredRevision = requests[0].ExpectedRevision;
+        Assert.AreEqual(checkpoint.State.Revision, measuredRevision);
     }
 
     [TestMethod]

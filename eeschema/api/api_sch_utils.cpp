@@ -178,9 +178,12 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
 {
     using namespace kiapi::automation::v1;
     output.Clear();
+    // Every incomplete observation names its reason (contract CN-1 §11), so a
+    // realizer can tell an unresolved variant mapping from a missing identity.
     if( !symbol.GetLibSymbolRef() )
     {
         output.add_limitations( "The symbol definition is unresolved" );
+        output.set_incomplete_reason( SPGIR_DEFINITION_UNRESOLVED );
         return;
     }
     // Variant replacements currently use similarity-based MapLibPins matching.
@@ -193,6 +196,7 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
                 && *selected->second.m_SymbolOverride != symbol.GetLibId() )
         {
             output.add_limitations( "Alternate variant symbols require an exact persistent pin mapping" );
+            output.set_incomplete_reason( SPGIR_VARIANT_PIN_MAPPING_UNRESOLVED );
             return;
         }
     }
@@ -211,6 +215,7 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
                 || !ownedIdentities.insert( pin->GetLibPin()->m_Uuid ).second )
         {
             output.add_limitations( "Every active pin requires an exact placed and owned library identity" );
+            output.set_incomplete_reason( SPGIR_PLACED_IDENTITY_MISSING );
             return;
         }
     }
@@ -233,6 +238,23 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
         anchor->set_unit( pin->GetUnit() );
         anchor->set_body_style( pin->GetBodyStyle() );
         anchor->set_visible( pin->IsVisible() );
+        // GetType() already applies an active alternate, as connectivity does.
+        anchor->set_electrical_type(
+                ToProtoEnum<ELECTRICAL_PINTYPE, kiapi::common::types::ElectricalPinType>( pin->GetType() ) );
+        // The implicit connection the connection graph gives this pin: global and
+        // local power pins join every same-named net (globally or on this sheet).
+        // A power symbol names it by its value on this sheet path; a legacy hidden
+        // power input by its shown pin name (CONNECTION_GRAPH power-pin naming).
+        const bool global = pin->IsGlobalPower();
+        const bool local = !global && pin->IsLocalPower();
+        anchor->set_power_scope( global ? SPPS_GLOBAL : local ? SPPS_LOCAL : SPPS_NONE );
+        if( global || local )
+        {
+            const SYMBOL* library = pin->GetLibPin()->GetParentSymbol();
+            const bool powerSymbol = library && ( library->IsGlobalPower() || library->IsLocalPower() );
+            const wxString name = powerSymbol ? symbol.GetValue( true, &path, false ) : pin->GetShownName();
+            anchor->set_power_net( name.ToUTF8() );
+        }
     }
     output.set_complete( true );
 }

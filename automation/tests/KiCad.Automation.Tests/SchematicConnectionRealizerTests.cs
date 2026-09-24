@@ -1449,6 +1449,9 @@ public sealed class SchematicConnectionRealizerTests
         // questions and produce exactly the recorded batch; faults injected into the real answers must still be caught.
         var recordings = Recordings();
         Assert.IsNotEmpty(recordings);
+        // Which scenarios ran the conditional must-catches below, so that none of them can go silent.
+        var covering = new List<string>();
+        var anchorBranches = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var recording in recordings)
         {
             int asked = 0;
@@ -1542,17 +1545,33 @@ public sealed class SchematicConnectionRealizerTests
             }
             var everywhere = recording;
             foreach (int multiple in SchematicConnectionPolicy.StubMultiples) everywhere = everywhere.WithJunction(Along(multiple * grid, policy.ClearanceNm), screen);
-            await RequireRecordingRefusal(everywhere, SchematicConnectionErrors.RealizationNoFreeStub);
-            // Must-catch from governed run t20260924T114705Z-b90471, whose own recording was not kept (the journey wrote it
-            // only after a successful realization; it now keeps a failed one too). There the new probe was copied from a
-            // symbol whose reference field an earlier check had dragged 60.96 mm aside and 121.666 mm in front of its pin.
-            // KiCad measures a symbol as one rectangle around its body, pins and visible fields, so that rectangle covered
-            // the probe pin's whole stub room: a correct refusal, which must say the pin's own symbol is in the way. The same
-            // field is added here to the real measured bounds of a recorded stub's symbol, on a connection with no join.
+            var (_, refusal, answered) = await everywhere.Attempt();
+            Assert.AreEqual(SchematicConnectionErrors.RealizationNoFreeStub, refusal?.Code, recording.Scenario + ": " + refusal?.Message);
+            // The evidence the journey keeps for a refused realization carries the refusal's own code and message, what the
+            // editor was asked and answered, and no operations or generated items.
+            var kept = System.Text.Json.Nodes.JsonNode.Parse(FormatRecording(recording.Scenario, everywhere.State, everywhere.Checkpoint, answered, null,
+                recording.Scenario + ".recovery.json", refusal))!;
+            Assert.AreEqual(refusal!.Code, kept["refusal"]!["code"]!.GetValue<string>(), recording.Scenario);
+            Assert.AreEqual(refusal.Message, kept["refusal"]!["message"]!.GetValue<string>(), recording.Scenario);
+            Assert.IsEmpty(kept["operations"]!.AsArray(), recording.Scenario);
+            Assert.IsEmpty(kept["generated"]!.AsArray(), recording.Scenario);
+            Assert.HasCount(answered.Count, kept["measurements"]!.AsArray(), recording.Scenario);
+            Assert.IsGreaterThan(0, answered.Count, recording.Scenario + ": the refusal came after measuring.");
+            Assert.IsTrue(System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(SchematicJson.Formatter.Format(answered[^1].Reply)),
+                kept["measurements"]!.AsArray()[^1]!["response"]), recording.Scenario + ": the last answer kept is the editor's last answer.");
+            // Must-catch for the likely cause of the refusal in governed run t20260924T114705Z-b90471, whose own recording was
+            // not kept (the journey wrote it only after a successful realization; it now keeps a failed one too): a new probe
+            // copied from a symbol whose reference field the journey's manual field check had dragged 60.96 mm aside and
+            // 121.666 mm in front of its pin, as it left one in governed run t20260924T154856Z-66ef97. KiCad measures a symbol
+            // as one rectangle around its body, pins and visible fields, so that rectangle would cover the probe pin's whole
+            // stub room: a correct refusal, which must say the pin's own symbol is in the way. New symbols no longer copy such
+            // a field, but a symbol that covers its own pin must still be refused. The same field is added here to the real
+            // measured bounds of a recorded stub's symbol, on a connection with no join.
             var covered = recording.Intent.Screens.SelectMany(s => s.Islands).Where(i => !i.JoinRequired).SelectMany(i => i.Members)
                 .FirstOrDefault(m => m.RequiresStub);
             if (covered is not null)
             {
+                covering.Add(recording.Scenario);
                 const long Aside = 60_960_000, Ahead = 121_666_000;
                 var faraway = recording.With((request, reply) =>
                 {
@@ -1576,8 +1595,8 @@ public sealed class SchematicConnectionRealizerTests
             }
             // On a real sheet where an existing connection was named by a label on a join candidate's pin (no join stub had
             // room): a junction one grid inside that label leaves it no room there, so the realizer never draws over the
-            // junction. When a later candidate exists, it is named by a label on its own pin (join-anchor-label, recorded from
-            // an earlier scene where both probe pins had room). In the join-turned-link scene the link's wire turns one grid
+            // junction. When a later candidate exists, it is named by a label on its own pin (join-anchor-label: the link's wire
+            // runs straight out of both probe pins, so the first is named). In the join-turned-link scene the link's wire turns one grid
             // in front of the first probe pin, so no label fits there, and runs straight out of the second: the label on the
             // second pin was the last candidate's, and blocking it leaves the connection nothing to be named by, with each
             // pin's reason in the refusal.
@@ -1590,6 +1609,7 @@ public sealed class SchematicConnectionRealizerTests
                 var (fx, fy) = SchematicConnectionRealizer.Facing(label.SpinStyle);
                 var labelScreen = recording.Checkpoint.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(target)).Metadata.ScreenId;
                 var blockedLabel = recording.WithJunction(new() { XNm = label.Position.XNm + fx * grid, YNm = label.Position.YNm + fy * grid }, labelScreen);
+                anchorBranches.Add(recording.Scenario, at + 1 < island.JoinCandidates.Count ? "next-candidate" : "no-join-anchor");
                 if (at + 1 < island.JoinCandidates.Count)
                 {
                     var renamed = await blockedLabel.Realize();
@@ -1610,6 +1630,12 @@ public sealed class SchematicConnectionRealizerTests
                 }
             }
         }
+        Assert.IsNotEmpty(covering, "Some recording has a new pin whose own symbol can be made to cover its stub room.");
+        // The live scenes are built so that each branch is taken on every recording of them.
+        Assert.AreEqual("next-candidate", anchorBranches.GetValueOrDefault("join-anchor-label"),
+            "join-anchor-label names its first candidate, so blocking that label names the next one.");
+        Assert.AreEqual("no-join-anchor", anchorBranches.GetValueOrDefault("join-turned-link"),
+            "join-turned-link names its last candidate, so blocking that label leaves nothing to name the connection.");
     }
 
     /// <summary>One recorded live realization (automation/tests/fixtures/connection-realization), optionally with a
@@ -1656,6 +1682,27 @@ public sealed class SchematicConnectionRealizerTests
             var design = saved.Baseline with { Engineering = saved.Baseline.Engineering with { Circuit = desired.Engineering.Circuit },
                 PartSymbols = desired.PartSymbols };
             return saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, saved.KnowledgeLibraries)) };
+        }
+
+        /// <summary>Realize as <see cref="Realize"/> does, keeping every measurement asked and answered, and the refusal instead of
+        /// throwing it, as the journey keeps them for a refused realization.</summary>
+        public async Task<(SchematicConnectionRealization? Realization, AutomationException? Refusal,
+            IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> Asked)> Attempt()
+        {
+            var replay = Replay(Measurements);
+            var asked = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
+            try
+            {
+                var realization = await SchematicConnectionRealizer.RealizeAsync(Intent, Plan.Candidate!, Checkpoint, async (request, token) =>
+                {
+                    var reply = await replay(request, token);
+                    reply = Fault is null ? reply : Fault(request, reply);
+                    asked.Add((request.Clone(), reply.Clone()));
+                    return reply;
+                }, SchematicConnectionPolicy.FromSnapshot(Checkpoint.Electrical.Hierarchy.Data));
+                return (realization, null, asked);
+            }
+            catch (AutomationException refusal) { return (null, refusal, asked); }
         }
 
         public Task<SchematicConnectionRealization> Realize()

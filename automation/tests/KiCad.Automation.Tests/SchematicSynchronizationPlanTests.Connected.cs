@@ -344,7 +344,7 @@ public sealed partial class SchematicSynchronizationPlanTests
         var planned = SchematicSynchronizationPlanner.Plan(unresolvedSaved, ConnectedSession(unresolvedSaved.InstanceId, realization: true));
         Assert.AreEqual(SchematicConnectionErrors.UnalignedElectricalBaseline, planned.ErrorCode, planned.ErrorMessage);
         Assert.AreEqual(named.ErrorMessage, planned.ErrorMessage);
-        var general =PrepareConnected(saved with { BaselineElectrical = foreign }, desired, admitted);
+        var general = PrepareConnected(saved with { BaselineElectrical = foreign }, desired, admitted);
         Assert.AreEqual("The saved baseline must agree with its native pin partition.", general.ErrorMessage, "No unresolved symbol is named.");
 
         // Hierarchy merge refusals pass through with the merge's own result, as PrepareCreation reports them

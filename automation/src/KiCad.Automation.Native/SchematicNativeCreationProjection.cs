@@ -291,10 +291,7 @@ internal static class SchematicNativeCreationProjection
             MirrorY = occurrence.Placement.MirrorY
         };
         result.Locked = occurrence.Placement.Locked ? LockedState.LsLocked : LockedState.LsUnlocked;
-        long dx = result.Position.XNm - template.Position.XNm;
-        long dy = result.Position.YNm - template.Position.YNm;
-        foreach (var field in Fields(result))
-            if (field.Text?.Position is { } position) { position.XNm += dx; position.YNm += dy; }
+        PlaceFields(result, result.Position.XNm - template.Position.XNm, result.Position.YNm - template.Position.YNm);
         if (result.ReferenceField?.Text is null || result.ValueField?.Text is null)
             throw Invalid("incomplete_symbol_fields", "A created symbol requires complete reference and value fields.");
         result.ReferenceField.Text.Text_ = component.Reference;
@@ -358,10 +355,48 @@ internal static class SchematicNativeCreationProjection
         return result;
     }
 
-    private static IEnumerable<SchematicField> Fields(SchematicSymbolInstance symbol) => new[]
+    /// <summary>A created symbol's fields sit where its library definition puts them, as KiCad places them when it resets a
+    /// placed symbol's fields from its library (<c>SCH_SYMBOL::UpdateFields</c>): at the symbol's position plus the library
+    /// field's position, with the library field's text angle and justification. They never follow the fields of the placed
+    /// symbol that is copied: which placed symbol that is depends on generated identities, and a person may have dragged its
+    /// fields anywhere. A copy would take such a field with it, and KiCad, which measures a symbol as one rectangle around
+    /// its visible fields, could then find no room at the new symbol's pins for their connections (the likely cause of the
+    /// refusal in governed run t20260924T114705Z-b90471, whose recording was not kept). Visibility and text style stay as the
+    /// copied symbol shows them. A field the definition does not define keeps its place relative to the copied symbol (moved
+    /// by <paramref name="dx"/>, <paramref name="dy"/>), as KiCad's own reset keeps it. A declared part's symbol is already
+    /// made from its definition's fields, so this changes nothing there.</summary>
+    private static void PlaceFields(SchematicSymbolInstance symbol, long dx, long dy)
     {
-        symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField
-    }.Concat(symbol.UserFields).Where(field => field is not null)!;
+        var definition = symbol.Definition;
+        var library = definition?.Items.Where(c => c.Item?.Is(SchematicField.Descriptor) == true)
+            .Select(c => c.Item.Unpack<SchematicField>()).ToArray() ?? [];
+        var pairs = new (SchematicField? Placed, SchematicField? Library)[]
+        {
+            (symbol.ReferenceField, definition?.ReferenceField), (symbol.ValueField, definition?.ValueField),
+            (symbol.FootprintField, definition?.FootprintField), (symbol.DatasheetField, definition?.DatasheetField),
+            (symbol.DescriptionField, definition?.DescriptionField)
+        }.Concat(symbol.UserFields.Select(field => ((SchematicField?)field, library.FirstOrDefault(l => l.Name == field.Name))));
+        bool fromLibrary = false;
+        foreach (var (placed, source) in pairs)
+        {
+            if (placed?.Text?.Position is not { } position) continue;
+            if (source?.Text?.Position is { } local)
+            {
+                placed.Text.Position = new() { XNm = symbol.Position.XNm + local.XNm, YNm = symbol.Position.YNm + local.YNm };
+                if (source.Text.Attributes is { } from)
+                {
+                    var attributes = placed.Text.Attributes ??= new();
+                    attributes.Angle = from.Angle?.Clone();
+                    attributes.HorizontalAlignment = from.HorizontalAlignment;
+                    attributes.VerticalAlignment = from.VerticalAlignment;
+                }
+                fromLibrary = true;
+            }
+            else { position.XNm += dx; position.YNm += dy; }
+        }
+        // Nothing arranged these fields automatically; they are where the library puts them.
+        if (fromLibrary) symbol.FieldsAutoplaced = false;
+    }
 
     private static SchematicSymbolInstance InstantiateDeclaration(SchematicPartSymbol source)
     {

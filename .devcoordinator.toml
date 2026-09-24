@@ -63,6 +63,15 @@ timeout_seconds=900
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216},{name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216},{name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216},{name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864},{name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864}]
 
+[[test.diagram-requirement-history.check]]
+name="psu-cpu-canvas"
+tier="development"
+requires=["contracts","native-protocol"]
+after=["native-ui"]
+timeout_seconds=900
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests"]
+retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
+
 [test.part-symbol-contracts]
 timeout_seconds=600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }

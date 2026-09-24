@@ -46,6 +46,7 @@ class SCH_SYMBOL_CACHE_STATE;
 class SCH_SHEET;
 class SCH_SCREEN;
 class SCH_SYMBOL;
+class SCHEMATIC;
 class TITLE_BLOCK;
 class PAGE_INFO;
 
@@ -76,6 +77,21 @@ public:
 
     virtual void Revert() override;
     bool Empty() const override;
+
+    /**
+     * True when pushing this commit would change what is saved.  Only the staged items are
+     * compared, each with the copy the commit saved when it was staged, in the form the
+     * schematic writer saves; the rest of the design is never written.  An added or removed
+     * item, or any staged setting, library cache, embedded file or ERC marker, counts as a
+     * change.
+     */
+    bool PersistsChange( SCHEMATIC& aSchematic ) const;
+
+    /**
+     * Forget every staged edit without applying or reverting it: only the saved copies are
+     * freed.  For a commit whose items were freed with a replaced document.
+     */
+    void Abandon();
     void SetAutomationOrigin( const std::string& aOriginId, const std::string& aOperationId )
     {
         m_automationBatch = true;

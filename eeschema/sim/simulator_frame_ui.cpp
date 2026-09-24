@@ -1954,9 +1954,10 @@ void SIMULATOR_FRAME_UI::UpdateTunerValue( const SCH_SHEET_PATH& aSheetPath, con
     }
 
     // Applying a tuned value is an ordinary, undoable symbol edit.  Writing the value the
-    // symbol already has leaves no undo entry, modified flag or revision.
-    SCH_TRACKED_CHANGE change( schematic, "Apply Tuned Value" );
+    // symbol already has leaves no undo entry, modified flag or revision; only the staged
+    // symbol is compared with its saved copy.
     SCH_COMMIT         commit( m_schematicFrame );
+    SCH_TRACKED_CHANGE change( schematic, "Apply Tuned Value", commit );
 
     commit.Modify( symbol, aSheetPath.LastScreen() );
     model.SetParamValue( tunerParam->info.name, std::string( aValue.ToUTF8() ) );

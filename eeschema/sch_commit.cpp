@@ -34,6 +34,7 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <sch_embedded_files_undo.h>
 #include <sch_page_settings_undo.h>
+#include <api/api_sch_state_groups.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <connection_graph.h>
 
@@ -73,6 +74,53 @@ SCH_COMMIT::~SCH_COMMIT()
 bool SCH_COMMIT::Empty() const
 {
     return COMMIT::Empty() && !m_embeddedFilesUndo && !m_pageSettingsUndo && !m_libraryCacheChanged;
+}
+
+
+bool SCH_COMMIT::PersistsChange( SCHEMATIC& aSchematic ) const
+{
+    // Staged settings, library caches, embedded files and ERC markers keep no item copy to
+    // compare.  Owners stage them only to change them.
+    if( m_embeddedFilesUndo || m_pageSettingsUndo || m_libraryCacheChanged || !m_libraryCacheUndo.empty()
+            || !m_ercMarkers.empty() )
+    {
+        return true;
+    }
+
+    for( const COMMIT_LINE& entry : m_entries )
+    {
+        if( ( entry.m_type & CHT_TYPE ) != CHT_MODIFY || !entry.m_copy || !entry.m_item->IsSCH_ITEM() )
+            return true;
+
+        const std::string before =
+                SCH_STATE_GROUPS::PersistedItem( aSchematic, static_cast<SCH_ITEM*>( entry.m_copy ) );
+
+        if( before.empty()
+                || before != SCH_STATE_GROUPS::PersistedItem( aSchematic, static_cast<SCH_ITEM*>( entry.m_item ) ) )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+void SCH_COMMIT::Abandon()
+{
+    for( COMMIT_LINE& entry : m_entries )
+        delete entry.m_copy;
+
+    m_entries.clear();
+    clear();
+    m_ercMarkers.clear();
+    m_embeddedFilesUndo.reset();
+    m_pageSettingsUndo.reset();
+    m_libraryCacheScopes.clear();
+    m_libraryCacheUndo.clear();
+    m_libraryCacheChanged = false;
+    m_connectivitySettingsChanged = false;
+    m_netSettingsChanged = false;
 }
 
 

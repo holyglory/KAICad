@@ -17,21 +17,28 @@
 //    not count; a braces-less if at the same brace level is not distinguished);
 //  - a call to a helper that marks the document modified is not itself routed, or stages into
 //    a commit that is not pushed after it;
-//  - a SCH_TRACKED_CHANGE is declared without review, or is restricted to screens without a
-//    reason (every other tracker compares the same whole state as the lifecycle digest);
+//  - a SCH_TRACKED_CHANGE is declared without review, is restricted to screens without a
+//    reason, or compares a commit that is not declared before it (a whole-state tracker
+//    compares the same state as the lifecycle digest; a staged tracker compares only the
+//    items its commit staged);
 //  - a schematic writer gains or loses a pinned persisted field, or a pinned writer group has
 //    no owner (the commit machinery or a reviewed direct owner);
-//  - a proven owner loses its rendered journey step, or complete tracking is claimed while
-//    owners are pending or routed but not yet proven end to end.
+//  - a proven owner loses its rendered journey steps (a real OneChange and Unchanged call in
+//    the journey method, not a comment or text), or complete tracking is claimed anywhere in
+//    the scanned sources while owners are pending or routed but not yet proven end to end.
 //
 // Owners that change no persisted schematic state are an explicit, reviewed allow-list.
 //
-// The oracle only reads the source tree.  It links nothing from eeschema, so the focused
-// journal check also compiles it (see qa/tests/common/test_document_change_journal.cpp).
+// The source checks read only the source tree and link nothing from eeschema, so the focused
+// journal check compiles them too (qa/tests/common/test_document_change_journal.cpp).  The
+// eeschema-linked checks at the end of this file (the tracked change itself and the cost of
+// what it compares) build only where EESCHEMA is defined: qa_symbol_graphic_identity, which
+// native-foundation builds and runs, and qa_eeschema.
 
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -42,6 +49,27 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined( EESCHEMA )
+#include <api/api_sch_state_groups.h>
+#include <lib_symbol.h>
+#include <qa_utils/wx_utils/unit_test_utils.h>
+#include <sch_commit.h>
+#include <sch_screen.h>
+#include <sch_sheet.h>
+#include <sch_symbol.h>
+#include <sch_text.h>
+#include <schematic.h>
+#include <schematic_utils/schematic_file_util.h>
+#include <settings/settings_manager.h>
+#include <tool/tool_manager.h>
+#include <kiid.h>
+
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#endif
 
 namespace SCH_CHANGE_TRACKING_ORACLE
 {
@@ -248,6 +276,8 @@ struct TRACKER
     std::string variable;
     int         arguments = 0;   ///< Top-level constructor arguments.
     int         line = 0;
+    std::string commit;          ///< Staged form: the third argument, the compared commit.
+    bool        commitDeclared = false;  ///< That commit is a SCH_COMMIT declared before it.
 };
 
 
@@ -646,6 +676,38 @@ inline int topLevelArguments( const std::string& aCode, size_t aOpen )
 }
 
 
+/// The top-level arguments of the parenthesised list at @a aOpen, spaces removed.
+inline std::vector<std::string> topLevelArgumentTexts( const std::string& aCode, size_t aOpen )
+{
+    std::string              text = argumentText( aCode, aOpen );
+    std::vector<std::string> arguments;
+    std::string              current;
+    int                      depth = 0;
+
+    for( char c : text )
+    {
+        if( c == '(' || c == '{' || c == '[' )
+            ++depth;
+        else if( c == ')' || c == '}' || c == ']' )
+            --depth;
+
+        if( c == ',' && depth == 0 )
+        {
+            arguments.push_back( withoutSpaces( current ) );
+            current.clear();
+            continue;
+        }
+
+        current += c;
+    }
+
+    if( !withoutSpaces( current ).empty() || !arguments.empty() )
+        arguments.push_back( withoutSpaces( current ) );
+
+    return arguments;
+}
+
+
 /// A definition header that takes a SCH_TRACKED_CHANGE by reference or pointer.
 inline bool receivesTracker( const std::string& aHeader )
 {
@@ -879,6 +941,15 @@ inline SOURCE_SCAN scanSource( const std::string& aSource, const std::set<std::s
                         tracker.variable = code.substr( v, w - v );
                         tracker.arguments = topLevelArguments( code, open );
                         tracker.line = static_cast<int>( std::count( code.begin(), code.begin() + i, '\n' ) ) + 1;
+
+                        // A staged tracker compares a commit that must outlive it: one declared
+                        // earlier in the same function (commit names are collected in order).
+                        if( tracker.arguments == 3 )
+                        {
+                            tracker.commit = topLevelArgumentTexts( code, open )[2];
+                            tracker.commitDeclared = commitVariables[function].count( tracker.commit ) > 0;
+                        }
+
                         scan.trackers.push_back( tracker );
                         scan.routes.push_back( { function, currentScope(), i, ROUTE_KIND::TRACKED, tracker.variable } );
                     }
@@ -1147,6 +1218,307 @@ inline std::string relativeName( const fs::path& aRoot, const fs::path& aFile )
 }
 
 
+/// Calls of @a aName in blanked code, wherever they are: an identifier followed by '('.
+inline size_t countCalls( const std::string& aCode, const std::string& aName )
+{
+    size_t count = 0;
+
+    for( size_t pos = aCode.find( aName ); pos != std::string::npos; pos = aCode.find( aName, pos + 1 ) )
+    {
+        size_t after = pos + aName.size();
+
+        if( ( pos > 0 && isIdentChar( aCode[pos - 1] ) ) || ( after < aCode.size() && isIdentChar( aCode[after] ) ) )
+            continue;
+
+        while( after < aCode.size() && isLineSpace( aCode[after] ) )
+            ++after;
+
+        count += after < aCode.size() && aCode[after] == '(' ? 1 : 0;
+    }
+
+    return count;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Journey scanning (C#)
+// ---------------------------------------------------------------------------------------------
+
+/// Blank C# comments, preprocessor lines and the contents of string and character literals
+/// (regular, verbatim, interpolated and raw), keeping every offset and line break, so that a
+/// journey step named only in a comment or a message never counts as a step.
+inline BLANKED_SOURCE blankCSharp( const std::string& aSource )
+{
+    BLANKED_SOURCE result{ aSource, {} };
+    std::string&   out = result.code;
+    const size_t   n = aSource.size();
+    size_t         i = 0;
+    bool           lineStart = true;
+
+    auto blank = [&]( size_t aBegin, size_t aEnd )
+    {
+        for( size_t k = aBegin; k < aEnd && k < n; ++k )
+        {
+            if( aSource[k] != '\n' )
+                out[k] = ' ';
+        }
+    };
+
+    auto literal = [&]( size_t aBegin, size_t aEnd )
+    {
+        aEnd = std::min( aEnd, n );
+        result.literals.emplace_back( aBegin, std::max( aBegin, aEnd ) );
+        blank( aBegin, aEnd );
+    };
+
+    while( i < n )
+    {
+        const char c = aSource[i];
+
+        if( c == '\n' )
+        {
+            lineStart = true;
+            ++i;
+            continue;
+        }
+
+        if( lineStart && ( c == ' ' || c == '\t' || c == '\r' ) )
+        {
+            ++i;
+            continue;
+        }
+
+        if( lineStart && c == '#' )
+        {
+            size_t j = aSource.find( '\n', i );
+            j = j == std::string::npos ? n : j;
+            blank( i, j );
+            i = j;
+            continue;
+        }
+
+        lineStart = false;
+
+        if( c == '/' && i + 1 < n && aSource[i + 1] == '/' )
+        {
+            size_t j = aSource.find( '\n', i );
+            j = j == std::string::npos ? n : j;
+            blank( i, j );
+            i = j;
+            continue;
+        }
+
+        if( c == '/' && i + 1 < n && aSource[i + 1] == '*' )
+        {
+            size_t j = aSource.find( "*/", i + 2 );
+            j = j == std::string::npos ? n : j + 2;
+            blank( i, j );
+            i = j;
+            continue;
+        }
+
+        if( c == '"' || ( ( c == '$' || c == '@' ) && !( i > 0 && isIdentChar( aSource[i - 1] ) ) ) )
+        {
+            // Any run of '$' and '@' prefixes a literal only when a quote follows it.
+            size_t q = i;
+
+            while( q < n && ( aSource[q] == '$' || aSource[q] == '@' ) )
+                ++q;
+
+            if( q >= n || aSource[q] != '"' )
+            {
+                i = q > i ? q : i + 1;
+                continue;
+            }
+
+            const bool verbatim = aSource.substr( i, q - i ).find( '@' ) != std::string::npos;
+            size_t     run = 0;
+
+            while( q + run < n && aSource[q + run] == '"' )
+                ++run;
+
+            if( run >= 3 )
+            {
+                // Raw literal: ends at the first run of as many quotes.
+                const std::string quotes( run, '"' );
+                size_t            j = aSource.find( quotes, q + run );
+                j = j == std::string::npos ? n : j;
+                literal( q + run, j );
+                i = std::min( n, j + run );
+                continue;
+            }
+
+            size_t j = q + 1;
+
+            if( verbatim )
+            {
+                // A doubled quote is a quote inside a verbatim literal.
+                while( j < n && !( aSource[j] == '"' && !( j + 1 < n && aSource[j + 1] == '"' ) ) )
+                    j += aSource[j] == '"' ? 2 : 1;
+            }
+            else
+            {
+                while( j < n && aSource[j] != '"' && aSource[j] != '\n' )
+                    j += aSource[j] == '\\' ? 2 : 1;
+            }
+
+            literal( q + 1, j );
+            i = std::min( n, j + 1 );
+            continue;
+        }
+
+        if( c == '\'' && !( i > 0 && isIdentChar( aSource[i - 1] ) ) )
+        {
+            size_t j = i + 1;
+
+            while( j < n && aSource[j] != '\'' && aSource[j] != '\n' )
+                j += aSource[j] == '\\' ? 2 : 1;
+
+            blank( i + 1, j );
+            i = std::min( n, j + 1 );
+            continue;
+        }
+
+        ++i;
+    }
+
+    return result;
+}
+
+
+/// The body [begin, end) of the method or local function @a aName declared in blanked C#
+/// code: "Task Name(...) {" or "Task<T> Name(...) {".  Calls do not count.
+inline std::pair<size_t, size_t> csharpMethodBody( const std::string& aCode, const std::string& aName,
+                                                   size_t aBegin = 0, size_t aEnd = std::string::npos )
+{
+    const size_t end = std::min( aEnd, aCode.size() );
+
+    for( size_t pos = aCode.find( aName, aBegin ); pos != std::string::npos && pos < end;
+         pos = aCode.find( aName, pos + 1 ) )
+    {
+        size_t after = pos + aName.size();
+
+        if( ( pos > 0 && isIdentChar( aCode[pos - 1] ) ) || after >= end || aCode[after] != '(' )
+            continue;
+
+        size_t typeEnd = pos;
+
+        while( typeEnd > aBegin && std::isspace( static_cast<unsigned char>( aCode[typeEnd - 1] ) ) )
+            --typeEnd;
+
+        size_t typeBegin = typeEnd;
+
+        while( typeBegin > aBegin
+               && ( isIdentChar( aCode[typeBegin - 1] ) || aCode[typeBegin - 1] == '<' || aCode[typeBegin - 1] == '>' ) )
+        {
+            --typeBegin;
+        }
+
+        if( !startsWith( aCode.substr( typeBegin, typeEnd - typeBegin ), "Task" ) )
+            continue;
+
+        int    depth = 0;
+        size_t k = after;
+
+        for( ; k < end; ++k )
+        {
+            if( aCode[k] == '(' )
+                ++depth;
+            else if( aCode[k] == ')' && --depth == 0 )
+                break;
+        }
+
+        size_t brace = aCode.find_first_not_of( " \t\r\n", k + 1 );
+
+        if( brace == std::string::npos || brace >= end || aCode[brace] != '{' )
+            continue;
+
+        depth = 0;
+
+        for( size_t m = brace; m < end; ++m )
+        {
+            if( aCode[m] == '{' )
+                ++depth;
+            else if( aCode[m] == '}' && --depth == 0 )
+                return { brace + 1, m };
+        }
+    }
+
+    return { std::string::npos, std::string::npos };
+}
+
+
+/// The string literal passed as argument @a aIndex of every awaited call of @a aName in
+/// [aBegin, aEnd) of blanked C# @a aCode: "await Name(a, "text", ...)".  The literal is read
+/// from @a aRaw at the same offsets; an argument that is not a plain literal yields nothing.
+inline std::vector<std::string> awaitedLiteralArguments( const std::string& aRaw, const std::string& aCode,
+                                                         const std::string& aName, size_t aIndex,
+                                                         size_t aBegin, size_t aEnd )
+{
+    std::vector<std::string> found;
+    const size_t             end = std::min( aEnd, aCode.size() );
+
+    for( size_t pos = aCode.find( aName, aBegin ); pos != std::string::npos && pos < end;
+         pos = aCode.find( aName, pos + 1 ) )
+    {
+        const size_t open = pos + aName.size();
+
+        if( ( pos > 0 && isIdentChar( aCode[pos - 1] ) ) || open >= end || aCode[open] != '(' )
+            continue;
+
+        size_t before = pos;
+
+        while( before > 0 && std::isspace( static_cast<unsigned char>( aCode[before - 1] ) ) )
+            --before;
+
+        if( before < 5 || aCode.compare( before - 5, 5, "await" ) != 0
+                || ( before > 5 && isIdentChar( aCode[before - 6] ) ) )
+        {
+            continue;
+        }
+
+        int    depth = 0;
+        size_t index = 0;
+        size_t argumentBegin = open + 1;
+
+        for( size_t k = open; k < end; ++k )
+        {
+            const char c = aCode[k];
+            const bool closes = c == ')' || c == '}' || c == ']';
+
+            if( c == '(' || c == '{' || c == '[' )
+                ++depth;
+            else if( closes )
+                --depth;
+
+            if( ( c == ',' && depth == 1 ) || ( closes && depth == 0 ) )
+            {
+                if( index == aIndex )
+                {
+                    const std::string text = aRaw.substr( argumentBegin, k - argumentBegin );
+                    const size_t      first = text.find_first_not_of( " \t\r\n" );
+                    const size_t      last = text.find_last_not_of( " \t\r\n" );
+
+                    if( first != std::string::npos && last > first && text[first] == '"' && text[last] == '"'
+                            && text.find( '"', first + 1 ) == last )
+                    {
+                        found.push_back( text.substr( first + 1, last - first - 1 ) );
+                    }
+
+                    break;
+                }
+
+                ++index;
+                argumentBegin = k + 1;
+            }
+
+            if( closes && depth == 0 )
+                break;
+        }
+    }
+
+    return found;
+}
 
 
 // ---------------------------------------------------------------------------------------------
@@ -1230,7 +1602,13 @@ const std::string ANY_ROUTE = "@routes";
 
 const std::string SYMBOL_FIELDS_DIALOG = "eeschema/dialogs/dialog_symbol_fields_table.cpp";
 const std::string SYMBOL_DIALOG = "eeschema/dialogs/dialog_symbol_properties.cpp";
+const std::string EDIT_TOOL = "eeschema/tools/sch_edit_tool.cpp";
+const std::string DRAWING_TOOLS = "eeschema/tools/sch_drawing_tools.cpp";
+const std::string EDITOR_CONTROL = "eeschema/tools/sch_editor_control.cpp";
+const std::string SETUP_CONFIG = "eeschema/eeschema_config.cpp";
+const std::string SIM_FRAME = "eeschema/sim/simulator_frame.cpp";
 const std::string JOURNEY = "automation/tests/KiCad.Automation.Tests/NativeEventJourney.cs";
+const std::string JOURNEY_METHOD = "VerifyDirectOwnerTracking";
 
 
 inline std::vector<OWNER> reviewedOwners()
@@ -1257,12 +1635,10 @@ inline std::vector<OWNER> reviewedOwners()
         // Schematic editor frame and its tools.
         { "eeschema/annotate.cpp", "SCH_EDIT_FRAME::AnnotateSymbols", "", 1, DISPOSITION::ROUTED_BY_CALLERS,
           { G_SYMBOL, G_FIELD }, {}, "Annotation stages into the caller's commit; every caller pushes it." },
-        { "eeschema/eeschema_config.cpp", "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "", 1,
-          DISPOSITION::ROUTED_UNLESS_RECORDED, { G_PROJECT },
-          { { "eeschema/eeschema_config.cpp", "SCH_EDIT_FRAME::ShowSchematicSetupDialog",
-              "if(Schematic().ChangeJournal().Sequence()==beforeRevision){Schematic().RecordCommittedChange(" } },
-          "Compares the project settings around Schematic Setup; an accepted change is recorded unless a "
-          "commit inside the dialog already recorded it, then the document is marked modified." },
+        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "", 1, DISPOSITION::ROUTED,
+          { G_PROJECT, G_EMBEDDED, G_LIB_CACHE }, {},
+          "Schematic Setup is compared with the same whole saved state as the lifecycle digest; an accepted "
+          "change is recorded once, by the dialog's commit or by the tracked change, then marked modified." },
         { "eeschema/files-io.cpp", "SCH_EDIT_FRAME::OpenProjectFiles", "", 3, DISPOSITION::LOAD_BASELINE,
           { G_FORMAT, G_SYMBOL, G_SHEET, G_INSTANCES }, {},
           "Legacy conversion, page-number repair and bus migration run inside the load that creates a new "
@@ -1286,21 +1662,28 @@ inline std::vector<OWNER> reviewedOwners()
         { "eeschema/tools/assign_footprints.cpp", "SCH_EDITOR_CONTROL::ImportFPAssignments", "m_frame->", 1,
           DISPOSITION::ROUTED, { G_FIELD }, {},
           "Footprint link import is compared with the persisted state; unchanged imports record nothing." },
-        { "eeschema/tools/sch_drawing_tools.cpp", "SCH_DRAWING_TOOLS::doSyncSheetsPins", "m_frame->", 1,
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::doSyncSheetsPins", "m_frame->", 1,
           DISPOSITION::ROUTED, { G_SHEET, G_TEXT }, {}, "Each synchronised pin edit is its own commit." },
-        { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::EditProperties", "m_frame->", 2,
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "m_frame->", 2, DISPOSITION::ROUTED,
+          { G_SYMBOL, G_FIELD, G_SHEET, G_INSTANCES, G_TEXT, G_LINE, G_JUNCTION, G_GROUP, G_LIB_CACHE }, {},
+          "Importing sheet content or a design block loads cached definitions and renumbers duplicated "
+          "identities outside the placement commit; a cancelled or refused placement is compared with the "
+          "whole saved state and recorded only if it left a change." },
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "m_frame->", 2,
           DISPOSITION::ROUTED, { G_SYMBOL, G_FIELD, G_SHEET, G_INSTANCES, G_EMBEDDED, G_LIB_CACHE }, {},
-          "Field placement after Symbol Properties and the sheet file, annotation and hierarchy changes "
-          "after Sheet Properties are tracked against the persisted state." },
+          "Sheet Properties compares its staged sheet, whose file name field changes with a non-undoable "
+          "file change, and marks a change the dialog left when cancelled; field placement after Symbol "
+          "Properties is staged and pushed by its own commit." },
         { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::Swap", "m_frame->", 1, DISPOSITION::ROUTED,
           { G_SYMBOL, G_FIELD, G_TEXT, G_LINE }, {},
           "A local commit is pushed first; otherwise the swap is staged in the caller's commit." },
         { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::SwapPins", "m_frame->", 1, DISPOSITION::ROUTED,
           { G_FORMAT, G_SYMBOL, G_LINE, G_JUNCTION }, {},
           "A local commit is pushed first; otherwise the swap is staged in the caller's commit." },
-        { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup", "m_frame->", 1,
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "m_frame->", 2,
           DISPOSITION::ROUTED, { G_FORMAT, G_TITLE, G_PAGE, G_EMBEDDED, G_PROJECT }, {},
-          "Accepted page settings record a committed change before the document is marked modified." },
+          "Page Settings is compared with the whole saved state; only a real change becomes a revision, an "
+          "undo entry and a modified document, and a cancel restores the preview." },
         { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::rescueProject", "m_frame->", 1,
           DISPOSITION::ROUTED, { G_FORMAT, G_SYMBOL, G_LIB_CACHE, G_PROJECT }, {},
           "Symbol rescue is compared with the persisted schematic and project state." },
@@ -1324,6 +1707,10 @@ inline std::vector<OWNER> reviewedOwners()
         { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::onVariantSelectionChange", "m_parent->", 1,
           DISPOSITION::ROUTED, { G_SYMBOL, G_FIELD }, {},
           "Pending field edits are pushed as a commit before switching variants." },
+        { SYMBOL_FIELDS_DIALOG, "DIALOG_SYMBOL_FIELDS_TABLE::onBomSettingsChanged", "m_parent->", 1,
+          DISPOSITION::ROUTED, { G_PROJECT }, {},
+          "Release fallback when an export name change arrives outside an interactive export: the replaced "
+          "name is unknown, so the change is recorded and marked modified without an undo entry." },
         { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", "parent->", 1,
           DISPOSITION::ROUTED, { G_FORMAT, G_SYMBOL, G_LIB_CACHE, G_PROJECT }, {},
           "Rescue and remapping are compared with the persisted schematic and project state." },
@@ -1374,11 +1761,11 @@ inline std::vector<OWNER> reviewedOwners()
           "overrides it and applies the saved export file name as a commit." },
         { "common/dialogs/dialog_page_settings.cpp", "DIALOG_PAGES_SETTINGS::TransferDataFromWindow", "m_parent->",
           1, DISPOSITION::ROUTED_BY_CALLERS, { G_TITLE, G_PAGE, G_EMBEDDED, G_PROJECT },
-          { { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup",
-              "DIALOG_EESCHEMA_PAGE_SETTINGSdlg(" },
-            { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup", "RecordCommittedChange(" } },
-          "The schematic editor opens the shared page dialog only from PageSetup, which records the "
-          "accepted change; other editors own other documents." },
+          { { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "DIALOG_EESCHEMA_PAGE_SETTINGSdlg(" },
+            { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "dlg.DeferModifiedNotification();" },
+            { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", ANY_ROUTE } },
+          "The schematic editor opens the shared page dialog only from PageSetup, which defers the dialog's "
+          "own modified flag and records and marks a real change itself; other editors own other documents." },
         { "common/tool/group_tool.cpp", "GROUP_TOOL::Ungroup", "m_frame->", 1, DISPOSITION::ROUTED, { G_GROUP },
           {}, "The ungrouping commit is pushed first." },
         { "common/tool/group_tool.cpp", "GROUP_TOOL::AddToGroup", "m_frame->", 1, DISPOSITION::ROUTED,
@@ -1403,11 +1790,10 @@ inline std::vector<OWNER> reviewedOwners()
           libraryTable },
 
         // Simulator.
-        { "eeschema/sim/simulator_frame.cpp", "SIMULATOR_FRAME::EditAnalysis", "", 1, DISPOSITION::PENDING,
-          { G_PROJECT }, {},
-          "The analysis dialog edits the project's live ngspice settings; only the workbook is marked "
-          "modified and no journal change is recorded until those settings are tracked.",
-          40 },
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", "", 1, DISPOSITION::OTHER_DOCUMENT, {}, {}, workbook },
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", "m_schematicFrame->", 2, DISPOSITION::ROUTED, { G_PROJECT }, {},
+          "The analysis dialog writes the project's live ngspice settings; they are compared with the whole "
+          "saved state, accepted or cancelled, and a real change is recorded and marks the schematic." },
         { "eeschema/sim/simulator_frame.cpp", "SIMULATOR_FRAME::SaveSettings", "m_schematicFrame->", 1,
           DISPOSITION::MODIFIED_FLAG_ONLY, { G_PROJECT }, {},
           "Copies already-live ngspice values into the project store so the next save writes them; the "
@@ -1587,25 +1973,39 @@ struct TRACKER_SITE
 {
     std::string file;
     std::string function;
-    int         wholeState;   ///< Two-argument declarations.
+    int         wholeState;   ///< Two-argument declarations: every screen and the project.
+    int         staged;       ///< Three-argument declarations: only the named commit's items.
     int         screens;      ///< Four-argument, screen-restricted declarations.
-    std::string reason;       ///< Why the restricted trackers cannot miss a change.
+    std::string reason;       ///< Why the staged or restricted trackers cannot miss a change.
 };
 
 
+/// Every tracker declaration.  Whole-state trackers write the whole design twice, so they are
+/// for edits made outside a commit; an owner whose every edit is staged compares the staged
+/// items instead, at a cost that does not grow with the design.
 inline std::vector<TRACKER_SITE> reviewedTrackers()
 {
     return {
-        { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 1, 0, "" },
-        { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, "" },
-        { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, "" },
-        { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 1, 0, "" },
-        { "eeschema/tools/assign_footprints.cpp", "SCH_EDITOR_CONTROL::ImportFPAssignments", 1, 0, "" },
-        { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::rescueProject", 1, 0, "" },
-        { "eeschema/tools/sch_edit_tool.cpp", "SCH_EDIT_TOOL::EditProperties", 1, 1,
-          "Field autoplacement after Symbol Properties moves only that symbol's fields, which are saved with "
-          "the current screen; everything the dialog changed is tracked by the dialog's whole-state tracker." },
-        { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, 0, "" },
+        { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", 0, 1, 0,
+          "Every persisted edit is staged: the symbol and the other units it synchronises, with the symbol's "
+          "own definition (embedded files and pin maps are applied after the snapshot and the definition is "
+          "compared with the item), and other symbols only on a real pin-map edit." },
+        { "eeschema/dialogs/dialog_symbol_remap.cpp", "DIALOG_SYMBOL_REMAP::OnRemapSymbols", 1, 0, 0, "" },
+        { "eeschema/dialogs/dialog_update_from_pcb.cpp", "DIALOG_UPDATE_FROM_PCB::OnUpdateClick", 1, 0, 0, "" },
+        { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", 0, 1, 0,
+          "A tuned value is written into the staged symbol's fields and nowhere else." },
+        { "eeschema/tools/assign_footprints.cpp", "SCH_EDITOR_CONTROL::ImportFPAssignments", 1, 0, 0, "" },
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::rescueProject", 1, 0, 0, "" },
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", 1, 0, 0, "" },
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", 0, 2, 0,
+          "Sheet Properties stages its sheet; a file change always changes the staged sheet's file name, and "
+          "loading the file and clearing annotation are part of that one revision.  Field placement after "
+          "Symbol Properties moves only that symbol's fields: when the dialog recorded nothing it is staged "
+          "on the symbol; otherwise it is part of the dialog's revision, whose undo entry restores it." },
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", 1, 0, 0, "" },
+        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", 1, 0, 0, "" },
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", 1, 0, 0, "" },
+        { "eeschema/widgets/hierarchy_pane.cpp", "HIERARCHY_PANE::onRightClick", 2, 0, 0, "" },
     };
 }
 
@@ -1643,36 +2043,117 @@ inline std::vector<UNPROVEN> unprovenRoutes()
           "Exporting a BOM to a new file name from the Symbol Fields Table." },
         { "eeschema/sim/simulator_frame_ui.cpp", "SIMULATOR_FRAME_UI::UpdateTunerValue", ANY_ROUTE, 90,
           "Applying a tuned value needs a simulation fixture with a tuner." },
-        { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", ANY_ROUTE, 50,
-          "Changing and closing the Annotate Schematic options." },
-        { "eeschema/tools/sch_editor_control.cpp", "SCH_EDITOR_CONTROL::PageSetup", ANY_ROUTE, 40,
-          "An unchanged Page Settings OK still records a revision and an undo entry, because the shared page "
-          "dialog marks the screen modified; needs no-op precision." },
-        { "eeschema/eeschema_config.cpp", "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "RecordCommittedChange(", 30,
-          "Schematic Setup compares only the project settings, without file metadata, instead of the shared "
-          "whole-state groups: a Setup that changes a screen outside a commit, or whose project save rewrites "
-          "file metadata, changes the lifecycle digest without a revision." },
+        { SIM_FRAME, "SIMULATOR_FRAME::EditAnalysis", ANY_ROUTE, 60,
+          "Editing the simulation settings needs the simulator window open on a simulation fixture." },
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "SCH_ACTIONS::placeDesignBlock", 120,
+          "Placing a design block shares the proven sheet-import placement, but its journey needs a design "
+          "block library registered in the fixture project before the editor starts." },
     };
 }
 
 
-/// Owners whose change, cancel and no-op precision the rendered journey asserts by the exact
-/// journal description.
+/// A routed owner whose change and whose cancel and no-op precision the rendered journey
+/// proves: inside the journey method, an awaited OneChange(...) call asserts exactly one
+/// revision with this journal description, and an awaited Unchanged(...) call asserts each
+/// cancel or no-op step left the revision, saved state, modified flag and journal alone.
 struct PROOF
 {
-    std::string function;
-    std::string description;
+    std::string              file;          ///< The owner's source.
+    std::string              function;      ///< The owner; it must still route its change.
+    std::string              description;   ///< The revision's exact journal description.
+    std::vector<std::string> unchanged;     ///< The exact cancel and no-op step names.
 };
 
 
 inline std::vector<PROOF> journeyProofs()
 {
+    const std::string pane = "eeschema/widgets/hierarchy_pane.cpp";
+
     return {
-        { "SCH_EDIT_TOOL::EditProperties", "Edit Symbol Properties" },
-        { "SCH_EDIT_TOOL::EditProperties", "Edit Sheet Properties" },
-        { "HIERARCHY_PANE::onRightClick", "New Top-Level Sheet" },
-        { "HIERARCHY_PANE::onRightClick", "Delete Top-Level Sheet" },
+        { SYMBOL_DIALOG, "DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow", "Edit Symbol Properties",
+          { "Cancelling Symbol Properties", "Accepting unchanged Symbol Properties" } },
+        { EDIT_TOOL, "SCH_EDIT_TOOL::EditProperties", "Edit Sheet Properties",
+          { "Cancelling Sheet Properties", "Accepting unchanged Sheet Properties" } },
+        { pane, "HIERARCHY_PANE::onRightClick", "New Top-Level Sheet", { "Cancelling a new top-level sheet" } },
+        { pane, "HIERARCHY_PANE::onRightClick", "Delete Top-Level Sheet",
+          { "Declining to delete a top-level sheet" } },
+        { DRAWING_TOOLS, "SCH_DRAWING_TOOLS::ImportSheet", "Import Schematic Sheet Content",
+          { "Cancelling a repeated sheet import" } },
+        { EDITOR_CONTROL, "SCH_EDITOR_CONTROL::PageSetup", "Edit Page Settings",
+          { "Cancelling Page Settings", "Accepting unchanged Page Settings" } },
+        { SETUP_CONFIG, "SCH_EDIT_FRAME::ShowSchematicSetupDialog", "Edit Schematic Setup",
+          { "Cancelling Schematic Setup", "Accepting unchanged Schematic Setup" } },
+        { "eeschema/dialogs/dialog_annotate.cpp", "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
+          { "Closing unchanged Annotate Schematic" } },
     };
+}
+
+
+/// Assertions the journey's step helpers must keep: Unchanged compares the revision, the saved
+/// state digest, the modified flag and the journal; OneChange requires exactly one change with
+/// the expected kind and description.
+inline std::map<std::string, std::vector<std::string>> journeyStepAssertions()
+{
+    return {
+        { "Unchanged",
+          { "Assert.AreEqual(baseline.Revision,after.Revision", "Assert.AreEqual(baseline.StateSha256,after.StateSha256",
+            "Assert.AreEqual(baseline.NativeContentDirty,after.NativeContentDirty",
+            "Assert.IsEmpty((awaitChanges(baseline)).Changes" } },
+        { "OneChange",
+          { "Assert.IsFalse(journal.ResetRequired)", "Assert.HasCount(1,journal.Changes",
+            "Assert.AreEqual(kind,change.Kind)", "Assert.AreEqual(description,change.Description)" } },
+    };
+}
+
+
+/// The journey steps found in the journey method: descriptions asserted by OneChange and step
+/// names asserted by Unchanged, or failures when the method or a step helper is missing.
+struct JOURNEY_STEPS
+{
+    std::set<std::string>    changes;
+    std::set<std::string>    unchanged;
+    std::vector<std::string> failures;
+};
+
+
+inline JOURNEY_STEPS journeySteps( const std::string& aSource, const std::string& aMethod )
+{
+    JOURNEY_STEPS        steps;
+    const BLANKED_SOURCE blanked = blankCSharp( aSource );
+    const auto [begin, end] = csharpMethodBody( blanked.code, aMethod );
+
+    if( begin == std::string::npos )
+    {
+        steps.failures.push_back( "The journey method " + aMethod + " is missing." );
+        return steps;
+    }
+
+    for( const auto& [helper, needles] : journeyStepAssertions() )
+    {
+        const auto [helperBegin, helperEnd] = csharpMethodBody( blanked.code, helper, begin, end );
+
+        if( helperBegin == std::string::npos )
+        {
+            steps.failures.push_back( aMethod + " no longer defines its " + helper + " step helper." );
+            continue;
+        }
+
+        const std::string body = withoutSpaces( blanked.code.substr( helperBegin, helperEnd - helperBegin ) );
+
+        for( const std::string& needle : needles )
+        {
+            if( body.find( needle ) == std::string::npos )
+                steps.failures.push_back( helper + " in " + aMethod + " no longer asserts " + needle + "." );
+        }
+    }
+
+    for( const std::string& text : awaitedLiteralArguments( aSource, blanked.code, "OneChange", 1, begin, end ) )
+        steps.changes.insert( text );
+
+    for( const std::string& text : awaitedLiteralArguments( aSource, blanked.code, "Unchanged", 1, begin, end ) )
+        steps.unchanged.insert( text );
+
+    return steps;
 }
 
 
@@ -1961,11 +2442,16 @@ inline bool changesState( DISPOSITION aDisposition )
            || aDisposition == DISPOSITION::ROUTED_BY_CALLERS || aDisposition == DISPOSITION::PENDING;
 }
 
-} // namespace SCH_CHANGE_TRACKING_ORACLE
+/// Every setter that reports whether native change tracking is complete.
+inline std::set<std::string> completeTrackingSetters()
+{
+    return { "set_tracking_complete", "set_complete_change_tracking" };
+}
 
 
-using namespace SCH_CHANGE_TRACKING_ORACLE;
-
+// The test suites live in this namespace, not behind a using-directive: in the eeschema-linked
+// builds the editor's own headers are included as well, and a global name there must never make
+// an oracle name ambiguous.
 
 BOOST_AUTO_TEST_SUITE( SchChangeTracking )
 
@@ -2045,6 +2531,14 @@ void FRAME::ScreenTracked( SCH_SCREEN* aScreen, const SCH_TRACKED_CHANGE::MARK& 
 void FRAME::Received( SCH_TRACKED_CHANGE& aChange )
 {
     OnModify();
+}
+
+void FRAME::StagedTracker( SCH_COMMIT* aOuter )
+{
+    SCH_TRACKED_CHANGE early( Schematic(), "Declared before its commit", late );
+    SCH_COMMIT late( this );
+    SCH_TRACKED_CHANGE staged( Schematic(), "Staged edit", late );
+    staged.PushOrRevert( late, "Staged edit" );
 }
 
 int FRAME::Unrouted()
@@ -2136,10 +2630,22 @@ void WRITER::save()
     for( const TRACKER& tracker : scan.trackers )
         trackers[tracker.function + " " + tracker.variable] = tracker.arguments;
 
-    BOOST_CHECK_EQUAL( trackers.size(), 3u );
+    BOOST_CHECK_EQUAL( trackers.size(), 5u );
     BOOST_CHECK_EQUAL( trackers["FRAME::Tracked change"], 2 );
     BOOST_CHECK_EQUAL( trackers["FRAME::ScreenTracked placement"], 4 );
     BOOST_CHECK_EQUAL( trackers["FRAME::RouteAfterCall change"], 2 );
+    BOOST_CHECK_EQUAL( trackers["FRAME::StagedTracker staged"], 3 );
+    BOOST_CHECK_EQUAL( trackers["FRAME::StagedTracker early"], 3 );
+
+    // A staged tracker must compare a commit declared before it, which therefore outlives it.
+    for( const TRACKER& tracker : scan.trackers )
+    {
+        if( tracker.function != "FRAME::StagedTracker" )
+            continue;
+
+        BOOST_CHECK_EQUAL( tracker.commit, "late" );
+        BOOST_CHECK_MESSAGE( tracker.commitDeclared == ( tracker.variable == "staged" ), tracker.variable );
+    }
 
     std::map<std::string, std::set<std::string>> fields = writerFields( scan );
     std::set<std::string> expected{ "sheet", "at", "size", "in_bom", "hide", "not_a_field" };
@@ -2332,19 +2838,27 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
     ORACLE_FIXTURE oracle;
     BOOST_REQUIRE( !oracle.root.empty() );
 
-    std::map<std::string, std::pair<int, int>> found;
+    // Whole-state, staged and screen-restricted declarations per function.
+    std::map<std::string, std::array<int, 3>> found;
 
     for( const std::string& relative : oracle.OwnerFiles() )
     {
         for( const TRACKER& tracker : oracle.Scan( relative ).trackers )
         {
-            std::pair<int, int>& counts = found[relative + " | " + tracker.function];
+            std::array<int, 3>& counts = found[relative + " | " + tracker.function];
+            const std::string   where = relative + " line " + std::to_string( tracker.line );
 
-            BOOST_CHECK_MESSAGE( tracker.arguments == 2 || tracker.arguments == 4,
-                                 relative + " line " + std::to_string( tracker.line )
-                                         + " constructs a tracker with an unreviewed argument list." );
+            BOOST_CHECK_MESSAGE( tracker.arguments >= 2 && tracker.arguments <= 4,
+                                 where + " constructs a tracker with an unreviewed argument list." );
 
-            ( tracker.arguments == 4 ? counts.second : counts.first )++;
+            // The staged form compares its commit when it completes, so the commit must be a
+            // SCH_COMMIT declared before the tracker and destroyed after it.
+            BOOST_CHECK_MESSAGE( tracker.arguments != 3 || tracker.commitDeclared,
+                                 where + " stages its tracker on '" + tracker.commit
+                                         + "', which is not a SCH_COMMIT declared before it." );
+
+            if( tracker.arguments >= 2 && tracker.arguments <= 4 )
+                counts[tracker.arguments - 2]++;
         }
     }
 
@@ -2352,17 +2866,20 @@ BOOST_AUTO_TEST_CASE( EveryTrackedChangeIsReviewed )
 
     for( const TRACKER_SITE& site : reviewedTrackers() )
     {
-        const std::string key = site.file + " | " + site.function;
+        const std::string        key = site.file + " | " + site.function;
+        const std::array<int, 3> expected{ site.wholeState, site.staged, site.screens };
         reviewed.insert( key );
 
-        BOOST_CHECK_MESSAGE( found[key] == std::make_pair( site.wholeState, site.screens ),
-                             key + " declares " + std::to_string( found[key].first ) + " whole-state and "
-                                     + std::to_string( found[key].second ) + " screen-restricted tracker(s); the "
-                                     "review covers " + std::to_string( site.wholeState ) + " and "
-                                     + std::to_string( site.screens ) + "." );
+        BOOST_CHECK_MESSAGE( found[key] == expected,
+                             key + " declares " + std::to_string( found[key][0] ) + " whole-state, "
+                                     + std::to_string( found[key][1] ) + " staged and "
+                                     + std::to_string( found[key][2] ) + " screen-restricted tracker(s); the "
+                                     "review covers " + std::to_string( site.wholeState ) + ", "
+                                     + std::to_string( site.staged ) + " and " + std::to_string( site.screens )
+                                     + "." );
 
-        BOOST_CHECK_MESSAGE( site.screens == 0 || !site.reason.empty(),
-                             key + " restricts a tracker to screens without a reason." );
+        BOOST_CHECK_MESSAGE( ( site.screens == 0 && site.staged == 0 ) || !site.reason.empty(),
+                             key + " stages or restricts a tracker without a reason." );
     }
 
     for( const auto& [key, counts] : found )
@@ -2499,45 +3016,140 @@ BOOST_AUTO_TEST_CASE( TrackingStaysIncompleteWhileOwnersArePending )
 
     BOOST_TEST_MESSAGE( pending << " owner(s) pending or unproven, about " << estimate << " lines." );
 
-    // Every proven owner keeps its rendered journey step.
+    // The journal, its notifications and the lifecycle state may claim complete tracking only
+    // once nothing is pending.  Every claim in every scanned source, api_handler_sch_render.cpp
+    // and any new file included, must be the literal false until then; each setter must still
+    // be called, and every call must sit where the scan reviews it.
+    ORACLE_FIXTURE claims;
+    claims.watched = completeTrackingSetters();
+
+    std::map<std::string, size_t> reviewedCalls;
+    std::map<std::string, size_t> textualCalls;
+
+    for( const std::string& relative : claims.OwnerFiles() )
+    {
+        const SOURCE_SCAN& scan = claims.Scan( relative );
+
+        for( const std::string& setter : claims.watched )
+            textualCalls[setter] += countCalls( scan.code, setter );
+
+        for( const CALL_SITE& call : scan.calls )
+        {
+            ++reviewedCalls[call.identifier];
+
+            BOOST_CHECK_MESSAGE( pending == 0 || call.arguments == "false",
+                                 relative + " line " + std::to_string( call.line ) + " claims complete tracking ("
+                                         + call.arguments + ") while " + std::to_string( pending )
+                                         + " owner(s) are pending or unproven." );
+        }
+    }
+
+    for( const std::string& setter : claims.watched )
+    {
+        BOOST_CHECK_MESSAGE( reviewedCalls[setter] > 0, "No scanned source reports " + setter + "() any more." );
+        BOOST_CHECK_MESSAGE( reviewedCalls[setter] == textualCalls[setter],
+                             setter + " is called " + std::to_string( textualCalls[setter] ) + " time(s), but only "
+                                     + std::to_string( reviewedCalls[setter] )
+                                     + " inside a function body where the claim is checked." );
+    }
+
+    // Recall and precision of the claim scan: a commented or quoted claim is no claim, a split
+    // argument list is read whole, and a claim outside a function body is still counted.
+    const std::string probe = "void API::Report( RESULT& result )\n"
+                              "{\n"
+                              "    // result.set_tracking_complete( true );\n"
+                              "    wxLogTrace( \"set_tracking_complete( true )\" );\n"
+                              "    result.set_tracking_complete(\n"
+                              "            false );\n"
+                              "    other->set_complete_change_tracking( complete );\n"
+                              "}\n"
+                              "static const bool claimed = []{ RESULT r; r.set_tracking_complete( true ); return true; }();\n";
+    const SOURCE_SCAN probed = scanSource( probe, completeTrackingSetters() );
+
+    BOOST_REQUIRE_EQUAL( probed.calls.size(), 2u );
+    BOOST_CHECK_EQUAL( probed.calls[0].arguments, "false" );
+    BOOST_CHECK_EQUAL( probed.calls[1].arguments, "complete" );
+    BOOST_CHECK_EQUAL( countCalls( probed.code, "set_tracking_complete" ), 2u );
+    BOOST_CHECK_EQUAL( countCalls( probed.code, "set_complete_change_tracking" ), 1u );
+}
+
+
+BOOST_AUTO_TEST_CASE( EveryProvenOwnerKeepsItsRenderedSteps )
+{
+    ORACLE_FIXTURE oracle;
+    BOOST_REQUIRE( !oracle.root.empty() );
+
     std::string journey;
-    BOOST_CHECK_MESSAGE( readFile( oracle.root / JOURNEY, journey ), JOURNEY + " is missing." );
+    BOOST_REQUIRE_MESSAGE( readFile( oracle.root / JOURNEY, journey ), JOURNEY + " is missing." );
+
+    const JOURNEY_STEPS steps = journeySteps( journey, JOURNEY_METHOD );
+
+    for( const std::string& failure : steps.failures )
+        BOOST_ERROR( JOURNEY + ": " + failure );
 
     for( const PROOF& proof : journeyProofs() )
     {
-        BOOST_CHECK_MESSAGE( journey.find( "\"" + proof.description + "\"" ) != std::string::npos,
-                             proof.function + " is no longer proven by the journey step asserting \""
-                                     + proof.description + "\"." );
-    }
+        // The proof is about the routed owner: it must still exist and route its change.
+        std::string failure;
+        BOOST_CHECK_MESSAGE( oracle.Evidence( { proof.file, proof.function, ANY_ROUTE }, failure ),
+                             "Proven owner " + failure );
 
-    // The journal, its notifications and the lifecycle state may claim complete tracking only
-    // once nothing is pending: until then every claim must be the literal false.
-    struct CLAIM
-    {
-        std::string file;
-        std::string call;
-    };
+        BOOST_CHECK_MESSAGE( steps.changes.count( proof.description ),
+                             proof.function + " is no longer proven: " + JOURNEY_METHOD
+                                     + " has no awaited OneChange(..., \"" + proof.description + "\", ...) step." );
 
-    for( const CLAIM& claim : { CLAIM{ "eeschema/schematic.cpp", "set_tracking_complete(" },
-                                CLAIM{ "eeschema/api/api_handler_sch.cpp", "set_tracking_complete(" },
-                                CLAIM{ "eeschema/api/api_handler_sch.cpp", "set_complete_change_tracking(" } } )
-    {
-        const SOURCE_SCAN& scan = oracle.Scan( claim.file );
-        const std::string  code = withoutSpaces( scan.code );
-        size_t             count = 0;
-
-        for( size_t pos = code.find( claim.call ); pos != std::string::npos; pos = code.find( claim.call, pos + 1 ) )
+        for( const std::string& step : proof.unchanged )
         {
-            ++count;
-            std::string argument = code.substr( pos + claim.call.size(), code.find( ')', pos ) - pos - claim.call.size() );
-
-            BOOST_CHECK_MESSAGE( pending == 0 || argument == "false",
-                                 claim.file + " claims complete tracking (" + argument + ") while "
-                                         + std::to_string( pending ) + " owner(s) are pending or unproven." );
+            BOOST_CHECK_MESSAGE( steps.unchanged.count( step ),
+                                 proof.function + " is no longer proven: " + JOURNEY_METHOD
+                                         + " has no awaited Unchanged(..., \"" + step + "\") step." );
         }
-
-        BOOST_CHECK_MESSAGE( count > 0, claim.file + " no longer reports " + claim.call + ")." );
     }
+
+    // Recall and precision of the journey scan: steps named in comments, strings, raw strings
+    // or other methods do not count, and helpers must keep their assertions.
+    const std::string probe = R"cs(
+private static async Task VerifyDirectOwnerTracking(NativeClient client)
+{
+    async Task Unchanged(DocumentLifecycleState baseline, string step)
+    {
+        var after = await State();
+        Assert.AreEqual(baseline.Revision, after.Revision, $"{step} must not create a revision.");
+        Assert.AreEqual(baseline.StateSha256, after.StateSha256, "no");
+        Assert.AreEqual(baseline.NativeContentDirty, after.NativeContentDirty, "no");
+        Assert.IsEmpty((await Changes(baseline)).Changes, "no");
+    }
+    async Task<SchematicChange> OneChange(DocumentLifecycleState baseline, string description, SchematicChange.Types.Kind kind)
+    {
+        var journal = await Changes(baseline);
+        Assert.IsFalse(journal.ResetRequired);
+        Assert.HasCount(1, journal.Changes, $"'{description}' must be exactly one revision.");
+        var change = journal.Changes.Single();
+        Assert.AreEqual(kind, change.Kind);
+        // Assert.AreEqual(description, change.Description);
+        return change;
+    }
+    // await OneChange(clean, "Commented", SchematicChange.Types.Kind.Commit);
+    var text = "await OneChange(clean, "Quoted", kind)";
+    var raw = """
+        await Unchanged(clean, "Raw");
+        """;
+    var verbatim = @"await Unchanged(clean, ""Verbatim"")";
+    await OneChange(clean, "Real change", SchematicChange.Types.Kind.Commit);
+    await Unchanged(clean, "Real cancel");
+    await Unchanged(clean, $"Interpolated {text}");
+}
+
+private static async Task Elsewhere() { await OneChange(clean, "Elsewhere", kind); }
+)cs";
+    const JOURNEY_STEPS probed = journeySteps( probe, JOURNEY_METHOD );
+
+    BOOST_CHECK( probed.changes == std::set<std::string>{ "Real change" } );
+    BOOST_CHECK( probed.unchanged == std::set<std::string>{ "Real cancel" } );
+    BOOST_REQUIRE_EQUAL( probed.failures.size(), 1u );
+    BOOST_CHECK_MESSAGE( probed.failures[0].find( "Assert.AreEqual(description,change.Description)" ) != std::string::npos,
+                         probed.failures[0] );
+    BOOST_CHECK_EQUAL( journeySteps( probe, "Missing" ).failures.size(), 1u );
 }
 
 
@@ -2649,3 +3261,311 @@ BOOST_AUTO_TEST_CASE( EveryErcExclusionChangeIsReviewed )
 
 
 BOOST_AUTO_TEST_SUITE_END()
+
+} // namespace SCH_CHANGE_TRACKING_ORACLE
+
+
+#if defined( EESCHEMA )
+
+// ---------------------------------------------------------------------------------------------
+// The tracked change itself and the cost of what it compares (eeschema-linked builds only)
+// ---------------------------------------------------------------------------------------------
+
+namespace SCH_CHANGE_TRACKING_ORACLE
+{
+/// A loaded, empty schematic with a project, as the editor has one: the project gives the
+/// saved state its project-settings group.
+struct TRACKED_SCHEMATIC
+{
+    TRACKED_SCHEMATIC()
+    {
+        settings.LoadProject( "" );
+        schematic = std::make_unique<SCHEMATIC>( &settings.Prj() );
+        schematic->CreateDefaultScreens();
+    }
+
+    SETTINGS_MANAGER           settings;
+    std::unique_ptr<SCHEMATIC> schematic;
+};
+
+
+inline double elapsedMs( std::chrono::steady_clock::time_point aStart )
+{
+    return std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - aStart ).count();
+}
+
+
+/// Median, minimum and maximum of @a aSamples, in milliseconds.
+inline std::string timing( std::vector<double> aSamples )
+{
+    std::sort( aSamples.begin(), aSamples.end() );
+    std::ostringstream text;
+    text << std::fixed << std::setprecision( 1 ) << "median=" << aSamples[aSamples.size() / 2]
+         << " min=" << aSamples.front() << " max=" << aSamples.back() << " samples=" << aSamples.size();
+    return text.str();
+}
+
+
+inline double median( std::vector<double> aSamples )
+{
+    std::sort( aSamples.begin(), aSamples.end() );
+    return aSamples[aSamples.size() / 2];
+}
+
+
+BOOST_AUTO_TEST_SUITE( SchTrackedChange )
+
+
+BOOST_FIXTURE_TEST_CASE( RecordsOnlyRealEditsOfTheSameDocument, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC& doc = *schematic;
+
+    // Recall: an edit made outside a commit is recorded once, by description.
+    {
+        SCH_TRACKED_CHANGE change( doc, "Add a note" );
+        doc.RootScreen()->Append( new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "note" ) ) );
+        BOOST_CHECK( change.Complete() );
+        BOOST_CHECK( !change.Complete() );
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().ReadAfter( doc.ChangeJournal().Epoch(), 0 ).entries.at( 0 ).description,
+                       "Add a note" );
+
+    // Precision: nothing changed, nothing recorded, and not marked changed.
+    {
+        SCH_TRACKED_CHANGE change( doc, "Nothing" );
+        BOOST_CHECK( !change.Complete() );
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+
+    // A replaced document starts a new journal epoch.  It is not an edit by the owner that was
+    // running across the replacement: nothing is recorded and the owner must not mark it.
+    const std::string oldEpoch = doc.ChangeJournal().Epoch();
+
+    {
+        SCH_TRACKED_CHANGE change( doc, "Across a replacement" );
+        doc.CreateDefaultScreens();
+        BOOST_CHECK_NE( doc.ChangeJournal().Epoch(), oldEpoch );
+        BOOST_CHECK( !change.Complete() );
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+
+    // The destructor completes an owner that returned early, with the same rules.
+    {
+        SCH_TRACKED_CHANGE change( doc, "Returned early" );
+        doc.RootScreen()->Append( new SCH_TEXT( VECTOR2I( 1000, 0 ), wxS( "early" ) ) );
+    }
+
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( StagedCommitsCompareOnlyTheirItems, TRACKED_SCHEMATIC )
+{
+    SCHEMATIC&  doc = *schematic;
+    SCH_SCREEN* screen = doc.RootScreen();
+    TOOL_MANAGER manager;
+
+    auto* text = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "value" ) );
+    screen->Append( text );
+
+    LIB_SYMBOL library( wxS( "Tracked" ) );
+    library.SetLibId( LIB_ID( wxS( "Automation" ), wxS( "Tracked" ) ) );
+    auto* symbol = new SCH_SYMBOL;
+    symbol->SetLibId( library.GetLibId() );
+    symbol->SetLibSymbol( new LIB_SYMBOL( library ) );
+    symbol->SetSchSymbolLibraryName( wxS( "Automation:Tracked" ) );
+    screen->Append( symbol, false );
+
+    {
+        SCH_COMMIT commit( &manager );
+        commit.Modify( text, screen );
+        commit.Modify( symbol, screen );
+
+        // Staged but unchanged, and a flag that is never saved: no persisted change.
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+        text->SetFlags( SELECTED );
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+        text->ClearFlags( SELECTED );
+
+        // Recall for the item's own saved form.
+        text->SetText( wxS( "changed" ) );
+        BOOST_CHECK( commit.PersistsChange( doc ) );
+        text->SetText( wxS( "value" ) );
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+
+        // Recall for the symbol's own library definition, which the screen's cache follows.
+        symbol->GetLibSymbolRef()->GetValueField().SetText( wxS( "edited definition" ) );
+        BOOST_CHECK( commit.PersistsChange( doc ) );
+        symbol->GetLibSymbolRef()->GetValueField().SetText( library.GetValueField().GetText() );
+        BOOST_CHECK( !commit.PersistsChange( doc ) );
+    }
+
+    {
+        // An added item has no copy to compare: it is a change.
+        SCH_COMMIT commit( &manager );
+        auto       added = std::make_unique<SCH_TEXT>( VECTOR2I( 2000, 0 ), wxS( "added" ) );
+        commit.Add( added.get(), screen );
+        BOOST_CHECK( commit.PersistsChange( doc ) );
+        commit.Abandon();
+        BOOST_CHECK( commit.Empty() );
+    }
+
+    // A staged tracker that finishes after the document was replaced neither pushes nor
+    // reverts: the replacement freed the document's items.  The staged item here lives on a
+    // screen the test owns, so the check can see that it was left exactly as edited.
+    SCH_SCREEN kept;
+    auto*      keptText = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "before" ) );
+    kept.Append( keptText );
+
+    {
+        SCH_COMMIT         commit( &manager );
+        SCH_TRACKED_CHANGE change( doc, "Across a replacement", commit );
+        commit.Modify( keptText, &kept );
+        keptText->SetText( wxS( "after" ) );
+        doc.CreateDefaultScreens();
+        BOOST_CHECK( !change.PushOrRevert( commit, wxS( "Across a replacement" ) ) );
+        BOOST_CHECK( commit.Empty() );
+    }
+
+    BOOST_CHECK_EQUAL( keptText->GetText(), wxS( "after" ) );
+    BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 0u );
+}
+
+
+/**
+ * The cost of what a tracked owner compares, on the largest demo design (vme-wren).  It is a
+ * measurement, not a pass/fail check, so it runs only when asked for by name: the native
+ * foundation journey runs it and keeps its output with the journey evidence.
+ */
+BOOST_AUTO_TEST_CASE( MeasuresTrackingCostOnTheLargestDemo, *boost::unit_test::disabled() )
+{
+    const fs::path root = findSourceRoot();
+    BOOST_REQUIRE_MESSAGE( !root.empty(), "The KiCad source tree was not found; set KICAD_SOURCE_DIR." );
+
+    const fs::path source = root / "demos" / "vme-wren";
+    BOOST_REQUIRE_MESSAGE( fs::exists( source / "vme-wren.kicad_sch" ), source.string() + " is missing." );
+
+    // Load a copy of the design's schematic and project files, so loading never writes a lock
+    // or anything else next to the checked-in demo.
+    const fs::path copy = fs::temp_directory_path() / ( "kicad-tracking-cost-" + KIID().AsStdString() );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ copy };
+    fs::create_directories( copy );
+
+    for( const fs::directory_entry& entry : fs::directory_iterator( source ) )
+    {
+        if( entry.path().extension() == ".kicad_sch" || entry.path().extension() == ".kicad_pro" )
+            fs::copy_file( entry.path(), copy / entry.path().filename() );
+    }
+
+    SETTINGS_MANAGER           settings;
+    std::unique_ptr<SCHEMATIC> schematic;
+    const auto                 loading = std::chrono::steady_clock::now();
+
+    KI_TEST::LoadSchematic( settings,
+                            fs::relative( copy / "vme-wren", KI_TEST::GetEeschemaTestDataDir() ).generic_string(),
+                            schematic );
+    BOOST_REQUIRE( schematic );
+    const double loadMs = elapsedMs( loading );
+
+    // One whole-state capture: every screen and the project settings, as the lifecycle digest
+    // and a whole-state tracker write them.
+    std::vector<double> whole;
+    SCH_STATE_GROUPS    captured;
+
+    for( int sample = 0; sample < 5; ++sample )
+    {
+        const auto started = std::chrono::steady_clock::now();
+        captured = SCH_STATE_GROUPS::Capture( *schematic );
+        whole.push_back( elapsedMs( started ) );
+    }
+
+    // The largest screen alone, as a screen-restricted tracker captures it.
+    SCH_SCREEN* largest = nullptr;
+    size_t      largestItems = 0;
+    size_t      symbols = 0;
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+        size_t      count = screen ? screen->Items().size() : 0;
+
+        if( count > largestItems )
+        {
+            largest = screen;
+            largestItems = count;
+        }
+    }
+
+    BOOST_REQUIRE( largest );
+    std::vector<double> oneScreen;
+
+    for( int sample = 0; sample < 5; ++sample )
+    {
+        const auto started = std::chrono::steady_clock::now();
+        SCH_STATE_GROUPS::CaptureScreens( *schematic, { largest } );
+        oneScreen.push_back( elapsedMs( started ) );
+    }
+
+    // A staged comparison of the symbol with the largest library definition: the worst single
+    // symbol a Symbol Properties, Sheet Properties or tuner commit can stage.
+    SCH_SYMBOL* heaviest = nullptr;
+    SCH_SCREEN* heaviestScreen = nullptr;
+    size_t      heaviestPins = 0;
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy() )
+    {
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            ++symbols;
+
+            if( symbol->GetLibSymbolRef() && symbol->GetLibSymbolRef()->GetPinCount() > (int) heaviestPins )
+            {
+                heaviest = symbol;
+                heaviestScreen = path.LastScreen();
+                heaviestPins = symbol->GetLibSymbolRef()->GetPinCount();
+            }
+        }
+    }
+
+    BOOST_REQUIRE( heaviest );
+    TOOL_MANAGER        manager;
+    SCH_COMMIT          commit( &manager );
+    std::vector<double> staged;
+
+    commit.Modify( heaviest, heaviestScreen );
+
+    for( int sample = 0; sample < 5; ++sample )
+    {
+        const auto started = std::chrono::steady_clock::now();
+        BOOST_CHECK( !commit.PersistsChange( *schematic ) );
+        staged.push_back( elapsedMs( started ) );
+    }
+
+    commit.Abandon();
+
+    // One line per measurement, read by the journey that keeps this output as evidence.
+    std::cout << std::fixed << std::setprecision( 1 )
+              << "tracking-cost design=vme-wren screens=" << captured.WrittenSheets().size()
+              << " symbols=" << symbols << " saved_bytes=" << captured.Bytes() << " load_ms=" << loadMs << "\n"
+              << "tracking-cost whole_state_capture_ms " << timing( whole ) << "\n"
+              << "tracking-cost largest_screen_capture_ms " << timing( oneScreen ) << " items=" << largestItems
+              << "\n"
+              << "tracking-cost staged_symbol_compare_ms " << timing( staged ) << " pins=" << heaviestPins
+              << "\n";
+    std::cout.flush();
+
+    // A staged comparison is the point of the staged form: it must stay well below the capture.
+    BOOST_CHECK_LT( median( staged ) * 10, median( whole ) );
+}
+
+
+BOOST_AUTO_TEST_SUITE_END()
+
+} // namespace SCH_CHANGE_TRACKING_ORACLE
+
+#endif // EESCHEMA

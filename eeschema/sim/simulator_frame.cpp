@@ -29,6 +29,8 @@
 
 #include <project/project_file.h>
 #include <sch_edit_frame.h>
+#include <schematic.h>
+#include <api/api_sch_state_groups.h>
 #include <widgets/wx_infobar.h>
 #include <kiway.h>
 #include <confirm.h>
@@ -666,6 +668,13 @@ bool SIMULATOR_FRAME::EditAnalysis()
     if( !simTab )
         return false;
 
+    // The dialog writes the ngspice settings, which are saved with the project, straight into
+    // the live project settings: the compatibility mode even before a later check can keep
+    // the dialog open and let it be cancelled.  Compare the saved state around it, so a real
+    // change makes older automation requests stale and marks the schematic modified, and an
+    // unchanged or cancelled dialog records nothing.  The analysis itself is workbook state.
+    SCH_TRACKED_CHANGE change( m_schematicFrame->Schematic(), "Edit Simulation Settings" );
+
     m_circuitModel->ReadSchematicAndLibraries( NETLIST_EXPORTER_SPICE::OPTION_DEFAULT_FLAGS,
                                                s_reporter );
 
@@ -681,8 +690,15 @@ bool SIMULATOR_FRAME::EditAnalysis()
         dlg.ApplySettings( simTab );
         m_ui->OnPlotSettingsChanged();
         OnModify();
+
+        if( change.Complete() )
+            m_schematicFrame->OnModify();
+
         return true;
     }
+
+    if( change.Complete() )
+        m_schematicFrame->OnModify();
 
     return false;
 }

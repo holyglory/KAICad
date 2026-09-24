@@ -14,6 +14,7 @@
 
 class SCHEMATIC;
 class SCH_COMMIT;
+class SCH_ITEM;
 class SCH_SCREEN;
 class SCH_SHEET;
 class wxString;
@@ -57,6 +58,15 @@ public:
     /// Bytes serialised to produce the digests; the cost of one capture.
     uint64_t Bytes() const { return m_bytes; }
 
+    /**
+     * The saved form of one placed item, exactly as SCH_IO_KICAD_SEXPR writes it into its
+     * screen, followed for a symbol by its own library definition, which the screen's cached
+     * definition follows.  Comparing an item with the copy a commit staged for it needs no
+     * capture of the rest of the design.  Empty when the writer has no form for the item's
+     * type; callers treat that as changed.
+     */
+    static std::string PersistedItem( SCHEMATIC& aSchematic, SCH_ITEM* aItem );
+
 private:
     void add( const std::string& aName, const NATIVE_STATE_DIGEST& aState );
 
@@ -68,13 +78,22 @@ private:
 
 
 /**
- * One native owner that can change persisted schematic state outside a pushed SCH_COMMIT.
+ * One native owner that can change persisted schematic state.
  *
- * Construct it before the owner changes anything and call Complete() after the owner's
- * own refresh.  A committed journal change is recorded only when the persisted state
- * really changed and no commit inside the owner already recorded it, so cancelled,
- * rejected and unchanged operations never become revisions.  The destructor completes an
- * owner that returned early.
+ * Construct it before the owner changes anything and call Complete() (or PushOrRevert())
+ * after the owner's own refresh.  A committed journal change is recorded only when the
+ * persisted state really changed and no commit inside the owner already recorded it, so
+ * cancelled, rejected and unchanged operations never become revisions.  The destructor
+ * completes an owner that returned early.
+ *
+ * Three forms, each reviewed by the change-tracking oracle by its argument count:
+ *  - two arguments: compares the whole persisted state (every screen and the project
+ *    settings).  Only for edits made outside a commit, because each capture writes the
+ *    whole design;
+ *  - three arguments: an owner whose every persisted edit is staged in one SCH_COMMIT.
+ *    Only the staged items are compared with the copies the commit saved, so the cost
+ *    follows the edit, not the size of the design.  Declare it after the commit;
+ *  - four arguments: named screens only, for an owner that provably changes nothing else.
  */
 class SCH_TRACKED_CHANGE
 {
@@ -90,6 +109,13 @@ public:
 
     /// Track the whole persisted state from now on.
     SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription );
+
+    /**
+     * Track an owner whose every persisted edit is staged in @a aCommit.  Nothing is
+     * captured: completion compares only the staged items with the commit's saved copies
+     * (see SCH_COMMIT::PersistsChange).  @a aCommit must outlive this tracker.
+     */
+    SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription, SCH_COMMIT& aCommit );
 
     /**
      * Track only @a aScreens, as part of a user action that began at @a aSince.  When a
@@ -108,7 +134,8 @@ public:
     /**
      * Finish tracking.  Returns true when the persisted state changed, whether this call
      * or a commit inside the owner recorded it; callers mark the document modified only
-     * then.  A replaced document (new journal epoch) is never recorded as an edit of it.
+     * then.  A replaced document (new journal epoch) was not edited by this owner: nothing
+     * is recorded and false is returned, so it is not marked modified either.
      */
     bool Complete();
 
@@ -116,11 +143,17 @@ public:
      * Finish an owner that staged its edit in @a aCommit.  A real change is pushed (and
      * recorded once even if it lies outside the commit); an unchanged confirmation reverts
      * the commit, so it leaves no undo entry, modified flag or revision.
+     *
+     * When the document was replaced meanwhile (new journal epoch) nothing is pushed and
+     * false is returned.  Replacing the document freed the items the commit staged, so the
+     * commit is abandoned: its saved copies are dropped without applying them to, or
+     * restoring, the freed items.
      */
     bool PushOrRevert( SCH_COMMIT& aCommit, const wxString& aMessage, int aCommitFlags = 0 );
 
 private:
     std::optional<SCH_STATE_GROUPS> capture() const;
+    bool                            replaced() const;
     bool                            recordedSinceStart() const;
     bool                            changedSinceStart();
     void                            recordIfUntracked( bool aChanged );
@@ -128,6 +161,7 @@ private:
     SCHEMATIC&                      m_schematic;
     std::string                     m_description;
     std::vector<const SCH_SCREEN*>  m_screens;       ///< Empty: the whole persisted state.
+    SCH_COMMIT*                     m_commit = nullptr; ///< Staged form: the compared commit.
     MARK                            m_start;
     std::optional<SCH_STATE_GROUPS> m_before;
     bool                            m_complete = false;

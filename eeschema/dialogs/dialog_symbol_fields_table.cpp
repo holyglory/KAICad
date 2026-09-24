@@ -31,6 +31,7 @@
 #include <template_fieldnames.h>
 #include <kiface_base.h>
 #include <sch_edit_frame.h>
+#include <schematic.h>
 #include <sch_group.h>
 #include <widgets/wx_infobar.h>
 #include <sch_reference_list.h>
@@ -854,8 +855,17 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnExport( wxCommandEvent& aEvent )
 
 void DIALOG_SYMBOL_FIELDS_TABLE::onBomSettingsChanged()
 {
-    wxCHECK_RET( m_exportFileNameBeforeExport && !m_job,
-                 wxS( "Only an interactive BOM export changes saved BOM settings here" ) );
+    if( !m_exportFileNameBeforeExport || m_job )
+    {
+        // Only an interactive export is expected to change the saved BOM settings here.  If
+        // another path does, the replaced value is unknown, so the change cannot become an
+        // undoable commit; it still must make older automation requests stale and be saved.
+        wxFAIL_MSG( wxS( "Only an interactive BOM export changes saved BOM settings here" ) );
+        m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
+                                                     "Change BOM Export File Name" );
+        m_parent->OnModify();
+        return;
+    }
 
     // Put the replaced name back and apply the new one through a commit: saving the project
     // writes it, so it is an undoable edit that makes older automation requests stale.

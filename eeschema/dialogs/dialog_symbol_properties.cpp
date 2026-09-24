@@ -761,14 +761,6 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
     if( !wxDialog::TransferDataFromWindow() )  // Calls our Validate() method.
         return false;
 
-    // Everything below, including embedded files that are applied outside the commit, is
-    // compared with the persisted state: an unchanged OK leaves no revision, undo entry or
-    // modified flag, and a real change is recorded exactly once.
-    SCH_TRACKED_CHANGE change( GetParent()->Schematic(), "Edit Symbol Properties" );
-
-    if( m_embeddedFiles && !m_embeddedFiles->TransferDataFromWindow() )
-        return false;
-
     if( !m_fieldsGrid->CommitPendingChanges() )
         return false;
 
@@ -786,6 +778,12 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
 
     wxCHECK( currentScreen, false );
 
+    // Every persisted edit below is staged in the commit, so only the staged symbols are
+    // compared with the copies it saved: an unchanged OK leaves no revision, undo entry or
+    // modified flag, and a real change is recorded exactly once, at a cost that does not
+    // grow with the design.
+    SCH_TRACKED_CHANGE change( GetParent()->Schematic(), "Edit Symbol Properties", commit );
+
     // This needs to be done before the LIB_ID is changed to prevent stale library symbols in
     // the schematic file.
     replaceOnCurrentScreen = currentScreen->Remove( m_symbol );
@@ -794,11 +792,32 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
     if( m_symbol->GetEditFlags() == 0 )
         commit.Modify( m_symbol, currentScreen );
 
-    // Apply pin-map edits after the undo snapshot so undo restores them (issue #2282).
+    // The symbol's embedded files belong to its own library definition.  Apply them after the
+    // undo snapshot, as the pin maps below, so the staged copy keeps the files they replace.
+    if( m_embeddedFiles && !m_embeddedFiles->TransferDataFromWindow() )
+    {
+        if( replaceOnCurrentScreen )
+            currentScreen->Append( m_symbol );
+
+        commit.Revert();
+        return false;
+    }
+
+    // Apply pin-map edits after the undo snapshot so undo restores them (issue #2282).  Other
+    // placed symbols and cached definitions follow only a real pin-map edit: an unchanged OK
+    // must not rewrite definitions it did not change.
     if( m_part )
     {
+        const auto pinMapsBefore = m_part->GetPinMaps();
+        const auto footprintsBefore = m_part->GetAssociatedFootprints();
+
         m_pinMapPanel->ApplyToSymbol( m_part );
-        GetParent()->Schematic().SyncLibSymbolPinMaps( m_symbol->GetSchSymbolLibraryName(), *m_part, &commit );
+
+        if( m_part->GetPinMaps() != pinMapsBefore || m_part->GetAssociatedFootprints() != footprintsBefore )
+        {
+            GetParent()->Schematic().SyncLibSymbolPinMaps( m_symbol->GetSchSymbolLibraryName(), *m_part,
+                                                           &commit );
+        }
     }
 
     // Save current flags which could be modified by next change settings

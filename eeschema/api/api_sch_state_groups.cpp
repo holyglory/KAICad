@@ -9,13 +9,18 @@
 #include <nlohmann/json.hpp>
 #include <project.h>
 #include <project/project_file.h>
+#include <lib_symbol.h>
+#include <richio.h>
 #include <sch_commit.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr_lib_cache.h>
 #include <sch_marker.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
+#include <sch_symbol.h>
 #include <schematic.h>
+#include <tools/sch_selection.h>
 #include <wx/log.h>
 
 #include <algorithm>
@@ -155,6 +160,71 @@ SCH_STATE_GROUPS SCH_STATE_GROUPS::Capture( SCHEMATIC& aSchematic )
 }
 
 
+std::string SCH_STATE_GROUPS::PersistedItem( SCHEMATIC& aSchematic, SCH_ITEM* aItem )
+{
+    if( !aItem )
+        return {};
+
+    // The item types the schematic writer saves at screen level.  Fields, pins and sheet
+    // pins are saved with their parent, which is what a commit stages; ERC markers are
+    // staged separately.  Anything else has no saved form here and counts as changed.
+    switch( aItem->Type() )
+    {
+    case SCH_SYMBOL_T:
+    case SCH_BITMAP_T:
+    case SCH_SHEET_T:
+    case SCH_JUNCTION_T:
+    case SCH_NO_CONNECT_T:
+    case SCH_BUS_WIRE_ENTRY_T:
+    case SCH_BUS_BUS_ENTRY_T:
+    case SCH_LINE_T:
+    case SCH_SHAPE_T:
+    case SCH_RULE_AREA_T:
+    case SCH_TEXT_T:
+    case SCH_LABEL_T:
+    case SCH_GLOBAL_LABEL_T:
+    case SCH_HIER_LABEL_T:
+    case SCH_DIRECTIVE_LABEL_T:
+    case SCH_TEXTBOX_T:
+    case SCH_TABLE_T:
+    case SCH_GROUP_T:
+        break;
+
+    default:
+        return {};
+    }
+
+    // The writer looks cached library definitions up through the selection's screen.  Both
+    // sides of a comparison would write the same, current, cache, so give it none and write
+    // the symbol's own definition below instead.  Without clipboard mode every instance of
+    // the item is written and the selection path is not consulted.
+    SCH_SCREEN         noCache;
+    SCH_SELECTION      selection( &noCache );
+    SCH_SHEET_PATH     unusedPath;
+    STRING_FORMATTER   out;
+    SCH_IO_KICAD_SEXPR writer;
+
+    selection.Add( aItem );
+    writer.Format( &selection, &unusedPath, aSchematic, &out, false );
+
+    if( aItem->Type() == SCH_SYMBOL_T )
+    {
+        SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( aItem );
+
+        // The screen caches this definition: a pin map, embedded file or other definition
+        // edit reaches the saved cache through it.
+        if( const std::unique_ptr<LIB_SYMBOL>& definition = symbol->GetLibSymbolRef() )
+        {
+            SCH_IO_KICAD_SEXPR_LIB_CACHE::SaveSymbol( definition.get(), out, symbol->GetSchSymbolLibraryName(),
+                                                      true, true );
+        }
+    }
+
+    // Never empty for a written item: the writer always opens its own s-expression.
+    return out.GetString();
+}
+
+
 std::vector<std::string> SCH_STATE_GROUPS::ChangedGroups( const SCH_STATE_GROUPS& aAfter ) const
 {
     std::vector<std::string> changed;
@@ -189,6 +259,17 @@ SCH_TRACKED_CHANGE::SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDesc
         m_start( Mark( aSchematic ) )
 {
     m_before = capture();
+}
+
+
+SCH_TRACKED_CHANGE::SCH_TRACKED_CHANGE( SCHEMATIC& aSchematic, std::string aDescription,
+                                        SCH_COMMIT& aCommit ) :
+        m_schematic( aSchematic ),
+        m_description( std::move( aDescription ) ),
+        m_commit( &aCommit ),
+        m_start( Mark( aSchematic ) )
+{
+    // Nothing is captured: the commit keeps a copy of every item it stages.
 }
 
 
@@ -241,6 +322,12 @@ std::optional<SCH_STATE_GROUPS> SCH_TRACKED_CHANGE::capture() const
 }
 
 
+bool SCH_TRACKED_CHANGE::replaced() const
+{
+    return m_schematic.ChangeJournal().Epoch() != m_start.epoch;
+}
+
+
 bool SCH_TRACKED_CHANGE::recordedSinceStart() const
 {
     const DOCUMENT_CHANGE_JOURNAL& journal = m_schematic.ChangeJournal();
@@ -250,14 +337,26 @@ bool SCH_TRACKED_CHANGE::recordedSinceStart() const
 
 bool SCH_TRACKED_CHANGE::changedSinceStart()
 {
-    // A replaced document starts a new journal epoch; its load is not an edit of the old one.
-    if( m_schematic.ChangeJournal().Epoch() != m_start.epoch )
-        return true;
-
     // A commit inside the owner already recorded the action, so it changed and needs no
     // second comparison.
     if( recordedSinceStart() )
         return true;
+
+    // Staged: compare only what the commit staged with the copies it saved.
+    if( m_commit )
+    {
+        try
+        {
+            return m_commit->PersistsChange( m_schematic );
+        }
+        catch( const std::exception& error )
+        {
+            // An item that cannot be written is conservatively treated as changed.
+            wxLogTrace( traceSchTracking, wxS( "Unable to compare the staged items of '%s': %s" ),
+                        m_description, error.what() );
+            return true;
+        }
+    }
 
     std::optional<SCH_STATE_GROUPS> after = capture();
 
@@ -298,6 +397,15 @@ bool SCH_TRACKED_CHANGE::Complete()
 
     m_complete = true;
 
+    // A replaced document starts a new journal epoch.  Its load is not an edit by this
+    // owner, and the new document has nothing of this owner's to record or mark modified.
+    if( replaced() )
+    {
+        wxLogTrace( traceSchTracking, wxS( "'%s' finished after the document was replaced; nothing recorded" ),
+                    m_description );
+        return false;
+    }
+
     bool changed = changedSinceStart();
     recordIfUntracked( changed );
     return changed;
@@ -311,6 +419,19 @@ bool SCH_TRACKED_CHANGE::PushOrRevert( SCH_COMMIT& aCommit, const wxString& aMes
         return false;
 
     m_complete = true;
+
+    if( m_commit && m_commit != &aCommit )
+        throw std::invalid_argument( "A staged tracked change must finish the commit it compares" );
+
+    if( replaced() )
+    {
+        // The replaced document freed the items this commit staged: neither pushing nor
+        // reverting may touch them.  Drop the saved copies and record nothing.
+        aCommit.Abandon();
+        wxLogTrace( traceSchTracking, wxS( "'%s' abandoned its commit after the document was replaced" ),
+                    m_description );
+        return false;
+    }
 
     bool changed = changedSinceStart();
 

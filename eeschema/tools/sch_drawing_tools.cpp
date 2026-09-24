@@ -59,6 +59,7 @@
 #include <sch_bitmap.h>
 #include <schematic.h>
 #include <sch_commit.h>
+#include <api/api_sch_state_groups.h>
 #include <scoped_set_reset.h>
 #include <libraries/legacy_symbol_library.h>
 #include <eeschema_settings.h>
@@ -852,16 +853,30 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 for( EDA_ITEM* item : screen->Items() )
                     item->SetFlags( SKIP_STRUCT );
 
+                // Loading the file changes more than the placed items: it adds cached library
+                // definitions and gives duplicated identities, possibly of items placed
+                // earlier on any sheet, new UUIDs.  Reverting the placement below removes only
+                // the placed items, so the whole saved state is compared around the import.  A
+                // kept placement is recorded by its commit; a cancelled one is recorded only if
+                // it still left a saved change.
+                SCH_TRACKED_CHANGE change( m_frame->Schematic(), placingDesignBlock
+                                                                 ? "Add Design Block"
+                                                                 : "Import Schematic Sheet Content" );
+
                 if( !m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath, sheetFileName, true,
                                                  placingDesignBlock ) )
                 {
+                    // A refused file can still have been read partly; record what it left.
+                    if( change.Complete() )
+                        m_frame->OnModify();
+
                     return false;
                 }
 
                 m_frame->SetSheetNumberAndCount();
 
                 // The placement commit below marks the document modified when it is pushed; a
-                // cancelled placement reverts the import and leaves the document unmodified.
+                // cancelled placement is marked only when the import left a saved change.
                 m_frame->SyncView();
                 m_frame->HardRedraw(); // Full reinit of the current screen and the display.
 
@@ -1009,6 +1024,9 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 else
                 {
                     commit.Revert();
+
+                    if( change.Complete() )
+                        m_frame->OnModify();
                 }
 
                 selectionTool->RebuildSelection();

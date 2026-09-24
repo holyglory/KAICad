@@ -361,6 +361,9 @@ add_executable( qa_symbol_graphic_identity
     test_sch_parity_netlist.cpp
     test_module.cpp
     test_sch_commit.cpp
+    # The change-tracking oracle and its eeschema-linked tracked-change checks; native-foundation
+    # builds and runs this target, so the eeschema-linked part runs there as well.
+    test_sch_change_tracking.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp

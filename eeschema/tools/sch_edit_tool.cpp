@@ -3003,17 +3003,29 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
 
             if( fieldsAutoplaced == AUTOPLACE_AUTO || fieldsAutoplaced == AUTOPLACE_MANUAL )
             {
-                // Placement moves only this symbol's fields, which are saved with the current
-                // screen.  When the dialog recorded its edit this is part of that revision;
-                // otherwise it is a revision of its own only if a field actually moved.  A
-                // confirmed dialog without persisted changes leaves the document unmodified.
-                SCH_TRACKED_CHANGE placement( m_frame->Schematic(), "Edit Symbol Properties",
-                                              { m_frame->GetScreen() }, started );
+                const SCH_TRACKED_CHANGE::MARK now = SCH_TRACKED_CHANGE::Mark( m_frame->Schematic() );
 
-                symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                if( now.epoch == started.epoch && now.sequence != started.sequence )
+                {
+                    // The dialog recorded its edit: placing this symbol's fields is part of that
+                    // revision, and its undo entry, which kept the symbol from before the dialog,
+                    // restores them too.
+                    symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                    m_frame->UpdateItem( symbol, false, true );
+                }
+                else
+                {
+                    // Otherwise it is an undoable revision of its own only if a field actually
+                    // moved.  Placement moves only this symbol's fields, so only the symbol is
+                    // compared with its staged copy; a confirmed dialog without persisted
+                    // changes leaves the document unmodified.
+                    SCH_COMMIT         commit( m_toolMgr );
+                    commit.Modify( symbol, m_frame->GetScreen() );
+                    SCH_TRACKED_CHANGE placement( m_frame->Schematic(), "Edit Symbol Properties", commit );
 
-                if( placement.Complete() )
-                    m_frame->OnModify();
+                    symbol->AutoplaceFields( m_frame->GetScreen(), fieldsAutoplaced );
+                    placement.PushOrRevert( commit, _( "Edit Symbol Properties" ) );
+                }
             }
         }
         else if( retval == SYMBOL_PROPS_EDIT_SCHEMATIC_SYMBOL )
@@ -3073,7 +3085,9 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
     case SCH_SHEET_T:
     {
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( aItem );
-        bool       isUndoable = false;
+        // The dialog clears this only when it changes the sheet's file, which it applies
+        // without an undo entry; until then every edit is the staged sheet's own.
+        bool       isUndoable = true;
         bool       doClearAnnotation = false;
         bool       okPressed = false;
         bool       updateHierarchyNavigator = false;
@@ -3084,11 +3098,14 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
         SCH_SHEET_LIST originalHierarchy;
         originalHierarchy.BuildSheetList( &m_frame->Schematic().Root(), true );
 
-        // A sheet file change is applied without an undo entry and clearing annotation below
-        // happens after any commit, so the whole action is tracked against the persisted state.
-        SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Sheet Properties" );
-        SCH_COMMIT         commit( m_toolMgr );
+        SCH_COMMIT commit( m_toolMgr );
         commit.Modify( sheet, m_frame->GetScreen() );
+
+        // Only the staged sheet is compared with its saved copy, never the whole design.  A
+        // file change always changes the sheet's file name field, so it is recorded as well;
+        // loading the file and clearing annotation below are part of that one revision.
+        SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Sheet Properties", commit );
+
         okPressed = m_frame->EditSheetProperties( sheet, &m_frame->GetCurrentSheet(), &isUndoable, &doClearAnnotation,
                                                   &updateHierarchyNavigator );
 
@@ -3131,7 +3148,10 @@ void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
             sheet->GetScreen()->ClearAnnotation( &m_frame->GetCurrentSheet(), false );
         }
 
-        change.Complete();
+        // A file change applied before a later check failed stays even when the dialog is
+        // then cancelled; it is recorded and marked like an accepted one.
+        if( change.Complete() && !okPressed )
+            m_frame->OnModify();
 
         if( okPressed )
             m_frame->GetCanvas()->Refresh();

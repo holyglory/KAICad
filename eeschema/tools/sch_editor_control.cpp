@@ -503,26 +503,37 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
     // clears Redo, which must survive opening and cancelling this dialog.
     auto undoItem = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( m_frame );
 
+    // The dialog writes the page, title blocks of every exported sheet, the drawing sheet and
+    // its embedded files straight into the design, outside any commit, so the whole saved
+    // state is compared around it.  Only a real change becomes a revision, an undo entry and
+    // a modified document; an unchanged OK leaves all three alone.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Page Settings" );
+
     DIALOG_EESCHEMA_PAGE_SETTINGS dlg( m_frame, m_frame->Schematic().GetEmbeddedFiles(),
                                        VECTOR2I( MAX_PAGE_SIZE_EESCHEMA_MILS, MAX_PAGE_SIZE_EESCHEMA_MILS ) );
     dlg.SetWksFileName( m_frame->GetDrawingSheetFileName() );
 
+    // The shared dialog would mark the document modified on every OK; this owner marks it
+    // only when the comparison below finds a change.
+    dlg.DeferModifiedNotification();
+
     if( dlg.ShowModal() == wxID_OK )
     {
-        PICKED_ITEMS_LIST undoCmd;
-        undoCmd.PushItem( ITEM_PICKER( m_frame->GetScreen(), undoItem.get(), UNDO_REDO::PAGESETTINGS ) );
-        undoCmd.SetDescription( _( "Page Settings" ) );
-        m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS, false );
-        undoItem.release();
+        if( change.Complete() )
+        {
+            PICKED_ITEMS_LIST undoCmd;
+            undoCmd.PushItem( ITEM_PICKER( m_frame->GetScreen(), undoItem.get(), UNDO_REDO::PAGESETTINGS ) );
+            undoCmd.SetDescription( _( "Page Settings" ) );
+            m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS, false );
+            undoItem.release();
+
+            m_frame->OnModify();
+        }
 
         // Update text variables
         m_frame->GetCanvas()->GetView()->MarkDirty();
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();
-
-        m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                   "Edit Page Settings" );
-        m_frame->OnModify();
     }
     else
     {
@@ -530,6 +541,10 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
         m_frame->GetCanvas()->GetView()->MarkDirty();
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();
+
+        // Anything the preview left behind that the restoration did not undo is still recorded.
+        if( change.Complete() )
+            m_frame->OnModify();
     }
 
     return 0;

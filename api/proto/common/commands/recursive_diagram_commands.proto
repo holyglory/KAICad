@@ -175,6 +175,31 @@ message RecursiveDiagramEditorState {
   uint64 canvas_presses = 222;
   // Each note placed on the viewed level's canvas, as drawn, in the level's note order.
   repeated DiagramCanvasNote canvas_notes = 223;
+  // Each port drawn on the viewed level (block ports and boundary ports), its square relative to the editor window,
+  // in pixels, with the port's name as label. active is true for the port the Connect tool highlights under the pointer.
+  repeated DiagramControlRect port_marks = 224;
+  // What the Connect tool highlights under the pointer as a valid place to start or finish a connection: a port's ring
+  // or a block's outline, relative to the editor window, with the port's or block's name as label; absent when nothing is.
+  DiagramControlRect connect_target = 225;
+  // Each connection caption of the viewed level, relative to the editor window, with its text as label. shown is false
+  // for a caption the canvas leaves out because every place beside its connection would touch a block, a handle, a port
+  // or another caption.
+  repeated DiagramControlRect connection_captions = 226;
+  // The caption and version line of every block of the viewed level, as drawn.
+  repeated DiagramCanvasBlockText block_texts = 227;
+  // The eight resize handles of the selected block as drawn, relative to the editor window; empty when none are drawn.
+  repeated DiagramControlRect selection_handles = 228;
+}
+
+// The text a block shows on the canvas, relative to the editor window, in pixels. Text is drawn whole or not at all.
+message DiagramCanvasBlockText {
+  string block_id = 1;
+  // The block's rectangle as drawn.
+  DiagramControlRect block = 2;
+  // The caption as drawn (shortened with "…" when the block is too narrow); absent when the block is too small for it.
+  DiagramControlRect caption = 3;
+  // The "vN" line of a saved caption-only block; absent when it is not drawn.
+  DiagramControlRect version_line = 4;
 }
 
 // A note on the canvas as drawn: its box relative to the editor window, in pixels (shown is true when the whole box

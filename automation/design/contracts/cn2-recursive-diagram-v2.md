@@ -965,3 +965,24 @@ item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`). The earlier sections sta
   `NativeStructuralEditorJourney.cs`, `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs` and
   `NativeStructuralMigrationJourney.cs`. Never created: `StructuralMigration.cs`, `StructuralMigrationTests.cs` and the
   `kicad_diagram_migrate` tool.
+
+## Erratum 2026-09-24: connection signals in the level draft
+
+Owner decision `ne0261047035e58c6` (`kicad-cn2-connection-signals-in-draft-20260924`): an abstract connection grows during
+development into a concrete bus with named signals (for example I2C gaining SDA and SCL), added in the connection panel with
+"+ Add detail" (owner decisions `nf53af9d74841b7d3` and `n98a3f3c41084f0ed`). The frozen text of §4.6 L3 and L4, §4.7 and
+§9.1 kept a connection's members unchanged in a level draft, which would make that impossible. The erratum is accepted
+(integration grant for lane 2B's design-QA batch). The earlier sections stay as history; this erratum overrides them.
+
+- **§4.6 L3 (connection drafts).** A connection draft's `Members` are the saved members it keeps, in saved order, followed
+  by exactly the signals drawn for it in this draft, in the order they were added. Anything else fails with
+  `connection_member_edit_requires_member_path`, and a saved member's own content is still edited only through its member
+  path. Dropping a saved member from a connection draft is allowed, but the save is refused while a note or a realization
+  still points at it (the graph's annotation and realization checks).
+- **§4.6 L4 (new occurrences).** A drawn signal names its root connection with `member_of` and is never a root itself. A
+  drawn root's members are its signals, in declaration order.
+- **§4.6 step 2 (new children).** A new caption-only block stores no local diagram until it has ports or content; the
+  sentence "`Diagram = new(Interfaces, [], [])`" applies only once the new block has ports or content.
+- **§4.7 (removals).** A signal drawn in the same draft is removed natively, as the inverse of its addition, with no
+  effects. Removing a saved signal goes through the ordinary removal preparation (`RFA_PREPARE_LEVEL_EDIT`).
+- **§9.1 (rebase).** A rebase that meets drawn signals refuses with a connection conflict instead of dropping them.

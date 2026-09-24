@@ -1783,6 +1783,15 @@ const D::BlockDefinitionData* RECURSIVE_DIAGRAM_FRAME::selectedDefinition() cons
         if( const REVISION* saved = revision( child ) ) return &saved->definition();
     return nullptr;
 }
+const D::BlockDefinitionData* RECURSIVE_DIAGRAM_FRAME::savedDefinition() const
+{
+    if( !m_ready || !m_connectionId.empty() || !current() || newChild( m_selected ) ) return nullptr;
+    if( const auto* draft = selectedBlockDraft() )
+        return revision( draft->baseline() ) ? &revision( draft->baseline() )->definition() : nullptr;
+    for( const auto& child : m_level.scope().children() ) if( child.block_id() == m_selected )
+        if( const REVISION* saved = revision( child ) ) return &saved->definition();
+    return nullptr;
+}
 void RECURSIVE_DIAGRAM_FRAME::storeFacet( int facet, const D::DefinitionTextChoiceData* choice )
 {
     auto store = []( auto* owner, int which, const D::DefinitionTextChoiceData* value )
@@ -1798,8 +1807,6 @@ void RECURSIVE_DIAGRAM_FRAME::storeFacet( int facet, const D::DefinitionTextChoi
 }
 bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice, wxString& problem ) const
 {
-    const auto* definition = selectedDefinition();
-    const auto* base = definition && m_facet >= 0 ? R::Facet( *definition, m_facet ) : nullptr;
     int state = facetState(), strength = facetStrength();
     choice.Clear();
     choice.set_strength( static_cast<kiapi::automation::structure::v1::StructuralGuidanceStrength>( strength ) );
@@ -1829,11 +1836,26 @@ bool RECURSIVE_DIAGRAM_FRAME::facetFromForm( D::DefinitionTextChoiceData& choice
     // The sources, the condition it applies under and the verification recorded with a facet describe that exact
     // choice. A changed state, value or unknown reason is a new statement: it keeps none of them (the inspector does
     // not show them, so the person could not see that they no longer fit). A changed strength alone keeps them.
-    bool same = base && base->state() == choice.state() && base->values().size() == choice.values().size()
-                && std::equal( base->values().begin(), base->values().end(), choice.values().begin() )
-                && base->unknown_reason() == choice.unknown_reason();
-    if( same ) { choice.set_applicability( base->applicability() ); *choice.mutable_sources() = base->sources(); }
-    choice.set_verification( same ? base->verification() : kiapi::automation::structure::v1::SV_UNVERIFIED );
+    // The entry is compared with the draft's facet and then with the saved revision's, so an edit that is typed back
+    // to the saved statement (a keystroke and Backspace) gets the saved sources, condition and verification again.
+    auto sameStatement = [&]( const D::DefinitionTextChoiceData* base )
+    {
+        return base && base->state() == choice.state() && base->values().size() == choice.values().size()
+               && std::equal( base->values().begin(), base->values().end(), choice.values().begin() )
+               && base->unknown_reason() == choice.unknown_reason();
+    };
+    const auto* drafted = selectedDefinition(); const auto* saved = savedDefinition();
+    const D::DefinitionTextChoiceData* base = nullptr;
+    if( m_facet >= 0 && drafted && sameStatement( R::Facet( *drafted, m_facet ) ) ) base = R::Facet( *drafted, m_facet );
+    else if( m_facet >= 0 && saved && sameStatement( R::Facet( *saved, m_facet ) ) ) base = R::Facet( *saved, m_facet );
+    if( base )
+    {
+        // Everything but the strength comes from the matching statement, so a facet typed back to its saved value
+        // and strength is byte-for-byte the saved facet and leaves nothing to save.
+        choice = *base;
+        choice.set_strength( static_cast<kiapi::automation::structure::v1::StructuralGuidanceStrength>( strength ) );
+    }
+    else choice.set_verification( kiapi::automation::structure::v1::SV_UNVERIFIED );
     problem.clear(); return true;
 }
 void RECURSIVE_DIAGRAM_FRAME::fillFacetForm()
@@ -2043,9 +2065,15 @@ void RECURSIVE_DIAGRAM_FRAME::clearFacet()
     m_dirty = hasChanges(); closeFacet( false ); changed();
     if( m_addDetail->IsShown() ) m_addDetail->SetFocus(); else m_canvas->SetFocus();
 }
+bool RECURSIVE_DIAGRAM_FRAME::facetLinkOffered() const
+{
+    // One rule for drawing, reporting and pressing the canvas Review facets link: the canvas takes no presses while
+    // the whole-diagram history is open, and a previewed past revision is read only.
+    return !m_diagramHistoryOpen && !m_historyPreview;
+}
 void RECURSIVE_DIAGRAM_FRAME::reviewFacets( const std::string& block )
 {
-    if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview ) return;
+    if( !m_ready || m_process || !facetLinkOffered() ) return;
     finishCaption( false ); select( block );
     if( m_selected != block ) return;
     if( const auto* definition = selectedDefinition() )
@@ -2072,8 +2100,8 @@ std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::dra
         wxRect inner = wxRect( toScreen( drawn.Rect( node.id ) ) ).Deflate( 8 );
         auto names = portNames( dc, drawn, node.id );
         auto chips = R::LayoutChips( dc, node, inner, small, R::CaptionRect( dc, node, inner, caption ), names );
-        // As drawn: a previewed past revision shows no Review facets link (see paint).
-        if( m_historyPreview ) chips.link.reset();
+        // As drawn: no Review facets link while the whole-diagram history is open (see paint).
+        if( !facetLinkOffered() ) chips.link.reset();
         if( chips.shown ) result.emplace_back( node.id, std::move( chips ) );
     }
     return result;

@@ -512,15 +512,23 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
         if( linkSize.x <= to - from ) { result.link = wxRect( from, bottom - linkSize.y, linkSize.x, linkSize.y ); bottom = result.link->y - gap; }
     }
     int rows = bottom - top >= height ? ( bottom - top + gap ) / ( height + gap ) : 0;
-    size_t shown = std::min<size_t>( chosen.size(), static_cast<size_t>( std::max( 0, rows ) ) );
     auto moreText = []( size_t count ) { return wxString::Format( _( "+%u more" ), static_cast<unsigned>( count ) ); };
     auto rowWidth = [&]( size_t row ) { auto [from, to] = rowSpan( row ); return to - from; };
+    // Every chip is at least minimumChip wide: its state mark and 40 pixels of text (or all of its text when shorter)
+    // with their margins. A row the port names narrow below that holds no chip: the chips stop at the first such row and
+    // the rest go behind "+N more". A row that holds a chip can also hold the widest "+N more" chip, so "+N more"
+    // always has a row when a chip does.
+    const int minimumText = 40, minimumChip = textLeft + minimumText + 8;
+    const int rowNeeded = std::max( minimumChip, dc.GetTextExtent( moreText( chosen.size() ) ).x + 16 );
+    size_t fit = 0;
+    while( fit < static_cast<size_t>( std::max( 0, rows ) ) && rowWidth( fit ) >= rowNeeded ) ++fit;
+    size_t shown = std::min<size_t>( chosen.size(), fit );
     int moreWidth = 0; bool ownRow = false;
     if( shown < chosen.size() )
     {
         moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16;
-        // "+N more" shares the last row when a chip can keep some text beside it; otherwise it takes that row.
-        if( shown > 0 && moreWidth + gap + textLeft + 40 > rowWidth( shown - 1 ) )
+        // "+N more" shares the last row when that chip keeps its minimum width beside it; otherwise it takes that row.
+        if( shown > 0 && moreWidth + gap + minimumChip > rowWidth( shown - 1 ) )
         { --shown; ownRow = true; moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16; }
     }
     for( size_t i = 0; i < shown; ++i )
@@ -530,8 +538,8 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
         bool shareRow = i + 1 == shown && shown < chosen.size() && !ownRow;
         int available = shareRow ? to - from - moreWidth - gap : to - from;
         wxString text = FacetLabel( chosen[i] ) + wxS( ": " ) + ChoiceValue( choice, wxS( " / " ) );
-        text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, std::max( 0, available - textLeft - 6 ) );
-        int chipWidth = std::max( 0, std::min( available, textLeft + dc.GetTextExtent( text ).x + 8 ) );
+        text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, available - textLeft - 8 );
+        int chipWidth = std::min( available, textLeft + std::max( minimumText, dc.GetTextExtent( text ).x ) + 8 );
         result.chips.push_back( { chosen[i], choice.state(), text, wxRect( from, rowTop( i ), chipWidth, height ) } );
     }
     result.hidden = static_cast<unsigned>( chosen.size() - result.chips.size() );
@@ -838,8 +846,10 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
 {
     // A channel route (two unlocked waypoints on one vertical line) always runs level from each end to its channel:
     // its two heights are the current heights of its ends, even when a merge or an earlier writer left them out of
-    // line, so every leg stays horizontal or vertical. When an end moved since aBefore, the channel keeps its offset
-    // from the middle between the ends. A locked route, and any other stored route, is kept exactly as drawn.
+    // line, so every leg stays horizontal or vertical. When an end moved since aBefore and the route is still the one
+    // aBefore drew, the channel keeps its offset from the middle between the ends. A route that changed since aBefore
+    // (a merge took another writer's route, whose channel that writer already placed against the ends it moved) keeps
+    // its channel; only its heights follow the ends. A locked route, and any other stored route, is kept exactly as drawn.
     if( !m_level.scope().local_diagram().has_presentation() ) return;
     auto after = layout( current(), true );
     for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
@@ -856,9 +866,10 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
         const R::POINT from = next.front(), to = next.back();
         int64_t x = first.x;
         const R::LINK* was = before.Link( row.connection_id() );
-        auto previous = was ? before.Route( *was, index ) : std::vector<R::POINT>();
-        if( previous.size() == 4 && ( from.x != previous.front().x || from.y != previous.front().y
-                                      || to.x != previous.back().x || to.y != previous.back().y ) )
+        auto previous = was && before.HasRoute( row.connection_id(), index ) ? before.Route( *was, index ) : std::vector<R::POINT>();
+        bool sameRoute = previous.size() == 4 && previous[1].x == first.x && previous[2].x == second.x;
+        if( sameRoute && ( from.x != previous.front().x || from.y != previous.front().y
+                           || to.x != previous.back().x || to.y != previous.back().y ) )
         {
             x = ( from.x + to.x ) / 2 + first.x - ( previous.front().x + previous.back().x ) / 2;
             const int64_t margin = 10 * Q, low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
@@ -1433,8 +1444,9 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         // A block shows a chip for each chosen or candidate component choice once it has any (Round A4, owner
         // decision n0b2a908b00e78823); until then it is only its caption (owner decision n98a3f3c41084f0ed).
         auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption, names );
-        // A previewed past revision is read only: its blocks keep their chips, but Review facets would do nothing there.
-        if( m_historyPreview ) chips.link.reset();
+        // While the whole-diagram history is open (browsing or previewing a past revision) the canvas takes no
+        // presses: the blocks keep their chips, but a Review facets link would do nothing there.
+        if( !facetLinkOffered() ) chips.link.reset();
         if( chips.shown ) R::DrawChips( dc, chips, chipFont(), dark, foreground, linkColour() );
         else if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), inner.x + 10, inner.y + 58 );
         dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
@@ -1643,7 +1655,7 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
     m_pointer = event.GetPosition();
     if( m_tool == TOOL::CONNECT && m_connectFrom && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
-    if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && !m_historyPreview )
+    if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && facetLinkOffered() )
     {
         bool link = false;
         for( const auto& [block, chips] : drawnChips() ) link |= chips.link && chips.link->Contains( m_pointer );

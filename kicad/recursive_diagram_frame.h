@@ -154,6 +154,8 @@ private:
     // Component choices (Round A4, owner decision n0b2a908b00e78823): chips on blocks, the inspector's
     // facet overview and one facet's detail. Edits change the level draft only.
     const kiapi::automation::diagrams::v1::BlockDefinitionData* selectedDefinition() const;
+    /// The selected block's definition in the saved revision the draft started from; nullptr for a new block.
+    const kiapi::automation::diagrams::v1::BlockDefinitionData* savedDefinition() const;
     /// Stores one facet of the selected block in the level draft; nullptr clears it (unspecified).
     void storeFacet( int aFacet, const kiapi::automation::diagrams::v1::DefinitionTextChoiceData* aChoice );
     void fillFacets( bool aAvailable );
@@ -165,6 +167,9 @@ private:
     void facetEdited();
     void clearFacet();
     void reviewFacets( const std::string& aBlockId );
+    /// Whether the canvas draws, reports and answers a block's Review facets link: not while the whole-diagram
+    /// history is open.
+    bool facetLinkOffered() const;
     bool facetFromForm( kiapi::automation::diagrams::v1::DefinitionTextChoiceData& aChoice, wxString& aProblem ) const;
     bool facetHasFocus() const;
     /// The detail's controls, in tab order.

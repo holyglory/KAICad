@@ -2105,6 +2105,39 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual((repairedPath[0].Y, repairedPath[^1].Y), (repairedLayout.ConnectionRoutes.Single().Points[0].Y, repairedLayout.ConnectionRoutes.Single().Points[1].Y),
             "The repaired route's heights are the resolved heights of its ends.");
 
+        // A rebase keeps another writer's route as that writer drew it (contract rbg-v2 section 4.8: only one side changed it, so
+        // take that side). This draft only comments on the CPU. Meanwhile another editor moved the CPU 40 right and, as this editor
+        // does on a move, moved Rail feed's channel with it: from x 500, 30 right of the middle (400 + 540) / 2, to x 520, 30 right
+        // of the new middle (400 + 580) / 2. The automatic save keeps x 520; shifting that channel again by the move would store x 540.
+        await At(cpuNowX, cpuNowY + 20);
+        await Wait("cpu-selected-for-comment", s => s.Draft.Baseline.BlockId == cpu && s.ConnectionDraft is null && !s.Dirty);
+        Key("4", control: true); Type("Keep the CPU cool.");
+        await Wait("cpu-comment", s => s.Dirty && s.LevelDraft.Scope.LocalDiagram.Annotations.Any(n => n.TargetId == cpu && n.Text == "Keep the CPU cool."));
+        var routeWriter = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
+        var routeDraft = routeWriter.StartDraft(routeWriter.SelectedRoot); var routeView = routeDraft.LocalDiagram.Layout;
+        routeDraft = routeDraft with { Diagram = routeDraft.LocalDiagram with { Presentation = routeView with {
+            Blocks = [.. routeView.Blocks.Select(b => b.BlockId.ToString("D") == cpu ? b with { Rect = b.Rect with { X = 580 } } : b)],
+            Routes = [.. routeView.ConnectionRoutes.Select(r => r with { Waypoints = [new DiagramPoint(520, 250), new DiagramPoint(520, 255)] })] } } };
+        var routeWritten = routeWriter.SaveDraft(routeWriter.SelectedRoot, [routeWriter.SelectedRoot], routeDraft, Guid.NewGuid(), Guid.NewGuid(), [],
+            RecursiveBlockFixture.Origin("Another editor")).Graph;
+        await File.WriteAllTextAsync(created.Path, RecursiveBlockGraphXml.Write(routeWritten), token);
+        ulong beforeRouteRebase = (await Read()).CompletedSaveCount;
+        Key("s", control: true);
+        var routeRebased = await Wait("route-rebased", s => s.CompletedSaveCount >= beforeRouteRebase + 2 && !s.Dirty);
+        Assert.AreEqual("", routeRebased.ErrorCode);
+        Assert.AreNotEqual(keptNotice, routeRebased.Notice, "Nothing both sides moved, so no position was kept over the saved design.");
+        Assert.IsFalse(NativeKeyboard.HasWindow(display, processId, "Resolve changes before saving"), "A change on each side never asks.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token); saved = routeRebased;
+        var routeGraph = RecursiveBlockGraphXml.Read(savedXml); var routeTop = routeGraph.Inspect(routeGraph.SelectedRoot);
+        Assert.AreEqual(new DiagramRect(580, 170, 280, 170), routeTop.LocalDiagram.Layout.Blocks.Single(b => b.BlockId.ToString("D") == cpu).Rect,
+            "The other editor's CPU position was merged in.");
+        CollectionAssert.AreEqual(new[] { new DiagramPoint(520, 250), new DiagramPoint(520, 255) }, routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points.ToArray(),
+            "Rail feed keeps the channel the other editor drew; only a route this draft drew keeps its offset when its ends move.");
+        Assert.AreEqual("Keep the CPU cool.", routeTop.LocalDiagram.Notes.Single(n => n.Target.TargetId?.ToString("D") == cpu).Text, "This draft's comment was saved.");
+        var mergedPath = await Resolved(feed.Selection.ConnectionId);
+        Assert.AreEqual((mergedPath[0].Y, mergedPath[^1].Y), (routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points[0].Y,
+            routeTop.LocalDiagram.Layout.ConnectionRoutes.Single().Points[1].Y), "The kept route still runs level from each of its ends.");
+
         // Decline discards a later layout edit and writes nothing.
         await Drag(psuX, psuY + 30, psuX + 20, psuY + 50);
         await Wait("psu-moved", s => s.Dirty && Placement(s, psu).X == "180");
@@ -2201,7 +2234,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(saved.SourceToken, again.SourceToken);
             var storedPath = await Route(again, top.LocalDiagram.Connections[1].ConnectionId.ToString("D"));
             Assert.AreEqual("RPS_PLACED", storedPath.GetProperty("source").GetString(), "Rail feed comes back on its stored route.");
-            CollectionAssert.AreEqual(new[] { "400,250", "500,250", "500,255", "540,255" }, storedPath.GetProperty("points").EnumerateArray()
+            CollectionAssert.AreEqual(new[] { "400,250", "520,250", "520,255", "580,255" }, storedPath.GetProperty("points").EnumerateArray()
                 .Select(p => p.GetProperty("x").GetString() + "," + p.GetProperty("y").GetString()).ToArray());
             var reopenedView = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, instanceId + "-drawing-observation.json"), token)).RootElement
                 .GetProperty("resolvedLayout");
@@ -2228,6 +2261,33 @@ public sealed partial class NativeSessionTests
                     && n.Text == "Check the rail current."));
                 Assert.AreEqual(readOnlyStatus, typedReadOnly.StatusText, "Typing keeps the read-only explanation in the status bar.");
                 Assert.IsFalse(Find(typedReadOnly, "RecursiveSave").Enabled, "Save stays unavailable after typing.");
+                // The same holds for the other typing paths: a requirement, a connection caption and a component choice.
+                void StillReadOnly(P.RecursiveDiagramEditorState at, string what)
+                {
+                    Assert.AreEqual(readOnlyStatus, at.StatusText, "Typing " + what + " keeps the read-only explanation in the status bar.");
+                    Assert.IsFalse(Find(at, "RecursiveSave").Enabled, "Save stays unavailable after typing " + what + ".");
+                }
+                await Press("RecursiveRequirements0"); await Wait("read-only-requirement-focused", s => s.FocusedControl == "RecursiveRequirements0");
+                Key("End"); Type(" Now");
+                StillReadOnly(await Wait("read-only-requirement-typed", s => s.Draft.Fields.General == "Supply the CPU. Now"), "a requirement");
+                await ClickRoute(feed.Selection.ConnectionId); await Wait("read-only-feed-selected", s => s.ConnectionDraft?.Name == "Rail feed");
+                await Press("RecursiveConnectionCaption"); await Wait("read-only-caption-focused", s => s.FocusedControl == "RecursiveConnectionCaption");
+                Key("End"); Type("s");
+                StillReadOnly(await Wait("read-only-caption-typed", s => s.ConnectionDraft?.Name == "Rail feeds"), "a connection caption");
+                var (movedX, movedY) = Centre(await Read(), psu);
+                await At(movedX, movedY); await Wait("read-only-psu-selected", s => s.Draft.Baseline.BlockId == psu && s.ConnectionDraft is null);
+                await Press("RecursiveAddDetail");
+                using (var menu = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    menu.CancelAfter(TimeSpan.FromSeconds(15)); int count = 0;
+                    do { NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, observePopupCount: value => count = value); if (count == 0) await Task.Delay(50, menu.Token); }
+                    while (count == 0);
+                }
+                Key("Home"); Key("Return");
+                await Wait("read-only-purpose-open", s => s.FacetEditor == "purpose" && s.FocusedControl == "RecursiveFacetValue");
+                Type("Power");
+                StillReadOnly(await Wait("read-only-purpose-typed", s => s.Draft.Definition?.Purpose is { } purpose && purpose.Values.SequenceEqual(["Power"])),
+                    "a component choice");
                 Key("s", control: true);
                 var lockedSave = await Wait("read-only-save", s => s.ErrorCode == "diagram_file_read_only");
                 Assert.IsTrue(lockedSave.Dirty); Assert.AreEqual(lockedDraft.CompletedSaveCount, lockedSave.CompletedSaveCount, "Nothing was sent to save.");
@@ -2389,6 +2449,12 @@ public sealed partial class NativeSessionTests
             var caption = block.Caption;
             Assert.IsTrue(caption.Shown && caption.Width > 0, step + ": the block's caption is drawn inside the canvas.");
             Assert.IsTrue(block.Chips.All(c => c.Rect.Shown), step + ": drawn chips lie inside the canvas.");
+            // A chip is never squeezed to nothing: it keeps its state mark (chip height - 9 pixels, with 6-pixel margins) and at least
+            // 40 pixels of text with an 8-pixel margin, so it is at least its height + 51 pixels wide. A row the port names make
+            // narrower than that holds no chip, and its facet goes behind "+N more".
+            foreach (var chip in block.Chips)
+                Assert.IsTrue(chip.Rect.Width >= chip.Rect.Height + 51 && chip.Text.Length > 0,
+                    step + ": the " + chip.Facet + " chip is " + chip.Rect.Width + " pixels wide, too narrow to show its text.");
             var withoutChip = expected.Where(e => !block.Chips.Any(c => c.Facet == e.Facet && c.State == e.State)).ToArray();
             Assert.AreEqual((uint)withoutChip.Length, block.HiddenChips, step + ": the hidden count is exactly the choices without a chip.");
             Assert.AreEqual(expected.Length - withoutChip.Length, block.Chips.Count, step + ": no chip is drawn for anything else.");
@@ -2619,10 +2685,15 @@ public sealed partial class NativeSessionTests
         VerifyMore(saved, "saved");
         await Capture("saved");
 
-        // A previewed past revision is read only: the PSU keeps its chips there, but the Review facets link, which would do nothing,
-        // is not drawn. The history opens on the saved revision; Down and Up inspect it again before Preview.
+        // While the whole-diagram history is open the canvas takes no presses, and a previewed past revision is read only: the PSU
+        // keeps its chips, but the Review facets link, which would do nothing, is not drawn, before Preview as well as during it. The
+        // history opens on the saved revision; Down and Up inspect it again before Preview.
         Key("h", control: true);
-        await Wait("history-open", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D"));
+        var historyOpen = await Wait("history-open", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D")
+            && s.Rendered);
+        var historyOpenChips = Chips(historyOpen, psu) ?? throw new AssertFailedException("history-open: the PSU still shows its chips.");
+        CollectionAssert.AreEqual(new[] { "type", "family" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
+        Assert.IsNull(historyOpenChips.ReviewFacets, "history-open: no Review facets link while the history is open.");
         Key("Down"); await Wait("history-older", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId != graph.SelectedRoot.RevisionId.ToString("D"));
         Key("Up"); await Wait("history-saved", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D"));
         Key("p", alt: true);
@@ -2654,6 +2725,14 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-compact.json"), SchematicJson.Formatter.Format(compact), token);
         VerifyChoicesVisible(compact, "compact", psu, three);
         await Capture("compact");
+        // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
+        // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
+        ulong beforeBetween = compact.ViewRevision;
+        NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1300, resizeHeight: 880);
+        var between = await Wait("between", s => s.Rendered && s.ViewRevision > beforeBetween && s.CanvasPixelWidth > compact.CanvasPixelWidth);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-between.json"), SchematicJson.Formatter.Format(between), token);
+        VerifyChoicesVisible(between, "between", psu, three);
+        await Capture("between");
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
         await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
 
@@ -2691,6 +2770,19 @@ public sealed partial class NativeSessionTests
         var sourcedType = await Wait("type-sourced", s => s.FacetEditor == "type" && s.FocusedControl == "RecursiveFacetStateChosen");
         Assert.AreEqual(("For the 3.3 V rail", 1, KiCad.Automation.Protocol.Structural.StructuralVerification.SvVerified), Provenance(sourcedType),
             "The agent's source, condition and verification arrive with the facet.");
+        // A keystroke that is taken back is no new statement: typing one letter drops the provenance, and Backspace, which
+        // returns the value to the saved one, brings the saved source, condition and verification back and leaves nothing to save.
+        await Press("RecursiveFacetValue"); await Wait("type-sourced-value-focused", s => s.FocusedControl == "RecursiveFacetValue");
+        Key("End"); Type("s");
+        var oneLetter = await Wait("type-sourced-letter", s => s.Dirty && Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulators"]) == true);
+        Assert.AreEqual(("", 0, KiCad.Automation.Protocol.Structural.StructuralVerification.SvUnverified), Provenance(oneLetter),
+            "A new value keeps none of the old value's source, condition or verification.");
+        Key("BackSpace");
+        var takenBack = await Wait("type-sourced-taken-back", s => Facet(s, d => d.Type)?.Values.SequenceEqual(["linear regulator"]) == true);
+        Assert.AreEqual(("For the 3.3 V rail", 1, KiCad.Automation.Protocol.Structural.StructuralVerification.SvVerified), Provenance(takenBack),
+            "Typing the saved value back restores the saved source, condition and verification.");
+        Assert.IsFalse(takenBack.Dirty, "A keystroke taken back leaves nothing to save.");
+        Assert.IsFalse(Find(takenBack, "RecursiveSave").Enabled, "Save is unavailable again.");
         await Press("RecursiveFacetStrengthPreference");
         var strengthOnly = await Wait("type-sourced-preference", s => s.Dirty
             && Facet(s, d => d.Type)?.Strength == KiCad.Automation.Protocol.Structural.StructuralGuidanceStrength.SgsPreference);

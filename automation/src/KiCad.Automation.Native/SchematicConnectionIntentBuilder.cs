@@ -12,8 +12,9 @@ namespace KiCad.Automation.Native;
 // saved recovery record and the pre-realization candidate, never the editor, and decides exactly which
 // placed pins each changed net must join, how every sheet crossing is carried, which label text each
 // island uses and which native pin partition the editor must prove afterwards. Label texts are outputs;
-// every identity comes from exact component, occurrence, binding and placed-pin identities. Lane 2A owns
-// this file.
+// every identity comes from exact component, occurrence, binding and placed-pin identities. Lane 2A created
+// this file under the cn1-intent integration grant. The ownership map (psu-cpu-fixture-and-ownership.md
+// §2.3) does not list it yet; registering it for 2A is a seam request to the integration owner.
 
 /// <summary>The placed pins a symbol placement shows for one unit (cn1-wiring-intent.md §5.1): definition
 /// pins of that unit or common to all units, of the placement's body style or common to all styles, that

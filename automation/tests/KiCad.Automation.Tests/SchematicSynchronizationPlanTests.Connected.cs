@@ -6,6 +6,8 @@ using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using ElectricalPinType = Kiapi.Common.Types.ElectricalPinType;
+using KIID = Kiapi.Common.Types.KIID;
+using LockedState = Kiapi.Common.Types.LockedState;
 
 namespace KiCad.Automation.Tests;
 
@@ -385,8 +387,8 @@ public sealed partial class SchematicSynchronizationPlanTests
 
         // The realized complete circuit: removing the memory write-protect pin from GND is a disconnection,
         // while tying the unresolved memory SDA pin to a free processor GPIO is an addition.
-        var realized = Connected(placed, complete.Nets);
-        var connectedState = PsuCpuConnectedState(realized);
+        // The editor state carries the fixture's hierarchical labels, sheet pins, local labels and wires.
+        var (realized, connectedState) = PsuCpuWired(Connected(placed, complete.Nets));
         Assert.IsTrue(SchematicElectricalComparison.Compare(realized, connectedState.ObservedElectrical!, []).ConnectivityEquivalent,
             "The synthetic native partition must equal the eleven fixture nets.");
         var u6 = realized.Engineering.Circuit.Components.Single(c => c.Reference == "U6").Id;
@@ -532,6 +534,152 @@ public sealed partial class SchematicSynchronizationPlanTests
         var named = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(PlanWith(complete.Nets, ("Battery_Management:LTC2959", "10"), ("pic_programmer:24C16", "4")));
         Assert.AreEqual("GND", named.Nets.Single(n => n.NetId == gnd.Id).GlobalName);
         Assert.IsFalse(named.Ports.Any(p => p.NetId == gnd.Id), "A global GND needs no sheet pins.");
+    }
+
+    [TestMethod]
+    public void PsuCpuWiredCrossingsAreReusedOrJoinedWhenXmlAddsPins()
+    {
+        // The fixture's Complete stage once the editor shows it wired: every net joined with its hierarchical labels,
+        // sheet pins and local labels from expected-native.json. XML revisions that add pins must reuse those items,
+        // join an existing connection only where no matching label reaches the new drawing, and plan new nets
+        // (the memory SDA link) from scratch.
+        var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
+        var typed = components with { PartSymbols = WithLibraryPinTypes(components.PartSymbols!) };
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit;
+        var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Complete);
+        var realized = WithPsuNets(SchematicNativeCreationProjection.Project(sheets, typed, []).Candidate, complete.Nets);
+        var (wired, state) = PsuCpuWired(realized);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(wired, state.ObservedElectrical!, []).ConnectivityEquivalent);
+        var circuit = wired.Engineering.Circuit;
+        var used = complete.Nets.SelectMany(n => n.Pins).ToHashSet();
+        Guid IdOf(string reference) => circuit.Components.Single(c => c.Reference == reference).Id;
+        PinEndpoint Free(string reference, int unit)
+        {
+            var component = circuit.Components.Single(c => c.Reference == reference);
+            var part = circuit.Parts.Single(p => p.Id == circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId).PartId);
+            return new(component.Id, part.Pins.Where(p => p.Unit == unit && !used.Contains(new(component.Id, p.Number)))
+                .OrderBy(p => p.Number, StringComparer.Ordinal).First().Number);
+        }
+        Guid InstanceOf(string key) => expected.Sheets.Single(s => s.Key == key).ModelSheetInstance;
+        Guid SheetSymbolOf(string key) => expected.Sheets.Single(s => s.Key == key).NativeSheetSymbol!.Value;
+        Guid ScreenOf(string key) => expected.Sheets.Single(s => s.Key == key).NativeScreen;
+        string PathOf(string key) => SchematicDesignBindings.PathKey(wired.SheetBindings.Single(b => b.SheetInstanceId == InstanceOf(key)).NativePath);
+        Guid[] AnchorOn(DesignRecoveryState at, string net, string key) => [.. at.ObservedElectrical!.Nets.Single(n => n.Name == "/" + net).Sheets
+            .Where(s => string.Join('/', s.Path.Path.Select(p => p.Value)) == PathOf(key)).SelectMany(s => s.Items).Select(i => Guid.Parse(i.Value))];
+        SchematicConnectionIntent PlanWith(DesignRecoveryState at, SchematicDesign design, string net, PinEndpoint pin)
+        {
+            var nets = complete.Nets.Select(n => n.Name == net ? n with { Pins = [.. n.Pins, pin] } : n).ToArray();
+            var saved = at with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithPsuNets(design, nets), [])) };
+            return SchematicConnectionIntentBuilderTests.RequireRealizationPlan(
+                SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true)));
+        }
+        PinEndpoint[] Ordered(params PinEndpoint[] pins) => [.. pins.OrderBy(p => p.ComponentId).ThenBy(p => p.Pin, StringComparer.Ordinal)];
+        PinEndpoint PinOf(string reference, string number) => new(IdOf(reference), number);
+        var gpio = Free("U5", 2);
+
+        // Same-sheet reuse: a free processor GPIO joins MEM_SCL on CPU, where the local label MEM_SCL already names it.
+        var memScl = PlanWith(state, wired, "MEM_SCL", gpio);
+        Assert.AreEqual(ConnectionScope.Local, memScl.Nets.Single().Scope);
+        CollectionAssert.AreEqual(new[] { gpio }, memScl.Nets.Single().AddedPins.ToArray());
+        Assert.IsEmpty(memScl.Ports, "MEM_SCL stays on CPU.");
+        var screen = memScl.Screens.Single();
+        Assert.AreEqual(ScreenOf("CPU"), screen.ScreenId);
+        var island = screen.Islands.Single();
+        Assert.AreEqual("MEM_SCL", island.LabelText);
+        Assert.IsTrue(island.AnchorHasMatchingDriver); Assert.IsFalse(island.JoinRequired); Assert.IsEmpty(island.JoinCandidates);
+        Assert.IsNull(island.UplinkSheetSymbolId); Assert.IsEmpty(island.ChildSheetSymbolIds);
+        CollectionAssert.AreEqual(new[] { gpio }, island.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        Assert.IsTrue(island.Members.All(m => m.Role == ConnectionMemberRole.Signal));
+        CollectionAssert.AreEquivalent(AnchorOn(state, "MEM_SCL", "CPU"), island.AnchorItemIds.ToArray());
+        Assert.HasCount(4, island.AnchorItemIds, "Two pins, the local label and the wire.");
+        SchematicConnectionIntentBuilderTests.RequireGroups(memScl, [SchematicConnectionIntentBuilderTests.Keys(wired,
+            (IdOf("U5"), "161"), (IdOf("U6"), "6"), (gpio.ComponentId, gpio.Pin))]);
+
+        // Cross-sheet reuse: the same GPIO joins TELEM_MCU_TO_CPU, which already crosses PSU -> ROOT -> CPU through
+        // hierarchical labels and sheet pins. Both crossings are reused and only the new pin is drawn on CPU.
+        var telemetry = PlanWith(state, wired, "TELEM_MCU_TO_CPU", gpio);
+        Assert.HasCount(2, telemetry.Ports);
+        foreach (var (port, child) in telemetry.Ports.Zip(new[] { "PSU", "CPU" }.OrderBy(PathOf, StringComparer.Ordinal)))
+        {
+            Assert.AreEqual(InstanceOf(child), port.ChildSheetInstanceId); Assert.AreEqual(InstanceOf("ROOT"), port.ParentSheetInstanceId);
+            Assert.AreEqual(SheetSymbolOf(child), port.SheetSymbolId); Assert.AreEqual("TELEM_MCU_TO_CPU", port.PortText);
+            Assert.IsTrue(port.SheetPinExists, child); Assert.IsTrue(port.UplinkLabelExists, child);
+        }
+        var cpu = telemetry.Screens.Single().Islands.Single();
+        Assert.AreEqual(ScreenOf("CPU"), cpu.ScreenId, "Nothing is drawn on ROOT or PSU.");
+        Assert.AreEqual("TELEM_MCU_TO_CPU", cpu.LabelText);
+        Assert.IsNull(cpu.UplinkSheetSymbolId); Assert.IsEmpty(cpu.ChildSheetSymbolIds);
+        Assert.IsTrue(cpu.AnchorHasMatchingDriver); Assert.IsFalse(cpu.JoinRequired);
+        CollectionAssert.AreEqual(new[] { gpio }, cpu.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        Assert.IsTrue(cpu.Members.Single(m => m.Pin.Endpoint == PinOf("U5", "74")).AlreadyConnected);
+        CollectionAssert.AreEquivalent(AnchorOn(state, "TELEM_MCU_TO_CPU", "CPU"), cpu.AnchorItemIds.ToArray());
+        SchematicConnectionIntentBuilderTests.RequireGroups(telemetry, [SchematicConnectionIntentBuilderTests.Keys(wired,
+            (IdOf("U4"), "8"), (IdOf("U5"), "74"), (gpio.ComponentId, gpio.Pin))]);
+
+        // Two-level reuse: a free unit-4 supply pin joins GND on CPU_POWER, crossing CPU_POWER -> CPU -> ROOT -> PSU.
+        var supply = Free("U5", 4);
+        var ground = PlanWith(state, wired, "GND", supply);
+        Assert.HasCount(3, ground.Ports);
+        Assert.IsTrue(ground.Ports.All(p => p.SheetPinExists && p.UplinkLabelExists && p.PortText == "GND"));
+        CollectionAssert.AreEquivalent(new[] { InstanceOf("PSU"), InstanceOf("CPU"), InstanceOf("CPU_POWER") }, ground.Ports.Select(p => p.ChildSheetInstanceId).ToArray());
+        Assert.AreEqual(InstanceOf("CPU"), ground.Ports.Single(p => p.ChildSheetInstanceId == InstanceOf("CPU_POWER")).ParentSheetInstanceId);
+        var power = ground.Screens.Single().Islands.Single();
+        Assert.AreEqual(ScreenOf("CPU_POWER"), power.ScreenId);
+        Assert.IsTrue(power.AnchorHasMatchingDriver); Assert.IsFalse(power.JoinRequired);
+        Assert.IsNull(power.UplinkSheetSymbolId); Assert.IsEmpty(power.ChildSheetSymbolIds);
+        CollectionAssert.AreEqual(new[] { supply }, power.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        Assert.AreEqual(ConnectionMemberRole.Signal, power.Members.Single(m => m.Pin.Endpoint == supply).Role, "A visible supply input is an ordinary pin.");
+
+        // Same-sheet join: without the MEM_SCL local label the wire alone holds U5.161 and U6.6, so the new label must
+        // also reach them.
+        var (unlabelled, unlabelledState) = PsuCpuWired(realized, "MEM_SCL");
+        var joined = PlanWith(unlabelledState, unlabelled, "MEM_SCL", gpio).Screens.Single().Islands.Single();
+        Assert.AreEqual("MEM_SCL", joined.LabelText, "Without a label the net's own name labels it.");
+        Assert.IsFalse(joined.AnchorHasMatchingDriver); Assert.IsTrue(joined.JoinRequired);
+        CollectionAssert.AreEqual(Ordered(PinOf("U5", "161"), PinOf("U6", "6")), joined.JoinCandidates.Select(p => p.Endpoint).ToArray());
+        Assert.IsTrue(joined.JoinCandidates.All(p => joined.Members.Single(m => m.Pin == p).Role == ConnectionMemberRole.Signal));
+        CollectionAssert.AreEqual(new[] { gpio }, joined.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        Assert.HasCount(3, joined.AnchorItemIds, "Two pins and the wire.");
+
+        // Uplink-only join: a free PSU pin joins MEM_SCL. CPU needs a new hierarchical label but has no new pin, so
+        // the label joins the existing MEM_SCL pins even though the local label matches; both crossings are new.
+        var psuPin = Free("U4", 1);
+        var uplink = PlanWith(state, wired, "MEM_SCL", psuPin);
+        Assert.HasCount(2, uplink.Ports);
+        Assert.IsTrue(uplink.Ports.All(p => !p.SheetPinExists && !p.UplinkLabelExists && p.PortText == "MEM_SCL"
+            && p.ParentSheetInstanceId == InstanceOf("ROOT")));
+        var islands = uplink.Screens.SelectMany(s => s.Islands).ToDictionary(i => i.SheetInstanceId);
+        Assert.HasCount(3, islands);
+        var cpuIsland = islands[InstanceOf("CPU")];
+        Assert.AreEqual(SheetSymbolOf("CPU"), cpuIsland.UplinkSheetSymbolId);
+        Assert.IsFalse(cpuIsland.Members.Any(m => m.RequiresStub)); Assert.IsEmpty(cpuIsland.ChildSheetSymbolIds);
+        Assert.IsTrue(cpuIsland.AnchorHasMatchingDriver); Assert.IsTrue(cpuIsland.JoinRequired);
+        CollectionAssert.AreEqual(Ordered(PinOf("U5", "161"), PinOf("U6", "6")), cpuIsland.JoinCandidates.Select(p => p.Endpoint).ToArray());
+        var psuIsland = islands[InstanceOf("PSU")];
+        Assert.AreEqual(SheetSymbolOf("PSU"), psuIsland.UplinkSheetSymbolId); Assert.IsFalse(psuIsland.JoinRequired);
+        CollectionAssert.AreEqual(new[] { psuPin }, psuIsland.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        var rootIsland = islands[InstanceOf("ROOT")];
+        Assert.IsEmpty(rootIsland.Members); Assert.AreEqual("MEM_SCL", rootIsland.LabelText);
+        CollectionAssert.AreEqual(new[] { SheetSymbolOf("PSU"), SheetSymbolOf("CPU") }.Order().ToArray(), rootIsland.ChildSheetSymbolIds.ToArray());
+        SchematicConnectionIntentBuilderTests.RequireGroups(uplink, [SchematicConnectionIntentBuilderTests.Keys(wired,
+            (IdOf("U5"), "161"), (IdOf("U6"), "6"), (psuPin.ComponentId, psuPin.Pin))]);
+
+        // The memory SDA link the fixture leaves open (§0 rule 2): a new net on CPU with two new stubs and no crossing.
+        var sda = new CircuitNet(Guid.NewGuid(), "MEM_SDA", [gpio, PinOf("U6", "5")]);
+        var sdaSaved = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithPsuNets(wired, [.. complete.Nets, sda]), [])) };
+        var sdaIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(
+            SchematicSynchronizationPlanner.Plan(sdaSaved, ConnectedSession(sdaSaved.InstanceId, realization: true)));
+        var sdaNet = sdaIntent.Nets.Single();
+        Assert.AreEqual(sda.Id, sdaNet.NetId); Assert.AreEqual(ConnectionScope.Local, sdaNet.Scope);
+        CollectionAssert.AreEqual(Ordered(gpio, PinOf("U6", "5")), sdaNet.AddedPins.ToArray());
+        Assert.IsEmpty(sdaIntent.Ports);
+        var sdaIsland = sdaIntent.Screens.Single().Islands.Single();
+        Assert.AreEqual(ScreenOf("CPU"), sdaIsland.ScreenId); Assert.AreEqual("MEM_SDA", sdaIsland.LabelText);
+        Assert.IsEmpty(sdaIsland.AnchorItemIds); Assert.IsFalse(sdaIsland.AnchorHasMatchingDriver); Assert.IsFalse(sdaIsland.JoinRequired);
+        Assert.IsTrue(sdaIsland.Members.All(m => m.RequiresStub && !m.AlreadyConnected && m.Role == ConnectionMemberRole.Signal));
+        CollectionAssert.AreEqual(Ordered(gpio, PinOf("U6", "5")), sdaIsland.Members.Select(m => m.Pin.Endpoint).ToArray());
+        SchematicConnectionIntentBuilderTests.RequireGroups(sdaIntent, [SchematicConnectionIntentBuilderTests.Keys(wired,
+            (gpio.ComponentId, gpio.Pin), (IdOf("U6"), "5"))]);
     }
 
     /// <summary>The connection intent for the fixture's Complete stage (psu-cpu-fixture-and-ownership.md §1.6.3),
@@ -691,8 +839,10 @@ public sealed partial class SchematicSynchronizationPlanTests
     }
 
     /// <summary>A stable recovery record whose editor shows <paramref name="baseline"/> exactly: the native
-    /// partition is built from the baseline's own nets through its exact placed-pin identities.</summary>
-    private static DesignRecoveryState PsuCpuConnectedState(SchematicDesign baseline)
+    /// partition is built from the baseline's own nets through its exact placed-pin identities, plus the listed
+    /// labels, sheet pins and wires of each net (by net name), which must already be on the baseline's screens.</summary>
+    private static DesignRecoveryState PsuCpuConnectedState(SchematicDesign baseline,
+        IReadOnlyDictionary<string, List<(string Path, KIID Id)>>? decorations = null)
     {
         var electrical = new SchematicElectricalState { Hierarchy = new() { Data = baseline.Schematic.Clone(),
             Revision = new() { Epoch = "psu-cpu-epoch", Sequence = 7 }, TrackingComplete = false } };
@@ -722,6 +872,12 @@ public sealed partial class SchematicSynchronizationPlanTests
                     contents.Items.Add(pin.Id.Clone());
                 }
             }
+            foreach (var (path, id) in decorations?.GetValueOrDefault(net.Name) ?? [])
+            {
+                if (!sheets.TryGetValue(path, out var contents))
+                    sheets.Add(path, contents = new() { Path = screens[path].Metadata.Document.SheetPath.Clone() });
+                contents.Items.Add(id.Clone());
+            }
             if (sheets.Count == 0) continue;
             var native = new SchematicNet { Name = "/" + net.Name };
             native.Sheets.Add(sheets.Values);
@@ -730,5 +886,69 @@ public sealed partial class SchematicSynchronizationPlanTests
         return new(Guid.NewGuid(), Guid.NewGuid(), new("psu-cpu-epoch", 7), false, baseline,
             Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])), baseline.Schematic.Clone(), [],
             BaselineElectrical: electrical, ObservedElectrical: electrical.Clone());
+    }
+
+    /// <summary>The fixture's Complete stage as the editor shows it once wired (psu-cpu-fixture-and-ownership.md
+    /// §1.6.3): <paramref name="realized"/>'s screens gain the hierarchical labels, sheet pins and required local
+    /// labels of expected-native.json (except <paramref name="withoutLocalLabels"/>) plus one wire per net and sheet,
+    /// and the native partition joins each net's placed pins with exactly those items.</summary>
+    private static (SchematicDesign Design, DesignRecoveryState State) PsuCpuWired(SchematicDesign realized, params string[] withoutLocalLabels)
+    {
+        var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Complete);
+        var schematic = realized.Schematic.Clone();
+        var circuit = realized.Engineering.Circuit;
+        string PathOf(Guid instance) => SchematicDesignBindings.PathKey(realized.SheetBindings.Single(b => b.SheetInstanceId == instance).NativePath);
+        string KeyPath(string key) => PathOf(expected.Sheets.Single(s => s.Key == key).ModelSheetInstance);
+        SchematicScreenData Screen(string path) => schematic.Instances.Single(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == path);
+        var items = new Dictionary<string, List<(string Path, KIID Id)>>(StringComparer.Ordinal);
+        long column = 0;
+        Kiapi.Common.Types.Vector2 Point() => new() { XNm = 12_700_000 + 2_540_000 * column++, YNm = 190_500_000 };
+        static Kiapi.Common.Types.Text Caption(string text) => new() { Text_ = text, Attributes = new() { Multiline = false } };
+        KIID Note(string net, string path)
+        {
+            var id = new KIID { Value = Guid.NewGuid().ToString("D") };
+            if (!items.TryGetValue(net, out var list)) items.Add(net, list = []);
+            list.Add((path, id));
+            return id;
+        }
+        foreach (var (sheet, texts) in expected.HierarchicalLabels)
+            foreach (var text in texts)
+                Screen(KeyPath(sheet)).Items.Add(Any.Pack(new HierarchicalLabel { Id = Note(text, KeyPath(sheet)).Clone(), Position = Point(), Text = Caption(text),
+                    SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked }));
+        foreach (var (sheet, texts) in expected.SheetPins)
+        {
+            var own = expected.Sheets.Single(s => s.Key == sheet);
+            string parent = KeyPath(own.Parent!);
+            var screen = Screen(parent);
+            int index = screen.Items.ToList().FindIndex(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Value == own.NativeSheetSymbol!.Value.ToString("D"));
+            var symbol = screen.Items[index].Unpack<SheetSymbol>();
+            foreach (var text in texts)
+                symbol.Pins.Add(new SheetPin { Id = Note(text, parent).Clone(), Position = Point(), Text = Caption(text), Side = SheetSide.ShsLeft,
+                    SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked });
+            screen.Items[index] = Any.Pack(symbol);
+        }
+        foreach (var (sheet, texts) in expected.RequiredLocalLabelNames)
+            foreach (var text in texts.Where(t => !withoutLocalLabels.Contains(t, StringComparer.Ordinal)))
+                Screen(KeyPath(sheet)).Items.Add(Any.Pack(new LocalLabel { Id = Note(text, KeyPath(sheet)).Clone(), Position = Point(), Text = Caption(text),
+                    SpinStyle = SchematicLabelSpinStyle.SlssRight, Locked = LockedState.LsUnlocked }));
+        // One wire per net and sheet joins that sheet's pins and labels of the net.
+        var components = circuit.Components.ToDictionary(c => c.Id);
+        foreach (var net in circuit.Nets.OrderBy(n => n.Id))
+        {
+            var paths = new SortedSet<string>(items.GetValueOrDefault(net.Name)?.Select(i => i.Path) ?? [], StringComparer.Ordinal);
+            foreach (var endpoint in net.Pins)
+            {
+                var component = components[endpoint.ComponentId];
+                var part = circuit.Parts.Single(p => p.Id == circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId).PartId);
+                int unit = part.Pins.Single(p => p.Number == endpoint.Pin).Unit;
+                foreach (var occurrence in circuit.Symbols.Where(o => o.ComponentId == component.Id && (unit == 0 || o.Unit == unit)))
+                    paths.Add(PathOf(occurrence.EffectiveSheetInstanceId(component)));
+            }
+            foreach (var path in paths)
+                Screen(path).Items.Add(Any.Pack(new SchematicLine { Id = Note(net.Name, path).Clone(), Start = Point(), End = Point(),
+                    Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked }));
+        }
+        var design = realized with { Schematic = schematic };
+        return (design, PsuCpuConnectedState(design, items));
     }
 }

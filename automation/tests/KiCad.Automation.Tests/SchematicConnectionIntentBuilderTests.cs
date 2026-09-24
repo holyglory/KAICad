@@ -21,6 +21,8 @@ namespace KiCad.Automation.Tests;
 // Each case goes through the public planner with a session that advertises the capability, so classification,
 // the creation guards, the intent and the XML round trip all run; only states no valid saved design can reach
 // (a second top-level sheet, pins without their own identities, oversized revisions) call the builder directly.
+// Lane 2A created this file with SchematicConnectionIntentBuilder.cs under the cn1-intent integration grant;
+// registering both in psu-cpu-fixture-and-ownership.md §2.3 is a seam request to the integration owner.
 [TestClass]
 public sealed class SchematicConnectionIntentBuilderTests
 {
@@ -167,6 +169,164 @@ public sealed class SchematicConnectionIntentBuilderTests
         CollectionAssert.AreEqual(island.Members.Where(m => m.AlreadyConnected).Select(m => m.Pin).ToArray(), island.JoinCandidates.ToArray());
         CollectionAssert.AreEquivalent(new[] { r1, r2 }, island.JoinCandidates.Select(p => p.Endpoint.ComponentId).ToArray());
         CollectionAssert.AreEqual(island.Members.OrderBy(m => m.Pin.Endpoint.ComponentId).ToArray(), island.Members.ToArray());
+    }
+
+    [TestMethod]
+    public void AGlobalNameGivenToAnUnlabelledConnectionIsJoinedAtItsExistingPins()
+    {
+        // §5.4 global scope: LINK = {R1.1, R2.1} is joined only by a wire. The XML adds a new global power symbol
+        // V5 to LINK, so LINK becomes the global net V5 and the existing connection must receive V5 at exactly one
+        // island, at its own already-connected signal pins.
+        var (bench, state, link, parts) = GlobalLinkBench(labelled: false);
+        var (created, pwr2) = bench.Create(state.Baseline, parts.Power, "#PWR2", BenchSheet.Root, "V5");
+        var plan = Plan(Revise(state, _ => WithNets(created, parts.Gnd, link with { Pins = [.. link.Pins, new(pwr2, "1")] })).Saved);
+        var intent = RequireRealizationPlan(plan);
+        var net = intent.Nets.Single();
+        Assert.AreEqual(link.Id, net.NetId);
+        Assert.AreEqual(ConnectionScope.Global, net.Scope); Assert.AreEqual("V5", net.GlobalName);
+        CollectionAssert.AreEqual(new[] { new PinEndpoint(pwr2, "1") }, net.AddedPins.ToArray());
+        Assert.IsEmpty(intent.Ports, "A global name needs no hierarchical port.");
+        var island = intent.Screens.Single().Islands.Single();
+        Assert.AreEqual(ConnectionScope.Global, island.Scope); Assert.AreEqual("V5", island.LabelText);
+        Assert.IsFalse(island.AnchorHasMatchingDriver, "Nothing in the existing connection carries V5.");
+        Assert.IsTrue(island.JoinRequired, "V5 must also reach R1.1 and R2.1, or the wire stays a separate net.");
+        CollectionAssert.AreEqual(Ordered(new(parts.R1, "1"), new(parts.R2, "1")), island.JoinCandidates.Select(p => p.Endpoint).ToArray(),
+            "The join candidates are the already-connected signal pins in member order.");
+        CollectionAssert.AreEqual(island.Members.Where(m => m.AlreadyConnected).Select(m => m.Pin).ToArray(), island.JoinCandidates.ToArray());
+        var carrier = island.Members.Single(m => m.Pin.Endpoint.ComponentId == pwr2);
+        Assert.AreEqual(ConnectionMemberRole.PowerCarrier, carrier.Role); Assert.AreEqual("V5", carrier.PowerName);
+        Assert.IsTrue(carrier.Pin.CreatedSymbol); Assert.IsFalse(carrier.AlreadyConnected); Assert.IsFalse(carrier.RequiresStub);
+        Assert.IsFalse(island.Members.Any(m => m.RequiresStub), "Only the join carries V5; no pin needs a new stub.");
+        Assert.IsNull(island.UplinkSheetSymbolId); Assert.IsEmpty(island.ChildSheetSymbolIds);
+        CollectionAssert.AreEquivalent(new[] { bench.PinId(parts.R1, "1"), bench.PinId(parts.R2, "1"), parts.Wire }, island.AnchorItemIds.ToArray());
+        RequireGroups(intent, [Keys(plan.Candidate!, (parts.R1, "1"), (parts.R2, "1"), (pwr2, "1"))]);
+
+        // False-positive guard: the same connection already carries V5 through a global label, so neither the new
+        // power symbol nor a new signal pin makes it join; only the new signal pin gets a stub.
+        var (named, namedState, namedLink, namedParts) = GlobalLinkBench(labelled: true);
+        var (namedCreated, pwr3) = named.Create(namedState.Baseline, namedParts.Power, "#PWR2", BenchSheet.Root, "V5");
+        var carried = RequireRealizationPlan(Plan(Revise(namedState, _ => WithNets(namedCreated, namedParts.Gnd,
+            namedLink with { Pins = [.. namedLink.Pins, new(pwr3, "1")] })).Saved));
+        Assert.AreEqual("V5", carried.Nets.Single().GlobalName);
+        Assert.IsEmpty(carried.Screens.Single().Islands, "The existing global label already names the connection: nothing is drawn.");
+        var withPin = Plan(Revise(namedState, _ => WithNets(namedCreated, namedParts.Gnd,
+            namedLink with { Pins = [.. namedLink.Pins, new(pwr3, "1"), new(namedParts.R4, "1")] })).Saved);
+        var stubbed = RequireRealizationPlan(withPin).Screens.Single().Islands.Single();
+        Assert.AreEqual("V5", stubbed.LabelText);
+        Assert.IsTrue(stubbed.AnchorHasMatchingDriver); Assert.IsFalse(stubbed.JoinRequired); Assert.IsEmpty(stubbed.JoinCandidates);
+        CollectionAssert.AreEqual(new[] { new PinEndpoint(namedParts.R4, "1") }, stubbed.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+        CollectionAssert.Contains(stubbed.AnchorItemIds.ToArray(), namedParts.Label!.Value);
+        RequireGroups(RequireRealizationPlan(withPin), [Keys(withPin.Candidate!, (namedParts.R1, "1"), (namedParts.R2, "1"), (namedParts.R4, "1"), (pwr3, "1"))]);
+    }
+
+    [TestMethod]
+    public void AGlobalNameJoinsTheExistingConnectionAtExactlyOneIsland()
+    {
+        // LINK already spans the root (R1.1, R2.1) and the child sheet (R9.1) through sheet pin and hierarchical
+        // label LINK. A new V5 power symbol on the root makes it global. Only the island of the first
+        // already-connected signal pin in member order is joined: R9 has the smallest identity, so the join lands
+        // on the child sheet even though the root comes first by path and holds the new symbol.
+        var bench = new Bench();
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid power = bench.Part("PWR", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        Guid pwr1 = bench.Component(power, "#PWR1", value: "GND");
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2"), r3 = bench.Component(r, "R3");
+        Guid r9 = bench.Component(r, "R9", BenchSheet.Child, id: Guid.Parse("00000000-0000-4000-8000-000000000001"));
+        var gnd = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr1, "1"), new(r3, "1")]);
+        var link = new CircuitNet(Guid.NewGuid(), "LINK", [new(r1, "1"), new(r2, "1"), new(r9, "1")]);
+        var state = bench.State([gnd, link], new()
+        {
+            [link.Id] = [(BenchSheet.Root, bench.Wire(BenchSheet.Root)), (BenchSheet.Root, bench.SheetPin(BenchSheet.Child, "LINK")),
+                (BenchSheet.Child, bench.HierarchicalLabel(BenchSheet.Child, "LINK")), (BenchSheet.Child, bench.Wire(BenchSheet.Child))]
+        });
+        var (created, pwr2) = bench.Create(state.Baseline, power, "#PWR2", BenchSheet.Root, "V5");
+        var plan = Plan(Revise(state, _ => WithNets(created, gnd, link with { Pins = [.. link.Pins, new(pwr2, "1")] })).Saved);
+        var intent = RequireRealizationPlan(plan);
+        Assert.AreEqual("V5", intent.Nets.Single().GlobalName);
+        Assert.IsEmpty(intent.Ports);
+        var joined = intent.Screens.SelectMany(s => s.Islands).Where(i => i.JoinRequired).ToArray();
+        Assert.HasCount(1, joined, "Exactly one island gives the existing connection its global name.");
+        Assert.AreEqual(bench.Instance(BenchSheet.Child), joined[0].SheetInstanceId);
+        CollectionAssert.AreEqual(new[] { new PinEndpoint(r9, "1") }, joined[0].JoinCandidates.Select(p => p.Endpoint).ToArray());
+        Assert.AreEqual("V5", joined[0].LabelText);
+        Assert.HasCount(1, intent.Screens.SelectMany(s => s.Islands).ToArray(), "The root island needs nothing: its pins already reach the child.");
+        CollectionAssert.AreEqual(new[] { bench.ScreenId(BenchSheet.Root), bench.ScreenId(BenchSheet.Child) }.Order().ToArray(),
+            intent.Screens.Select(s => s.ScreenId).ToArray(), "The root screen is listed for the created symbol, the child for the join.");
+        RequireGroups(intent, [Keys(plan.Candidate!, (r1, "1"), (r2, "1"), (r9, "1"), (pwr2, "1"))]);
+    }
+
+    [TestMethod]
+    public void AnExistingConnectionReachedOnlyThroughANewUplinkIsJoinedAtItsOwnPins()
+    {
+        // §5.4 step 5, second clause: DATA exists only on the child sheet, wired and labelled "DATA". The XML adds a
+        // bare root pin, so the child island needs a hierarchical label but has no new pin to attach it to. Even
+        // with a matching label there, the uplink must be joined at the existing pins.
+        var bench = new Bench();
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid r5 = bench.Component(r, "R5"), r9 = bench.Component(r, "R9", BenchSheet.Child), r6 = bench.Component(r, "R6", BenchSheet.Child);
+        Guid r7 = bench.Component(r, "R7", BenchSheet.Child);
+        string wire = bench.Wire(BenchSheet.Child), label = bench.LocalLabel(BenchSheet.Child, "DATA");
+        var data = new CircuitNet(Guid.NewGuid(), "/Child/DATA", [new(r9, "1"), new(r6, "1")]);
+        var state = bench.State([data], new() { [data.Id] = [(BenchSheet.Child, wire), (BenchSheet.Child, label)] });
+        var (saved, _) = Revise(state, d => WithNets(d, data with { Pins = [.. data.Pins, new(r5, "2")] }));
+        var intent = RequireRealizationPlan(Plan(saved));
+        var net = intent.Nets.Single();
+        Assert.AreEqual(ConnectionScope.Local, net.Scope);
+        CollectionAssert.AreEqual(new[] { new PinEndpoint(r5, "2") }, net.AddedPins.ToArray());
+        var port = intent.Ports.Single();
+        Assert.AreEqual(bench.ChildSheetSymbol, port.SheetSymbolId); Assert.AreEqual("DATA", port.PortText);
+        Assert.IsFalse(port.SheetPinExists); Assert.IsFalse(port.UplinkLabelExists);
+        var child = Island(intent, BenchSheet.Child, bench);
+        Assert.AreEqual("DATA", child.LabelText);
+        Assert.IsTrue(child.AnchorHasMatchingDriver, "The local label DATA already names the connection on the child sheet.");
+        Assert.AreEqual(bench.ChildSheetSymbol, child.UplinkSheetSymbolId);
+        Assert.IsEmpty(child.ChildSheetSymbolIds);
+        Assert.IsFalse(child.Members.Any(m => m.RequiresStub));
+        Assert.IsTrue(child.JoinRequired, "The new hierarchical label has no new pin to sit on, so it joins the existing ones.");
+        CollectionAssert.AreEqual(Ordered(new(r9, "1"), new(r6, "1")), child.JoinCandidates.Select(p => p.Endpoint).ToArray());
+        CollectionAssert.AreEqual(child.Members.Select(m => m.Pin).ToArray(), child.JoinCandidates.ToArray());
+        CollectionAssert.AreEquivalent(new[] { bench.PinId(r9, "1"), bench.PinId(r6, "1"), Guid.Parse(wire), Guid.Parse(label) }, child.AnchorItemIds.ToArray());
+        var root = Island(intent, BenchSheet.Root, bench);
+        Assert.AreEqual("DATA", root.LabelText);
+        Assert.IsNull(root.UplinkSheetSymbolId);
+        CollectionAssert.AreEqual(new[] { bench.ChildSheetSymbol }, root.ChildSheetSymbolIds.ToArray());
+        Assert.AreEqual(new PinEndpoint(r5, "2"), root.Members.Single(m => m.RequiresStub).Pin.Endpoint);
+        Assert.IsFalse(root.JoinRequired); Assert.IsFalse(root.AnchorHasMatchingDriver); Assert.IsEmpty(root.AnchorItemIds);
+        RequireGroups(intent, [Keys(saved.Baseline, (r9, "1"), (r6, "1"), (r5, "2"))]);
+
+        // False-positive guard: when the same revision also adds a bare child pin, the hierarchical label sits on that
+        // pin's new stub and the matching local label already names the existing pins, so nothing is joined.
+        var (alsoChild, _) = Revise(state, d => WithNets(d, data with { Pins = [.. data.Pins, new(r5, "2"), new(r7, "1")] }));
+        var stubbed = Island(RequireRealizationPlan(Plan(alsoChild)), BenchSheet.Child, bench);
+        Assert.AreEqual(bench.ChildSheetSymbol, stubbed.UplinkSheetSymbolId);
+        Assert.IsFalse(stubbed.JoinRequired); Assert.IsEmpty(stubbed.JoinCandidates);
+        CollectionAssert.AreEqual(new[] { new PinEndpoint(r7, "1") }, stubbed.Members.Where(m => m.RequiresStub).Select(m => m.Pin.Endpoint).ToArray());
+    }
+
+    private sealed record GlobalLinkParts(Guid Power, Guid R1, Guid R2, Guid R4, CircuitNet Gnd, Guid Wire, Guid? Label);
+
+    /// <summary>LINK = {R1.1, R2.1} joined by a root wire, optionally also carrying a global label V5; GND holds the
+    /// template power symbol #PWR1 and R3.1; R4 is bare.</summary>
+    private static (Bench Bench, DesignRecoveryState State, CircuitNet Link, GlobalLinkParts Parts) GlobalLinkBench(bool labelled)
+    {
+        var bench = new Bench();
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid power = bench.Part("PWR", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        Guid pwr1 = bench.Component(power, "#PWR1", value: "GND");
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2"), r3 = bench.Component(r, "R3"), r4 = bench.Component(r, "R4");
+        var gnd = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr1, "1"), new(r3, "1")]);
+        var link = new CircuitNet(Guid.NewGuid(), labelled ? "V5" : "LINK", [new(r1, "1"), new(r2, "1")]);
+        string wire = bench.Wire(BenchSheet.Root);
+        var items = new List<(BenchSheet Sheet, string Id)> { (BenchSheet.Root, wire) };
+        Guid? label = null;
+        if (labelled)
+        {
+            string id = bench.GlobalLabel(BenchSheet.Root, "V5");
+            items.Add((BenchSheet.Root, id));
+            label = Guid.Parse(id);
+        }
+        var state = bench.State([gnd, link], new() { [link.Id] = [.. items] });
+        return (bench, state, link, new(power, r1, r2, r4, gnd, Guid.Parse(wire), label));
     }
 
     [TestMethod]
@@ -615,12 +775,12 @@ public sealed class SchematicConnectionIntentBuilderTests
         }
 
         public Guid Component(Guid part, string reference, BenchSheet sheet = BenchSheet.Root, string? value = null, int[]? units = null,
-            string? duplicatePin = null, Action<SchematicSymbolInstance>? edit = null)
+            string? duplicatePin = null, Action<SchematicSymbolInstance>? edit = null, Guid? id = null)
         {
             var (name, _, _, _) = info[part];
             var definition = new ComponentDefinition(Guid.NewGuid(), part, value ?? name);
             sheetComponents[(int)sheet].Add(definition);
-            var component = new ComponentInstance(Guid.NewGuid(), definition.Id, instances[(int)sheet], reference);
+            var component = new ComponentInstance(id ?? Guid.NewGuid(), definition.Id, instances[(int)sheet], reference);
             components.Add(component);
             foreach (int unit in units ?? Enumerable.Range(1, parts.Single(p => p.Id == part).Units).ToArray())
             {
@@ -660,6 +820,8 @@ public sealed class SchematicConnectionIntentBuilderTests
         public string Wire(BenchSheet sheet) => Add(sheet, id => new SchematicLine { Id = id, Start = Point(), End = Point(), Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked });
         public string BusEntry(BenchSheet sheet) => Add(sheet, id => new BusEntry { Id = id, Position = Point(), Size = Point(), Type = BusEntryType.BetWireToBus, Locked = LockedState.LsUnlocked });
         public string LocalLabel(BenchSheet sheet, string text) => Add(sheet, id => new LocalLabel { Id = id, Position = Point(), Text = Caption(text), SpinStyle = SchematicLabelSpinStyle.SlssRight, Locked = LockedState.LsUnlocked });
+        public string GlobalLabel(BenchSheet sheet, string text) => Add(sheet, id => new GlobalLabel { Id = id, Position = Point(), Text = Caption(text),
+            SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked });
         public string HierarchicalLabel(BenchSheet sheet, string text) => Add(sheet, id => new HierarchicalLabel { Id = id, Position = Point(), Text = Caption(text),
             SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked });
 

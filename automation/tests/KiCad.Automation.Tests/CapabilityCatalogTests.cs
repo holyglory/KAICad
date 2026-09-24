@@ -118,6 +118,21 @@ public sealed class CapabilityCatalogTests
         }
         Assert.IsEmpty(problems, string.Join(Environment.NewLine, problems));
 
+        // The check's reading of the real fixture must agree with a plain text search of its files, so
+        // a regression in the member or dispatch reader cannot hide a stub and let its journeys count.
+        var reading = VerificationEvidenceRules.ReadStubs(sources);
+        var nativeFiles = sources.Where(source => Regex.IsMatch(source.Text, $@"\bpartial\s+class\s+{VerificationEvidenceRules.NativeJourneyClass}\b")).ToArray();
+        string[] searched = nativeFiles
+            .Select(source => (source.File, Sites: Regex.Matches(VerificationEvidenceRules.StripComments(source.Text), @"AssertInconclusiveException\(|Assert\.Inconclusive\(").Count))
+            .Where(file => file.Sites > 0).Select(file => $"{file.File}: {file.Sites}").ToArray();
+        CollectionAssert.AreEquivalent(searched, reading.RaiseSites.Select(file => $"{file.Key}: {file.Value}").ToArray(),
+            "Every Inconclusive raise in the native journey files must lie in a member the check reads as a stub.");
+        foreach (var source in nativeFiles)
+            foreach (Match arm in Regex.Matches(VerificationEvidenceRules.StripComments(source.Text), @"NativeJourney\.(\w+)\s*=>\s*(\w+)\s*\("))
+                if (reading.Stubs.Contains(arm.Groups[2].Value))
+                    Assert.IsTrue(reading.StubJourneys.Contains(arm.Groups[1].Value),
+                        $"{source.File}: NativeJourney.{arm.Groups[1].Value} leads to the stub {arm.Groups[2].Value}, which the check must read as a stub journey.");
+
         static bool IsTestMethod(string type, string method) =>
             typeof(CapabilityCatalogTests).Assembly.GetType("KiCad.Automation.Tests." + type)?
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance).SingleOrDefault(m => m.Name == method)?
@@ -380,15 +395,19 @@ public sealed class CapabilityCatalogTests
         Assert.IsTrue(unlimitedFoundation.Any(p => p.Contains("without citing")), string.Join(Environment.NewLine, unlimitedFoundation));
         Assert.IsEmpty(CheckIn(unlimited, native + ".Named"), "A journey its own switch arm sends elsewhere cannot reach the default arm.");
         // An earlier statement switching over the same parameter and throwing for any other journey
-        // limits the default arm to the journeys it names.
+        // limits the default arm to the journeys it names, also after an unconditional block.
         string limit = "int seed = journey switch { NativeJourney.Named => 1, _ => throw new ArgumentOutOfRangeException(nameof(journey)) };";
         Assert.IsEmpty(CheckIn(NativeOnly(Lane("        " + limit)), foundation), "A limit over the same value keeps other journeys away from the stub.");
+        Assert.IsEmpty(CheckIn(NativeOnly(Lane("        if (ready) { }\n        " + limit)), foundation), "A limit after a finished if block always runs.");
         // Must catch: only a limit over the same value counts; a reassigned value, or a limit that
-        // runs only under a condition, limits nothing.
+        // runs only under a condition (an if, or the else of one), limits nothing.
+        string conditional = limit.Replace("int seed = ", "seed = ", StringComparison.Ordinal);
         foreach (string unreadable in new[]
         {
             "        " + limit.Replace("journey switch", "other switch", StringComparison.Ordinal),
-            "        int seed = 0;\n        if (ready) seed = journey switch { NativeJourney.Named => 1, _ => throw new ArgumentOutOfRangeException(nameof(journey)) };"
+            "        int seed = 0;\n        if (ready) " + conditional,
+            "        int seed;\n        if (ready) seed = 0; else " + conditional,
+            "        int seed;\n        if (ready) { seed = 0; } else\n            " + conditional
         })
         {
             var unlimitedByValue = CheckIn(NativeOnly(Lane(unreadable)), foundation);
@@ -397,7 +416,97 @@ public sealed class CapabilityCatalogTests
         }
         var reassigned = NativeOnly(Lane("        " + limit + "\n        journey = other;"));
         foreach (string test in new[] { foundation, native + ".Named" })
-            StringAssert.Contains(CheckIn(reassigned, test)[0], "only a switch over the member's own NativeJourney parameter, never reassigned, can be read");
+            StringAssert.Contains(CheckIn(reassigned, test)[0], "can be read: RunLaneJourney reassigns or redeclares journey");
+        // Must catch: a limit written earlier in the text than a switch in a local function, which the
+        // member may call before the limit runs, limits nothing; the switch's own arms still count.
+        foreach (string dispatch in new[]
+        {
+            "async Task Dispatch() => await (journey switch { NativeJourney.Named => VerifyNamed(0), _ => VerifyStubbed(0) });",
+            "async Task Dispatch()\n        {\n            await (journey switch { NativeJourney.Named => VerifyNamed(0), _ => VerifyStubbed(0) });\n        }"
+        })
+        {
+            var late = NativeOnly($$"""
+                    [TestMethod]
+                    public Task Named() => RunNativeSessions(NativeJourney.Named);
+
+                    private static async Task RunLaneJourney(NativeJourney journey)
+                    {
+                        await Dispatch();
+                        {{limit}}
+                        {{dispatch}}
+                    }
+
+                    private static Task VerifyNamed(int seed) => Task.CompletedTask;
+            """);
+            var beforeLimit = CheckIn(late, foundation);
+            Assert.IsTrue(beforeLimit.Any(p => p.Contains("leads to the stub VerifyStubbed from inside a lambda, a local function or a nested block")
+                && p.Contains("no earlier switch over journey there limits the journeys that reach it")), string.Join(Environment.NewLine, beforeLimit));
+            Assert.IsEmpty(CheckIn(late, native + ".Named"), "A journey the switch's own arm sends elsewhere cannot reach its default arm.");
+        }
+
+        // Only a parameter that always holds the journey being run is read as dispatch: the one
+        // RunNativeSessions receives from tests, passed on unchanged. Must not flag: a clean two-level
+        // chain passing it on by position and then by name.
+        static string Runner(string call) => $$"""
+                    private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
+                    {
+                        await {{call}};
+                    }
+
+                    [TestMethod]
+                    public Task Stubbed() => RunNativeSessions(NativeJourney.Stubbed);
+
+                    [TestMethod]
+                    public Task Named() => RunNativeSessions(NativeJourney.Named);
+
+            """;
+        const string dispatchOverJourney = """
+                    private static async Task Dispatch(string theme, NativeJourney journey)
+                    {
+                        await (journey switch { NativeJourney.Stubbed => VerifyStubbed(0), _ => Task.CompletedTask });
+                    }
+            """;
+        var carried = NativeOnly(Runner("RunLaneJourney(journey, theme)") + """
+                    private static Task RunLaneJourney(NativeJourney journey, string theme) => Dispatch(theme, journey: journey);
+
+            """ + dispatchOverJourney);
+        Assert.IsEmpty(CheckIn(carried, foundation), "The journey passed on unchanged through two members is read exactly.");
+        StringAssert.Contains(CheckIn(carried, native + ".Stubbed")[0], "whose journey NativeJourney.Stubbed is still an Inconclusive lane stub.");
+        // Must catch: a switch over a second NativeJourney parameter that a caller sets to a fixed
+        // journey, a fixed or default journey passed instead of the running one, a member also used as
+        // a delegate, and a run of another journey started from inside a journey.
+        var second = NativeOnly(Runner("RunLaneJourney(journey, NativeJourney.Named)") + """
+                    private static async Task RunLaneJourney(NativeJourney journey, NativeJourney other)
+                    {
+                        await (other switch { NativeJourney.Named => VerifyStubbed(0), _ => Task.CompletedTask });
+                    }
+            """);
+        StringAssert.Contains(CheckIn(second, foundation)[0], "can be read: RunNativeSessions calls RunLaneJourney with NativeJourney.Named for other");
+        foreach (string passed in new[] { "NativeJourney.Stubbed", "default" })
+        {
+            var fixedJourney = NativeOnly(Runner($"Dispatch(theme, {passed})") + dispatchOverJourney);
+            StringAssert.Contains(CheckIn(fixedJourney, foundation)[0], $"can be read: RunNativeSessions calls Dispatch with {passed} for journey");
+        }
+        var delegated = NativeOnly(Runner("RunLaneJourney(journey)") + """
+                    private static async Task RunLaneJourney(NativeJourney journey)
+                    {
+                        Func<string, NativeJourney, Task> dispatch = Dispatch;
+                        await dispatch("", journey);
+                    }
+
+            """ + dispatchOverJourney);
+        StringAssert.Contains(CheckIn(delegated, foundation)[0], "can be read: Dispatch is named other than in a call");
+        var nested = NativeOnly(Runner("RunLaneJourney(journey, theme)") + """
+                    private async Task RunLaneJourney(NativeJourney journey, string theme)
+                    {
+                        await Nested();
+                        await Dispatch(theme, journey);
+                    }
+
+                    private Task Nested() => RunNativeSessions(NativeJourney.Stubbed);
+
+            """ + dispatchOverJourney);
+        StringAssert.Contains(CheckIn(nested, foundation)[0], "and Nested calls RunNativeSessions with NativeJourney.Stubbed for journey");
         // An if/else dispatch to a stub.
         var ifElse = NativeOnly("""
                     private static async Task RunLaneJourney(NativeJourney journey)
@@ -424,6 +533,68 @@ public sealed class CapabilityCatalogTests
         StringAssert.Contains(CheckIn(direct, foundation)[0], "reached other than through a NativeJourney switch arm");
         // The same stub without any unreadable dispatch leaves the journey provable.
         Assert.IsEmpty(CheckIn(NativeOnly(""), foundation));
+        // Must catch: a helper that catches Inconclusive, or whose filter can still let one be caught,
+        // is a stub, because it can turn an unfinished journey into a pass.
+        var handled = NativeOnly("""
+                    [TestMethod]
+                    public Task Swallowed() => VerifySwallowed();
+
+                    [TestMethod]
+                    public Task Tested() => VerifyTested();
+
+                    [TestMethod]
+                    public Task Either() => VerifyEither(true);
+
+                    private static async Task VerifySwallowed()
+                    {
+                        try { await Task.Yield(); } catch (AssertInconclusiveException) { }
+                    }
+
+                    private static async Task VerifyTested()
+                    {
+                        try { await Task.Yield(); } catch (Exception error) when (error is AssertInconclusiveException) { }
+                    }
+
+                    private static async Task VerifyEither(bool retry)
+                    {
+                        try { await Task.Yield(); } catch (Exception error) when (error is not AssertInconclusiveException || retry) { }
+                    }
+            """);
+        foreach (string test in new[] { "Swallowed", "Tested", "Either" })
+            StringAssert.Contains(CheckIn(handled, native + "." + test)[0], $"reaches the Inconclusive lane stub Verify{test} through {test}.");
+        // A call into another test class is followed member by member. Must catch: one that reaches
+        // Inconclusive two levels down, or a name the check cannot find in a class that can end
+        // Inconclusive; any journey may make such a call. Must not flag: a member of the same class
+        // that reaches nothing Inconclusive.
+        VerificationEvidenceRules.Source[] external =
+        [
+            .. NativeOnly("""
+                    [TestMethod]
+                    public Task ExternalStub() => SampleFixture.Prepare(0);
+
+                    [TestMethod]
+                    public Task ExternalUnknown() => SampleFixture.Missing();
+
+                    [TestMethod]
+                    public Task ExternalClean() => SampleFixture.Clean();
+            """),
+            new("SampleFixture.cs", """
+                internal static class SampleFixture
+                {
+                    internal static Task Prepare(int seed) => Step(seed);
+
+                    private static Task Step(int seed) => throw new AssertInconclusiveException("Phase 2 lane 2X has not delivered this step");
+
+                    internal static Task Clean() => Task.CompletedTask;
+                }
+                """)
+        ];
+        StringAssert.Contains(CheckIn(external, native + ".ExternalStub")[0],
+            "where ExternalStub calls SampleFixture.Prepare -> SampleFixture.Step, where SampleFixture.Step raises, catches or tests for Inconclusive.");
+        StringAssert.Contains(CheckIn(external, native + ".ExternalUnknown")[0],
+            "SampleFixture.Missing, which this check cannot find, so any SampleFixture.Step, where SampleFixture.Step raises");
+        Assert.IsEmpty(CheckIn(external, native + ".ExternalClean"));
+        StringAssert.Contains(CheckIn(external, foundation)[0], "may reach an Inconclusive lane stub: ExternalStub calls SampleFixture.Prepare");
         // A name that is only listed, asserted, assigned or used as an object member is not a call.
         StringAssert.Contains(Check("sample_listed", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_listed");
         StringAssert.Contains(Check("sample_other", KiCadVerificationLevel.McpProcess, "SampleStdioTests.Run")[0], "never calls sample_other");
@@ -560,31 +731,50 @@ internal static class CapabilityCatalogAssertions
 /// call, and comments are removed before matching. The call check is per class, not per method.
 /// <para>
 /// NativeSessionTests is the Linux native session fixture: its partial sources are the journeys that
-/// drive a real KiCad. Its members are read with their braces, strings and comments, so every member
-/// is found, with or without an access modifier. An Inconclusive lane stub is any member whose body
-/// raises AssertInconclusiveException or calls Assert.Inconclusive; testing an exception's type
-/// (is, is not, catch) raises nothing. A cited NativeSessionTests method counts only when this check
-/// can read that it cannot reach a stub, and what it cannot read is rejected, never accepted:
+/// drive a real KiCad. Its members, and those of every other class in the test sources, are read with
+/// their braces, strings and comments, so every member is found, with or without an access modifier.
+/// An Inconclusive lane stub is any member that names AssertInconclusiveException or
+/// Assert.Inconclusive, whether it raises, catches or tests for it, except in the one catch filter
+/// that lets such a result through: catch (T e) when (e is not AssertInconclusiveException), alone or
+/// followed by &amp;&amp; with no top-level | or ?. A cited NativeSessionTests method counts only when this
+/// check can read that it cannot reach a stub, and what it cannot read is rejected, never accepted:
 /// </para>
 /// <list type="bullet">
 /// <item>An expression body that is exactly RunNativeSessions(NativeJourney.X[, parameters]) runs
-/// journey X. X is rejected when a NativeJourney switch arm sends it to a stub, or when a default arm
-/// leading to a stub may be reached by X. A default arm is limited only by earlier switches over the
-/// same value, which must be a NativeJourney parameter of the member that is never reassigned or
-/// redeclared, each a whole statement of the member's body whose arms name journeys and throw for
-/// any other. A stub named anywhere except its declaration and such switch arms (an if/else dispatch,
-/// a direct call, a delegate) may be reached by every journey.</item>
+/// journey X. A switch is read as dispatch only over a parameter that always holds the journey being
+/// run: the NativeJourney parameter of RunNativeSessions when every call passes it a named journey
+/// from a test that nothing else names, or the NativeJourney parameter of a member named only in
+/// calls that each pass it such a parameter of the caller, unchanged. Neither may be reassigned or
+/// redeclared, and an overloaded member is not read. X is rejected when a dispatch arm sends it to a
+/// stub, or when a default arm leading to a stub may be reached by X. A default arm is limited only
+/// when its switch runs directly in the member's block, outside any lambda, local function or nested
+/// block, and then only by earlier switches over the same parameter, each a whole unconditional
+/// assignment statement of that block whose arms name journeys and throw for any other. Every journey
+/// may reach a stub that is named anywhere except its declaration and switch arms (an if/else
+/// dispatch, a direct call, a delegate), a stub that a switch over any other value leads to, and a
+/// call into another test class that can end Inconclusive.</item>
 /// <item>Any other test is followed through every NativeSessionTests member it names, to any depth.
 /// It is rejected when a reachable member is or names a stub, names NativeJourney or
-/// RunNativeSessions, or makes an unqualified call that is neither a NativeSessionTests member nor
-/// a local function, delegate or parameter declared where it is called.</item>
+/// RunNativeSessions, makes an unqualified call that is neither a NativeSessionTests member nor a
+/// local function, delegate or parameter declared where it is called, or calls into another test
+/// class a member that can end Inconclusive.</item>
 /// </list>
+/// A call into another test class (Class.Member(...) or new Class(...)) is followed member by member
+/// through that class and the test classes it calls the same way; a name this check cannot find there
+/// stands for every member of its class. Members reached through an instance, and code outside the
+/// test sources, are not examined.
 /// </summary>
 internal static class VerificationEvidenceRules
 {
     internal const string NativeJourneyClass = "NativeSessionTests";
+    private const string JourneyRunner = "RunNativeSessions";
 
     internal sealed record Source(string File, string Text);
+
+    // What this check reads about the fixture's Inconclusive lane stubs, for comparison with a plain
+    // text search: the raise sites inside stub members per file, the stub members, and the journeys
+    // that a dispatch arm or a limited default arm sends to one.
+    internal sealed record StubReading(IReadOnlyDictionary<string, int> RaiseSites, IReadOnlySet<string> Stubs, IReadOnlySet<string> StubJourneys);
 
     private static readonly Regex ClassDeclaration = new(
         @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file)\s+)*class\s+(\w+)", RegexOptions.Multiline);
@@ -592,17 +782,29 @@ internal static class VerificationEvidenceRules
     // A whole expression body that runs one named journey and passes on only parameters or constants.
     private static readonly Regex JourneyRun = new(
         @"^\s*(?:await\s+)?RunNativeSessions\s*\(\s*NativeJourney\s*\.\s*(?<journey>[A-Za-z_]\w*)\s*(?:,\s*(?:[A-Za-z_]\w*|`+)\s*)*\)\s*;?\s*$");
-    // Raising Inconclusive, and the type tests that only let one pass (RunNativeSessions has one).
+    // Naming Inconclusive at all, raising it, and the one catch filter that only lets it through
+    // (RunNativeSessions has one).
     private static readonly Regex InconclusiveMention = new(@"\bAssert\s*\.\s*Inconclusive\b|\bAssertInconclusiveException\b");
-    private static readonly Regex InconclusiveTypeTest = new(
-        @"\bis\s+(?:not\s+)?(?:[A-Za-z_][\w.]*\.)?AssertInconclusiveException\b|\bcatch\s*\(\s*(?:[A-Za-z_][\w.]*\.)?AssertInconclusiveException\b");
+    private static readonly Regex RaiseSite = new(@"\bAssertInconclusiveException\s*\(|\bAssert\s*\.\s*Inconclusive\s*\(");
+    private static readonly Regex LetThroughFilter = new(
+        @"\bcatch\s*\(\s*[A-Za-z_][\w.]*\s+(?<name>[A-Za-z_]\w*)\s*\)\s*when\s*(?<open>\()\s*\k<name>\s+is\s+not\s+(?:[A-Za-z_]\w*\s*\.\s*)*(?<type>AssertInconclusiveException)\b");
     private static readonly Regex JourneyMention = new(@"\b(?:NativeJourney|RunNativeSessions)\b");
+    private static readonly Regex JourneyEnum = new(@"\benum\s+NativeJourney\b");
+    private static readonly Regex JourneyLiteral = new(@"^NativeJourney\s*\.\s*[A-Za-z_]\w*$");
+    private static readonly Regex Identifier = new(@"^[A-Za-z_]\w*$");
+    private static readonly Regex NamedArgument = new(@"^(?<name>[A-Za-z_]\w*)\s*:(?!:)\s*(?<value>[\s\S]*)$");
+    private static readonly Regex ParameterDeclaration = new(
+        @"^(?:\[[^\]]*\]\s*)*(?:(?<modifier>this|params|in|ref|out|scoped|readonly)\s+)*(?<type>[A-Za-z_][\w.]*(?:\s*<[^=]*>)?(?:\s*\[[\s,]*\])*\??|\([^=]*\))\s+(?<name>[A-Za-z_]\w*)\s*(?:=[\s\S]*)?$");
     // A name another member may refer to: unqualified, or through this, base or the fixture class.
     private static readonly Regex Reference = new(
         @"(?<![\w@$]|\.\s*)(?<name>[A-Za-z_]\w*)|\b(?:this|base|NativeSessionTests)\s*\.\s*(?<name>[A-Za-z_]\w*)");
     // An unqualified call, optionally generic; constructors (new T(...)) are not calls of a member.
     private static readonly Regex UnqualifiedCall = new(
         @"(?<![\w@$]|\.\s*|\bnew\s+|::)(?<name>[A-Za-z_]\w*)\s*(?:<[\w\s,.?\[\]]*(?:<[\w\s,.?\[\]]*>[\w\s,.?\[\]]*)*>)?\s*\(");
+    // A call of another class's static member or constructor: Class.Member(...) or new Class(...).
+    private static readonly Regex QualifiedCall = new(
+        @"(?<![\w@$]|\.\s*)(?<class>[A-Za-z_]\w*)\s*\.\s*(?<name>[A-Za-z_]\w*)\s*(?:<[\w\s,.?\[\]]*(?:<[\w\s,.?\[\]]*>[\w\s,.?\[\]]*)*>)?\s*\(" +
+        @"|\bnew\s+(?<class>[A-Za-z_]\w*)\s*\(");
     // Declarations inside a member: local functions (type name(...) { or =>), typed variables and
     // parameters (type name followed by = , ; ) : or in), deconstructed variables and lambda parameters.
     private const string Generic = @"<(?:[^<>;{}]|<(?:[^<>;{}]|<[^<>;{}]*>)*>)*>";
@@ -625,9 +827,10 @@ internal static class VerificationEvidenceRules
     private static readonly Regex ArmTarget = new(
         @"^\s*(?:await\s+)?(?:[A-Za-z_]\w*\s*\.\s*)*(?<target>[A-Za-z_]\w*)\s*(?:<[^()]*>)?\s*\(");
     private static readonly Regex JourneyName = new(@"NativeJourney\s*\.\s*(\w+)");
-    // A whole statement that assigns the switch to a variable: [type] name = <value> switch.
+    // A whole statement that assigns the switch to a variable: [type] name = <value> switch. A
+    // statement keyword in the type's place (else, do) makes it conditional.
     private static readonly Regex AssigningStatement = new(
-        @"^\s*(?:[A-Za-z_][\w.]*(?:\s*<[\w\s,.?\[\]<>]*>)?\??\s+)?[A-Za-z_]\w*\s*=\s*$");
+        @"^\s*(?:(?<type>[A-Za-z_][\w.]*)(?:\s*<[\w\s,.?\[\]<>]*>)?\??\s+)?[A-Za-z_]\w*\s*=\s*$");
 
     private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
     {
@@ -655,6 +858,8 @@ internal static class VerificationEvidenceRules
 
     // The sources are analysed once per source set, not once per checked claim.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<Source>, Analysis> Analyses = new();
+
+    internal static StubReading ReadStubs(IReadOnlyList<Source> sources) => Analyses.GetValue(sources, Analyse).Reading();
 
     internal static IReadOnlyList<string> Check(string tool, KiCadVerificationLevel level, IReadOnlyList<string> evidence,
         IReadOnlyList<Source> sources, Func<string, string, bool> isTestMethod)
@@ -700,15 +905,18 @@ internal static class VerificationEvidenceRules
         return problems;
     }
 
-    // One member of the fixture class, attributes removed. Text keeps its string literals; Masked is
-    // the same range with every literal blanked (interpolation holes stay code). Body is the offset of
-    // the body's '{', '=>' or '=' in both, or -1 for a declaration that has none.
-    private sealed record Member(string Name, string Text, string Masked, int Body)
+    // One member of a class in the test sources, attributes removed. Text keeps its string literals;
+    // Masked is the same range with every literal blanked (interpolation holes stay code). Body is the
+    // offset of the body's '{', '=>' or '=' in both, or -1 for a declaration that has none.
+    private sealed record Member(string Class, string File, string Name, string Text, string Masked, int Body)
     {
         public bool Expression => Body >= 0 && Body + 1 < Masked.Length && Masked[Body] == '=' && Masked[Body + 1] == '>';
         public string Header => Masked[..(Body < 0 ? Masked.Length : Body)];
         public string MaskedBody => Body < 0 ? "" : Masked[Body..];
     }
+
+    // One declared parameter: its position, name and type, and whether it is passed by value.
+    private sealed record Parameter(int Index, string Name, string Type, bool Plain);
 
     // Why the dispatch to an Inconclusive stub cannot be read; a journey in Excluded cannot reach it.
     private sealed record Unresolved(string Reason, IReadOnlySet<string> Excluded);
@@ -718,32 +926,53 @@ internal static class VerificationEvidenceRules
     // A switch expression: where its switched value starts in the member, the value, and its arms.
     private sealed record SwitchExpression(int Index, string? Value, IReadOnlyList<Arm> Arms);
 
-    private sealed class Analysis(IReadOnlyDictionary<string, Source[]> classes, IReadOnlyList<Member> members)
+    private sealed class Analysis
     {
-        private readonly IReadOnlyList<Member> all = members;
         private readonly Dictionary<string, string?> verdicts = new(StringComparer.Ordinal);
         private readonly Dictionary<Member, Facts> facts = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<string, string?> external = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> mentions = new(StringComparer.Ordinal);
+        private readonly IReadOnlyDictionary<string, ILookup<string, Member>> classMembers;
+        private readonly IReadOnlyList<Member> native;
+        private readonly IReadOnlyList<Source> nativeCode;
         private IReadOnlySet<string> stubJourneys = new HashSet<string>();
         private IReadOnlyList<Unresolved> unresolved = [];
         private Regex? stubMention;
 
-        public IReadOnlyDictionary<string, Source[]> Classes { get; } = classes;
-        public ILookup<string, Member> Members { get; } = members.ToLookup(member => member.Name, StringComparer.Ordinal);
-        public IReadOnlySet<string> Stubs { get; } = members.Where(IsStub).Select(member => member.Name).ToHashSet(StringComparer.Ordinal);
-
-        public void ReadDispatch(IReadOnlyList<Source> nativeCode)
+        public Analysis(IReadOnlyDictionary<string, Source[]> classes, IReadOnlyDictionary<string, List<Member>> members, IReadOnlyList<Source> nativeCode)
         {
-            var (journeys, open, targets) = VerificationEvidenceRules.ReadDispatch(all, Stubs);
+            Classes = classes;
+            classMembers = members.ToDictionary(entry => entry.Key, entry => entry.Value.ToLookup(member => member.Name, StringComparer.Ordinal),
+                StringComparer.Ordinal);
+            native = members.GetValueOrDefault(NativeJourneyClass) ?? [];
+            this.nativeCode = nativeCode;
+            Members = native.ToLookup(member => member.Name, StringComparer.Ordinal);
+            Stubs = native.Where(IsStub).Select(member => member.Name).ToHashSet(StringComparer.Ordinal);
+        }
+
+        public IReadOnlyDictionary<string, Source[]> Classes { get; }
+        public ILookup<string, Member> Members { get; }
+        public IReadOnlySet<string> Stubs { get; }
+
+        public StubReading Reading() => new(
+            native.Where(IsStub).GroupBy(member => member.File, StringComparer.Ordinal)
+                .ToDictionary(file => file.Key, file => file.Sum(member => RaiseSite.Matches(member.Text).Count), StringComparer.Ordinal),
+            Stubs, stubJourneys);
+
+        public void ReadDispatch()
+        {
+            var none = new HashSet<string>(StringComparer.Ordinal);
+            var (journeys, open, targets) = VerificationEvidenceRules.ReadDispatch(native, Stubs, RunningJourneyParameters());
             // A stub is reached only through the switch arms read above. Any other mention, such as an
             // if/else dispatch, a direct call or a delegate, could reach it from any journey.
             foreach (string stub in Stubs.Order(StringComparer.Ordinal))
-            {
-                var mention = new Regex($@"\b{Regex.Escape(stub)}\b");
-                int mentions = nativeCode.Sum(source => mention.Matches(source.Text).Count);
-                if (mentions > Members[stub].Count() + targets.GetValueOrDefault(stub))
-                    open.Add(new($"the Inconclusive lane stub {stub} is reached other than through a NativeJourney switch arm",
-                        new HashSet<string>(StringComparer.Ordinal)));
-            }
+                if (Mentions(stub) > Members[stub].Count() + targets.GetValueOrDefault(stub))
+                    open.Add(new($"the Inconclusive lane stub {stub} is reached other than through a NativeJourney switch arm", none));
+            // Which fixture members a journey runs is not read, so a call into another test class that
+            // can end Inconclusive may be made by any journey.
+            foreach (var member in native)
+                if (ExternalReach(member) is { } path)
+                    open.Add(new($"{member.Name} calls {path}", none));
             stubJourneys = journeys;
             unresolved = open;
             if (Stubs.Count > 0)
@@ -768,7 +997,7 @@ internal static class VerificationEvidenceRules
 
         private string? TestVerdict(Member test)
         {
-            if (IsStub(test)) return "which ends Inconclusive itself: its body raises AssertInconclusiveException or calls Assert.Inconclusive.";
+            if (IsStub(test)) return "which ends Inconclusive itself: its body raises, catches or tests for AssertInconclusiveException or calls Assert.Inconclusive.";
             if (test.Expression && JourneyRun.Match(test.Masked[(test.Body + 2)..]) is { Success: true } run)
             {
                 string journey = run.Groups["journey"].Value;
@@ -799,6 +1028,8 @@ internal static class VerificationEvidenceRules
                     return $"which reaches the Inconclusive lane stub {stub} through {chain}.";
                 if (known.UnresolvedCall is { } unknown)
                     return $"which reaches {chain}, where {unknown}(...) is neither a {NativeJourneyClass} member nor a local this check can read, so where it leads cannot be read.";
+                if (known.External is { } path)
+                    return $"which reaches {chain}, where {member.Name} calls {path}.";
                 foreach (string name in known.References)
                     foreach (var next in Members[name])
                         if (chains.TryAdd(next, chain + " -> " + next.Name)) queue.Enqueue(next);
@@ -806,7 +1037,8 @@ internal static class VerificationEvidenceRules
             return null;
         }
 
-        private sealed record Facts(bool Stub, bool NamesJourney, string? NamedStub, string? UnresolvedCall, IReadOnlyList<string> References);
+        private sealed record Facts(bool Stub, bool NamesJourney, string? NamedStub, string? UnresolvedCall, string? External,
+            IReadOnlyList<string> References);
 
         private Facts FactsOf(Member member)
         {
@@ -821,9 +1053,145 @@ internal static class VerificationEvidenceRules
                     .Where(Members.Contains).Distinct(StringComparer.Ordinal).ToArray();
                 known = new(IsStub(member), JourneyMention.IsMatch(member.Text),
                     stubMention?.Matches(member.Text).Select(match => match.Value).FirstOrDefault(name => name != member.Name),
-                    unknown, references);
+                    unknown, ExternalReach(member), references);
                 facts[member] = known;
                 return known;
+            }
+        }
+
+        // Mentions of a fixture member's name in the fixture's code, leaving out journey names:
+        // NativeJourney.X and the NativeJourney declaration itself.
+        private int Mentions(string name)
+        {
+            lock (mentions)
+            {
+                if (mentions.TryGetValue(name, out int known)) return known;
+                var mention = new Regex($@"(?<!\bNativeJourney\s*\.\s*)\b{Regex.Escape(name)}\b");
+                int count = nativeCode.Sum(source => mention.Matches(source.Text).Count)
+                    - native.Where(member => JourneyEnum.IsMatch(member.Header)).Sum(member => mention.Matches(member.Text).Count);
+                mentions[name] = count;
+                return count;
+            }
+        }
+
+        // For each fixture member and NativeJourney parameter: null when the parameter always holds the
+        // journey being run, otherwise why not. The parameter of RunNativeSessions does when every call
+        // of it passes a named journey from a test that nothing else names, or such a parameter of the
+        // caller; the parameter of any other member does when every call passes it such a parameter.
+        // Read as the greatest fixed point, so a parameter passed on unchanged, even recursively, keeps
+        // holding the journey, and one that any call can set to something else does not.
+        private Func<Member, string, string?> RunningJourneyParameters()
+        {
+            var reasons = new Dictionary<Member, Dictionary<string, string?>>(ReferenceEqualityComparer.Instance);
+            var parameters = new Dictionary<Member, Parameter[]>(ReferenceEqualityComparer.Instance);
+            var calls = new Dictionary<string, List<(Member Caller, IReadOnlyList<string>? Arguments)>>(StringComparer.Ordinal);
+            foreach (var member in native)
+            {
+                var journeyParameters = Parameters(member).Where(parameter => parameter.Type == "NativeJourney").ToArray();
+                if (journeyParameters.Length == 0) continue;
+                parameters[member] = journeyParameters;
+                reasons[member] = journeyParameters.ToDictionary(parameter => parameter.Name, parameter =>
+                    !parameter.Plain ? $"{member.Name} does not take {parameter.Name} by value"
+                    : !IsStableJourneyParameter(member, parameter.Name) ? $"{member.Name} reassigns or redeclares {parameter.Name}, or jumps with goto"
+                    : Members[member.Name].Count() > 1 ? $"{member.Name} is overloaded, so which declaration a call reaches cannot be read"
+                    : (string?)null, StringComparer.Ordinal);
+                if (!calls.ContainsKey(member.Name))
+                    calls[member.Name] = native.SelectMany(caller => CallsOf(caller, member.Name).Select(arguments => (caller, arguments))).ToList();
+            }
+            for (bool changed = true; changed;)
+            {
+                changed = false;
+                foreach (var (member, own) in reasons)
+                    foreach (var parameter in parameters[member])
+                    {
+                        if (own[parameter.Name] is not null) continue;
+                        var found = calls[member.Name];
+                        string? reason = Mentions(member.Name) > Members[member.Name].Count() + found.Count
+                            ? $"{member.Name} is named other than in a call, so what it is passed cannot be read" : null;
+                        foreach (var (caller, arguments) in found)
+                        {
+                            if (reason is not null) break;
+                            string? argument = arguments is null ? null : ArgumentFor(arguments, parameter);
+                            if (argument is null)
+                                reason = $"{caller.Name} calls {member.Name} without a readable argument for {parameter.Name}";
+                            else if (member.Name == JourneyRunner && JourneyLiteral.IsMatch(argument) && Mentions(caller.Name) == Members[caller.Name].Count())
+                                continue;
+                            else if (Identifier.IsMatch(argument) && reasons.TryGetValue(caller, out var passed) && passed.TryGetValue(argument, out string? inherited))
+                                reason = inherited is null ? null : $"{caller.Name} calls {member.Name} with {argument} for {parameter.Name}, and {inherited}";
+                            else
+                                reason = $"{caller.Name} calls {member.Name} with {Regex.Replace(argument, @"\s+", " ")} for {parameter.Name}";
+                        }
+                        if (reason is null) continue;
+                        own[parameter.Name] = reason;
+                        changed = true;
+                    }
+            }
+            return (member, value) => reasons.TryGetValue(member, out var own) && own.TryGetValue(value, out string? reason)
+                ? reason : $"{value} is not a NativeJourney parameter of {member.Name}";
+        }
+
+        // The first call member makes into another test class that can end Inconclusive, as the path to
+        // where it does, or null.
+        private string? ExternalReach(Member member)
+        {
+            foreach (Match call in QualifiedCall.Matches(member.MaskedBody))
+                if (ExternalTarget(call) is { } target && External(target.Class, target.Name) is { } path)
+                    return path;
+            return null;
+        }
+
+        private (string Class, string Name)? ExternalTarget(Match call)
+        {
+            string owner = call.Groups["class"].Value;
+            if (owner == NativeJourneyClass || !classMembers.ContainsKey(owner)) return null;
+            return (owner, call.Groups["name"].Success ? call.Groups["name"].Value : owner);
+        }
+
+        // Whether calling owner.name can reach a member that raises or catches Inconclusive, followed
+        // member by member through its class and the test classes it calls by name; a name this check
+        // cannot find stands for every member of its class. Null when it cannot, otherwise the path.
+        private string? External(string owner, string name)
+        {
+            lock (external)
+            {
+                string key = owner + "." + name;
+                if (external.TryGetValue(key, out string? known)) return known;
+                var chains = new Dictionary<Member, string>(ReferenceEqualityComparer.Instance);
+                var queue = new Queue<Member>();
+                void Enqueue(Member next, string chain)
+                {
+                    if (chains.TryAdd(next, chain)) queue.Enqueue(next);
+                }
+                void Visit(string type, string called, string? from)
+                {
+                    var lookup = classMembers[type];
+                    string prefix = from is null ? "" : from + " -> ";
+                    if (lookup.Contains(called))
+                        foreach (var next in lookup[called]) Enqueue(next, prefix + type + "." + called);
+                    else
+                        foreach (var next in lookup.SelectMany(group => group))
+                            Enqueue(next, $"{prefix}{type}.{called}, which this check cannot find, so any {type}.{next.Name}");
+                }
+                Visit(owner, name, null);
+                string? result = null;
+                while (result is null && queue.TryDequeue(out var member))
+                {
+                    string chain = chains[member];
+                    if (IsStub(member))
+                    {
+                        result = $"{chain}, where {member.Class}.{member.Name} raises, catches or tests for Inconclusive";
+                        continue;
+                    }
+                    var own = classMembers[member.Class];
+                    foreach (Match reference in Reference.Matches(member.Masked))
+                        foreach (var next in own[reference.Groups["name"].Value])
+                            Enqueue(next, chain + " -> " + member.Class + "." + next.Name);
+                    foreach (Match call in QualifiedCall.Matches(member.MaskedBody))
+                        if (ExternalTarget(call) is { } target)
+                            Visit(target.Class, target.Name, chain);
+                }
+                external[key] = result;
+                return result;
             }
         }
     }
@@ -833,7 +1201,7 @@ internal static class VerificationEvidenceRules
         var code = sources.Select(source => source with { Text = StripComments(source.Text) }).ToArray();
         var masked = code.Select(source => Mask(source.Text)).ToArray();
         var classes = new Dictionary<string, List<Source>>(StringComparer.Ordinal);
-        var members = new List<Member>();
+        var members = new Dictionary<string, List<Member>>(StringComparer.Ordinal);
         var nativeCode = new List<Source>();
         for (int index = 0; index < code.Length; index++)
             foreach (Match declaration in ClassDeclaration.Matches(masked[index]))
@@ -841,22 +1209,48 @@ internal static class VerificationEvidenceRules
                 string name = declaration.Groups[1].Value;
                 var list = classes.TryGetValue(name, out var existing) ? existing : classes[name] = [];
                 if (!list.Contains(code[index])) list.Add(code[index]);
-                if (name != NativeJourneyClass) continue;
-                if (!nativeCode.Contains(code[index])) nativeCode.Add(code[index]);
+                if (name == NativeJourneyClass && !nativeCode.Contains(code[index])) nativeCode.Add(code[index]);
                 int open = masked[index].IndexOf('{', declaration.Index + declaration.Length);
-                if (open >= 0) members.AddRange(ParseMembers(code[index].Text, masked[index], open));
+                if (open < 0) continue;
+                var own = members.TryGetValue(name, out var found) ? found : members[name] = [];
+                own.AddRange(ParseMembers(name, code[index].File, code[index].Text, masked[index], open));
             }
-        var analysis = new Analysis(classes.ToDictionary(entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal), members);
-        analysis.ReadDispatch(nativeCode);
+        var analysis = new Analysis(classes.ToDictionary(entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal), members, nativeCode);
+        analysis.ReadDispatch();
         return analysis;
     }
 
-    private static bool IsStub(Member member) =>
-        InconclusiveMention.Matches(member.Text).Count > InconclusiveTypeTest.Matches(member.Text).Count;
+    // A member that names Inconclusive other than in the catch filter that only lets it through.
+    private static bool IsStub(Member member)
+    {
+        var through = new HashSet<int>();
+        foreach (Match filter in LetThroughFilter.Matches(member.Masked))
+        {
+            int close = Math.Min(Matching(member.Masked, filter.Groups["open"].Index), member.Masked.Length);
+            string rest = member.Masked[(filter.Index + filter.Length)..close].Trim();
+            if (rest.Length == 0 || rest.StartsWith("&&", StringComparison.Ordinal) && TopLevel(rest).IndexOfAny(['|', '?']) < 0)
+                through.Add(filter.Groups["type"].Index);
+        }
+        return InconclusiveMention.Matches(member.Text).Any(mention => !through.Contains(mention.Index));
+    }
+
+    // The characters of text outside any bracket.
+    private static string TopLevel(string text)
+    {
+        var output = new System.Text.StringBuilder(text.Length);
+        int depth = 0;
+        foreach (char c in text)
+        {
+            if (c is '(' or '[' or '{') depth++;
+            else if (c is ')' or ']' or '}') depth--;
+            else if (depth == 0) output.Append(c);
+        }
+        return output.ToString();
+    }
 
     // The members of the class body that opens at open: each ends at its own ';' or at the '}' of its
     // block, whichever comes first outside brackets. Attributes are left out of the member.
-    private static IEnumerable<Member> ParseMembers(string code, string masked, int open)
+    private static IEnumerable<Member> ParseMembers(string owner, string file, string code, string masked, int open)
     {
         int i = open + 1;
         while (true)
@@ -896,14 +1290,22 @@ internal static class VerificationEvidenceRules
             if (end < 0) end = masked.Length;
             if (end <= start) yield break;
             string header = masked[start..(body < 0 ? end : body)];
-            yield return new(MemberName(header), code[start..end], masked[start..end], body < 0 ? -1 : body - start);
+            yield return new(owner, file, MemberName(header), code[start..end], masked[start..end], body < 0 ? -1 : body - start);
             i = end;
         }
     }
 
-    // A method's name precedes its parameter list: the first top-level '(' that follows a name which
-    // is not a modifier (a tuple return type follows a modifier). Types and fields name themselves.
+    // A method's name precedes its parameter list. Types and fields name themselves.
     private static string MemberName(string header)
+    {
+        if (ParameterList(header) is { } method) return method.Name;
+        if (TypeDeclaration.Match(header) is { Success: true } type) return type.Groups["name"].Value;
+        return LastIdentifier.Match(header) is { Success: true } last ? last.Groups["name"].Value : "";
+    }
+
+    // The first top-level '(' of a header that follows a name which is not a modifier (a tuple return
+    // type follows a modifier): the method's name and where its parameter list opens.
+    private static (string Name, int Open)? ParameterList(string header)
     {
         int angle = 0, depth = 0;
         for (int i = 0; i < header.Length; i++)
@@ -914,10 +1316,76 @@ internal static class VerificationEvidenceRules
             else if (c == ')') depth--;
             else if (c == '(' && depth++ == 0 && angle == 0
                 && TrailingName.Match(header[..i]) is { Success: true } name && !Modifiers.Contains(name.Groups["name"].Value))
-                return name.Groups["name"].Value;
+                return (name.Groups["name"].Value, i);
         }
-        if (TypeDeclaration.Match(header) is { Success: true } type) return type.Groups["name"].Value;
-        return LastIdentifier.Match(header) is { Success: true } last ? last.Groups["name"].Value : "";
+        return null;
+    }
+
+    // The declared parameters of a method member, in order; empty for any other member.
+    private static Parameter[] Parameters(Member member)
+    {
+        string header = member.Header;
+        if (ParameterList(header) is not { } list) return [];
+        int close = Math.Min(Matching(header, list.Open), header.Length), depth = 0, start = list.Open + 1, index = 0;
+        var result = new List<Parameter>();
+        void Add(string part)
+        {
+            part = part.Trim();
+            if (part.Length == 0) return;
+            if (ParameterDeclaration.Match(part) is { Success: true } parameter)
+                result.Add(new(index, parameter.Groups["name"].Value, Regex.Replace(parameter.Groups["type"].Value, @"\s+", ""),
+                    !parameter.Groups["modifier"].Success));
+            index++;
+        }
+        for (int i = list.Open + 1; i < close; i++)
+        {
+            char c = header[i];
+            if (c is '(' or '[' or '{' or '<') depth++;
+            else if (c is ')' or ']' or '}' or '>') depth--;
+            else if (c == ',' && depth == 0)
+            {
+                Add(header[start..i]);
+                start = i + 1;
+            }
+        }
+        Add(header[start..close]);
+        return [.. result];
+    }
+
+    // The argument lists of the caller's calls of the fixture member name, unqualified or through this
+    // or the fixture class, in its body; null for a call whose arguments cannot be split with
+    // certainty (a '<' or '>' may be a generic type argument list spanning a comma).
+    private static IEnumerable<IReadOnlyList<string>?> CallsOf(Member caller, string name)
+    {
+        if (caller.Body < 0) yield break;
+        foreach (Match match in Regex.Matches(caller.Masked, $@"\b{Regex.Escape(name)}\s*\("))
+        {
+            if (match.Index < caller.Body) continue;
+            int before = match.Index - 1;
+            while (before >= 0 && char.IsWhiteSpace(caller.Masked[before])) before--;
+            if (before >= 0 && caller.Masked[before] == '.')
+            {
+                var qualifier = LastIdentifier.Match(caller.Masked[..before]);
+                if (!qualifier.Success || qualifier.Groups["name"].Value is not ("this" or NativeJourneyClass)) continue;
+            }
+            int open = match.Index + match.Length - 1;
+            string[] arguments = [.. TopLevelParts(caller.Masked, open + 1, Matching(caller.Masked, open))];
+            yield return arguments.Any(argument => argument.IndexOfAny(['<', '>']) >= 0) ? null : arguments;
+        }
+    }
+
+    // The argument a call passes for a parameter, by name or by position; null when it passes none.
+    private static string? ArgumentFor(IReadOnlyList<string> arguments, Parameter parameter)
+    {
+        for (int i = 0; i < arguments.Count; i++)
+        {
+            if (NamedArgument.Match(arguments[i]) is { Success: true } named)
+            {
+                if (named.Groups["name"].Value == parameter.Name) return named.Groups["value"].Value.Trim();
+            }
+            else if (i == parameter.Index) return arguments[i];
+        }
+        return null;
     }
 
     // Whether the name at index opens an attribute ([Name(...)] or [target: Name(...)]) that decorates
@@ -960,10 +1428,10 @@ internal static class VerificationEvidenceRules
     // Reads the dispatch switches member by member. An arm naming a journey sends that journey to its
     // target. A default arm is reached only by the journeys that every earlier limiting switch lets
     // through and that its own switch does not name; with no limiting switch, every journey its switch
-    // does not name may reach it. Both need the switched value to be the member's own NativeJourney
-    // parameter, never reassigned or redeclared; otherwise any journey may reach the stub.
+    // does not name may reach it. Both need the switched value to be a parameter that always holds the
+    // journey being run (notRunning says why one does not); otherwise any journey may reach the stub.
     private static (HashSet<string> StubJourneys, List<Unresolved> Unresolved, Dictionary<string, int> ArmTargets) ReadDispatch(
-        IReadOnlyList<Member> members, IReadOnlySet<string> stubs)
+        IReadOnlyList<Member> members, IReadOnlySet<string> stubs, Func<Member, string, string?> notRunning)
     {
         var journeys = new HashSet<string>(StringComparer.Ordinal);
         var unresolved = new List<Unresolved>();
@@ -975,25 +1443,30 @@ internal static class VerificationEvidenceRules
             for (int index = 0; index < switches.Count; index++)
             {
                 var current = switches[index];
-                bool dispatch = current.Value is { } value && IsStableJourneyParameter(member, value);
                 var named = current.Arms.Where(arm => arm.Readable).SelectMany(arm => arm.Journeys).ToHashSet(StringComparer.Ordinal);
                 foreach (var arm in current.Arms)
                 {
                     if (!arm.Readable || arm.Target is null) continue;
                     targets[arm.Target] = targets.GetValueOrDefault(arm.Target) + 1;
                     if (!stubs.Contains(arm.Target)) continue;
-                    if (!dispatch)
+                    string? notDispatch = current.Value is { } value ? notRunning(member, value) : "it switches over an expression";
+                    if (notDispatch is not null)
                     {
                         unresolved.Add(new($"a switch in {member.Name} over {current.Value ?? "an expression"} leads to the stub {arm.Target}, " +
-                            "and only a switch over the member's own NativeJourney parameter, never reassigned, can be read", none));
+                            $"and only a switch over a parameter that always holds the journey being run can be read: {notDispatch}", none));
                         continue;
                     }
                     if (!arm.Discard) { journeys.UnionWith(arm.Journeys); continue; }
-                    var filters = switches.Take(index).Where(earlier => IsLimit(member, earlier, current.Value!))
-                        .Select(earlier => earlier.Arms.SelectMany(other => other.Journeys).ToHashSet(StringComparer.Ordinal)).ToArray();
-                    if (filters.Length == 0)
+                    // Earlier limits have run only when this switch runs directly in the member's block.
+                    var filters = RunsInMemberBlock(member, current.Index)
+                        ? switches.Take(index).Where(earlier => IsLimit(member, earlier, current.Value!))
+                            .Select(earlier => earlier.Arms.SelectMany(other => other.Journeys).ToHashSet(StringComparer.Ordinal)).ToArray()
+                        : null;
+                    if (filters is null or { Length: 0 })
                     {
-                        unresolved.Add(new($"a default arm in {member.Name} leads to the stub {arm.Target}, and no earlier switch over {current.Value} there limits the journeys that reach it", named));
+                        string where = filters is null ? " from inside a lambda, a local function or a nested block" : "";
+                        unresolved.Add(new($"a default arm in {member.Name} leads to the stub {arm.Target}{where}, " +
+                            $"and no earlier switch over {current.Value} there limits the journeys that reach it", named));
                         continue;
                     }
                     var reaching = filters.Skip(1).Aggregate(filters[0], (all, next) => { all.IntersectWith(next); return all; });
@@ -1017,8 +1490,8 @@ internal static class VerificationEvidenceRules
     }
 
     // An earlier switch limits a default arm only when it switches over the same value, is a whole
-    // statement of the member's block body (never conditional or nested), names journeys in every
-    // arm it has, and throws for any other.
+    // assignment statement of the member's block body (never conditional, as after else or do, and
+    // never nested), names journeys in every arm it has, and throws for any other.
     private static bool IsLimit(Member member, SwitchExpression earlier, string value)
     {
         if (earlier.Value != value || member.Expression || member.Body < 0) return false;
@@ -1028,7 +1501,40 @@ internal static class VerificationEvidenceRules
         string before = member.Masked[..earlier.Index];
         if (before.Count(c => c == '{') - before.Count(c => c == '}') != 1) return false;
         int boundary = before.LastIndexOfAny([';', '{', '}']);
-        return boundary >= member.Body && AssigningStatement.IsMatch(before[(boundary + 1)..]);
+        return boundary >= member.Body && AssigningStatement.Match(before[(boundary + 1)..]) is { Success: true } statement
+            && !NotTypes.Contains(statement.Groups["type"].Value);
+    }
+
+    // Whether the switch whose value starts at index runs directly in the member's block: at the
+    // block's own level, in a statement that declares no lambda or local function before it. Only
+    // then has every whole statement before it in that block run first.
+    private static bool RunsInMemberBlock(Member member, int index)
+    {
+        if (member.Body < 0 || member.Masked[member.Body] != '{') return false;
+        int braces = 0, brackets = 0, start = member.Body + 1;
+        for (int i = member.Body; i < index; i++)
+        {
+            char c = member.Masked[i];
+            if (c == '{') braces++;
+            else if (c == '}') braces--;
+            else if (braces != 1) continue;
+            else if (c is '(' or '[') brackets++;
+            else if (c is ')' or ']') brackets--;
+            else if (c == ';' && brackets == 0) start = i + 1;
+        }
+        if (braces != 1) return false;
+        // Nested blocks, initializers and earlier switch bodies of the statement are left out, so a
+        // remaining => is a lambda or an expression-bodied local function that encloses the switch.
+        var statement = new System.Text.StringBuilder();
+        int depth = 0;
+        for (int i = start; i < index; i++)
+        {
+            char c = member.Masked[i];
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+            else if (depth == 0) statement.Append(c);
+        }
+        return !statement.ToString().Contains("=>", StringComparison.Ordinal);
     }
 
     // The switch expressions of one member in source order, read from its masked text.

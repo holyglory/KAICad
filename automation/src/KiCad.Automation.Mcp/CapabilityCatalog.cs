@@ -25,12 +25,18 @@ public enum KiCadVerificationLevel
 /// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
 /// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
 /// STDIO server and call the tool by name. A cited NativeSessionTests method proves nothing, and is
-/// rejected, when it can reach an Inconclusive lane stub (any member that raises
-/// AssertInconclusiveException or calls Assert.Inconclusive) or when the check cannot read whether
-/// it can: its journey's dispatch switches are read exactly, and a test that hands over to helpers
-/// is followed through every NativeSessionTests member it names, to any depth. Comments never count
-/// as calls. The call check is per class, not per method: it cannot tell which journey of
-/// NativeSessionTests makes the call.
+/// rejected, when it can reach an Inconclusive lane stub (any member that raises, catches or tests
+/// for AssertInconclusiveException or calls Assert.Inconclusive, except a catch filter that only lets
+/// such a result through) or when the check cannot read whether it can. A journey's dispatch switch
+/// is read only over a parameter that always holds the journey being run, passed on unchanged from
+/// RunNativeSessions; a default arm is limited only by earlier unconditional switches over that
+/// parameter in the same block, and only when it is not inside a lambda, local function or nested
+/// block. A test that hands over to helpers is followed through every NativeSessionTests member it
+/// names, to any depth, and a static call into another test class is followed member by member.
+/// The check reads source text, not compiled code: members reached through an instance, and code
+/// outside the test sources, are not examined, and whatever it cannot read is rejected rather than
+/// accepted. Comments never count as calls. The call check is per class, not per method: it cannot
+/// tell which journey of NativeSessionTests makes the call.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute

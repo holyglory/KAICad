@@ -102,6 +102,9 @@ public sealed partial class NativeSessionTests
         coordinateFreeCode = unplaced.GetProperty("structuredContent").GetProperty("errorCode").GetString();
         Assert.AreEqual("created_symbol_placement_required", coordinateFreeCode, unplaced.GetRawText());
 
+        // Connection-aware placement of the whole Complete stage on this seed (CN-1 §10), read-only.
+        var completeLayout = await RequirePsuCpuConnectedCompleteLayout(client, context, store, path, instanceId, regions, Evidence, token);
+
         var layout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = saved.RevisionToken, gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L, regions,
             userInstructions = "Place each fixture component on its own sheet and keep the processor's power unit on CPU_POWER." });
@@ -168,6 +171,9 @@ public sealed partial class NativeSessionTests
         var afterApply = RequireCreated(created, "after apply");
         await CheckPresentation(created);
         var stackedAfterApply = await RequireStackedPinsOnCreatedSymbols();
+        // Connection-aware placement of pull-ups added to the created stage (CN-1 §10), read-only.
+        var connectedAddition = await RequirePsuCpuConnectedAddition(client, context, store, path, instanceId, host, expected, sheetPaths,
+            regions, Evidence, token);
 
         // One native undo removes every created symbol from all three sheets; redo restores them exactly.
         await FocusedSchematicShortcut(client, document, processId, display, "z", token);
@@ -270,7 +276,8 @@ public sealed partial class NativeSessionTests
             stackedPinsJoinedByKiCad = expected.JoinedPins.Select(g => g.Select(p => p.Reference + "." + p.Number).ToArray()).ToArray(),
             stackedPinsOnCreatedSymbols = stackedAfterApply,
             nativeUndoRedoVerified = true, undoRestoredLibraryCache, saveReloadVerified = true, recoveryReattachedWithoutChanges = true,
-            settledPlan, presentation = expected.Presentation, crossPlatformReady = false, connectionIntent
+            settledPlan, presentation = expected.Presentation, crossPlatformReady = false, connectionIntent,
+            connectedPlacement = new { completeStage = completeLayout, addition = connectedAddition }
         }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
@@ -679,6 +686,480 @@ public sealed partial class NativeSessionTests
                 return JsonNode.Parse(element.GetRawText());
         }
     }
+
+    // ---- connection-aware initial placement (cn1-wiring-intent.md §10, ledger p1f9bc19460f72e2b) ----
+
+    // The layout policy the PSU/CPU journeys use: the 1.27 mm placement grid, 2.54 mm between symbols, and the page
+    // inset carried by the explicit usable regions instead.
+    private static readonly InitialLayoutPolicy PsuCpuLayoutPolicy = new(1_270_000, 2_540_000, 0);
+
+    /// <summary>The stated distance: every new, coordinate-free symbol lands with at least one of its connected pins at most
+    /// 50.8 mm (2 in) from the nearest already placed pin it connects to on its sheet. The PSU sheet's usable width is 277 mm
+    /// and the CPU sheet's 400 mm.</summary>
+    internal const long ConnectedPartnerDistanceNm = 50_800_000;
+
+    internal const string ConnectionTooLong = "connection_too_long";
+    internal const string ExistingSymbolMoved = "existing_symbol_moved";
+    internal const string ConnectionRoomBlocked = "connection_room_blocked";
+
+    private static Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> LiveMeasure(NativeClient client) =>
+        (request, token) => client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+
+    private static Task<CheckedSchematicState> CaptureChecked(NativeClient client, DocumentSpecifier document, CancellationToken token) =>
+        client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new() { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+    private static string SheetPathKey(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(p => p.Value));
+
+    // CN-1 §10 on the S1 seed: the frozen Complete stage, every occurrence coordinate-free, laid out as a connected addition
+    // the way an editor advertising schematic.connection-realization.v1 would receive it, from this editor's own measurements.
+    // No symbol overlaps another or an existing item or leaves its sheet's usable region, and every pin that needs a connection
+    // keeps the room for its shortest stub (two connection-grid steps) and each label its net may put there, as KiCad measures
+    // them at the proposed positions: no other symbol, item or other symbol's stub room is inside it. Must-catch: the same
+    // symbols laid out by the ordinary, connection-unaware planner (the layout this journey creates next) leave pins without
+    // that room. No symbol has an already placed partner, so no preferred anchor is reported. The milestone-1 realizer is run
+    // on the proposal from the same live measurements and its outcome recorded, not asserted: drawing the connections is the
+    // next batch, gated behind lane 2C's assertion. Nothing is saved, published or sent to the editor.
+    private static async Task<object> RequirePsuCpuConnectedCompleteLayout(NativeClient client, PsuCpuNativeContext context,
+        DesignRecoveryStore store, string path, string instanceId, IReadOnlyList<SchematicLayoutRegion> regions,
+        Func<string, string> evidence, CancellationToken token)
+    {
+        var session = await client.HandshakeAsync(token);
+        Assert.AreEqual(instanceId, session.InstanceId);
+        Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability), string.Join(",", session.Capabilities));
+        var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+        var current = store.Read()!;
+        var nativeBefore = await CaptureChecked(client, context.Root, token);
+        byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
+        var revision = current.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(PsuCpuFixture.Desired(context, PsuCpuStage.Complete), [])) };
+        var live = LiveMeasure(client);
+        const string Instructions = "Lay out the complete PSU/CPU circuit with room for every connection.";
+        var proposal = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(revision, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
+        Assert.IsTrue(proposal.CanPropose, "Complete-stage layout: " + string.Join("; ", proposal.Layout.Issues.Select(i => i.Code + " " + i.BodyId)));
+        Assert.IsEmpty(proposal.PreferredAnchors, "Every symbol is new and coordinate-free, so none has an already placed partner.");
+        Assert.IsEmpty(proposal.PowerAttachments, "The fixture declares no power symbols.");
+        var again = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(revision, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
+        Assert.AreEqual(proposal.DesiredXml, again.DesiredXml, "The same saved revision and editor revision give the same layout.");
+        var aware = await ProposedRooms(proposal.DesiredDesign!);
+        var awareIssues = aware.Sheets.SelectMany(s => ConnectedPlacementIssues(s, aware.Expectation)).ToArray();
+        Assert.IsEmpty(awareIssues, "Connection-aware Complete layout: " + string.Join("; ", awareIssues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
+        Assert.IsTrue(aware.Sheets.Sum(s => s.Rooms.Count) > 20, "Every connected pin's room was measured.");
+
+        // Must-catch: the ordinary layout of the same symbols (their connections left out) keeps no such room.
+        var ordinary = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(current.State, PsuCpuLayoutPolicy, regions, Instructions, live, token);
+        Assert.IsTrue(ordinary.CanPropose);
+        var unaware = await ProposedRooms(ordinary.DesiredDesign! with { Engineering = ordinary.DesiredDesign!.Engineering with
+            { Circuit = ordinary.DesiredDesign.Engineering.Circuit with { Nets = complete } } });
+        var unawareIssues = unaware.Sheets.SelectMany(s => ConnectedPlacementIssues(s, unaware.Expectation)).ToArray();
+        CollectionAssert.Contains(unawareIssues.Select(i => i.Code).Distinct().ToArray(), ConnectionRoomBlocked,
+            "The connection-unaware layout must leave some pin without room for its stub and label.");
+
+        // The milestone-1 realizer on the connection-aware proposal, measuring this editor, recorded as it answers.
+        var checkpoint = await CaptureChecked(client, context.Root, token);
+        Assert.AreEqual(nativeBefore, checkpoint, "Layout measurement must not change the native document.");
+        object realizer;
+        try
+        {
+            var realization = await SchematicConnectionRealizer.RealizeAsync(aware.Plan.Connections!, aware.Plan.Candidate!, checkpoint, live,
+                SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical.Hierarchy.Data), token);
+            realizer = new { refused = false, generated = realization.Generated.GroupBy(g => g.Role.ToString()).ToDictionary(g => g.Key, g => g.Count()) };
+        }
+        catch (AutomationException error) { realizer = new { refused = true, error.Code, error.Message }; }
+        Assert.AreEqual(nativeBefore, await CaptureChecked(client, context.Root, token), "Planning and realizing connections read-only must not change the native document.");
+        Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, "Layout must not write the recovery record.");
+        CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Layout must not publish XML.");
+        var summary = new
+        {
+            placedSymbols = proposal.Layout.Placements!.Count, measuredRooms = aware.Sheets.Sum(s => s.Rooms.Count), issues = awareIssues.Length,
+            unawareBlockedRooms = unawareIssues.Count(i => i.Code == ConnectionRoomBlocked),
+            unawareIssues = unawareIssues.Select(i => i.Code + " " + string.Join(",", i.Symbols)).ToArray(), realizerObservation = realizer
+        };
+        await File.WriteAllTextAsync(evidence("complete-layout.json"), JsonSerializer.Serialize(new { summary, layout = proposal.Layout,
+            ordinaryLayout = ordinary.Layout }), token);
+        return summary;
+
+        // The Complete nets over a laid-out design, planned as a connected addition, and its created symbols measured by KiCad
+        // at their positions with the room each connected pin needs.
+        async Task<(SchematicSynchronizationPlan Plan, List<ConnectedSheetGeometry> Sheets, ConnectedPlacementExpectation Expectation)> ProposedRooms(SchematicDesign placed)
+        {
+            var plan = SchematicSynchronizationPlanner.Plan(revision with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(placed, [])) },
+                advertised, token);
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+            SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, plan.Candidate!, created: true);
+            var policy = SchematicConnectionPolicy.FromSnapshot(nativeBefore.Electrical.Hierarchy.Data);
+            var created = intent.CreatedSymbolIds.ToHashSet();
+            var expectation = new ConnectedPlacementExpectation(created, created, intent, policy.GridNm * SchematicConnectionPolicy.StubMultiples[0]);
+            var sheets = new List<ConnectedSheetGeometry>();
+            foreach (var region in regions)
+                foreach (var screen in plan.Candidate!.Schematic.Instances.Where(s => Guid.Parse(s.Metadata.ScreenId.Value) == region.ScreenId))
+                {
+                    var sheet = await MeasureProposedSheet(client, screen, created, nativeBefore.State.Revision, region.UsableBounds, token);
+                    await MeasureStubRoom(client, sheet, expectation, policy, nativeBefore.State.Revision, token);
+                    sheets.Add(sheet);
+                }
+            return (plan, sheets, expectation);
+        }
+    }
+
+    // A sheet of a planned design as KiCad measures it at the recorded revision: the planned new symbols as detached candidates
+    // at their planned positions and every existing item as it is, with every symbol's pins, and each existing symbol's
+    // position as KiCad draws it (Before) and as the planned design places it (After).
+    private static async Task<ConnectedSheetGeometry> MeasureProposedSheet(NativeClient client, SchematicScreenData screen,
+        IReadOnlySet<Guid> created, KiCad.Automation.Protocol.DocumentRevision revision, PresentationBounds usable, CancellationToken token)
+    {
+        var candidates = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Where(s => created.Contains(Guid.Parse(s.Id.Value))).OrderBy(s => s.Id.Value, StringComparer.Ordinal).ToArray();
+        var request = new MeasureSchematicPlacement { Document = screen.Metadata.Document.Clone(), ExpectedRevision = revision.Clone() };
+        request.Candidates.Add(candidates.Select(s => s.Clone()));
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+        Assert.IsTrue(measured.PinGeometryAvailable);
+        Assert.HasCount(candidates.Length, measured.Candidates);
+        var bodies = new Dictionary<Guid, PresentationBounds>();
+        // Existing symbols as KiCad draws them, and as the planned design places them.
+        var before = new Dictionary<Guid, PresentationPoint>();
+        var after = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Where(s => !created.Contains(Guid.Parse(s.Id.Value))).ToDictionary(s => Guid.Parse(s.Id.Value), s => new PresentationPoint(s.Position.XNm, s.Position.YNm));
+        var pins = new Dictionary<Guid, PresentationPoint>();
+        var anchors = new Dictionary<Guid, SchematicPinAnchor>();
+        var owner = new Dictionary<Guid, Guid>();
+        var items = new List<(Guid, PresentationBounds)>();
+        foreach (var symbol in measured.Candidates.Concat(measured.Obstacles))
+        {
+            Guid id = Guid.Parse(symbol.Id.Value);
+            if (symbol.SymbolPins is null) { items.Add((id, Presentation(symbol.Bounds))); continue; }
+            Assert.IsTrue(symbol.SymbolPins.Complete, "Every symbol reports complete pins.");
+            bodies[id] = Presentation(symbol.Bounds);
+            if (!created.Contains(id)) before[id] = new(symbol.Anchor.XNm, symbol.Anchor.YNm);
+            foreach (var pin in symbol.SymbolPins.Pins)
+            {
+                Guid pinId = Guid.Parse(pin.Id.Value);
+                pins[pinId] = new(pin.Position.XNm, pin.Position.YNm); anchors[pinId] = pin; owner[pinId] = id;
+            }
+        }
+        // Placement measurement gives one envelope per symbol (body, pins and visible fields); it serves for both checks.
+        return new(SheetPathKey(screen.Metadata.Document), screen.Metadata.Document.Clone(), usable, bodies, new(bodies), before, after,
+            pins, anchors, owner, items, []);
+    }
+
+    // CN-1 §10 on the created Components stage: the fixture's Complete nets plus I2C pull-up resistors, R2 (PSU_SCL to RAIL_B)
+    // coordinate-free and R3 (PSU_SDA to RAIL_B) placed explicitly and locked on PSU, and R4 (MEM_SCL to RAIL_B) coordinate-free
+    // on CPU. The public layout tool over STDIO refuses the connected addition because this editor does not advertise connection
+    // realization; the same planner, as an editor advertising it would run it on this editor's measurements, aims R2 and R4 at the
+    // placed pins they connect to. KiCad then measures the proposal: existing symbols unmoved, R3 exactly where the XML put it,
+    // R2 and R4 each with a connected pin within ConnectedPartnerDistanceNm of the nearest placed pin it connects to, no symbol
+    // overlapping another, every symbol inside its usable region, and the room for each new pin's shortest stub and its label
+    // clear of every other symbol, item and other symbol's stub room. The checks are shown to catch an overlap, a symbol off the
+    // page, a moved existing symbol, a distant symbol and a blocked stub, and to pass the real layout unchanged. Applying the
+    // addition waits for connection realization; the design file and recovery record are restored and KiCad is never changed.
+    private static async Task<object> RequirePsuCpuConnectedAddition(NativeClient client, PsuCpuNativeContext context, DesignRecoveryStore store,
+        string path, string instanceId, StdioMcpFixture host, PsuCpuExpectedNative expected, IReadOnlyDictionary<string, string> sheetPaths,
+        IReadOnlyList<SchematicLayoutRegion> allRegions, Func<string, string> evidence, CancellationToken token)
+    {
+        var session = await client.HandshakeAsync(token);
+        Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability), string.Join(",", session.Capabilities));
+        var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+        var current = store.Read()!;
+        Assert.IsFalse(current.State.HasPendingWork);
+        byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+        var baseline = current.State.Baseline;
+        var pinned = new SymbolPlacement(215.9m, 76.2m, 0, false, false, true);
+        var (connected, added) = WithPullUps(baseline, expected, pinned);
+        byte[] connectedBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, []));
+        await File.WriteAllBytesAsync(path, connectedBytes, token);
+        var saved = store.Save(current.State with { DesiredFileBytes = connectedBytes }, current.RevisionToken);
+        var screenOf = expected.Sheets.ToDictionary(s => s.Key, s => s.NativeScreen);
+        var regions = allRegions.Where(r => r.ScreenId == screenOf["PSU"] || r.ScreenId == screenOf["CPU"]).ToArray();
+        Assert.HasCount(2, regions);
+        var nativeBefore = await CaptureChecked(client, context.Root, token);
+        const string Instructions = "Place the I2C pull-ups next to the bus pins they serve.";
+
+        // The public tool over STDIO: this editor cannot draw and verify XML connections yet, so the connected addition is
+        // refused before anything is measured, written or sent.
+        var gated = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = saved.RevisionToken, gridNm = PsuCpuLayoutPolicy.GridNm, clearanceNm = PsuCpuLayoutPolicy.ClearanceNm,
+            pageInsetNm = PsuCpuLayoutPolicy.PageInsetNm, regions, userInstructions = Instructions });
+        await File.WriteAllTextAsync(evidence("connected-layout-gated.json"), gated.GetRawText(), token);
+        Assert.IsTrue(gated.TryGetProperty("isError", out var gatedError) && gatedError.GetBoolean(), gated.GetRawText());
+        // This tool reports a refusal as a JSON text block with its code and message.
+        using (var refusal = JsonDocument.Parse(string.Concat(gated.GetProperty("content").EnumerateArray()
+            .Where(b => b.TryGetProperty("text", out _)).Select(b => b.GetProperty("text").GetString()))))
+        {
+            Assert.AreEqual("unsupported_layout_creation", refusal.RootElement.GetProperty("code").GetString(), gated.GetRawText());
+            StringAssert.Contains(refusal.RootElement.GetProperty("message").GetString()!, "draw and verify XML connections");
+        }
+        Assert.AreEqual(nativeBefore, await CaptureChecked(client, context.Root, token));
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        CollectionAssert.AreEqual(connectedBytes, await File.ReadAllBytesAsync(path, token));
+
+        var live = LiveMeasure(client);
+        var proposal = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(saved.State, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
+        Assert.IsTrue(proposal.CanPropose, "Connected addition layout: " + string.Join("; ", proposal.Layout.Issues.Select(i => i.Code + " " + i.BodyId)));
+        var again = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(saved.State, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
+        Assert.AreEqual(proposal.DesiredXml, again.DesiredXml, "The same saved revision and editor revision give the same layout.");
+        var design = proposal.DesiredDesign!;
+        var oldSymbols = baseline.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+        foreach (var symbol in design.Engineering.Circuit.Symbols)
+            if (oldSymbols.TryGetValue(symbol.Id, out var old)) Assert.AreEqual(old, symbol, "Existing occurrences keep their XML exactly.");
+        Assert.AreEqual(pinned, design.Engineering.Circuit.Symbols.Single(s => s.Id == added["R3"].Occurrence).Placement,
+            "The explicitly placed, locked R3 keeps its position.");
+        foreach (var reference in new[] { "R2", "R4" })
+        {
+            var placement = design.Engineering.Circuit.Symbols.Single(s => s.Id == added[reference].Occurrence).Placement!;
+            Assert.AreEqual(0, Coordinates.MillimetersToNanometers(placement.XMillimeters) % PsuCpuLayoutPolicy.GridNm, reference);
+            Assert.AreEqual(0, Coordinates.MillimetersToNanometers(placement.YMillimeters) % PsuCpuLayoutPolicy.GridNm, reference);
+        }
+        // The proposal as synchronization would plan it: R2 and R4 were aimed at exactly the placed pins they connect to on
+        // their own sheet (R3, placed explicitly, among them).
+        var plan = SchematicSynchronizationPlanner.Plan(saved.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(proposal.DesiredXml!) }, advertised, token);
+        var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+        var candidate = plan.Candidate!;
+        var refs = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Reference, c => c.Id);
+        Guid PinId((string Reference, string Number) pin) => SchematicConnectionIntentBuilderTests.Keys(candidate, (refs[pin.Reference], pin.Number)).Single().PlacedPinId;
+        var bodies = candidate.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+        var expectedPartners = new Dictionary<string, (string, string)[]>
+        {
+            ["R2"] = [("U3", "6"), ("U4", "5"), ("U2", "1"), ("U2", "4"), ("U3", "8"), ("R3", "2")],
+            ["R4"] = [("U5", "161"), ("U6", "6"), ("U6", "8")]
+        };
+        CollectionAssert.AreEquivalent(new[] { bodies[added["R2"].Occurrence], bodies[added["R4"].Occurrence] },
+            proposal.PreferredAnchors.Select(a => a.BodyId).ToArray(), "Exactly the coordinate-free pull-ups are aimed at their partners.");
+        foreach (var (reference, partners) in expectedPartners)
+            CollectionAssert.AreEquivalent(partners.Select(PinId).ToArray(),
+                proposal.PreferredAnchors.Single(a => a.BodyId == bodies[added[reference].Occurrence]).PartnerPins.ToArray(), reference);
+        await File.WriteAllTextAsync(evidence("connected-layout.json"), JsonSerializer.Serialize(new
+        {
+            preferredAnchors = proposal.PreferredAnchors, powerAttachments = proposal.PowerAttachments, layout = proposal.Layout,
+            placements = added.ToDictionary(a => a.Key, a => design.Engineering.Circuit.Symbols.Single(s => s.Id == a.Value.Occurrence).Placement)
+        }), token);
+
+        // KiCad measures the proposal: the new symbols at their proposed positions beside every existing item, and the room
+        // each new pin's shortest stub and label need there.
+        var policy = SchematicConnectionPolicy.FromSnapshot(nativeBefore.Electrical.Hierarchy.Data);
+        var created = intent.CreatedSymbolIds.ToHashSet();
+        CollectionAssert.AreEquivalent(added.Values.Select(a => bodies[a.Occurrence]).ToArray(), created.ToArray());
+        var free = new[] { "R2", "R4" }.Select(r => bodies[added[r].Occurrence]).ToHashSet();
+        var expectation = new ConnectedPlacementExpectation(created, free, intent, policy.GridNm * SchematicConnectionPolicy.StubMultiples[0]);
+        var sheets = new List<ConnectedSheetGeometry>();
+        foreach (var key in new[] { "PSU", "CPU" })
+        {
+            var screen = candidate.Schematic.Instances.Single(s => SheetPathKey(s.Metadata.Document) == sheetPaths[key]);
+            var sheet = await MeasureProposedSheet(client, screen, created, nativeBefore.State.Revision,
+                allRegions.Single(r => r.ScreenId == screenOf[key]).UsableBounds, token) with { Key = key };
+            await MeasureStubRoom(client, sheet, expectation, policy, nativeBefore.State.Revision, token);
+            sheets.Add(sheet);
+        }
+        var r3 = sheets.Single(s => s.Key == "PSU").Bodies.ContainsKey(bodies[added["R3"].Occurrence]);
+        Assert.IsTrue(r3, "R3 is measured on PSU.");
+        var issues = sheets.SelectMany(s => ConnectedPlacementIssues(s, expectation)).ToArray();
+        Assert.IsEmpty(issues, string.Join("; ", issues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
+
+        // Must-catch: each defect class is found in otherwise real geometry, and only there.
+        var psu = sheets.Single(s => s.Key == "PSU");
+        Guid r2 = bodies[added["R2"].Occurrence];
+        Guid neighbour = psu.Before.Keys.Order().First();
+        var caught = new Dictionary<string, string[]>
+        {
+            ["overlap"] = Codes(psu with { Bodies = Moved(psu.Bodies, r2, Between(Centre(psu.Bodies[r2]), Centre(psu.Bodies[neighbour]))) }),
+            ["offPage"] = Codes(psu with { Bodies = Moved(psu.Bodies, r2, new(psu.Usable.RightNm - psu.Bodies[r2].LeftNm, 0)),
+                Fields = Moved(psu.Fields, r2, new(psu.Usable.RightNm - psu.Bodies[r2].LeftNm, 0)) }),
+            ["movedExisting"] = Codes(psu with { After = psu.After.ToDictionary(p => p.Key, p => p.Key == neighbour ? p.Value with { XNm = p.Value.XNm + 1_270_000 } : p.Value) }),
+            // R2's pins moved 110 mm down, to the bottom of the sheet, far from every pin they connect to (R3 included).
+            ["distant"] = Codes(psu with { Pins = psu.Pins.ToDictionary(p => p.Key, p => psu.Owner[p.Key] == r2 ? new PresentationPoint(p.Value.XNm, p.Value.YNm + 110_000_000) : p.Value) }),
+            ["blockedStub"] = Codes(psu with { Items = [.. psu.Items, (Guid.NewGuid(), psu.Rooms.First(r => r.Owner == r2).Label)] }),
+            ["unchanged"] = Codes(psu)
+        };
+        CollectionAssert.Contains(caught["overlap"], NativePresentationChecks.SymbolBodiesOverlap);
+        CollectionAssert.Contains(caught["offPage"], NativePresentationChecks.SymbolOutsideUsableRegion);
+        CollectionAssert.AreEqual(new[] { ExistingSymbolMoved }, caught["movedExisting"]);
+        CollectionAssert.AreEqual(new[] { ConnectionTooLong }, caught["distant"]);
+        CollectionAssert.AreEqual(new[] { ConnectionRoomBlocked }, caught["blockedStub"]);
+        Assert.IsEmpty(caught["unchanged"], "False-positive guard: the real layout passes every check.");
+        string[] Codes(ConnectedSheetGeometry sheet) => [.. ConnectedPlacementIssues(sheet, expectation).Select(i => i.Code).Distinct().Order(StringComparer.Ordinal)];
+
+        // The milestone-1 realizer on the proposal, measuring this editor, recorded as it answers (not asserted): the Components
+        // stage it would also wire was laid out before its connections existed.
+        object realizer;
+        try
+        {
+            var realization = await SchematicConnectionRealizer.RealizeAsync(intent, candidate, nativeBefore, live, policy, token);
+            realizer = new { refused = false, generated = realization.Generated.Count };
+        }
+        catch (AutomationException error) { realizer = new { refused = true, error.Code, error.Message }; }
+
+        // Nothing reached KiCad; the design file and the recovery record's desired XML are restored for the rest of the journey.
+        Assert.AreEqual(nativeBefore, await CaptureChecked(client, context.Root, token), "Connected placement must not change the native document.");
+        await File.WriteAllBytesAsync(path, fileBefore, token);
+        var restored = store.Save(store.Read()!.State with { DesiredFileBytes = current.State.DesiredFileBytes }, store.Read()!.RevisionToken);
+        CollectionAssert.AreEqual(current.State.DesiredFileBytes, restored.State.DesiredFileBytes);
+        var distances = sheets.SelectMany(s => PartnerDistances(s, expectation)).ToArray();
+        var summary = new
+        {
+            gatedErrorCode = "unsupported_layout_creation", deterministic = true, preferredAnchors = proposal.PreferredAnchors.Count,
+            pinnedR3Preserved = true, existingSymbolsUnmoved = true, statedDistanceNm = ConnectedPartnerDistanceNm,
+            symbolDistanceNm = distances.GroupBy(d => d.Symbol).ToDictionary(g => g.Key.ToString("D"), g => g.Min(d => d.DistanceNm)),
+            distances = distances.Select(d => new { d.Sheet, d.Pin, d.DistanceNm }), measuredRooms = sheets.Sum(s => s.Rooms.Count),
+            mustCatch = caught, realizerObservation = realizer
+        };
+        await File.WriteAllTextAsync(evidence("connected-addition.json"), JsonSerializer.Serialize(summary), token);
+        return summary;
+    }
+
+    /// <summary>The Components-stage design plus the pull-up resistors R2, R3 and R4 (Device:R, value 4k7) and the fixture's
+    /// Complete nets extended with their pins. R3 carries <paramref name="pinned"/>; R2 and R4 are coordinate-free.</summary>
+    private static (SchematicDesign Design, Dictionary<string, (Guid Component, Guid Occurrence)> Added) WithPullUps(SchematicDesign baseline,
+        PsuCpuExpectedNative expected, SymbolPlacement pinned)
+    {
+        var circuit = baseline.Engineering.Circuit;
+        var part = circuit.Parts.Single(p => p.Name == "R");
+        var sheet = expected.Sheets.ToDictionary(s => s.Key);
+        // Journey-local identities in the fixture's scheme, under a kind the frozen fixture does not use.
+        (string Reference, string Sheet, SymbolPlacement? Placement)[] pullUps = [("R2", "PSU", null), ("R3", "PSU", pinned), ("R4", "CPU", null)];
+        var added = new Dictionary<string, (Guid Component, Guid Occurrence)>();
+        var definitions = new List<(string Sheet, ComponentDefinition Definition)>();
+        var components = new List<ComponentInstance>();
+        var symbols = new List<SymbolOccurrence>();
+        for (int i = 0; i < pullUps.Length; i++)
+        {
+            var (reference, key, placement) = pullUps[i];
+            var definition = new ComponentDefinition(PsuCpuIds.Id(0xa2, 0x10 + i), part.Id, "4k7");
+            var component = new ComponentInstance(PsuCpuIds.Id(0xa2, 0x20 + i), definition.Id, sheet[key].ModelSheetInstance, reference);
+            var occurrence = new SymbolOccurrence(PsuCpuIds.Id(0xa2, 0x30 + i), component.Id, 1, placement);
+            definitions.Add((key, definition)); components.Add(component); symbols.Add(occurrence);
+            added.Add(reference, (component.Id, occurrence.Id));
+        }
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
+        PinEndpoint Pin(string reference, string number) => new(added[reference].Component, number);
+        var extra = new Dictionary<string, PinEndpoint[]>
+        {
+            ["PSU_SCL"] = [Pin("R2", "1")], ["PSU_SDA"] = [Pin("R3", "1")], ["MEM_SCL"] = [Pin("R4", "1")],
+            ["RAIL_B"] = [Pin("R2", "2"), Pin("R3", "2"), Pin("R4", "2")]
+        };
+        var nets = complete.Select(n => extra.TryGetValue(n.Name, out var pins) ? n with { Pins = [.. n.Pins, .. pins] } : n).ToArray();
+        return (baseline with { Engineering = baseline.Engineering with { Circuit = circuit with
+        {
+            Sheets = circuit.Sheets.Select(s => s with { Components = [.. s.Components, .. definitions
+                .Where(d => sheet[d.Sheet].Definition == s.Id).Select(d => d.Definition)] }).ToArray(),
+            Components = [.. circuit.Components, .. components], Symbols = [.. circuit.Symbols, .. symbols], Nets = nets
+        } } }, added);
+    }
+
+    /// <summary>One sheet of a proposed layout as KiCad measures it: every symbol's envelope (body, pins and visible fields),
+    /// every existing symbol's position as drawn and as planned, every measured pin with its owner, every non-symbol item's
+    /// measured bounds, and the room each new pin's shortest stub and label need there.</summary>
+    internal sealed record ConnectedSheetGeometry(string Key, DocumentSpecifier Document, PresentationBounds Usable,
+        Dictionary<Guid, PresentationBounds> Bodies, Dictionary<Guid, PresentationBounds> Fields,
+        Dictionary<Guid, PresentationPoint> Before, Dictionary<Guid, PresentationPoint> After,
+        Dictionary<Guid, PresentationPoint> Pins, Dictionary<Guid, SchematicPinAnchor> Anchors, Dictionary<Guid, Guid> Owner,
+        List<(Guid Id, PresentationBounds Bounds)> Items, List<ConnectedStubRoom> Rooms)
+    {
+        public string PathKey => SheetPathKey(Document);
+    }
+
+    /// <summary>The shortest stub of pin <paramref name="Pin"/> on symbol <paramref name="Owner"/> and the union of the
+    /// label envelopes KiCad measures at its end.</summary>
+    internal sealed record ConnectedStubRoom(Guid Owner, Guid Pin, PresentationBounds Stub, PresentationBounds Label);
+
+    internal sealed record ConnectedPlacementExpectation(IReadOnlySet<Guid> NewSymbols, IReadOnlySet<Guid> FreeSymbols,
+        SchematicConnectionIntent Intent, long StubLengthNm);
+
+    // The room the shortest stub of each pin that needs one takes: from its pin away from its body, ending in every label kind
+    // its net may put there, each measured by KiCad at that very spot (never inserted).
+    private static async Task MeasureStubRoom(NativeClient client, ConnectedSheetGeometry sheet, ConnectedPlacementExpectation expectation,
+        SchematicConnectionPolicy policy, KiCad.Automation.Protocol.DocumentRevision revision, CancellationToken token)
+    {
+        var islands = expectation.Intent.Screens.SelectMany(s => s.Islands).Where(i => i.SheetPathKey == sheet.PathKey).ToArray();
+        var request = new MeasureSchematicPlacement { Document = sheet.Document.Clone(), ExpectedRevision = revision.Clone() };
+        var pending = new List<(ConnectionPlacedPin Pin, PresentationBounds Stub, int First, int Count)>();
+        foreach (var island in islands)
+            foreach (var member in island.Members.Where(m => m.RequiresStub))
+            {
+                var anchor = sheet.Anchors[member.Pin.PlacedPinId];
+                var outward = SchematicConnectionGeometry.Outward(anchor);
+                var end = SchematicConnectionGeometry.StubEnd(anchor.Position, outward, expectation.StubLengthNm);
+                var kinds = island.Scope == ConnectionScope.Global ? new[] { ConnectionLabelKind.Global }
+                    : island.UplinkSheetSymbolId is null ? [ConnectionLabelKind.Local] : [ConnectionLabelKind.Local, ConnectionLabelKind.Hierarchical];
+                pending.Add((member.Pin, new(Math.Min(anchor.Position.XNm, end.XNm), Math.Min(anchor.Position.YNm, end.YNm),
+                    Math.Max(anchor.Position.XNm, end.XNm), Math.Max(anchor.Position.YNm, end.YNm)), request.ItemCandidates.Count, kinds.Length));
+                foreach (var kind in kinds)
+                    request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, Guid.NewGuid(), end, island.LabelText,
+                        SchematicConnectionGeometry.Spin(outward), policy)));
+            }
+        if (pending.Count == 0) return;
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+        Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
+        foreach (var (pin, stub, first, count) in pending)
+        {
+            var label = measured.ItemCandidates.Skip(first).Take(count).Select(c => Presentation(c.Bounds))
+                .Aggregate((a, b) => new PresentationBounds(Math.Min(a.LeftNm, b.LeftNm), Math.Min(a.TopNm, b.TopNm), Math.Max(a.RightNm, b.RightNm), Math.Max(a.BottomNm, b.BottomNm)));
+            sheet.Rooms.Add(new(pin.SymbolId, pin.PlacedPinId, stub, label));
+        }
+    }
+
+    internal sealed record ConnectedPlacementIssue(string Code, IReadOnlyList<Guid> Symbols);
+
+    /// <summary>Everything wrong with a connected addition's layout on one sheet: a symbol outside the usable region or two
+    /// symbol bodies overlapping (<see cref="NativePresentationChecks"/>), an existing symbol that moved, a connected pin of a
+    /// new coordinate-free symbol none of whose connected pins lies within <see cref="ConnectedPartnerDistanceNm"/> of a placed
+    /// pin it connects to,
+    /// a new pin whose shortest stub or label meets another symbol, an item or another symbol's stub room, and an existing pin
+    /// whose stub or label meets a new symbol or a new symbol's stub room.</summary>
+    internal static IReadOnlyList<ConnectedPlacementIssue> ConnectedPlacementIssues(ConnectedSheetGeometry sheet, ConnectedPlacementExpectation expectation)
+    {
+        var issues = new List<ConnectedPlacementIssue>();
+        var ids = sheet.Bodies.Keys.Order().ToArray();
+        issues.AddRange(NativePresentationChecks.SymbolPlacementIssues(ids, ids.Select(id => sheet.Bodies[id]).ToArray(),
+            ids.Select(id => sheet.Fields[id]).ToArray(), sheet.Usable).Select(i => new ConnectedPlacementIssue(i.Code, i.Symbols)));
+        foreach (var (id, at) in sheet.Before.OrderBy(p => p.Key))
+            if (!sheet.After.TryGetValue(id, out var now) || now != at) issues.Add(new(ExistingSymbolMoved, [id]));
+        foreach (var symbol in PartnerDistances(sheet, expectation).GroupBy(d => d.Symbol).OrderBy(g => g.Key))
+            if (symbol.Min(d => d.DistanceNm) > ConnectedPartnerDistanceNm) issues.Add(new(ConnectionTooLong, [symbol.Key]));
+        // Placement controls the room between symbols; a label that meets its own symbol is the realizer's concern. A new
+        // symbol's room must be clear of everything else; an existing symbol's room must be clear of every new symbol and room.
+        foreach (var room in sheet.Rooms)
+        {
+            bool fresh = expectation.NewSymbols.Contains(room.Owner);
+            bool Relevant(Guid other) => fresh || expectation.NewSymbols.Contains(other);
+            bool blocked = sheet.Fields.Any(f => f.Key != room.Owner && Relevant(f.Key) && (Overlap(room.Stub, f.Value) || Overlap(room.Label, f.Value)))
+                || (fresh && sheet.Items.Any(i => Overlap(room.Stub, i.Bounds) || Overlap(room.Label, i.Bounds)))
+                || sheet.Rooms.Any(o => o.Owner != room.Owner && Relevant(o.Owner) && (Overlap(room.Label, o.Label) || Overlap(room.Stub, o.Label)));
+            if (blocked) issues.Add(new(ConnectionRoomBlocked, [room.Owner]));
+        }
+        return issues;
+    }
+
+    internal sealed record PartnerDistance(string Sheet, Guid Symbol, Guid Pin, long DistanceNm);
+
+    // For each connected pin of a new coordinate-free symbol, the Euclidean distance to the nearest same-net pin on this sheet
+    // of a symbol whose position was already known (existing or explicitly placed).
+    internal static IEnumerable<PartnerDistance> PartnerDistances(ConnectedSheetGeometry sheet, ConnectedPlacementExpectation expectation)
+    {
+        foreach (var island in expectation.Intent.Screens.SelectMany(s => s.Islands).Where(i => i.SheetPathKey == sheet.PathKey))
+        {
+            var partners = island.Members.Where(m => m.Role != ConnectionMemberRole.ImplicitPower && !expectation.FreeSymbols.Contains(m.Pin.SymbolId))
+                .Select(m => sheet.Pins[m.Pin.PlacedPinId]).ToArray();
+            if (partners.Length == 0) continue;
+            foreach (var member in island.Members.Where(m => expectation.FreeSymbols.Contains(m.Pin.SymbolId)))
+            {
+                var at = sheet.Pins[member.Pin.PlacedPinId];
+                double nearest = partners.Min(p => Math.Sqrt(Math.Pow(p.XNm - at.XNm, 2) + Math.Pow(p.YNm - at.YNm, 2)));
+                yield return new(sheet.Key, member.Pin.SymbolId, member.Pin.PlacedPinId, (long)Math.Ceiling(nearest));
+            }
+        }
+    }
+
+    private static Dictionary<Guid, PresentationBounds> Moved(Dictionary<Guid, PresentationBounds> boxes, Guid id, PresentationPoint by) =>
+        boxes.ToDictionary(p => p.Key, p => p.Key != id ? p.Value
+            : new PresentationBounds(p.Value.LeftNm + by.XNm, p.Value.TopNm + by.YNm, p.Value.RightNm + by.XNm, p.Value.BottomNm + by.YNm));
+
+    private static PresentationPoint Centre(PresentationBounds b) => new((b.LeftNm + b.RightNm) / 2, (b.TopNm + b.BottomNm) / 2);
+    private static PresentationPoint Between(PresentationPoint from, PresentationPoint to) => new(to.XNm - from.XNm, to.YNm - from.YNm);
+
+    private static PresentationBounds Presentation(Box2 box) =>
+        new(box.Position.XNm, box.Position.YNm, box.Position.XNm + box.Size.XNm, box.Position.YNm + box.Size.YNm);
+
+    // Open interiors overlap; touching edges do not.
+    private static bool Overlap(PresentationBounds a, PresentationBounds b) =>
+        a.LeftNm < b.RightNm && b.LeftNm < a.RightNm && a.TopNm < b.BottomNm && b.TopNm < a.BottomNm;
 
     private static async Task VerifyXmlComponentCreation(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, bool interruptAfterNativeEdit, CancellationToken token)

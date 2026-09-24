@@ -1280,10 +1280,11 @@ public sealed class SchematicConnectionRealizerTests
             for (int i = 0; i < active.Length; i++)
             {
                 var id = Guid.Parse(active[i].Id.Value);
-                var at = Place.TryGetValue(id, out var placed) ? placed
-                    : new Point(symbol.Position.XNm - 4 * Grid, symbol.Position.YNm + (2 * i - (active.Length - 1)) * Grid);
+                var offset = Turn(symbol, -4 * Grid, (2 * i - (active.Length - 1)) * Grid);
+                var at = Place.TryGetValue(id, out var placed) ? placed : new Point(symbol.Position.XNm + offset.X, symbol.Position.YNm + offset.Y);
                 if (Shift.TryGetValue((path, id), out var shift)) at = new(at.X + shift.X, at.Y + shift.Y);
-                var (dx, dy) = Direction.TryGetValue(id, out var direction) ? direction : (1, 0);
+                var turned = Turn(symbol, 1, 0);
+                var (dx, dy) = Direction.TryGetValue(id, out var direction) ? direction : ((int)turned.X, (int)turned.Y);
                 yield return (active[i], at, dx, dy);
             }
         }
@@ -1302,8 +1303,10 @@ public sealed class SchematicConnectionRealizerTests
                 {
                     var pins = Pins(path, symbol).ToArray();
                     long half = Math.Max(1, pins.Length) * Grid + Grid;
+                    var (a, b) = (Turn(symbol, -4 * Grid, -half), Turn(symbol, 4 * Grid, half));
                     var box = Body.TryGetValue(id, out var body) ? body
-                        : new Rect(symbol.Position.XNm - 4 * Grid, symbol.Position.YNm - half, symbol.Position.XNm + 4 * Grid, symbol.Position.YNm + half);
+                        : new Rect(symbol.Position.XNm + Math.Min(a.X, b.X), symbol.Position.YNm + Math.Min(a.Y, b.Y),
+                            symbol.Position.XNm + Math.Max(a.X, b.X), symbol.Position.YNm + Math.Max(a.Y, b.Y));
                     // KiCad draws a symbol whose definition it cannot resolve without pins, and measures it by its own bounds.
                     bool unresolved = Incomplete.TryGetValue(id, out var missing) && missing == SchematicPinGeometryIncompleteReason.SpgirDefinitionUnresolved;
                     if (!unresolved)
@@ -1346,6 +1349,16 @@ public sealed class SchematicConnectionRealizerTests
         }
 
         private long Behind(IMessage label) => LabelBehind ?? MeasuredBehind[label.GetType()];
+
+        // A symbol turned by its orientation, as KiCad turns it on a sheet whose y grows down: 90 degrees takes (x, y) to (y, -x).
+        // Mirrors are not modelled; the default unturned symbol is unchanged.
+        private static Point Turn(SchematicSymbolInstance symbol, long x, long y) => symbol.Transform?.Orientation switch
+        {
+            SchematicSymbolOrientation.Sso90 => new(y, -x),
+            SchematicSymbolOrientation.Sso180 => new(-x, -y),
+            SchematicSymbolOrientation.Sso270 => new(-y, x),
+            _ => new(x, y)
+        };
 
         private static SchematicPlacementBounds Label(SchematicPlacementBounds result, Vector2 position, string text, SchematicLabelSpinStyle spin,
             long shape, long behind)

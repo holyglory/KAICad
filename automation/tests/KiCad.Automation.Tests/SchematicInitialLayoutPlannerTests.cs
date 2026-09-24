@@ -5,6 +5,7 @@ using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using static KiCad.Automation.Tests.SchematicConnectionIntentBuilderTests;
 
 namespace KiCad.Automation.Tests;
 
@@ -271,6 +272,242 @@ public sealed class SchematicInitialLayoutPlannerTests
                 cancellation.Cancel(); return Task.FromResult(value);
             }, cancellation.Token));
         Assert.IsTrue(DesignRecoveryStore.ReadDesired(state).Engineering.Circuit.Symbols.Any(s => s.Placement is null));
+    }
+
+    // ---- connection-aware placement (cn1-wiring-intent.md §10) ----
+    // Why unit tests beside the live journey: the NativeXmlComponentCreation journey proves the same rules on the PSU/CPU
+    // fixture in a live editor, but only a synthetic measurement can put a power symbol's pin, a blocked seat or a
+    // missing rotation exactly where each rule decides; every must-catch case here has its false-positive guard.
+
+    private const long ConnectionGrid = 1_270_000;
+
+    // An existing IC U1 and a template R9 on the root; the XML adds R1, coordinate-free, joining U1.1 (SIG) and U1.2 (OUT).
+    private static (Bench Bench, DesignRecoveryState Saved, Guid U1, Guid R1) Signals(bool coordinateFree = true)
+    {
+        var bench = new Bench();
+        Guid ic = bench.Part("IC", Passive("1"), Passive("2"), Passive("3"));
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid u1 = bench.Component(ic, "U1");
+        bench.Component(r, "R9");
+        var state = SchematicConnectionRealizerTests.WithFormatting(bench.State([]));
+        var (design, r1) = bench.Create(state.Baseline, r, "R1", BenchSheet.Root);
+        if (coordinateFree) design = Unplaced(design, r1);
+        design = WithNets(design, new CircuitNet(Guid.NewGuid(), "SIG", [new(u1, "1"), new(r1, "1")]),
+            new CircuitNet(Guid.NewGuid(), "OUT", [new(u1, "2"), new(r1, "2")]));
+        var (saved, _) = Revise(state, _ => design);
+        return (bench, saved, u1, r1);
+    }
+
+    private static SchematicDesign Unplaced(SchematicDesign design, Guid component) => design with { Engineering = design.Engineering with
+        { Circuit = design.Engineering.Circuit with { Symbols = [.. design.Engineering.Circuit.Symbols
+            .Select(s => s.ComponentId == component ? s with { Placement = null } : s)] } } };
+
+    private static SchematicLayoutRegion[] Root(Bench bench) =>
+        [new(bench.ScreenId(BenchSheet.Root), new(0, 0, 297_000_000, 210_000_000), [])];
+
+    private static SchematicConnectionRealizerTests.Scene Measuring(DesignRecoveryState saved, SchematicConnectionRealizerTests.Geometry geometry) =>
+        new(null, saved, d => d, saved, null!, SchematicConnectionRealizerTests.Checkpoint(saved), geometry);
+
+    private static Task<SchematicInitialLayoutResult> ProposeConnected(DesignRecoveryState saved, SchematicLayoutRegion[] regions,
+        SchematicConnectionRealizerTests.Geometry geometry, AutomationSession? session = null) =>
+        SchematicInitialLayoutPlanner.ProposeMeasuredAsync(saved, Policy, regions, "Keep connections short.",
+            (request, token) => geometry.Measure(Measuring(saved, geometry), request, token), session ?? Realizing(saved));
+
+    [TestMethod]
+    public async Task ConnectedAdditionsNeedAnEditorThatCanDrawTheirConnections()
+    {
+        var (bench, saved, _, _) = Signals();
+        var geometry = new SchematicConnectionRealizerTests.Geometry();
+        var plain = new AutomationSession { InstanceId = saved.InstanceId.ToString("D") };
+        var refused = await Assert.ThrowsAsync<AutomationException>(() => ProposeConnected(saved, Root(bench), geometry, plain));
+        Assert.AreEqual("unsupported_layout_creation", refused.Code);
+        StringAssert.Contains(refused.Message, "draw and verify XML connections");
+        var foreign = Realizing(saved); foreign.InstanceId = Guid.NewGuid().ToString("D");
+        Assert.AreEqual("unsupported_layout_creation", (await Assert.ThrowsAsync<AutomationException>(() => ProposeConnected(saved, Root(bench), geometry, foreign))).Code,
+            "Another instance's capability is no evidence for this one.");
+        Assert.IsEmpty(geometry.Requests, "Nothing is measured before admission.");
+        // Guard: the same revision without its connections is an ordinary addition, laid out with or without the capability.
+        var unconnected = saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(
+            WithNets(DesignRecoveryStore.ReadDesired(saved)), saved.KnowledgeLibraries)) };
+        var ordinary = await ProposeConnected(unconnected, Root(bench), new(), plain);
+        Assert.IsTrue(ordinary.CanPropose);
+        Assert.IsEmpty(ordinary.PreferredAnchors); Assert.IsEmpty(ordinary.PowerAttachments);
+        Assert.AreEqual(ordinary.DesiredXml, (await ProposeConnected(unconnected, Root(bench), new())).DesiredXml,
+            "An unconnected addition is laid out exactly as before, whatever the editor advertises.");
+    }
+
+    [TestMethod]
+    public async Task ANewSymbolIsAimedAtItsPartnersAndEveryConnectionKeepsItsShortestStub()
+    {
+        var (bench, saved, u1, r1) = Signals();
+        var geometry = new SchematicConnectionRealizerTests.Geometry();
+        var result = await ProposeConnected(saved, Root(bench), geometry);
+        Assert.IsTrue(result.CanPropose, string.Join("; ", result.Layout.Issues.Select(i => i.Code)));
+        var design = result.DesiredDesign!;
+        var baseline = saved.Baseline.Engineering.Circuit.Symbols.ToDictionary(s => s.Id);
+        Assert.IsTrue(design.Engineering.Circuit.Symbols.Where(s => baseline.ContainsKey(s.Id)).All(s => baseline[s.Id] == s), "Existing symbols stay.");
+        // §10: snap(mean partner anchor − mean own member-pin offset). The bench draws every pin on the symbol's left edge,
+        // two grids apart: U1.1 and U1.2 sit at U1 − (4, 2) and U1 − (4, 0) grids, R1's pins at R1 − (4, ±1) grids.
+        var u1Symbol = saved.Baseline.Schematic.Instances[0].Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.ReferenceField.Text.Text_ == "U1");
+        var aim = result.PreferredAnchors.Single();
+        static long Snap(long value) => (long)(decimal.Round((decimal)value / Policy.GridNm, MidpointRounding.AwayFromZero) * Policy.GridNm);
+        Assert.AreEqual(new PresentationPoint(Snap(u1Symbol.Position.XNm), Snap(u1Symbol.Position.YNm - ConnectionGrid)), aim.Anchor,
+            "The mean partner pin minus the mean own pin offset, snapped to the layout grid.");
+        CollectionAssert.AreEquivalent(new[] { bench.PinId(u1, "1"), bench.PinId(u1, "2") }, aim.PartnerPins.ToArray());
+        // The aimed spot is U1 itself, so R1 goes to the nearest free place that also keeps U1's stubs and labels clear.
+        var placed = result.Layout.Placements!.Single();
+        Assert.AreEqual(aim.BodyId, placed.BodyId);
+        long off = Math.Abs(placed.Anchor.XNm - aim.Anchor.XNm) + Math.Abs(placed.Anchor.YNm - aim.Anchor.YNm);
+        Assert.IsTrue(off > 0 && off <= 40 * ConnectionGrid, "R1 lands next to U1, " + off + " nm from the aimed spot.");
+        Assert.AreEqual(result.DesiredXml, (await ProposeConnected(saved, Root(bench), new())).DesiredXml, "Deterministic.");
+
+        // The proposal realizes: every stub, from R1 and from U1, has its shortest length, and R1's reserved room held it.
+        var scene = SchematicConnectionRealizerTests.Scene.Of(null, saved, _ => design);
+        var realization = await scene.Realize();
+        var wires = realization.Design.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicLine.Descriptor))
+            .Select(i => i.Unpack<SchematicLine>()).ToDictionary(l => Guid.Parse(l.Id.Value));
+        var stubs = realization.Generated.Where(g => g.Role == GeneratedConnectionRole.StubWire).ToArray();
+        Assert.HasCount(4, stubs);
+        Assert.IsTrue(stubs.All(g => Math.Abs(wires[g.Id].End.XNm - wires[g.Id].Start.XNm) == 2 * ConnectionGrid && wires[g.Id].End.YNm == wires[g.Id].Start.YNm));
+        // R1's occupied bounds reach past its pins (4 grids left of its anchor) by the 2-grid stub and the 3-grid label the
+        // bench measures for "SIG" and "OUT", which the layout asked the editor to measure as label prototypes.
+        Assert.IsTrue(placed.Bounds.LeftNm <= placed.Anchor.XNm - 9 * ConnectionGrid, "R1 reserves its stubs and labels left of its pins.");
+        Assert.IsTrue(geometry.Requests.Any(r => r.ItemCandidates.Count == 2 && r.Candidates.Count == 0), "Both labels were measured.");
+
+        // U1's own stubs keep their room too: R1 covers neither stub end.
+        foreach (var pin in new[] { "1", "2" })
+        {
+            var wire = wires[stubs.Single(g => g.PlacedPinId == bench.PinId(u1, pin)).Id];
+            Assert.IsFalse(placed.Bounds.LeftNm < wire.End.XNm && wire.End.XNm < placed.Bounds.RightNm
+                && placed.Bounds.TopNm < wire.End.YNm && wire.End.YNm < placed.Bounds.BottomNm, "U1." + pin + " keeps its stub room.");
+        }
+    }
+
+    [TestMethod]
+    public async Task AnExplicitlyPlacedConnectedSymbolKeepsItsPositionAndBecomesAPartner()
+    {
+        var (bench, saved, _, r1) = Signals();
+        // R2, explicitly placed and locked, joins OUT; R1 stays coordinate-free and is also aimed at R2.2.
+        Guid r = DesignRecoveryStore.ReadDesired(saved).Engineering.Circuit.Parts.Single(p => p.Name == "R").Id;
+        var pinned = new SymbolPlacement(200, 150, 0, false, false, true);
+        var desired = DesignRecoveryStore.ReadDesired(saved);
+        var (withR2, r2) = bench.Create(desired, r, "R2", BenchSheet.Root);
+        withR2 = withR2 with { Engineering = withR2.Engineering with { Circuit = withR2.Engineering.Circuit with
+        {
+            Symbols = [.. withR2.Engineering.Circuit.Symbols.Select(s => s.ComponentId == r2 ? s with { Placement = pinned } : s)],
+            Nets = [.. withR2.Engineering.Circuit.Nets.Select(n => n.Name == "OUT" ? n with { Pins = [.. n.Pins, new(r2, "2")] } : n)]
+        } } };
+        var revision = saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(withR2, saved.KnowledgeLibraries)) };
+        var result = await ProposeConnected(revision, Root(bench), new());
+        Assert.IsTrue(result.CanPropose, string.Join("; ", result.Layout.Issues.Select(i => i.Code)));
+        Assert.AreEqual(pinned, result.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == r2).Placement);
+        Assert.IsTrue(result.Layout.Placements!.Single(p => p.Fixed).Bounds.RightNm > 0);
+        Assert.HasCount(1, result.PreferredAnchors, "Only coordinate-free R1 is aimed.");
+        var r2Pin = Keys(SchematicConnectionIntentBuilderTests.Plan(revision with { DesiredFileBytes = Encoding.UTF8.GetBytes(result.DesiredXml!) }).Candidate!,
+            (r2, "2")).Single().PlacedPinId;
+        CollectionAssert.Contains(result.PreferredAnchors.Single().PartnerPins.ToArray(), r2Pin, "The explicitly placed R2 is one of R1's partners.");
+        // Must-catch: a pinned position whose own stub room leaves the page is refused without a partial candidate.
+        var edge = revision with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(withR2 with { Engineering = withR2.Engineering with
+            { Circuit = withR2.Engineering.Circuit with { Symbols = [.. withR2.Engineering.Circuit.Symbols.Select(s => s.ComponentId == r2
+                ? s with { Placement = pinned with { XMillimeters = 6.35m } } : s)] } } }, saved.KnowledgeLibraries)) };
+        var overflow = await ProposeConnected(edge, Root(bench), new());
+        Assert.IsFalse(overflow.CanPropose); Assert.IsNull(overflow.DesiredXml); Assert.IsNull(overflow.Layout.Placements);
+        Assert.AreEqual("pinned_page_overflow", overflow.Layout.Issues.Single().Code);
+    }
+
+    [TestMethod]
+    public async Task NoSpaceForAConnectedAdditionReturnsNoPartialCandidate()
+    {
+        var (bench, saved, _, _) = Signals();
+        // Narrower than R1 with the room its stubs and labels need.
+        var small = new SchematicLayoutRegion[] { new(bench.ScreenId(BenchSheet.Root), new(0, 0, 15_000_000, 40_000_000), []) };
+        var result = await ProposeConnected(saved, small, new());
+        Assert.IsFalse(result.CanPropose); Assert.IsNull(result.DesiredXml); Assert.IsNull(result.Refinement);
+        Assert.IsNull(result.Layout.Placements); Assert.AreEqual("no_free_region", result.Layout.Issues.Single().Code);
+        Assert.IsEmpty(result.PowerAttachments);
+    }
+
+    // #PWR01 (global GND) is in GND; the XML adds TP1 and #PWR02, both coordinate-free, to GND. TP9 is the test-point template.
+    private static (Bench Bench, DesignRecoveryState Saved, Guid Tp1, Guid Pwr2) Power()
+    {
+        var bench = new Bench();
+        Guid gnd = bench.Part("GND", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "GND", 1, ElectricalPinType.EptPowerInput, false));
+        Guid tp = bench.Part("TP", Passive("1"));
+        Guid pwr1 = bench.Component(gnd, "#PWR01", value: "GND");
+        bench.Component(tp, "TP9");
+        var ground = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr1, "1")]);
+        var state = SchematicConnectionRealizerTests.WithFormatting(bench.State([ground]));
+        var (design, tp1) = bench.Create(state.Baseline, tp, "TP1", BenchSheet.Root);
+        (design, var pwr2) = bench.Create(design, gnd, "#PWR02", BenchSheet.Root, value: "GND");
+        design = WithNets(Unplaced(Unplaced(design, tp1), pwr2), ground with { Pins = [.. ground.Pins, new(tp1, "1"), new(pwr2, "1")] });
+        var (saved, _) = Revise(state, _ => design);
+        return (bench, saved, tp1, pwr2);
+    }
+
+    [TestMethod]
+    public async Task ANewPowerSymbolIsTurnedAndSeatedOnItsPartnerStubEnd()
+    {
+        var (bench, saved, tp1, pwr2) = Power();
+        var result = await ProposeConnected(saved, Root(bench), new());
+        Assert.IsTrue(result.CanPropose, string.Join("; ", result.Layout.Issues.Select(i => i.Code)));
+        var attachment = result.PowerAttachments.Single();
+        Assert.IsTrue(attachment.Attached, attachment.DroppedReason);
+        Assert.AreEqual(new PinEndpoint(tp1, "1"), attachment.Partner);
+        Assert.AreEqual(pwr2, attachment.CarrierComponentId);
+        // The bench draws a pin on the symbol's left edge facing into the body (+x): only a half turn makes it face the
+        // stub arriving from TP1.1's left.
+        Assert.AreEqual(180, attachment.RotationDegrees);
+        var placement = result.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr2).Placement!;
+        Assert.AreEqual(180, placement.RotationDegrees);
+        Assert.AreEqual(attachment.Anchor, new PresentationPoint(Coordinates.MillimetersToNanometers(placement.XMillimeters),
+            Coordinates.MillimetersToNanometers(placement.YMillimeters)));
+        // Realized, TP1.1's shortest stub ends on #PWR02's pin: a wire with no label.
+        var scene = SchematicConnectionRealizerTests.Scene.Of(null, saved, _ => result.DesiredDesign!);
+        var realization = await scene.Realize();
+        var outcome = realization.Outcomes.Single();
+        Assert.IsTrue(outcome.AttachedCarrier, "The stub attaches to the seated power symbol.");
+        Assert.IsFalse(realization.Generated.Any(g => g.Role == GeneratedConnectionRole.StubLabel));
+        Assert.AreEqual(result.DesiredXml, (await ProposeConnected(saved, Root(bench), new())).DesiredXml, "Deterministic.");
+    }
+
+    [TestMethod]
+    public async Task APowerSymbolPairingIsDroppedWhenNoTurnFacesTheStubOrItsSeatIsTaken()
+    {
+        var (bench, saved, tp1, pwr2) = Power();
+        // The created pin identities do not depend on where the symbols go; take them from the seated proposal's plan.
+        var seated = await ProposeConnected(saved, Root(bench), new());
+        var pin = Keys(SchematicConnectionIntentBuilderTests.Plan(saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(seated.DesiredXml!) }).Candidate!,
+            (pwr2, "1")).Single().PlacedPinId;
+        Assert.IsTrue(seated.PowerAttachments.Single().Attached, "Guard: with its real geometry the power symbol is seated.");
+        // Must-catch 1: a power symbol whose pin faces up in every turn cannot meet a stub arriving from the side.
+        var upright = new SchematicConnectionRealizerTests.Geometry(); upright.Direction[pin] = (0, 1);
+        var turned = await ProposeConnected(saved, Root(bench), upright);
+        Assert.IsTrue(turned.CanPropose);
+        var dropped = turned.PowerAttachments.Single();
+        Assert.IsFalse(dropped.Attached); Assert.AreEqual("no_matching_rotation", dropped.DroppedReason);
+        Assert.AreEqual(0, turned.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr2).Placement!.RotationDegrees,
+            "A dropped pairing keeps the free placement.");
+        // Must-catch 2: a turned power symbol measured far wider than its seat, reaching past its pin over TP1, is left
+        // where it was (still inside the page, so only the overlap refuses it).
+        var large = new SchematicConnectionRealizerTests.Geometry
+        {
+            Tamper = (request, reply) =>
+            {
+                foreach (var candidate in reply.Candidates)
+                    if (request.Candidates.Single(c => c.Id.Equals(candidate.Id)).Transform?.Orientation is SchematicSymbolOrientation.Sso180)
+                        candidate.Bounds.Size.XNm += 30 * ConnectionGrid;
+                return reply;
+            }
+        };
+        var blocked = await ProposeConnected(saved, Root(bench), large);
+        Assert.IsTrue(blocked.CanPropose);
+        var collision = blocked.PowerAttachments.Single();
+        Assert.IsFalse(collision.Attached); Assert.AreEqual("collision", collision.DroppedReason);
+        Assert.AreEqual(180, collision.RotationDegrees);
+        Assert.AreEqual(0, blocked.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr2).Placement!.RotationDegrees,
+            "A dropped pairing keeps the free placement.");
+        Assert.AreEqual(new PinEndpoint(tp1, "1"), collision.Partner);
     }
 
     private static DesignRecoveryState Fixture()

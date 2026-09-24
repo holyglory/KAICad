@@ -21,7 +21,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbItemTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_items_read", ReadOnly = true),
-     Description("Read explicitly typed native PCB items through KiCad's board API. requestJson is GetItems protobuf JSON and may select footprints, pads, tracks, arcs, vias, zones or graphics. Any-packed board fields are preserved; this does not infer routing or claim DRC freshness.")]
+     Description("Read explicitly typed native PCB items through KiCad's board API. requestJson is GetItems protobuf JSON and may select footprints, pads, tracks, arcs, vias, zones or graphics. Any-packed board fields are preserved; this does not infer routing or claim DRC freshness."),
+     KiCadCapability("pcb", "native-board-api", "explicit board document"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Read(string instanceId, string requestJson, CancellationToken cancellationToken) => Execute(async () =>
     {
         var request = BoardJson.Parser.Parse<GetItems>(requestJson);
@@ -31,17 +33,23 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_items_create"),
-     Description("Create typed native PCB items with an exact lifecycle checkpoint. requestJson is CreateItems protobuf JSON containing Any-packed Track, Via, Footprint, Pad or graphic objects; expectedStateJson is the matching kicad_document_state observation. The native API commit is undoable. A changed board is rejected before mutation; the result returns the native created identities and a fresh state observation.")]
+     Description("Create typed native PCB items with an exact lifecycle checkpoint. requestJson is CreateItems protobuf JSON containing Any-packed Track, Via, Footprint, Pad or graphic objects; expectedStateJson is the matching kicad_document_state observation. The native API commit is undoable. A changed board is rejected before mutation; the result returns the native created identities and a fresh state observation."),
+     KiCadCapability("pcb", "native-board-api", "board lifecycle state, typed Any items"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Create(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_items_update"),
-     Description("Update typed native PCB items with an exact lifecycle checkpoint. requestJson is UpdateItems protobuf JSON; expectedStateJson must identify the same open board and native content digest. Stale boards are rejected and no unchecked fallback is used. This is a primitive edit, not automatic routing.")]
+     Description("Update typed native PCB items with an exact lifecycle checkpoint. requestJson is UpdateItems protobuf JSON; expectedStateJson must identify the same open board and native content digest. Stale boards are rejected and no unchecked fallback is used. This is a primitive edit, not automatic routing."),
+     KiCadCapability("pcb", "native-board-api", "board lifecycle state, typed Any items"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Update(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Mutate<UpdateItems, UpdateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_guide_create"),
-     Description("Create a visual PCB routing guide as native non-copper board objects. The request may contain only BoardGraphicShape vector geometry or ReferenceImage objects, and every item must use a non-copper layer. The source SHA-256 and guide ID are attached as custom provenance properties. This never creates Track, Arc or Via copper and does not validate RF, impedance, clearance or length constraints; convert a guide to explicitly net-bound copper candidates separately.")]
+     Description("Create a visual PCB routing guide as native non-copper board objects. The request may contain only BoardGraphicShape vector geometry or ReferenceImage objects, and every item must use a non-copper layer. The source SHA-256 and guide ID are attached as custom provenance properties. This never creates Track, Arc or Via copper and does not validate RF, impedance, clearance or length constraints; convert a guide to explicitly net-bound copper candidates separately."),
+     KiCadCapability("pcb-guide", "native-board-api", "board lifecycle state, non-copper guide objects, source hash"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> CreateGuide(string instanceId, string requestJson, string expectedStateJson,
         string guideId, string sourceSha256, CancellationToken cancellationToken)
         => Execute(() => CreateGuideCore(instanceId, requestJson, expectedStateJson, guideId, sourceSha256, cancellationToken));
@@ -80,7 +88,9 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_guide_svg_create"),
-     Description("Parse a strict SVG guide subset (line, polyline, polygon and M/L/H/V/Z paths) into native non-copper BoardGraphicShape vectors. The raw SVG is archived under the explicit repository root, and its exact SHA-256 plus source archive path are attached to every guide object. Transforms, images, text, scripts, unsupported paths, out-of-viewBox geometry and copper layers are rejected. This creates a visual underlay only; it never creates copper routing.")]
+     Description("Parse a strict SVG guide subset (line, polyline, polygon and M/L/H/V/Z paths) into native non-copper BoardGraphicShape vectors. The raw SVG is archived under the explicit repository root, and its exact SHA-256 plus source archive path are attached to every guide object. Transforms, images, text, scripts, unsupported paths, out-of-viewBox geometry and copper layers are rejected. This creates a visual underlay only; it never creates copper routing."),
+     KiCadCapability("pcb-guide", "compiled-mcp plus native-board-api", "SVG source archive, non-copper layer, board lifecycle state"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> CreateSvgGuide(string instanceId, string documentJson, string expectedStateJson,
         string svg, string repositoryRoot, string sourceArchivePath, string guideId, string sourceSha256,
         string layer, string originXNm, string originYNm, string nanometersPerSvgUnit,
@@ -129,7 +139,9 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_route_candidate_from_guide", ReadOnly = true),
-     Description("Convert the exact vector segments of a saved, provenance-matched visual guide into a deterministic, read-only CreateItems request containing explicit net-bound Track candidates. The requested net must already exist on the board. This is a handoff from visual intent to a candidate for native validation; it does not commit copper and does not claim DRC, impedance, RF or high-speed correctness. Reference images and non-segment guide geometry are intentionally not converted.")]
+     Description("Convert the exact vector segments of a saved, provenance-matched visual guide into a deterministic, read-only CreateItems request containing explicit net-bound Track candidates. The requested net must already exist on the board. This is a handoff from visual intent to a candidate for native validation; it does not commit copper and does not claim DRC, impedance, RF or high-speed correctness. Reference images and non-segment guide geometry are intentionally not converted."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "board lifecycle state, guide provenance, existing net, deterministic candidate"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> RouteCandidateFromGuide(string instanceId, string expectedInstanceEpoch,
         string documentJson, string expectedStateJson, string guideId, string sourceSha256,
         string netName, string layer, long widthNm, CancellationToken cancellationToken) => Execute(async () =>
@@ -212,7 +224,9 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_candidate_validate", ReadOnly = true),
-     Description("Validate a guide-derived PCB copper candidate before native mutation. The candidate must contain only exact Track, Arc or Via objects with canonical identities, copper layers and explicit net names. Requires a guide ID/source hash and an unchanged PCB lifecycle checkpoint. This validates structure and provenance supplied by the caller; it does not claim DRC, impedance, length, RF or high-speed correctness and does not mutate the board.")]
+     Description("Validate a guide-derived PCB copper candidate before native mutation. The candidate must contain only exact Track, Arc or Via objects with canonical identities, copper layers and explicit net names. Requires a guide ID/source hash and an unchanged PCB lifecycle checkpoint. This validates structure and provenance supplied by the caller; it does not claim DRC, impedance, length, RF or high-speed correctness and does not mutate the board."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "board lifecycle state, guide provenance, typed copper candidate"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ValidateRouteCandidate(string instanceId, string expectedInstanceEpoch,
         string requestJson, string expectedStateJson, string guideId, string sourceSha256,
         CancellationToken cancellationToken) => Execute(async () =>

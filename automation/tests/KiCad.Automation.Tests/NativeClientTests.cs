@@ -263,13 +263,16 @@ public sealed class NativeClientTests
         public bool WrongType { get; set; }
         public string InstanceId { get; } = Guid.NewGuid().ToString("D");
         public string ProjectPath { get; set; } = "/fixture/test.kicad_pro";
+        // Feature contracts of the handshake. Like a KiCad built before handled_requests, the
+        // fixture never lists the requests it handles.
+        public string[] Features { get; set; } = [];
         public ApiRequest? LastRequest { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             LastRequest = ApiRequest.Parser.ParseFrom(request);
             IMessage payload = LastRequest.Message.Is(GetAutomationSession.Descriptor) && !WrongType
-                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch }
+                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch, Capabilities = { Features } }
                 : new GetVersionResponse { Version = new Kiapi.Common.Types.KiCadVersion { FullVersion = "isolated-protocol-fixture" } };
             return Task.FromResult(new ApiResponse
             {

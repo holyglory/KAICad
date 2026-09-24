@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using Kiapi.Common.Commands;
 using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -64,6 +66,22 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(native.HasExited);
             var session = await recovered.Client(attached.InstanceId).HandshakeAsync(token);
             Assert.AreEqual(attached.Epoch, session.Epoch);
+            // The handshake keeps its named features apart from the requests it handles.
+            string[] features = NativeFeatureContracts.Verify(session);
+            // A manager with no editor open lists exactly what it dispatches in handled_requests: its
+            // own requests and the automation controllers, but no schematic editor request until an
+            // editor opens.
+            string[] managerOnly = await NativeCapabilityProbe.VerifyHandshakeAsync(recovered.Client(attached.InstanceId),
+                Path.Combine(evidence, "startup-recovery.capabilities.json"), token);
+            foreach (string type in new[] { GetAutomationSession.Descriptor.FullName, GetVersion.Descriptor.FullName,
+                         OpenDocument.Descriptor.FullName, CloseDocument.Descriptor.FullName, CheckedSaveDocument.Descriptor.FullName,
+                         CheckedSchematicBatch.Descriptor.FullName })
+                CollectionAssert.Contains(managerOnly, type);
+            CollectionAssert.DoesNotContain(managerOnly, ReadSchematicScreenData.Descriptor.FullName);
+            // The clean-close journey proves that opening and closing editors leaves them unchanged.
+            CollectionAssert.AreEqual(features, (await recovered.Client(attached.InstanceId).HandshakeAsync(token)).Capabilities.ToArray(),
+                "A repeated handshake of the same manager must name the same feature contracts.");
+            Console.WriteLine($"Manager {attached.InstanceId}: features [{string.Join(", ", features)}], {managerOnly.Length} handled request types.");
             var third = new InstanceRegistry(new NngTransport(), state);
             Assert.AreEqual(0, third.List().Count);
             Assert.AreEqual(attached.InstanceId, (await third.SavedSessionsAsync(token)).Single().InstanceId);

@@ -42,6 +42,7 @@
 
 #include <api/common/envelope.pb.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <google/protobuf/descriptor.h>
 
 #ifdef __UNIX__
 #include <sys/file.h>
@@ -389,8 +390,15 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
             session.set_instance_id( m_automationInstanceId );
             session.set_project_path( m_automationProjectPath );
             session.set_epoch( m_token );
+
+            // Named feature contracts, each listed only when the whole feature works in this build.
             session.add_capabilities( "session.info" );
             session.add_capabilities( "version.read" );
+
+            // The individual requests this process dispatches right now.
+            for( const std::string& type : AdvertisedRequestTypes() )
+                session.add_handled_requests( type );
+
             session.set_event_endpoint( m_eventEndpoint );
             session.set_event_epoch( m_eventEpoch );
             reply.mutable_message()->PackFrom( session );
@@ -489,6 +497,60 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
     }
     return result;
 }
+
+namespace
+{
+// The checked schematic controller claims requests by type through a static predicate, before
+// any handler sees them, and does not publish its list.  Probe that predicate with every message
+// in the given scope, nested messages included, so the advertisement follows its dispatch rule
+// rather than a copied list.  The native capability probe fails if a claimed type is declared
+// outside this scope.
+void collectCheckedSchematicTypes( const google::protobuf::Descriptor* aMessage, std::set<std::string>& aTypes )
+{
+    const std::string name( aMessage->full_name() );
+    ApiRequest        probe;
+    probe.mutable_message()->set_type_url( "type.googleapis.com/" + name );
+
+    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( probe ) )
+        aTypes.insert( name );
+
+    for( int i = 0; i < aMessage->nested_type_count(); ++i )
+        collectCheckedSchematicTypes( aMessage->nested_type( i ), aTypes );
+}
+} // namespace
+
+
+std::vector<std::string> KICAD_API_SERVER::AdvertisedRequestTypes() const
+{
+    std::set<std::string> types;
+
+    // Outside automation mode the handshake and both controllers refuse every request they claim.
+    if( IsAutomation() )
+    {
+        const google::protobuf::Descriptor* session = kiapi::automation::v1::GetAutomationSession::descriptor();
+        types.insert( std::string( session->full_name() ) );
+
+        // The lifecycle controller's Handles() reads this same list.
+        for( const std::string& type : DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes() )
+            types.insert( type );
+
+        // Every checked schematic request is declared beside the handshake in the automation
+        // protocol.
+        const google::protobuf::FileDescriptor* file = session->file();
+
+        for( int i = 0; i < file->message_type_count(); ++i )
+            collectCheckedSchematicTypes( file->message_type( i ), types );
+    }
+
+    for( const API_HANDLER* handler : m_handlers )
+    {
+        for( std::string& type : handler->HandledMessageTypes() )
+            types.insert( std::move( type ) );
+    }
+
+    return { types.begin(), types.end() };
+}
+
 
 void KICAD_API_SERVER::RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& document )
 {

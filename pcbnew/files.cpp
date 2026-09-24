@@ -25,6 +25,7 @@
 
 #include <advanced_config.h>
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <confirm.h>
 #include <kidialog.h>
 #include <core/arraydim.h>
@@ -1054,6 +1055,9 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     if( pcbFileName.GetExt() == FILEEXT::LegacyPcbFileExtension )
         pcbFileName.SetExt( FILEEXT::KiCadPcbFileExtension );
 
+    // A checked save names the board as the document spells it, before following a link.
+    const wxString documentPath = pcbFileName.GetFullPath();
+
     // Write through symlinks, don't replace them
     WX_FILENAME::ResolvePossibleSymlinks( pcbFileName );
 
@@ -1134,6 +1138,12 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     }
     catch( const IO_ERROR& ioe )
     {
+        // The writer names the file and the system error, for example a full disk. A checked
+        // save that refused the write itself ignores this report and keeps its own reason.
+        if( automation )
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM::WRITE_BLOCKED, documentPath, ioe.Problem() );
+
         reportFailure( wxString::Format( _( "Error saving board file '%s'.\n%s" ),
                                          pcbFileName.GetFullPath(), ioe.What() ) );
         return false;

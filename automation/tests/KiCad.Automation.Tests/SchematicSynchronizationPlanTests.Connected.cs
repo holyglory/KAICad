@@ -1,16 +1,20 @@
 using System.Text;
+using System.Text.Json;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using ElectricalPinType = Kiapi.Common.Types.ElectricalPinType;
 
 namespace KiCad.Automation.Tests;
 
-// CN-1 classification and preparation guards (cn1-wiring-intent.md §4.1 and §4.4). These are unit tests
-// of isolated pure logic: no editor can exercise an admitted connected addition until native advertises
-// schematic.connection-realization.v1, which it does not yet. The rendered NativeXmlComponentCreation
-// journey checks the same gate against a real handshake and captured state, and the existing plan tests
-// here pin the unchanged general-path results.
+// CN-1 classification, preparation guards and connection intent (cn1-wiring-intent.md §4.1, §4.4 and §5).
+// These are unit tests of isolated pure logic: no editor can exercise an admitted connected addition until
+// native advertises schematic.connection-realization.v1, which it does not yet, and nothing can draw the
+// planned connections before the realizer and the native assertion exist. The rendered NativeXmlComponentCreation
+// and NativePsuCpuComponentCreation journeys check the same gate and build intents from real handshakes and
+// captured states without applying them, and the existing plan tests here pin the unchanged general-path results.
 public sealed partial class SchematicSynchronizationPlanTests
 {
     [TestMethod]
@@ -18,14 +22,19 @@ public sealed partial class SchematicSynchronizationPlanTests
     {
         var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var vcc = circuit.Nets.Single();
         Guid u1 = circuit.Components[0].Id, u2 = circuit.Components[1].Id, signal = Guid.NewGuid();
-        foreach (var (problem, edit, changed) in new (string, Func<Circuit, Circuit>, Guid[])[]
+        // Preparation (§5.6): U1 and U2 are the two instances of one repeated channel sheet and share its symbols,
+        // so only a connection drawn identically on both instances can be realized; every other one is refused.
+        foreach (var (problem, edit, changed, prepared) in new (string, Func<Circuit, Circuit>, Guid[], string?)[]
         {
             ("a new net joins drawn unit-1 pins on both repeated sheets",
-                c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "1"), new(u2, "1")])] }, [signal]),
-            ("an existing net gains a drawn pin", c => c with { Nets = [vcc with { Pins = [.. vcc.Pins, new(u1, "1")] }] }, [vcc.Id]),
-            ("a rename in the same revision", c => c with { Nets = [vcc with { Name = "VDD", Pins = [.. vcc.Pins, new(u2, "7")] }] }, [vcc.Id]),
+                c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "1"), new(u2, "1")])] }, [signal], null),
+            ("an existing net gains a drawn pin", c => c with { Nets = [vcc with { Pins = [.. vcc.Pins, new(u1, "1")] }] }, [vcc.Id],
+                SchematicConnectionErrors.ConnectedRepeatedScreenDivergent),
+            ("a rename in the same revision", c => c with { Nets = [vcc with { Name = "VDD", Pins = [.. vcc.Pins, new(u2, "7")] }] }, [vcc.Id],
+                SchematicConnectionErrors.ConnectedRepeatedScreenDivergent),
             ("a new net whose pins are all new to the circuit's nets",
-                c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "7"), new(u2, "1"), new(u2, "7")])] }, [signal])
+                c => c with { Nets = [.. c.Nets, new(signal, "SIG", [new(u1, "7"), new(u2, "1"), new(u2, "7")])] }, [signal],
+                SchematicConnectionErrors.ConnectedRepeatedScreenDivergent)
         })
         {
             var (saved, desired) = ConnectedRevision(state, edit);
@@ -40,7 +49,84 @@ public sealed partial class SchematicSynchronizationPlanTests
             Assert.IsTrue(plan.CanPrepare, problem + ": " + plan.ErrorCode + " " + plan.ErrorMessage);
             Assert.IsTrue(plan.NativeConnectivityValidationRequired, problem);
             Assert.IsFalse(plan.ObservedConnectivity!.ConnectivityEquivalent, "The general path still defers the unrealized connection: " + problem);
+            var realized = SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true));
+            if (prepared is not null)
+            {
+                SchematicConnectionIntentBuilderTests.RequireRefusal(saved, prepared, "is used 2 times", problem);
+                continue;
+            }
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(realized);
+            var net = intent.Nets.Single();
+            Assert.AreEqual(ConnectionScope.Local, net.Scope, problem);
+            // One shared hierarchical label on the channel sheet, and one sheet pin per channel on the root.
+            var channel = intent.Screens.Single(s => s.InstancePathKeys.Count == 2);
+            var shared = channel.Islands.Single();
+            Assert.AreEqual(channel.InstancePathKeys[0], shared.SheetPathKey, "The representative instance is the ordinal-first path.");
+            Assert.AreEqual("SIG", shared.LabelText); Assert.IsNotNull(shared.UplinkSheetSymbolId);
+            Assert.IsTrue(shared.Members.Single().RequiresStub);
+            var root = intent.Screens.Single(s => s.InstancePathKeys.Count == 1).Islands.Single();
+            Assert.IsEmpty(root.Members); Assert.HasCount(2, root.ChildSheetSymbolIds);
+            CollectionAssert.AreEquivalent(root.ChildSheetSymbolIds.ToArray(), intent.Ports.Select(p => p.SheetSymbolId).ToArray());
+            Assert.IsTrue(intent.Ports.All(p => p.PortText == "SIG" && !p.SheetPinExists && !p.UplinkLabelExists));
+            var group = intent.ExpectedGroups.Single();
+            Assert.HasCount(2, group);
+            Assert.AreEqual(group[0].PlacedPinId, group[1].PlacedPinId, "Both instances share the one physical pin.");
+            CollectionAssert.AreEqual(channel.InstancePathKeys.ToArray(), group.Select(k => k.SheetPathKey).ToArray());
         }
+    }
+
+    [TestMethod]
+    public void ARealizationPlanStopsBeforeTheEditorUntilTheRealizerExists()
+    {
+        // The executor hands a realization plan to the lane entry point (§9.1 steps 2-3). Without the capability for
+        // the recorded instance it is refused with native_capability_missing; with it, this build still has no
+        // label-stub realizer, so it stops with connected_addition_unavailable. Both happen before any measurement,
+        // journal entry or native request, which is why the editor and checkpoint are never touched here.
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit;
+        var (saved, _) = ConnectedRevision(state, c => c with { Nets = [.. c.Nets,
+            new(Guid.NewGuid(), "SIG", [new(circuit.Components[0].Id, "1"), new(circuit.Components[1].Id, "1")])] });
+        var plan = SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true));
+        Assert.IsNotNull(plan.Connections, plan.ErrorCode + " " + plan.ErrorMessage);
+        foreach (var (problem, session, code) in new (string, AutomationSession, string)[]
+        {
+            ("today's editor", ConnectedSession(saved.InstanceId, realization: false), SchematicConnectionErrors.NativeCapabilityMissing),
+            ("another instance's handshake", ConnectedSession(Guid.NewGuid(), realization: true), SchematicConnectionErrors.NativeCapabilityMissing),
+            ("a realizing editor", ConnectedSession(saved.InstanceId, realization: true), SchematicConnectionErrors.ConnectedAdditionUnavailable)
+        })
+        {
+            var error = Assert.ThrowsExactly<AutomationException>(() => { _ = SchematicConnectedAddition.RealizeAsync(null!, session, saved, plan, null!); }, problem);
+            Assert.AreEqual(code, error.Code, problem + ": " + error.Message);
+            StringAssert.Contains(error.Message, "nothing was changed", problem);
+        }
+    }
+
+    [TestMethod]
+    public void RepeatedSheetsRealizeOnlyConnectionsThatMatchOnEveryInstance()
+    {
+        // U1 and U2 share one repeated channel sheet. Each instance joins its own OUT_A and OUT_B pins. With the same
+        // name after the last '/', both instances show the same labels and the plan realizes both nets; with
+        // different names the one shared drawing cannot carry both, and with only one instance connected the other
+        // instance would show the connection too.
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit;
+        Guid u1 = circuit.Components[0].Id, u2 = circuit.Components[1].Id;
+        CircuitNet Net(string name, Guid component) => new(Guid.NewGuid(), name, [new(component, "1"), new(component, "7")]);
+        var (same, _) = ConnectedRevision(state, c => c with { Nets = [.. c.Nets, Net("/CH1/OUT", u1), Net("/CH2/OUT", u2)] });
+        var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(SchematicSynchronizationPlanner.Plan(same,
+            ConnectedSession(same.InstanceId, realization: true)));
+        Assert.HasCount(2, intent.Nets);
+        Assert.IsEmpty(intent.Ports, "Each net stays on its own instance.");
+        var channel = intent.Screens.Single();
+        Assert.HasCount(2, channel.InstancePathKeys);
+        var island = channel.Islands.Single();
+        Assert.AreEqual("OUT", island.LabelText);
+        Assert.HasCount(2, island.Members.Where(m => m.RequiresStub).ToArray());
+        Assert.HasCount(2, intent.ExpectedGroups);
+        Assert.IsTrue(intent.ExpectedGroups.All(g => g.Select(k => k.SheetPathKey).Distinct().Count() == 1));
+
+        var (different, _) = ConnectedRevision(state, c => c with { Nets = [.. c.Nets, Net("/CH1/OUT", u1), Net("/CH2/RET", u2)] });
+        SchematicConnectionIntentBuilderTests.RequireRefusal(different, SchematicConnectionErrors.ConnectedLabelTextDivergent, "'OUT', 'RET'");
+        var (single, _) = ConnectedRevision(state, c => c with { Nets = [.. c.Nets, Net("/CH1/OUT", u1)] });
+        SchematicConnectionIntentBuilderTests.RequireRefusal(single, SchematicConnectionErrors.ConnectedRepeatedScreenDivergent, "is used 2 times");
     }
 
     [TestMethod]
@@ -176,12 +262,32 @@ public sealed partial class SchematicSynchronizationPlanTests
         Assert.IsNull(plan.Connections);
         Assert.AreEqual("electrical_ownership_changed", plan.ErrorCode, "The general path keeps refusing connected creation.");
 
-        // Every creation guard runs first; the connected projection then succeeds, and preparation stops
-        // only because the connection intent is not in this build.
+        // Every creation guard runs first and the connected projection succeeds. The probe then joins one channel's
+        // new pin with an existing pin of one channel only, which the shared channel drawing cannot show on just
+        // one instance, so the intent refuses it before anything reaches the editor.
         var ready = PrepareConnected(saved, desired, admitted);
-        Assert.AreEqual(SchematicConnectionErrors.ConnectedAdditionUnavailable, ready.ErrorCode, ready.ErrorMessage);
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedRepeatedScreenDivergent, ready.ErrorCode, ready.ErrorMessage);
         Assert.IsFalse(ready.CanPrepare); Assert.IsNull(ready.Candidate); Assert.IsNull(ready.CandidateXml); Assert.IsEmpty(ready.NativeOperations);
         Assert.IsNull(ready.Connections);
+        // The two created channel components share one physical symbol, so joining their pins is the same on both
+        // instances: the plan carries the intent, the created symbols and no publishable XML.
+        Guid pair = Guid.NewGuid();
+        var (pairSaved, pairDesired) = ConnectedRevision(state, _ => creation.Circuit with
+            { Nets = [.. creation.Circuit.Nets, new(pair, "PROBE_PAIR", [new(created[0], "1"), new(created[1], "1")])] });
+        var pairShape = ClassifyConnected(pairSaved, pairDesired);
+        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, pairShape.Kind);
+        var pairPlan = PrepareConnected(pairSaved, pairDesired, pairShape);
+        var pairIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(pairPlan);
+        CollectionAssert.AreEqual(pairPlan.Candidate!.SymbolBindings.Where(b => pairDesired.Engineering.Circuit.Symbols
+                .Any(s => s.Id == b.SymbolOccurrenceId && created.Contains(s.ComponentId))).Select(b => b.NativeObjectId).Distinct().Order().ToArray(),
+            pairIntent.CreatedSymbolIds.ToArray());
+        Assert.HasCount(2, pairIntent.CreatedSymbolIds, "One shared symbol per unit on the repeated channel sheet.");
+        Assert.HasCount(2, pairIntent.Ports);
+        var pairGroup = pairIntent.ExpectedGroups.Single(g => g.Count == 2);
+        Assert.AreEqual(pairGroup[0].PlacedPinId, pairGroup[1].PlacedPinId);
+        Assert.IsTrue(pairIntent.ExpectedGroups.Where(g => g != pairGroup).All(g => g.Count == 1),
+            "Every other created pin, on each instance, must stay alone.");
+        Assert.HasCount(8, pairIntent.ExpectedGroups.SelectMany(g => g).ToArray(), "Two units with two pins each, on two instances.");
         var changed = saved.ObservedElectrical!.Clone(); changed.Nets.Clear();
         var foreign = saved.BaselineElectrical!.Clone(); foreign.Nets.Clear();
         var bindingChange = desired with { SymbolBindings = desired.SymbolBindings.Select((b, i) => i == 0 ? b with { NativeObjectId = Guid.NewGuid() } : b).ToArray() };
@@ -260,8 +366,9 @@ public sealed partial class SchematicSynchronizationPlanTests
         RequireConnectionGate(fromSheets, createAndConnect, "S1 to Complete");
         var withBytes = fromSheets with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(createAndConnect, [])) };
         Assert.AreEqual("electrical_ownership_changed", SchematicSynchronizationPlanner.Plan(withBytes).ErrorCode);
-        Assert.AreEqual(SchematicConnectionErrors.ConnectedAdditionUnavailable, PrepareConnected(fromSheets, createAndConnect, admitted).ErrorCode,
-            "The eleven placements must pass creation with their connections allowed.");
+        var createdPlan = PrepareConnected(fromSheets, createAndConnect, admitted);
+        Assert.IsNotNull(createdPlan.Connections, "The eleven placements must pass creation with their connections allowed: "
+            + createdPlan.ErrorCode + " " + createdPlan.ErrorMessage);
         Assert.AreEqual(SchematicConnectionErrors.CreatedSymbolPlacementRequired,
             PrepareConnected(fromSheets, Connected(components with { Engineering = PsuCpuFixture.Engineering(PsuCpuStage.Complete) }, complete.Nets), admitted).ErrorCode,
             "The frozen coordinate-free occurrences still need layout before creation.");
@@ -273,7 +380,8 @@ public sealed partial class SchematicSynchronizationPlanTests
         Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, connectOnly.Kind);
         Assert.IsEmpty(connectOnly.AddedComponentIds);
         CollectionAssert.AreEqual(complete.Nets.Select(n => n.Id).Order().ToArray(), connectOnly.ChangedNetIds.ToArray());
-        Assert.AreEqual(SchematicConnectionErrors.ConnectedAdditionUnavailable, PrepareConnected(unconnected, Connected(placed, complete.Nets), connectOnly).ErrorCode);
+        var connectPlan = PrepareConnected(unconnected, Connected(placed, complete.Nets), connectOnly);
+        Assert.IsNotNull(connectPlan.Connections, connectPlan.ErrorCode + " " + connectPlan.ErrorMessage);
 
         // The realized complete circuit: removing the memory write-protect pin from GND is a disconnection,
         // while tying the unresolved memory SDA pin to a free processor GPIO is an addition.
@@ -344,6 +452,196 @@ public sealed partial class SchematicSynchronizationPlanTests
 
         Assert.IsNull(SchematicConnectedAddition.Delta(circuit, Nets(circuit, new CircuitNet(probe, "PROBE", [new(u1, "99")]))), "An unknown pin is left to the general path.");
     }
+
+    [TestMethod]
+    public void PsuCpuCompleteStagePlansEveryFixtureNetAcrossItsFourSheets()
+    {
+        // The frozen fixture's eleven nets (psu-cpu-fixture-and-ownership.md §1.4.2) with the real electrical types
+        // and visibility of its eight library symbols: every member is an ordinary signal, every net is local, and
+        // the planned hierarchical labels and sheet pins are exactly the expected native ones (§1.6.3).
+        var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
+        var typed = components with { PartSymbols = WithLibraryPinTypes(components.PartSymbols!) };
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit;
+
+        // S1 sheets to Complete in one revision: eleven created placements and every net.
+        var fromSheets = PsuCpuConnectedState(sheets);
+        var createAndConnect = fromSheets with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithPsuNets(typed, complete.Nets), [])) };
+        var session = ConnectedSession(createAndConnect.InstanceId, realization: true);
+        var plan = SchematicSynchronizationPlanner.Plan(createAndConnect, session);
+        var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+        RequirePsuCpuIntent(intent, plan.Candidate!, created: true);
+        Assert.IsNull(SchematicSynchronizationPlanner.Plan(createAndConnect).Connections, "Without the capability nothing is planned for wiring.");
+        var again = SchematicSynchronizationPlanner.Plan(createAndConnect, session).Connections!;
+        Assert.AreEqual(JsonSerializer.Serialize(SchematicConnectionIntentBuilder.Summary(intent)), JsonSerializer.Serialize(SchematicConnectionIntentBuilder.Summary(again)),
+            "The same saved revision must plan the same intent.");
+        CollectionAssert.AreEqual(intent.ExpectedGroups.SelectMany(g => g).ToArray(), again.ExpectedGroups.SelectMany(g => g).ToArray());
+
+        // Components already created, then XML connects them: the same nets, ports and labels, no created symbols.
+        var placed = SchematicNativeCreationProjection.Project(sheets, typed, []).Candidate;
+        var unconnected = PsuCpuConnectedState(placed);
+        var connect = unconnected with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithPsuNets(placed, complete.Nets), [])) };
+        var connectPlan = SchematicSynchronizationPlanner.Plan(connect, ConnectedSession(connect.InstanceId, realization: true));
+        RequirePsuCpuIntent(SchematicConnectionIntentBuilderTests.RequireRealizationPlan(connectPlan), connectPlan.Candidate!, created: false);
+    }
+
+    [TestMethod]
+    public void PsuCpuHiddenPowerPinsNameTheirNetGloballyOrAreRefused()
+    {
+        // Must-catch cases on the same fixture: a hidden power input joins the global net of its own name (§5.3).
+        var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit;
+        var u6 = complete.Components.Single(c => c.Reference == "U6").Id;
+        SchematicSynchronizationPlan PlanWith(IReadOnlyList<CircuitNet> nets, params (string CacheKey, string Number)[] hidden)
+        {
+            var typed = components with { PartSymbols = WithLibraryPinTypes(components.PartSymbols!, hidden) };
+            var state = PsuCpuConnectedState(sheets);
+            var saved = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(WithPsuNets(typed, nets), [])) };
+            return SchematicSynchronizationPlanner.Plan(saved, ConnectedSession(saved.InstanceId, realization: true));
+        }
+
+        // The memory's VCC pin hidden: RAIL_B is named VCC everywhere and needs no hierarchical crossing.
+        var railB = complete.Nets.Single(n => n.Name == "RAIL_B");
+        var global = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(PlanWith(complete.Nets, ("pic_programmer:24C16", "8")));
+        var net = global.Nets.Single(n => n.NetId == railB.Id);
+        Assert.AreEqual(ConnectionScope.Global, net.Scope); Assert.AreEqual("VCC", net.GlobalName);
+        Assert.IsTrue(global.Nets.Where(n => n.NetId != railB.Id).All(n => n.Scope == ConnectionScope.Local));
+        Assert.IsFalse(global.Ports.Any(p => p.NetId == railB.Id));
+        Assert.HasCount(10, global.Ports);
+        var railIslands = global.Screens.SelectMany(s => s.Islands).Where(i => i.NetId == railB.Id).ToArray();
+        var railIsland = railIslands.Single();
+        Assert.AreEqual("VCC", railIsland.LabelText); Assert.AreEqual(ConnectionScope.Global, railIsland.Scope);
+        Assert.IsNull(railIsland.UplinkSheetSymbolId); Assert.IsEmpty(railIsland.ChildSheetSymbolIds);
+        Assert.HasCount(3, railIsland.Members.Where(m => m.RequiresStub).ToArray(), "U2.1, U2.4 and U3.8 get global labels on PSU.");
+        Assert.IsFalse(global.Screens.SelectMany(s => s.Islands).Any(i => i.Members.Any(m => m.Pin.Endpoint == new PinEndpoint(u6, "8"))),
+            "The memory's hidden VCC pin needs nothing drawn, so its CPU island is not realized.");
+        Assert.IsTrue(global.ExpectedGroups.Any(g => g.Count == railB.Pins.Count), "RAIL_B still becomes one native net.");
+
+        // The telemetry MCU's VDD and the processor's VDDIO hidden: RAIL_A would join two global names.
+        var twoNames = PlanWith(complete.Nets, ("MCU_ST_STM32C0:STM32C011J_4-6_Mx", "2"), ("Library:F28P659DK8PTPQ1", "3"));
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, twoNames.ErrorCode, twoNames.ErrorMessage);
+        StringAssert.Contains(twoNames.ErrorMessage!, "'VDD'"); StringAssert.Contains(twoNames.ErrorMessage!, "'VDDIO'");
+        Assert.IsNull(twoNames.Candidate); Assert.IsNull(twoNames.Connections);
+
+        // The ADC's and the memory's GND pins hidden, with the memory's left out of GND: KiCad would still join it.
+        var gnd = complete.Nets.Single(n => n.Name == "GND");
+        var withoutMemory = complete.Nets.Select(n => n.Id == gnd.Id ? n with { Pins = n.Pins.Where(p => p != new PinEndpoint(u6, "4")).ToArray() } : n).ToArray();
+        var lone = PlanWith(withoutMemory, ("Battery_Management:LTC2959", "10"), ("pic_programmer:24C16", "4"));
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, lone.ErrorCode, lone.ErrorMessage);
+        StringAssert.Contains(lone.ErrorMessage!, "U6.4");
+        // False-positive guard: the same two hidden GND pins inside GND name it globally and are planned.
+        var named = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(PlanWith(complete.Nets, ("Battery_Management:LTC2959", "10"), ("pic_programmer:24C16", "4")));
+        Assert.AreEqual("GND", named.Nets.Single(n => n.NetId == gnd.Id).GlobalName);
+        Assert.IsFalse(named.Ports.Any(p => p.NetId == gnd.Id), "A global GND needs no sheet pins.");
+    }
+
+    /// <summary>The connection intent for the fixture's Complete stage (psu-cpu-fixture-and-ownership.md §1.6.3),
+    /// checked against the frozen expected-native.json: eleven local nets of ordinary signal pins, the exact
+    /// hierarchical labels per sheet and sheet pins per sheet symbol, required and allowed label texts, twelve new
+    /// crossings, and the expected native groups computed independently from the candidate's own bindings.</summary>
+    internal static void RequirePsuCpuIntent(SchematicConnectionIntent intent, SchematicDesign candidate, bool created)
+    {
+        var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Complete);
+        var complete = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit;
+        CollectionAssert.AreEqual(complete.Nets.Select(n => n.Id).Order().ToArray(), intent.Nets.Select(n => n.NetId).ToArray());
+        foreach (var net in intent.Nets)
+        {
+            var model = complete.Nets.Single(n => n.Id == net.NetId);
+            Assert.AreEqual(model.Name, net.Name);
+            Assert.AreEqual(ConnectionScope.Local, net.Scope, net.Name); Assert.IsNull(net.GlobalName, net.Name);
+            CollectionAssert.AreEquivalent(model.Pins.ToArray(), net.AddedPins.ToArray(), net.Name);
+        }
+        var sheetOfPath = expected.Sheets.ToDictionary(s => SchematicDesignBindings.PathKey(candidate.SheetBindings
+            .Single(b => b.SheetInstanceId == s.ModelSheetInstance).NativePath), s => s.Key, StringComparer.Ordinal);
+        Assert.HasCount(4, intent.Screens, "Root carries the crossings; PSU, CPU and CPU_POWER carry the pins.");
+        Assert.IsTrue(intent.Screens.All(s => s.InstancePathKeys.Count == 1));
+        var islands = intent.Screens.SelectMany(s => s.Islands).ToArray();
+        var members = islands.SelectMany(i => i.Members).ToArray();
+        Assert.HasCount(41, members);
+        Assert.IsTrue(members.All(m => m.Role == ConnectionMemberRole.Signal && m.PowerName is null && !m.AlreadyConnected && m.RequiresStub),
+            "Every fixture pin is an ordinary signal, including its visible power inputs and hidden non-power pins.");
+        Assert.IsTrue(members.All(m => m.Pin.CreatedSymbol == created));
+        Assert.IsTrue(islands.All(i => i.Scope == ConnectionScope.Local && i.AnchorItemIds.Count == 0 && !i.JoinRequired && !i.AnchorHasMatchingDriver));
+        foreach (var sheet in expected.Sheets)
+        {
+            var here = islands.Where(i => sheetOfPath[i.SheetPathKey] == sheet.Key).ToArray();
+            CollectionAssert.AreEqual(expected.HierarchicalLabels[sheet.Key].ToArray(),
+                here.Where(i => i.UplinkSheetSymbolId is not null).Select(i => i.LabelText).Order(StringComparer.Ordinal).ToArray(), "hierarchical labels on " + sheet.Key);
+            Assert.IsTrue(here.All(i => i.UplinkSheetSymbolId is null || i.UplinkSheetSymbolId == sheet.NativeSheetSymbol), sheet.Key);
+            CollectionAssert.IsSubsetOf((expected.RequiredLocalLabelNames.GetValueOrDefault(sheet.Key) ?? []).ToArray(),
+                here.Where(i => i.UplinkSheetSymbolId is null && i.Members.Any(m => m.RequiresStub)).Select(i => i.LabelText).ToArray(), "local labels on " + sheet.Key);
+            CollectionAssert.IsSubsetOf(here.Select(i => i.LabelText).Distinct(StringComparer.Ordinal).ToArray(),
+                expected.AllowedLabelNames[sheet.Key].ToArray(), "allowed labels on " + sheet.Key);
+            if (sheet.Parent is null) Assert.IsTrue(here.All(i => i.Members.Count == 0 && i.ChildSheetSymbolIds.Count != 0), "The root only carries crossings.");
+        }
+        var sheetPins = islands.SelectMany(i => i.ChildSheetSymbolIds.Select(k => (Sheet: expected.Sheets.Single(s => s.NativeSheetSymbol == k).Key,
+                Text: intent.Ports.Single(p => p.NetId == i.NetId && p.SheetSymbolId == k).PortText)))
+            .GroupBy(x => x.Sheet, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Select(x => x.Text).Order(StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
+        foreach (var (key, names) in expected.SheetPins)
+            CollectionAssert.AreEqual(names.ToArray(), sheetPins.GetValueOrDefault(key) ?? [], "sheet pins on " + key);
+        Assert.HasCount(12, intent.Ports);
+        Assert.IsTrue(intent.Ports.All(p => !p.SheetPinExists && !p.UplinkLabelExists && p.PortText == complete.Nets.Single(n => n.Id == p.NetId).Name));
+
+        var groups = complete.Nets.Select(n => SchematicConnectionIntentBuilderTests.Keys(candidate, [.. n.Pins.Select(p => (p.ComponentId, p.Pin))])).ToList();
+        if (created)
+        {
+            var connected = groups.SelectMany(g => g).ToHashSet();
+            var circuit = candidate.Engineering.Circuit;
+            foreach (var component in circuit.Components)
+            {
+                var part = circuit.Parts.Single(p => p.Id == circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId).PartId);
+                foreach (var pin in part.Pins)
+                    foreach (var key in SchematicConnectionIntentBuilderTests.Keys(candidate, (component.Id, pin.Number)).Where(k => !connected.Contains(k)))
+                        groups.Add([key]);
+            }
+            Assert.HasCount(11, intent.CreatedSymbolIds, "Eleven unit placements (errata 2026-09-23).");
+        }
+        else Assert.IsEmpty(intent.CreatedSymbolIds);
+        SchematicConnectionIntentBuilderTests.RequireGroups(intent, groups);
+        Assert.AreEqual(created ? 222 : 41, intent.ExpectedGroups.Sum(g => g.Count));
+    }
+
+    /// <summary>The fixture's part declarations with each pin's electrical type and visibility taken from the frozen
+    /// lib_symbols list, optionally hiding the named (cache key, pin number) pins.</summary>
+    internal static IReadOnlyList<SchematicPartSymbol> WithLibraryPinTypes(IReadOnlyList<SchematicPartSymbol> declarations,
+        params (string CacheKey, string Number)[] hidden)
+    {
+        var facts = new Dictionary<(string CacheKey, int Unit, int Style, string Number), (ElectricalPinType Type, bool Hidden)>();
+        var list = PsuCpuSexpr.Parse(PsuCpuFixture.ReadText("lib_symbols.kicad_sexpr"));
+        foreach (var symbol in list.Children("symbol"))
+            foreach (var body in symbol.Children("symbol"))
+            {
+                var name = body.Value(1).Split('_');
+                int unit = int.Parse(name[^2], System.Globalization.CultureInfo.InvariantCulture), style = int.Parse(name[^1], System.Globalization.CultureInfo.InvariantCulture);
+                foreach (var pin in body.Children("pin"))
+                {
+                    bool hide = pin.Children("hide").Any(h => h.Items!.Count < 2 || h.Value(1) == "yes") || pin.Items!.Any(i => i is { Atom: "hide", Quoted: false });
+                    facts.Add((symbol.Value(1), unit, style, pin.Child("number").Value(1)), (pin.Value(1) switch
+                    {
+                        "input" => ElectricalPinType.EptInput, "output" => ElectricalPinType.EptOutput, "bidirectional" => ElectricalPinType.EptBidirectional,
+                        "tri_state" => ElectricalPinType.EptTristate, "passive" => ElectricalPinType.EptPassive, "free" => ElectricalPinType.EptFree,
+                        "unspecified" => ElectricalPinType.EptUnspecified, "power_in" => ElectricalPinType.EptPowerInput, "power_out" => ElectricalPinType.EptPowerOutput,
+                        "open_collector" => ElectricalPinType.EptOpenCollector, "open_emitter" => ElectricalPinType.EptOpenEmitter,
+                        "no_connect" => ElectricalPinType.EptNoConnect, var other => throw new AssertFailedException("Unknown pin type " + other)
+                    }, hide));
+                }
+            }
+        return [.. declarations.Select(declaration =>
+        {
+            var symbol = declaration.Symbol.Clone();
+            foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                var (type, hide) = facts[(symbol.CacheKey, child.Unit?.Unit ?? 0, child.BodyStyle?.Style ?? 0, pin.Number)];
+                pin.ElectricalType = type;
+                pin.Visible = !hide && !hidden.Contains((symbol.CacheKey, pin.Number));
+                child.Item = Any.Pack(pin);
+            }
+            return declaration with { Symbol = symbol };
+        })];
+    }
+
+    private static SchematicDesign WithPsuNets(SchematicDesign design, IReadOnlyList<CircuitNet> nets) =>
+        design with { Engineering = design.Engineering with { Circuit = design.Engineering.Circuit with { Nets = nets } } };
 
     private static (DesignRecoveryState Saved, SchematicDesign Desired) ConnectedRevision(DesignRecoveryState state, Func<Circuit, Circuit> edit)
     {

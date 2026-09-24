@@ -108,6 +108,7 @@ public sealed partial class NativeSessionTests
         bytes = Encoding.UTF8.GetBytes(proposedXml);
         await File.WriteAllBytesAsync(path, bytes, token);
         saved = store.Save(saved.State with { DesiredFileBytes = bytes }, saved.RevisionToken);
+        var connectionIntent = await RequirePsuCpuConnectionIntent(placed);
 
         // The public preview is exactly the planner's creation candidate: eleven new native symbols.
         var planner = SchematicSynchronizationPlanner.Plan(saved.State, token);
@@ -203,11 +204,43 @@ public sealed partial class NativeSessionTests
             publishedXml = new { length = published.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(published)) },
             processorUnit4Sheet = "CPU_POWER", processorOneComponentOneDefinition = true,
             nativeUndoRedoVerified = true, undoRestoredLibraryCache, saveReloadVerified = true, recoveryReattachedWithoutChanges = true,
-            presentation = expected.Presentation, crossPlatformReady = false
+            presentation = expected.Presentation, crossPlatformReady = false, connectionIntent
         }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+        // CN-1 connection intent for the fixture's Complete stage (cn1-wiring-intent.md §5), planned from this editor's
+        // real S1 capture, the part symbols it captured and the laid-out placements, as an editor advertising
+        // schematic.connection-realization.v1 would receive it. This editor does not advertise it and nothing can draw
+        // the connections yet, so the plan is only inspected against expected-native.json: every net, crossing,
+        // hierarchical label, sheet pin and native group. Nothing is saved, published or sent to the editor.
+        async Task<object> RequirePsuCpuConnectionIntent(SchematicDesign layout)
+        {
+            var session = await client.HandshakeAsync(token);
+            Assert.AreEqual(instanceId, session.InstanceId);
+            Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
+                "This editor must not advertise connection realization before every native piece exists: " + string.Join(",", session.Capabilities));
+            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var current = store.Read()!;
+            var nativeBefore = await Capture();
+            byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+            var nets = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
+            var connected = layout with { Engineering = layout.Engineering with { Circuit = layout.Engineering.Circuit with { Nets = nets } } };
+            var revision = current.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, [])) };
+            var gated = SchematicSynchronizationPlanner.Plan(revision, session, token);
+            Assert.IsNull(gated.Connections, "This editor's own handshake admits no wiring.");
+            var plan = SchematicSynchronizationPlanner.Plan(revision, advertised, token);
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+            SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, plan.Candidate!, created: true);
+            Assert.AreEqual(nativeBefore, await Capture(), "Planning connections must not change the native document.");
+            Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, "Planning connections must not advance recovery.");
+            CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning connections must not publish XML.");
+            await File.WriteAllTextAsync(Evidence("connection-intent.json"), JsonSerializer.Serialize(new
+                { gatedErrorCode = gated.ErrorCode, intent = SchematicConnectionIntentBuilder.Summary(intent) }), token);
+            return new { gatedErrorCode = gated.ErrorCode, nets = intent.Nets.Count, islands = intent.Screens.Sum(s => s.Islands.Count),
+                ports = intent.Ports.Count, expectedGroups = intent.ExpectedGroups.Count, createdSymbols = intent.CreatedSymbolIds.Count };
+        }
 
         static SchematicHierarchyData WithoutLibraryCache(SchematicHierarchyData data)
         {
@@ -1034,12 +1067,95 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(planned.RevisionToken, store.Read()!.RevisionToken, "Planning must not advance recovery.");
             CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning must not publish XML.");
             store.Save(current.State, planned.RevisionToken);
+            var intents = await RequireRealConnectionIntents(store.Read()!.State, session, advertised);
             return new { nativeCapabilities = session.Capabilities.ToArray(), classification = real.Kind.ToString(),
                 classificationIfAdvertised = withCapability.Kind.ToString(), changedNets = withCapability.ChangedNetIds,
                 publicPlanCanPrepare = planContent.GetProperty("canPrepare").GetBoolean(), publicPlanErrorCode = planCode,
                 publicPlanNativeOperations = planContent.GetProperty("nativeOperationsJson").GetArrayLength(),
                 publicPlanNativeConnectivityValidationRequired = planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
-                publicPlanMatchesPlanner = true };
+                publicPlanMatchesPlanner = true, intents };
+        }
+
+        // CN-1 connection intent (cn1-wiring-intent.md §5) planned from this editor's real captured state, as an
+        // editor that advertises schematic.connection-realization.v1 would receive it. Planning is offline and this
+        // editor cannot draw the connections yet, so each plan is only inspected: nothing is saved, published or sent.
+        // The repeated channel sheet shares one symbol per unit between its two instances, and the root's two probe
+        // pins are joined by a wire and the local label SIGNAL.
+        async Task<object> RequireRealConnectionIntents(DesignRecoveryState state, AutomationSession session, AutomationSession advertised)
+        {
+            var nativeBefore = await Capture();
+            byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
+            string revisionBefore = store.Read()!.RevisionToken;
+            var circuit = state.Baseline.Engineering.Circuit;
+            var rootSheet = circuit.SheetInstances.Single(s => s.ParentId is null);
+            var drawnPin = part.Pins.Where(p => p.Unit is 0 or 1).OrderBy(p => p.Number, StringComparer.Ordinal).First();
+            var mine = circuit.Components.Where(c => createdIds.Contains(c.Id)).ToArray();
+            var channels = mine.Where(c => c.SheetInstanceId != rootSheet.Id).OrderBy(c => c.Id).ToArray();
+            var rootProbe = mine.Single(c => c.SheetInstanceId == rootSheet.Id);
+            Assert.HasCount(2, channels);
+            (SchematicSynchronizationPlan Real, SchematicSynchronizationPlan Realizing) PlanNets(IEnumerable<CircuitNet> nets)
+            {
+                var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with { Nets = [.. nets] } } };
+                var revision = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, [])) };
+                return (SchematicSynchronizationPlanner.Plan(revision, session, token), SchematicSynchronizationPlanner.Plan(revision, advertised, token));
+            }
+
+            // The two channel probes share one physical pin, so joining them draws one hierarchical label on the
+            // shared channel sheet and one sheet pin per channel on the root.
+            var pairNet = new CircuitNet(Guid.NewGuid(), "XML_CHANNEL_PAIR", [.. channels.Select(c => new PinEndpoint(c.Id, drawnPin.Number))]);
+            var pair = PlanNets([.. circuit.Nets, pairNet]);
+            Assert.IsNull(pair.Real.Connections, "This editor's own handshake admits no wiring.");
+            var pairIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(pair.Realizing);
+            Assert.AreEqual(ConnectionScope.Local, pairIntent.Nets.Single().Scope);
+            var channelScreen = pairIntent.Screens.Single(s => s.InstancePathKeys.Count == 2);
+            var shared = channelScreen.Islands.Single();
+            Assert.AreEqual("XML_CHANNEL_PAIR", shared.LabelText);
+            Assert.IsNotNull(shared.UplinkSheetSymbolId);
+            Assert.AreEqual(ConnectionMemberRole.Signal, shared.Members.Single().Role, "The probe pin is a visible passive pin.");
+            Assert.IsTrue(shared.Members.Single().RequiresStub);
+            var rootIsland = pairIntent.Screens.Single(s => s.InstancePathKeys.Count == 1).Islands.Single();
+            Assert.IsEmpty(rootIsland.Members); Assert.HasCount(2, rootIsland.ChildSheetSymbolIds);
+            Assert.HasCount(2, pairIntent.Ports);
+            Assert.IsTrue(pairIntent.Ports.All(p => !p.SheetPinExists && !p.UplinkLabelExists));
+            SchematicConnectionIntentBuilderTests.RequireGroups(pairIntent,
+                [SchematicConnectionIntentBuilderTests.Keys(state.Baseline, [.. channels.Select(c => (c.Id, drawnPin.Number))])]);
+            Assert.IsEmpty(pairIntent.CreatedSymbolIds);
+
+            // The root probe joins the existing probe link: the link's own label names it and only the new pin is drawn.
+            var link = circuit.Nets.Single();
+            var joined = PlanNets([link with { Pins = [.. link.Pins, new PinEndpoint(rootProbe.Id, drawnPin.Number)] }]);
+            Assert.IsNull(joined.Real.Connections);
+            var joinIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(joined.Realizing);
+            var joinIsland = joinIntent.Screens.Single().Islands.Single();
+            Assert.AreEqual("SIGNAL", joinIsland.LabelText, "The existing local label names the connection.");
+            Assert.IsTrue(joinIsland.AnchorHasMatchingDriver); Assert.IsFalse(joinIsland.JoinRequired);
+            Assert.AreEqual(new PinEndpoint(rootProbe.Id, drawnPin.Number), joinIsland.Members.Single(m => m.RequiresStub).Pin.Endpoint);
+            Assert.IsTrue(joinIsland.Members.Where(m => m.Pin.Endpoint.ComponentId != rootProbe.Id).All(m => m.AlreadyConnected));
+            var rootScreen = state.Observed.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+            var signal = rootScreen.Items.Where(i => i.Is(LocalLabel.Descriptor)).Select(i => i.Unpack<LocalLabel>()).Single(l => l.Text.Text_ == "SIGNAL");
+            CollectionAssert.Contains(joinIsland.AnchorItemIds.ToArray(), Guid.Parse(signal.Id.Value), "The anchor is the editor's own connection.");
+            SchematicConnectionIntentBuilderTests.RequireGroups(joinIntent, [SchematicConnectionIntentBuilderTests.Keys(state.Baseline,
+                [.. link.Pins.Select(p => (p.ComponentId, p.Pin)), (rootProbe.Id, drawnPin.Number)])]);
+
+            // The root probe with one channel probe cannot be drawn on the shared channel sheet for one instance only.
+            var mixed = PlanNets([.. circuit.Nets, new CircuitNet(Guid.NewGuid(), "XML_MIXED",
+                [new(rootProbe.Id, drawnPin.Number), new(channels[0].Id, drawnPin.Number)])]);
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedRepeatedScreenDivergent, mixed.Realizing.ErrorCode, mixed.Realizing.ErrorMessage);
+            Assert.IsNull(mixed.Realizing.Candidate); Assert.IsNull(mixed.Realizing.Connections);
+
+            Assert.AreEqual(nativeBefore, await Capture(), "Planning connections must not change the native document.");
+            Assert.AreEqual(revisionBefore, store.Read()!.RevisionToken, "Planning connections must not advance recovery.");
+            CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning connections must not publish XML.");
+            var result = new
+            {
+                channelPair = SchematicConnectionIntentBuilder.Summary(pairIntent),
+                joinExistingLink = SchematicConnectionIntentBuilder.Summary(joinIntent),
+                joinAnchorItems = joinIsland.AnchorItemIds.Count,
+                rootAndOneChannel = new { errorCode = mixed.Realizing.ErrorCode, errorMessage = mixed.Realizing.ErrorMessage }
+            };
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-intents.json"), JsonSerializer.Serialize(result), token);
+            return new { channelPairIslands = channelScreen.Islands.Count, channelPairPorts = pairIntent.Ports.Count, joinLabel = joinIsland.LabelText,
+                joinAnchorItems = joinIsland.AnchorItemIds.Count, rootAndOneChannel = mixed.Realizing.ErrorCode };
         }
 
         async Task RequireAgreement(int count, bool afterReload = false)

@@ -257,10 +257,23 @@ public static class SchematicConnectedAddition
     /// <summary>Check the <paramref name="session"/> handshake for the realization capability,
     /// measure the checkpoint natively and return the operations, ending with the connectivity
     /// assertion, plus the exact design they plan to publish (§9.1 steps 2-3). The executor
-    /// builds, validates and journals the batch envelope.</summary>
+    /// builds, validates and journals the batch envelope. A session that does not advertise
+    /// <see cref="NativeCapability"/> for the recorded instance is refused with
+    /// <c>native_capability_missing</c>. The label-stub realizer (§6) is not in this build, so a
+    /// planned connection intent stops here with <c>connected_addition_unavailable</c>, before
+    /// anything is measured, journaled or sent to the editor.</summary>
     internal static Task<SchematicPreparedRealization> RealizeAsync(NativeClient client, AutomationSession session,
         DesignRecoveryState state, SchematicSynchronizationPlan plan, CheckedSchematicState checkpoint, CancellationToken token = default)
-        => throw Unavailable();
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(plan);
+        if (!Advertises(session, state.InstanceId))
+            throw new AutomationException(SchematicConnectionErrors.NativeCapabilityMissing,
+                "This KiCad does not report that it can draw and verify XML connections, so nothing was changed.");
+        if (plan.Connections is null)
+            throw new ArgumentException("Only a plan with a connection intent is realized here.", nameof(plan));
+        throw Unavailable();
+    }
 
     /// <summary>Check a realization receipt before generic handling (§9.2): abandon a
     /// batch its own assertion rejected, and refuse a completion without verification.</summary>
@@ -273,17 +286,18 @@ public static class SchematicConnectedAddition
         CancellationToken token = default) => throw Unavailable();
 
     internal static AutomationException Unavailable() => new(SchematicConnectionErrors.ConnectedAdditionUnavailable,
-        "Connected XML additions are not available in this build.");
+        "This build can plan the XML connections but cannot draw them in KiCad yet; nothing was changed.");
 }
 
 /// <summary>Prepare an admitted connected addition (cn1-wiring-intent.md §4.4).</summary>
 public static class SchematicConnectedAdditionPlanner
 {
     /// <summary>Run the creation guards in <c>PrepareCreation</c> order with its error codes, build the
-    /// pre-realization candidate and check its bindings. A refusal is a plan with no candidate, exactly
-    /// as the synchronization planner reports creation refusals. The connection intent (§4.4 step 4,
-    /// §5) is not delivered in this build, so an addition that passes every guard still stops with
-    /// <c>connected_addition_unavailable</c> and nothing reaches the editor.</summary>
+    /// pre-realization candidate, check its bindings, build the connection intent (§5) and require the
+    /// candidate to round-trip through XML. A refusal is a plan with no candidate, exactly as the
+    /// synchronization planner reports creation refusals. A success is a realization plan (§4.2): the
+    /// candidate, <see cref="SchematicSynchronizationPlan.Connections"/>, no publishable XML and no native
+    /// operations, because only the realizer measures the editor and produces those.</summary>
     public static SchematicSynchronizationPlan Prepare(DesignRecoveryState state, SchematicDesign desired,
         SchematicHierarchyMergeResult hierarchy, SchematicConnectedAdditionClassification shape,
         List<HierarchyCoverageGap> gaps, CancellationToken token = default)
@@ -331,9 +345,18 @@ public static class SchematicConnectedAdditionPlanner
             if (!bindings.IdentitiesResolved)
                 return Failure(SchematicConnectionErrors.CreatedBindingInvalid, "The generated native identities do not resolve exactly.", bindings.Issues);
 
-            // Step 4 needs the connection intent (§5), which this build does not contain.
-            var unavailable = SchematicConnectedAddition.Unavailable();
-            return Failure(unavailable.Code, unavailable.Message);
+            // Step 4: the connection intent. Every §5 refusal is thrown here.
+            var intent = SchematicConnectionIntentBuilder.Build(state, candidate, shape, token);
+
+            // Step 5: the candidate must round-trip exactly; its XML is not a publishable preview.
+            string xml = SchematicDesignXml.Write(candidate, state.KnowledgeLibraries);
+            if (SchematicDesignXml.Write(SchematicDesignXml.Read(xml, state.KnowledgeLibraries), state.KnowledgeLibraries) != xml)
+                return Failure(SchematicConnectionErrors.InconsistentDesignSerialization, "The connected candidate must round-trip without information loss.");
+
+            // Step 6.
+            token.ThrowIfCancellationRequested();
+            return new(candidate, null, [], hierarchy, null, null, [], [], null, gaps.Distinct().ToArray(),
+                NativeConnectivityValidationRequired: true, NativeLayoutResolutionRequired: true, Connections: intent);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
 

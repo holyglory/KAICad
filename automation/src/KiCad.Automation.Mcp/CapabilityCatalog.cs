@@ -35,30 +35,58 @@ public enum KiCadVerificationLevel
 /// <item>An Inconclusive lane stub, recognised by its body: a member whose own text names
 /// AssertInconclusiveException or Assert.Inconclusive, whether to raise, catch or test for it,
 /// except a catch filter that only lets such a result through. A cited stub is rejected.</item>
-/// <item>A direct citation, whose body is exactly RunNativeSessions(NativeJourney.X[, parameters]).
-/// It is rejected when a switch over the running journey sends X to a stub or has a default arm
-/// leading to a stub that X may reach. A switch is read as dispatch only over a parameter that
+/// <item>A direct citation, whose expression body (=>) is exactly
+/// RunNativeSessions(NativeJourney.X[, further arguments that are each a plain name or a string
+/// literal with no interpolated values]), optionally awaited. A block body that makes the same call
+/// is read as a helper chain, which rejects it because it names RunNativeSessions. A direct
+/// citation is rejected when a switch over the running journey sends X to a stub or has a default
+/// arm leading to a stub that X may reach. A switch is read as dispatch only over a parameter that
 /// always holds the journey being run, passed on unchanged from RunNativeSessions. A default arm is
 /// limited only by earlier unconditional switches over that same parameter in the same block, and
 /// only when it is not inside a lambda, local function or nested block. Every direct citation is
 /// rejected when a stub is named other than in its declaration and switch arms, when a switch over
 /// any other value leads to a stub, or when a fixture member calls into another test class a member
 /// that can end Inconclusive.</item>
-/// <item>A helper-chain citation, followed through every NativeSessionTests member it names, to any
-/// depth. It is rejected when a reached member is or names a stub, names NativeJourney or
+/// <item>A helper-chain citation (any other cited method), followed through every
+/// NativeSessionTests member it names without a qualifier, to any depth. It is rejected when a
+/// reached member, including the cited test itself, is or names a stub, names NativeJourney or
 /// RunNativeSessions, makes an unqualified call the check cannot find, or calls into another test
-/// class a member that can end Inconclusive; such a static call is followed member by member.</item>
+/// class a member that can end Inconclusive.</item>
 /// </list>
+/// A call into another test class (any other class declared in the test sources) is followed only
+/// when written Class.Member(...), with Class a simple class name, or new Class(...); it is followed
+/// member by member through that class's own members and the test classes they call the same way.
+/// After new Class(...), only the constructor is followed when the class declares one.
+/// <para>
 /// A construct the check recognises but cannot follow, such as a cited name whose declaration it
 /// cannot find, a switch leading to a stub over a value it cannot tie to the running journey or, in
 /// a helper chain, an unqualified call it cannot find, is rejected rather than accepted. Known
-/// forms it does not read, and so does not check: test initialize and cleanup hooks, which the test
-/// framework runs without the test naming them; a variable that a lambda or local function
-/// redeclares under the journey parameter's name in a form the check does not recognise as a
-/// declaration; calls through another NativeSessionTests instance; an exception class declared
-/// outside NativeSessionTests that derives from AssertInconclusiveException and is raised under its
-/// own name; a bare Inconclusive(...) made available by using static; and code outside the test
-/// sources. VerificationEvidenceRules in CapabilityCatalogTests.cs states the full rules.
+/// forms it does not read, and so does not check:
+/// </para>
+/// <list type="bullet">
+/// <item>Code the test framework runs without the test naming it: initialize and cleanup hooks in
+/// any class, the NativeSessionTests constructor, Dispose and DisposeAsync, and field and property
+/// initializers. It is not treated as part of the tests it runs around: a helper chain reaches it
+/// only when the test names it, and such code that is itself a stub is caught only by chance, when
+/// its name appears elsewhere in the fixture.</item>
+/// <item>In a helper chain, a NativeSessionTests member named with a qualifier (this., base.,
+/// NativeSessionTests., an instance or a field): it is not followed, so a stub it reaches further
+/// on is missed.</item>
+/// <item>Calls through any instance or field of another test class, and extension-method
+/// calls.</item>
+/// <item>Calls into another test class written with a namespace, an enclosing class or generic
+/// arguments on the class, or with target-typed new(); property reads, method groups and delegates
+/// of another test class; and members another test class inherits from its base class.</item>
+/// <item>A variable that a lambda or local function redeclares under the journey parameter's name
+/// in a form the check does not recognise as a declaration.</item>
+/// <item>An exception class declared outside NativeSessionTests that derives from
+/// AssertInconclusiveException and is raised under its own name.</item>
+/// <item>An unqualified call made available by using static, such as a bare Inconclusive(...), in
+/// fixture code that a direct citation runs. A helper chain rejects it as a call it cannot
+/// find.</item>
+/// <item>Code outside the test sources.</item>
+/// </list>
+/// VerificationEvidenceRules in CapabilityCatalogTests.cs states the full rules.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute

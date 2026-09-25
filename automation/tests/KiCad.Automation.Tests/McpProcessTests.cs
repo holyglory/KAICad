@@ -101,19 +101,24 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_apply_checked_batch");
             CollectionAssert.Contains(names, "kicad_schematic_checked_state");
             CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
-            // A checked object batch that is unreadable or names no attached KiCad is refused before anything is sent, and
-            // the agent is told so; NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo drives the
-            // same tools against a rendered editor.
+            // A checked object batch that is unreadable, carries an object type this server does not know, or names no
+            // attached KiCad is refused before anything is sent, and the agent is told why. The LocalLabel written the way
+            // the tool description shows is read, so its refusal comes from the instance lookup; the same batch with an
+            // unknown @type is refused as unreadable and names that type. Checks against an observed state need a real
+            // editor: NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo drives the same tools there.
             string checkedBatch = SchematicJson.Formatter.Format(new Protocol.CheckedSchematicBatch
             {
                 Batch = new() { OperationId = Guid.NewGuid().ToString("D"), Operations = { new Protocol.SchematicItemOperation
                     { Create = Any.Pack(new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") } }) } } }
             });
-            foreach (var (requestId, tool, requestJson, code) in new[]
+            string unknownType = checkedBatch.Replace("kiapi.schematic.types.LocalLabel", "kiapi.schematic.types.NoSuchObject", StringComparison.Ordinal);
+            Assert.AreNotEqual(checkedBatch, unknownType, "The batch carries the typed LocalLabel.");
+            foreach (var (requestId, tool, requestJson, code, detail) in new[]
             {
-                (9090, "kicad_schematic_apply_checked_batch", "{\"batch\":", "invalid_checked_batch"),
-                (9091, "kicad_schematic_apply_checked_batch", checkedBatch, "unknown_instance"),
-                (9092, "kicad_schematic_checked_batch_receipt", checkedBatch, "unknown_instance")
+                (9090, "kicad_schematic_apply_checked_batch", "{\"batch\":", "invalid_checked_batch", ""),
+                (9091, "kicad_schematic_apply_checked_batch", checkedBatch, "unknown_instance", ""),
+                (9092, "kicad_schematic_checked_batch_receipt", checkedBatch, "unknown_instance", ""),
+                (9093, "kicad_schematic_apply_checked_batch", unknownType, "invalid_checked_batch", "kiapi.schematic.types.NoSuchObject")
             })
             {
                 var refused = (await Request(requestId, "tools/call", new { name = tool,
@@ -123,6 +128,7 @@ public sealed class McpProcessTests
                 Assert.AreEqual(code, refusal.GetProperty("errorCode").GetString(), refused.GetRawText());
                 Assert.IsFalse(refusal.GetProperty("mutationSubmitted").GetBoolean(), refused.GetRawText());
                 Assert.AreEqual("not_submitted", refusal.GetProperty("outcome").GetString(), refused.GetRawText());
+                StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), detail, refused.GetRawText());
             }
             StringAssert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_apply_checked_batch").GetProperty("description").GetString(),

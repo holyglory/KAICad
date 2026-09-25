@@ -241,11 +241,13 @@ public sealed partial class NativeSessionTests
             .Single(screen => Equals(screen.Metadata.Document?.SheetPath, document.SheetPath)).Items);
         async Task Canvas(DocumentLifecycleState state, IReadOnlyDictionary<string, IMessage?> expected, string phase)
         {
-            // The editor's own capture of its visible canvas: the committed revision, drawn with exactly these objects.
+            // The editor's own capture of its visible canvas: the committed revision, drawn with exactly these objects,
+            // each inside the area the captured canvas shows.
             var observation = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document }, token);
             Assert.AreEqual(state.Revision, observation.Snapshot.Revision, phase + ": the canvas shows the observed revision.");
             Assert.AreEqual(state.Revision, observation.Preview.Revision, phase);
             AssertObjects(ItemsByUuid(observation.Snapshot.Data.Items), expected, phase + " canvas");
+            AssertInView(observation.Preview, expected.Values.OfType<IMessage>(), phase);
             await File.WriteAllBytesAsync(Path.Combine(evidence, $"{instanceId}-crud-{phase.Replace(' ', '-')}.png"),
                 observation.Preview.Png.ToByteArray(), token);
         }
@@ -432,6 +434,37 @@ public sealed partial class NativeSessionTests
 
     private static Dictionary<string, Any> ItemsByUuid(IEnumerable<Any> items) => items
         .Select(item => (Id: ItemUuid(item), Item: item)).Where(entry => entry.Id is not null).ToDictionary(entry => entry.Id!, entry => entry.Item);
+
+    // Every point that places an object maps, through the capture's own pixel-to-sheet transform, to a pixel of the
+    // captured canvas, so the objects KiCad holds are the ones on screen and not outside the visible area.
+    private static void AssertInView(SchematicPreview preview, IEnumerable<IMessage> objects, string phase)
+    {
+        var view = preview.Viewport;
+        double determinant = view.PixelXDxNm * view.PixelYDyNm - view.PixelXDyNm * view.PixelYDxNm;
+        Assert.IsTrue(preview.WidthPixels > 0 && preview.HeightPixels > 0 && double.IsNormal(determinant),
+            phase + ": the canvas capture has a size and an invertible pixel-to-sheet transform.");
+        foreach (var item in objects)
+        {
+            IEnumerable<Vector2> anchors = item switch
+            {
+                LocalLabel label => [label.Position],
+                SchematicLine line => [line.Start, line.End],
+                Junction junction => [junction.Position],
+                SchematicText text => [text.Text.Position],
+                SchematicSymbolInstance symbol => [symbol.Position, .. symbol.UserFields.Where(field => field.Visible).Select(field => field.Text.Position)],
+                _ => throw new AssertFailedException($"{phase}: no drawn position is known for {item.Descriptor.Name}.")
+            };
+            foreach (var point in anchors)
+            {
+                double dx = point.XNm - view.OriginXNm, dy = point.YNm - view.OriginYNm;
+                double x = (view.PixelYDyNm * dx - view.PixelYDxNm * dy) / determinant;
+                double y = (view.PixelXDxNm * dy - view.PixelXDyNm * dx) / determinant;
+                Assert.IsTrue(x >= 0 && x < preview.WidthPixels && y >= 0 && y < preview.HeightPixels,
+                    $"{phase}: {item.Descriptor.Name} at ({point.XNm}, {point.YNm}) nm maps to pixel ({x:F0}, {y:F0}), outside the "
+                    + $"{preview.WidthPixels}x{preview.HeightPixels} canvas.");
+            }
+        }
+    }
 
     // Every expected object exists exactly as expected (null: does not exist).
     private static void AssertObjects(IReadOnlyDictionary<string, Any> actual, IReadOnlyDictionary<string, IMessage?> expected, string phase)

@@ -41,7 +41,7 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_schematic_apply_checked_batch", ReadOnly = false),
-     Description("Create, change and delete schematic objects in one step, only while KiCad still holds the exact observed native state (process epoch, native content digest, project settings and file baselines). requestJson is a CheckedSchematicBatch in protobuf JSON: batch {document: the sheet to edit, operations, operationId: a new UUID, documentEpoch and expectedRevision copied from the observed state, description} and expectedState: the state from kicad_schematic_checked_state or kicad_document_state. Each operation is one of: create with a new object carrying a new UUID, or update with the complete changed object carrying its existing UUID, both as a typed Any, for example {\"create\":{\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\",...}} for a LocalLabel, SchematicLine (wire), Junction, SchematicText or SchematicSymbolInstance; remove with the object's UUID ({\"remove\":{\"value\":\"<uuid>\"}}); or a sheet or project setting. Add, change or remove a symbol field by updating the symbol with its complete userFields list. The operations apply together as one native undo step, or not at all: a rejected receipt means KiCad is unchanged, and when KiCad refuses an operation the errorMessage starts 'Atomic operation N rejected:' with its zero-based index. A completed receipt lists every created or changed object as KiCad stored it (result.items, in operation order) and every removed UUID (result.removed). Sending the identical request again, for example after a timeout, returns the same receipt and never edits again, even after the batch was undone; kicad_schematic_checked_batch_receipt reads it without sending. An operation ID stays bound to its request: after any refusal or change, observe again and send a new operation ID. Old peers reject this distinct command; no unchecked fallback exists. A rejected or indeterminate result is not success; cancellation or transport failure does not prove rollback. Does not save files or complete XML synchronization."),
+     Description("Create, change and delete schematic objects in one step, only while KiCad still holds the exact observed native state (process epoch, native content digest, project settings and file baselines). requestJson is a CheckedSchematicBatch in protobuf JSON: batch {document: exactly the document expectedState was observed for (the schematic root when observed with kicad_schematic_checked_state), operations, operationId: a new UUID, documentEpoch and expectedRevision copied from the observed state, description} and expectedState: the state field of the kicad_schematic_checked_state result, or the kicad_document_state result for that same document. An operation edits the batch document unless its optional targetDocument names another loaded sheet instance of the same schematic. Operations include: create with a new object carrying a new UUID, or update with the complete changed object carrying its existing UUID, both as a typed Any, for example {\"create\":{\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\",...}} for a LocalLabel, SchematicLine (wire), Junction, SchematicText or SchematicSymbolInstance; remove with the object's UUID ({\"remove\":{\"value\":\"<uuid>\"}}); sheet and project settings and embedded files; connected symbol moves and transforms; symbol locks; library cache replacement; and one final assertConnectivity check, without targetDocument and alongside only create, update and library cache operations, that refuses the whole batch unless the result has the expected connections. Add, change or remove a symbol field by updating the symbol with its complete userFields list. The operations apply together as one native undo step, or not at all: a rejected receipt means KiCad is unchanged. A refused operation gives errorCode native_batch_rejected, usually with an errorMessage starting 'Atomic operation N rejected:' and the operation's zero-based index; a failed assertConnectivity check gives connectivity_postcondition_failed, and a batch planned from an out-of-date observation gives stale_document_state. A completed receipt lists every created or changed object as KiCad stored it (result.items, with created and updated objects in operation order) and every removed UUID (result.removed). Sending the identical request again, for example after a timeout, returns the same receipt and never edits again, even after the batch was undone; kicad_schematic_checked_batch_receipt reads it without sending. An operation ID stays bound to its request: after any refusal or change, observe again and send a new operation ID. Old peers reject this distinct command; no unchecked fallback exists. A rejected or indeterminate result is not success; cancellation or transport failure does not prove rollback. Does not save files or complete XML synchronization."),
      KiCadCapability("schematic-design", "native-api", "document state observation, process epoch, document revision, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
     public Task<CallToolResult> Apply(string instanceId, string requestJson, CancellationToken cancellationToken) =>
@@ -61,7 +61,7 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
         try
         {
             token.ThrowIfCancellationRequested();
-            request = SchematicJson.Parser.Parse<CheckedSchematicBatch>(requestJson);
+            request = ParseRequest(requestJson);
             var client = registry.Client(instanceId);
             ValidateRequest(request, client.Epoch);
             token.ThrowIfCancellationRequested();
@@ -88,6 +88,18 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
             var data = JsonSerializer.SerializeToElement(new { instanceId, operationId = request?.Batch?.OperationId,
                 mutationSubmitted = submitted, outcome = submitted ? "not_confirmed" : "not_submitted", errorCode = code, errorMessage = error.Message });
             return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
+    // An object whose "@type" this server cannot read fails as InvalidOperationException rather than as a JSON error;
+    // it is still an unreadable request, refused before anything is sent, and the agent is told which type it was.
+    private static CheckedSchematicBatch ParseRequest(string requestJson)
+    {
+        try { return SchematicJson.Parser.Parse<CheckedSchematicBatch>(requestJson); }
+        catch (InvalidOperationException error)
+        {
+            throw new AutomationException("invalid_checked_batch",
+                "requestJson could not be read; each object's @type must name a kiapi.schematic.types message. " + error.Message);
         }
     }
 

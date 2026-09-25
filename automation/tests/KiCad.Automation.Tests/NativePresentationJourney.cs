@@ -453,6 +453,11 @@ public sealed partial class NativeSessionTests
         // A stale revision is refused as stale first, even when it names a sheet instance KiCad does not hold now.
         Assert.AreEqual("presentation_revision_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
             NativePresentationChecks.CheckHierarchyAsync(client, absent, policy, token, before.Revision))).Code);
+        // The displayed-sheet check refuses a stale revision as stale first as well, when it names a sheet instance KiCad does
+        // not hold now or one it holds but does not display, rather than as a request for a sheet that is not displayed.
+        foreach (var instance in new[] { absent, first })
+            Assert.AreEqual("presentation_revision_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                NativePresentationChecks.CheckAsync(client, instance, policy, token, before.Revision))).Code, Key(instance));
 
         batch.Operations.Clear();
         batch.Operations.Add(new SchematicItemOperation { Remove = symbol.Id.Clone() });

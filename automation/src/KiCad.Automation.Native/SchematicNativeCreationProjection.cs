@@ -367,7 +367,9 @@ internal static class SchematicNativeCreationProjection
     /// visible fields would depend on that choice, and there could be no room at its pins for their connections (the likely
     /// cause of the refusal in governed run t20260924T114705Z-b90471, whose recording was not kept). A field the definition
     /// does not define keeps its place and style relative to the copied symbol (moved by <paramref name="dx"/>,
-    /// <paramref name="dy"/>), as KiCad's own reset keeps it. A declared part's symbol is already made from its definition's
+    /// <paramref name="dy"/>), as KiCad's own reset keeps it. That is the one way the copy still shows: a visible field a person
+    /// added to the copied symbol and dragged far aside comes along and can widen the new symbol's measured outline, which
+    /// placing the part from its library would not do. A declared part's symbol is already made from its definition's
     /// fields, so this changes nothing there.</summary>
     private static void PlaceFields(SchematicSymbolInstance symbol, long dx, long dy)
     {

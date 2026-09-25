@@ -84,7 +84,9 @@ public sealed class SchematicNativeCreationProjectionTests
         // The library definition every placed symbol of the part carries: its own fields, symbol-local, each styled its own way.
         var libraryReference = Field("Reference", "U", 0, -3 * Mm, 0, HorizontalAlignment.HaCenter);
         var libraryValue = Field("Value", "Probe", 0, -5 * Mm, 0, HorizontalAlignment.HaCenter, size: 1_524_000, bold: true, autoplace: false);
+        // Private in the library, and public on every placed copy, so that the created field's privacy tells them apart.
         var libraryPart = Field("MPN", "P-1", 5 * Mm, 0, 0, HorizontalAlignment.HaLeft, visible: false, size: 1_000_000, italic: true, showName: true);
+        libraryPart.IsPrivate = true;
         SchematicDesign Dragged(long aside, long ahead, int degrees, bool shown, long size)
         {
             var design = baseline with { Schematic = baseline.Schematic.Clone() };
@@ -131,6 +133,7 @@ public sealed class SchematicNativeCreationProjectionTests
             Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x, YNm = y - 5 * Mm }, symbol.ValueField.Text.Position, "The value sits where the library puts it.");
             var mpn = symbol.UserFields.Single(f => f.Name == "MPN");
             Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x + 5 * Mm, YNm = y }, mpn.Text.Position, "A user field the library defines sits where the library puts it.");
+            Assert.IsTrue(mpn.IsPrivate, "The field is private as the library field is, though every placed copy of it is public.");
             foreach (var (field, source) in new[] { (symbol.ReferenceField, libraryReference), (symbol.ValueField, libraryValue), (mpn, libraryPart) })
             {
                 Assert.AreEqual(source.Text.Attributes, field.Text.Attributes, field.Name + " takes every text attribute of the library field.");

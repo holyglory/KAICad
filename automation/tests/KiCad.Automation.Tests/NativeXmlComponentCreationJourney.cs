@@ -1194,8 +1194,14 @@ public sealed partial class NativeSessionTests
         var unloaded = psu.Clone(); unloaded.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
         string unloadedCode = await Refused("unloaded-sheet", unloaded, null);
         Assert.AreEqual("presentation_sheet_not_loaded", unloadedCode);
-        // A stale revision is refused as stale first, even when it names a sheet instance KiCad does not hold now.
+        // A stale revision is refused as stale first, even when it names a sheet instance KiCad does not hold now, and in the
+        // default mode too, where it names a sheet KiCad does not display (PSU is loaded, the root stays displayed) or holds.
         Assert.AreEqual("presentation_revision_changed", await Refused("stale-revision-unloaded-sheet", unloaded, clean.State.State.Revision));
+        Assert.AreEqual("presentation_revision_changed", await Refused("stale-revision-undisplayed", psu, clean.State.State.Revision, subsheets: false));
+        Assert.AreEqual("presentation_revision_changed", await Refused("stale-revision-unloaded-sheet-displayed", unloaded, clean.State.State.Revision,
+            subsheets: false));
+        // With the current revision, the default mode still checks only the displayed sheet: KiCad refuses to measure PSU there.
+        Assert.AreEqual("native_status_3", await Refused("current-revision-undisplayed", psu, seeded.State.Revision, subsheets: false));
         // An overlap tolerance that would switch the overlap rules off (half the 1.27 mm grid or more) is refused in both modes.
         Assert.AreEqual("invalid_presentation", await Refused("tolerance-too-loose", root, null, overlapToleranceMm: 1000m));
         Assert.AreEqual("invalid_presentation", await Refused("tolerance-too-loose-displayed", root, null, subsheets: false,

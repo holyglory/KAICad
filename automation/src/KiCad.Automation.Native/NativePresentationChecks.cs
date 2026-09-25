@@ -77,16 +77,40 @@ public static class NativePresentationChecks
     /// instance: KiCad confirms the displayed sheet and its revision, then measures that instance at that revision with its own
     /// references, painted field glyphs, roles and reading directions. So a power or '#' symbol's hidden reference is not
     /// required to show, and overlap and reading-direction rules apply. With <paramref name="expectedRevision"/>, the check is
-    /// refused (presentation_revision_changed) unless KiCad holds exactly that document revision; the same refusal is given when
-    /// the design changes between confirming and measuring. An invalid <paramref name="policy"/> is refused before KiCad is
-    /// asked anything.</summary>
+    /// refused (presentation_revision_changed) unless KiCad holds exactly that document revision, and that refusal comes first:
+    /// a stale revision naming a sheet no longer displayed, or a sheet instance deleted since, is refused as stale. The same
+    /// refusal is given when the design changes between confirming and measuring, even if the displayed sheet changed too. An
+    /// invalid <paramref name="policy"/> or a document naming no sheet instance is refused before KiCad is asked anything.</summary>
     public static async Task<NativePresentationCheck> CheckAsync(NativeClient client, DocumentSpecifier document,
         PresentationPolicy policy, CancellationToken cancellationToken = default, Protocol.DocumentRevision? expectedRevision = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(document);
+        if (document.SheetPath is null || document.SheetPath.Path.Count == 0)
+            throw Invalid("An explicit sheet-instance path naming the displayed sheet is required.");
         PresentationVerifier.RequireValid(policy);
         RequireRevision(expectedRevision);
+        // The revision KiCad holds, read through the root sheet: unlike the displayed-sheet read below, this read does not
+        // depend on which sheet KiCad displays or on whether the named sheet instance still exists. So a stale revision is
+        // refused as stale before the displayed sheet is confirmed, and whether the design moved on during the check is
+        // decided even when a person switched sheets meanwhile. The save-state read reports the same document revision as
+        // every other read without packing any sheet's content.
+        var root = document.Clone();
+        root.SheetPath.Path.Clear();
+        root.SheetPath.Path.Add(document.SheetPath.Path[0].Clone());
+        async Task<Protocol.DocumentRevision> Current()
+        {
+            var read = await client.InvokeAsync<ReadSchematicSaveState, SchematicSaveState>(
+                new() { Document = root.Clone() }, cancellationToken);
+            if (read.Revision is null || string.IsNullOrWhiteSpace(read.Revision.Epoch))
+                throw Invalid("The native schematic has no identified revision.");
+            return read.Revision;
+        }
+        if (expectedRevision is not null)
+        {
+            var held = await Current();
+            if (!expectedRevision.Equals(held)) throw RevisionChanged(expectedRevision, held);
+        }
         // KiCad refuses this read unless the document names the displayed sheet; the facts name the revision it holds.
         async Task<SchematicPresentationFacts> Displayed()
         {
@@ -111,8 +135,9 @@ public static class NativePresentationChecks
         }
         catch (NativeApiException)
         {
-            // As in the hierarchy check: whether the design moved on is decided from the revision KiCad reports now.
-            var now = (await Displayed()).Revision;
+            // As in the hierarchy check: whether the design moved on is decided from the revision KiCad reports now, read
+            // through the root sheet so that a person switching sheets meanwhile cannot turn the answer into another refusal.
+            var now = await Current();
             if (!now.Equals(revision)) throw RevisionChanged(revision, now);
             throw;
         }

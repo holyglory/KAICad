@@ -1504,7 +1504,7 @@ tier="development"
 requires=["native-build"]
 timeout_seconds=900
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }]
+retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }, { name = "native-crash-release-evidence", path = "automation/artifacts/native-crash-release/native-session-current", max_bytes = 67108864 }]
 
 [test.psu-cpu-fixture-writer-drift]
 timeout_seconds=3600
@@ -3480,7 +3480,7 @@ requires=["native-build"]
 after=["journey-psu-cpu-rebuild"]
 timeout_seconds=1200
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }]
+retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }, { name = "native-crash-release-evidence", path = "automation/artifacts/native-crash-release/native-session-current", max_bytes = 67108864 }]
 
 [[test.native-acceptance.check]]
 name="journey-diagram-canvas"

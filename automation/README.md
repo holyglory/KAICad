@@ -747,8 +747,15 @@ proposes field positions for exact symbol fields (addressed by symbol or slot an
 expected name and revision) while preserving content, visibility, locks and repeated
 geometry; review and apply it through the same synchronization workflow. Neither
 tool creates unknown parts, generates wiring, infers drawing-sheet reservations or
-performs AI reasoning inside the service; general occlusion and hierarchy-wide
-presentation checks remain open.
+performs AI reasoning inside the service; general occlusion remains open.
+`kicad_schematic_check_presentation` checks the displayed sheet by default, or with
+`includeSubsheets=true` the sheet instance `documentJson` names and every loaded sheet
+instance below it, each measured by KiCad at its own instance without changing the
+design or the displayed sheet. Both modes apply the same rules, refuse a stale
+`expectedRevisionJson` first as `presentation_revision_changed`, and report the policy
+they applied. Coverage is partial: text crossed by wires, pin names, graphics or the
+drawing-sheet frame and title block is not measured yet, so a report without findings
+is not a complete verification pass.
 
 For an explicitly attached instance and initialized recovery record, use
 `kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,
@@ -765,6 +772,28 @@ expectedDocumentEpoch)`. This records a fresh observation without editing KiCad,
 writing XML or advancing the synchronized baseline. Pending old-session actions
 must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
 then start automatic synchronization with the returned recovery token.
+
+When KiCad ends while a synchronization is applying or saving its edit, the record
+keeps that operation and it is never replayed on another KiCad process. Start KiCad
+again for the project (`kicad_instance_start`, which continues the instance ID), stop
+any paused automatic session, and call `kicad_design_recovery_release_exited` with the
+operation ID and `resume` or `roll-back`. The operation is released only when the
+server proves that exactly the KiCad process holding it has ended: its own observer
+saw it end, or a saved registration from the same machine, boot and process ID
+namespace shows it gone; a registration written on another computer never counts. The
+release keeps a receipt of the whole operation beside the record and checks every
+sheet the new KiCad loaded: each must be the last synchronized version or exactly the
+operation's result, so a user edit is never taken for it (`released_operation_diverged`
+otherwise). `resume` applies only the part the new KiCad does not hold yet and publishes
+the operation's XML; `roll-back` removes the partial result and publishes the last
+synchronized design, keeping the replaced XML as the previous version. Either completes
+through `kicad_design_sync_apply` with the returned `continuationOperationId` and
+`requestedRecoveryRevisionToken`, or through automatic synchronization. Until then the
+record cannot be attached to another KiCad session (`kicad_design_recovery_reattach`
+returns `released_operation_requires_continuation`). If the XML was already being
+published when KiCad ended, `resume` refuses (`released_publication_started`), and if the
+restarted KiCad holds other edits neither continuation can proceed yet. The PSU/CPU
+`native-crash` graph proves both continuations on killed KiCad processes.
 
 Run `devcoordinator2 test start . --test native-xml-component-creation --tier
 development --client codex` for the two-editor Linux journey. It checks XML-driven
@@ -1316,7 +1345,7 @@ unfinished work that no registered tool provides.
 A Linux native check has opened schematic windows in two isolated
 instances and captured their actual software-rendered canvases as PNGs. This
 preview is exposed through a preliminary MCP tool with viewport metadata and an
-explicitly incomplete revision-tracking flag. Current-sheet presentation checks,
+explicitly incomplete revision-tracking flag. Presentation checks of the displayed sheet or a whole loaded hierarchy,
 sheet activation and operation-receipt inspection are also exposed. Independent
 region/layer images of any explicitly targeted loaded sheet are available through
 the separate render tool below. PCB/3D views and complete synchronized

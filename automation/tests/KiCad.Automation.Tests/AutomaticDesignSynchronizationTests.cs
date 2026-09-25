@@ -154,8 +154,9 @@ public sealed class AutomaticDesignSynchronizationTests
     // worker and apply each hand planning the recorded instance's handshake, so a connection-only XML revision
     // is classified identically by all three once KiCad advertises schematic.connection-realization.v1, and
     // exactly as today without such a handshake. This drives the real preview tool, worker and executor entry
-    // points with a scripted handshake: no KiCad build advertises the capability yet (CN-1 §8.3), so no rendered
-    // journey can reach the advertised branch. Every expectation for it is derived from the planner's own
+    // points with a scripted handshake, so every classification can be forced without an editor; KiCad started for a
+    // project advertises the capability (CN-1 §8.3), and the rendered McpReattachmentJourney and psu-cpu-connected journeys
+    // prove the advertised branch on a real editor. Every expectation for it is derived from the planner's own
     // reference plan, so the check holds for whichever planner is built in: one that refuses the connection
     // before KiCad is touched, or lane 2A's, which plans a realization that apply measures in the captured
     // checkpoint before anything is journaled or sent (CN-1 §9.1). The native journeys keep covering the
@@ -281,6 +282,8 @@ public sealed class AutomaticDesignSynchronizationTests
             var preview = await Preview(advertising);
             Assert.AreEqual(reference.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
             Assert.AreEqual(reference.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
+            // The preview is the reference plan, including whether it realizes and the connections it would draw (CN-1 §9.5).
+            McpProcessTests.RequirePreviewPlan(reference, preview);
             var automatic = await Worker(advertising);
             if (reference.CanPrepare)
             {

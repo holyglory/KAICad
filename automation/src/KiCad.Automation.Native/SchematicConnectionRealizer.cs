@@ -346,9 +346,12 @@ public static class SchematicConnectionRealizer
             // in front of the pin must be clear of its own symbol (a CN-1 clarification requested from the integration
             // owner); anything that symbol draws further in front of the pin refuses it. Every other symbol, including
             // one with a pin stacked on the anchor, must be clear of the whole label, as §6.4 rule 6 states.
+            // KiCad measures a symbol as one rectangle around its body, pins and visible fields, so a field far from the
+            // body (for example one dragged away) puts everything between them inside the symbol's own bounds.
             bool ownPinSymbol = variant == Variant.AnchorLabel && id == owner;
             if (r is { } labelBox && (ownPinSymbol ? Beyond(labelBox, a, outward, PinTargetReachNm) : labelBox).InteriorMeets(bounds))
                 return ownPinSymbol ? "the label overlaps symbol " + id.ToString("D") + " more than the pin target in front of the pin"
+                    : id == owner ? "the label overlaps the bounds KiCad measures for its own symbol " + id.ToString("D") + ", which take in all of that symbol's visible fields"
                     : "the label overlaps item " + id.ToString("D");
         }
         foreach (var envelope in screen.Envelopes)
@@ -450,6 +453,9 @@ public static class SchematicConnectionRealizer
         public bool UplinkLabelled { get; set; }
         /// <summary>New pins stacked on an existing connection whose optional stub for the hierarchical label had no room.</summary>
         public List<ConnectionPlacedPin> UplinkRefused { get; } = [];
+        /// <summary>Stubs (by pin, or by sheet pin name) that had no room for the island's hierarchical label and carry a local
+        /// label instead.</summary>
+        public List<string> HierarchicalRefused { get; } = [];
     }
 
     private sealed class Screen
@@ -484,6 +490,8 @@ public static class SchematicConnectionRealizer
         private readonly SortedSet<string> limitations = new(StringComparer.Ordinal);
         private readonly Dictionary<Guid, Screen> screens = [];
         private readonly KiCad.Automation.Protocol.DocumentRevision revision = checkpoint.State?.Revision ?? new();
+        // Why the last stub, join stub or anchor label that was tried was refused, for the refusal a person reads.
+        private string? lastRefusal;
 
         public async Task<SchematicConnectionRealization> ExecuteAsync()
         {
@@ -553,8 +561,12 @@ public static class SchematicConnectionRealizer
             ConfirmPower(screen, islands);
             PreexistingContacts(screen, islands);
             await Prototypes(screen, islands);
-            // §6.3 (a) and (b): joins and pin stubs, island by island.
-            foreach (var island in islands)
+            // §6.3 (a) and (b): joins and pin stubs, island by island. Islands whose labels are all fixed come first; islands
+            // that still need their hierarchical label follow, in the same order, because any of their stubs may carry that
+            // label: the first one with room for it (KindFor, MemberStub). Otherwise a hierarchical label drawn first beside a
+            // neighbouring pin could leave that pin's fixed label no room at any stub length (a CN-1 §6.3 clarification
+            // requested from the integration owner).
+            foreach (var island in islands.OrderBy(i => UplinkPending(i) ? 1 : 0))
             {
                 token.ThrowIfCancellationRequested();
                 if (island.Island.JoinRequired) Join(screen, island);
@@ -570,7 +582,12 @@ public static class SchematicConnectionRealizer
                 // connection that has no room; then the next labelled stub carries it. When no stub can carry it, the
                 // refusal names why (a CN-1 clarification requested from the integration owner).
                 if (UplinkPending(island))
-                    throw island.UplinkRefused.Count != 0
+                    throw island.HierarchicalRefused.Count != 0
+                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                            + island.Island.SheetPathKey + ", but none of its new stubs there has room for one (so the stub of " + string.Join(", ", island.HierarchicalRefused)
+                            + (island.HierarchicalRefused.Count == 1 ? " carries a local label" : " carry local labels") + " instead)" + (island.UplinkRefused.Count != 0 ? " and new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
+                            + " sits on an existing connection with no free room for a stub" : "") + ". Clear the space next to one of those pins in the schematic editor.")
+                        : island.UplinkRefused.Count != 0
                         ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
                             + island.Island.SheetPathKey + ", but new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
                             + " sits on an existing connection with no free room for a stub carrying that label, and no other new stub or sheet pin there "
@@ -873,15 +890,21 @@ public static class SchematicConnectionRealizer
 
         private void Join(Screen screen, IslandState island)
         {
+            var refused = new List<string>();
+            // A join that would carry the island's hierarchical label and has no room for it at any candidate names the
+            // connection with a local label instead; a later stub of the island then carries the hierarchical label.
+            ConnectionLabelKind[] kinds = KindFor(island) == ConnectionLabelKind.Hierarchical
+                ? [ConnectionLabelKind.Hierarchical, ConnectionLabelKind.Local] : [KindFor(island)];
+            foreach (var kind in kinds)
             foreach (var pin in island.Island.JoinCandidates)
             {
                 var anchor = AnchorOf(screen.Views[0], pin);
                 var a = Pt.Of(anchor.Position);
                 var outward = SchematicConnectionGeometry.Outward(anchor);
                 var owner = pin.SymbolId;
-                var kind = KindFor(island);
                 if (TryStub(screen, island, a, outward, pin.PlacedPinId, owner, Variant.JoinStub, kind, out var stub))
                 {
+                    if (kind != kinds[0]) island.HierarchicalRefused.Add("pin " + Describe(pin));
                     Accept(screen, island, stub, GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel,
                         SchematicConnectionIdentity.PinAnchorKey(pin.PlacedPinId), pin.PlacedPinId, null);
                     island.Joined = true;
@@ -891,14 +914,17 @@ public static class SchematicConnectionRealizer
                 var envelope = screen.Prototypes[combo].Offset(a);
                 if (Admit(screen, island, a, a, outward, envelope, pin.PlacedPinId, owner, null, null, Variant.AnchorLabel))
                 {
+                    if (kind != kinds[0]) island.HierarchicalRefused.Add("pin " + Describe(pin));
                     Accept(screen, island, new(a, a, combo, envelope, null), null, GeneratedConnectionRole.AnchorLabel,
                         SchematicConnectionIdentity.PinAnchorKey(pin.PlacedPinId), pin.PlacedPinId, null);
                     island.Joined = true;
                     return;
                 }
+                refused.Add("pin " + Describe(pin) + (kinds.Length > 1 ? " (" + kind.ToString().ToLowerInvariant() + " label)" : "") + ": " + lastRefusal);
             }
             throw Error(SchematicConnectionErrors.RealizationNoJoinAnchor, "Net '" + NetName(island) + "' must name its existing connection on sheet "
-                + island.Island.SheetPathKey + ", but no existing pin of it has room for a label. Make room next to one of its pins in the schematic editor.");
+                + island.Island.SheetPathKey + ", but no existing pin of it has room for a label (a label on " + string.Join("; ", refused)
+                + "). Make room next to one of its pins in the schematic editor.");
         }
 
         private void MemberStub(Screen screen, IslandState island, ConnectionMember member)
@@ -923,11 +949,20 @@ public static class SchematicConnectionRealizer
                 else island.UplinkRefused.Add(member.Pin);
                 return;
             }
-            if (!TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.Stub,
-                    KindFor(island), out var stub))
+            // A stub that would carry the island's hierarchical label and has no room for it at any length carries a local
+            // label instead, and the island's next labelled stub carries the hierarchical label (§6.3 (d) clarification).
+            var kind = KindFor(island);
+            bool fits = TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.Stub, kind, out var stub);
+            if (!fits && kind == ConnectionLabelKind.Hierarchical
+                && TryStub(screen, island, a, outward, member.Pin.PlacedPinId, member.Pin.SymbolId, Variant.Stub, ConnectionLabelKind.Local, out stub))
+            {
+                island.HierarchicalRefused.Add("pin " + Describe(member.Pin));
+                fits = true;
+            }
+            if (!fits)
                 throw Error(SchematicConnectionErrors.RealizationNoFreeStub, "Pin " + Describe(member.Pin) + " of net '" + NetName(island)
                     + "' has no free room for a connection stub and label on sheet " + island.Island.SheetPathKey
-                    + ". Move the symbol or clear the space next to that pin.");
+                    + " (at the longest stub length tried, " + lastRefusal + "). Move the symbol or clear the space next to that pin.");
             Accept(screen, island, stub, GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel,
                 SchematicConnectionIdentity.PinAnchorKey(member.Pin.PlacedPinId), member.Pin.PlacedPinId, null);
         }
@@ -961,7 +996,7 @@ public static class SchematicConnectionRealizer
         // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier).
         private bool Admit(Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward, Box? r, Guid? ownPin, Guid owner,
             Guid? carrierPin, Guid? carrierSymbol, Variant variant) =>
-            Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant) is null;
+            (lastRefusal = Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant)) is null;
 
         // §6.5: which side of sheet symbol K a new pin goes on, and that side's x.
         private (SheetSide Side, long X) Side(Screen screen, IslandState island, SheetSymbol sheet)
@@ -1011,16 +1046,19 @@ public static class SchematicConnectionRealizer
             var outward = side == SheetSide.ShsLeft ? (-1, 0) : (1, 0);
             var taken = sheet.Pins.Where(p => p.Side == side).Select(p => p.Position.YNm)
                 .Concat(sheetPins.GetValueOrDefault(sheetId)?.Where(p => p.Side == side).Select(p => p.Position.YNm) ?? []).ToArray();
-            // The hierarchical label goes on the island's first labelled stub; after (a) and (b) that is its first crossing.
-            var kind = island.Island.UplinkSheetSymbolId is not null && !island.UplinkLabelled && island.Island.ChildSheetSymbolIds[0] == sheetId
-                ? ConnectionLabelKind.Hierarchical : ConnectionLabelKind.Local;
+            // The hierarchical label goes on the island's first labelled stub with room for it; when no pin stub had room, that is
+            // its first crossing (in sheet-pin order). A crossing whose stub has room for it at no slot carries a local label,
+            // and the island's next crossing carries the hierarchical label.
+            ConnectionLabelKind[] kinds = UplinkPending(island) ? [ConnectionLabelKind.Hierarchical, ConnectionLabelKind.Local] : [ConnectionLabelKind.Local];
             long top = sheet.Position.YNm, bottom = checked(sheet.Position.YNm + sheet.Size.YNm);
+            foreach (var kind in kinds)
             for (long y = checked(top + policy.SheetPinPitchNm); y <= bottom - policy.SheetPinPitchNm; y = checked(y + policy.GridNm))
             {
                 if (taken.Any(t => Math.Abs(t - y) < policy.SheetPinPitchNm)) continue;
                 var a = new Pt(x, y);
                 // The new sheet pin itself is not yet a point; its own sheet symbol is the stub's owner.
                 if (!TryStub(screen, island, a, outward, null, sheetId, Variant.Stub, kind, out var stub, allowAttach: false)) continue;
+                if (kind != kinds[0]) island.HierarchicalRefused.Add("sheet pin '" + port.PortText + "' on sheet symbol " + sheetId.ToString("D"));
                 string key = SchematicConnectionIdentity.SheetPinAnchorKey(sheetId, port.PortText);
                 var pinId = SchematicConnectionIdentity.Generated(intent.OriginId, intent.NativeRevision, intent.DesiredSha256, screen.Record.ScreenId,
                     GeneratedConnectionRole.SheetPin, key);
@@ -1072,6 +1110,12 @@ public static class SchematicConnectionRealizer
             var labelId = SchematicConnectionIdentity.Generated(intent.OriginId, intent.NativeRevision, intent.DesiredSha256, screen.Record.ScreenId, labelRole, key);
             SchematicConnectionIdentity.Claim(used, labelId);
             var label = LabelPayload(combo.Kind, labelId, stub.E.Vector(), combo.Text, combo.Spin, policy);
+            // A local or hierarchical label has no fields, and KiCad marks every such label it loads from a file as having
+            // auto-placed fields; created without that mark, the label would change when its sheet is saved and reloaded. The
+            // mark places no field, so the prototype measured without it has the same bounds (a CN-1 §6.6 clarification
+            // requested from the integration owner). A global label keeps its intersheet-reference field as KiCad creates it.
+            if (label is LocalLabel local) local.FieldsAutoplaced = true;
+            else if (label is HierarchicalLabel hierarchical) hierarchical.FieldsAutoplaced = true;
             screen.Items.Add(label);
             screen.Envelopes.Add(stub.Envelope!.Value);
             island.Same.Add(labelId);
@@ -1135,9 +1179,9 @@ public static class SchematicConnectionRealizer
         }
 
         // I6 before the assertion is added: the batch may create only the planned symbols and the generated items, each
-        // once, give existing sheet symbols exactly their generated sheet pins, and extend library caches only for new
-        // symbols. Anything else would change an existing item, which native connectivity cannot reveal and the
-        // resolution would find only after KiCad had committed it.
+        // once, give existing sheet symbols exactly their generated sheet pins, and extend a sheet's library cache only by
+        // the definitions of symbols created on that sheet. Anything else would change an existing item, which native
+        // connectivity cannot reveal and the resolution would find only after KiCad had committed it.
         private void RequireOnlyPlannedEdits(IReadOnlyList<SchematicItemOperation> operations)
         {
             var expected = generated.Where(g => g.Role != GeneratedConnectionRole.SheetPin).Select(g => g.Id).Concat(created).ToHashSet();
@@ -1188,7 +1232,8 @@ public static class SchematicConnectionRealizer
         }
 
         // A library cache may be replaced only on a sheet that receives a new symbol, once, and only by adding the
-        // definitions new symbols bring: every definition KiCad already holds on that sheet stays exactly as it is
+        // definitions that new symbols on that sheet use: every added key must be the library cache key of a symbol
+        // created on that sheet (CacheKeyOf), and every definition KiCad already holds there stays exactly as it is
         // (compared as KiCad keeps it, ignoring only the order of its drawn children).
         private void RequireCacheExtension(SchematicItemOperation operation, HashSet<Guid> replaced)
         {
@@ -1198,9 +1243,9 @@ public static class SchematicConnectionRealizer
                 || !TryId(state.ScreenId, out var screenId) || screenId != Id(screen.Metadata.ScreenId) || !replaced.Add(screenId))
                 throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace a library cache that is not "
                     + "exactly one checkpoint sheet's (sheet " + path + ").");
-            bool receivesSymbol = desired.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
-                .Any(i => TryId(i.Unpack<SchematicSymbolInstance>().Id, out var id) && created.Contains(id));
-            if (!receivesSymbol)
+            var newSymbolKeys = desired.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Where(s => TryId(s.Id, out var id) && created.Contains(id)).Select(CacheKeyOf).ToHashSet(StringComparer.Ordinal);
+            if (newSymbolKeys.Count == 0)
                 throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would replace the library cache of sheet "
                     + path + ", which receives no new symbol.");
             var replacement = new Dictionary<string, SchematicCachedSymbol>(StringComparer.Ordinal);
@@ -1212,7 +1257,21 @@ public static class SchematicConnectionRealizer
                 if (!replacement.TryGetValue(kept.CacheKey, out var after) || !SchematicLibraryCacheEquivalence.Equal(kept, after))
                     throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would "
                         + (after is null ? "drop" : "change") + " the library definition '" + kept.CacheKey + "' KiCad already holds on sheet " + path
-                        + "; only definitions for new symbols may be added.");
+                        + "; only the definitions of new symbols on that sheet may be added.");
+            var held = screen.CachedSymbols.Select(c => c.CacheKey).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in replacement.Keys.Where(k => !held.Contains(k)).Order(StringComparer.Ordinal))
+                if (!newSymbolKeys.Contains(key))
+                    throw Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "Realizing connections would add the library definition '"
+                        + key + "' to sheet " + path + ", which no new symbol on that sheet uses; only the definitions of new symbols on that sheet may be added.");
+        }
+
+        // The key a placed symbol's definition has in its sheet's library cache, as KiCad names it
+        // (SCH_SYMBOL::GetSchSymbolLibraryName): its cache alias when it has one, otherwise its library identifier.
+        private static string CacheKeyOf(SchematicSymbolInstance symbol)
+        {
+            if (symbol.LibName.Length != 0) return symbol.LibName;
+            var library = symbol.LibraryId ?? symbol.Definition?.Id;
+            return library is null ? "" : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
         }
 
         // ---- helpers ----

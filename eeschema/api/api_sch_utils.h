@@ -29,13 +29,48 @@
 #include <api/schematic/schematic_types.pb.h>
 #include <pin_map.h>
 
+#include <optional>
+
 class EDA_ITEM;
+class SCH_FIELD;
+class SCH_RENDER_SETTINGS;
 class SCH_SYMBOL;
 class SCH_SHEET;
 class SCH_SHEET_PATH;
 class SCHEMATIC;
 
-namespace kiapi::automation::v1 { class SchematicSymbolPinGeometry; }
+namespace kiapi::automation::v1
+{
+class SchematicPresentationFacts;
+class SchematicSymbolPinGeometry;
+}
+
+/// Sheet-space body of a placed symbol at an explicit sheet instance: the drawn body and its
+/// visible pins for the unit and body style selected there, without fields.
+BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
+
+/// The drawn body and visible pins of a placed symbol at an explicit sheet instance, as a presentation check sees
+/// it: like MeasureSchematicSymbolBody, but without the circle the editor draws at an unconnected pin end, which a
+/// touching wire, label or power symbol removes and which is never printed.
+BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
+
+/// Extent of the glyphs SCH_PAINTER::draw( SCH_FIELD ) paints for @a aField at an explicit sheet
+/// instance, from the exact native glyph geometry: the text KiCad shows there, centred on the
+/// field's bounding box (offset like the painter for a global label), at the field's draw
+/// rotation, with the renderer's effective stroke width, font and metrics. Empty when KiCad
+/// paints nothing (hidden, private or empty field).
+std::optional<BOX2I> MeasureSchematicFieldGlyphs( const SCH_FIELD& aField, const SCH_SHEET_PATH& aPath,
+                                                 const wxString& aVariant,
+                                                 const SCH_RENDER_SETTINGS& aSettings );
+
+/// Presentation facts of one loaded sheet instance, measured on private copies at @a aPath rather
+/// than the displayed sheet: page bounds, every object with its presentation role, per-instance
+/// field text, painted field glyphs and reading directions, which references must show, wires
+/// with their native net identity at this instance, and junctions. The caller sets the document
+/// and revision. Never changes the design, its caches or the human view.
+void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                     const wxString& aVariant,
+                                     kiapi::automation::v1::SchematicPresentationFacts& aOutput );
 
 /// Sheet-space bounds a placement measurement reports for a symbol at an explicit sheet
 /// instance: its body and visible pins for the selected unit and body style (every visible

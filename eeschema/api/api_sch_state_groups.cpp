@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <initializer_list>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -98,12 +99,54 @@ nlohmann::json persistedProjectSettings( SCHEMATIC& aSchematic )
     ( *erc )["erc_exclusions"] = std::move( recorded );
     return settings;
 }
+
+
+/// @a aSettings without the entries every save writes from the schematic itself rather than
+/// from a setting: the sheet list and the top-level sheet list (both from the loaded hierarchy)
+/// and the root sheet's revision kept for IPC-2581 BOM export, which the API save
+/// (SCH_API_SAVE::UpdateProjectFile) and the editor's save (SCH_EDIT_FRAME::SaveProject and
+/// saveProjectSettings) derive, and the project file name, which PROJECT_FILE::SaveToFile
+/// writes.  The ERC exclusions are already digested as the save writes them.
+nlohmann::json withoutSaveDerivedEntries( nlohmann::json aSettings )
+{
+    auto erase = [&]( std::initializer_list<const char*> aPath )
+    {
+        nlohmann::json* parent = &aSettings;
+        auto             leaf = aPath.end() - 1;
+
+        for( auto key = aPath.begin(); key != leaf; ++key )
+        {
+            auto child = parent->find( *key );
+
+            if( child == parent->end() || !child->is_object() )
+                return;
+
+            parent = &*child;
+        }
+
+        parent->erase( std::string( *leaf ) );
+    };
+
+    erase( { "sheets" } );
+    erase( { "schematic", "top_level_sheets" } );
+    erase( { "board", "ipc2581", "sch_revision" } );
+    erase( { "meta", "filename" } );
+    return aSettings;
+}
 } // namespace
 
 
 void SCH_STATE_GROUPS::add( const std::string& aName, const NATIVE_STATE_DIGEST& aState )
 {
+    add( aName, aState, aState );
+}
+
+
+void SCH_STATE_GROUPS::add( const std::string& aName, const NATIVE_STATE_DIGEST& aState,
+                            const NATIVE_STATE_DIGEST& aSaveStable )
+{
     m_document.Add( aName, aState );
+    m_saveStable.Add( aName, aSaveStable );
     m_groups.emplace( aName, std::to_string( aState.Bytes() ) + ":" + aState.Hex() );
     m_bytes += aState.Bytes();
 }
@@ -138,9 +181,13 @@ SCH_STATE_GROUPS SCH_STATE_GROUPS::CaptureScreens( SCHEMATIC& aSchematic,
 
     if( aScreens.empty() || aWithProjectSettings )
     {
-        NATIVE_STATE_DIGEST settings;
-        settings.Append( persistedProjectSettings( aSchematic ).dump() );
-        result.add( "project-settings", settings );
+        const nlohmann::json persisted = persistedProjectSettings( aSchematic );
+        NATIVE_STATE_DIGEST  settings;
+        NATIVE_STATE_DIGEST  saveStable;
+        settings.Append( persisted.dump() );
+        saveStable.Append( withoutSaveDerivedEntries( persisted ).dump() );
+        result.add( "project-settings", settings, saveStable );
+        result.m_projectSettings = true;
     }
 
     if( !aScreens.empty() && result.m_sheets.size() != aScreens.size() )

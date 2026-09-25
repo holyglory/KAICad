@@ -167,7 +167,7 @@ public sealed partial class NativeSessionTests
         await using var mcp = await StdioMcpFixture.StartAsync(Path.Combine(evidence, instanceId + "-assertion-mcp"),
             Path.Combine(evidence, instanceId + "-assertion-mcp.stderr.log"), token);
         RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
-        // CN-1 §8.3: the capability stays unadvertised until lane 2A's measurement pieces land.
+        // CN-1 §8.3: KiCad started for a project serves every piece of connection realization and advertises it.
         // Measure it through the same MCP server and the native handshake instead of assuming it.
         var inspected = await mcp.Tool("kicad_instance_inspect", new { instanceId });
         RequireToolSuccess(inspected);
@@ -177,7 +177,7 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual((await client.HandshakeAsync(token)).Capabilities.Order(StringComparer.Ordinal).ToArray(), nativeCapabilities,
             "MCP must report exactly the capabilities the native handshake advertises.");
         bool capabilityAdvertised = nativeCapabilities.Contains(SchematicConnectedAddition.NativeCapability, StringComparer.Ordinal);
-        Assert.IsFalse(capabilityAdvertised, "Connection realization must not be advertised before every CN-1 §8.3 piece is present.");
+        Assert.IsTrue(capabilityAdvertised, "KiCad started for a project serves every CN-1 §8.3 piece, so it must advertise connection realization.");
         async Task<CheckedSchematicState> Observe()
         {
             var observed = await mcp.Tool("kicad_schematic_checked_state", new { instanceId, documentJson = SchematicJson.Formatter.Format(document) });

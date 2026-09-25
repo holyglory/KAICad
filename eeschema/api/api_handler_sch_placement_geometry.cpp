@@ -274,6 +274,15 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
                 append( **prototype, result.add_item_candidates() );
             }
         }
+        if( aCtx.Request.include_presentation() )
+        {
+            // Presentation facts of this exact instance at the same observed revision, so a
+            // hierarchy check measures every sheet instance without displaying it.
+            SchematicPresentationFacts* facts = result.mutable_presentation();
+            facts->mutable_document()->CopyFrom( aCtx.Request.document() );
+            facts->mutable_revision()->CopyFrom( aCtx.Request.expected_revision() );
+            PackSchematicPresentationFacts( *path, *settings, variant, *facts );
+        }
     }
     catch( const std::exception& error ) { return reject( error.what() ); }
     if( journal.Epoch() != result.revision().epoch() || journal.Sequence() != result.revision().sequence() )

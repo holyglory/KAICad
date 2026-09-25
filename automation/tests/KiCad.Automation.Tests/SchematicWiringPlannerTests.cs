@@ -9,9 +9,10 @@ namespace KiCad.Automation.Tests;
 
 // Contract tests for the wiring planner's pure building blocks (cn1-wiring-intent.md §6.1 policy and
 // geometry, §6.7 identities). They are unit tests on purpose: these helpers are isolated arithmetic and
-// hashing with no native or file boundary, and no existing journey can reach them until the editor
-// advertises schematic.connection-realization.v1. The identity vectors were computed independently of
-// this implementation (Python hashlib and uuid over the §6.7 material).
+// hashing with no native or file boundary. The journeys that realize connections on a real editor (psu-cpu-connected
+// and McpReattachmentJourney) run them, but only on the fixture's own grid and identities, so the edge cases and exact
+// test vectors are pinned here. The identity vectors were computed independently of this implementation (Python
+// hashlib and uuid over the §6.7 material).
 [TestClass]
 public sealed class SchematicWiringPlannerTests
 {

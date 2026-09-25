@@ -252,10 +252,12 @@ public sealed class DesignRecoveryStore(string statePath)
         if (assertions > 1 || (assertions == 1 && batch.Operations[^1].OperationCase != assertion)
             || (lane == DesignLayoutIntent.ConnectionRealizationLane && assertions == 0))
             return false;
-        return batch.Operations.All(o => o.OperationCase is assertion
+        // A rebuild also recreates a deleted file's non-item state (lane 2C, SchematicRebuild.RecreatesFileState).
+        return batch.Operations.Select((o, index) => (o, index)).All(p => p.o.OperationCase is assertion
             or SchematicItemOperation.OperationOneofCase.Create
             or SchematicItemOperation.OperationOneofCase.Update
-            or SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache);
+            or SchematicItemOperation.OperationOneofCase.ReplaceLibraryCache
+            || (lane == DesignLayoutIntent.RebuildLane && SchematicRebuild.RecreatesFileState(p.o, p.index)));
     }
 
     /// <summary>Clear a lane realization whose native assertion rejected the batch before any
@@ -586,9 +588,12 @@ public sealed class DesignRecoveryStore(string statePath)
     private static void ValidatePublicationSave(DesignRecoveryState state, CheckedSaveDocument save)
     {
         var native = state.PendingNativeState!;
+        // A rebuild's first operation gives the new root the identity its saved file had (lane 2C, SchematicRebuild).
+        string identity = state.PendingMutation?.Operations.FirstOrDefault()?.RebuildScreenIdentity?.Value is { } adopted
+            && save.ExpectedState?.NativeIdentity == adopted ? adopted : native.NativeIdentity;
         if (!Guid.TryParseExact(save.OperationId, "D", out var operation) || operation == Guid.Empty
             || !Equals(save.Document, native.Document) || !Equals(save.ExpectedState?.Document, native.Document)
-            || save.ExpectedState!.ProcessEpoch != native.ProcessEpoch || save.ExpectedState.NativeIdentity != native.NativeIdentity
+            || save.ExpectedState!.ProcessEpoch != native.ProcessEpoch || save.ExpectedState.NativeIdentity != identity
             || save.ExpectedState.Revision?.Epoch != native.Revision.Epoch
             || save.ExpectedState.Revision.Sequence < native.Revision.Sequence)
             throw Failure("invalid_design_publication", "The pending save must identify the same native document and process.");

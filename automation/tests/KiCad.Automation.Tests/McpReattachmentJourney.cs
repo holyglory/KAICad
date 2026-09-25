@@ -146,8 +146,13 @@ public sealed partial class NativeSessionTests
     {
         var live = await client.HandshakeAsync(token);
         string instanceId = live.InstanceId;
+        // This step proves the unadvertised case only. The change that makes KiCad advertise the capability (CN-1 §8.3,
+        // §16 step 3) must replace it with the native advertised-case proof, so it fails here rather than silently
+        // proving less.
         Assert.IsFalse(live.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
-            "No KiCad may advertise connection realization before every native piece exists (CN-1 §8.3): " + string.Join(",", live.Capabilities));
+            "KiCad now advertises " + SchematicConnectedAddition.NativeCapability + ": replace this unadvertised-case step with the native "
+            + "advertised-case proof (the preview is the realization plan and the worker and apply realize it identically; ledger "
+            + "pf1134ca32f913781). Capabilities: " + string.Join(",", live.Capabilities));
         var root = (await Ready(() => client.OpenRootSchematicAsync(schematic, token))).Document;
         await Ready(() => client.InvokeAsync<SaveDocument, Empty>(new() { Document = root.Clone() }, token));
         Task<CheckedSchematicState> Capture() => Ready(() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
@@ -166,9 +171,11 @@ public sealed partial class NativeSessionTests
         var reference = Revision();
         var wanted = DesignRecoveryStore.ReadDesired(reference);
         var advertised = live.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
-        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, SchematicConnectedAddition.Classify(reference, wanted, advertised, token).Kind,
+        var classifiedIfAdvertised = SchematicConnectedAddition.Classify(reference, wanted, advertised, token).Kind;
+        var classified = SchematicConnectedAddition.Classify(reference, wanted, live, token).Kind;
+        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, classifiedIfAdvertised,
             "The saved revision must only add a connection over drawn pins, which an advertising editor would realize.");
-        Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, SchematicConnectedAddition.Classify(reference, wanted, live, token).Kind);
+        Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, classified);
         var today = SchematicSynchronizationPlanner.Plan(reference, token);
         Assert.IsTrue(today.CanPrepare, today.ErrorCode + ": " + today.ErrorMessage);
         Assert.IsFalse(today.NativeConnectionRealizationRequired);
@@ -189,9 +196,10 @@ public sealed partial class NativeSessionTests
                 .GetProperty("structuredContent").Clone();
         var preview = Record("preview");
         var before = await Capture();
-        JsonElement unattached;
+        JsonElement unattached, afterAttach, afterRestart, afterReattach;
         (string? Code, Guid? Operation) worker;
         string? applied;
+        var journaled = new Dictionary<string, object>();
         await using (var mcp = await StdioMcpFixture.StartAsync(registryState, Path.Combine(evidence, "handshake-planning-attach.stderr.log"), token))
         {
             unattached = await Preview(mcp, preview);
@@ -202,7 +210,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(0, unattached.GetProperty("nativeOperationsJson").GetArrayLength());
             Assert.IsTrue(unattached.GetProperty("nativeConnectivityValidationRequired").GetBoolean());
             RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
-            Assert.AreEqual(unattached.GetRawText(), (await Preview(mcp, preview)).GetRawText(),
+            afterAttach = await Preview(mcp, preview);
+            Assert.AreEqual(unattached.GetRawText(), afterAttach.GetRawText(),
                 "The handshake recorded at attach does not advertise realization, so the preview stays today's plan.");
 
             // The automatic worker takes its own handshake, plans, and applies the general plan.
@@ -240,6 +249,8 @@ public sealed partial class NativeSessionTests
                 Assert.IsNull(journal.PendingLayout, $"The {name} must not plan a connection realization.");
                 Assert.IsNull(journal.PendingMutation, $"The {name} has no native batch to send.");
                 CollectionAssert.AreEqual(desired, File.ReadAllBytes(target.Design), $"The {name} must not publish XML.");
+                journaled[name] = new { publication = journal.PendingPublication is not null, layout = journal.PendingLayout is not null,
+                    mutation = journal.PendingMutation is not null };
             }
             Assert.AreEqual(worker.Operation, new DesignRecoveryStore(automatic.Recovery).Read()!.State.PendingPublication!.OperationId,
                 "The worker journaled the operation it paused on.");
@@ -247,20 +258,27 @@ public sealed partial class NativeSessionTests
         // A restarted server holds only the saved registration, which is not a handshake, until it reattaches.
         await using (var mcp = await StdioMcpFixture.StartAsync(registryState, Path.Combine(evidence, "handshake-planning-reattach.stderr.log"), token))
         {
-            Assert.AreEqual(unattached.GetRawText(), (await Preview(mcp, preview)).GetRawText(),
+            afterRestart = await Preview(mcp, preview);
+            Assert.AreEqual(unattached.GetRawText(), afterRestart.GetRawText(),
                 "A saved registration is not a recorded handshake: the preview is today's plan.");
             RequireToolSuccess(await mcp.Tool("kicad_instance_reattach", new { instanceId }));
-            Assert.AreEqual(unattached.GetRawText(), (await Preview(mcp, preview)).GetRawText(),
+            afterReattach = await Preview(mcp, preview);
+            Assert.AreEqual(unattached.GetRawText(), afterReattach.GetRawText(),
                 "The handshake recorded at reattach does not advertise realization either.");
         }
-        Assert.AreEqual(before.State, (await Capture()).State, "Planning, the worker and apply must leave KiCad unchanged.");
+        var after = await Capture();
+        Assert.AreEqual(before.State, after.State, "Planning, the worker and apply must leave KiCad unchanged.");
         Assert.AreEqual(preview.Token, new DesignRecoveryStore(preview.Recovery).Read()!.RevisionToken, "The preview writes nothing.");
+        static string Sha256(JsonElement plan) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(plan.GetRawText())));
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-handshake-planning.json"), JsonSerializer.Serialize(new
         {
             instanceId, nativeCapabilities = live.Capabilities.ToArray(),
-            classification = SchematicConnectedAdditionKind.NotApplicable.ToString(), classificationIfAdvertised = SchematicConnectedAdditionKind.Admitted.ToString(),
-            previewWithoutAttachment = "today", previewAfterAttach = "today", previewAfterRestart = "today", previewAfterReattach = "today",
-            workerErrorCode = worker.Code, applyErrorCode = applied, workerAndApplyJournaled = "xml-publication", nativeUnchanged = true
+            classification = classified.ToString(), classificationIfAdvertised = classifiedIfAdvertised.ToString(),
+            todayCandidateXmlSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(today.CandidateXml!))),
+            previewSha256 = new { withoutAttachment = Sha256(unattached), afterAttach = Sha256(afterAttach),
+                afterRestart = Sha256(afterRestart), afterReattach = Sha256(afterReattach) },
+            workerErrorCode = worker.Code, applyErrorCode = applied, journaled,
+            nativeStateSha256 = new { before = before.State.StateSha256, after = after.State.StateSha256 }
         }), token);
         Console.WriteLine($"Recorded handshake planning {instanceId}: preview, worker and apply all took the general path.");
 

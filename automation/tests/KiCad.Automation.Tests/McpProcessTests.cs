@@ -838,8 +838,9 @@ public sealed class McpProcessTests
     // the record. The automatic worker and apply take their own live handshakes and classify the same revision the
     // same way. No KiCad build advertises schematic.connection-realization.v1 yet (CN-1 §8.3), so a scripted editor
     // on the real NNG transport stands in for one; NativeSessionTests (VerifyRecordedHandshakePlanning) proves the
-    // unadvertised case against a real KiCad. Every expectation for the advertised case comes from the planner's own
-    // reference plan, so it holds whether the built-in planner refuses the connection or plans its realization.
+    // unadvertised case against a real KiCad. With the capability the planner plans the connection's realization
+    // (CN-1 §4.3), and the scripted editor refuses the realization's measurement, so the worker and apply must both
+    // stop with that measurement's code (CN-1 §13) after sending the editor the same requests.
     [TestMethod]
     public async Task SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio()
     {
@@ -861,8 +862,9 @@ public sealed class McpProcessTests
             var realizing = SchematicSynchronizationPlanner.Plan(state, advertising);
             Assert.IsTrue(today.CanPrepare, today.ErrorMessage);
             Assert.IsFalse(today.NativeConnectionRealizationRequired);
-            Assert.IsTrue(realizing.CanPrepare ? realizing.NativeConnectionRealizationRequired : realizing.ErrorCode is not null,
-                "An admitted connection-only revision either plans a native realization or names its refusal (CN-1 §4.3).");
+            Assert.IsTrue(realizing.CanPrepare, realizing.ErrorCode + ": " + realizing.ErrorMessage);
+            Assert.IsTrue(realizing.NativeConnectionRealizationRequired,
+                "With the capability an admitted connection-only revision plans a native realization (CN-1 §4.3): " + realizing.ErrorMessage);
 
             int records = 0;
             (string Recovery, string Design, string Token) Record()
@@ -923,27 +925,18 @@ public sealed class McpProcessTests
             var worker = await Worker();
             var apply = await Apply();
             CollectionAssert.AreEqual(workerStart, worker.Requests.Take(4).ToArray(), string.Join(", ", worker.Requests));
-            if (realizing.CanPrepare)
-            {
-                // Both hand the realization to its measurement of the captured checkpoint (CN-1 §9.1). The scripted
-                // editor refuses the measurement, so nothing is journaled, drawn or saved.
-                CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
-                CollectionAssert.AreEqual(new[] { handshake, capture }, apply.Requests.Take(2).ToArray(), string.Join(", ", apply.Requests));
-                Assert.IsGreaterThan(2, apply.Requests.Length, "After the capture the realization measures the checkpoint: " + string.Join(", ", apply.Requests));
-                Assert.IsTrue(apply.Requests.Skip(2).All(r => r == measure),
-                    "After the capture the realization only measures the checkpoint: " + string.Join(", ", apply.Requests));
-                Assert.IsNotNull(worker.Code); Assert.IsNotNull(apply.Code);
-            }
-            else
-            {
-                Assert.AreEqual(realizing.ErrorCode, worker.Code, "The worker pauses on the planner's refusal.");
-                Assert.AreEqual(realizing.ErrorCode, apply.Code, "Apply refuses with the planner's code.");
-                Assert.HasCount(4, worker.Requests, "The worker must not hand an unrealizable plan to apply: " + string.Join(", ", worker.Requests));
-                CollectionAssert.AreEqual(new[] { handshake }, apply.Requests, "Apply refuses after its handshake, before capturing the editor.");
-            }
+            // Both hand the realization to its measurement of the captured checkpoint (CN-1 §9.1). The scripted editor
+            // refuses the measurement, so both stop with the same code and nothing is journaled, drawn or saved.
+            CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
+            CollectionAssert.AreEqual(new[] { handshake, capture }, apply.Requests.Take(2).ToArray(), string.Join(", ", apply.Requests));
+            Assert.IsGreaterThan(2, apply.Requests.Length, "After the capture the realization measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.IsTrue(apply.Requests.Skip(2).All(r => r == measure),
+                "After the capture the realization only measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.AreEqual(SchematicConnectionErrors.RealizationMeasurementUnsupported, apply.Code, "Apply stops at the refused measurement.");
+            Assert.AreEqual(apply.Code, worker.Code, "The worker pauses with apply's code.");
             Assert.IsFalse(worker.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
             Assert.IsFalse(apply.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
-            Console.WriteLine($"Advertised handshake: the planner {(realizing.CanPrepare ? "plans a native realization" : "refuses with " + realizing.ErrorCode)}; "
+            Console.WriteLine($"Advertised handshake: the planner plans a native realization; "
                 + $"worker {worker.Code} after [{string.Join(", ", worker.Requests)}]; apply {apply.Code} after [{string.Join(", ", apply.Requests)}].");
 
             // The preview reads the record made at attach, not the live editor: after the editor stops advertising the

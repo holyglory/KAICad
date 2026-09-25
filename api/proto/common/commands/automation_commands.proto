@@ -267,6 +267,13 @@ message DocumentLifecycleState {
   // Exact native state at a successful load/save checkpoint; empty means unavailable.
   string clean_checkpoint_sha256 = 13;
   // -- lane 2C (300-399) --
+  // state_sha256 without the project-file entries that every save writes from the schematic
+  // itself: the sheet list, the top-level sheet list, the root sheet's revision kept for IPC-2581
+  // and the project file name.  Saving writes nothing else into the project settings, so a save
+  // that only rewrites a stale sheet list (a project KiCad has not saved yet, or sheets added or
+  // renamed since the last save) changes state_sha256 but not this digest.  Empty when
+  // unavailable; a client must then require state_sha256 itself to be unchanged.
+  string save_stable_state_sha256 = 300;
   // -- end lane 2C --
   // -- lane 2D (400-499) --
   // -- end lane 2D --
@@ -416,6 +423,11 @@ message AutomationSession {
   // feature contracts. A peer that answers this handshake always dispatches GetAutomationSession,
   // so an empty list means a peer built before this field, whose request coverage is unknown.
   repeated string handled_requests = 401;
+  // The operating-system process ID of this KiCad process, 0 when unknown. An automation client
+  // uses it only to observe whether this same process is still running, together with the start
+  // time the operating system reports for it, so a KiCad that ended can be reported as ended; it
+  // never signals or stops KiCad through it.
+  uint32 process_id = 402;
   // -- end lane 2D --
 }
 
@@ -551,6 +563,10 @@ message MeasureSchematicPlacement {
   repeated google.protobuf.Any item_candidates = 5;
   // 6: reserved for explicit variant selection (p20323), declared at a later seam freeze.
   // -- lane 2A (100-199) --
+  // Also return the presentation facts of this sheet instance (presentation), measured on
+  // private copies at this instance: its own references, units and field text, painted glyph
+  // extents and native net identities. Servers that predate this field refuse the request.
+  bool include_presentation = 100;
   // -- end lane 2A --
 }
 
@@ -572,6 +588,10 @@ message SchematicPlacementGeometry {
   repeated SchematicPlacementBounds item_candidates = 9;
   // 10: held for the CN-1 milestone 2 measurement extension, declared at a later seam freeze.
   // -- lane 2A (100-199) --
+  // Present only when include_presentation was requested; document and revision equal this
+  // response's. Unlike ReadSchematicPresentationFacts it measures any loaded sheet instance, not
+  // only the displayed one, and fills every lane 2A presentation field.
+  SchematicPresentationFacts presentation = 100;
   // -- end lane 2A --
 }
 
@@ -653,6 +673,9 @@ message SchematicPresentationFacts {
   repeated SchematicPresentationWire wires = 7;
   repeated kiapi.common.types.Vector2 junctions = 8;
   // -- lane 2A (100-199) --
+  // Human-readable sheet-instance path (for example "/CPU/CPU_POWER/") and page number.
+  string sheet_name = 100;
+  string page_number = 101;
   // -- end lane 2A --
 }
 
@@ -682,6 +705,20 @@ message SchematicPresentationObject {
   // font metrics, transformed to sheet coordinates; not a clipping rectangle.
   kiapi.common.types.Box2 text_bounds = 9;
   // -- lane 2A (100-199) --
+  // Extent of the glyphs the schematic painter draws for this text: its draw position,
+  // justification, rotation, effective stroke width, font and metrics, from the exact native
+  // glyph geometry. Absent for objects without painted glyphs.
+  kiapi.common.types.Box2 glyph_bounds = 100;
+  // Painted reading direction in degrees counter-clockwise, in [0, 360): 0 reads left to right,
+  // 90 bottom to top, 180 upside down, 270 top to bottom. Absent for objects without text.
+  optional double reading_angle_degrees = 101;
+  // The reference designator of a symbol that must show one: every symbol except power and
+  // virtual ('#') symbols, whose references KiCad hides by design.
+  bool designator_required = 102;
+  // What the object is on its sheet, deciding which overlap rules apply: "symbol" (body and
+  // pins), "sheet" (sheet symbol body), "label" (label body), "field", "sheet_pin", "text" or
+  // "other". Empty from peers that predate it.
+  string presentation_role = 103;
   // -- end lane 2A --
 }
 
@@ -857,6 +894,15 @@ message SchematicItemOperation {
     // -- lane 2A (100-199) --
     // -- end lane 2A --
     // -- lane 2C (300-399) --
+    // Rebuilding deleted native files from saved XML: the screen identity the root's saved file had.
+    // A schematic KiCad creates for a project whose files are missing gets a new root screen
+    // identity; this gives that root the recorded one, so the rebuilt root file is the original.
+    // Nothing else changes: not the root sheet's own identity, which the project file declares,
+    // nor any path. Only as the first operation, targeting the root sheet of a single-root
+    // schematic whose only screen was never loaded or saved and holds no item or cached
+    // definition, and never an identity another loaded screen has. Undo and a rejected batch
+    // restore the previous identity.
+    kiapi.common.types.KIID rebuild_screen_identity = 300;
     // -- end lane 2C --
   }
 }
@@ -982,6 +1028,8 @@ message SchematicItemBatchResult {
   // -- lane 2A (100-199) --
   // -- end lane 2A --
   // -- lane 2C (300-399) --
+  // True only when a rebuild_screen_identity operation changed the root screen's identity.
+  bool screen_identity_changed = 300;
   // -- end lane 2C --
 }
 

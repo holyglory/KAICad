@@ -351,6 +351,10 @@ public sealed partial class NativeSessionTests
     // of its own symbol only where that symbol draws more than its pin target in front of the pin. On a pin that already
     // has wires or labels, the same label must be refused once those are treated as another connection's items; the
     // recorded count takes only labels the rule admitted before, and the root sheet (with its wired probe link) needs one.
+    // The creation journey's new symbols all face one way, so the first one is also judged turned to every other
+    // orientation on the same sheet, and labels are judged facing all four ways. Must-catch on the same real geometry: a
+    // new symbol whose own reference text is moved in front of a pin, where a label admitted there runs, draws beyond
+    // its pin target and refuses that label; the root sheet must run it.
     private static async Task VerifyAnchorLabels(NativeClient client, MeasureSchematicPlacement original, SchematicPlacementGeometry symbols,
         CheckedSchematicState before, KiCad.Automation.Model.DocumentRevision revision, Guid screen, SchematicConnectionPolicy policy,
         ConnectionLabelKind[] kinds, string evidence, string instanceId, CancellationToken token)
@@ -370,79 +374,146 @@ public sealed partial class NativeSessionTests
         var measuredSymbols = symbols.Obstacles.Concat(symbols.Candidates).Where(o => o.SymbolPins is not null).ToArray();
         var owners = measuredSymbols.Where(o => o.SymbolPins.Complete && o.SymbolPins.Pins.Any(p => p.Visible)).OrderBy(o => o.Id.Value, StringComparer.Ordinal).ToArray();
         int skipped = measuredSymbols.Length - owners.Length;
-        var probes = owners.SelectMany(o => o.SymbolPins.Pins.Where(p => p.Visible).OrderBy(p => p.Id.Value, StringComparer.Ordinal)
-            .SelectMany(p => kinds.Select(k => (Owner: o, Pin: p, Kind: k)))).ToArray();
+        (SchematicPlacementBounds Owner, SchematicPinAnchor Pin, ConnectionLabelKind Kind)[] Visible(SchematicPlacementBounds owner) =>
+            [.. owner.SymbolPins.Pins.Where(p => p.Visible).OrderBy(p => p.Id.Value, StringComparer.Ordinal).SelectMany(p => kinds.Select(k => (owner, p, k)))];
+        var probes = owners.SelectMany(Visible).ToArray();
         Assert.IsNotEmpty(probes, "This sheet has visible pins to check.");
+
+        // Measure a label of each listed kind on each listed pin, check what KiCad measures, and judge it with the realizer's
+        // own rule against `sheet`: this sheet measured with its new symbols (possibly turned or edited).
+        async Task<List<AnchorLabelVerdict>> Judge(SchematicPlacementGeometry sheet,
+            IReadOnlyList<(SchematicPlacementBounds Owner, SchematicPinAnchor Pin, ConnectionLabelKind Kind)> listed)
+        {
+            var verdicts = new List<AnchorLabelVerdict>();
+            foreach (var chunk in listed.Chunk(SchematicConnectionRealizer.MaxMeasuredCandidates))
+            {
+                var request = original.Clone(); request.Candidates.Clear();
+                foreach (var (_, pin, kind) in chunk)
+                {
+                    var spin = SchematicConnectionGeometry.Spin(SchematicConnectionGeometry.Outward(pin));
+                    var shape = kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
+                    // One probe identity per pin: the symbol-probe form keyed by the placed pin.
+                    var id = SchematicConnectionIdentity.Probe(revision, screen, SchematicConnectionRealizer.Descriptor(kind), "PROBE_ANCHOR", spin, shape,
+                        Guid.Parse(pin.Id.Value), 0);
+                    request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, id, pin.Position.Clone(), "PROBE_ANCHOR", spin, policy)));
+                }
+                var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+                Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
+                Assert.AreEqual(symbols.Obstacles, measured.Obstacles, "One revision measures the same existing items with or without anchor labels.");
+                for (int i = 0; i < chunk.Length; i++)
+                {
+                    var (owner, pin, kind) = chunk[i];
+                    var outward = SchematicConnectionGeometry.Outward(pin);
+                    string what = kind + " label on pin " + pin.Number + " of " + owner.Id.Value + " facing (" + outward.Dx + "," + outward.Dy + ")";
+                    var label = Box(measured.ItemCandidates[i].Bounds);
+                    var body = Box(owner.Bounds);
+                    Assert.AreEqual(pin.Position, measured.ItemCandidates[i].Anchor, what);
+                    long reach = outward switch
+                    {
+                        (-1, 0) => pin.Position.XNm - body.L, (1, 0) => body.R - pin.Position.XNm,
+                        (0, -1) => pin.Position.YNm - body.T, _ => body.B - pin.Position.YNm
+                    };
+                    long behind = outward switch { (-1, 0) => label.R - pin.Position.XNm, (1, 0) => pin.Position.XNm - label.L,
+                        (0, -1) => label.B - pin.Position.YNm, _ => pin.Position.YNm - label.T };
+                    // KiCad's bounds include every visible pin up to its end and, on a pin that can be left unconnected, the target
+                    // drawn around that end.
+                    bool target = pin.ElectricalType is not (ElectricalPinType.EptNoConnect or ElectricalPinType.EptFree);
+                    Assert.IsGreaterThanOrEqualTo(target ? SchematicConnectionRealizer.PinTargetReachNm : 0L, reach, what + ": the symbol's bounds past the pin.");
+                    Assert.AreEqual(SchematicConnectionRealizerTests.Geometry.MeasuredBehind[SchematicConnectionRealizer.Descriptor(kind).ClrType], behind,
+                        what + " reaches behind its anchor as the realizer tests draw it.");
+                    Assert.IsTrue(Overlap(label, body), what + " overlaps its own symbol's bounds at the pin.");
+                    var own = connection.GetValueOrDefault(pin.Id.Value) ?? [];
+                    var refusal = SchematicConnectionRealizer.AnchorLabelRefusal(native, sheet, Guid.Parse(owner.Id.Value), pin, measured.ItemCandidates[i].Bounds,
+                        own, policy);
+                    if (refusal is not null && refusal.StartsWith("the label overlaps symbol " + owner.Id.Value, StringComparison.Ordinal))
+                        Assert.IsGreaterThan(SchematicConnectionRealizer.PinTargetReachNm, reach,
+                            what + " is refused by its own symbol only where that symbol draws beyond its pin target: " + refusal);
+                    verdicts.Add(new(owner, pin, kind, outward, reach, behind, refusal, own, measured.ItemCandidates[i].Bounds));
+                }
+            }
+            return verdicts;
+        }
+
         var facts = new List<object>();
         var admitted = kinds.ToDictionary(k => k, _ => 0);
         int refusedAsForeign = 0;
-        foreach (var chunk in probes.Chunk(SchematicConnectionRealizer.MaxMeasuredCandidates))
+        var verdicts = await Judge(symbols, probes);
+        foreach (var verdict in verdicts)
         {
-            var request = original.Clone(); request.Candidates.Clear();
-            foreach (var (_, pin, kind) in chunk)
+            var (owner, pin, kind) = (verdict.Owner, verdict.Pin, verdict.Kind);
+            if (verdict.Refusal is null) admitted[kind]++;
+            // Must-catch on the same real geometry: for a pin that already has wires or labels, the same label is refused
+            // once those items are not taken as the pin's own connection (they would touch or run through it). Only a label
+            // the rule admits with its own connection shows that treating those items as another connection's refuses it.
+            string? foreign = verdict.Connection.Length > 1 ? SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin,
+                verdict.Label, [], policy) : null;
+            if (verdict.Connection.Length > 1)
             {
-                var spin = SchematicConnectionGeometry.Spin(SchematicConnectionGeometry.Outward(pin));
-                var shape = kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
-                // One probe identity per pin: the symbol-probe form keyed by the placed pin.
-                var id = SchematicConnectionIdentity.Probe(revision, screen, SchematicConnectionRealizer.Descriptor(kind), "PROBE_ANCHOR", spin, shape,
-                    Guid.Parse(pin.Id.Value), 0);
-                request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(kind, id, pin.Position.Clone(), "PROBE_ANCHOR", spin, policy)));
+                Assert.IsNotNull(foreign, kind + " label on pin " + pin.Number + " of " + owner.Id.Value
+                    + " would touch the items of its pin's connection if they belonged to another one.");
+                if (verdict.Refusal is null) refusedAsForeign++;
             }
-            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
-            Assert.HasCount(request.ItemCandidates.Count, measured.ItemCandidates);
-            Assert.AreEqual(symbols.Obstacles, measured.Obstacles, "One revision measures the same existing items with or without anchor labels.");
-            for (int i = 0; i < chunk.Length; i++)
-            {
-                var (owner, pin, kind) = chunk[i];
-                var outward = SchematicConnectionGeometry.Outward(pin);
-                string what = kind + " label on pin " + pin.Number + " of " + owner.Id.Value;
-                var label = Box(measured.ItemCandidates[i].Bounds);
-                var body = Box(owner.Bounds);
-                Assert.AreEqual(pin.Position, measured.ItemCandidates[i].Anchor, what);
-                long reach = outward switch
-                {
-                    (-1, 0) => pin.Position.XNm - body.L, (1, 0) => body.R - pin.Position.XNm,
-                    (0, -1) => pin.Position.YNm - body.T, _ => body.B - pin.Position.YNm
-                };
-                long behind = outward switch { (-1, 0) => label.R - pin.Position.XNm, (1, 0) => pin.Position.XNm - label.L,
-                    (0, -1) => label.B - pin.Position.YNm, _ => pin.Position.YNm - label.T };
-                // KiCad's bounds include every visible pin up to its end and, on a pin that can be left unconnected, the target
-                // drawn around that end.
-                bool target = pin.ElectricalType is not (ElectricalPinType.EptNoConnect or ElectricalPinType.EptFree);
-                Assert.IsGreaterThanOrEqualTo(target ? SchematicConnectionRealizer.PinTargetReachNm : 0L, reach, what + ": the symbol's bounds past the pin.");
-                Assert.AreEqual(SchematicConnectionRealizerTests.Geometry.MeasuredBehind[SchematicConnectionRealizer.Descriptor(kind).ClrType], behind,
-                    what + " reaches behind its anchor as the realizer tests draw it.");
-                Assert.IsTrue(Overlap(label, body), what + " overlaps its own symbol's bounds at the pin.");
-                var own = connection.GetValueOrDefault(pin.Id.Value) ?? [];
-                var refusal = SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin, measured.ItemCandidates[i].Bounds,
-                    own, policy);
-                if (refusal is not null && refusal.StartsWith("the label overlaps symbol " + owner.Id.Value, StringComparison.Ordinal))
-                    Assert.IsGreaterThan(SchematicConnectionRealizer.PinTargetReachNm, reach,
-                        what + " is refused by its own symbol only where that symbol draws beyond its pin target: " + refusal);
-                if (refusal is null) admitted[kind]++;
-                // Must-catch on the same real geometry: for a pin that already has wires or labels, the same label is refused
-                // once those items are not taken as the pin's own connection (they would touch or run through it). Only a label
-                // the rule admits with its own connection shows that treating those items as another connection's refuses it.
-                string? foreign = own.Length > 1 ? SchematicConnectionRealizer.AnchorLabelRefusal(native, symbols, Guid.Parse(owner.Id.Value), pin,
-                    measured.ItemCandidates[i].Bounds, [], policy) : null;
-                if (own.Length > 1)
-                {
-                    Assert.IsNotNull(foreign, what + " would touch the items of its pin's connection if they belonged to another one.");
-                    if (refusal is null) refusedAsForeign++;
-                }
-                facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kind.ToString(), outward = new[] { outward.Dx, outward.Dy }, reach, behind,
-                    admitted = refusal is null, whyNot = refusal, connectionItems = own.Length, whyNotIfForeign = foreign });
-            }
+            facts.Add(new { owner = owner.Id.Value, pin = pin.Number, kind = kind.ToString(), outward = new[] { verdict.Outward.Dx, verdict.Outward.Dy },
+                reach = verdict.Reach, behind = verdict.Behind, admitted = verdict.Refusal is null, whyNot = verdict.Refusal, connectionItems = verdict.Connection.Length,
+                whyNotIfForeign = foreign });
         }
         foreach (var kind in kinds)
             Assert.IsGreaterThan(0, admitted[kind], "The realizer's rule admits a " + kind + " label on some pin of this real sheet.");
         // The root sheet always holds the wired probe link, so the must-catch above must actually have run there.
-        if (original.Document.SheetPath.Path.Count == 1)
+        bool root = original.Document.SheetPath.Path.Count == 1;
+        if (root)
             Assert.IsGreaterThan(0, refusedAsForeign, "A label admitted on a wired pin of the root sheet is refused once its wires are another connection's.");
+
+        // The first new symbol turned about its own anchor to each other orientation, on the same sheet, judged by the same
+        // rule and checks: with the untouched sheet, labels on pins facing all four ways.
+        var first = original.Candidates[0];
+        var turned = new List<AnchorLabelVerdict>();
+        foreach (var orientation in Enumerable.Range(0, 4).Select(quarter => (SchematicSymbolOrientation)(quarter + 1)))
+        {
+            if (first.Transform is { MirrorX: false, MirrorY: false } transform && transform.Orientation == orientation) continue;
+            var request = original.Clone();
+            request.Candidates[0].Transform = new() { Orientation = orientation };
+            var sheet = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+            Assert.AreEqual(symbols.Obstacles, sheet.Obstacles, "Turning a new symbol measures the same existing items.");
+            turned.AddRange(await Judge(sheet, Visible(sheet.Candidates.Single(c => c.Id.Equals(first.Id)))));
+        }
+        CollectionAssert.AreEquivalent(new[] { (1, 0), (-1, 0), (0, 1), (0, -1) },
+            verdicts.Concat(turned).Select(v => v.Outward).Distinct().ToArray(), "Anchor labels are judged on pins facing every way.");
+
+        // Must-catch: a new symbol's own reference text moved three grids in front of a pin whose local label the rule admits.
+        // Only that symbol's bounds change, so the label is now refused by its own symbol, beyond its pin target.
+        object? fieldInFront = null;
+        var basis = verdicts.FirstOrDefault(v => v.Refusal is null && v.Kind == ConnectionLabelKind.Local && symbols.Candidates.Any(c => c.Id.Equals(v.Owner.Id)));
+        if (root) Assert.IsNotNull(basis, "A local label on a new symbol's pin is admitted on the root sheet.");
+        if (basis is not null)
+        {
+            var request = original.Clone();
+            var symbol = request.Candidates.Single(c => c.Id.Equals(basis.Owner.Id));
+            long ahead = 3 * policy.GridNm;
+            symbol.ReferenceField.Visible = true;
+            symbol.ReferenceField.Text.Position = new() { XNm = basis.Pin.Position.XNm + basis.Outward.Dx * ahead, YNm = basis.Pin.Position.YNm + basis.Outward.Dy * ahead };
+            var sheet = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+            Assert.AreEqual(symbols.Obstacles, sheet.Obstacles, "Moving a new symbol's text measures the same existing items.");
+            var moved = sheet.Candidates.Single(c => c.Id.Equals(symbol.Id));
+            var refused = (await Judge(sheet, [(moved, moved.SymbolPins.Pins.Single(p => p.Id.Equals(basis.Pin.Id)), ConnectionLabelKind.Local)])).Single();
+            Assert.IsGreaterThan(SchematicConnectionRealizer.PinTargetReachNm, refused.Reach, "The moved reference text is drawn in front of the pin.");
+            Assert.AreEqual("the label overlaps symbol " + moved.Id.Value + " more than the pin target in front of the pin", refused.Refusal,
+                "A label its own symbol's text overlaps beyond the pin target is refused by that symbol.");
+            fieldInFront = new { owner = moved.Id.Value, pin = basis.Pin.Number, reachBefore = basis.Reach, reachAfter = refused.Reach, whyNot = refused.Refusal };
+        }
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-anchor-labels-" + original.Document.SheetPath.Path[^1].Value + ".json"),
             System.Text.Json.JsonSerializer.Serialize(new { skippedSymbols = skipped, checkedSymbols = owners.Length, checkedPins = probes.Length / kinds.Length,
-                admitted = admitted.ToDictionary(p => p.Key.ToString(), p => p.Value), refusedAsForeign, facts }), token);
+                admitted = admitted.ToDictionary(p => p.Key.ToString(), p => p.Value), refusedAsForeign, facts,
+                turned = turned.Select(v => new { owner = v.Owner.Id.Value, pin = v.Pin.Number, kind = v.Kind.ToString(), outward = new[] { v.Outward.Dx, v.Outward.Dy },
+                    reach = v.Reach, behind = v.Behind, admitted = v.Refusal is null, whyNot = v.Refusal }).ToArray(),
+                fieldInFront }), token);
     }
+
+    // One anchor label judged on a live sheet: its pin and owner as measured, the pin's outward direction, how far the owner's
+    // bounds reach past the pin, how far the label reaches behind it, the realizer's verdict, the pin's existing connection
+    // on the sheet and the label's measured bounds.
+    private sealed record AnchorLabelVerdict(SchematicPlacementBounds Owner, SchematicPinAnchor Pin, ConnectionLabelKind Kind, (int Dx, int Dy) Outward,
+        long Reach, long Behind, string? Refusal, Guid[] Connection, Box2 Label);
 
     // The public MCP measurement tool must return exactly the native geometry for every measured
     // sheet instance, reject a stale revision and replay the same answer. One service session serves

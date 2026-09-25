@@ -18,7 +18,8 @@ string state = Environment.GetEnvironmentVariable("KICAD_AUTOMATION_STATE_DIRECT
     ?? throw new InvalidOperationException("An isolated state directory is required.");
 if (!Path.IsPathFullyQualified(state)) throw new InvalidOperationException("The state directory must be absolute.");
 var pause = new PauseGate(Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_STAGE") ?? "none",
-    Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_MARKER"));
+    Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_MARKER"),
+    Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_RELEASE"));
 if (args is ["--refinement-input-file", var inputFile])
 {
     using var inputJson = JsonDocument.Parse(await File.ReadAllBytesAsync(inputFile)); var request = inputJson.RootElement;
@@ -60,6 +61,11 @@ builder.Services.AddSingleton(pause);
 builder.Services.AddSingleton<IExecutionCheckpoint>(pause);
 builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause));
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), state));
+// As in the production server: the synchronization preview classifies with the handshake each instance gave when it
+// was attached, without contacting KiCad, so it classifies a saved revision exactly as apply does (decision
+// n39ac0ccc5c9270f2).
+builder.Services.AddSingleton<IAttachedHandshakes>(provider =>
+    new AttachedHandshakes(provider.GetRequiredService<InstanceRegistry>().AttachedHandshake));
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddMcpServer().WithStdioServerTransport()
     .WithTools<InstanceTools>().WithTools<RecoveryTools>().WithTools<SchematicViewTools>()
@@ -72,8 +78,11 @@ public sealed class PauseGate : IExecutionCheckpoint
 {
     private readonly string stage;
     private readonly string? marker;
+    private readonly string? release;
     private int fired;
-    public PauseGate(string stage, string? marker)
+    /// <param name="release">Absent: the paused call waits until the parent kills this host. Present: the parent
+    /// observes the paused state, then creates this file and the same call continues.</param>
+    public PauseGate(string stage, string? marker, string? release = null)
     {
         if (stage is not ("none" or "native-edit" or "native-save" or "completed" or "publication-staged"
             or "publication-replaced" or "baseline-committed" or "receipt-archived" or "retained-archived"
@@ -83,7 +92,9 @@ public sealed class PauseGate : IExecutionCheckpoint
             throw new ArgumentException("Unknown interruption stage.", nameof(stage));
         if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
             throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));
-        this.stage = stage; this.marker = marker;
+        if (release is not null && (stage == "none" || !Path.IsPathFullyQualified(release)))
+            throw new ArgumentException("A release file needs a pause stage and an absolute test-owned path.", nameof(release));
+        this.stage = stage; this.marker = marker; this.release = release;
     }
     public async Task WaitAsync(string reached, CancellationToken token)
     {
@@ -95,9 +106,22 @@ public sealed class PauseGate : IExecutionCheckpoint
             await stream.FlushAsync(token); stream.Flush(flushToDisk: true);
         }
         File.Move(temporary, marker!, overwrite: false);
-        // The parent kills only this owned host. Native editors are separate
-        // processes and remain alive; no cooperative cleanup establishes proof.
-        await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        if (release is null)
+        {
+            // The parent kills only this owned host. Native editors are separate
+            // processes and remain alive; no cooperative cleanup establishes proof.
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return;
+        }
+        // An observing parent reads the state at this exact point, then lets the same call finish.
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(Path.GetDirectoryName(release)!, Path.GetFileName(release));
+        watcher.Created += (_, _) => released.TrySetResult();
+        watcher.Renamed += (_, _) => released.TrySetResult();
+        watcher.Error += (_, error) => released.TrySetException(error.GetException());
+        watcher.EnableRaisingEvents = true;
+        if (File.Exists(release)) released.TrySetResult();
+        await released.Task.WaitAsync(token);
     }
 }
 

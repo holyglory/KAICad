@@ -48,6 +48,11 @@
 
 #include "api_sch_utils.h"
 
+#include <api/sch_text_presentation.h>
+#include <sch_connection.h>
+#include <sch_render_settings.h>
+#include <trigo.h>
+
 #include <api/api_utils.h>
 #include <api/api_enums.h>
 #include <api/common/commands/automation_commands.pb.h>
@@ -172,8 +177,7 @@ static void packSymbolVariants( kiapi::schematic::types::SchematicSymbolVariants
 }
 
 
-BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
-                                    const wxString& variant )
+BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path )
 {
     // SCH_SYMBOL::GetBoundingBox() draws an unresolved symbol as the placeholder
     // LIB_SYMBOL::GetDummy(); measure exactly that, but at the explicit sheet
@@ -186,6 +190,34 @@ BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PA
     bounds = symbol.GetTransform().TransformCoordinate( bounds );
     bounds.Normalize();
     bounds.Offset( symbol.GetPosition() );
+    return bounds;
+}
+
+
+BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path )
+{
+    // A library pin's box includes the circle the editor draws at an unconnected pin end (TARGET_PIN_RADIUS),
+    // because library pins are never connected. That circle disappears as soon as a wire, label or power symbol
+    // touches the pin end, and it is never printed, so the drawn body leaves it out: measure a private copy of the
+    // definition whose pins count as connected.
+    const LIB_SYMBOL* definition = symbol.GetEffectiveLibSymbol( &path );
+    if( !definition )
+        definition = LIB_SYMBOL::GetDummy();
+    LIB_SYMBOL drawn( *definition, nullptr, false );
+    for( SCH_PIN* pin : drawn.GetPins() )
+        pin->SetIsDangling( false );
+    BOX2I bounds = drawn.GetBodyBoundingBox( symbol.GetUnitSelection( &path ), symbol.GetBodyStyle(), true, false );
+    bounds = symbol.GetTransform().TransformCoordinate( bounds );
+    bounds.Normalize();
+    bounds.Offset( symbol.GetPosition() );
+    return bounds;
+}
+
+
+BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
+                                    const wxString& variant )
+{
+    BOX2I bounds = MeasureSchematicSymbolBody( symbol, path );
     for( const SCH_FIELD& field : symbol.GetFields() )
         if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
     return bounds;
@@ -872,4 +904,249 @@ tl::expected<bool, ApiResponseStatus> UnpackSheet( SCH_SHEET* aOutput, const kia
     }
 
     return true;
+}
+
+
+namespace
+{
+
+// Bounds of the strokes and outlines a font paints, collected exactly as the painter draws them.
+std::optional<BOX2I> paintedGlyphBounds( KIFONT::FONT& aFont, const wxString& aText, const VECTOR2I& aPosition,
+                                         const TEXT_ATTRIBUTES& aAttrs, const KIFONT::METRICS& aMetrics )
+{
+    std::optional<BOX2I> bounds;
+    auto merge = [&]( const BOX2I& box )
+    {
+        if( bounds )
+            bounds->Merge( box );
+        else
+            bounds = box;
+    };
+    KIGFX::GAL_DISPLAY_OPTIONS options;
+    CALLBACK_GAL gal( options,
+            [&]( const VECTOR2I& aStart, const VECTOR2I& aEnd )
+            {
+                merge( SHAPE_SEGMENT( aStart, aEnd, aAttrs.m_StrokeWidth ).BBox() );
+            },
+            [&]( const SHAPE_LINE_CHAIN& aOutline )
+            {
+                merge( aOutline.BBox() );
+            } );
+    aFont.Draw( &gal, aText, aPosition, aAttrs, aMetrics );
+    return bounds;
+}
+
+
+// SCH_PAINTER::draw( SCH_FIELD ) places a global label's fields with the label's text offset.
+BOX2I paintedFieldBox( const SCH_FIELD& aField, const SCH_SHEET_PATH& aPath, const wxString& aVariant,
+                       const SCH_RENDER_SETTINGS& aSettings )
+{
+    BOX2I box = aField.GetBoundingBox( &aPath, aVariant );
+    if( aField.GetParent() && aField.GetParent()->Type() == SCH_GLOBAL_LABEL_T )
+        box.Offset( static_cast<const SCH_GLOBALLABEL*>( aField.GetParent() )->GetSchematicTextOffset( &aSettings ) );
+    return box;
+}
+
+
+double readingAngle( EDA_ANGLE aAngle )
+{
+    aAngle.Normalize();
+    return aAngle.AsDegrees();
+}
+
+} // namespace
+
+
+std::optional<BOX2I> MeasureSchematicFieldGlyphs( const SCH_FIELD& aField, const SCH_SHEET_PATH& aPath,
+                                                 const wxString& aVariant,
+                                                 const SCH_RENDER_SETTINGS& aSettings )
+{
+    // The painter draws neither hidden nor private fields in a schematic, nor an empty text.
+    if( !aField.IsVisible() || aField.IsPrivate() )
+        return std::nullopt;
+    const wxString shown = aField.GetShownText( &aPath, true, 0, aVariant );
+    if( shown.IsEmpty() )
+        return std::nullopt;
+    TEXT_ATTRIBUTES attrs = aField.GetAttributes();
+    attrs.m_StrokeWidth = aField.GetEffectiveTextPenWidth( aSettings.GetDefaultPenWidth() );
+    attrs.m_Halign = GR_TEXT_H_ALIGN_CENTER;
+    attrs.m_Valign = GR_TEXT_V_ALIGN_CENTER;
+    attrs.m_Angle = aField.GetDrawRotation();
+    KIFONT::FONT* font = attrs.m_Font;
+    if( !font )
+        font = KIFONT::FONT::GetFont( aSettings.GetDefaultFont(), attrs.m_Bold, attrs.m_Italic );
+    if( !font )
+        return std::nullopt;
+    return paintedGlyphBounds( *font, shown, paintedFieldBox( aField, aPath, aVariant, aSettings ).Centre(),
+                               attrs, aField.GetFontMetrics() );
+}
+
+
+void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                     const wxString& aVariant,
+                                     kiapi::automation::v1::SchematicPresentationFacts& aOutput )
+{
+    using Fact = kiapi::automation::v1::SchematicPresentationObject;
+    SCH_SCREEN* screen = aPath.LastScreen();
+    if( !screen )
+        throw std::runtime_error( "The sheet instance has no loaded screen" );
+
+    const PAGE_INFO& page = screen->GetPageSettings();
+    PackBox2( *aOutput.mutable_page_bounds(),
+              BOX2I( VECTOR2I( 0, 0 ), VECTOR2I( page.GetWidthIU( schIUScale.IU_PER_MILS ),
+                                                 page.GetHeightIU( schIUScale.IU_PER_MILS ) ) ),
+              schIUScale );
+    aOutput.set_sheet_name( aPath.PathHumanReadable().ToUTF8() );
+    aOutput.set_page_number( aPath.GetPageNumber().ToUTF8() );
+    // Exact for what is reported; not a complete readability certificate.
+    aOutput.set_coverage_complete( false );
+    aOutput.add_limitations( "Overlap is measured between symbol bodies with their pins, label bodies and painted "
+                             "field glyphs; text crossed by wires, pin names, graphics or the drawing-sheet frame "
+                             "and title block is not measured" );
+    aOutput.add_limitations( "Complete native revision tracking is unfinished" );
+
+    auto object = [&]( const SCH_ITEM& aItem, const KIID* aOwner, const char* aRole, Fact::Kind aKind,
+                       BOX2I aBounds, bool aVisible ) -> Fact*
+    {
+        Fact* fact = aOutput.add_objects();
+        fact->mutable_id()->set_value( aItem.m_Uuid.AsStdString() );
+        if( aOwner )
+            fact->mutable_owner_id()->set_value( aOwner->AsStdString() );
+        fact->set_kind( aKind );
+        fact->set_visible( aVisible );
+        fact->set_presentation_role( aRole );
+        aBounds.Normalize();
+        PackBox2( *fact->mutable_bounds(), aBounds, schIUScale );
+        return fact;
+    };
+    auto text = [&]( Fact& aFact, const EDA_TEXT& aText, const wxString& aShown, const EDA_ANGLE& aAngle )
+    {
+        aFact.set_text_height_nm( schIUScale.IUToNm( aText.GetTextHeight() ) );
+        aFact.set_text( aShown.ToUTF8() );
+        aFact.set_reading_angle_degrees( readingAngle( aAngle ) );
+    };
+    auto field = [&]( const SCH_FIELD& aField, const SCH_ITEM& aOwner, bool aRequired )
+    {
+        const bool painted = aField.IsVisible() && !aField.IsPrivate();
+        const bool reference = aOwner.Type() == SCH_SYMBOL_T && aField.GetId() == FIELD_T::REFERENCE;
+        Fact* fact = object( aField, &aOwner.m_Uuid, "field", reference ? Fact::REFERENCE_DESIGNATOR : Fact::TEXT,
+                             paintedFieldBox( aField, aPath, aVariant, aSettings ), painted );
+        fact->set_field_name( aField.GetName().ToUTF8() );
+        text( *fact, aField, aField.GetShownText( &aPath, true, 0, aVariant ), aField.GetDrawRotation() );
+        fact->set_designator_required( reference && aRequired );
+        if( painted )
+            if( auto glyphs = MeasureSchematicFieldGlyphs( aField, aPath, aVariant, aSettings ) )
+                PackBox2( *fact->mutable_glyph_bounds(), *glyphs, schIUScale );
+    };
+    auto textBox = [&]( SCH_TEXTBOX& aBox, const KIID* aOwner, bool aVisible )
+    {
+        const wxString shown = aBox.GetShownText( &aSettings, &aPath, true );
+        aBox.SetText( shown );
+        Fact* fact = object( aBox, aOwner, "text", Fact::TEXT, aBox.GetBoundingBox(), aVisible );
+        text( *fact, aBox, shown, aBox.GetDrawRotation() );
+        // The rectangle is not a text clip. Match the painter's draw origin and rotation when
+        // transforming the native font-metric bounds.
+        const BOX2I textBounds = aBox.GetTextBox( nullptr );
+        const VECTOR2I origin = aBox.GetDrawPos();
+        VECTOR2I corners[] = { textBounds.GetOrigin(), VECTOR2I( textBounds.GetRight(), textBounds.GetTop() ),
+                               textBounds.GetEnd(), VECTOR2I( textBounds.GetLeft(), textBounds.GetBottom() ) };
+        for( VECTOR2I& corner : corners )
+            RotatePoint( corner, origin, aBox.GetDrawRotation() );
+        BOX2I rotated( corners[0], VECTOR2I( 0, 0 ) );
+        for( const VECTOR2I& corner : corners )
+            rotated.Merge( corner );
+        PackBox2( *fact->mutable_text_bounds(), rotated, schIUScale );
+    };
+
+    std::vector<SCH_ITEM*> originals;
+    for( SCH_ITEM* item : screen->Items() )
+        if( item->Type() != SCH_GROUP_T && item->Type() != SCH_MARKER_T )
+            originals.push_back( item );
+    std::sort( originals.begin(), originals.end(), []( auto* a, auto* b ) { return a->m_Uuid < b->m_Uuid; } );
+
+    for( SCH_ITEM* original : originals )
+    {
+        // Measure private copies: explicit-instance text must neither borrow nor disturb the
+        // caches of the displayed sheet.
+        auto copy = std::unique_ptr<SCH_ITEM>( static_cast<SCH_ITEM*>( original->Clone() ) );
+
+        if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( copy.get() ) )
+        {
+            object( *symbol, nullptr, "symbol", Fact::GRAPHIC, MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
+            // Power and virtual ('#') symbols hide their references by design.
+            const bool required = !symbol->IsPower() && !symbol->GetRef( &aPath ).StartsWith( wxT( "#" ) );
+            for( const SCH_FIELD& symbolField : symbol->GetFields() )
+                field( symbolField, *symbol, required );
+        }
+        else if( auto* sheet = dynamic_cast<SCH_SHEET*>( copy.get() ) )
+        {
+            object( *sheet, nullptr, "sheet", Fact::GRAPHIC, sheet->GetBodyBoundingBox(), true );
+            for( const SCH_FIELD& sheetField : sheet->GetFields() )
+                field( sheetField, *sheet, false );
+            for( SCH_SHEET_PIN* pin : sheet->GetPins() )
+            {
+                const wxString shown = pin->GetShownText( &aPath, true );
+                pin->SetText( shown );
+                Fact* fact = object( *pin, &sheet->m_Uuid, "sheet_pin", Fact::TEXT, pin->GetBoundingBox(), true );
+                text( *fact, *pin, shown, pin->GetDrawRotation() );
+            }
+        }
+        else if( auto* table = dynamic_cast<SCH_TABLE*>( copy.get() ) )
+        {
+            object( *table, nullptr, "other", Fact::GRAPHIC, table->GetBoundingBox(), true );
+            // The painter skips cells covered by a merged cell.
+            for( SCH_TABLECELL* cell : table->GetCells() )
+                textBox( *cell, &table->m_Uuid, cell->GetColSpan() > 0 && cell->GetRowSpan() > 0 );
+        }
+        else if( auto* box = dynamic_cast<SCH_TEXTBOX*>( copy.get() ) )
+        {
+            textBox( *box, nullptr, box->IsVisible() );
+        }
+        else if( auto* label = dynamic_cast<SCH_LABEL_BASE*>( copy.get() ) )
+        {
+            const wxString shown = label->GetShownText( &aPath, true );
+            label->SetText( shown );
+            Fact* fact = object( *label, nullptr, "label", Fact::TEXT, label->GetBodyBoundingBox( &aSettings ), true );
+            text( *fact, *label, shown, label->GetDrawRotation() );
+            for( const SCH_FIELD& labelField : label->GetFields() )
+                field( labelField, *label, false );
+        }
+        else if( copy->Type() == SCH_TEXT_T )
+        {
+            auto* note = static_cast<SCH_TEXT*>( copy.get() );
+            const wxString shown = note->GetShownText( &aPath, true );
+            note->SetText( shown );
+            const std::optional<BOX2I> painted = SchTextPresentationBounds( *note, aSettings );
+            Fact* fact = object( *note, nullptr, "text", Fact::TEXT, painted ? *painted : note->GetBoundingBox(),
+                                 note->IsVisible() );
+            text( *fact, *note, shown, note->GetDrawRotation() );
+            if( painted )
+                PackBox2( *fact->mutable_glyph_bounds(), *painted, schIUScale );
+        }
+        else
+        {
+            object( *copy, nullptr, "other", copy->Type() == SCH_BITMAP_T ? Fact::IMAGE : Fact::GRAPHIC,
+                    copy->GetBoundingBox(), true );
+        }
+
+        // Connectivity lives on the design's own items, per sheet instance.
+        if( auto* line = dynamic_cast<SCH_LINE*>( original ); line && line->GetLayer() == LAYER_WIRE )
+        {
+            const SCH_CONNECTION* connection = line->Connection( &aPath );
+            if( connection && connection->NetCode() > 0 && !line->IsConnectivityDirty() )
+            {
+                auto* wire = aOutput.add_wires();
+                wire->mutable_id()->set_value( line->m_Uuid.AsStdString() );
+                PackVector2( *wire->mutable_start(), line->GetStartPoint(), schIUScale );
+                PackVector2( *wire->mutable_end(), line->GetEndPoint(), schIUScale );
+                wire->set_signal_key( "native-net-code:" + std::to_string( connection->NetCode() ) );
+            }
+            else
+            {
+                aOutput.add_limitations( "A wire lacks a current native signal binding: " + line->m_Uuid.AsStdString() );
+            }
+        }
+        if( original->Type() == SCH_JUNCTION_T )
+            PackVector2( *aOutput.add_junctions(), original->GetPosition(), schIUScale );
+    }
 }

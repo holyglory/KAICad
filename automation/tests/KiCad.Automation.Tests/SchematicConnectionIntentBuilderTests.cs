@@ -12,12 +12,12 @@ using KiCad.Automation.Protocol;
 namespace KiCad.Automation.Tests;
 
 // CN-1 connection intent (cn1-wiring-intent.md §5) on small hand-built schematics: the contract's own examples
-// (§15), every §13 planning refusal, and the limits. These are unit tests of pure planning logic on purpose: no
-// editor can reach this code until KiCad advertises schematic.connection-realization.v1, and the native assertion
-// that must admit the realizer's wires (lane 2C) does not exist yet. The nearest higher-level
-// coverage is extended instead where it can run today: SchematicSynchronizationPlanTests.Connected checks the
-// same planner on the frozen PSU/CPU fixture and the repeated-sheet fixture, and the NativeXmlComponentCreation
-// and NativePsuCpuComponentCreation journeys build intents from real editor captures without applying them.
+// (§15), every §13 planning refusal, and the limits. These are unit tests of pure planning logic on purpose: the
+// end-to-end journeys (psu-cpu-connected in NativeXmlComponentCreationJourney, and McpReattachmentJourney) build intents
+// from a real editor that advertises schematic.connection-realization.v1 and apply them with KiCad's connectivity
+// assertion, but a valid fixture reaches only the admitted cases; most §13 refusals and the limits need hand-built states
+// that no editor produces on request. SchematicSynchronizationPlanTests.Connected checks the same planner on the frozen
+// PSU/CPU fixture and the repeated-sheet fixture.
 // Each case goes through the public planner with a session that advertises the capability, so classification,
 // the creation guards, the intent and the XML round trip all run; only states no valid saved design can reach
 // (a second top-level sheet, pins without their own identities, oversized revisions) call the builder directly.
@@ -721,24 +721,27 @@ public sealed class SchematicConnectionIntentBuilderTests
     private static Guid NativeSymbol(SchematicDesign design, Guid component) =>
         design.SymbolBindings.Single(b => b.SymbolOccurrenceId == design.Engineering.Circuit.Symbols.Single(s => s.ComponentId == component).Id).NativeObjectId;
 
-    internal enum BenchSheet { Root, Child, Grand }
+    /// <summary>The bench's sheets: the root, its child and the child's grandchild; <c>Grand2</c> is a second
+    /// grandchild under the same child sheet, present only on a bench built with <c>secondGrand</c>.</summary>
+    internal enum BenchSheet { Root, Child, Grand, Grand2 }
 
     internal sealed record BenchPin(string Number, string Name, int Unit = 1, ElectricalPinType Type = ElectricalPinType.EptPassive, bool Visible = true);
 
-    /// <summary>A small native-backed design: a root sheet, one child and one grandchild, parts with explicit pin
-    /// types and visibility, components drawn as separate-identity symbols, and a native pin partition built from
+    /// <summary>A small native-backed design: a root sheet, one child and one grandchild (optionally a second grandchild,
+    /// drawn by a second sheet symbol on the child sheet), parts with explicit pin types and visibility, components drawn as separate-identity symbols, and a native pin partition built from
     /// the model nets plus explicitly listed labels, wires and sheet pins. Every state it returns is aligned and
     /// stable, so the planner's guards pass and only the connection intent decides the outcome.</summary>
     internal sealed class Bench
     {
-        private readonly Guid[] instances = [Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()];
-        private readonly Guid[] definitions = [Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()];
-        private readonly KIID[] screens = [NewId(), NewId(), NewId()];
-        private readonly KIID rootId = NewId(), childSymbol = NewId(), grandSymbol = NewId();
+        private readonly Guid[] instances = [Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()];
+        private readonly Guid[] definitions = [Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()];
+        private readonly KIID[] screens = [NewId(), NewId(), NewId(), NewId()];
+        private readonly KIID rootId = NewId(), childSymbol = NewId(), grandSymbol = NewId(), grand2Symbol = NewId();
+        private readonly bool secondGrand;
         private readonly SchematicHierarchyData data;
         private readonly List<PartDefinition> parts = [];
         private readonly Dictionary<Guid, (string Name, SchematicSymbolType Type, BenchPin[] Pins, Dictionary<string, string> LibraryPins)> info = [];
-        private readonly List<ComponentDefinition>[] sheetComponents = [[], [], []];
+        private readonly List<ComponentDefinition>[] sheetComponents = [[], [], [], []];
         private readonly List<ComponentInstance> components = [];
         private readonly List<SymbolOccurrence> occurrences = [];
         private readonly List<SchematicSymbolBinding> bindings = [];
@@ -746,8 +749,9 @@ public sealed class SchematicConnectionIntentBuilderTests
         private readonly Guid circuit = Guid.NewGuid(), structure = Guid.NewGuid();
         private int column;
 
-        public Bench()
+        public Bench(bool secondGrand = false)
         {
+            this.secondGrand = secondGrand;
             var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new(), Project = new() { Name = "bench", Path = "/bench" } };
             document.SheetPath.Path.Add(rootId.Clone());
             data = new() { Document = document.Clone() };
@@ -756,9 +760,15 @@ public sealed class SchematicConnectionIntentBuilderTests
             Screen(document, [rootId, childSymbol, grandSymbol], 2);
             root.Items.Add(Any.Pack(SheetSymbolFor(childSymbol, 1, root, "Child")));
             child.Items.Add(Any.Pack(SheetSymbolFor(grandSymbol, 2, child, "Grand")));
+            if (!secondGrand) return;
+            // The second grandchild's sheet symbol sits 10 mm below the first on the child sheet.
+            Screen(document, [rootId, childSymbol, grand2Symbol], 3);
+            child.Items.Add(Any.Pack(SheetSymbolFor(grand2Symbol, 3, child, "Grand2", 100_000_000)));
         }
 
         public Guid ChildSheetSymbol => Guid.Parse(childSymbol.Value);
+        /// <summary>The sheet symbol, in its parent sheet, that draws <paramref name="sheet"/>.</summary>
+        public Guid SheetSymbolOf(BenchSheet sheet) => Guid.Parse(SymbolOf(sheet).Value);
         public Guid Instance(BenchSheet sheet) => instances[(int)sheet];
         public Guid ScreenId(BenchSheet sheet) => Guid.Parse(screens[(int)sheet].Value);
         public string Path(BenchSheet sheet) => string.Join('/', data.Instances[(int)sheet].Metadata.Document.SheetPath.Path.Select(p => p.Value));
@@ -883,12 +893,13 @@ public sealed class SchematicConnectionIntentBuilderTests
 
         public SchematicDesign Design(IReadOnlyList<CircuitNet> nets)
         {
-            var model = new Circuit(circuit, [.. parts],
-                [new(definitions[0], "Root", [.. sheetComponents[0]]), new(definitions[1], "Child", [.. sheetComponents[1]]), new(definitions[2], "Grand", [.. sheetComponents[2]])],
-                [new(instances[0], definitions[0], null), new(instances[1], definitions[1], instances[0]), new(instances[2], definitions[2], instances[1])],
-                [.. components], nets, [.. occurrences]);
+            SheetDefinition[] sheets = [new(definitions[0], "Root", [.. sheetComponents[0]]), new(definitions[1], "Child", [.. sheetComponents[1]]),
+                new(definitions[2], "Grand", [.. sheetComponents[2]]), .. secondGrand ? [new SheetDefinition(definitions[3], "Grand2", [.. sheetComponents[3]])] : Array.Empty<SheetDefinition>()];
+            KiCad.Automation.Model.SheetInstance[] sheetInstances = [new(instances[0], definitions[0], null), new(instances[1], definitions[1], instances[0]),
+                new(instances[2], definitions[2], instances[1]), .. secondGrand ? [new KiCad.Automation.Model.SheetInstance(instances[3], definitions[3], instances[1])] : Array.Empty<KiCad.Automation.Model.SheetInstance>()];
+            var model = new Circuit(circuit, [.. parts], sheets, sheetInstances, [.. components], nets, [.. occurrences]);
             return new(new EngineeringDesign(model, new StructuralDiagram(structure, [], [], [], []), [], []), data.Clone(),
-                instances.Select((instance, index) => new SchematicSheetBinding(instance,
+                instances.Take(data.Instances.Count).Select((instance, index) => new SchematicSheetBinding(instance,
                     data.Instances[index].Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())).ToArray(),
                 [.. bindings]);
         }
@@ -954,8 +965,8 @@ public sealed class SchematicConnectionIntentBuilderTests
 
         private void EditSheetSymbol(BenchSheet sheet, Action<SheetSymbol> edit)
         {
-            var parent = data.Instances[(int)sheet - 1];
-            string id = (sheet == BenchSheet.Child ? childSymbol : grandSymbol).Value;
+            var parent = data.Instances[sheet == BenchSheet.Grand2 ? (int)BenchSheet.Child : (int)sheet - 1];
+            string id = SymbolOf(sheet).Value;
             int index = parent.Items.ToList().FindIndex(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Value == id);
             var symbol = parent.Items[index].Unpack<SheetSymbol>();
             edit(symbol);
@@ -977,11 +988,18 @@ public sealed class SchematicConnectionIntentBuilderTests
             return screen;
         }
 
-        private SheetSymbol SheetSymbolFor(KIID id, int child, SchematicScreenData parent, string name) => new()
+        private KIID SymbolOf(BenchSheet sheet) => sheet switch
+        {
+            BenchSheet.Child => childSymbol, BenchSheet.Grand => grandSymbol,
+            BenchSheet.Grand2 when secondGrand => grand2Symbol,
+            _ => throw new ArgumentOutOfRangeException(nameof(sheet), sheet, "This bench has no sheet symbol for that sheet.")
+        };
+
+        private SheetSymbol SheetSymbolFor(KIID id, int child, SchematicScreenData parent, string name, long y = 50_000_000) => new()
         {
             Id = id.Clone(), ChildScreenId = screens[child].Clone(), Path = parent.Metadata.Document.SheetPath.Clone(), Locked = LockedState.LsUnlocked,
             NameField = Field(name), FilenameField = Field(name.ToLowerInvariant() + ".kicad_sch"),
-            Position = new() { XNm = 150_000_000, YNm = 50_000_000 }, Size = new() { XNm = 40_000_000, YNm = 40_000_000 }
+            Position = new() { XNm = 150_000_000, YNm = y }, Size = new() { XNm = 40_000_000, YNm = 40_000_000 }
         };
 
         private Vector2 Point() => new() { XNm = 10_000_000 + 2_540_000L * column++, YNm = 80_000_000 };

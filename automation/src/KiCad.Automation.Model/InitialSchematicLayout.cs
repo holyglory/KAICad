@@ -5,9 +5,19 @@ public sealed record InitialLayoutSheet(Guid Id, PresentationBounds AvailableBou
     IReadOnlyList<InitialLayoutObstacle> Obstacles);
 // Bounds are measured relative to the symbol's anchor, in its requested orientation.
 // Repeated native instances share one body with the union of their measured bounds.
+// A connected body (cn1-wiring-intent.md §10) may name a PreferredAnchor, the point nearest the
+// pins it connects to, which takes precedence over its functional group's centre, and
+// ReservedRelativeBounds, a superset of RelativeBounds that also covers the connection stubs and
+// labels its pins will receive; the reserved bounds are what the layout fits and keeps clear.
 public sealed record InitialLayoutBody(Guid Id, Guid SheetId, IReadOnlyList<Guid> SymbolOccurrences,
-    PresentationBounds RelativeBounds, PresentationPoint? FixedAnchor = null, Guid? FunctionalGroupId = null);
+    PresentationBounds RelativeBounds, PresentationPoint? FixedAnchor = null, Guid? FunctionalGroupId = null,
+    PresentationPoint? PreferredAnchor = null, PresentationBounds? ReservedRelativeBounds = null)
+{
+    /// <summary>The bounds the layout fits on the page and keeps clear of everything else.</summary>
+    public PresentationBounds OccupiedRelativeBounds => ReservedRelativeBounds ?? RelativeBounds;
+}
 public sealed record InitialLayoutPolicy(long GridNm, long ClearanceNm, long PageInsetNm);
+// Bounds are the occupied bounds: the measured envelope, or for a connected body its reserved bounds.
 public sealed record InitialLayoutPlacement(Guid BodyId, Guid SheetId, IReadOnlyList<Guid> SymbolOccurrences,
     PresentationPoint Anchor, PresentationBounds Bounds, bool Fixed);
 public sealed record InitialLayoutIssue(string Code, Guid BodyId, Guid SheetId,
@@ -21,7 +31,12 @@ public sealed record InitialLayoutCandidate(IReadOnlyList<InitialLayoutPlacement
 
 /// <summary>Deterministic initial placement over caller-measured native rectangles.
 /// Does not infer symbol sizes, move existing geometry, wire a circuit or certify readability.
-/// The native adapter must bind measurements to the same revision as the layout request.</summary>
+/// The native adapter must bind measurements to the same revision as the layout request.
+/// Bodies are placed in the order (pinned first, then bodies with a preferred anchor, then by sheet,
+/// functional group and identity). A free body goes to the free grid position nearest its preferred
+/// anchor, else nearest its functional group's first placement, else to the first free position in
+/// reading order. Bodies without a preferred anchor are laid out exactly as before connected
+/// placement existed.</summary>
 public static class InitialSchematicLayout
 {
     public static InitialLayoutCandidate Propose(IReadOnlyList<InitialLayoutSheet> sheets,
@@ -72,25 +87,35 @@ public static class InitialSchematicLayout
                 throw Invalid("Bodies need exact physical/occurrence ownership without collisions with existing obstacles.");
             if (body.FixedAnchor is { } fixedAnchor && (fixedAnchor.XNm % 100 != 0 || fixedAnchor.YNm % 100 != 0))
                 throw Invalid("Preserved anchors must be representable on KiCad's native 100 nm coordinate quantum.");
+            if (body.PreferredAnchor is { } preferredAnchor && (preferredAnchor.XNm % 100 != 0 || preferredAnchor.YNm % 100 != 0))
+                throw Invalid("Preferred anchors must be representable on KiCad's native 100 nm coordinate quantum.");
+            if (body.ReservedRelativeBounds is { } reserved)
+            {
+                RequireBounds(reserved);
+                if (!reserved.Contains(body.RelativeBounds))
+                    throw Invalid("A body's reserved bounds must contain its measured bounds.");
+            }
         }
         var result = new List<InitialLayoutPlacement>();
         var issues = new List<InitialLayoutIssue>();
         var groups = new Dictionary<(Guid Sheet, Guid Group), PresentationPoint>();
-        // Fixed positions occupy space before free positions are considered.
-        foreach (var body in bodies.OrderBy(b => b.FixedAnchor is null).ThenBy(b => b.SheetId)
-                     .ThenBy(b => b.FunctionalGroupId ?? b.Id).ThenBy(b => b.Id))
+        // Fixed positions occupy space before free positions are considered, and bodies that know
+        // where their connections are go before bodies that only follow their group.
+        foreach (var body in bodies.OrderBy(b => b.FixedAnchor is null).ThenBy(b => b.PreferredAnchor is null)
+                     .ThenBy(b => b.SheetId).ThenBy(b => b.FunctionalGroupId ?? b.Id).ThenBy(b => b.Id))
         {
             token.ThrowIfCancellationRequested();
             var page = pages[body.SheetId]; var occupied = obstacles[body.SheetId];
-            PresentationPoint? preferred = body.FunctionalGroupId is { } group && groups.TryGetValue((body.SheetId, group), out var center)
-                ? center : null;
-            var anchor = body.FixedAnchor ?? Find(body.RelativeBounds, page, occupied, policy, preferred, token);
+            PresentationPoint? preferred = body.PreferredAnchor
+                ?? (body.FunctionalGroupId is { } group && groups.TryGetValue((body.SheetId, group), out var center) ? center : null);
+            var anchor = body.FixedAnchor
+                ?? Find(body.OccupiedRelativeBounds, page, occupied, policy, preferred, body.PreferredAnchor is not null, token);
             if (anchor is null)
             {
                 issues.Add(new("no_free_region", body.Id, body.SheetId, occupied.Select(o => o.Id).Order().ToArray()));
                 continue;
             }
-            var bounds = Translate(body.RelativeBounds, anchor.Value);
+            var bounds = Translate(body.OccupiedRelativeBounds, anchor.Value);
             var collisions = occupied.Where(o => Intersects(bounds, o.Bounds, policy.ClearanceNm)).Select(o => o.Id).Order().ToArray();
             if (!page.Contains(bounds) || collisions.Length > 0)
             {
@@ -105,8 +130,14 @@ public static class InitialSchematicLayout
         return issues.Count > 0 ? new(null, issues) : new(result.OrderBy(p => p.SheetId).ThenBy(p => p.BodyId).ToArray(), []);
     }
 
+    // The free grid position nearest the preferred point (Manhattan distance, then y, then x), or
+    // without one the first free position in reading order. Candidate rows are the page top, the
+    // preferred row and every row just below an obstacle. A connected body (exhaustive) also tries
+    // the page bottom and every row just above an obstacle: between those rows the set of blocking
+    // obstacles is constant, so the nearest free grid position is always among the candidates.
     private static PresentationPoint? Find(PresentationBounds body, PresentationBounds page,
-        IReadOnlyList<InitialLayoutObstacle> occupied, InitialLayoutPolicy policy, PresentationPoint? preferred, CancellationToken token)
+        IReadOnlyList<InitialLayoutObstacle> occupied, InitialLayoutPolicy policy, PresentationPoint? preferred, bool exhaustive,
+        CancellationToken token)
     {
         long grid = policy.GridNm, gap = policy.ClearanceNm;
         decimal minX = Ceiling((decimal)page.LeftNm - body.LeftNm, grid), maxX = Floor((decimal)page.RightNm - body.RightNm, grid);
@@ -117,8 +148,16 @@ public static class InitialSchematicLayout
         {
             decimal y = Ceiling((decimal)obstacle.Bounds.BottomNm + gap - body.TopNm, grid);
             if (y >= minY && y <= maxY) rows.Add(y);
+            if (!exhaustive) continue;
+            y = Floor((decimal)obstacle.Bounds.TopNm - gap - body.BottomNm, grid);
+            if (y >= minY && y <= maxY) rows.Add(y);
         }
-        if (preferred is { } center) rows.Add(Math.Clamp(Ceiling(center.YNm, grid), minY, maxY));
+        if (exhaustive) rows.Add(maxY);
+        if (preferred is { } center)
+        {
+            rows.Add(Math.Clamp(Ceiling(center.YNm, grid), minY, maxY));
+            if (exhaustive) rows.Add(Math.Clamp(Floor(center.YNm, grid), minY, maxY));
+        }
         PresentationPoint? best = null;
         (decimal Distance, decimal Y, decimal X)? bestScore = null;
         foreach (decimal y in rows)
@@ -143,7 +182,12 @@ public static class InitialSchematicLayout
         void Offer(decimal left, decimal right, decimal y)
         {
             if (left > right) return;
-            decimal x = preferred is { } center ? Math.Clamp(Floor(center.XNm, grid), left, right) : left;
+            Consider(preferred is { } center ? Math.Clamp(Floor(center.XNm, grid), left, right) : left, y);
+            if (exhaustive && preferred is { } off) Consider(Math.Clamp(Ceiling(off.XNm, grid), left, right), y);
+        }
+
+        void Consider(decimal x, decimal y)
+        {
             decimal distance = preferred is { } p ? Math.Abs(x - p.XNm) + Math.Abs(y - p.YNm) : 0;
             var score = (distance, y, x);
             if (bestScore is null || score.CompareTo(bestScore.Value) < 0)

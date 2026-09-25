@@ -85,9 +85,11 @@ public sealed partial class NativeSessionTests
             await FocusedSchematicShortcut(client, root, processId, display, "y", token);
             await Watching(after.Schematic);
 
+            // A failure deadline, not a speed requirement: on a host shared by several native journeys the publication after a
+            // native redo took longer than the earlier 20 s (governed run t20260924T130055Z-c96415).
             async Task Watching(SchematicHierarchyData expected)
             {
-                using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(20));
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(60));
                 var status = automatic.Inspect();
                 while (status.Phase != AutomaticDesignPhase.Watching
                     || !SamePersisted(expected, store.Read()!.State.Baseline.Schematic))

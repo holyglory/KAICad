@@ -99,7 +99,7 @@ internal static class SchematicSynchronizationExecutor
                 ? await SchematicConnectedAddition.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken)
                 : await SchematicRebuild.RealizeAsync(client, session, saved.State, plan, checkpoint, cancellationToken);
             var realized = RealizationBatch(checkpoint.State, saved.State.OriginId, prepared, requireAssertion: connections,
-                connections ? "Apply XML connections" : "Rebuild native sheets from XML");
+                connections ? "Apply XML connections" : SchematicRebuild.BatchDescription);
             var journal = saved.State with { PendingMutation = realized, PendingNativeState = checkpoint.State.Clone(),
                 PendingLayout = DesignLayoutIntent.Create(designPath, original, prepared.PlannedDesignFileBytes, operationId, expectedRevisionToken,
                     connections ? DesignLayoutIntent.ConnectionRealizationLane : DesignLayoutIntent.RebuildLane) };

@@ -1341,12 +1341,15 @@ requires=["build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "(FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~McpProcessTests)&TestCategory!=NativeSession", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/engineering-model-results"]
 retained_artifacts=[{ name = "engineering-model-results", path = "automation/artifacts/engineering-model-results", max_bytes = 16777216 }]
 
+# The graph ceiling also covers time spent waiting for shared capacity (decision n0149da579195f432);
+# each check keeps its own execution limit.
 [test.automation]
-timeout_seconds=1200
+timeout_seconds=3600
 env={ DOTNET_CLI_TELEMETRY_OPTOUT = "1", DOTNET_NOLOGO = "1", TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
 [[test.automation.check]]
 name="restore"
+timeout_seconds=600
 tier="development"
 role="preflight"
 invalidates=["build", "unit"]
@@ -1355,12 +1358,14 @@ command=["dotnet", "restore", "KiCad.Automation.slnx", "--locked-mode"]
 
 [[test.automation.check]]
 name="build"
+timeout_seconds=900
 tier="development"
 cwd="automation"
 command=["dotnet", "build", "KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
 [[test.automation.check]]
 name="unit"
+timeout_seconds=1500
 tier="development"
 cwd="automation"
 command=["dotnet", "test", "KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory!=NativeSession&TestCategory!=NativeDocuments&TestCategory!=ExternalIntegration&TestCategory!=NativeFieldHistory", "--logger", "trx;LogFileName=results.trx", "--results-directory", "artifacts/tests"]
@@ -1371,6 +1376,7 @@ retained_artifacts=[{ name = "dotnet-test-results", path = "automation/artifacts
 # worktree supersedes the first one.
 [[test.automation.check]]
 name="source-documents"
+timeout_seconds=600
 tier="development"
 cwd="automation"
 requires=["build"]
@@ -1379,6 +1385,7 @@ retained_artifacts=[{ name = "source-document-results", path = "automation/artif
 
 [[test.automation.check]]
 name="native-configure"
+timeout_seconds=600
 tier="development"
 role="preflight"
 invalidates=["native-objects"]
@@ -1386,6 +1393,7 @@ command=["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja",
 
 [[test.automation.check]]
 name="native-objects"
+timeout_seconds=1500
 tier="development"
 command=["cmake", "--build", "automation/artifacts/native", "--target", "kiapi", "common/CMakeFiles/kicommon.dir/api/api_server.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad_manager_frame.cpp.o"]
 

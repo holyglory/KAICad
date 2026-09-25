@@ -24,19 +24,41 @@ public enum KiCadVerificationLevel
 /// journey and a call to the tool by name in a NativeSessionTests source (the Linux native
 /// journeys); a native-journey claim needs a cited NativeSessionTests journey; every other cited
 /// class of an mcp-native-journey, native-journey or mcp-process claim must start the compiled MCP
-/// STDIO server and call the tool by name. A cited NativeSessionTests method proves nothing, and is
-/// rejected, when it can reach an Inconclusive lane stub (any member that raises, catches or tests
-/// for AssertInconclusiveException or calls Assert.Inconclusive, except a catch filter that only lets
-/// such a result through) or when the check cannot read whether it can. A journey's dispatch switch
-/// is read only over a parameter that always holds the journey being run, passed on unchanged from
-/// RunNativeSessions; a default arm is limited only by earlier unconditional switches over that
-/// parameter in the same block, and only when it is not inside a lambda, local function or nested
-/// block. A test that hands over to helpers is followed through every NativeSessionTests member it
-/// names, to any depth, and a static call into another test class is followed member by member.
-/// The check reads source text, not compiled code: members reached through an instance, and code
-/// outside the test sources, are not examined, and whatever it cannot read is rejected rather than
-/// accepted. Comments never count as calls. The call check is per class, not per method: it cannot
-/// tell which journey of NativeSessionTests makes the call.
+/// STDIO server and call the tool by name. Comments never count as calls. The call check is per
+/// class, not per method: it cannot tell which journey of NativeSessionTests makes the call.
+/// <para>
+/// The check guards against honest mistakes, such as citing a journey that still ends Inconclusive;
+/// it does not guard against deliberate evasion. It reads source text, not compiled code, and
+/// rejects a cited NativeSessionTests method only for what it finds in these forms:
+/// </para>
+/// <list type="bullet">
+/// <item>An Inconclusive lane stub, recognised by its body: a member whose own text names
+/// AssertInconclusiveException or Assert.Inconclusive, whether to raise, catch or test for it,
+/// except a catch filter that only lets such a result through. A cited stub is rejected.</item>
+/// <item>A direct citation, whose body is exactly RunNativeSessions(NativeJourney.X[, parameters]).
+/// It is rejected when a switch over the running journey sends X to a stub or has a default arm
+/// leading to a stub that X may reach. A switch is read as dispatch only over a parameter that
+/// always holds the journey being run, passed on unchanged from RunNativeSessions. A default arm is
+/// limited only by earlier unconditional switches over that same parameter in the same block, and
+/// only when it is not inside a lambda, local function or nested block. Every direct citation is
+/// rejected when a stub is named other than in its declaration and switch arms, when a switch over
+/// any other value leads to a stub, or when a fixture member calls into another test class a member
+/// that can end Inconclusive.</item>
+/// <item>A helper-chain citation, followed through every NativeSessionTests member it names, to any
+/// depth. It is rejected when a reached member is or names a stub, names NativeJourney or
+/// RunNativeSessions, makes an unqualified call the check cannot find, or calls into another test
+/// class a member that can end Inconclusive; such a static call is followed member by member.</item>
+/// </list>
+/// A construct the check recognises but cannot follow, such as a cited name whose declaration it
+/// cannot find, a switch leading to a stub over a value it cannot tie to the running journey or, in
+/// a helper chain, an unqualified call it cannot find, is rejected rather than accepted. Known
+/// forms it does not read, and so does not check: test initialize and cleanup hooks, which the test
+/// framework runs without the test naming them; a variable that a lambda or local function
+/// redeclares under the journey parameter's name in a form the check does not recognise as a
+/// declaration; calls through another NativeSessionTests instance; an exception class declared
+/// outside NativeSessionTests that derives from AssertInconclusiveException and is raised under its
+/// own name; a bare Inconclusive(...) made available by using static; and code outside the test
+/// sources. VerificationEvidenceRules in CapabilityCatalogTests.cs states the full rules.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class KiCadVerificationAttribute(KiCadVerificationLevel level, params string[] evidence) : Attribute

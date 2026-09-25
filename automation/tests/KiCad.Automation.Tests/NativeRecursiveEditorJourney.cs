@@ -231,32 +231,48 @@ public sealed partial class NativeSessionTests
             // the other captions, beside its own connection or moved along it. A caption whose whole text has no clear place is
             // shortened with "…", as a block caption is; none is left out.
             VerifyCanvasText(psuLevel, "psu");
+            // Each caption is matched to its own connection by identity, not by its text ("Rail…" could otherwise stand for either
+            // rail's sense connection).
+            var psuConnections = psuRevision.LocalDiagram.Connections.ToDictionary(c => S(c.ConnectionId),
+                c => fixture.Connections(psu.BlockId).Inspect(c).Name, StringComparer.Ordinal);
             foreach (string name in new[] { "LDO supply", "Rail A sense", "Rail B sense", "Measurements", "Fault" })
             {
-                Assert.IsTrue(psuLevel.ConnectionCaptions.Any(c => c.Shown && (c.Label == name
-                    || (c.Label.EndsWith('…') && c.Label.Length >= 5 && name.StartsWith(c.Label[..^1].TrimEnd(), StringComparison.Ordinal)))),
-                    "psu: the caption of " + name + " is drawn at the default size, whole or shortened with an ellipsis.");
+                string id = psuConnections.Single(c => c.Value == name).Key;
+                var drawnCaption = psuLevel.ConnectionCaptions.SingleOrDefault(c => c.ObjectId == id);
+                Assert.IsNotNull(drawnCaption, "psu: the editor reports a caption for " + name + ".");
+                Assert.IsTrue(drawnCaption.Shown && (drawnCaption.Label == name || (drawnCaption.Label.EndsWith('…') && drawnCaption.Label.Length >= 5
+                    && name.StartsWith(drawnCaption.Label[..^1].TrimEnd(), StringComparison.Ordinal))),
+                    "psu: the caption of " + name + " is drawn at the default size, whole or shortened with an ellipsis, as '" + drawnCaption.Label + "'.");
             }
+            Assert.IsTrue(psuLevel.ConnectionCaptions.All(c => psuConnections.ContainsKey(c.ObjectId)), "psu: every caption belongs to a connection of the level.");
             var psuLayout = await Observe("psu");
             var psuChildren = psuRevision.Children;
             Drawn(psuLayout, "psu", (psuChildren[0].BlockId, "140,110,240,145", "RPS_FALLBACK"), (psuChildren[1].BlockId, "510,110,240,145", "RPS_FALLBACK"),
                 (psuChildren[2].BlockId, "140,360,240,145", "RPS_FALLBACK"), (psuChildren[3].BlockId, "510,360,240,145", "RPS_FALLBACK"));
             FallbackBoundary(psuLayout, "psu", psu, psuRevision);
             CollectionAssert.AreEqual(psuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(psuLayout));
-            // Design QA P2-5 on the shared design (rules F2, F4a and F4c as revised; see the design QA record's contract request).
-            // Each computed leg leaves its blocks along their edges before turning: Rail A sense and Fault, whose ends face the
-            // same way on two blocks of one column, run out 20 units and back instead of along the blocks' edges. Connections
-            // keep apart: LDO supply and Rail B sense no longer meet end to end at (445, 182.5), and Telemetry no longer runs
-            // along Measurements' leg at 468.75 (they turn up 10 units apart, at x 445 and 455). Only connections from one port
-            // (Rail B and Rail B sense from the LDO's output, Rail A and Rail B into the Power port) share the leg at that port.
+            // Design QA P2-5 on the shared design (rules F2, F4a and F4c as revised; cn2 erratum "connection layout", decision
+            // n03892aa8cecf933f, and its review). Each computed leg leaves its blocks along their edges before turning: Rail A sense
+            // and Fault, whose ends face the same way on two blocks of one column, run out 20 units and back instead of along the
+            // blocks' edges. Connections keep apart: LDO supply and Rail B sense no longer meet end to end at (445, 182.5), and
+            // Telemetry no longer runs along Measurements' leg at 468.75 (they turn up 10 units apart, at x 445 and 455). Only
+            // connections from one port (Rail B and Rail B sense from the LDO's output, Rail A and Rail B into the Power port) share
+            // the leg at that port. Level runs 7.5 units apart count as running beside each other too (the formal QA asks for 8
+            // pixels): Rail A's and LDO supply's runs at 182.5 lie beside Rail B's run into the Power port at 175, so both turn
+            // at their 20-unit limit (Rail A at x 120, LDO supply at x 400) and Rail B turns at x 415, which keeps each of those
+            // runs beside it to the 20 units the end itself needs.
             CollectionAssert.AreEqual(new[] {
-                    "40,90 90,90 90,146.25 140,146.25", "140,182.5 90,182.5 90,175 40,175", "380,182.5 445,182.5 445,146.25 510,146.25",
-                    "510,182.5 455,182.5 455,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
+                    "40,90 90,90 90,146.25 140,146.25", "140,182.5 120,182.5 120,175 40,175", "380,182.5 400,182.5 400,146.25 510,146.25",
+                    "510,182.5 415,182.5 415,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
                     "380,468.75 445,468.75 445,396.25 510,396.25", "510,218.75 490,218.75 490,432.5 510,432.5", "510,468.75 455,468.75 455,260 40,260" },
                 psuLayout.GetProperty("routes").EnumerateArray().Select(r => string.Join(" ", r.GetProperty("points").EnumerateArray().Select(Point))).ToArray(),
                 "psu: every connection runs on its computed path.");
-            VerifyRoutesClear(psuLayout, "psu");
-            await Capture("psu");
+            // Those two are the only runs beside another, and neither can be avoided with three-segment paths: Rail B's run into the
+            // Power port at 175 must reach the port, and Rail A's and LDO supply's runs at 182.5 must first leave their ends by 20
+            // units. Each is held to exactly those 20 units.
+            string Link(string name) => psuConnections.Single(c => c.Value == name).Key;
+            VerifyRoutesClear(psuLayout, "psu", (Link("Rail A"), Link("Rail B")), (Link("LDO supply"), Link("Rail B")));
+            await Retain("psu", psuLevel); await Capture("psu");
 
             // PSU -> System (Backspace keeps the PSU selected, as the level was left) -> CPU.
             Key("BackSpace");
@@ -512,8 +528,112 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, reopenedChips.Chips.Select(c => c.Text).ToArray(), "The Memory's chip is back.");
             Assert.IsNull(reopenedCpu.BlockChips.SingleOrDefault(b => b.BlockId == clockId));
             await Retain("reopened", reopenedCpu); await Capture("reopened");
+
+            // Ports on a top and a bottom edge (review of design QA P2-5, rule F4d): Place port puts "Status" on the Memory's top
+            // edge and "Reset" on the Processor's bottom edge, and Connect joins them. The wire leaves each of those ports straight
+            // up or down for 20 units or more, never along the block's outline, and every other rule of the level still holds.
+            // Decline then discards all of it.
+            await Press("DiagramPalettePlacePort");
+            await Wait("palette-place-port", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+            await At(700, 150); await Wait("status-caption", s => s.CaptionEditor == "port");
+            Type("Status"); Key("Return");
+            var statusPlaced = await Wait("status-placed", s => s.CaptionEditor == "" && (View(s)?.Ports.Any(p => p.BlockId == memoryId && p.Side == P.DiagramPortSide.DpsTop) ?? false));
+            static decimal Offset(P.DiagramPortPlacementData port) => decimal.Parse(port.Offset, System.Globalization.CultureInfo.InvariantCulture);
+            var statusPort = View(statusPlaced)!.Ports.Single(p => p.BlockId == memoryId && p.Side == P.DiagramPortSide.DpsTop);
+            Assert.IsTrue(Math.Abs(Offset(statusPort) - 110) <= 2, $"Status sits on the Memory's top edge where it was placed ({statusPort.Offset} along it).");
+            await Press("DiagramPalettePlacePort");
+            await Wait("palette-place-port-again", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+            await At(280, 285); await Wait("reset-caption", s => s.CaptionEditor == "port");
+            Type("Reset"); Key("Return");
+            var resetPlaced = await Wait("reset-placed", s => s.CaptionEditor == "" && (View(s)?.Ports.Any(p => p.BlockId == processorId && p.Side == P.DiagramPortSide.DpsBottom) ?? false));
+            var resetPort = View(resetPlaced)!.Ports.Single(p => p.BlockId == processorId && p.Side == P.DiagramPortSide.DpsBottom);
+            Assert.IsTrue(Math.Abs(Offset(resetPort) - 140) <= 2, $"Reset sits on the Processor's bottom edge where it was placed ({resetPort.Offset} along it).");
+            decimal statusX = 590 + Offset(statusPort), resetX = 140 + Offset(resetPort);
+            await Press("DiagramPaletteConnect");
+            await Wait("palette-connect-ports", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At(700, 150); await Wait("reset-line-started", s => s.CanvasHint == "Click a port to finish connection");
+            await At(280, 285); await Wait("reset-line-caption", s => s.CaptionEditor == "connection");
+            Type("Reset line"); Key("Return");
+            var resetLine = await Wait("reset-line-added", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+            var resetLink = resetLine.LevelDraft.NewConnections[0];
+            CollectionAssert.AreEqual(new[] { (memoryId, statusPort.InterfaceId), (processorId, resetPort.InterfaceId) },
+                resetLink.Endpoints.Select(e => (e.BlockId, e.InterfaceId)).ToArray(), "Reset line joins the two new ports.");
+            var portsLayout = await Observe("top-bottom-ports");
+            var resetRoute = portsLayout.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == resetLink.Selection.ConnectionId)
+                .GetProperty("points").EnumerateArray().Select(p => (X: decimal.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                    Y: decimal.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            Assert.AreEqual((statusX, 150m), resetRoute[0], "Reset line starts at the Status port on the Memory's top edge.");
+            Assert.IsTrue(resetRoute[1].X == statusX && resetRoute[1].Y <= 130m, $"Reset line leaves the top edge straight up for 20 units or more, to ({resetRoute[1].X}, {resetRoute[1].Y}).");
+            Assert.AreEqual((resetX, 285m), resetRoute[^1], "Reset line ends at the Reset port on the Processor's bottom edge.");
+            Assert.IsTrue(resetRoute[^2].X == resetX && resetRoute[^2].Y >= 305m, $"Reset line reaches the bottom edge straight from below, from ({resetRoute[^2].X}, {resetRoute[^2].Y}).");
+            VerifyRoutesClear(portsLayout, "top-bottom-ports");
+            await Retain("top-bottom-ports", await Read()); await Capture("top-bottom-ports");
+            Key("d", alt: true);
+            await Wait("top-bottom-declined", s => !s.Dirty && s.LevelDraft.NewConnections.Count == 0
+                && !(View(s)?.Ports.Any(p => p.Side is P.DiagramPortSide.DpsTop or P.DiagramPortSide.DpsBottom) ?? false));
             Key("w", control: true); await Closed();
-            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening and closing write nothing.");
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening, drawing, declining and closing write nothing.");
+
+            // A dense level stays responsive (review of design QA P2-5): another agent draws twelve blocks with eight ports each and
+            // fifty connections between them on the System level. The editor lays a level's connection paths out once for each
+            // change of its geometry and reuses that layout for every repaint and every state read; a drag of one block lays the
+            // level out at most once per pointer motion (the fixture's drag makes eight), and no single layout takes a second
+            // even in this unoptimized build.
+            var denseBase = RecursiveBlockGraphXml.Read(savedXml);
+            var denseLevel = denseBase.StartLevelDraft(denseBase.SelectedRoot);
+            var denseBlocks = new List<NewBlockOccurrence>(); var densePorts = new List<Guid[]>();
+            for (int b = 0; b < 12; ++b)
+            {
+                var ports = Enumerable.Range(0, 8).Select(_ => Guid.NewGuid()).ToArray(); densePorts.Add(ports);
+                denseBlocks.Add(new NewBlockOccurrence(new BlockSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial",
+                    "Dense " + (b + 1), DiagramRequirements.Empty, [.. ports.Select((id, k) => new DiagramBoundaryInterface(id, "P" + (k + 1), ""))], null));
+            }
+            var denseLinks = new List<NewConnectionOccurrence>();
+            for (int i = 0; i < 50; ++i)
+            {
+                int first = i % 12, second = (first + 1 + i * 7 % 11) % 12;
+                denseLinks.Add(new NewConnectionOccurrence(new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial",
+                    "Link " + (i + 1), DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified,
+                    [new(DiagramEndpointKind.Interface, denseBlocks[first].Selection.BlockId, densePorts[first][i / 12 % 8], "", null, [], null),
+                     new(DiagramEndpointKind.Interface, denseBlocks[second].Selection.BlockId, densePorts[second][(i / 12 + 4) % 8], "", null, [], null)],
+                    DiagramRequirements.Empty, null));
+            }
+            denseLevel = denseLevel with
+            {
+                Scope = denseLevel.Scope with { Children = denseLevel.Scope.Children.AddRange(denseBlocks.Select(n => n.Selection)),
+                    Diagram = denseLevel.Scope.LocalDiagram with { Connections = denseLevel.Scope.LocalDiagram.Connections.AddRange(denseLinks.Select(l => l.Selection)) } },
+                NewChildren = [.. denseBlocks], NewConnections = [.. denseLinks]
+            };
+            var noRevisions = System.Collections.Immutable.ImmutableDictionary<Guid, LevelRevisionId>.Empty;
+            var denseGraph = denseBase.SaveLevelDraft(denseBase.SelectedRoot, [denseBase.SelectedRoot], denseLevel,
+                new LevelRevisionIds(Guid.NewGuid(), Guid.NewGuid(), [], noRevisions, noRevisions), RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(context.BlocksPath, RecursiveBlockGraphXml.Write(denseGraph), token);
+            var denseOpen = await Open("dense");
+            Assert.HasCount(14, denseOpen.LevelDraft.Scope.Children, "The System level shows the PSU, the CPU and the twelve drawn blocks.");
+            var denseLayout = await Observe("dense");
+            Assert.AreEqual(systemRevision.LocalDiagram.Connections.Length + 50, denseLayout.GetProperty("routes").GetArrayLength(),
+                "Every connection of the dense level is drawn: the System level's own and the fifty drawn ones.");
+            var settled = await Read(); var readAgain = await Read();
+            Assert.IsTrue(settled.RouteLayouts > 0, "The editor reports how often it laid connection paths out.");
+            Assert.AreEqual(settled.RouteLayouts, readAgain.RouteLayouts, "Reading the state again lays nothing out again: an unchanged level reuses its layout.");
+            string denseId = S(denseBlocks[0].Selection.BlockId);
+            var denseRect = denseLayout.GetProperty("blocks").EnumerateArray().Single(b => b.GetProperty("blockId").GetString() == denseId).GetProperty("rect");
+            double Units(JsonElement value) => double.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+            double denseX = Units(denseRect.GetProperty("x")) + Units(denseRect.GetProperty("width")) / 2, denseY = Units(denseRect.GetProperty("y")) + 30;
+            var watch = Stopwatch.StartNew();
+            await Drag(denseX, denseY, denseX + 40, denseY + 40);
+            var denseDragged = await Wait("dense-dragged", s => s.Dirty && Placed(s).Contains(denseId));
+            watch.Stop();
+            ulong layoutsDuringDrag = denseDragged.RouteLayouts - readAgain.RouteLayouts;
+            Console.WriteLine($"Dense level: {layoutsDuringDrag} layouts during the drag, slowest {denseDragged.SlowestRouteLayoutMicros} µs, "
+                + $"latest {denseDragged.LatestRouteLayoutMicros} µs, drag settled after {watch.ElapsedMilliseconds} ms.");
+            await Retain("dense-dragged", denseDragged); await Capture("dense-dragged");
+            Assert.IsTrue(layoutsDuringDrag >= 1 && layoutsDuringDrag <= 12,
+                $"A drag of eight pointer motions lays the dense level out at most once per motion and once more after it, not {layoutsDuringDrag} times.");
+            Assert.IsTrue(denseDragged.SlowestRouteLayoutMicros <= 1_000_000,
+                $"The slowest layout of the dense level took {denseDragged.SlowestRouteLayoutMicros} µs, at most a second.");
+            Key("d", alt: true); await Wait("dense-declined", s => !s.Dirty && Placed(s).Length == 0);
+            Key("w", control: true); await Closed();
         }
         finally { Directory.Delete(stateRoot, true); }
     }
@@ -787,7 +907,8 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(dirty, currentView.GetProperty("containsUnsavedDraft").GetBoolean());
                 Assert.AreEqual((history ?? psuView).RevisionId.ToString("D"), state.GetProperty("views")[1].GetProperty("diagram").GetProperty("selection").GetProperty("revisionId").GetString());
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + label + "-observation.json"), state.GetRawText(), token);
-                Assert.AreEqual(before, await Read(), "Offscreen views must not alter draft, selection, source, view revision or viewport.");
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()),
+                    "Offscreen views must not alter draft, selection, source, view revision or viewport.");
                 viewArguments["expectedViewRevision"] = before.ViewRevision + 1;
                 Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
                 viewArguments["expectedViewRevision"] = before.ViewRevision; viewArguments["documentId"] = Guid.NewGuid().ToString("D");
@@ -807,11 +928,11 @@ public sealed partial class NativeSessionTests
                         new() { DocumentId = graph.DocumentId.ToString("D"), ExpectedSourceToken = before.SourceToken, ExpectedViewRevision = before.ViewRevision,
                             Views = { new P.RecursiveDiagramViewRequest { ViewId = "cancelled", PixelWidth = 640, PixelHeight = 480 } } }, cancelledView.Token));
                 }
-                Assert.AreEqual(before, await Read());
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()));
                 viewArguments["views"] = new[] { new { viewId = "recovered", pixelWidth = 640, pixelHeight = 480 } };
                 var recoveredObservation = await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token);
                 Assert.IsFalse(recoveredObservation.IsError == true, "A valid native observation must work after rejected and cancelled requests.");
-                Assert.AreEqual(before, await Read());
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()));
             }
             await ObserveViews("saved-root", false);
             Key("Escape"); Key("Right");
@@ -3001,7 +3122,10 @@ public sealed partial class NativeSessionTests
         }
         // The Add detail menu lists the block's facets without a value, in facet order (requirement boxes are under Add requirement).
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
-        // The strength choices stay in one row, unclipped and without overlap, at every inspector width; brief tells which labels show.
+        // The strength choices stay in one row, unclipped and without overlap, at every inspector width; brief tells which labels
+        // show. Whenever the full labels show, the row fits the detail's column with the rule's 4 DIP to spare (the fixture display
+        // is at 96 DPI, so 4 pixels): the build that failed in clear-facet-overlap-11e548 showed its 369-pixel row of full labels
+        // in a 365-pixel column, and a build that kept only 2 pixels spare would show them in a 371-pixel column.
         string[] StrengthLabels(P.RecursiveDiagramEditorState at) =>
             new[] { "Information", "Preference", "Requirement" }.Select(n => Find(at, "RecursiveFacetStrength" + n).Label).ToArray();
         void StrengthRow(P.RecursiveDiagramEditorState at, string step, bool? brief)
@@ -3016,6 +3140,13 @@ public sealed partial class NativeSessionTests
             var labels = StrengthLabels(at);
             if (brief is bool collapsed) CollectionAssert.AreEqual(collapsed ? shortLabels : full, labels, step + ": the strength labels.");
             else Assert.IsTrue(labels.SequenceEqual(full) || labels.SequenceEqual(shortLabels), step + ": the strength labels are all full or all short.");
+            if (labels.SequenceEqual(full) && at.Controls.Where(c => c.Shown && c.Name is "RecursiveFacetValue" or "RecursiveFacetCandidates" or "RecursiveFacetReason")
+                .ToArray() is [var column])
+            {
+                int rowWidth = row[2].X + row[2].Width - row[0].X;
+                Assert.IsTrue(rowWidth + 4 <= column.Width,
+                    $"{step}: the full strength labels ({rowWidth} pixels) show only with 4 pixels to spare in the detail's {column.Width}-pixel column.");
+            }
         }
         // The interactive controls of a facet's detail, where the editor drew them.
         string[] detailNames = ["RecursiveFacetBack", "RecursiveFacetStateChosen", "RecursiveFacetStateCandidate", "RecursiveFacetStateUnknown",
@@ -3064,7 +3195,11 @@ public sealed partial class NativeSessionTests
             var back = Find(at, "RecursiveFacetBack"); var clear = Find(at, "RecursiveFacetClear");
             Assert.IsTrue(back.Shown, step + ": Back to facet overview is shown while the overview lists facets.");
             Assert.IsTrue(clear.Shown, step + ": Clear facet is shown for a facet with a value.");
-            Assert.AreEqual(back.Height, clear.Height, $"{step}: {Box(clear)} is as tall as {Box(back)}; both are link-look actions.");
+            // Clear facet keeps at least a whole line of text: it is as tall as the inspector's one-line text (the saved version line),
+            // whichever font draws the glyph of Back to facet overview.
+            var textLine = Find(at, "RecursiveSavedVersion");
+            Assert.IsTrue(textLine.Height > 0 && clear.Height >= textLine.Height,
+                $"{step}: {Box(clear)} is at least as tall as a line of the inspector's text ({textLine.Height} pixels).");
             int closest = int.MaxValue;
             for (int i = 0; i < shown.Length; ++i)
                 for (int j = i + 1; j < shown.Length; ++j)
@@ -3101,14 +3236,17 @@ public sealed partial class NativeSessionTests
             shot.Record("Clear facet below the lowest strength choice (px)", below);
             var inspector = Find(at, "RecursiveInspector");
             // Each choice is drawn where the editor reports it: its label's ink lies in the right two thirds of its rectangle (the
-            // indicator takes the left), measured against the inspector beside it.
+            // indicator takes the left), measured against the inspector beside it. The label's letters are separate runs of ink over
+            // 12 pixels or more, which the indicator alone, a ring at most a few pixels into that part, cannot make.
             foreach (var choice in DetailControls(at).Where(c => c.Name.StartsWith("RecursiveFacetState", StringComparison.Ordinal)
                 || c.Name.StartsWith("RecursiveFacetStrength", StringComparison.Ordinal)))
             {
                 var page = shot.At(inspector.X + 3, choice.Y + choice.Height / 2);
                 int textFrom = choice.X + choice.Width / 3;
-                Assert.IsNotEmpty(shot.InkRuns(textFrom, choice.Y, choice.X + choice.Width - textFrom, choice.Height, page, rows: false, minimum: 2.0),
-                    $"{step}: {choice.Name} ({choice.X}, {choice.Y}, {choice.Width} x {choice.Height}) shows its label where it is reported.");
+                var ink = shot.InkRuns(textFrom, choice.Y, choice.X + choice.Width - textFrom, choice.Height, page, rows: false, minimum: 2.0);
+                Assert.IsTrue(ink.Count >= 2 && ink[^1].Last - ink[0].First + 1 >= 12,
+                    $"{step}: {choice.Name} ({choice.X}, {choice.Y}, {choice.Width} x {choice.Height}) shows its label where it is reported "
+                    + $"({ink.Count} runs of ink over {(ink.Count == 0 ? 0 : ink[^1].Last - ink[0].First + 1)} pixels).");
             }
             VerifyLink(shot, Find(at, "RecursiveFacetClear"), Find(at, "RecursiveSavedVersion"), step, "Clear facet");
         }
@@ -3395,6 +3533,8 @@ public sealed partial class NativeSessionTests
         // Clear facet was squeezed to nothing below the wrapped row. So the inspector is widened from the default width in 3-pixel
         // steps until the full labels show with the Package detail open. At each width the detail is measured as the sash left it,
         // and again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        // The facet overview's column where the sweep starts, as drawn: each overview row fills the width inside the 12 DIP margins.
+        int overviewColumn = Find(await Read(), "RecursiveFacetRowPackage").Width;
         var sweepStart = (await OpenPackage("sweep-00", true)).Detail;
         P.RecursiveDiagramEditorState lastShort = sweepStart, firstFull;
         for (int i = 1; ; ++i)
@@ -3410,13 +3550,17 @@ public sealed partial class NativeSessionTests
             var reopenedDetail = (await OpenPackage(step + "-reopened", null)).Detail;
             CollectionAssert.AreEqual(StrengthLabels(dragged), StrengthLabels(reopenedDetail),
                 step + ": the strength labels follow the inspector's width, however the detail was reached.");
+            // Every width is visited: each step widens the detail's column by 1 to 3 pixels, so no width where the labels could
+            // switch is skipped.
+            int widened = Find(reopenedDetail, "RecursiveFacetCandidates").Width - Find(lastShort, "RecursiveFacetCandidates").Width;
+            Assert.IsTrue(widened >= 1 && widened <= 3, $"{step}: the detail's column widened by {widened} pixels, 1 to 3.");
             if (StrengthLabels(reopenedDetail).SequenceEqual(fullStrengths)) { firstFull = reopenedDetail; break; }
             lastShort = reopenedDetail;
         }
-        // They switch where the rule says: the full labels show once they fit the detail's column with 4 DIP to spare (the fixture
-        // display is at 96 DPI, where the detail's 12 DIP margin is 12 pixels), and one step narrower they did not. The editor
-        // measures a label with wxWidgets and GTK draws it, and each may round a label's width by a pixel, so the rule is held to
-        // within 3 pixels; that the full labels fit their column is asserted exactly in the measurement.
+        // They switch exactly where the rule says: the full labels show once they fit the detail's column with 4 DIP to spare (the
+        // fixture display is at 96 DPI, where the detail's 12 DIP margin is 12 pixels), and one step narrower they did not. The
+        // editor adds up the same label widths the journey measures here, so the wide side is exact; on the narrow side the editor
+        // estimates the full labels from the short ones it shows, which each may round by a pixel, so that side allows 3 pixels.
         var (fullDetail, fullShot) = await MeasurePackage("first-full-width", false);
         var information = Find(fullDetail, "RecursiveFacetStrengthInformation"); var requirement = Find(fullDetail, "RecursiveFacetStrengthRequirement");
         Assert.AreEqual(12, Find(fullDetail, "RecursiveFacetCandidates").X - Find(fullDetail, "RecursiveInspector").X, "The detail's margin is 12 pixels.");
@@ -3424,11 +3568,11 @@ public sealed partial class NativeSessionTests
         int wideColumn = fullShot.Record("Detail column where the full labels first show (px)", Find(fullDetail, "RecursiveFacetCandidates").Width);
         int narrowColumn = fullShot.Record("Detail column one step narrower, short labels (px)", Find(lastShort, "RecursiveFacetCandidates").Width);
         Assert.AreEqual(Find(firstFull, "RecursiveFacetCandidates").Width, wideColumn, "The detail keeps its width while it is measured again.");
-        Assert.IsTrue(fullRow + 4 <= wideColumn + 3 && fullRow + 4 > narrowColumn - 3,
-            $"The full strength labels ({fullRow} pixels) show from a {wideColumn}-pixel column and not from {narrowColumn} pixels, where they need {fullRow + 4}.");
+        Assert.IsTrue(fullRow + 4 <= wideColumn, $"The full strength labels ({fullRow} pixels) show from a {wideColumn}-pixel column, where they have 4 pixels to spare.");
+        Assert.IsTrue(fullRow + 4 > narrowColumn - 3,
+            $"The full strength labels ({fullRow} pixels) did not show from {narrowColumn} pixels, where they would need {fullRow + 4}.");
         // The sweep covered every width where opening the detail switches the labels: where it started, even the facet overview's
-        // column (the inspector's width less its 12 DIP margins, as the overview has no scroll bar) was too narrow for them.
-        int overviewColumn = Find(sweepStart, "RecursiveInspector").Width - 24;
+        // column (measured from its rows, as the overview has no scroll bar) was too narrow for them.
         fullShot.Record("Facet overview column where the sweep started (px)", overviewColumn);
         Assert.IsTrue(overviewColumn < fullRow + 4,
             $"The sweep starts below the widths where opening the detail switches the labels: the overview's {overviewColumn}-pixel column there is under {fullRow + 4} pixels.");
@@ -4101,15 +4245,15 @@ public sealed partial class NativeSessionTests
         Key("d", alt: true);
         var declined = await Wait("declined", s => !s.Dirty && s.ConnectionDraft?.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
-        // On a clean draft, a signal drawn for the saved Power and removed again leaves nothing to save. The only trace is Power's
-        // connection draft, which the addition opened and which is again exactly the saved Power.
+        // On a clean draft, a signal drawn for the saved Power and removed again leaves nothing to save and no trace: Power's
+        // connection draft, which the addition opened, goes with it, so the level draft is exactly the declined one.
         await Press("RecursiveSignalEntry"); Type("VREF"); Key("Return");
-        await Wait("clean-signal-added", s => Signals(s).SequenceEqual(["VBUS", "GND", "VREF"]) && s.Dirty);
+        var vrefAdded = await Wait("clean-signal-added", s => Signals(s).SequenceEqual(["VBUS", "GND", "VREF"]) && s.Dirty);
+        Assert.IsTrue(vrefAdded.LevelDraft.ConnectionDrafts.Any(d => d.Baseline.ConnectionId == power), "Adding the signal opened Power's connection draft.");
         await Press("RecursiveSignalRemove2");
         var vrefGone = await Wait("clean-signal-removed", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && !s.Dirty);
-        var cleanAgain = declined.LevelDraft.Clone(); cleanAgain.ConnectionDrafts.Add(declined.ConnectionDraft);
-        await DrawnRemoval(vrefGone, cleanAgain, savedXml, "clean-signal-removed");
-        Assert.AreEqual(declined.ConnectionDraft, vrefGone.ConnectionDraft, "Power's draft is again its saved revision.");
+        await DrawnRemoval(vrefGone, declined.LevelDraft, savedXml, "clean-signal-removed");
+        Assert.AreEqual(declined.ConnectionDraft, vrefGone.ConnectionDraft, "The inspector shows Power as saved.");
         Assert.IsFalse(Find(vrefGone, "RecursiveSave").Enabled, "Save is unavailable: nothing is left to save.");
         // A saved signal leaves through the companion's removal cascade and the status bar names it; Undo restores it.
         await Press("RecursiveSignalRemove0");
@@ -4456,7 +4600,8 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-5, from the paths the editor reports it drew: no two connections share a segment or an end point,
-    /// no end sits on a block's corner, and vertical legs that run beside each other keep at least 10 units apart.</summary>
+    /// no end sits on a block's corner, vertical legs that run beside each other keep at least 10 units apart, and so do level
+    /// runs that overlap (the formal QA asks for 8 pixels; the drawing journey's level is drawn at about a pixel per unit).</summary>
     private static void VerifyPathsApart(string step, (double X, double Y, double W, double H)[] blocks, params (double X, double Y)[][] paths)
     {
         static double Overlap(double a, double b, double c, double d) => Math.Max(0, Math.Min(Math.Max(a, b), Math.Max(c, d)) - Math.Max(Math.Min(a, b), Math.Min(c, d)));
@@ -4473,8 +4618,8 @@ public sealed partial class NativeSessionTests
                     for (int n = 1; n < b.Length; ++n)
                     {
                         var (p, q, r, t) = (a[m - 1], a[m], b[n - 1], b[n]);
-                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y)
-                            Assert.AreEqual(0.0, Overlap(p.X, q.X, r.X, t.X), $"{step}: two connections share part of a horizontal segment at y {p.Y}.");
+                        if (p.Y == q.Y && r.Y == t.Y && p.X != q.X && r.X != t.X && Overlap(p.X, q.X, r.X, t.X) > 0)
+                            Assert.IsTrue(Math.Abs(p.Y - r.Y) >= 10, $"{step}: horizontal legs at y {p.Y} and {r.Y} run beside each other less than 10 units apart.");
                         if (p.X == q.X && r.X == t.X && p.Y != q.Y && r.Y != t.Y && Overlap(p.Y, q.Y, r.Y, t.Y) > 0)
                             Assert.IsTrue(Math.Abs(p.X - r.X) >= 10, $"{step}: vertical legs at x {p.X} and {r.X} run beside each other less than 10 units apart.");
                     }
@@ -4483,11 +4628,14 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-5 on a level as an agent observes it (resolved_layout). Every leg leaves a block's left or right
-    /// edge, and an unplaced boundary port, along the edge for at least 20 units before it turns (rule F4c). No two connections
-    /// share or touch a horizontal run (on one height, overlapping or less than 10 units apart), unless both runs start at the
-    /// same end point (two connections from one port), and no two upright runs lie within 10 units of each other over heights
-    /// they share or meet at (rule F4a).</summary>
-    private static void VerifyRoutesClear(JsonElement layout, string step)
+    /// edge, and an unplaced boundary port, along the edge for at least 20 units before it turns (rule F4c), and a block's top or
+    /// bottom edge straight up or down for at least 20 units (rule F4d), never along the block's outline. No two connections run
+    /// beside each other (rule F4a): level runs on one height that overlap or end less than 10 units apart, level runs less
+    /// than 10 units apart in height that overlap (the formal QA asks for 8 pixels, and the editor draws about a pixel per
+    /// unit at its default size), or upright runs less than 10 units apart over heights they share or meet at, unless both runs
+    /// start at the same end point (two connections from one port). A pair of connections named in <paramref name="unavoidable"/>
+    /// may run beside each other only along the 20 units one of them needs to leave its end.</summary>
+    private static void VerifyRoutesClear(JsonElement layout, string step, params (string First, string Second)[] unavoidable)
     {
         static decimal Unit(JsonElement value) => decimal.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
         var blocks = layout.GetProperty("blocks").EnumerateArray().Select(b => b.GetProperty("rect"))
@@ -4495,36 +4643,57 @@ public sealed partial class NativeSessionTests
         var boundary = layout.GetProperty("ports").EnumerateArray()
             .Where(p => p.GetProperty("source").GetString() == "RPS_FALLBACK" && p.GetProperty("side").GetString() == "DPS_LEFT")
             .Select(p => (X: Unit(p.GetProperty("anchor").GetProperty("x")), Y: Unit(p.GetProperty("anchor").GetProperty("y")))).ToHashSet();
-        var routes = layout.GetProperty("routes").EnumerateArray()
-            .Select(r => r.GetProperty("points").EnumerateArray().Select(p => (X: Unit(p.GetProperty("x")), Y: Unit(p.GetProperty("y")))).ToArray()).ToArray();
+        var drawn = layout.GetProperty("routes").EnumerateArray()
+            .Select(r => (Id: r.GetProperty("connectionId").GetString()!, Points: r.GetProperty("points").EnumerateArray()
+                .Select(p => (X: Unit(p.GetProperty("x")), Y: Unit(p.GetProperty("y")))).ToArray())).ToArray();
         string Describe((decimal X, decimal Y)[] route) => string.Join(" ", route.Select(p => p.X + "," + p.Y));
-        foreach (var route in routes)
+        foreach (var (_, route) in drawn)
             foreach (var (end, next) in new[] { (route[0], route[1]), (route[^1], route[^2]) })
             {
-                int direction = boundary.Contains(end) ? 1 : 0;
+                // Which way the leg must leave this end: out of the block edge it is on, or into the level from a boundary port.
+                (int X, int Y) direction = boundary.Contains(end) ? (1, 0) : (0, 0);
                 foreach (var (x, y, w, h) in blocks)
-                    if (end.Y >= y && end.Y <= y + h) direction = end.X == x ? -1 : end.X == x + w ? 1 : direction;
-                if (direction == 0) continue;
-                Assert.IsTrue(next.Y == end.Y && (next.X - end.X) * direction >= 20,
-                    $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) along the edge for 20 units or more before it turns.");
+                {
+                    if (end.Y >= y && end.Y <= y + h && (end.X == x || end.X == x + w)) direction = (end.X == x ? -1 : 1, 0);
+                    else if (end.X > x && end.X < x + w && (end.Y == y || end.Y == y + h)) direction = (0, end.Y == y ? -1 : 1);
+                }
+                if (direction == (0, 0)) continue;
+                if (direction.Y == 0)
+                    Assert.IsTrue(next.Y == end.Y && (next.X - end.X) * direction.X >= 20,
+                        $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) along the edge for 20 units or more before it turns.");
+                else
+                    Assert.IsTrue(next.X == end.X && (next.Y - end.Y) * direction.Y >= 20,
+                        $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) on a {(direction.Y < 0 ? "top" : "bottom")} edge straight "
+                        + $"{(direction.Y < 0 ? "up" : "down")} for 20 units or more, not along the block's outline.");
             }
-        static decimal Gap(decimal a1, decimal a2, decimal b1, decimal b2) => Math.Max(Math.Min(a1, a2), Math.Min(b1, b2)) - Math.Min(Math.Max(a1, a2), Math.Max(b1, b2));
-        for (int i = 0; i < routes.Length; ++i)
-            for (int j = i + 1; j < routes.Length; ++j)
+        static decimal Overlap(decimal a1, decimal a2, decimal b1, decimal b2) => Math.Min(Math.Max(a1, a2), Math.Max(b1, b2)) - Math.Max(Math.Min(a1, a2), Math.Min(b1, b2));
+        for (int i = 0; i < drawn.Length; ++i)
+            for (int j = i + 1; j < drawn.Length; ++j)
             {
-                var a = routes[i]; var b = routes[j];
+                var a = drawn[i].Points; var b = drawn[j].Points;
+                bool allowed = unavoidable.Any(u => (u.First == drawn[i].Id && u.Second == drawn[j].Id) || (u.First == drawn[j].Id && u.Second == drawn[i].Id));
                 var shared = new[] { a[0], a[^1] }.Intersect(new[] { b[0], b[^1] }).ToArray();
+                decimal beside = 0;
                 for (int m = 1; m < a.Length; ++m)
                     for (int n = 1; n < b.Length; ++n)
                     {
                         var (p, q, r, t) = (a[m - 1], a[m], b[n - 1], b[n]);
                         if (p == q || r == t) continue;
                         bool fromOneEnd = shared.Any(e => (e == p || e == q) && (e == r || e == t));
-                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y && !fromOneEnd)
-                            Assert.IsTrue(Gap(p.X, q.X, r.X, t.X) >= 10, $"{step}: {Describe(a)} and {Describe(b)} run along one height at y {p.Y}.");
-                        if (p.X == q.X && r.X == t.X && Math.Abs(p.X - r.X) < 10 && !fromOneEnd)
-                            Assert.IsTrue(Gap(p.Y, q.Y, r.Y, t.Y) > 0, $"{step}: {Describe(a)} and {Describe(b)} run upright within 10 units at x {p.X} and {r.X}.");
+                        if (fromOneEnd) continue;
+                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y)
+                            Assert.IsTrue(-Overlap(p.X, q.X, r.X, t.X) >= 10, $"{step}: {Describe(a)} and {Describe(b)} run along one height at y {p.Y}.");
+                        if (p.Y == q.Y && r.Y == t.Y && p.Y != r.Y && Math.Abs(p.Y - r.Y) < 10 && Overlap(p.X, q.X, r.X, t.X) > 0)
+                        {
+                            Assert.IsTrue(allowed, $"{step}: {Describe(a)} and {Describe(b)} run beside each other {Math.Abs(p.Y - r.Y)} units apart at y {p.Y} and {r.Y}.");
+                            beside += Overlap(p.X, q.X, r.X, t.X);
+                        }
+                        if (p.X == q.X && r.X == t.X && Math.Abs(p.X - r.X) < 10)
+                            Assert.IsTrue(Overlap(p.Y, q.Y, r.Y, t.Y) < 0, $"{step}: {Describe(a)} and {Describe(b)} run upright within 10 units at x {p.X} and {r.X}.");
                     }
+                if (allowed)
+                    Assert.IsTrue(beside > 0 && beside <= 20,
+                        $"{step}: {Describe(a)} and {Describe(b)} run beside each other for {beside} units; only the 20 units one of them needs to leave its end are allowed.");
             }
     }
 
@@ -4583,15 +4752,20 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-11, measured in one capture: every shown facet row ends in a chevron at least 9 pixels high and 3:1
-    /// or more on the row (its focus ring and bottom rule left out of the measurement).</summary>
+    /// or more on the row (its focus ring and bottom rule left out of the measurement). Each row is the platform's own toggle
+    /// button: assistive technology reads it as a toggle button named by its facet and value, pressed exactly for the facet
+    /// whose detail is open (review of the design QA fixes).</summary>
     private static void VerifyChevrons(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step)
     {
         var rows = at.Controls.Where(c => c.Name.StartsWith("RecursiveFacetRow", StringComparison.Ordinal) && c.Shown).ToArray();
         Assert.IsNotEmpty(rows, step + ": the facet overview lists facets.");
+        string open = at.FacetEditor == "" ? "" : "RecursiveFacetRow" + string.Concat(at.FacetEditor.Split('-').Select(w => char.ToUpperInvariant(w[0]) + w[1..]));
         foreach (var row in rows)
         {
-            // The editor draws each row, and tells assistive technology it is a button named by its facet and value.
-            VerifyAccessible(row, "button", step);
+            VerifyAccessible(row, "toggle button", step);
+            StringAssert.StartsWith(row.Label, FacetRowLabel(row.Name) + ": ", step + ": " + row.Name + " is named by its facet and value.");
+            Assert.AreEqual(row.Name == open, row.Active, step + ": " + row.Name + " is pressed exactly while its facet's detail is open.");
+            Assert.AreEqual(row.Name == open, row.Accessible.Checked, step + ": assistive technology reads " + row.Name + " as pressed exactly while its detail is open.");
             var background = shot.At(row.X + 3, row.Y + 3);
             var chevron = shot.MostContrasting(row.X + row.Width - 22, row.Y + 3, 18, row.Height - 6, background);
             Assert.IsTrue(shot.Contrast("P2-11 " + row.Name + " chevron on its row", chevron, background) >= 3.0,
@@ -4601,6 +4775,22 @@ public sealed partial class NativeSessionTests
                 $"{step}: {row.Name}'s chevron is text-sized, at least 9 pixels high.");
         }
     }
+
+    /// <summary>The editor state without its layout statistics. They count the work of the whole editor process (an offscreen view
+    /// of another level lays that level out once), so they are left out where a journey compares what a person sees and edits.</summary>
+    private static P.RecursiveDiagramEditorState WithoutLayoutStatistics(P.RecursiveDiagramEditorState state)
+    {
+        var copy = state.Clone();
+        copy.RouteLayouts = 0; copy.SlowestRouteLayoutMicros = 0; copy.LatestRouteLayoutMicros = 0;
+        return copy;
+    }
+
+    /// <summary>The facet a facet row is named for, as its label starts: "Orderable part" for RecursiveFacetRowOrderablePart.</summary>
+    private static string FacetRowLabel(string name) => name["RecursiveFacetRow".Length..] switch
+    {
+        "OrderablePart" => "Orderable part",
+        var facet => facet
+    };
 
     /// <summary>Design QA P2-13, measured in one capture: when Comments does not fit the inspector's view, the inspector shows a
     /// scroll bar that stays visible without the pointer over it.</summary>

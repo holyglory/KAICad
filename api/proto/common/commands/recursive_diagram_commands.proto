@@ -190,6 +190,13 @@ message RecursiveDiagramEditorState {
   repeated DiagramCanvasBlockText block_texts = 227;
   // The eight resize handles of the selected block as drawn, relative to the editor window; empty when none are drawn.
   repeated DiagramControlRect selection_handles = 228;
+  // How often this editor process laid out the computed connection paths of a level since it started (rule F4). A level
+  // whose geometry did not change reuses its last layout, so repainting or reading the state again adds nothing.
+  uint64 route_layouts = 229;
+  // The longest single layout of computed connection paths since the process started, and the latest one, in
+  // microseconds.
+  uint64 slowest_route_layout_micros = 230;
+  uint64 latest_route_layout_micros = 231;
 }
 
 // The text a block shows on the canvas, relative to the editor window, in pixels. Text is drawn whole or not at all.
@@ -278,6 +285,8 @@ message DiagramControlRect {
   // What assistive technology reads from a button, a one-click choice or a facet row, as the toolkit exposes it (GTK's
   // ATK object); absent for other controls and where the toolkit exposes none.
   DiagramAccessible accessible = 10;
+  // The diagram object the control is drawn for: the connection id of a connection caption; empty otherwise.
+  string object_id = 11;
 }
 
 // A control's accessible role, name and state, read back from the toolkit.
@@ -286,7 +295,8 @@ message DiagramAccessible {
   string role = 1;
   // The accessible name.
   string name = 2;
-  // Whether the control is checked: a pressed toggle button or a selected one-click choice.
+  // Whether the control is checked: a pressed toggle button (a tool that is active, a facet row whose detail is open) or a
+  // selected one-click choice.
   bool checked = 3;
 }
 

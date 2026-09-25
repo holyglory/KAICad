@@ -1339,6 +1339,19 @@ public sealed class RecursiveEditorFileCommandTests
                 Assert.IsFalse(refused.Success, name); Assert.AreEqual("connection_member_edit_requires_member_path", refused.ErrorCode, name);
             }
             Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "A refused member list writes nothing.");
+            // The positive control for the refusals above: the one member list the rule accepts (the saved signals in their saved
+            // order, then the signal drawn for I2C) saves through the same EditI2c draft. It is saved to a copy of the file, so the
+            // steps below still start from the saved design.
+            string copy = Path.Combine(root, "accepted-members.xml"); await File.WriteAllTextAsync(copy, savedXml);
+            var copyRead = ReadRequest(root, copy, stored, 2); var copyLoaded = await Invoke(copyRead); Assert.IsTrue(copyLoaded.Success, copyLoaded.ErrorMessage);
+            var accepted = await Invoke(SaveLevelRequest(copyRead, copyLoaded.SourceToken, stored.SelectedRoot, [stored.SelectedRoot],
+                EditI2c([sda.Selection, scl.Selection, alert.Selection], alert)));
+            Assert.IsTrue(accepted.Success, accepted.ErrorMessage);
+            var acceptedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(copy)); var acceptedLinks = acceptedGraph.Connections(system.BlockId);
+            var acceptedI2c = acceptedLinks.Inspect(acceptedGraph.Inspect(acceptedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL", "ALERT" }, acceptedI2c.Members.Select(m => acceptedLinks.Inspect(m).Name).ToArray(),
+                "The saved signals keep their order and the drawn one follows them.");
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Saving the copy leaves the design itself unchanged.");
 
             // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
             var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",

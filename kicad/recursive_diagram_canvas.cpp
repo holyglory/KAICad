@@ -535,79 +535,437 @@ POINT LEVEL_LAYOUT::EndAnchor( const LINK& link, int endpoint, int leg ) const
             return found->second;
     return Anchor( end, centreX( peer ) );
 }
-int LEVEL_LAYOUT::normal( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
+std::pair<int, int> LEVEL_LAYOUT::leaving( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
 {
-    // Which way a path leaves an end (rule F4c): +1 to the right, -1 to the left, 0 for an end on a top or bottom side. A
-    // child block's end points out of the block; a boundary port points into the level.
-    auto side = []( D::DiagramPortSide portSide, bool boundary ) -> int
+    // Which way a path leaves an end (rules F4c and F4d): a child block's end points out of the block, a boundary port
+    // into the level.
+    auto out = []( D::DiagramPortSide side, bool boundary ) -> std::pair<int, int>
     {
-        if( portSide == D::DPS_LEFT ) return boundary ? 1 : -1;
-        if( portSide == D::DPS_RIGHT ) return boundary ? -1 : 1;
-        return 0;
+        const int sign = boundary ? -1 : 1;
+        switch( side )
+        {
+        case D::DPS_LEFT: return { -sign, 0 };
+        case D::DPS_TOP: return { 0, -sign };
+        case D::DPS_BOTTOM: return { 0, sign };
+        default: return { sign, 0 };
+        }
     };
     if( endpoint.block_id() == m_scope )
     {
         if( endpoint.has_interface_id() )
-            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return side( port->side, true );
-        return 1;
+            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return out( port->side, true );
+        return { 1, 0 };
     }
     if( endpoint.has_interface_id() )
-        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return side( port->side, false );
-    return at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1;
+        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return out( port->side, false );
+    return { at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1, 0 };
 }
-std::string LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
+int LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
 {
-    return endpoint.block_id() != m_scope && Node( endpoint.block_id() ) ? endpoint.block_id() : std::string();
+    if( endpoint.block_id() == m_scope ) return -1;
+    for( size_t i = 0; i < m_nodes.size(); ++i ) if( m_nodes[i].id == endpoint.block_id() ) return static_cast<int>( i );
+    return -1;
 }
-void LEVEL_LAYOUT::placePaths()
+bool LEVEL_LAYOUT::Sideways( const LINK& link, int index ) const
 {
-    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
-    // (two waypoints on one vertical line) runs level from each of its ends to its channel, so a route stored against ends
-    // that have since moved never draws a slanted leg (F4b). A computed leg is the three-segment path from, (x, from.y),
-    // (x, to.y), to, whose channel x is chosen so that the leg leaves each block along its edge before turning (F4c) and
-    // keeps apart from the other legs (F4a):
-    //  - An end on a block's left or right edge, or on a boundary port, needs the channel at least 20 units out along its
-    //    edge. The preferred channel is the middle between the ends moved into those limits; the candidates are it and every
-    //    channel 10k units from it inside the limits (up to 200 units past the ends on an open side). When the limits of the
-    //    two ends cannot both hold, the preferred channel is the middle and the candidates stay 10 units inside the ends.
-    //  - A candidate scores, in this order: the runs beside another leg (its vertical leg within 10 units of another vertical
-    //    leg over heights they share or meet at; its horizontal leg on the height of another leg's horizontal segment that
-    //    overlaps it or ends within 10 units of it, unless that other leg starts or ends at the same point), the blocks its
-    //    segments come within 10 units of (a segment leaving an end does not count that end's own block), the other legs it
-    //    crosses, and its distance from the preferred channel; then the lower channel.
-    //  - Stored routes are laid out first, then the computed legs in level order, each taking its best candidate against the
-    //    legs laid out before it. Then, up to four times over, each computed leg still running beside another is laid out
-    //    again together with each computed leg it runs beside, over every pair of their candidates, against all the other
-    //    legs; a pair is taken when its summed score is lower than the pair's current one (the first such lowest pair, in
-    //    candidate order).
+    if( index < 1 || index >= static_cast<int>( link.endpoints.size() ) ) return false;
+    return leaving( link.endpoints[0], EndAnchor( link, 0, index ) ).second == 0
+           && leaving( link.endpoints[index], EndAnchor( link, index, index ) ).second == 0;
+}
+
+namespace
+{
+ROUTE_STATS g_routeStats;
+
+/// The computed legs of one level geometry, laid out once: an unchanged level (a repaint, a state report, the geometry
+/// before and after a drag step) reuses its layout instead of laying it out again.
+std::vector<std::vector<POINT>> cachedRoutes( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
+                                              const std::vector<ROUTE_LEG>& legs )
+{
+    std::string key;
+    auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
+    put( static_cast<int64_t>( blocks.size() ) );
+    for( const RECT& rect : blocks ) { put( rect.x ); put( rect.y ); put( rect.w ); put( rect.h ); }
+    put( static_cast<int64_t>( stored.size() ) );
+    for( const auto& path : stored ) { put( static_cast<int64_t>( path.size() ) ); for( const POINT& point : path ) { put( point.x ); put( point.y ); } }
+    put( static_cast<int64_t>( legs.size() ) );
+    for( const ROUTE_LEG& leg : legs )
+        for( const ROUTE_END* end : { &leg.from, &leg.to } ) { put( end->at.x ); put( end->at.y ); put( end->dx ); put( end->dy ); put( end->block ); }
+    struct ENTRY { std::string key; std::vector<std::vector<POINT>> paths; };
+    static std::vector<ENTRY> recent;
+    for( size_t i = 0; i < recent.size(); ++i )
+        if( recent[i].key == key )
+        {
+            std::rotate( recent.begin(), recent.begin() + static_cast<std::ptrdiff_t>( i ), recent.begin() + static_cast<std::ptrdiff_t>( i ) + 1 );
+            return recent.front().paths;
+        }
+    const auto started = std::chrono::steady_clock::now();
+    auto paths = RouteLegs( blocks, stored, legs );
+    const auto micros = static_cast<uint64_t>( std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - started ).count() );
+    ++g_routeStats.layouts; g_routeStats.latestMicros = micros; g_routeStats.slowestMicros = std::max( g_routeStats.slowestMicros, micros );
+    recent.insert( recent.begin(), ENTRY{ std::move( key ), paths } );
+    if( recent.size() > 16 ) recent.pop_back();
+    return paths;
+}
+}
+
+ROUTE_STATS RouteStats() { return g_routeStats; }
+
+std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
+                                           const std::vector<ROUTE_LEG>& legs )
+{
+    // Rule F4 for computed legs, as revised for design QA P2-5 and its review. A leg runs from its first end to a channel (a
+    // vertical line at x) and on to its other end:
+    //  - An end on a block's left or right edge, or a boundary port on the frame's left or right side (or unplaced), is left
+    //    level: the leg runs from, (x, from.y), (x, to.y), to, with the channel at least 20 units out along the edge (F4c).
+    //  - An end on a top or bottom side is left along its normal (F4d): the leg first runs straight up or down from it for a
+    //    lead of 20, 30 or 40 units, and only then level to the channel. The channel may also be the end's own x, where the
+    //    lead runs on to the other end's level run.
+    // Candidates: the preferred channel, the middle between the ends moved into their limits, and every channel 10k units
+    // from it within the limits, at most 20 either side (and up to 200 units beyond the ends on a side without a limit); then
+    // each limit itself (exactly 20 units out from its end) and, for an end on a top or bottom side, its own x; each with
+    // every lead. When the limits of the two ends cannot both hold,
+    // the preferred channel is the middle and the candidates stay 10 units inside the ends. A leg whose ends are level and
+    // leave sideways has only the preferred channel. A candidate scores, in this order (F4a):
+    //  (a) its runs beside other legs: two level segments less than 10 units apart in height whose runs overlap (on one
+    //      height, also runs that end less than 10 units apart), or two upright segments less than 10 units apart that share
+    //      or meet at a height, unless both segments start at an end the two legs share (two connections of one port);
+    //  (b) how far, in total, it runs beside them;
+    //  (c) its contacts: each segment that comes within 10 units of a child block, not counting a block for the segment that
+    //      leaves or reaches that block's end;
+    //  (d) the other legs' segments it crosses;
+    //  (e) its distance from the preferred channel plus the length of its leads beyond 20 units;
+    // then the lower channel, then the earlier candidate. The legs are laid out in level order, each against the paths
+    // already drawn; then, up to four times over, a leg still running beside another is laid out again together with each
+    // leg it runs beside, over every pair of each one's 16 best candidates (scored against all the other legs), and the first
+    // pair (in candidate order) whose summed score is the lowest and lower than their current one is taken. Each candidate's
+    // score against the other legs is kept up to date as legs change, and paths or segments whose boxes lie 10 units or
+    // more apart are not compared, so a level of fifty connections is laid out in bounded time.
     const int64_t apart = 10 * QUANTUM, stub = 20 * QUANTUM, reach = 200 * QUANTUM;
-    struct PATH { std::vector<POINT> points; };
-    struct LEG
-    {
-        std::pair<std::string, int> key;
-        POINT from, to;
-        std::string fromBlock, toBlock;
-        int64_t preferred = 0;
-        std::vector<int64_t> candidates;
-    };
+    const int steps = 20;
+    const size_t shortlist = 16;
+    const std::vector<int64_t> leads{ 20 * QUANTUM, 30 * QUANTUM, 40 * QUANTUM }, level{ 0 };
+    using PATH = std::vector<POINT>;
     struct SCORE
     {
-        int64_t conflicts = 0, contacts = 0, crossings = 0, distance = 0;
+        int64_t conflicts = 0, alongside = 0, contacts = 0, crossings = 0, distance = 0;
         SCORE operator+( const SCORE& other ) const
         {
-            return { conflicts + other.conflicts, contacts + other.contacts, crossings + other.crossings, distance + other.distance };
+            return { conflicts + other.conflicts, alongside + other.alongside, contacts + other.contacts, crossings + other.crossings,
+                     distance + other.distance };
+        }
+        SCORE operator-( const SCORE& other ) const
+        {
+            return { conflicts - other.conflicts, alongside - other.alongside, contacts - other.contacts, crossings - other.crossings,
+                     distance - other.distance };
         }
         bool operator<( const SCORE& other ) const
         {
-            return std::tie( conflicts, contacts, crossings, distance ) < std::tie( other.conflicts, other.contacts, other.crossings, other.distance );
+            return std::tie( conflicts, alongside, contacts, crossings, distance )
+                   < std::tie( other.conflicts, other.alongside, other.contacts, other.crossings, other.distance );
         }
     };
-    std::vector<PATH> stored;
-    std::vector<LEG> legs;
+    // A path as its segments (zero-length ones left out), each with its box, and the box of the whole path: two paths or
+    // segments whose boxes are 10 units apart or more can neither cross nor run beside each other.
+    struct SEGMENT
+    {
+        POINT a, b;
+        int64_t left, top, right, bottom;
+        bool level, upright, first, last;
+    };
+    struct DRAWN
+    {
+        PATH path;
+        std::vector<SEGMENT> segments;
+        int64_t left = 0, top = 0, right = 0, bottom = 0;
+        explicit DRAWN( PATH points = {} ) : path( std::move( points ) )
+        {
+            if( path.empty() ) return;
+            left = right = path.front().x; top = bottom = path.front().y;
+            for( size_t i = 1; i < path.size(); ++i )
+            {
+                const POINT &a = path[i - 1], &b = path[i];
+                if( a.x == b.x && a.y == b.y ) continue;
+                SEGMENT segment{ a, b, a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y, a.x < b.x ? b.x : a.x, a.y < b.y ? b.y : a.y,
+                                 a.y == b.y, a.x == b.x, i == 1, i + 1 == path.size() };
+                left = left < segment.left ? left : segment.left; right = right > segment.right ? right : segment.right;
+                top = top < segment.top ? top : segment.top; bottom = bottom > segment.bottom ? bottom : segment.bottom;
+                segments.push_back( segment );
+            }
+        }
+    };
+    struct CANDIDATE { DRAWN drawn; int64_t x = 0; SCORE own; };
+    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
+    auto simplify = [&]( const PATH& points )
+    {
+        PATH out;
+        for( const POINT& point : points ) if( out.empty() || !same( out.back(), point ) ) out.push_back( point );
+        // A point in the middle of a straight run goes; a point where the path turns, or turns back, stays.
+        for( size_t i = 1; i + 1 < out.size(); )
+        {
+            const POINT &a = out[i - 1], &b = out[i], &c = out[i + 1];
+            bool straight = ( a.x == b.x && b.x == c.x && ( b.y - a.y ) * ( c.y - b.y ) > 0 )
+                            || ( a.y == b.y && b.y == c.y && ( b.x - a.x ) * ( c.x - b.x ) > 0 );
+            if( straight ) out.erase( out.begin() + static_cast<std::ptrdiff_t>( i ) );
+            else ++i;
+        }
+        return out;
+    };
+    auto pathOf = [&]( const ROUTE_LEG& leg, int64_t x, int64_t leadFrom, int64_t leadTo ) -> PATH
+    {
+        const POINT f = leg.from.at, t = leg.to.at;
+        const bool upFrom = leg.from.dy != 0, upTo = leg.to.dy != 0;
+        if( !upFrom && !upTo ) return { f, { x, f.y }, { x, t.y }, t };
+        const POINT f2{ f.x, f.y + leg.from.dy * leadFrom }, t2{ t.x, t.y + leg.to.dy * leadTo };
+        PATH points{ f };
+        if( upFrom ) points.push_back( f2 );
+        points.push_back( { x, upFrom ? f2.y : f.y } );
+        points.push_back( { x, upTo ? t2.y : t.y } );
+        if( upTo ) points.push_back( t2 );
+        points.push_back( t );
+        return simplify( points );
+    };
+    // How one path runs beside and crosses another (the same both ways round).
+    auto against = [&]( const DRAWN& mine, const DRAWN& other ) -> SCORE
+    {
+        SCORE score;
+        if( mine.left >= other.right + apart || other.left >= mine.right + apart || mine.top >= other.bottom + apart
+            || other.top >= mine.bottom + apart )
+            return score;
+        const POINT &mineFrom = mine.path.front(), &mineTo = mine.path.back();
+        const POINT &otherFrom = other.path.front(), &otherTo = other.path.back();
+        for( const SEGMENT& s : mine.segments )
+            for( const SEGMENT& t : other.segments )
+            {
+                // A slanted segment (a stored route drawn as stored) neither runs beside nor crosses anything.
+                if( !( s.level || s.upright ) || !( t.level || t.upright ) ) continue;
+                if( s.left >= t.right + apart || t.left >= s.right + apart || s.top >= t.bottom + apart || t.top >= s.bottom + apart )
+                    continue;
+                if( s.level != t.level )
+                {
+                    // A crossing: the upright one passes strictly through the level one.
+                    const SEGMENT &h = s.level ? s : t, &v = s.level ? t : s;
+                    if( v.left > h.left && v.left < h.right && h.top > v.top && h.top < v.bottom ) ++score.crossings;
+                    continue;
+                }
+                const int64_t apartAcross = s.level ? ( s.top > t.top ? s.top - t.top : t.top - s.top ) : ( s.left > t.left ? s.left - t.left : t.left - s.left );
+                const int64_t overlap = s.level ? ( s.right < t.right ? s.right : t.right ) - ( s.left > t.left ? s.left : t.left )
+                                                : ( s.bottom < t.bottom ? s.bottom : t.bottom ) - ( s.top > t.top ? s.top : t.top );
+                // Level runs on one height beside each other when they overlap or end less than 10 units apart, at nearby
+                // heights when they overlap; upright runs when they share or meet at a height.
+                const bool beside = apartAcross < apart
+                                    && ( s.level ? ( apartAcross == 0 ? overlap > -apart : overlap > 0 ) : overlap >= 0 );
+                if( !beside ) continue;
+                // Two connections of one port share the run at that port: both segments start at an end of both legs.
+                const bool onePort = ( s.first && ( ( t.first && same( mineFrom, otherFrom ) ) || ( t.last && same( mineFrom, otherTo ) ) ) )
+                                     || ( s.last && ( ( t.first && same( mineTo, otherFrom ) ) || ( t.last && same( mineTo, otherTo ) ) ) );
+                if( onePort ) continue;
+                ++score.conflicts; score.alongside += overlap > 0 ? overlap : 0;
+            }
+        return score;
+    };
+    // Its own part of the score: the blocks it comes near.
+    auto contacts = [&]( const ROUTE_LEG& leg, const PATH& path ) -> int64_t
+    {
+        int64_t count = 0;
+        for( size_t j = 1; j < path.size(); ++j )
+        {
+            const POINT &a = path[j - 1], &b = path[j];
+            if( same( a, b ) ) continue;
+            for( size_t n = 0; n < blocks.size(); ++n )
+            {
+                const int block = static_cast<int>( n );
+                if( ( j == 1 && block == leg.from.block ) || ( j + 1 == path.size() && block == leg.to.block ) ) continue;
+                const RECT& r = blocks[n];
+                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
+                    && std::min( a.y, b.y ) < r.Bottom() + apart )
+                    ++count;
+            }
+        }
+        return count;
+    };
+    std::vector<std::vector<CANDIDATE>> candidates( legs.size() );
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        const ROUTE_LEG& leg = legs[i];
+        const POINT f = leg.from.at, t = leg.to.at;
+        const bool upFrom = leg.from.dy != 0, upTo = leg.to.dy != 0;
+        std::optional<int64_t> low, high;
+        for( const ROUTE_END* end : { &leg.from, &leg.to } )
+        {
+            if( end->dx > 0 ) low = low ? std::max( *low, end->at.x + stub ) : end->at.x + stub;
+            else if( end->dx < 0 ) high = high ? std::min( *high, end->at.x - stub ) : end->at.x - stub;
+        }
+        int64_t left, right, preferred = ( f.x + t.x ) / 2;
+        if( !low || !high || *low <= *high )
+        {
+            if( low ) preferred = std::max( preferred, *low );
+            if( high ) preferred = std::min( preferred, *high );
+            left = low ? *low : std::min( f.x, t.x ) - reach;
+            right = high ? *high : std::max( f.x, t.x ) + reach;
+        }
+        else
+        {
+            left = std::min( f.x, t.x ) + apart; right = std::max( f.x, t.x ) - apart;
+        }
+        std::vector<int64_t> channels{ preferred };
+        if( upFrom || upTo || f.y != t.y )
+            for( int k = 1; k <= steps; ++k )
+                for( int64_t x : { preferred - k * apart, preferred + k * apart } )
+                    if( x >= left && x <= right ) channels.push_back( x );
+        // The channels exactly 20 units out from an end, so a run beside another can be kept to that end's own stub, and
+        // an upright end's own x.
+        std::vector<int64_t> extra;
+        if( upFrom || upTo || f.y != t.y )
+        {
+            if( low ) extra.push_back( *low );
+            if( high ) extra.push_back( *high );
+        }
+        for( const ROUTE_END* end : { &leg.from, &leg.to } ) if( end->dy != 0 ) extra.push_back( end->at.x );
+        for( int64_t x : extra )
+            if( x >= left && x <= right && std::find( channels.begin(), channels.end(), x ) == channels.end() ) channels.push_back( x );
+        for( int64_t x : channels )
+            for( int64_t leadFrom : upFrom ? leads : level )
+                for( int64_t leadTo : upTo ? leads : level )
+                {
+                    CANDIDATE candidate;
+                    candidate.x = x; candidate.drawn = DRAWN( pathOf( leg, x, leadFrom, leadTo ) );
+                    candidate.own.contacts = contacts( leg, candidate.drawn.path );
+                    candidate.own.distance = std::llabs( x - preferred ) + ( upFrom ? leadFrom - stub : 0 ) + ( upTo ? leadTo - stub : 0 );
+                    candidates[i].push_back( std::move( candidate ) );
+                }
+    }
+    std::vector<DRAWN> fixed;
+    for( const auto& path : stored ) fixed.emplace_back( path );
+    std::vector<size_t> chosen( legs.size(), 0 );
+    // The paths drawn so far: every stored route and the first aCount computed legs, leaving out aSkipA and aSkipB.
+    auto others = [&]( size_t count, size_t skipA, size_t skipB )
+    {
+        std::vector<const DRAWN*> result;
+        for( const auto& path : fixed ) result.push_back( &path );
+        for( size_t i = 0; i < count; ++i ) if( i != skipA && i != skipB ) result.push_back( &candidates[i][chosen[i]].drawn );
+        return result;
+    };
+    auto cost = [&]( size_t leg, size_t index, const std::vector<const DRAWN*>& drawn )
+    {
+        SCORE score = candidates[leg][index].own;
+        for( const DRAWN* other : drawn ) score = score + against( candidates[leg][index].drawn, *other );
+        return score;
+    };
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        const auto before = others( i, SIZE_MAX, SIZE_MAX );
+        std::optional<SCORE> best; size_t bestIndex = 0;
+        for( size_t c = 0; c < candidates[i].size(); ++c )
+        {
+            SCORE score = cost( i, c, before );
+            if( !best || score < *best || ( !( *best < score ) && candidates[i][c].x < candidates[i][bestIndex].x ) ) { best = score; bestIndex = c; }
+        }
+        chosen[i] = bestIndex;
+    }
+    // Every candidate's score against all the other legs as they are drawn now (and the stored routes), kept up to date as
+    // legs take another channel.
+    std::vector<std::vector<SCORE>> all( legs.size() );
+    for( size_t x = 0; x < legs.size(); ++x )
+    {
+        const auto drawn = others( legs.size(), x, SIZE_MAX );
+        for( size_t i = 0; i < candidates[x].size(); ++i ) all[x].push_back( cost( x, i, drawn ) );
+    }
+    // The box around all of a leg's candidates: a leg whose box is 10 units or more from a path cannot score against it.
+    struct BOX { int64_t left, top, right, bottom; };
+    std::vector<BOX> reachOf;
+    for( const auto& list : candidates )
+    {
+        BOX box{ LLONG_MAX, LLONG_MAX, LLONG_MIN, LLONG_MIN };
+        for( const CANDIDATE& candidate : list )
+        {
+            box.left = std::min( box.left, candidate.drawn.left ); box.top = std::min( box.top, candidate.drawn.top );
+            box.right = std::max( box.right, candidate.drawn.right ); box.bottom = std::max( box.bottom, candidate.drawn.bottom );
+        }
+        reachOf.push_back( box );
+    }
+    auto near = [&]( const BOX& box, const DRAWN& path )
+    {
+        return !( box.left >= path.right + apart || path.left >= box.right + apart || box.top >= path.bottom + apart || path.top >= box.bottom + apart );
+    };
+    auto take = [&]( size_t leg, size_t index )
+    {
+        const DRAWN &was = candidates[leg][chosen[leg]].drawn, &now = candidates[leg][index].drawn;
+        for( size_t x = 0; x < legs.size(); ++x )
+            if( x != leg && ( near( reachOf[x], was ) || near( reachOf[x], now ) ) )
+                for( size_t i = 0; i < candidates[x].size(); ++i )
+                    all[x][i] = all[x][i] - against( candidates[x][i].drawn, was ) + against( candidates[x][i].drawn, now );
+        chosen[leg] = index;
+    };
+    for( int round = 0; round < 4; ++round )
+    {
+        bool improved = false;
+        for( size_t a = 0; a < legs.size(); ++a )
+        {
+            if( all[a][chosen[a]].conflicts == 0 ) continue;
+            for( size_t b = 0; b < legs.size(); ++b )
+            {
+                // Only a leg this one runs beside is laid out again with it.
+                const DRAWN &nowA = candidates[a][chosen[a]].drawn, &nowB = candidates[b][chosen[b]].drawn;
+                if( b == a || against( nowA, nowB ).conflicts == 0 ) continue;
+                // Each leg's score against all the other legs but these two.
+                std::vector<SCORE> baseA, baseB;
+                for( size_t i = 0; i < candidates[a].size(); ++i ) baseA.push_back( all[a][i] - against( candidates[a][i].drawn, nowB ) );
+                for( size_t j = 0; j < candidates[b].size(); ++j ) baseB.push_back( all[b][j] - against( candidates[b][j].drawn, nowA ) );
+                auto total = [&]( size_t i, size_t j )
+                {
+                    const SCORE between = against( candidates[a][i].drawn, candidates[b][j].drawn );
+                    return baseA[i] + between + baseB[j] + between;
+                };
+                const SCORE current = total( chosen[a], chosen[b] );
+                // Each leg's best candidates against all the other legs (at most `shortlist`, in candidate order among equals),
+                // so a dense level is laid out in bounded time.
+                auto best = [&]( const std::vector<SCORE>& base )
+                {
+                    std::vector<size_t> order( base.size() );
+                    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
+                    std::stable_sort( order.begin(), order.end(), [&]( size_t x, size_t y ) { return base[x] < base[y]; } );
+                    if( order.size() > shortlist ) order.resize( shortlist );
+                    std::sort( order.begin(), order.end() );
+                    return order;
+                };
+                const auto listA = best( baseA ), listB = best( baseB );
+                std::optional<std::tuple<SCORE, size_t, size_t>> found;
+                for( size_t i : listA )
+                    for( size_t j : listB )
+                    {
+                        SCORE score = total( i, j );
+                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
+                    }
+                if( !found ) continue;
+                take( a, std::get<1>( *found ) ); take( b, std::get<2>( *found ) );
+                improved = true;
+                if( std::get<0>( *found ).conflicts == 0 ) break;
+            }
+        }
+        if( !improved ) break;
+    }
+    std::vector<PATH> result;
+    for( size_t i = 0; i < legs.size(); ++i ) result.push_back( candidates[i][chosen[i]].drawn.path );
+    return result;
+}
+
+void LEVEL_LAYOUT::placePaths()
+{
+    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
+    // (two waypoints on one vertical line) whose ends both leave sideways runs level from each of its ends to its channel, so
+    // a route stored against ends that have since moved never draws a slanted leg (F4b). Every other leg is computed
+    // (RouteLegs): stored routes are laid out first, then the computed legs in level order (connections in the level's order,
+    // each connection's legs in endpoint order).
+    std::vector<std::vector<POINT>> stored;
+    std::vector<ROUTE_LEG> legs;
+    std::vector<std::pair<std::string, int>> keys;
     for( const auto& link : m_links )
         for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
         {
             const POINT from = EndAnchor( link, 0, leg ), to = EndAnchor( link, leg, leg );
+            const auto [fromDx, fromDy] = leaving( link.endpoints[0], from );
+            const auto [toDx, toDy] = leaving( link.endpoints[leg], to );
             const D::DiagramConnectionRouteData* route = nullptr;
             for( const auto& row : m_routes )
                 if( row.connection_id() == link.id && row.endpoint_index() == static_cast<unsigned>( leg ) ) { route = &row; break; }
@@ -616,166 +974,19 @@ void LEVEL_LAYOUT::placePaths()
                 std::vector<POINT> waypoints;
                 for( const auto& waypoint : route->waypoints() )
                 { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) waypoints.push_back( point ); }
-                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x ) { waypoints[0].y = from.y; waypoints[1].y = to.y; }
+                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x && fromDy == 0 && toDy == 0 )
+                { waypoints[0].y = from.y; waypoints[1].y = to.y; }
                 std::vector<POINT> points{ from };
                 points.insert( points.end(), waypoints.begin(), waypoints.end() );
                 points.push_back( to );
-                m_paths[{ link.id, leg }] = points; stored.push_back( { std::move( points ) } );
+                m_paths[{ link.id, leg }] = points; stored.push_back( std::move( points ) );
                 continue;
             }
-            LEG item{ { link.id, leg }, from, to, ownBlock( link.endpoints[0] ), ownBlock( link.endpoints[leg] ), 0, {} };
-            std::optional<int64_t> low, high;
-            for( const auto& [endpoint, at] : { std::pair{ &link.endpoints[0], from }, std::pair{ &link.endpoints[leg], to } } )
-            {
-                int direction = normal( *endpoint, at );
-                if( direction > 0 ) low = low ? std::max( *low, at.x + stub ) : at.x + stub;
-                else if( direction < 0 ) high = high ? std::min( *high, at.x - stub ) : at.x - stub;
-            }
-            int64_t left, right, preferred = ( from.x + to.x ) / 2;
-            if( !low || !high || *low <= *high )
-            {
-                if( low ) preferred = std::max( preferred, *low );
-                if( high ) preferred = std::min( preferred, *high );
-                left = low ? *low : std::min( from.x, to.x ) - reach;
-                right = high ? *high : std::max( from.x, to.x ) + reach;
-            }
-            else
-            {
-                left = std::min( from.x, to.x ) + apart; right = std::max( from.x, to.x ) - apart;
-            }
-            item.preferred = preferred; item.candidates = { preferred };
-            if( from.y != to.y )
-                for( int64_t k = 1; preferred - k * apart >= left || preferred + k * apart <= right; ++k )
-                    for( int64_t x : { preferred - k * apart, preferred + k * apart } )
-                        if( x >= left && x <= right ) item.candidates.push_back( x );
-            legs.push_back( std::move( item ) );
+            legs.push_back( { { from, fromDx, fromDy, ownBlock( link.endpoints[0] ) }, { to, toDx, toDy, ownBlock( link.endpoints[leg] ) } } );
+            keys.emplace_back( link.id, leg );
         }
-    auto pathOf = []( const LEG& leg, int64_t x ) { return PATH{ { leg.from, { x, leg.from.y }, { x, leg.to.y }, leg.to } }; };
-    auto crosses = []( const POINT& a, const POINT& b, const POINT& c, const POINT& d )
-    {
-        auto one = []( const POINT& h1, const POINT& h2, const POINT& v1, const POINT& v2 )
-        {
-            return h1.y == h2.y && v1.x == v2.x && v1.x > std::min( h1.x, h2.x ) && v1.x < std::max( h1.x, h2.x )
-                   && h1.y > std::min( v1.y, v2.y ) && h1.y < std::max( v1.y, v2.y );
-        };
-        return one( a, b, c, d ) || one( c, d, a, b );
-    };
-    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
-    // How leg aLeg on channel aX runs beside and crosses one other drawn leg.
-    auto against = [&]( const LEG& leg, int64_t x, const PATH& other ) -> SCORE
-    {
-        SCORE score;
-        const PATH mine = pathOf( leg, x );
-        const int64_t top = std::min( leg.from.y, leg.to.y ), bottom = std::max( leg.from.y, leg.to.y );
-        const auto& points = other.points;
-        const POINT &otherFrom = points.front(), &otherTo = points.back();
-        for( size_t i = 1; i < points.size(); ++i )
-        {
-            const POINT &a = points[i - 1], &b = points[i];
-            if( same( a, b ) ) continue;
-            if( a.x == b.x && top != bottom )
-            {
-                if( std::llabs( a.x - x ) < apart && std::min( std::max( a.y, b.y ), bottom ) >= std::max( std::min( a.y, b.y ), top ) ) ++score.conflicts;
-            }
-            else if( a.y == b.y )
-            {
-                for( const auto& [y, x1, x2, anchor] : { std::tuple{ leg.from.y, std::min( leg.from.x, x ), std::max( leg.from.x, x ), leg.from },
-                                                         std::tuple{ leg.to.y, std::min( leg.to.x, x ), std::max( leg.to.x, x ), leg.to } } )
-                {
-                    if( x1 == x2 || a.y != y || same( anchor, otherFrom ) || same( anchor, otherTo ) ) continue;
-                    if( std::max( std::min( a.x, b.x ), x1 ) - std::min( std::max( a.x, b.x ), x2 ) < apart ) ++score.conflicts;
-                }
-            }
-            for( size_t j = 1; j < mine.points.size(); ++j ) if( crosses( mine.points[j - 1], mine.points[j], a, b ) ) ++score.crossings;
-        }
-        return score;
-    };
-    // Its own part of the score: the blocks it comes near and its distance from the preferred channel.
-    auto alone = [&]( const LEG& leg, int64_t x ) -> SCORE
-    {
-        SCORE score;
-        const PATH mine = pathOf( leg, x );
-        for( size_t j = 1; j < mine.points.size(); ++j )
-        {
-            const POINT &a = mine.points[j - 1], &b = mine.points[j];
-            if( same( a, b ) ) continue;
-            for( size_t n = 0; n < m_nodes.size(); ++n )
-            {
-                if( ( j == 1 && m_nodes[n].id == leg.fromBlock ) || ( j == 3 && m_nodes[n].id == leg.toBlock ) ) continue;
-                const RECT& r = m_rects[n];
-                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
-                    && std::min( a.y, b.y ) < r.Bottom() + apart )
-                    ++score.contacts;
-            }
-        }
-        score.distance = std::llabs( x - leg.preferred );
-        return score;
-    };
-    auto cost = [&]( const LEG& leg, int64_t x, const std::vector<const PATH*>& others )
-    {
-        SCORE score = alone( leg, x );
-        for( const PATH* other : others ) score = score + against( leg, x, *other );
-        return score;
-    };
-    std::vector<int64_t> chosen( legs.size() );
-    std::vector<PATH> placed;
-    auto others = [&]( size_t skipA, size_t skipB )
-    {
-        std::vector<const PATH*> result;
-        for( const auto& path : stored ) result.push_back( &path );
-        for( size_t i = 0; i < placed.size(); ++i ) if( i != skipA && i != skipB ) result.push_back( &placed[i] );
-        return result;
-    };
-    for( size_t i = 0; i < legs.size(); ++i )
-    {
-        auto before = others( SIZE_MAX, SIZE_MAX );
-        std::optional<SCORE> best; int64_t bestX = legs[i].preferred;
-        for( int64_t x : legs[i].candidates )
-        {
-            SCORE score = cost( legs[i], x, before );
-            if( !best || score < *best || ( !( *best < score ) && x < bestX ) ) { best = score; bestX = x; }
-        }
-        chosen[i] = bestX; placed.push_back( pathOf( legs[i], bestX ) );
-    }
-    for( int round = 0; round < 4; ++round )
-    {
-        bool improved = false;
-        for( size_t a = 0; a < legs.size(); ++a )
-        {
-            if( cost( legs[a], chosen[a], others( a, SIZE_MAX ) ).conflicts == 0 ) continue;
-            for( size_t b = 0; b < legs.size(); ++b )
-            {
-                // Only a leg this one runs beside is laid out again with it.
-                if( b == a || ( against( legs[a], chosen[a], placed[b] ).conflicts == 0 && against( legs[b], chosen[b], placed[a] ).conflicts == 0 ) )
-                    continue;
-                const auto rest = others( a, b );
-                std::vector<SCORE> baseA, baseB;
-                for( int64_t x : legs[a].candidates ) baseA.push_back( cost( legs[a], x, rest ) );
-                for( int64_t x : legs[b].candidates ) baseB.push_back( cost( legs[b], x, rest ) );
-                auto total = [&]( size_t i, size_t j )
-                {
-                    int64_t xa = legs[a].candidates[i], xb = legs[b].candidates[j];
-                    return baseA[i] + against( legs[a], xa, pathOf( legs[b], xb ) ) + baseB[j] + against( legs[b], xb, pathOf( legs[a], xa ) );
-                };
-                const SCORE current = cost( legs[a], chosen[a], rest ) + against( legs[a], chosen[a], placed[b] )
-                                      + cost( legs[b], chosen[b], rest ) + against( legs[b], chosen[b], placed[a] );
-                std::optional<std::tuple<SCORE, size_t, size_t>> found;
-                for( size_t i = 0; i < legs[a].candidates.size(); ++i )
-                    for( size_t j = 0; j < legs[b].candidates.size(); ++j )
-                    {
-                        SCORE score = total( i, j );
-                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
-                    }
-                if( !found ) continue;
-                chosen[a] = legs[a].candidates[std::get<1>( *found )]; chosen[b] = legs[b].candidates[std::get<2>( *found )];
-                placed[a] = pathOf( legs[a], chosen[a] ); placed[b] = pathOf( legs[b], chosen[b] );
-                improved = true;
-                if( std::get<0>( *found ).conflicts == 0 ) break;
-            }
-        }
-        if( !improved ) break;
-    }
-    for( size_t i = 0; i < legs.size(); ++i ) m_paths[legs[i].key] = placed[i].points;
+    const auto paths = cachedRoutes( m_rects, stored, legs );
+    for( size_t i = 0; i < keys.size(); ++i ) m_paths[keys[i]] = paths[i];
 }
 bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
 {
@@ -1193,27 +1404,30 @@ void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool da
 }
 
 FACET_ROW::FACET_ROW( wxWindow* parent, int facet, std::function<void( int )> open ) :
-        wxWindow( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS | wxFULL_REPAINT_ON_RESIZE ),
+        wxToggleButton( parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ),
         m_facet( facet ), m_open( std::move( open ) )
 {
     static const char* NAMES[FACETS] = { "Purpose", "Type", "Manufacturer", "Family", "Model", "OrderablePart", "Package" };
     SetName( wxString( "RecursiveFacetRow" ) + NAMES[std::clamp( facet, 0, FACETS - 1 )] );
-    SetBackgroundStyle( wxBG_STYLE_PAINT );
-    SetMinSize( FromDIP( wxSize( 200, 28 ) ) );
-    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
-    Bind( wxEVT_LEFT_DOWN, [this]( wxMouseEvent& ) { SetFocus(); if( m_open ) m_open( m_facet ); } );
-    Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& ) { m_hover = true; Refresh(); } );
-    Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& ) { m_hover = false; Refresh(); } );
-    Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
+    // Pressing the row opens its facet; the row stays pressed exactly while that facet's detail is open (SetChoice).
+    Bind( wxEVT_TOGGLEBUTTON, [this]( wxCommandEvent& )
           {
-              int key = event.GetKeyCode();
-              if( !event.HasAnyModifiers() && ( key == WXK_RETURN || key == WXK_NUMPAD_ENTER || key == WXK_SPACE ) )
-              { if( m_open ) m_open( m_facet ); return; }
-              if( key == WXK_TAB ) { Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
-              event.Skip();
+              SetValue( m_isOpen );
+              if( m_open ) m_open( m_facet );
           } );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetMinSize( DoGetBestSize() );
+}
+
+wxSize FACET_ROW::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return FromDIP( wxSize( 200, 28 ) );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
 }
 
 void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open )
@@ -1221,28 +1435,26 @@ void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open 
     wxString value = ChoiceValue( choice, wxS( ", " ) );
     if( choice.state() == D::DCSD_CANDIDATES )
         value += choice.values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" );
+    if( GetValue() != open ) SetValue( open );
     if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
     m_value = value; m_state = choice.state(); m_isOpen = open;
+    // The label is the row's accessible name: its facet and value.
     SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
-    // The editor draws the row itself, so it tells assistive technology what the row is: a button named by its facet and
-    // value, which opens the facet's detail.
-    SetAccessibleRole( this, "button", GetLabel() );
+    SetMinSize( DoGetBestSize() );
     Refresh();
 }
 
-void FACET_ROW::paint()
+void FACET_ROW::PaintButton( wxDC& dc, bool hover, bool )
 {
-    wxAutoBufferedPaintDC dc( this );
     wxColour background = GetParent()->GetBackgroundColour();
     wxColour foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
     wxColour muted = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
     wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
     bool dark = darkBackground( background );
     wxRect area( GetClientSize() );
-    dc.SetBackground( wxBrush( background ) ); dc.Clear();
-    if( m_isOpen || m_hover )
+    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( area );
+    if( m_isOpen || hover )
     {
-        dc.SetPen( *wxTRANSPARENT_PEN );
         dc.SetBrush( wxBrush( m_isOpen ? accent.ChangeLightness( dark ? 60 : 180 ) : background.ChangeLightness( dark ? 115 : 95 ) ) );
         dc.DrawRectangle( area );
     }
@@ -1264,8 +1476,8 @@ void FACET_ROW::paint()
     int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 18 );
     dc.SetTextForeground( foreground );
     dc.DrawText( wxControl::Ellipsize( m_value, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
-    wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hover = background.ChangeLightness( dark ? 115 : 95 );
-    wxColour chevron = Readable( muted, { background, open, hover }, 3.5 );
+    wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hovered = background.ChangeLightness( dark ? 115 : 95 );
+    wxColour chevron = Readable( muted, { background, open, hovered }, 3.5 );
     {
         const int right = area.width - FromDIP( 9 ), middle = area.height / 2;
         const wxPoint points[] = { { right - chevronWidth, middle - chevronHeight / 2 }, { right, middle }, { right - chevronWidth, middle + chevronHeight / 2 } };
@@ -1751,7 +1963,9 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
     // line, so every leg stays horizontal or vertical. When an end moved since aBefore and the route is still the one
     // aBefore drew, the channel keeps its offset from the middle between the ends. A route that changed since aBefore
     // (a merge took another writer's route, whose channel that writer already placed against the ends it moved) keeps
-    // its channel; only its heights follow the ends. A locked route, and any other stored route, is kept exactly as drawn.
+    // its channel; only its heights follow the ends. A locked route, a route with an end on a top or bottom side (its leg
+    // leaves that end upright, so a level run from it would lie along the block's outline), and any other stored route are
+    // kept exactly as drawn.
     if( !m_level.scope().local_diagram().has_presentation() ) return;
     auto after = layout( current(), true );
     for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
@@ -1759,7 +1973,7 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
         if( row.locked() || row.waypoints_size() != 2 ) continue;
         const R::LINK* now = after.Link( row.connection_id() );
         int index = static_cast<int>( row.endpoint_index() );
-        if( !now ) continue;
+        if( !now || !after.Sideways( *now, index ) ) continue;
         R::POINT first, second;
         if( !R::ParseUnits( row.waypoints( 0 ).x(), first.x ) || !R::ParseUnits( row.waypoints( 0 ).y(), first.y )
             || !R::ParseUnits( row.waypoints( 1 ).x(), second.x ) || !R::ParseUnits( row.waypoints( 1 ).y(), second.y ) ) continue;

@@ -1644,6 +1644,16 @@ void RECURSIVE_DIAGRAM_FRAME::removeSignals( const std::vector<std::string>& ids
                 added->DeleteSubrange( n, 1 );
         if( auto* draft = editConnection( false ) )
             for( int n = draft->members_size() - 1; n >= 0; --n ) if( listed( draft->members( n ).connection_id() ) ) draft->mutable_members()->DeleteSubrange( n, 1 );
+        // The exact inverse of adding them: a connection draft that adding a signal opened, and that is now again the saved
+        // connection, goes with them.
+        if( const auto* savedLink = savedConnection( m_connectionId ) )
+        {
+            const std::string savedDraft = connectionDraftFor( *savedLink ).SerializeAsString();
+            auto* drafts = m_level.mutable_connection_drafts();
+            for( int n = drafts->size() - 1; n >= 0; --n )
+                if( drafts->Get( n ).baseline().connection_id() == m_connectionId && drafts->Get( n ).SerializeAsString() == savedDraft )
+                    drafts->DeleteSubrange( n, 1 );
+        }
         m_notice.clear(); m_lastEffects.Clear(); changed(); return;
     }
     // A saved signal leaves through the companion's one removal cascade (contract rbg-v2 section 4.7): notes and
@@ -2740,6 +2750,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             {
                 auto* row = result.add_connection_captions(); place( row, "DiagramConnectionCaption", caption.rect, false );
                 row->set_shown( caption.shown && visible.Contains( caption.rect ) ); row->set_label( R::Utf8( caption.text ) );
+                row->set_object_id( caption.connection );
             }
             wxFont captionFont = GetFont().Bold().Larger();
             for( const auto& node : drawn.Nodes() )
@@ -2848,6 +2859,10 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     }
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( Utf8( focused->GetName() ) );
+    // How often the computed connection paths were laid out and how long that took, read after everything above has drawn.
+    const R::ROUTE_STATS routes = R::RouteStats();
+    result.set_route_layouts( routes.layouts ); result.set_slowest_route_layout_micros( routes.slowestMicros );
+    result.set_latest_route_layout_micros( routes.latestMicros );
     return result;
 }
 

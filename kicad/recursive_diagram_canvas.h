@@ -183,26 +183,6 @@ void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool
 /// grey dot for unknown.
 void DrawChoiceMark( wxDC& aDC, const wxRect& aBox, D::DefinitionChoiceStateData aState, bool aDark );
 
-/** One row of the inspector's facet overview: the facet's name and its value with its state mark.
- * Pressing it (click, Enter or Space) opens that facet's detail. */
-class FACET_ROW : public wxWindow
-{
-public:
-    FACET_ROW( wxWindow* aParent, int aFacet, std::function<void( int )> aOpen );
-    void SetChoice( const D::DefinitionTextChoiceData& aChoice, bool aOpen );
-    int FacetIndex() const { return m_facet; }
-    bool AcceptsFocus() const override { return IsShown() && IsEnabled(); }
-
-private:
-    void paint();
-
-    int m_facet;
-    std::function<void( int )> m_open;
-    D::DefinitionChoiceStateData m_state = D::DCSD_UNSPECIFIED;
-    wxString m_value;
-    bool m_isOpen = false, m_hover = false;
-};
-
 /// A root connection as the level draft shows it.
 struct LINK
 {
@@ -212,6 +192,29 @@ struct LINK
     /// Its direction detail (Round A3); the canvas draws arrowheads for it.
     D::DiagramConnectionDirection direction = D::DCDR_UNSPECIFIED;
 };
+
+/// One end of a computed leg (rule F4): where it attaches, which way the leg leaves it, (±1, 0) to the right or left
+/// or (0, ±1) down or up, and the child block it is on (an index into the blocks), or -1 for the level's boundary.
+struct ROUTE_END
+{
+    POINT at;
+    int dx = 0, dy = 0;
+    int block = -1;
+};
+struct ROUTE_LEG { ROUTE_END from, to; };
+/// Lays out computed legs (rule F4 as revised for design QA P2-5) against aStored, the paths already drawn, and aBlocks,
+/// the level's child blocks. Returns each leg's points in order.
+std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& aBlocks, const std::vector<std::vector<POINT>>& aStored,
+                                           const std::vector<ROUTE_LEG>& aLegs );
+/// How often the editor laid out computed paths since it started, and how long the slowest and the latest layout took.
+/// A level is laid out once per change of its geometry: an unchanged level reuses its last layout.
+struct ROUTE_STATS
+{
+    uint64_t layouts = 0;
+    uint64_t slowestMicros = 0;
+    uint64_t latestMicros = 0;
+};
+ROUTE_STATS RouteStats();
 
 /// A port anchor as drawn: stored (PLACED) or from the deterministic fallback (FALLBACK).
 struct PORT
@@ -253,6 +256,9 @@ public:
     /// The drawn path from endpoint 0 to endpoint aEndpoint (rule F4; computed paths keep their vertical legs apart, F4a).
     std::vector<POINT> Route( const LINK& aLink, int aEndpoint ) const;
     bool HasRoute( const std::string& aConnectionId, int aEndpoint ) const;
+    /// Whether both ends of the leg from endpoint 0 to aEndpoint leave sideways (a left or right edge, or a boundary port
+    /// on the frame's left or right side). Only such a leg's unlocked channel route follows its ends' heights (F4b).
+    bool Sideways( const LINK& aLink, int aEndpoint ) const;
     /// The caption position a stored route names, if it names one.
     std::optional<POINT> RouteLabel( const std::string& aConnectionId, int aEndpoint ) const;
     std::optional<RECT> Frame() const { return m_frame; }
@@ -270,10 +276,11 @@ private:
     int64_t referenceY( const D::DiagramEndpointBindingData& aEndpoint ) const;
     bool isBlockEnd( const D::DiagramEndpointBindingData& aEndpoint ) const;
     D::DiagramPortSide facing( const D::DiagramEndpointBindingData& aEndpoint, const D::DiagramEndpointBindingData& aPeer ) const;
-    /// Which way a path leaves aEndpoint attached at aAt (rule F4c): +1 right, -1 left, 0 for a top or bottom side.
-    int normal( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
-    /// The child block aEndpoint is on, or an empty id for a boundary end.
-    std::string ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    /// Which way a path leaves aEndpoint attached at aAt (rules F4c and F4d): out of a child block's side, into the level
+    /// from a boundary port, as (1, 0) right, (-1, 0) left, (0, 1) down or (0, -1) up.
+    std::pair<int, int> leaving( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
+    /// The index of the child block aEndpoint is on, or -1 for a boundary end.
+    int ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
     void placeBlockEnds();
     void placePaths();
 
@@ -383,6 +390,29 @@ public:
 
 protected:
     wxSize DoGetBestSize() const override;
+};
+
+/** One row of the inspector's facet overview: the facet's name and its value with its state mark. It is the platform's own
+ * toggle button, pressed while its facet's detail is open, and on GTK the editor paints it. Pressing it (the pointer, or
+ * Space or Enter when focused) opens that facet's detail; assistive technology reads it as a toggle button named by its
+ * facet and value, pressed for the open facet (design QA P2-11 and its review). */
+class FACET_ROW : public wxToggleButton, public BUTTON_PAINTER
+{
+public:
+    FACET_ROW( wxWindow* aParent, int aFacet, std::function<void( int )> aOpen );
+    void SetChoice( const D::DefinitionTextChoiceData& aChoice, bool aOpen );
+    int FacetIndex() const { return m_facet; }
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    int m_facet;
+    std::function<void( int )> m_open;
+    D::DefinitionChoiceStateData m_state = D::DCSD_UNSPECIFIED;
+    wxString m_value;
+    bool m_isOpen = false;
 };
 
 /** A row of one-click choices, left to right, that continues on a new line only when the next choice does not fit the

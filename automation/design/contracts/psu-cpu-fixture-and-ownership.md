@@ -802,7 +802,8 @@ the matching erratum of `cn2-recursive-diagram-v2.md`.
   `kicad/structural_editor_control.{h,cpp}`, `kicad/structural_editor_frame.{h,cpp}`, `kicad/structural_editor_admission.h`,
   `api/proto/common/commands/structural_commands.proto`, `NativeStructuralEditorJourney.cs`,
   `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs`, `NativeStructuralMigrationJourney.cs` and
-  `StructuralMigrationTests.cs`. `RecursiveEditorTools.cs` gains `kicad_diagram_create` only, never `kicad_diagram_migrate`.
+  `StructuralMigrationTests.cs`. `RecursiveEditorTools.cs` gains `kicad_diagram_create` and `kicad_diagram_discover`, never
+  `kicad_diagram_migrate`.
 - **§3.** The retired conversion numbers in `diagram_revision_types.proto` are reserved (including frozen numbers below 100)
   and are never reused. `SharedProtoBandTests` records them and no longer grants lane 2B the `StructuralMigration` type
   prefix or the `SMG_` value prefix.

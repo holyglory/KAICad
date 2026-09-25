@@ -1,13 +1,18 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Native;
 
+/// <summary>A verified registration. ProcessId and ProcessStart name the KiCad process of that epoch only
+/// when this server verified it runs the instance (or started it); ProcessStart is null off Linux and in
+/// records written before it existed, and then a saved registration never proves that process ended.</summary>
 public sealed record InstanceRecord(string InstanceId, string ProjectPath, string Endpoint,
-                                    string Epoch, int? ProcessId, DateTimeOffset VerifiedAt);
+                                    string Epoch, int? ProcessId, DateTimeOffset VerifiedAt,
+                                    ProcessStartIdentity? ProcessStart = null);
 
 /// <summary>The registry is connection metadata, not a second source of design truth.</summary>
 public sealed partial class InstanceRegistry(INativeTransport transport, string stateDirectory,
@@ -82,6 +87,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             await changes.WaitAsync(cancellationToken);
             try
             {
+                // The launch receipt's process ID is the process a previous server started, which may be a
+                // launcher rather than KiCad: it stays a diagnostic hint, never an identity that proves an exit.
                 var attached = await AttachCoreAsync(launch.Endpoint, instanceId, launch.ProcessId,
                     cancellationToken, launch.ProjectPath);
                 RetireLaunch(instanceId);
@@ -93,7 +100,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         await changes.WaitAsync(cancellationToken);
         try
         {
-            var attached = await AttachCoreAsync(saved.Endpoint, saved.InstanceId, saved.ProcessId,
+            // The same epoch keeps the process recorded when it was verified (AttachCoreAsync copies it).
+            var attached = await AttachCoreAsync(saved.Endpoint, saved.InstanceId, null,
                 cancellationToken, saved.ProjectPath, saved.Epoch);
             RetireLaunch(instanceId);
             return attached.Instance;
@@ -107,10 +115,13 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         (await StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering)).Instance;
 
     /// <summary>Start KiCad for a project. When the project's registered KiCad is proven to have ended
-    /// (this server saw its exit status, or its process no longer exists), the new process continues
-    /// that instance ID with a new epoch, so recovery records and journals that name the instance can
-    /// be reattached; the result names the replaced registration and how its process ended. A project
-    /// whose registered KiCad may still run is refused as before.</summary>
+    /// (this server saw its exit status, or its recorded process no longer exists), the new process
+    /// continues that instance ID with a new epoch, so recovery records and journals that name the
+    /// instance can be reattached; the result names the replaced registration and how its process ended.
+    /// A project whose attached KiCad may still run, or whose saved registration's KiCad is shown to be
+    /// still running this instance, is refused (project_owned). A saved registration whose KiCad this
+    /// server can neither prove ended nor show running does not block the start: the new KiCad gets a new
+    /// instance ID, as before, and KiCad itself refuses a project another KiCad has open.</summary>
     public async Task<InstanceRegistration> StartInstanceAsync(string executable, string projectPath,
                                                              CancellationToken cancellationToken = default,
                                                              bool? softwareRendering = null)
@@ -131,14 +142,21 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
             if (connections.Values.FirstOrDefault(r => r.Record.ProjectPath == projectPath) is { } owner)
             {
-                replacedExit = await ProvenExitAsync(owner.Record, owner.Process, cancellationToken)
+                replacedExit = await ProvenExitAsync(owner.Record.InstanceId, owner.Record.Epoch, cancellationToken)
                     ?? throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
                 replacing = owner.Record;
             }
-            else if (await LatestSavedAsync(projectPath, cancellationToken) is { } saved
-                     && await ProvenExitAsync(saved.InstanceId, saved.Epoch, cancellationToken) is { } exit)
+            else
             {
-                replacing = saved; replacedExit = exit;
+                var saved = await SavedForProjectAsync(projectPath, cancellationToken);
+                if (saved.FirstOrDefault(r => r.ProcessId is { } pid && r.ProcessStart is { } identity
+                        && ProcessIdentity.Runs(pid, identity) && ProcessIdentity.RunsInstance(pid, r.InstanceId)) is { } running)
+                    throw new AutomationException("project_owned", $"KiCad instance {running.InstanceId} (process {running.ProcessId}) from a saved "
+                        + "registration still runs this project; reattach it with kicad_instance_reattach instead of starting another KiCad.");
+                if (saved.Count != 0 && await ProvenExitAsync(saved[0].InstanceId, saved[0].Epoch, cancellationToken) is { } exit)
+                {
+                    replacing = saved[0]; replacedExit = exit;
+                }
             }
             startingProjects.Add(projectPath);
         }
@@ -150,6 +168,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             string socket = Path.Combine(runtime, "api.sock");
             string endpoint = NativeIpcEndpoint.FromSocketPath(socket);
             Directory.CreateDirectory(runtime);
+            // KiCad started again under the same instance ID writes into the same runtime folder.
+            KeepEarlierProcessLogs(runtime);
             var start = new ProcessStartInfo(executable)
             {
                 WorkingDirectory = Path.GetDirectoryName(projectPath)!,
@@ -213,11 +233,19 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                         await changes.WaitAsync(deadline.Token);
                         try
                         {
-                            var watcher = new ChildProcessObserver(id, ready.Epoch, process, RecordExit);
-                            observed = true;
-                            var attached = await AttachCoreAsync(endpoint, id, process.Id, deadline.Token, projectPath, ready.Epoch,
-                                replaceExited: replacing is not null, child: watcher);
+                            // KiCad names its own process in the handshake (0 from a KiCad built before that
+                            // field). The process this server started witnesses KiCad's exit only when it is
+                            // that KiCad: a launcher that started KiCad and ended is not, so its exit is never
+                            // reported as KiCad's. The process KiCad names is then observed instead, when it
+                            // runs this instance, or the instance stays unverified. The same epoch is attached
+                            // below, so its handshake names the same process.
+                            bool startedKiCad = ready.ProcessId == 0 || ready.ProcessId == (uint)process.Id;
+                            var watcher = startedKiCad ? new ChildProcessObserver(id, ready.Epoch, process, RecordExit) : null;
+                            observed = watcher is not null;
+                            var attached = await AttachCoreAsync(endpoint, id, startedKiCad ? process.Id : null, deadline.Token,
+                                projectPath, ready.Epoch, replaceExited: replacing is not null, child: watcher);
                             RetireLaunch(id);
+                            RecordLogEpoch(runtime, attached.Instance.Epoch);
                             return attached;
                         }
                         finally { changes.Release(); }
@@ -241,6 +269,10 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         }
     }
 
+    // processId is the KiCad process this server started when child observes it, and otherwise an unverified
+    // hint (a launch receipt's process). A process identity is recorded only for a verified KiCad process: that
+    // child, or the process the handshake names when it runs this instance; never for whatever holds an
+    // unverified process ID now.
     private async Task<InstanceRegistration> AttachCoreAsync(string endpoint, string expectedId, int? processId,
                                                        CancellationToken cancellationToken,
                                                        string? expectedProject = null, string? expectedEpoch = null,
@@ -254,9 +286,15 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             || (expectedEpoch is not null && session.Epoch != expectedEpoch))
             throw new AutomationException("instance_changed", "The native session no longer matches the requested project or recorded epoch.");
         // KiCad reports its own process ID in the handshake; it is recorded once it is shown to run this instance.
-        // A process this server started is known by its child ID.
+        // A process this server started, and that KiCad names as itself, is known by its child ID.
+        bool verified = child is not null;
         if (child is null && session.ProcessId is > 0 and <= int.MaxValue && ProcessIdentity.RunsInstance((int)session.ProcessId, expectedId))
+        {
             processId = (int)session.ProcessId;
+            verified = true;
+        }
+        // Which process that is, recorded right after the verified handshake so a later server can prove it ended.
+        var identity = verified ? ProcessIdentity.Record(processId) : null;
         // A different process under a known identity is adopted only as the replacement of a
         // registration whose process is proven to have ended; anything else stays a changed identity.
         InstanceRecord? previous = null;
@@ -276,27 +314,29 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         }
         if (previous is not null)
         {
-            var exit = await ProvenExitAsync(previous, existing?.Process, cancellationToken)
+            var exit = await ProvenExitAsync(previous.InstanceId, previous.Epoch, cancellationToken)
                 ?? throw new AutomationException("instance_changed", $"Instance {expectedId} is registered to another KiCad process "
                     + $"(epoch {previous.Epoch}) that this server cannot prove has ended. Inspect that process; a replacement is adopted only after its exit.");
-            var observer = child ?? Observe(expectedId, session.Epoch, processId);
+            var observer = child ?? Observe(expectedId, session.Epoch, processId, identity);
             client.Process = observer;
-            return new(await AdoptExitReplacementAsync(previous, exit, client, session, endpoint, processId, observer, cancellationToken),
+            return new(await AdoptExitReplacementAsync(previous, exit, client, session, endpoint, processId, identity, observer, cancellationToken),
                 previous, exit);
         }
         var record = new InstanceRecord(session.InstanceId, session.ProjectPath, endpoint,
-                                        session.Epoch, processId, DateTimeOffset.UtcNow);
+                                        session.Epoch, processId, DateTimeOffset.UtcNow, identity);
         using var lease = await MetadataLease(cancellationToken);
         if (File.Exists(Path.Combine(directory, record.InstanceId + ".json")))
         {
             var saved = await ReadSavedAsync(record.InstanceId, cancellationToken);
             if (saved.Epoch != record.Epoch || saved.ProjectPath != record.ProjectPath || saved.Endpoint != record.Endpoint)
                 throw new AutomationException("instance_changed", "A saved identity requires explicit verified replacement, not ordinary attachment.");
-            if (record.ProcessId is null) record = record with { ProcessId = saved.ProcessId };
+            // The same epoch is the same process: keep what was recorded when it was first verified. It is
+            // observed only when it is still exactly that process in this server's namespace.
+            if (record.ProcessId is null) record = record with { ProcessId = saved.ProcessId, ProcessStart = saved.ProcessStart };
         }
         // A repeated attachment keeps the shared serialized client and what it knows about the process,
         // but records this handshake.
-        var process = existing?.Process ?? child ?? Observe(record.InstanceId, record.Epoch, record.ProcessId);
+        var process = existing?.Process ?? child ?? Observe(record.InstanceId, record.Epoch, record.ProcessId, record.ProcessStart);
         if (existing is null) client.Process = process;
         var connection = new Connection(record, existing?.Client ?? client, session.Clone(), process);
         await WriteRecordAsync(record, cancellationToken);
@@ -304,20 +344,54 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         return new(record, null, null);
     }
 
-    // The most recently verified saved registration of a project that no attached instance holds.
+    // The saved registrations of a project that no attached instance holds, most recently verified first.
     // Unreadable records are skipped here; reattaching them reports why.
-    private async Task<InstanceRecord?> LatestSavedAsync(string projectPath, CancellationToken token)
+    private async Task<IReadOnlyList<InstanceRecord>> SavedForProjectAsync(string projectPath, CancellationToken token)
     {
-        if (!Directory.Exists(directory)) return null;
-        InstanceRecord? latest = null;
+        if (!Directory.Exists(directory)) return [];
+        var found = new List<InstanceRecord>();
         foreach (string file in Directory.EnumerateFiles(directory, "*.json"))
         {
             InstanceRecord saved;
             try { saved = await ReadSavedAsync(Path.GetFileNameWithoutExtension(file), token); }
             catch (AutomationException) { continue; }
-            if (saved.ProjectPath == projectPath && (latest is null || saved.VerifiedAt > latest.VerifiedAt)) latest = saved;
+            if (saved.ProjectPath == projectPath) found.Add(saved);
         }
-        return latest;
+        return found.OrderByDescending(saved => saved.VerifiedAt).ToArray();
+    }
+
+    // The logs a started KiCad writes into its runtime folder, and the file naming the epoch that wrote them.
+    private static readonly string[] ProcessLogs = ["native.log", "bootstrap.stdout.log", "bootstrap.stderr.log"];
+    private const string LogEpochFile = "logs.epoch";
+
+    // Before KiCad starts again in a runtime folder, the logs of the process that ran there before move to
+    // epochs/<its epoch>/, the epoch this server verified for it; logs of a start that never answered a
+    // handshake move to epochs/unverified-<time>/. So every process keeps its own logs and none is appended
+    // to or overwritten by the next one. A failed move leaves the files in place (the new process's logs
+    // then follow them) rather than failing the start.
+    private static void KeepEarlierProcessLogs(string runtime)
+    {
+        string marker = Path.Combine(runtime, LogEpochFile);
+        string[] present = ProcessLogs.Where(name => File.Exists(Path.Combine(runtime, name))).ToArray();
+        try
+        {
+            if (present.Length == 0) { File.Delete(marker); return; }
+            string? epoch = File.Exists(marker) ? File.ReadAllText(marker).Trim() : null;
+            string folder = epoch is { Length: > 0 } ? EpochName(epoch)
+                : "unverified-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfffffff'Z'", CultureInfo.InvariantCulture);
+            string destination = Path.Combine(runtime, "epochs", folder);
+            if (Directory.Exists(destination)) destination += "-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(destination);
+            foreach (string name in present) File.Move(Path.Combine(runtime, name), Path.Combine(destination, name));
+            File.Delete(marker);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+    }
+
+    private static void RecordLogEpoch(string runtime, string epoch)
+    {
+        try { File.WriteAllText(Path.Combine(runtime, LogEpochFile), epoch); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     // KiCad logs why a start failed ("Error: ..." lines in its automation log, for example a

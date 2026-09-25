@@ -24,7 +24,10 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
 
     /// <summary>What the registry can prove about the KiCad process behind this client. Once that
     /// process is proven to have ended, every request fails at once with instance_exited instead of
-    /// waiting for a reply that cannot come; a request in flight is abandoned when the exit is seen.</summary>
+    /// waiting for a reply that cannot come. A request in flight is abandoned when the exit is proven:
+    /// at once for a KiCad this server started (the operating system reports its exit), and within
+    /// half a second for one it attached on Linux (its process is checked while the request waits).
+    /// Without an observer (an unverified process) a request waits for its reply timeout.</summary>
     internal InstanceProcessObserver? Process { get; set; }
 
     public async Task<AutomationSession> HandshakeAsync(CancellationToken cancellationToken = default)
@@ -127,9 +130,13 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
         // A local check first, so a request to a KiCad that has already ended fails at once.
         if (process.Probe() is { } known) throw process.ExitedError(known, requestMayHaveReached: false);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
+        using var watching = CancellationTokenSource.CreateLinkedTokenSource(token);
         Task<byte[]> exchange = transport.ExchangeAsync(Endpoint, request, TimeSpan.FromSeconds(15), linked.Token);
-        if (await Task.WhenAny(exchange, process.Exited) == exchange)
+        Task<InstanceExit> ended = process.WaitForExitAsync(watching.Token);
+        if (await Task.WhenAny(exchange, ended) == exchange || !ended.IsCompletedSuccessfully)
         {
+            // The reply (or the caller's cancellation) came first: stop watching the process.
+            await watching.CancelAsync();
             try { return await exchange; }
             // A transport failure of a process proven to have ended is that ending, not a network fault.
             catch (NngException error) when (!token.IsCancellationRequested && process.Probe() is { } exit)
@@ -138,7 +145,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
         await linked.CancelAsync();
         try { return await exchange; } // A reply that arrived before the exit is still the reply.
         catch (Exception) when (!token.IsCancellationRequested)
-        { throw process.ExitedError(await process.Exited, requestMayHaveReached: true); }
+        { throw process.ExitedError(await ended, requestMayHaveReached: true); }
     }
 
     // New clients opt into all current schematic fields. Explicit legacy or

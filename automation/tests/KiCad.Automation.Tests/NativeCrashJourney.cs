@@ -13,7 +13,11 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private sealed record CrashKiCad(string Id, int ProcessId, string Epoch, NativeClient Client, DocumentSpecifier Document,
-        Process? Owned = null);
+        Process? Owned = null)
+    {
+        // When it was killed, which names its log copied to the evidence.
+        public string? Moment { get; set; }
+    }
 
     // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9; ledger pcb5513dd69eda714, Linux part):
     // a KiCad that dies mid-session leaves the XML, the recovery record and the instance list truthful.
@@ -26,16 +30,19 @@ public sealed partial class NativeSessionTests
     //      held (SIGSTOP) as soon as its commit notification arrives (first copy);
     //   3. during the apply's checked save, after the root and PSU sheets were replaced and before the CPU sheet was: strace
     //      holds KiCad at the flush of the CPU sheet's new version (second copy).
-    // Each time the MCP server reports the instance as exited with exit status 137 (signal 9, SIGKILL) and answers
-    // instance_exited for it, and the synchronization that was applying pauses with instance_exited. The XML is
-    // byte-identical to the version last published or, while an apply was pending, to the version the recovery record
-    // names as that operation's starting point, with the operation and its save request stated exactly; the recovery
-    // record survives unchanged. A fresh KiCad for the same project continues the instance ID with a new epoch (started
-    // through the MCP server, or started like a user would and attached) and loads exactly what the killed KiCad had
-    // saved, never an edit twice. After the idle kill the record is reattached and automatic synchronization resumes.
-    // After the two mid-apply kills the record keeps the operation, and neither reattachment nor resuming the operation
-    // replays it on the fresh process; releasing such an operation needs the recovery store's transition for a proven
-    // exit, a parent seam (the service catalogue lists it as the exited-operation-release limitation).
+    // Each time the MCP server reports the instance as exited with exit status 137 (the status reported for signal 9,
+    // SIGKILL) and answers instance_exited for it, and the synchronization that was applying pauses with instance_exited.
+    // The XML is byte-identical to the version last published or, while an apply was pending, to the version the recovery
+    // record names as that operation's starting point, with the operation stated exactly: the native edit KiCad committed
+    // (its operation ID), the XML it publishes, and the save KiCad was cut off in. The recovery record survives unchanged.
+    // A fresh KiCad for the same project continues the instance ID with a new epoch (started through the MCP server, or
+    // started like a user would and attached) and loads exactly what the killed KiCad had saved, never an edit twice; the
+    // killed process keeps its own logs. After the idle kill the record is reattached and automatic synchronization
+    // resumes. After the two mid-apply kills the record keeps the operation, and neither reattachment nor resuming the
+    // operation replays it on the fresh process. Releasing such an operation so the fresh KiCad can resume or roll back
+    // the design needs the recovery store's transition for a proven exit, a parent seam (the service catalogue lists it
+    // as the exited-operation-release limitation). Until it lands this journey ends Inconclusive after every assertion
+    // above has run: two of the three kills cannot yet be resumed or rolled back, so the item is not passed.
     private static async Task VerifyPsuCpuNativeCrash(NativeClient client, PsuCpuNativeContext context, Process native, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -81,6 +88,8 @@ public sealed partial class NativeSessionTests
                 "After KiCad died idle the XML is byte-identical to the version last published.");
             Assert.AreEqual(idle.RevisionToken, first.Store.Read()!.RevisionToken, "The recovery record survives unchanged.");
             RequireDisk(first, idleDisk, "idle kill");
+            // Nothing was applying: the worker learns of the exit only when it next needs KiCad or its events fall silent.
+            var idleBeforeStop = await SynchronizationStatus(kicad, first.Session);
             var idleStop = await StopSynchronization(kicad, first.Session);
             kicad = await Start(first, "after the idle kill", kicad);
             RequirePlaced(await Capture(kicad), 2, "fresh KiCad after the idle kill");
@@ -90,35 +99,38 @@ public sealed partial class NativeSessionTests
             RequirePublished(first, "resumed after the idle kill");
             await ApplyEdit(first, kicad, 4, "R1 and U2 after the idle kill");
             cases.Add(new { moment = "idle", exit = idleExit, recoveryRevision = idle.RevisionToken, xmlSha256 = Sha(published),
-                automaticSynchronizationAtStop = idleStop, resumedEpoch = kicad.Epoch, resumedPlacements = Expected(4).Length });
+                automaticSynchronizationBeforeStop = idleBeforeStop, automaticSynchronizationAtStop = idleStop, resumedEpoch = kicad.Epoch,
+                resumedPlacements = Expected(4).Length });
 
             var commitDisk = Disk(first);
             var committing = await Capture(kicad);
             byte[] commitEdit;
+            SchematicCommitNotification committed;
             using (var events = new NativeEventSubscription(await kicad.Client.HandshakeAsync(token)))
             {
                 // The first packet proves the subscription is connected before the edit is written.
                 await NextEvent(events, _ => true, "the first native notification");
                 commitEdit = await WriteEdit(first, 6);
-                var commit = await NextEvent(events, delivery => delivery.Event.SchematicCommit is { } change
-                    && change.Revision.Epoch == committing.State.Revision.Epoch && change.Revision.Sequence > committing.State.Revision.Sequence,
-                    "KiCad to commit the XML edit");
+                committed = await NextCommit(events, committing, "KiCad to commit the XML edit");
                 Assert.AreEqual(0, SignalProcess(kicad.ProcessId, SigStop), "KiCad could not be held.");
                 await WaitUntil(() => ProcessState(kicad.ProcessId) == 'T', "KiCad to stop after its commit", token);
-                Phase($"KiCad held right after commit {commit.Event.SchematicCommit.Revision.Sequence}");
+                Phase($"KiCad held right after commit {committed.Revision.Sequence}");
             }
             var heldCommit = first.Store.Read()!;
             var commitPending = heldCommit.State.PendingPublication
                 ?? throw new AssertFailedException("The apply journals its publication before KiCad commits the edit.");
-            Assert.IsNotNull(heldCommit.State.PendingMutation, "The recovery record holds the native edit KiCad committed.");
+            RequireCommitted(heldCommit, committed, 6, "after-commit");
             Assert.AreEqual(kicad.Epoch, heldCommit.State.PendingNativeState!.ProcessEpoch, "The operation names the process that holds it.");
             Assert.AreEqual(DesignPublicationPhase.Prepared, commitPending.Phase, "Nothing was published.");
             CollectionAssert.AreEqual(commitEdit, commitPending.ExpectedFileBytes, "The operation starts from the edited XML.");
             CollectionAssert.AreEqual(commitEdit, await File.ReadAllBytesAsync(first.Design, token));
             RequireDisk(first, commitDisk, "held after the commit");
+            // The apply may already have journaled its save request; KiCad, held, had not started it (no file was rewritten).
             bool commitSaveJournaled = heldCommit.State.PendingNativeSave is not null;
+            if (heldCommit.State.PendingNativeSave is { } journaledSave)
+                RequireSaveOf(journaledSave, heldCommit, committed, kicad, commitDisk, first, "after-commit");
             var commitExit = await Kill(kicad, "after-commit");
-            await RequireKilledOperation(first, kicad, heldCommit, commitEdit, commitDisk, "after-commit");
+            var commitPaused = await RequireKilledOperation(first, kicad, heldCommit, commitEdit, commitDisk, "after-commit");
             var commitStop = await StopSynchronization(kicad, first.Session);
             // A KiCad started again for the project like a user would, with the same instance ID, attached to the server.
             kicad = await StartAttached(first, "after the commit kill", kicad);
@@ -127,10 +139,11 @@ public sealed partial class NativeSessionTests
             await RequireNotReplayed(first, kicad, heldCommit, commitEdit, 4, "after-commit");
             var attachedExit = await KillAttached(kicad, "attached");
             cases.Add(new { moment = "after-native-commit", exit = commitExit, operationId = commitPending.OperationId,
+                nativeOperationId = committed.Change.OperationId, committedRevision = committed.Revision.Sequence,
                 pendingProcessEpoch = heldCommit.State.PendingNativeState!.ProcessEpoch, recoveryRevision = heldCommit.RevisionToken,
-                xmlSha256 = Sha(commitEdit), candidateSha256 = Sha(commitPending.CandidateFileBytes), saveJournaled = commitSaveJournaled,
-                automaticSynchronizationAtStop = commitStop, restartedAttachedEpoch = kicad.Epoch, restartedPlacements = Expected(4).Length,
-                attachedExit });
+                xmlSha256 = Sha(commitEdit), candidateSha256 = Sha(commitPending.CandidateFileBytes), candidatePlacements = Expected(6),
+                saveJournaled = commitSaveJournaled, automaticSynchronizationPaused = commitPaused, automaticSynchronizationAtStop = commitStop,
+                restartedAttachedEpoch = kicad.Epoch, restartedPlacements = Expected(4).Length, attachedExit });
 
             // ---- Second copy: during the checked save ------------------------------------------------------------------
             var second = await Prepare("second");
@@ -142,10 +155,16 @@ public sealed partial class NativeSessionTests
             string[] trace;
             string[] temporary;
             JsonElement saveExit;
+            SchematicCommitNotification saveCommitted;
+            var saving = await Capture(kicad);
+            using (var events = new NativeEventSubscription(await kicad.Client.HandshakeAsync(token)))
             await using (var fault = await SyscallFault.AttachAsync(kicad.ProcessId, Evidence("save.strace"), token,
                 "-e", "trace=fsync", "-e", "inject=fsync:signal=SIGSTOP:when=5"))
             {
+                await NextEvent(events, _ => true, "the first native notification");
                 saveEdit = await WriteEdit(second, 8);
+                // KiCad commits the edit before it saves, so the notification arrives before strace holds the save.
+                saveCommitted = await NextCommit(events, saving, "KiCad to commit the XML edit before saving it");
                 await WaitLonger(() => IsPaused(kicad.ProcessId), "KiCad to stop inside the synchronization's save", 90);
                 heldSave = second.Store.Read()!;
                 temporary = Directory.GetFiles(second.Project, "*.kicad-save-*");
@@ -156,7 +175,8 @@ public sealed partial class NativeSessionTests
                 ?? throw new AssertFailedException("The apply journals its publication before KiCad saves.");
             var saveRequest = heldSave.State.PendingNativeSave
                 ?? throw new AssertFailedException("KiCad was saving, so the record holds the exact save request.");
-            Assert.AreEqual(kicad.Epoch, saveRequest.ExpectedState.ProcessEpoch, "The save request names the process that ran it.");
+            RequireCommitted(heldSave, saveCommitted, 8, "during-save");
+            RequireSaveOf(saveRequest, heldSave, saveCommitted, kicad, saveDisk, second, "during-save");
             Assert.AreEqual(DesignPublicationPhase.Prepared, savePending.Phase, "Nothing was published.");
             CollectionAssert.AreEqual(saveEdit, savePending.ExpectedFileBytes);
             // The trace shows where KiCad stopped: flushing the CPU sheet's new version, not yet in place.
@@ -169,17 +189,19 @@ public sealed partial class NativeSessionTests
             StringAssert.Contains(await File.ReadAllTextAsync(second.Psu, token), "\"U4\"", "The replaced PSU sheet holds U3 and U4.");
             Assert.IsFalse((await File.ReadAllTextAsync(second.Cpu, token)).Contains("\"U5\"", StringComparison.Ordinal),
                 "The CPU sheet in place is the previous version, without U5.");
-            await RequireKilledOperation(second, kicad, heldSave, saveEdit, null, "during-save");
+            var savePaused = await RequireKilledOperation(second, kicad, heldSave, saveEdit, null, "during-save");
             var saveStop = await StopSynchronization(kicad, second.Session);
             kicad = await Start(second, "after the save kill", kicad);
             // The fresh KiCad loads the half-written save: U3 and U4 once on the replaced PSU sheet, no U5 or U6.
             RequirePlaced(await Capture(kicad), 6, "fresh KiCad after the save kill");
             await RequireNotReplayed(second, kicad, heldSave, saveEdit, 6, "during-save");
             cases.Add(new { moment = "during-checked-save", exit = saveExit, operationId = savePending.OperationId,
-                nativeSaveOperationId = saveRequest.OperationId, recoveryRevision = heldSave.RevisionToken, xmlSha256 = Sha(saveEdit),
-                candidateSha256 = Sha(savePending.CandidateFileBytes), stoppedAt, replacedBeforeKill = new[] { "fixture.kicad_sch", "psu.kicad_sch" },
-                leftBehind = temporary.Select(Path.GetFileName).ToArray(), automaticSynchronizationAtStop = saveStop,
-                restartedEpoch = kicad.Epoch, restartedPlacements = Expected(6).Length });
+                nativeOperationId = saveCommitted.Change.OperationId, committedRevision = saveCommitted.Revision.Sequence,
+                nativeSaveOperationId = saveRequest.OperationId, nativeSaveRevision = saveRequest.ExpectedState.Revision.Sequence,
+                recoveryRevision = heldSave.RevisionToken, xmlSha256 = Sha(saveEdit), candidateSha256 = Sha(savePending.CandidateFileBytes),
+                candidatePlacements = Expected(8), stoppedAt, replacedBeforeKill = new[] { "fixture.kicad_sch", "psu.kicad_sch" },
+                leftBehind = temporary.Select(Path.GetFileName).ToArray(), automaticSynchronizationPaused = savePaused,
+                automaticSynchronizationAtStop = saveStop, restartedEpoch = kicad.Epoch, restartedPlacements = Expected(6).Length });
 
             // ---- The other KiCad was never touched -------------------------------------------------------------------
             Assert.AreEqual(other.Epoch, (await client.HandshakeAsync(token)).Epoch, "The other KiCad kept its process.");
@@ -189,10 +211,11 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Evidence("result.json"), JsonSerializer.Serialize(new
             {
                 instanceId, otherEpoch = other.Epoch, otherProcess = processId, cases,
-                releaseOfExitedOperations = "unfinished: needs the DesignRecoveryStore transition for a proven process exit (parent seam)",
+                releaseOfExitedOperations = "unfinished: needs the DesignRecoveryStore transition for a proven process exit (parent seam 1); "
+                    + "the journey ends Inconclusive until a fresh KiCad can resume or roll back after the two mid-apply kills",
                 seconds = clock.Elapsed.TotalSeconds
             }, new JsonSerializerOptions { WriteIndented = true }), token);
-            Phase("complete");
+            Phase("every assertion passed; release after the mid-apply kills is unfinished");
         }
         catch { failure = true; throw; }
         finally
@@ -211,6 +234,10 @@ public sealed partial class NativeSessionTests
                 if (Directory.Exists(runtime)) Directory.Delete(runtime, true);
             }
         }
+        // Everything above passed, but the brief also requires that a fresh KiCad can resume or roll back after the two
+        // mid-apply kills, and that needs a recovery-store transition that does not exist yet. This is not a pass.
+        throw new AssertInconclusiveException(
+            "exited-operation-release: release/resume after mid-apply kills awaits DesignRecoveryStore.ReleaseExitedOperation (seam 1)");
 
         // ---- Steps ------------------------------------------------------------------------------------------------------
 
@@ -238,9 +265,8 @@ public sealed partial class NativeSessionTests
             // sheets). Each edit adds the next components with these placements to the XML KiCad last published.
             if (placed is null)
             {
-                await LayoutComponents(copy, kicad, seed, seeded, recovery);
-                recovery = copy.Store.Read()!;
-                copy.Store.Save(recovery.State with { DesiredFileBytes = baselineBytes }, recovery.RevisionToken);
+                await LayoutComponents(copy, kicad, seed, seeded);
+                await CommitCandidate(copy, kicad, baselineBytes);
             }
             copy.KiCad = kicad;
             copy.Session = await StartSynchronization(copy, kicad, name + " copy");
@@ -257,7 +283,19 @@ public sealed partial class NativeSessionTests
             started.Add(id);
             Assert.AreEqual("running", view.GetProperty("processState").GetString(), reply.GetRawText());
             if (previous is null) Assert.AreEqual(JsonValueKind.Null, view.GetProperty("replaces").ValueKind, reply.GetRawText());
-            else RequireContinues(view, previous, reply);
+            else
+            {
+                RequireContinues(view, previous, reply);
+                // The same instance ID reuses its runtime folder; the killed process's log moved aside unchanged, and the
+                // fresh process writes its own.
+                string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
+                string kept = Path.Combine(runtime, "epochs", previous.Epoch, "native.log");
+                Assert.IsTrue(File.Exists(kept), $"The killed KiCad's log is kept under its epoch: {kept}");
+                CollectionAssert.AreEqual(await File.ReadAllBytesAsync(Evidence("native-" + previous.Moment + ".log"), token),
+                    await File.ReadAllBytesAsync(kept, token), "The fresh KiCad neither appended to nor replaced the killed KiCad's log.");
+                Assert.AreEqual(view.GetProperty("epoch").GetString(), (await File.ReadAllTextAsync(Path.Combine(runtime, "logs.epoch"), token)).Trim(),
+                    "The runtime folder's current logs are the fresh process's.");
+            }
             return await Open(copy, id, view.GetProperty("processId").GetInt32(), view.GetProperty("epoch").GetString()!, label, null);
         }
 
@@ -335,6 +373,7 @@ public sealed partial class NativeSessionTests
         async Task<JsonElement> Kill(CrashKiCad target, string moment)
         {
             Assert.AreEqual(0, SignalProcess(target.ProcessId, 9), "KiCad could not be killed.");
+            target.Moment = moment;
             var exit = await ReportedExit(target, moment);
             RequireKilled(exit, target);
             return exit;
@@ -344,7 +383,23 @@ public sealed partial class NativeSessionTests
         // recorded no longer existing, without an exit status.
         async Task<JsonElement> KillAttached(CrashKiCad target, string moment)
         {
+            // KiCad is held first, so a request to it waits for a reply that cannot come. The operating system tells
+            // only KiCad's parent (this test) when it ends; the server checks the process it recorded while the
+            // request waits, so the request fails soon after the kill instead of after its 15 s reply timeout.
+            Assert.AreEqual(0, SignalProcess(target.ProcessId, SigStop), "KiCad could not be held.");
+            await WaitUntil(() => ProcessState(target.ProcessId) == 'T', "the attached KiCad to stop", token);
+            var (_, waiting) = mcp.StartTool("kicad_instance_inspect", new { instanceId = target.Id });
+            await Task.Delay(TimeSpan.FromSeconds(2), token);
+            Assert.IsFalse(waiting.IsCompleted, "A request to the held KiCad waits for its reply.");
+            var sinceKill = Stopwatch.StartNew();
             Assert.AreEqual(0, SignalProcess(target.ProcessId, 9), "KiCad could not be killed.");
+            var answer = await waiting.WaitAsync(TimeSpan.FromSeconds(60), token);
+            double waited = sinceKill.Elapsed.TotalSeconds;
+            Assert.IsFalse(answer.TryGetProperty("error", out var protocolError), protocolError.ToString());
+            var failed = answer.GetProperty("result");
+            Assert.AreEqual("instance_exited", Error(failed), failed.GetRawText());
+            Assert.IsLessThan(5.0, waited, $"The waiting request failed {waited:F1}s after the kill, not after its reply timeout.");
+            Phase($"a request waiting on the attached KiCad failed {waited:F2}s after the kill");
             await target.Owned!.WaitForExitAsync(token);
             Assert.AreEqual(137, target.Owned.ExitCode, "The attached KiCad was killed by signal 9.");
             var exit = await ReportedExit(target, moment);
@@ -353,7 +408,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(exit.TryGetProperty("exitCode", out var status) && status.ValueKind != JsonValueKind.Null,
                 "Only the parent of a process learns its exit status: " + exit.GetRawText());
             Assert.AreEqual(target.ProcessId, exit.GetProperty("processId").GetInt32());
-            return exit;
+            return JsonSerializer.SerializeToElement(new { exit, waitingRequestFailedAfterSeconds = waited });
         }
 
         // What follows is the MCP server's own proof of the exit, never an answer from KiCad.
@@ -387,22 +442,64 @@ public sealed partial class NativeSessionTests
             RequireToolSuccess(await mcp.Tool("kicad_instance_inspect", new { instanceId }));
             Assert.AreEqual(other.Epoch, (await client.HandshakeAsync(token)).Epoch, "The other KiCad kept its process epoch.");
             Assert.IsFalse(native.HasExited, "The other KiCad is still running.");
+            // A KiCad the server started logs into its runtime folder; one this test started logs to the evidence already.
             string log = Path.Combine(NativeIpcEndpoint.RuntimeDirectory(target.Id), "native.log");
-            if (File.Exists(log)) File.Copy(log, Evidence("native-" + moment + ".log"), true);
+            if (target.Owned is null) File.Copy(log, Evidence("native-" + moment + ".log"), true);
             Phase($"KiCad {target.ProcessId} killed {moment}; the MCP server reports it exited");
             return listed.GetProperty("exit").Clone();
         }
 
         // The worker that was applying when KiCad died pauses with instance_exited; the recovery record, the XML and the
         // native files are exactly as they were while KiCad was held.
-        async Task RequireKilledOperation(CrashCopy copy, CrashKiCad target, StoredDesignRecovery held, byte[] xml,
+        async Task<JsonElement> RequireKilledOperation(CrashCopy copy, CrashKiCad target, StoredDesignRecovery held, byte[] xml,
             Dictionary<string, (byte[] Bytes, DateTime Written)>? disk, string moment)
         {
             var paused = await WaitSynchronization(target, copy.Session, await SynchronizationStatus(target, copy.Session), "the worker to pause",
                 status => status.GetProperty("phase").GetString() == "Paused");
             Assert.AreEqual("instance_exited", paused.GetProperty("errorCode").GetString(), paused.GetRawText());
+            Assert.AreEqual(held.State.PendingPublication!.OperationId.ToString("D"), paused.GetProperty("operationId").GetString(),
+                $"{moment}: the worker paused on exactly the operation the recovery record keeps. {paused.GetRawText()}");
+            StringAssert.Contains(paused.GetProperty("errorMessage").GetString(), target.Id, paused.GetRawText());
             RequireKept(copy, held, xml, moment);
             if (disk is not null) RequireDisk(copy, disk, moment);
+            return paused;
+        }
+
+        // The next commit KiCad notifies after a captured state: the edit the synchronization applied.
+        async Task<SchematicCommitNotification> NextCommit(NativeEventSubscription events, CheckedSchematicState before, string what) =>
+            (await NextEvent(events, delivery => delivery.Event.SchematicCommit is { } change
+                && change.Revision.Epoch == before.State.Revision.Epoch && change.Revision.Sequence > before.State.Revision.Sequence, what))
+                .Event.SchematicCommit;
+
+        // The recovery record names exactly the edit KiCad committed (the native batch's own operation ID, which the
+        // commit notification carries, and this record's origin), and the XML the pending operation publishes adds
+        // exactly the next components.
+        void RequireCommitted(StoredDesignRecovery held, SchematicCommitNotification committed, int components, string moment)
+        {
+            var mutation = held.State.PendingMutation
+                ?? throw new AssertFailedException($"{moment}: the recovery record holds the native edit KiCad committed.");
+            Assert.AreEqual(mutation.OperationId, committed.Change.OperationId, $"{moment}: the record's native edit is the one KiCad committed.");
+            Assert.AreEqual(held.State.OriginId.ToString("D"), committed.Change.OriginId, $"{moment}: KiCad attributes the commit to this design.");
+            CollectionAssert.AreEqual(Expected(components), Placements(held.State.PendingPublication!.CandidateFileBytes),
+                $"{moment}: the operation publishes exactly the components of the edit, each unit once.");
+        }
+
+        // The save request in the record is the save of exactly that commit, by the killed process, of the files as
+        // they were on disk before it: the save KiCad was cut off in.
+        void RequireSaveOf(CheckedSaveDocument save, StoredDesignRecovery held, SchematicCommitNotification committed, CrashKiCad killed,
+            Dictionary<string, (byte[] Bytes, DateTime Written)> disk, CrashCopy copy, string moment)
+        {
+            Assert.IsTrue(Guid.TryParseExact(save.OperationId, "D", out _), $"{moment}: the save has its own operation ID: {save}");
+            Assert.AreEqual(held.State.PendingMutation!.Document, save.Document, $"{moment}: the save is of the edited design.");
+            Assert.AreEqual(killed.Epoch, save.ExpectedState.ProcessEpoch, $"{moment}: the save request names the process that ran it.");
+            Assert.AreEqual(committed.Revision, save.ExpectedState.Revision, $"{moment}: the save is of exactly the revision KiCad committed.");
+            Assert.IsTrue(save.ExpectedState.NativeContentDirty, $"{moment}: the save is of the unsaved edit.");
+            foreach (string file in new[] { copy.Root, copy.Psu, copy.Cpu })
+            {
+                var baseline = save.ExpectedState.FileBaselines.Single(b => Path.GetFileName(b.Path) == Path.GetFileName(file));
+                Assert.AreEqual(Sha(disk[file].Bytes), baseline.BaselineSha256.ToLowerInvariant(),
+                    $"{moment}: the save expected {Path.GetFileName(file)} as it was on disk before the save.");
+            }
         }
 
         void RequireKept(CrashCopy copy, StoredDesignRecovery held, byte[] xml, string moment)
@@ -537,12 +634,11 @@ public sealed partial class NativeSessionTests
             return bytes;
         }
 
-        async Task LayoutComponents(CrashCopy copy, CrashKiCad target, PsuCpuNativeContext seed, CheckedSchematicState seeded,
-            StoredDesignRecovery saved)
+        async Task LayoutComponents(CrashCopy copy, CrashKiCad target, PsuCpuNativeContext seed, CheckedSchematicState seeded)
         {
             // The layout tool reads the desired design from the recovery record: the Components stage, without coordinates.
             var free = PsuCpuFixture.Desired(seed, PsuCpuStage.Components);
-            saved = copy.Store.Save(saved.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(free, [])) }, saved.RevisionToken);
+            var saved = await CommitCandidate(copy, target, Encoding.UTF8.GetBytes(SchematicDesignXml.Write(free, [])));
             var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Components);
             string PathKey(IEnumerable<string> ids) => string.Join('/', ids);
             var regions = new List<SchematicLayoutRegion>();
@@ -566,6 +662,17 @@ public sealed partial class NativeSessionTests
             placed = SchematicDesignXml.Read(proposal.GetProperty("desiredXml").GetString()!, []);
             Assert.IsTrue(placed.Engineering.Circuit.Symbols.All(s => s.Placement is not null));
             Assert.HasCount(8, placed.Engineering.Circuit.Components);
+        }
+
+        // Stores complete XML as the recovery record's desired design through the public candidate tool.
+        async Task<StoredDesignRecovery> CommitCandidate(CrashCopy copy, CrashKiCad target, byte[] xml)
+        {
+            RequireToolSuccess(await mcp.Tool("kicad_design_candidate_commit", new { instanceId = target.Id, recoveryPath = copy.Store.StatePath,
+                expectedRevisionToken = copy.Store.Read()!.RevisionToken, candidateXml = Encoding.UTF8.GetString(xml),
+                expectedCandidateSha256 = Sha(xml), operationId = Guid.NewGuid().ToString("D") }));
+            var committed = copy.Store.Read()!;
+            CollectionAssert.AreEqual(xml, committed.State.DesiredFileBytes, "The candidate tool stored exactly this XML.");
+            return committed;
         }
 
         void RequirePublished(CrashCopy copy, string when)
@@ -645,7 +752,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(9, exit.GetProperty("signal").GetInt32(), exit.GetRawText());
         Assert.AreEqual("SIGKILL", exit.GetProperty("signalName").GetString(), exit.GetRawText());
         Assert.AreEqual("exit-status", exit.GetProperty("evidence").GetString(), exit.GetRawText());
-        StringAssert.Contains(exit.GetProperty("description").GetString(), "exit status 137 (killed by signal 9, SIGKILL)");
+        StringAssert.Contains(exit.GetProperty("description").GetString(), "exit status 137, the status reported for a process ended by signal 9 (SIGKILL)");
     }
 
     // Every expected unit placement exactly once and nothing else: the check that no edit is ever applied twice.
@@ -657,6 +764,14 @@ public sealed partial class NativeSessionTests
             .SelectMany(symbol => symbol.InstanceRecords.Records.Select(record => $"{record.Reference}/{record.Unit}"))
             .Order(StringComparer.Ordinal).ToArray();
         CollectionAssert.AreEqual(Expected(components), placed, $"{when}: every unit exactly once. Placed: {string.Join(", ", placed)}");
+    }
+
+    // The unit placements a design XML declares, as "reference/unit".
+    private static string[] Placements(byte[] xml)
+    {
+        var circuit = SchematicDesignXml.Read(Encoding.UTF8.GetString(xml), []).Engineering.Circuit;
+        var references = circuit.Components.ToDictionary(component => component.Id, component => component.Reference);
+        return circuit.Symbols.Select(symbol => $"{references[symbol.ComponentId]}/{symbol.Unit}").Order(StringComparer.Ordinal).ToArray();
     }
 
     private static string[] Expected(int components) => PsuCpuFixtureBuilder.Occurrences.Where(o => o.Component <= components)

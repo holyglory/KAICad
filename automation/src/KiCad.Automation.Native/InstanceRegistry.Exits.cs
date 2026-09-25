@@ -12,8 +12,9 @@ namespace KiCad.Automation.Native;
 /// "exit-status": this server started the process and the operating system returned its exit
 /// status to it. "process-absent": the process recorded for that epoch no longer exists, or its
 /// process ID now belongs to a process started later, so its exit status is unknown. ExitCode is
-/// the status .NET reports; for a process ended by a signal it reports 128 plus the signal number,
-/// which Signal gives back.</summary>
+/// the status .NET reports. It reports a process ended by a signal as 128 plus the signal number,
+/// and Signal is the signal that status stands for; a program that itself exits with such a status
+/// is reported the same way, so the signal is how the exit was reported, not a separate proof.</summary>
 public sealed record InstanceExit(string InstanceId, string Epoch, int ProcessId, int? ExitCode, int? Signal,
     string Evidence, DateTimeOffset ObservedAt)
 {
@@ -26,16 +27,24 @@ public sealed record InstanceExit(string InstanceId, string Epoch, int ProcessId
         _ => "signal " + Signal.Value.ToString(CultureInfo.InvariantCulture)
     };
 
-    /// <summary>One sentence part, for example "ended with exit status 137 (killed by signal 9, SIGKILL)".</summary>
+    /// <summary>One sentence part, for example "ended with exit status 137, the status reported for a
+    /// process ended by signal 9 (SIGKILL)".</summary>
     public string Describe() => Evidence == ProcessAbsentEvidence
         ? "is no longer running (its process no longer exists, so its exit status is unknown)"
         : Signal is { } signal
-            ? $"ended with exit status {ExitCode} (killed by signal {signal}, {SignalName})"
+            ? $"ended with exit status {ExitCode}, the status reported for a process ended by signal {signal} ({SignalName})"
             : $"ended with exit status {ExitCode}";
 
     internal static int? SignalOf(int exitCode) =>
         !OperatingSystem.IsWindows() && exitCode is > 128 and <= 128 + 64 ? exitCode - 128 : null;
 }
+
+/// <summary>Which Linux process an instance record names: the boot it ran in, the process ID
+/// namespace of the server that recorded it (the inode of /proc/self/ns/pid) and the kernel start
+/// time of the process. A later server proves that exact process ended only in the same namespace
+/// (or after the machine restarted), so a process ID read in another namespace or reused by
+/// another program is never taken for it.</summary>
+public sealed record ProcessStartIdentity(string BootId, ulong PidNamespace, ulong StartTicks);
 
 /// <summary>What this server can prove about the process behind an attached instance, without
 /// contacting KiCad. Only a proven exit ever changes what the registry reports.</summary>
@@ -54,6 +63,10 @@ internal abstract class InstanceProcessObserver(string instanceId, string epoch,
     public abstract InstanceExit? Probe();
     /// <summary>True when this server positively observes the same process still running.</summary>
     public abstract bool VerifiedRunning { get; }
+    /// <summary>Completes once the exit is proven, and is cancelled by the token otherwise. A request
+    /// waiting on KiCad waits on this too, so it fails soon after KiCad ends instead of after its
+    /// reply timeout.</summary>
+    public virtual Task<InstanceExit> WaitForExitAsync(CancellationToken token) => Exited.WaitAsync(token);
 
     protected InstanceExit Prove(InstanceExit value)
     {
@@ -106,10 +119,11 @@ internal sealed class ChildProcessObserver : InstanceProcessObserver
     public override bool VerifiedRunning => KnownExit is null;
 }
 
-/// <summary>A KiCad process this server did not start, identified by its process ID and, on
-/// Linux, the kernel start counter read when it was attached, so a reused process ID is never
-/// mistaken for the same process. Without that counter a present process ID proves nothing.</summary>
-internal sealed class ObservedProcessObserver(string instanceId, string epoch, int processId, ulong? startTicks,
+/// <summary>A KiCad process this server did not start, identified on Linux by its process ID and the
+/// kernel start time read when it was attached, so a reused process ID is never mistaken for the same
+/// process. The operating system tells only a parent when a process ends, so its exit is proven by
+/// checking /proc: whenever something asks, and every half second at most while a request waits on it.</summary>
+internal sealed class ObservedProcessObserver(string instanceId, string epoch, int processId, ulong startTicks,
     Func<InstanceExit, Task>? recorder) : InstanceProcessObserver(instanceId, epoch, processId, recorder)
 {
     public override InstanceExit? Probe()
@@ -120,7 +134,20 @@ internal sealed class ObservedProcessObserver(string instanceId, string epoch, i
             : null;
     }
 
-    public override bool VerifiedRunning => OperatingSystem.IsLinux() && startTicks is not null && Probe() is null;
+    public override bool VerifiedRunning => Probe() is null;
+
+    // One bounded-backoff check per waiting request, from 50 ms up to 500 ms between reads of one
+    // small /proc file; it stops when the request completes (the token) or the exit is proven.
+    public override async Task<InstanceExit> WaitForExitAsync(CancellationToken token)
+    {
+        int delay = 50;
+        while (true)
+        {
+            if (Probe() is { } exit) return exit;
+            await Task.Delay(delay, token);
+            delay = Math.Min(delay * 2, 500);
+        }
+    }
 }
 
 internal static class ProcessIdentity
@@ -157,24 +184,61 @@ internal static class ProcessIdentity
             ? ticks : null;
     }
 
-    /// <summary>True only when the process is proven gone: it does not exist, it has ended, or on
-    /// Linux its process ID now names a process started at another time or, when only the instance is
-    /// known, a process that does not run that instance's KiCad.</summary>
-    public static bool Gone(int processId, ulong? startTicks, string? instanceId = null)
+    /// <summary>True only when the process this server observed (in its own process ID namespace) is
+    /// proven gone: its process ID no longer exists, the process has ended, or the ID now names a process
+    /// started at another time. Linux only; elsewhere nothing is proven.</summary>
+    public static bool Gone(int processId, ulong startTicks)
     {
-        if (processId <= 0) return false;
-        if (OperatingSystem.IsLinux())
-        {
-            if (!Directory.Exists($"/proc/{processId.ToString(CultureInfo.InvariantCulture)}")) return true;
-            ulong? now = LinuxStartTicks(processId);
-            // Present but unreadable proves nothing; ended, or started at another time, proves the exit.
-            if (now is null) return IsEnded(processId);
-            if (startTicks is { } then) return now != then;
-            return instanceId is not null && !RunsInstance(processId, instanceId);
-        }
-        try { using var process = Process.GetProcessById(processId); return process.HasExited; }
-        catch (ArgumentException) { return true; }
-        catch (InvalidOperationException) { return true; }
+        if (!OperatingSystem.IsLinux() || processId <= 0) return false;
+        if (!Directory.Exists($"/proc/{processId.ToString(CultureInfo.InvariantCulture)}")) return true;
+        ulong? now = LinuxStartTicks(processId);
+        // Present but unreadable proves nothing; ended, or started at another time, proves the exit.
+        return now is null ? IsEnded(processId) : now != startTicks;
+    }
+
+    /// <summary>The identity to record for a running process, or null when it has ended, does not
+    /// exist, or the platform does not provide one (only Linux does).</summary>
+    public static ProcessStartIdentity? Record(int? processId)
+    {
+        if (processId is not { } pid || BootId() is not { } boot || PidNamespace() is not { } space
+            || LinuxStartTicks(pid) is not { } ticks) return null;
+        return new(boot, space, ticks);
+    }
+
+    /// <summary>True when the process ID names exactly the recorded process, still running: same boot,
+    /// same process ID namespace as this server, same start time.</summary>
+    public static bool Runs(int processId, ProcessStartIdentity identity) =>
+        BootId() is { } boot && boot == identity.BootId && PidNamespace() == identity.PidNamespace
+        && LinuxStartTicks(processId) == identity.StartTicks;
+
+    /// <summary>True only when a recorded process, which this server may never have observed (for example
+    /// one recorded before the server restarted), is proven to have ended: the machine restarted since it
+    /// was recorded, or in the same process ID namespace its ID no longer names that process. In another
+    /// namespace, or without a boot identity, nothing is proven.</summary>
+    public static bool Ended(int processId, ProcessStartIdentity identity)
+    {
+        if (!OperatingSystem.IsLinux() || processId <= 0 || BootId() is not { } boot) return false;
+        if (boot != identity.BootId) return true;
+        return PidNamespace() == identity.PidNamespace && Gone(processId, identity.StartTicks);
+    }
+
+    private static string? BootId()
+    {
+        if (!OperatingSystem.IsLinux()) return null;
+        try { return File.ReadAllText("/proc/sys/kernel/random/boot_id").Trim() is { Length: > 0 } boot ? boot : null; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    // The inode of this server's process ID namespace, from the link text "pid:[4026531836]".
+    private static ulong? PidNamespace()
+    {
+        if (!OperatingSystem.IsLinux()) return null;
+        string? target;
+        try { target = new FileInfo("/proc/self/ns/pid").LinkTarget; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
+        if (target is null || !target.StartsWith("pid:[", StringComparison.Ordinal) || !target.EndsWith(']')) return null;
+        return ulong.TryParse(target.AsSpan(5, target.Length - 6), NumberStyles.None, CultureInfo.InvariantCulture, out ulong inode)
+            && inode != 0 ? inode : null;
     }
 
     private static bool IsEnded(int processId)
@@ -218,21 +282,23 @@ public sealed partial class InstanceRegistry
         }).ToArray();
 
     /// <summary>The proven exit of the process that served <paramref name="epoch"/> of an instance, or
-    /// null when this server cannot prove it ended: from the attached process, the durable exit
-    /// record, or a saved registration of that epoch whose process no longer exists.</summary>
+    /// null when this server cannot prove it ended. While that epoch is attached here, only the process
+    /// this server observes for it decides: KiCad answered a handshake at that epoch, so neither a durable
+    /// record nor a saved process ID overrides it, and an attached epoch whose process this server cannot
+    /// observe is never proven to have ended. Otherwise the durable exit record decides, or a saved
+    /// registration of that epoch whose recorded process (boot, namespace, start time) is proven gone.</summary>
     public async Task<InstanceExit?> ProvenExitAsync(string instanceId, string epoch, CancellationToken token = default)
     {
         if (!Guid.TryParseExact(instanceId, "D", out _) || string.IsNullOrWhiteSpace(epoch))
             throw new AutomationException("invalid_instance", "An instance UUID and a process epoch are required.");
-        // The process this server observes for that epoch decides; nothing weaker overrides it.
-        if (connections.TryGetValue(instanceId, out var connection) && connection.Record.Epoch == epoch
-            && connection.Process is { } observed)
-            return observed.Probe();
+        if (connections.TryGetValue(instanceId, out var connection) && connection.Record.Epoch == epoch)
+            return connection.Process?.Probe();
         if (await ReadExitAsync(instanceId, epoch, token) is { } recorded) return recorded;
         if (File.Exists(Path.Combine(directory, instanceId + ".json")))
         {
             var saved = await ReadSavedAsync(instanceId, token);
-            if (saved.Epoch == epoch && saved.ProcessId is { } pid && ProcessIdentity.Gone(pid, null, instanceId))
+            if (saved.Epoch == epoch && saved.ProcessId is { } pid && saved.ProcessStart is { } identity
+                && ProcessIdentity.Ended(pid, identity))
             {
                 var exit = new InstanceExit(instanceId, epoch, pid, null, null, InstanceExit.ProcessAbsentEvidence, DateTimeOffset.UtcNow);
                 await WriteExitAsync(exit, token);
@@ -242,18 +308,11 @@ public sealed partial class InstanceRegistry
         return null;
     }
 
-    private async Task<InstanceExit?> ProvenExitAsync(InstanceRecord record, InstanceProcessObserver? process, CancellationToken token)
-    {
-        if (process is not null && process.Epoch == record.Epoch && process.Probe() is { } exit) return exit;
-        return await ProvenExitAsync(record.InstanceId, record.Epoch, token);
-    }
+    // A file or folder name for one process epoch: the epoch itself when it is a UUID, as KiCad's are.
+    private static string EpochName(string epoch) => Guid.TryParseExact(epoch, "D", out var parsed) ? parsed.ToString("D")
+        : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(epoch)));
 
-    private string ExitPath(string instanceId, string epoch)
-    {
-        string name = Guid.TryParseExact(epoch, "D", out var parsed) ? parsed.ToString("D")
-            : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(epoch)));
-        return Path.Combine(directory, "exits", instanceId, name + ".json");
-    }
+    private string ExitPath(string instanceId, string epoch) => Path.Combine(directory, "exits", instanceId, EpochName(epoch) + ".json");
 
     private async Task WriteExitAsync(InstanceExit exit, CancellationToken token)
     {
@@ -287,13 +346,14 @@ public sealed partial class InstanceRegistry
     }
 
     // A process this server did not start is observed by its process ID only when that ID runs this
-    // instance's KiCad, with the start counter read right after the verified handshake, so the exit of
-    // exactly that process can be proven later. Anything else stays unverified.
-    private InstanceProcessObserver? Observe(string instanceId, string epoch, int? processId)
+    // instance's KiCad and is exactly the recorded process (same boot, namespace and start time, read
+    // right after the verified handshake or saved when that epoch was verified), so the exit of exactly
+    // that process can be proven later. Anything else stays unverified.
+    private InstanceProcessObserver? Observe(string instanceId, string epoch, int? processId, ProcessStartIdentity? identity)
     {
-        if (processId is not { } pid || !ProcessIdentity.RunsInstance(pid, instanceId)) return null;
-        return ProcessIdentity.LinuxStartTicks(pid) is { } ticks
-            ? new ObservedProcessObserver(instanceId, epoch, pid, ticks, RecordExit) : null;
+        if (processId is not { } pid || identity is null || !ProcessIdentity.Runs(pid, identity)
+            || !ProcessIdentity.RunsInstance(pid, instanceId)) return null;
+        return new ObservedProcessObserver(instanceId, epoch, pid, identity.StartTicks, RecordExit);
     }
 
     private Task RecordExit(InstanceExit exit) => WriteExitAsync(exit, CancellationToken.None);
@@ -302,12 +362,14 @@ public sealed partial class InstanceRegistry
     // instance ID continues with the new process epoch. The receipt keeps the previous registration and
     // how it ended, so nothing about the exited process is lost.
     private async Task<InstanceRecord> AdoptExitReplacementAsync(InstanceRecord previous, InstanceExit exit, NativeClient client,
-        AutomationSession session, string endpoint, int? processId, InstanceProcessObserver? process, CancellationToken token)
+        AutomationSession session, string endpoint, int? processId, ProcessStartIdentity? identity, InstanceProcessObserver? process,
+        CancellationToken token)
     {
         if (session.InstanceId != previous.InstanceId || session.ProjectPath != previous.ProjectPath
             || session.Epoch == previous.Epoch || exit.Epoch != previous.Epoch || exit.InstanceId != previous.InstanceId)
             throw new AutomationException("instance_changed", "The replacement does not continue the exited instance and project.");
-        var replacement = new InstanceRecord(previous.InstanceId, previous.ProjectPath, endpoint, session.Epoch, processId, DateTimeOffset.UtcNow);
+        var replacement = new InstanceRecord(previous.InstanceId, previous.ProjectPath, endpoint, session.Epoch, processId, DateTimeOffset.UtcNow,
+            identity);
         using (await MetadataLease(token))
         {
             if (File.Exists(Path.Combine(directory, previous.InstanceId + ".json")))

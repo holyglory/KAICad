@@ -345,15 +345,20 @@ public static class SchematicRebuild
                 + "), so they cannot be rebuilt without loss.");
         if (baseline.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1))
             return Rejected("rebuild_state_unrepresented", "Rebuilding a sheet file shown by several sheets is not supported yet.");
-        // The project file was kept, so KiCad's new root already shows its settings. They must be the ones the XML
-        // records: a rebuild recreates only the deleted schematic files and never overwrites a project setting.
+        // The project file was kept, so KiCad's new root shows project settings: the ones KiCad loaded from that file, and any
+        // change made in KiCad since. They must be the ones the XML records: a rebuild recreates only the deleted schematic
+        // files and never overwrites a project setting. While the files are lost the XML cannot take KiCad's settings instead:
+        // every plan is this rebuild, and an edited XML is refused as rebuild_requires_settled_xml. So the message names only
+        // what does fix it: putting KiCad's settings back, in KiCad or by reopening the project with the project file saved
+        // with this XML.
         var kept = state.Observed.Instances[0].Metadata;
         var recorded = baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(baseline.Schematic.Document)).Metadata;
         var changed = ChangedProjectSettings(kept, recorded);
         if (changed.Count != 0)
             return Rejected("rebuild_project_settings_changed",
-                "The kept project file's settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding "
-                + "would overwrite them. Restore the project file KiCad last saved with this XML, or synchronize its settings first.");
+                "KiCad's project settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding would "
+                + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad "
+                + "last saved with this XML and reopen the project), then rebuild.");
         return new(SchematicRebuildKind.Admitted, [.. baseline.SheetBindings.Select(b => b.SheetInstanceId)]);
     }
 

@@ -34,7 +34,9 @@ public sealed partial class NativeSessionTests
     //     design file keeps preview 23's list until a synchronization next publishes the design. A record saved before
     //     electrical checkpoints stops at planning with the one action that fixes it, kicad_design_electrical_baseline_initialize,
     //     which then succeeds (before, it failed with a spurious electrical_baseline_mismatch), and the record plans and
-    //     applies normally.
+    //     applies normally. These records are this design's, written in preview 23's format by this build's store; a record
+    //     preview 23 itself wrote is kept byte for byte in automation/tests/fixtures/preview-23-recovery and read, planned
+    //     and saved again by DesignElectricalRecoveryTests.ARecordPreview23WroteReadsAndPlansAgainstThisBuildsSnapshot.
     //  3. Every schematic file is lost, KiCad creates a new empty root for the project and the recovery record adopts it.
     //     Two ways the kept project settings can differ from the XML are refused through the public tools, each with the
     //     project file, the XML and KiCad unchanged (p001c485926b37099). The kept project file changed on disk (a text
@@ -42,7 +44,9 @@ public sealed partial class NativeSessionTests
     //     settings it loaded, the plan is the rebuild, and apply refuses it with native_file_conflict before anything reaches
     //     KiCad, so the changed file is never overwritten. KiCad's own project settings changed (the same text variable
     //     added with kicad_schematic_apply_checked_batch): planning and applying are refused with
-    //     rebuild_project_settings_changed and KiCad's reason. The file and the setting are then restored.
+    //     rebuild_project_settings_changed and a message naming the settings KiCad shows and the actions that work while
+    //     the files are lost (change them back in KiCad, or restore the saved project file and reopen the project). The
+    //     file is restored, and the journey takes the first action, after which the rebuild proceeds.
     //     (The harness KiCad cannot be started again inside the journey: NativeSessionTests checks afterwards that it kept its
     //     process epoch and still holds the project. Planning on a KiCad started after the file changed is the same
     //     classification, proven with every setting group in SchematicRebuildTests.)
@@ -53,9 +57,12 @@ public sealed partial class NativeSessionTests
     // The native rules of the root identity a rebuild adopts are exercised here too, in the live editor: a root KiCad loaded
     // from its file, an identity that is not first or not canonical, and a batch that fails after the identity (which must
     // leave the root's own identity) are refused with nothing changed.
-    // The earlier journey also drew three nets by hand in KiCad. With the Complete stage realized from XML, every net is
-    // realized, so a hand-drawn net would change the Complete partition; every kind of object it drew (local and
-    // hierarchical labels, sheet pins and wires) is now drawn by the realization and rebuilt.
+    // The earlier journey also drew three nets by hand in KiCad and published them to the XML before the files were lost.
+    // They are left out because the coverage they would add was judged marginal, not because they would disturb the
+    // Complete partition (a redundant connection drawn inside an existing net would not). A rebuild recreates every object
+    // of the XML last synchronized with KiCad, whatever path brought it there (PlanRebuild reads only that XML), and every
+    // kind of object those nets drew is drawn here by the realization and rebuilt: local and hierarchical labels with the
+    // same label payload (SchematicConnectionRealizer.LabelPayload), sheet pins and wires.
     private static async Task VerifyPsuCpuXmlRebuild(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -297,8 +304,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("B", changedSettings.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.GetValueOrDefault("FIXTURE_REVISION"));
             RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
                 expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedSettings.State.Revision.Epoch }));
-            const string SettingsRefusal = "The kept project file's settings (text variables) differ from the ones the XML records, so rebuilding would "
-                + "overwrite them. Restore the project file KiCad last saved with this XML, or synchronize its settings first.";
+            const string SettingsRefusal = "KiCad's project settings (text variables) differ from the ones the XML records, so rebuilding would "
+                + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last "
+                + "saved with this XML and reopen the project), then rebuild.";
             var settingsPlan = await host.Tool("kicad_design_sync_plan", Recovery(store));
             await File.WriteAllTextAsync(Evidence("changed-settings-plan.json"), RetainedToolEvidence(settingsPlan), token);
             Assert.AreEqual("rebuild_project_settings_changed", Error(settingsPlan), settingsPlan.GetRawText());
@@ -310,7 +318,7 @@ public sealed partial class NativeSessionTests
             var changedSetting = await RefusedRebuild("changed-settings", originalFiles[projectFile], changedSettings);
             Assert.AreEqual("rebuild_project_settings_changed", changedSetting.Code, changedSetting.Message);
             Assert.AreEqual(SettingsRefusal, changedSetting.Message);
-            // The setting is restored, and the record adopts the root as KiCad shows it again.
+            // The refusal's first action: the setting is changed back in KiCad, and the record adopts the root as KiCad shows it again.
             var restored = await EditTextVariables(changedSettings, emptyRoot.Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value),
                 "Restore the project's text variables");
             Assert.IsTrue(emptyRoot.Metadata.TextVariables.Equals(restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables));

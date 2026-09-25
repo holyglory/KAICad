@@ -345,10 +345,13 @@ public sealed class SchematicRebuildTests
     // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
     // project settings other than the XML's is refused before anything reaches KiCad, and no rebuild journal holds a
     // project setting. Every one of the thirteen setting groups the project file holds is checked on its own, with the
-    // exact message naming only that group (ledger p001c485926b37099); the NativeXmlRebuild journey proves the refusal
-    // through kicad_design_sync_plan and kicad_design_sync_apply on a real changed project file.
+    // exact message naming only that group (ledger p001c485926b37099). The message names what is compared (the settings
+    // KiCad shows) and only actions that work while the files are lost; synchronizing the settings into the XML is not one
+    // of them (review of 31cbe4f594). The NativeXmlRebuild journey proves the refusal through kicad_design_sync_plan and
+    // kicad_design_sync_apply on a setting changed in KiCad, and apply's refusal of a project file changed on disk.
     private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
-        + "Restore the project file KiCad last saved with this XML, or synchronize its settings first.";
+        + "Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last saved with "
+        + "this XML and reopen the project), then rebuild.";
 
     private static readonly (string What, Action<SchematicMetadata> Edit)[] ProjectSettingGroups =
     [
@@ -391,7 +394,7 @@ public sealed class SchematicRebuildTests
             var shape = SchematicRebuild.Classify(state, baseline);
             Assert.AreEqual(SchematicRebuildKind.Rejected, shape.Kind, what);
             Assert.AreEqual("rebuild_project_settings_changed", shape.ErrorCode, what);
-            Assert.AreEqual("The kept project file's settings (" + what + ") " + SettingsChangedMessage, shape.ErrorMessage, what);
+            Assert.AreEqual("KiCad's project settings (" + what + ") " + SettingsChangedMessage, shape.ErrorMessage, what);
             var plan = SchematicSynchronizationPlanner.Plan(state);
             Assert.AreEqual("rebuild_project_settings_changed", plan.ErrorCode, what);
             Assert.AreEqual(shape.ErrorMessage, plan.ErrorMessage, what);
@@ -401,7 +404,7 @@ public sealed class SchematicRebuildTests
         // All of them at once are named together, in the order the project file's groups are compared.
         var all = NewEmptyRoot(baseline);
         foreach (var (_, edit) in ProjectSettingGroups) edit(all.Instances[0].Metadata);
-        Assert.AreEqual("The kept project file's settings (" + string.Join(", ", ProjectSettingGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
+        Assert.AreEqual("KiCad's project settings (" + string.Join(", ", ProjectSettingGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
             SchematicRebuild.Classify(State(baseline, baseline, all, "loaded", "created"), baseline).ErrorMessage);
         // Precision: the schematic file's own state on the new root (here its page) is what a rebuild recreates.
         var fresh = NewEmptyRoot(baseline);
@@ -441,7 +444,7 @@ public sealed class SchematicRebuildTests
         var state = State(recorded, recorded, kept, "loaded", "created");
         var classified = SchematicRebuild.Classify(state, recorded);
         Assert.AreEqual("rebuild_project_settings_changed", classified.ErrorCode, "Classification refuses this state first.");
-        Assert.AreEqual("The kept project file's settings (formatting) " + SettingsChangedMessage, classified.ErrorMessage);
+        Assert.AreEqual("KiCad's project settings (formatting) " + SettingsChangedMessage, classified.ErrorMessage);
 
         var admitted = new SchematicRebuildClassification(SchematicRebuildKind.Admitted, [.. recorded.SheetBindings.Select(b => b.SheetInstanceId)]);
         var hierarchy = SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, kept);

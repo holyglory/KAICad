@@ -21,6 +21,7 @@
 #include <wx/settings.h>
 #include <wx/tglbtn.h>
 #include <memory>
+#include <queue>
 #include <set>
 #include <tuple>
 #if defined( __WXGTK__ )
@@ -950,6 +951,108 @@ std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, cons
     return result;
 }
 
+std::vector<wxPoint> OrthogonalDetour( const std::vector<wxRect>& obstacles, const wxPoint& start, const wxPoint& startDirection,
+                                       const wxPoint& goal, const wxPoint& goalDirection, const wxRect& area )
+{
+    // A route on the lines through the two ends and one pixel outside each obstacle's sides (every turn a shortest orthogonal
+    // way around rectangles needs lies on them), searched for the fewest turns and then the shortest length. A run between
+    // two neighbouring lines is open unless it passes through an obstacle.
+    auto inside = [&]( const wxPoint& p )
+    { return std::any_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& r ) { return r.Contains( p ); } ); };
+    if( inside( start ) || inside( goal ) || !area.Contains( start ) || !area.Contains( goal ) ) return {};
+    std::vector<int> xs{ start.x, goal.x }, ys{ start.y, goal.y };
+    for( const wxRect& r : obstacles )
+    { xs.push_back( r.x - 1 ); xs.push_back( r.GetRight() + 1 ); ys.push_back( r.y - 1 ); ys.push_back( r.GetBottom() + 1 ); }
+    auto tidy = []( std::vector<int>& lines, int low, int high )
+    {
+        lines.erase( std::remove_if( lines.begin(), lines.end(), [&]( int v ) { return v < low || v > high; } ), lines.end() );
+        std::sort( lines.begin(), lines.end() ); lines.erase( std::unique( lines.begin(), lines.end() ), lines.end() );
+    };
+    tidy( xs, area.x, area.GetRight() ); tidy( ys, area.y, area.GetBottom() );
+    const int columns = static_cast<int>( xs.size() ), rows = static_cast<int>( ys.size() );
+    // Whether the run from (a, at) to (b, at) along x (or, with aAlongY, along y) passes through an obstacle between its ends.
+    auto blocked = [&]( int a, int b, int at, bool alongY )
+    {
+        const int low = std::min( a, b ) + 1, high = std::max( a, b ) - 1;
+        for( const wxRect& r : obstacles )
+        {
+            const int from = alongY ? r.y : r.x, to = alongY ? r.GetBottom() : r.GetRight();
+            const int acrossFrom = alongY ? r.x : r.y, acrossTo = alongY ? r.GetRight() : r.GetBottom();
+            if( at >= acrossFrom && at <= acrossTo && std::max( low, from ) <= std::min( high, to ) ) return true;
+        }
+        return false;
+    };
+    const int column0 = static_cast<int>( std::find( xs.begin(), xs.end(), start.x ) - xs.begin() );
+    const int row0 = static_cast<int>( std::find( ys.begin(), ys.end(), start.y ) - ys.begin() );
+    const int column1 = static_cast<int>( std::find( xs.begin(), xs.end(), goal.x ) - xs.begin() );
+    const int row1 = static_cast<int>( std::find( ys.begin(), ys.end(), goal.y ) - ys.begin() );
+    // Directions: 0 right, 1 left, 2 down, 3 up.
+    const int dx[] = { 1, -1, 0, 0 }, dy[] = { 0, 0, 1, -1 };
+    auto directionOf = []( const wxPoint& d ) { return d.x > 0 ? 0 : d.x < 0 ? 1 : d.y > 0 ? 2 : d.y < 0 ? 3 : -1; };
+    const int first = directionOf( startDirection ), last = directionOf( goalDirection );
+    constexpr int64_t TURN = 1000000;
+    const int states = columns * rows * 4;
+    std::vector<int64_t> cost( states, INT64_MAX );
+    std::vector<int> previous( states, -1 );
+    using ENTRY = std::pair<int64_t, int>;
+    std::priority_queue<ENTRY, std::vector<ENTRY>, std::greater<ENTRY>> open;
+    auto state = [&]( int column, int row, int direction ) { return ( row * columns + column ) * 4 + direction; };
+    for( int direction = 0; direction < 4; ++direction )
+    {
+        // Leaving the start another way than it must costs a turn; with no way given, any way is free.
+        const int64_t initial = first < 0 || direction == first ? 0 : TURN;
+        const int at = state( column0, row0, direction );
+        cost[at] = initial; open.push( { initial, at } );
+    }
+    int reached = -1; int64_t best = INT64_MAX;
+    while( !open.empty() )
+    {
+        auto [here, at] = open.top(); open.pop();
+        if( here != cost[at] ) continue;
+        const int direction = at % 4, node = at / 4, column = node % columns, row = node / columns;
+        if( column == column1 && row == row1 )
+        {
+            const int64_t total = here + ( last < 0 || direction == last ? 0 : TURN );
+            if( total < best ) { best = total; reached = at; }
+            continue;
+        }
+        if( here >= best ) continue;
+        for( int next = 0; next < 4; ++next )
+        {
+            if( ( next ^ 1 ) == direction && ( next >> 1 ) == ( direction >> 1 ) ) continue;
+            const int c = column + dx[next], r = row + dy[next];
+            if( c < 0 || c >= columns || r < 0 || r >= rows ) continue;
+            const wxPoint to( xs[c], ys[r] );
+            if( inside( to ) ) continue;
+            if( next < 2 ? blocked( xs[column], to.x, ys[row], false ) : blocked( ys[row], to.y, xs[column], true ) ) continue;
+            const int64_t step = std::abs( to.x - xs[column] ) + std::abs( to.y - ys[row] ) + ( next == direction ? 0 : TURN );
+            const int target = state( c, r, next );
+            if( here + step < cost[target] ) { cost[target] = here + step; previous[target] = at; open.push( { cost[target], target } ); }
+        }
+    }
+    if( reached < 0 ) return {};
+    std::vector<wxPoint> points;
+    for( int at = reached; at >= 0; at = previous[at] )
+    {
+        const int node = at / 4;
+        const wxPoint point( xs[node % columns], ys[node / columns] );
+        if( points.empty() || points.back() != point ) points.push_back( point );
+    }
+    std::reverse( points.begin(), points.end() );
+    // Only the corners stay.
+    std::vector<wxPoint> corners;
+    for( const wxPoint& point : points )
+    {
+        if( corners.size() >= 2 )
+        {
+            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
+            if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
+        }
+        corners.push_back( point );
+    }
+    return corners;
+}
+
 void LEVEL_LAYOUT::placePaths()
 {
     // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
@@ -1314,45 +1417,45 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
     int rows = bottom - top >= height ? ( bottom - top + gap ) / ( height + gap ) : 0;
     auto moreText = []( size_t count ) { return wxString::Format( _( "+%u more" ), static_cast<unsigned>( count ) ); };
     auto rowWidth = [&]( size_t row ) { auto [from, to] = rowSpan( row ); return to - from; };
-    // Every chip is at least minimumChip wide: its state mark and 40 pixels of text (or all of its text when shorter)
-    // with their margins. A row the port names narrow below that holds no chip: the chips stop at the first such row and
-    // the rest go behind "+N more". A row that holds a chip can also hold the widest "+N more" chip, so "+N more"
-    // always has a row when a chip does.
-    const int minimumText = 40, minimumChip = textLeft + minimumText + 8;
-    const int rowNeeded = std::max( minimumChip, dc.GetTextExtent( moreText( chosen.size() ) ).x + 16 );
-    size_t fit = 0;
-    while( fit < static_cast<size_t>( std::max( 0, rows ) ) && rowWidth( fit ) >= rowNeeded ) ++fit;
-    size_t shown = std::min<size_t>( chosen.size(), fit );
-    int moreWidth = 0; bool ownRow = false;
-    if( shown < chosen.size() )
+    // Every chip shows its whole "Facet: value" and is at least its state mark and 40 pixels of text wide (padded when its
+    // text is shorter). A chip is never cut short: "Family: T…" no longer showed the value the chip exists for (design QA round
+    // 2, R2-P2-6). The chips take the rows in facet order, one per row; a chip wider than the row it would take goes behind
+    // "+N more", and the next chip tries that row. "+N more"
+    // shares the last chip's row when both fit whole beside each other, and otherwise takes the next row; when no row is left
+    // for it, the last chip goes behind it as well.
+    const int minimumText = 40;
+    auto chipText = [&]( int facet ) { return FacetLabel( facet ) + wxS( ": " ) + ChoiceValue( *Facet( node.definition, facet ), wxS( " / " ) ); };
+    auto chipWidth = [&]( int facet ) { return textLeft + std::max( minimumText, dc.GetTextExtent( chipText( facet ) ).x ) + 8; };
+    auto moreWidthFor = [&]( size_t count ) { return dc.GetTextExtent( moreText( count ) ).x + 16; };
+    const size_t rowCount = static_cast<size_t>( std::max( 0, rows ) );
+    std::vector<int> placed, behind;
+    for( int facet : chosen )
     {
-        moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16;
-        // "+N more" shares the last row when that chip keeps its minimum width beside it; otherwise it takes that row.
-        if( shown > 0 && moreWidth + gap + minimumChip > rowWidth( shown - 1 ) )
-        { --shown; ownRow = true; moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16; }
+        if( placed.size() < rowCount && chipWidth( facet ) <= rowWidth( placed.size() ) ) placed.push_back( facet );
+        else behind.push_back( facet );
     }
-    for( size_t i = 0; i < shown; ++i )
+    while( !behind.empty() )
     {
-        const auto& choice = *Facet( node.definition, chosen[i] );
-        auto [from, to] = rowSpan( i );
-        bool shareRow = i + 1 == shown && shown < chosen.size() && !ownRow;
-        int available = shareRow ? to - from - moreWidth - gap : to - from;
-        wxString text = FacetLabel( chosen[i] ) + wxS( ": " ) + ChoiceValue( choice, wxS( " / " ) );
-        text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, available - textLeft - 8 );
-        int chipWidth = std::min( available, textLeft + std::max( minimumText, dc.GetTextExtent( text ).x ) + 8 );
-        result.chips.push_back( { chosen[i], choice.state(), text, wxRect( from, rowTop( i ), chipWidth, height ) } );
-    }
-    result.hidden = static_cast<unsigned>( chosen.size() - result.chips.size() );
-    if( result.hidden )
-    {
-        if( !result.chips.empty() && !ownRow )
+        const int moreWidth = moreWidthFor( behind.size() );
+        if( !placed.empty() )
         {
-            wxRect more( result.chips.back().rect.GetRight() + 1 + gap, result.chips.back().rect.y, moreWidth, height );
-            if( more.GetRight() < rowSpan( result.chips.size() - 1 ).second + 1 ) result.more = more;
+            auto [from, to] = rowSpan( placed.size() - 1 );
+            const int x = from + chipWidth( placed.back() ) + gap;
+            if( x + moreWidth <= to ) { result.more = wxRect( x, rowTop( placed.size() - 1 ), moreWidth, height ); break; }
         }
-        else if( rows > 0 && static_cast<size_t>( rows ) > result.chips.size() && moreWidth <= rowWidth( result.chips.size() ) )
-            result.more = wxRect( rowSpan( result.chips.size() ).first, rowTop( result.chips.size() ), moreWidth, height );
+        if( placed.size() < rowCount && moreWidth <= rowWidth( placed.size() ) )
+        { result.more = wxRect( rowSpan( placed.size() ).first, rowTop( placed.size() ), moreWidth, height ); break; }
+        if( placed.empty() ) break;
+        behind.push_back( placed.back() ); placed.pop_back();
+        std::sort( behind.begin(), behind.end() );
     }
+    for( size_t i = 0; i < placed.size(); ++i )
+    {
+        const auto& choice = *Facet( node.definition, placed[i] );
+        result.chips.push_back( { placed[i], choice.state(), chipText( placed[i] ), wxRect( rowSpan( i ).first, rowTop( i ), chipWidth( placed[i] ), height ) } );
+    }
+    result.hidden = static_cast<unsigned>( behind.size() );
+    result.hiddenFacets = behind;
     if( result.chips.empty() && !result.more && !chosen.empty() && !caption.IsEmpty() )
     {
         // Too small for a chip: the choices' state marks follow the caption, level with it, where they fit. They keep 6 pixels
@@ -1372,6 +1475,22 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
                 result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, y, size, size ) } );
     }
     return result;
+}
+
+wxString MoreToolTip( const NODE& node, const BLOCK_CHIPS& chips )
+{
+    // The facet overview's words for a choice: its value, and "(candidate)" for a candidate; a chosen value says so as well.
+    wxString tip;
+    for( int facet : chips.hiddenFacets )
+        if( const auto* choice = Facet( node.definition, facet ) )
+        {
+            wxString line = FacetLabel( facet ) + wxS( ": " ) + ChoiceValue( *choice, wxS( ", " ) );
+            line += choice->state() == D::DCSD_CANDIDATES ? ( choice->values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" ) )
+                                                          : _( " (chosen)" );
+            if( !tip.empty() ) tip += wxS( "\n" );
+            tip += line;
+        }
+    return tip;
 }
 
 void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool dark, const wxColour& foreground, const wxColour& link )
@@ -1433,6 +1552,7 @@ wxSize FACET_ROW::DoGetBestSize() const
 void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open )
 {
     wxString value = ChoiceValue( choice, wxS( ", " ) );
+    m_bareValue = value;
     if( choice.state() == D::DCSD_CANDIDATES )
         value += choice.values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" );
     if( GetValue() != open ) SetValue( open );
@@ -1476,7 +1596,10 @@ void FACET_ROW::PaintButton( wxDC& dc, bool hover, bool )
     const int chevronWidth = FromDIP( 6 ), chevronHeight = FromDIP( 11 );
     int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 18 );
     dc.SetTextForeground( foreground );
-    dc.DrawText( wxControl::Ellipsize( m_value, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
+    // A value too long for its column first drops its "(candidate)" suffix, which the ring already shows, so the value itself
+    // is not cut mid-word (design QA round 2, P3 11); only a value that still does not fit is shortened.
+    wxString shown = dc.GetTextExtent( m_value ).x <= valueWidth ? m_value : m_bareValue;
+    dc.DrawText( wxControl::Ellipsize( shown, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
     wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hovered = background.ChangeLightness( dark ? 115 : 95 );
     wxColour chevron = Readable( muted, { background, open, hovered }, 3.5 );
     {
@@ -1817,6 +1940,71 @@ void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
     }
 }
 
+CHOICE_BUTTON::CHOICE_BUTTON( wxWindow* parent, const wxString& label, const wxString& name ) :
+        wxToggleButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT, wxDefaultValidator, name )
+{
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void CHOICE_BUTTON::SetLabel( const wxString& label )
+{
+    wxToggleButton::SetLabel( label ); InvalidateBestSize(); SetInitialSize( DoGetBestSize() ); Refresh();
+}
+
+wxSize CHOICE_BUTTON::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    // As the toolkit's own exact-fit button was: the label with 10 DIP either side and 8 DIP above and below.
+    return GetTextExtent( GetLabelText() ) + wxSize( 2 * FromDIP( 10 ), 2 * FromDIP( 8 ) );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
+}
+
+CHOICE_BUTTON::LOOK CHOICE_BUTTON::Look( const wxColour& surface, bool chosen, bool hover, bool enabled )
+{
+    const bool dark = IsDark( surface );
+    const wxColour highlight = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    const wxColour grey = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    LOOK look;
+    if( chosen )
+    {
+        // The strip's active tool (design QA P2-1): a pale accent tile, an accent border 3:1 or more from the inspector and
+        // the tile, and an accent label 4.5:1 or more on the tile.
+        look.fill = mix( highlight, surface, dark ? 0.30 : 0.14 );
+        look.border = Readable( highlight, { surface, look.fill }, 3.0 );
+        look.text = enabled ? Readable( highlight, { look.fill }, 4.5 ) : grey;
+        return look;
+    }
+    // Idle, a quiet framed button; under the pointer, a neutral grey fill, never the accent, so hover and chosen look different.
+    look.fill = enabled && hover ? surface.ChangeLightness( dark ? 125 : 91 ) : surface.ChangeLightness( dark ? 112 : 102 );
+    look.border = enabled ? surface.ChangeLightness( dark ? 150 : 80 ) : surface.ChangeLightness( dark ? 130 : 88 );
+    look.text = enabled ? Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ), { look.fill }, 4.5 ) : grey;
+    return look;
+}
+
+void CHOICE_BUTTON::PaintButton( wxDC& dc, bool aHover, bool aDown )
+{
+    const wxColour surface = GetParent()->GetBackgroundColour();
+    const wxRect area( GetClientSize() );
+    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( surface ) ); dc.DrawRectangle( area );
+    const LOOK look = Look( surface, GetValue(), aHover || aDown, IsEnabled() );
+    const wxRect tile = wxRect( area ).Deflate( FromDIP( 1 ) );
+    const int radius = FromDIP( 4 );
+    dc.SetPen( wxPen( look.border, FromDIP( 1 ) ) ); dc.SetBrush( wxBrush( look.fill ) ); dc.DrawRoundedRectangle( tile, radius );
+    dc.SetFont( GetFont() ); dc.SetTextForeground( look.text );
+    const wxString label = GetLabelText(); const wxSize extent = dc.GetTextExtent( label );
+    dc.DrawText( label, ( area.width - extent.x ) / 2, ( area.height - extent.y ) / 2 );
+    if( HasFocus() )
+    {
+        dc.SetPen( wxPen( Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), { look.fill }, 3.0 ), 1, wxPENSTYLE_DOT ) );
+        dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawRoundedRectangle( wxRect( tile ).Deflate( FromDIP( 2 ) ), radius );
+    }
+}
+
 bool CHOICE_FLOW::SetWrapWidth( int width )
 {
     width = std::max( 0, width );
@@ -1898,7 +2086,9 @@ void TOOL_PALETTE::paint()
     const bool dark = IsDark( window );
     const wxRect area( GetClientSize() );
     dc.SetBackground( wxBrush( window ) ); dc.Clear();
-    dc.SetPen( wxPen( window.ChangeLightness( dark ? 175 : 78 ), 1 ) ); dc.SetBrush( wxBrush( Surface() ) );
+    // A quiet outline in both themes: the dark theme's was near-white, 8.4:1 on the canvas against the light theme's 1.7:1
+    // (design QA round 2, P3 9).
+    dc.SetPen( wxPen( window.ChangeLightness( dark ? 130 : 78 ), 1 ) ); dc.SetBrush( wxBrush( Surface() ) );
     dc.DrawRoundedRectangle( area, FromDIP( 8 ) );
     const int y = ( m_delete->GetRect().GetBottom() + m_undo->GetRect().y ) / 2;
     dc.SetPen( wxPen( window.ChangeLightness( dark ? 160 : 82 ), 1 ) );
@@ -2339,12 +2529,19 @@ std::optional<RECURSIVE_DIAGRAM_FRAME::TARGET> RECURSIVE_DIAGRAM_FRAME::connectT
 }
 std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::connectionCaptions( const R::LEVEL_LAYOUT& drawn, const wxSize& area ) const
 {
-    // Design QA P2-7: text keeps its size while the drawing zooms out, so each caption looks for a clear place beside its own
-    // connection: above and below the middle of each horizontal leg, right and left of the middle of each vertical leg,
-    // longest leg first (a stored route's caption position comes first), and then the same places moved along each leg
-    // (the fix the design QA gives: "move labels along their segment when they would collide"). Clear means inside the canvas and apart from every
-    // block by the handle size plus 4 pixels (so a resize handle never covers a caption), from every port and its name, from
-    // every wire and from the captions already placed. A caption with no clear place is left out; the inspector names it.
+    // Every connection shows its caption (owner rule 1, design QA round 2, R2-P2-1 and R2-P2-8; the approved sketch A3 captions
+    // a connection to a boundary port as well, beside the port's own name). Text keeps its size while the drawing zooms out
+    // (design QA P2-7), so each caption looks for a clear place beside its own connection, in this order:
+    //  1. a stored route's caption position, then beside the middle of each leg, longest leg first: above or below a level leg,
+    //     right or left of an upright one;
+    //  2. the same places moved along each leg in 6-pixel steps, nearest the middle first, where the caption may reach past the
+    //     leg's end (past a bend, or beside a short leg) as long as it stays beside at least 8 pixels of the leg;
+    //  3. the free space around the connection: the same places up to six steps further out from each leg.
+    // Clear means inside the canvas, off the palette, and apart from every block by the handle size plus 4 pixels (so a resize
+    // handle never covers a caption), from every port and its name, from every note, from every wire and from the captions
+    // already placed. Only a caption whose whole text has no clear place is shortened with "…" (at least four characters kept)
+    // into the first clear place of 1 and 2, and shows its whole text on hover; one that has no clear place even so is drawn
+    // shortened to four characters where it covers least, on its knocked-out background, never left out.
     std::vector<CAPTION_PLACE> result;
     if( !m_ready || !current() ) return result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
@@ -2358,93 +2555,281 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     const auto& notes = visibleNotes();
     for( int i = 0; i < notes.size(); ++i )
         if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
+    // The palette covers the canvas's left edge; a caption under it could not be read.
+    if( m_paletteShown && m_palette->IsShown() ) obstacles.push_back( wxRect( m_palette->GetRect() ).Inflate( FromDIP( 4 ) ) );
     std::vector<std::pair<wxPoint, wxPoint>> wires;
+    std::string key;
+    auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
     for( const auto& link : drawn.Links() )
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
             auto route = drawn.Route( link, i );
+            key += link.id; key += '\0'; key += link.name; key += '\0'; put( i );
+            if( auto label = drawn.RouteLabel( link.id, i ) ) { wxPoint at = toScreen( *label ); put( at.x ); put( at.y ); }
+            for( const auto& point : route ) { wxPoint at = toScreen( point ); put( at.x ); put( at.y ); }
             for( size_t j = 1; j < route.size(); ++j ) wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
         }
-    auto touchesWire = [&]( const wxRect& rect )
-    {
-        wxRect zone = wxRect( rect ).Inflate( FromDIP( 2 ) );
-        for( const auto& [a, b] : wires )
-        {
-            wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
-            if( segment.Intersects( zone ) ) return true;
-        }
-        return false;
-    };
+    put( area.x ); put( area.y ); put( GetFont().GetPointSize() );
+    for( const wxRect& rect : obstacles ) { put( rect.x ); put( rect.y ); put( rect.width ); put( rect.height ); }
+    // An unchanged canvas (a repaint, a state read, a pointer move) keeps the places already found.
+    if( key == m_captionKey ) return m_captionCache;
+    std::vector<wxRect> placed;
     for( const auto& link : drawn.Links() )
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
-            // A boundary already names its interface. Avoid duplicating the title on it.
-            if( link.endpoints[0].block_id() == drawn.ScopeId() || link.endpoints[i].block_id() == drawn.ScopeId() ) continue;
             auto route = drawn.Route( link, i );
             if( route.size() < 2 ) continue;
             std::vector<wxPoint> points; for( const auto& point : route ) points.push_back( toScreen( point ) );
             std::vector<size_t> legs;
             for( size_t j = 1; j < points.size(); ++j ) if( points[j] != points[j - 1] ) legs.push_back( j );
+            if( legs.empty() ) continue;
             auto length = [&]( size_t j ) { return std::abs( points[j].x - points[j - 1].x ) + std::abs( points[j].y - points[j - 1].y ); };
             std::stable_sort( legs.begin(), legs.end(), [&]( size_t a, size_t b ) { return length( a ) > length( b ); } );
-            // The places for a text of aExtent: a stored route's caption position first, then the middle of every leg, then,
-            // when none is clear, places moved along the legs in 6-pixel steps, the nearest to a middle first.
-            auto places = [&]( const wxSize& extent )
+            wxString full = Text( link.name );
+            const wxSize fullExtent = dc.GetTextExtent( full );
+            // Only what lies near this connection can touch its caption.
+            wxRect reach( points.front(), points.front() );
+            for( const auto& point : points ) reach.Union( wxRect( point, point ) );
+            reach.Inflate( fullExtent.x + FromDIP( 90 ), fullExtent.y + FromDIP( 90 ) );
+            // The blocks (the first obstacles) apart from everything else: where no place is clear, a caption covers a wire
+            // rather than a port, a name or another caption, and any of those rather than a block.
+            std::vector<wxRect> nearBlocks, nearby;
+            for( size_t k = 0; k < obstacles.size(); ++k )
+                if( obstacles[k].Intersects( reach ) ) ( k < drawn.Nodes().size() ? nearBlocks : nearby ).push_back( obstacles[k] );
+            for( const wxRect& rect : placed ) if( rect.Intersects( reach ) ) nearby.push_back( rect );
+            std::vector<wxRect> nearWires;
+            for( const auto& [a, b] : wires )
+            {
+                wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+                if( segment.Intersects( reach ) ) nearWires.push_back( segment );
+            }
+            auto collisions = [&]( const wxRect& candidate, bool stopAtFirst )
+            {
+                // A place outside the canvas could not be seen at all: in the last resort it counts as worse than any overlap.
+                int count = canvas.Contains( candidate ) ? 0 : 1000;
+                if( count && stopAtFirst ) return count;
+                const wxRect zone = wxRect( candidate ).Inflate( FromDIP( 2 ) );
+                for( const wxRect& rect : nearBlocks ) if( rect.Intersects( candidate ) && ( count += 100 ) && stopAtFirst ) return count;
+                for( const wxRect& rect : nearby ) if( rect.Intersects( candidate ) && ( count += 10 ) && stopAtFirst ) return count;
+                for( const wxRect& segment : nearWires ) if( segment.Intersects( zone ) && ++count && stopAtFirst ) return count;
+                return count;
+            };
+            // The places for a text of aExtent (see above), up to aLevel.
+            auto places = [&]( const wxSize& extent, int level )
             {
                 std::vector<wxRect> candidates;
                 if( auto label = drawn.RouteLabel( link.id, i ) ) candidates.emplace_back( toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 ), extent );
-                // Beside the point `shift` pixels from the middle of leg j, while that point is still on the leg.
-                auto beside = [&]( size_t j, int shift )
+                // Beside the point `shift` pixels from the middle of leg j, `out` steps away from it; false once the caption would
+                // no longer lie beside at least 8 pixels (or the whole) of the leg.
+                auto beside = [&]( size_t j, int shift, int out ) -> bool
                 {
                     const wxPoint &a = points[j - 1], &b = points[j];
-                    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
+                    const int along = a.y == b.y ? extent.x : extent.y, span = std::abs( a.y == b.y ? b.x - a.x : b.y - a.y );
+                    const int keep = std::min( FromDIP( 8 ), span );
+                    if( shift != 0 && std::abs( shift ) > span / 2 + along / 2 - keep ) return false;
+                    const wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
                     if( a.y == b.y )
                     {
-                        int x = middle.x + shift;
-                        if( x < std::min( a.x, b.x ) || x > std::max( a.x, b.x ) ) return;
-                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y - extent.y - FromDIP( 4 ) ), extent );
-                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y + FromDIP( 4 ) ), extent );
+                        const int x = middle.x + shift - extent.x / 2, gap = FromDIP( 4 ) + out * ( extent.y / 2 + FromDIP( 2 ) );
+                        candidates.emplace_back( wxPoint( x, a.y - extent.y - gap ), extent );
+                        candidates.emplace_back( wxPoint( x, a.y + gap ), extent );
                     }
                     else if( a.x == b.x )
                     {
-                        int y = middle.y + shift;
-                        if( y < std::min( a.y, b.y ) || y > std::max( a.y, b.y ) ) return;
-                        candidates.emplace_back( wxPoint( a.x + FromDIP( 6 ), y - extent.y / 2 ), extent );
-                        candidates.emplace_back( wxPoint( a.x - FromDIP( 6 ) - extent.x, y - extent.y / 2 ), extent );
+                        const int y = middle.y + shift - extent.y / 2, gap = FromDIP( 6 ) + out * FromDIP( 12 );
+                        candidates.emplace_back( wxPoint( a.x + gap, y ), extent );
+                        candidates.emplace_back( wxPoint( a.x - gap - extent.x, y ), extent );
                     }
+                    return true;
                 };
-                int longest = 0;
-                for( size_t j : legs ) { beside( j, 0 ); longest = std::max( longest, length( j ) ); }
-                const int step = FromDIP( 6 );
-                for( int shift = step; shift <= longest / 2; shift += step )
-                    for( size_t j : legs ) { beside( j, shift ); beside( j, -shift ); }
+                for( size_t j : legs ) beside( j, 0, 0 );
+                if( level >= 1 )
+                {
+                    const int step = FromDIP( 6 );
+                    for( int shift = step; ; shift += step )
+                    {
+                        bool any = false;
+                        for( size_t j : legs ) { any |= beside( j, shift, 0 ); any |= beside( j, -shift, 0 ); }
+                        if( !any ) break;
+                    }
+                }
+                if( level >= 2 )
+                    for( int out = 1; out <= 6; ++out )
+                    {
+                        for( size_t j : legs ) beside( j, 0, out );
+                        const int step = FromDIP( 12 );
+                        for( int shift = step; ; shift += step )
+                        {
+                            bool any = false;
+                            for( size_t j : legs ) { any |= beside( j, shift, out ); any |= beside( j, -shift, out ); }
+                            if( !any ) break;
+                        }
+                    }
                 return candidates;
             };
-            auto clear = [&]( const wxRect& candidate )
+            CAPTION_PLACE place{ link.id, full, full, wxRect(), false, true };
+            for( const wxRect& candidate : places( fullExtent, 2 ) )
+                if( !collisions( candidate, true ) ) { place.rect = candidate; place.shown = true; break; }
+            // Shortened only when the whole caption has no clear place (as a block caption is shortened to its block's width).
+            for( size_t keep = full.length() - 1; !place.shown && keep >= 4 && keep < full.length(); --keep )
             {
-                return canvas.Contains( candidate ) && !touchesWire( candidate )
-                       && std::none_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& other ) { return other.Intersects( candidate ); } );
-            };
-            // The whole caption where it has a clear place. Otherwise the longest shortening of it, ending in "…" and keeping at
-            // least four characters, that has one, as a block caption is shortened to its block's width; only a caption that
-            // has no clear place even so is left out (the inspector names it).
-            wxString full = Text( link.name );
-            CAPTION_PLACE place{ link.id, full, wxRect(), false };
-            for( size_t keep = full.length(); !place.shown && ( keep == full.length() || keep >= 4 ); --keep )
-            {
-                wxString text = keep == full.length() ? full : wxString( full.Left( keep ) ).Trim() + wxS( "…" );
-                if( keep < full.length() && text.length() >= full.length() ) continue;
-                auto candidates = places( dc.GetTextExtent( text ) );
-                if( keep == full.length() && !candidates.empty() ) place.rect = candidates.front();
-                for( const auto& candidate : candidates )
-                    if( clear( candidate ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
-                if( keep == 0 ) break;
+                wxString text = wxString( full.Left( keep ) ).Trim() + wxS( "…" );
+                if( text.length() >= full.length() ) continue;
+                for( const wxRect& candidate : places( dc.GetTextExtent( text ), 1 ) )
+                    if( !collisions( candidate, true ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
             }
-            if( legs.empty() && !place.shown ) continue;
-            if( place.shown ) obstacles.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
+            if( !place.shown )
+            {
+                // Never left out: the shortest shortening (four characters and "…", the whole caption when it is not longer), where
+                // it covers least (a wire rather than a port, a name or another caption, and any of those rather than a block), on
+                // its knocked-out background, naming the whole caption on hover.
+                if( full.length() > 5 ) place.text = wxString( full.Left( 4 ) ).Trim() + wxS( "…" );
+                int fewest = INT_MAX;
+                for( const wxRect& candidate : places( dc.GetTextExtent( place.text ), 2 ) )
+                    if( int count = collisions( candidate, false ); count < fewest ) { fewest = count; place.rect = candidate; }
+                place.shown = true; place.clear = false;
+            }
+            placed.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
             result.push_back( std::move( place ) );
         }
+    m_captionKey = std::move( key ); m_captionCache = result;
     return result;
+}
+
+std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // Design QA round 2, R2-P2-2: the preview is the path the connection's router would draw for it (rule F4 as revised), from
+    // where its first end attaches and leaving it outward. Where that path would run through a block (the router's legs have
+    // three segments) or across a port's name, the preview leaves its first end outward for at least 12 pixels and goes around
+    // the blocks, 8 pixels clear of them, with as few turns as it can, into its target the way the target's edge faces.
+    if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || !m_ready || !current() ) return {};
+    std::optional<D::DiagramEndpointBindingData> toEndpoint = m_connectTo;
+    if( !toEndpoint )
+        if( auto target = connectTarget( drawn ) )
+        {
+            toEndpoint.emplace(); toEndpoint->set_block_id( target->owner );
+            if( target->port ) { toEndpoint->set_kind( D::DEK_INTERFACE ); toEndpoint->set_interface_id( target->id ); }
+            else toEndpoint->set_kind( D::DEK_UNRESOLVED );
+        }
+    auto centreOf = [&]( const D::DiagramEndpointBindingData& endpoint ) -> int64_t
+    {
+        if( endpoint.has_interface_id() ) if( const R::PORT* port = drawn.Port( endpoint.block_id(), endpoint.interface_id() ) ) return port->anchor.x;
+        if( endpoint.block_id() == drawn.ScopeId() ) return drawn.Anchor( endpoint, 0 ).x;
+        R::RECT rect = drawn.Rect( endpoint.block_id() ); return rect.x + rect.w / 2;
+    };
+    const R::POINT pointer = toDiagram( m_pointer );
+    R::ROUTE_END from, to;
+    from.at = drawn.Anchor( *m_connectFrom, toEndpoint ? centreOf( *toEndpoint ) : pointer.x );
+    std::tie( from.dx, from.dy ) = drawn.Leaving( *m_connectFrom, from.at ); from.block = drawn.OwnBlock( *m_connectFrom );
+    if( toEndpoint )
+    {
+        to.at = drawn.Anchor( *toEndpoint, from.at.x );
+        std::tie( to.dx, to.dy ) = drawn.Leaving( *toEndpoint, to.at ); to.block = drawn.OwnBlock( *toEndpoint );
+    }
+    else to.at = pointer;
+    std::vector<std::vector<R::POINT>> others;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i ) others.push_back( drawn.Route( link, i ) );
+    // The router's result is kept in a local: a range-for over a member of a temporary would outlive the temporary (C++20).
+    const auto routed = R::RouteLegs( drawn.Rects(), others, { R::ROUTE_LEG{ from, to } } );
+    std::vector<wxPoint> path;
+    if( !routed.empty() ) for( const auto& point : routed.front() ) path.push_back( toScreen( point ) );
+    if( path.size() < 2 ) return path;
+    std::vector<wxRect> blocks, names;
+    for( const auto& node : drawn.Nodes() ) blocks.push_back( toScreen( drawn.Rect( node.id ) ) );
+    {
+        wxClientDC dc( m_canvas );
+        for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) names.push_back( name );
+    }
+    for( const auto& [name, rect] : boundaryNames( drawn ) ) names.push_back( rect );
+    auto crosses = [&]( const std::vector<wxPoint>& points )
+    {
+        for( size_t i = 1; i < points.size(); ++i )
+        {
+            const wxRect run( wxPoint( std::min( points[i - 1].x, points[i].x ), std::min( points[i - 1].y, points[i].y ) ),
+                              wxPoint( std::max( points[i - 1].x, points[i].x ), std::max( points[i - 1].y, points[i].y ) ) );
+            for( const wxRect& block : blocks ) if( run.Intersects( wxRect( block ).Deflate( 1 ) ) ) return true;
+            for( const wxRect& name : names ) if( run.Intersects( name ) ) return true;
+        }
+        return false;
+    };
+    if( !crosses( path ) ) return path;
+    std::vector<wxRect> obstacles;
+    for( const wxRect& block : blocks ) obstacles.push_back( wxRect( block ).Inflate( FromDIP( 8 ) ) );
+    for( const wxRect& name : names ) obstacles.push_back( wxRect( name ).Inflate( FromDIP( 2 ) ) );
+    const int stub = FromDIP( 12 );
+    const wxPoint start = path.front(), goal = path.back();
+    const wxPoint startOut = start + wxPoint( from.dx * stub, from.dy * stub );
+    const bool fixedEnd = toEndpoint.has_value();
+    const wxPoint goalOut = fixedEnd ? goal + wxPoint( to.dx * stub, to.dy * stub ) : goal;
+    const wxRect around = wxRect( wxPoint( 0, 0 ), m_canvas->GetClientSize() ).Inflate( FromDIP( 200 ) );
+    auto middle = R::OrthogonalDetour( obstacles, startOut, wxPoint( from.dx, from.dy ), goalOut,
+                                       fixedEnd ? wxPoint( -to.dx, -to.dy ) : wxPoint(), around );
+    if( middle.empty() ) return path;
+    std::vector<wxPoint> detour{ start };
+    for( const wxPoint& point : middle ) if( detour.back() != point ) detour.push_back( point );
+    if( detour.back() != goal ) detour.push_back( goal );
+    // Only the corners stay.
+    std::vector<wxPoint> corners;
+    for( const wxPoint& point : detour )
+    {
+        if( corners.size() >= 2 )
+        {
+            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
+            if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
+        }
+        corners.push_back( point );
+    }
+    return corners;
+}
+
+wxString RECURSIVE_DIAGRAM_FRAME::canvasTipAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
+{
+    // A shortened connection caption shows its whole text, and "+N more" the choices behind it (design QA round 2, R2-P2-1
+    // and R2-P2-6).
+    for( const auto& place : connectionCaptions( drawn, m_canvas->GetClientSize() ) )
+        if( place.shown && place.text != place.full && place.rect.Contains( point ) ) return place.full;
+    for( const auto& [block, chips] : drawnChips() )
+        if( chips.more && chips.more->Contains( point ) )
+            if( const R::NODE* node = drawn.Node( block ) ) return R::MoreToolTip( *node, chips );
+    return wxString();
+}
+
+std::optional<wxRect> RECURSIVE_DIAGRAM_FRAME::connectHint( const R::LEVEL_LAYOUT& drawn, const std::vector<wxPoint>& preview ) const
+{
+    if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || m_captionKind || preview.empty() ) return std::nullopt;
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const wxSize extent = dc.GetTextExtent( _( "Click a port to finish connection" ) ), size( extent.x + 16, extent.y + 10 );
+    const wxPoint at = preview.back();
+    // Below right of the pointer as before, then above right, below left and above left, then the same places moved down and
+    // up in half-steps of the hint's height, nearest first: the first that covers no block, no port name, no part of the preview
+    // and not the palette, inside the canvas.
+    std::vector<wxRect> spots;
+    const int step = size.y / 2 + FromDIP( 4 );
+    for( int k = 0; k <= 12; ++k )
+        for( int sign : { 1, -1 } )
+        {
+            if( k == 0 && sign < 0 ) continue;
+            const int dy = sign * k * step;
+            spots.emplace_back( wxPoint( at.x + 14, at.y + 10 + dy ), size );
+            spots.emplace_back( wxPoint( at.x + 14, at.y - 10 - size.y + dy ), size );
+            spots.emplace_back( wxPoint( at.x - 14 - size.x, at.y + 10 + dy ), size );
+            spots.emplace_back( wxPoint( at.x - 14 - size.x, at.y - 10 - size.y + dy ), size );
+        }
+    std::vector<wxRect> avoid;
+    if( m_paletteShown && m_palette->IsShown() ) avoid.push_back( m_palette->GetRect() );
+    for( const auto& node : drawn.Nodes() ) avoid.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( FromDIP( 4 ) ) );
+    for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) avoid.push_back( name );
+    for( const auto& [name, rect] : boundaryNames( drawn ) ) avoid.push_back( rect );
+    for( size_t i = 1; i < preview.size(); ++i )
+        avoid.emplace_back( wxPoint( std::min( preview[i - 1].x, preview[i].x ) - 2, std::min( preview[i - 1].y, preview[i].y ) - 2 ),
+                            wxPoint( std::max( preview[i - 1].x, preview[i].x ) + 2, std::max( preview[i - 1].y, preview[i].y ) + 2 ) );
+    const wxRect canvas( wxPoint( 0, 0 ), m_canvas->GetClientSize() );
+    for( const wxRect& spot : spots )
+        if( canvas.Contains( spot ) && std::none_of( avoid.begin(), avoid.end(), [&]( const wxRect& other ) { return other.Intersects( spot ); } ) )
+            return spot;
+    for( const wxRect& spot : spots ) if( canvas.Contains( spot ) ) return spot;
+    return spots[0];
 }
 
 int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
@@ -2819,18 +3204,19 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         }
         if( m_connectFrom )
         {
-            // The connection in progress, at right angles like a drawn connection, ending in a circle at the pointer (design QA
-            // P1-1 and P3 4), and the hint shared by the toolbar strip and the palette.
-            wxPoint from = toScreen( drawn.Anchor( *m_connectFrom, toDiagram( m_pointer ).x ) );
-            wxPoint to = m_connectTo ? toScreen( drawn.Anchor( *m_connectTo, drawn.Anchor( *m_connectFrom, 0 ).x ) ) : m_pointer;
-            int middle = ( from.x + to.x ) / 2;
-            wxPoint path[] = { from, { middle, from.y }, { middle, to.y }, to };
-            dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLines( 4, path );
-            dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( to, FromDIP( 5 ) );
-            if( !m_captionKind )
+            // The connection in progress on the path its router would draw, or around the blocks in its way (design QA round 2,
+            // R2-P2-2), ending in an open ring at the pointer that the crosshair does not hide (P3 8), and the hint shared by the
+            // toolbar strip and the palette, placed clear of the blocks (P3 1).
+            std::vector<wxPoint> path = connectPreview( drawn );
+            if( path.size() >= 2 )
             {
-                wxString hint = _( "Click a port to finish connection" ); wxSize extent = dc.GetTextExtent( hint );
-                wxRect callout( to.x + 14, to.y + 10, extent.x + 16, extent.y + 10 );
+                dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLines( static_cast<int>( path.size() ), path.data() );
+                dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( path.back(), FromDIP( 6 ) );
+            }
+            if( auto spot = connectHint( drawn, path ) )
+            {
+                wxString hint = _( "Click a port to finish connection" );
+                wxRect callout = *spot;
                 wxColour fill = accent.ChangeLightness( dark ? 45 : 185 );
                 dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( fill ) );
                 dc.SetTextForeground( R::Readable( foreground, { fill }, 4.5 ) );
@@ -2900,7 +3286,16 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
                                            : _( "Start the connection on a block or port." ) );
             refresh(); return;
         }
-        if( !m_connectFrom ) { m_connectFrom = endpoint; m_notice.clear(); refresh(); return; }
+        if( !m_connectFrom )
+        {
+            // The connection's first end becomes the selection and fills the inspector, from the palette or the strip alike, so
+            // what is selected is what the person is connecting (design QA round 2, R2-P2-3); the finished connection is
+            // selected in its turn (commitNewConnection).
+            m_connectFrom = endpoint; m_notice.clear();
+            if( endpoint->has_interface_id() ) selectPort( endpoint->block_id(), endpoint->interface_id() );
+            else select( endpoint->block_id() );
+            refresh(); return;
+        }
         if( endpoint->block_id() == m_connectFrom->block_id() && endpoint->interface_id() == m_connectFrom->interface_id() )
         { m_notice = Utf8( _( "Connect two different blocks or ports." ) ); refresh(); return; }
         m_connectTo = endpoint;
@@ -2953,7 +3348,17 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 
 void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
-    m_pointer = event.GetPosition(); m_pointerInside = true;
+    m_pointer = event.GetPosition(); m_pointerInside = true; ++m_canvasMotions;
+    // A shortened connection caption shows its whole text on hover, and "+N more" the choices behind it (design QA round 2).
+    if( m_drag == DRAG::NONE && m_ready && !m_process && current() )
+    {
+        wxString tip = canvasTipAt( layout( current(), !m_historyPreview ), m_pointer );
+        if( tip != m_canvasTip )
+        {
+            m_canvasTip = tip;
+            if( tip.empty() ) m_canvas->UnsetToolTip(); else m_canvas->SetToolTip( tip );
+        }
+    }
     // The Connect tool follows the pointer: its preview, and the port or block it would start or finish on.
     if( m_tool == TOOL::CONNECT && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
     if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && facetLinkOffered() )

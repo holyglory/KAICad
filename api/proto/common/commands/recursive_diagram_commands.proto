@@ -184,10 +184,12 @@ message RecursiveDiagramEditorState {
   // What the Connect tool highlights under the pointer as a valid place to start or finish a connection: a port's ring
   // or a block's outline, relative to the editor window, with the port's or block's name as label; absent when nothing is.
   DiagramControlRect connect_target = 225;
-  // Each connection caption of the viewed level, relative to the editor window, with the text drawn as label (the caption
-  // shortened with "…" where only a shorter text has a clear place). shown is false for a caption the canvas leaves out
-  // because every place beside its connection, even for a shortened caption, would touch a block, a handle, a port, a wire
-  // or another caption.
+  // Each connection caption of the viewed level, relative to the editor window, with the text drawn as label and the
+  // connection's id as object_id. Every caption is drawn (design QA round 2, R2-P2-1): whole in the nearest clear place beside
+  // its connection or in the free space around it; shortened with "…" only when no clear place holds the whole text, and then
+  // tooltip carries the whole caption. Where not even a shortened text has a clear place (a crowded level), the caption is
+  // shortened to four characters and "…" where it covers least, and enabled is false. shown is false only for a caption
+  // drawn outside the canvas's view.
   repeated DiagramControlRect connection_captions = 226;
   // The caption and version line of every block of the viewed level, as drawn.
   repeated DiagramCanvasBlockText block_texts = 227;
@@ -203,6 +205,25 @@ message RecursiveDiagramEditorState {
   // How many distinct level geometries pointer drags reached in this window since it opened: each is one position the
   // level must be laid out for, however many pointer motions reached it.
   uint64 drag_positions = 232;
+  // The canvas's tooltip as it is set now: the full caption of a shortened connection caption, or the choices behind a
+  // "+N more" chip, under the pointer; empty when the pointer is over neither.
+  string canvas_tooltip = 233;
+  // The Connect tool's preview of the connection in progress as drawn, relative to the editor window, in pixels, from its
+  // first end to the pointer or the port or block the pointer is on; empty when no connection is in progress.
+  repeated DiagramCanvasPoint connect_preview = 234;
+  // Where the Connect hint ("Click a port to finish connection") is drawn beside the preview's end, relative to the editor
+  // window, with the hint as label; absent when it is not drawn.
+  DiagramControlRect connect_hint = 235;
+  // How many pointer motions and entries over the canvas the editor handled since the window opened, and where it last saw
+  // the pointer there, relative to the editor window, so a journey can tell a hover that has not arrived from one that did.
+  uint64 canvas_motions = 236;
+  DiagramCanvasPoint canvas_pointer = 237;
+}
+
+// A point on the canvas, relative to the editor window, in pixels.
+message DiagramCanvasPoint {
+  int32 x = 1;
+  int32 y = 2;
 }
 
 // The text a block shows on the canvas, relative to the editor window, in pixels. Text is drawn whole or not at all.
@@ -293,6 +314,9 @@ message DiagramControlRect {
   DiagramAccessible accessible = 10;
   // The diagram object the control is drawn for: the connection id of a connection caption; empty otherwise.
   string object_id = 11;
+  // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, or
+  // the choices behind a "+N more" chip, one per line; empty when it shows none.
+  string tooltip = 12;
 }
 
 // A control's accessible role, name and state, read back from the toolkit.

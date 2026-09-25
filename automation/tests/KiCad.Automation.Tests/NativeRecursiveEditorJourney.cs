@@ -226,24 +226,17 @@ public sealed partial class NativeSessionTests
             Key("Return");
             var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
             Level(psuLevel, "psu", psu, psuRevision);
-            // Design QA P2-7 at the default window size: every connection caption between two blocks of the crowded PSU level is
-            // drawn (the four that end at a boundary port are named by the port), each clear of blocks, handles, ports, wires and
-            // the other captions, beside its own connection or moved along it. A caption whose whole text has no clear place is
-            // shortened with "…", as a block caption is; none is left out.
-            VerifyCanvasText(psuLevel, "psu");
-            // Each caption is matched to its own connection by identity, not by its text ("Rail…" could otherwise stand for either
-            // rail's sense connection).
+            // Design QA P2-7 and round 2 (R2-P2-1) at the default window size: every connection caption of the crowded PSU level is
+            // drawn, the four that end at a boundary port as well (the approved sketch A3 captions such a connection beside the
+            // port's own name), each clear of blocks, handles, ports, wires and the other captions, beside its own connection or in
+            // the free space around it. A caption whose whole text has no clear place is shortened with "…", as a block caption is,
+            // and shows its whole text on hover; none is left out. Each caption is matched to its own connection by identity, not
+            // by its text ("Rail…" could otherwise stand for either rail's sense connection).
             var psuConnections = psuRevision.LocalDiagram.Connections.ToDictionary(c => S(c.ConnectionId),
                 c => fixture.Connections(psu.BlockId).Inspect(c).Name, StringComparer.Ordinal);
-            foreach (string name in new[] { "LDO supply", "Rail A sense", "Rail B sense", "Measurements", "Fault" })
-            {
-                string id = psuConnections.Single(c => c.Value == name).Key;
-                var drawnCaption = psuLevel.ConnectionCaptions.SingleOrDefault(c => c.ObjectId == id);
-                Assert.IsNotNull(drawnCaption, "psu: the editor reports a caption for " + name + ".");
-                Assert.IsTrue(drawnCaption.Shown && (drawnCaption.Label == name || (drawnCaption.Label.EndsWith('…') && drawnCaption.Label.Length >= 5
-                    && name.StartsWith(drawnCaption.Label[..^1].TrimEnd(), StringComparison.Ordinal))),
-                    "psu: the caption of " + name + " is drawn at the default size, whole or shortened with an ellipsis, as '" + drawnCaption.Label + "'.");
-            }
+            await Capture("psu-captions");
+            var psuShot = await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-canvas-psu-captions.png"), WindowOrigin(display, processId, title), token);
+            VerifyCaptions(psuShot, psuLevel, "psu", psuConnections);
             Assert.IsTrue(psuLevel.ConnectionCaptions.All(c => psuConnections.ContainsKey(c.ObjectId)), "psu: every caption belongs to a connection of the level.");
             var psuLayout = await Observe("psu");
             var psuChildren = psuRevision.Children;
@@ -731,7 +724,31 @@ public sealed partial class NativeSessionTests
                 $"A drag that reached {dragPositions} positions lays the dense level out at most once per position and once more, not {layoutsDuringDrag} times.");
             Assert.IsTrue(denseDragged.SlowestRouteLayoutMicros <= 1_000_000,
                 $"The slowest layout of the dense level took {denseDragged.SlowestRouteLayoutMicros} µs, at most a second.");
-            Key("d", alt: true); await Wait("dense-declined", s => !s.Dirty && Placed(s).Length == 0);
+            Key("d", alt: true); var denseDeclined = await Wait("dense-declined", s => !s.Dirty && Placed(s).Length == 0);
+            // Design QA round 2, R2-P2-1: on the dense level every connection still shows its caption (none is left out, as the
+            // earlier editor left out the ones without a clear place); a caption shortened for want of room shows its whole text on
+            // hover, and the tooltip goes when the pointer leaves it. Where not even a shortened caption has a clear place, it is
+            // drawn shortened where it covers least, never over a block.
+            Assert.AreEqual(systemRevision.LocalDiagram.Connections.Length + 50, denseDeclined.ConnectionCaptions.Count(c => c.Shown),
+                "dense: every connection of the dense level shows its caption.");
+            foreach (var crowded in denseDeclined.ConnectionCaptions.Where(c => !c.Enabled))
+                Assert.IsTrue(denseDeclined.BlockTexts.All(b => RectsApart(crowded, b.Block)),
+                    $"dense: the crowded caption '{crowded.Label}' covers no block.");
+            var shortenedCaption = denseDeclined.ConnectionCaptions.FirstOrDefault(c => c.Shown && c.Tooltip != "" && c.X > denseDeclined.CanvasWindowX + 120);
+            Assert.IsNotNull(shortenedCaption, "dense: the crowded level shortens a caption for want of room.");
+            Assert.IsTrue(shortenedCaption.Label.EndsWith('…') && shortenedCaption.Tooltip.StartsWith(shortenedCaption.Label[..^1].TrimEnd(), StringComparison.Ordinal),
+                $"dense: the shortened caption '{shortenedCaption.Label}' names '{shortenedCaption.Tooltip}' in full.");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: denseDeclined.CanvasWindowX + (int)denseDeclined.CanvasPixelWidth - 4,
+                clickFromTop: denseDeclined.CanvasWindowY + (int)denseDeclined.CanvasPixelHeight - 4);
+            ulong denseMotions = (await Read()).CanvasMotions;
+            foreach (int dx in new[] { -3, 0, 2 })
+                NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: shortenedCaption.X + shortenedCaption.Width / 2 + dx,
+                    clickFromTop: shortenedCaption.Y + shortenedCaption.Height / 2);
+            await Wait("dense-caption-hover", s => s.CanvasMotions > denseMotions && s.CanvasTooltip == shortenedCaption.Tooltip);
+            await Capture("dense-caption-hover");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: denseDeclined.CanvasWindowX + (int)denseDeclined.CanvasPixelWidth - 4,
+                clickFromTop: denseDeclined.CanvasWindowY + (int)denseDeclined.CanvasPixelHeight - 4);
+            await Wait("dense-caption-hover-left", s => s.CanvasTooltip == "");
             Key("w", control: true); await Closed();
         }
         finally { Directory.Delete(stateRoot, true); }
@@ -2868,7 +2885,13 @@ public sealed partial class NativeSessionTests
             return (double.Parse(rect.X, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Width, System.Globalization.CultureInfo.InvariantCulture) / 2,
                 double.Parse(rect.Y, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Height, System.Globalization.CultureInfo.InvariantCulture) / 2);
         }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-" + name + ".png"), token);
+        // Design QA round 2: a capture waits until GTK's short fade of a button that just became available has finished (the
+        // round's refuted "washed-out Save" was one frame of it).
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-" + name + ".png"), token);
+        }
         // The captures double as measured design evidence (design QA of the drawing tools): pixels are read back from them.
         async Task<CapturedWindow> Shot(string name)
         {
@@ -2973,7 +2996,12 @@ public sealed partial class NativeSessionTests
         await Wait("palette-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         var (psuX, psuY) = Centre(cpuAdded, psu); var (cpuX, cpuY) = Centre(cpuAdded, cpu);
         await At(psuX, psuY);
-        await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        // Design QA round 2, R2-P2-3: the connection's first end becomes the selection and fills the inspector; the CPU, selected
+        // before, is no longer selected.
+        var connectStarted = await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        Assert.AreEqual(psu, connectStarted.Draft.Baseline.BlockId, "connect-started: the connection's first end, the PSU, is the selection.");
+        Assert.IsNull(connectStarted.ConnectionDraft, "connect-started: no connection is selected.");
+        Assert.AreEqual("PSU", Find(connectStarted, "RecursiveOwnerCaption").Label, "connect-started: the inspector shows the PSU.");
         await At(psuX + 60, psuY + 30);
         await Wait("connect-same-block", s => s.Notice == "Connect two different blocks or ports." && s.CanvasHint == "Click a port to finish connection"
             && s.CaptionEditor == "");
@@ -3001,6 +3029,23 @@ public sealed partial class NativeSessionTests
                 $"connect-hint: Save {CapturedWindow.Describe(saveFill)} stands apart from Decline {CapturedWindow.Describe(declineFill)}.");
             Assert.IsTrue(Math.Abs(save.Width - decline.Width) <= 2 && save.Width >= 120 && save.X > decline.X,
                 "connect-hint: Decline and Save share the inspector's width, Save on the right.");
+            // Design QA round 2, R2-P2-3, measured: the PSU, where the connection starts, has the selection's accent outline and
+            // tinted fill; the CPU, selected before Connect, is drawn plain again (its outline is not the accent and its fill is
+            // not the selection's tint).
+            var psuBox = connectEmpty.BlockTexts.Single(b => b.BlockId == psu).Block; var cpuBox = connectEmpty.BlockTexts.Single(b => b.BlockId == cpu).Block;
+            var psuFill = shot.At(psuBox.X + psuBox.Width - 18, psuBox.Y + psuBox.Height - 14); var cpuFill = shot.At(cpuBox.X + cpuBox.Width - 18, cpuBox.Y + cpuBox.Height - 14);
+            var psuBorder = shot.MostContrasting(psuBox.X + psuBox.Width / 4 - 2, psuBox.Y - 1, 5, 4, psuFill);
+            var cpuBorder = shot.MostContrasting(cpuBox.X + cpuBox.Width / 4 - 2, cpuBox.Y - 1, 5, 4, cpuFill);
+            Assert.IsTrue(shot.Contrast("R2-P2-3 connection source's outline on the canvas", psuBorder, canvasColour) >= 3.0,
+                $"connect-hint: the PSU, where the connection starts, is outlined in the accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuBorder, cpuBorder) >= 60,
+                $"connect-hint: the CPU's outline {CapturedWindow.Describe(cpuBorder)} is not the selection's accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuFill, cpuFill) >= 12,
+                $"connect-hint: the CPU's fill {CapturedWindow.Describe(cpuFill)} is not the selection's tint {CapturedWindow.Describe(psuFill)}.");
+            Assert.AreEqual("PSU", Find(connectEmpty, "RecursiveOwnerCaption").Label, "connect-hint: the inspector shows the connection's source, not the CPU.");
+            // The hint is placed clear of every block (design QA round 2, P3 1).
+            Assert.IsNotNull(connectEmpty.ConnectHint, "connect-hint: the hint is drawn.");
+            Assert.IsTrue(connectEmpty.BlockTexts.All(b => RectsApart(connectEmpty.ConnectHint, b.Block)), "connect-hint: the hint covers no block.");
         }
         await At(cpuX, cpuY); await Wait("connection-caption", s => s.CaptionEditor == "connection");
         Type("Power"); Key("Return");
@@ -3035,6 +3080,8 @@ public sealed partial class NativeSessionTests
         await Press("RecursiveToolConnect");
         await Wait("strip-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         await At(380, 180); var portStarted = await Wait("port-connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        Assert.AreEqual((psu, rail), (portStarted.SelectedInterfaceOwnerId, portStarted.SelectedInterfaceId),
+            "port-connect-started: the Rail port, where the connection starts, is the selection (design QA round 2, R2-P2-3).");
         {
             // Design QA P2-6: ports are 12-pixel squares at every zoom, and while Connect is active the port under the pointer gets
             // a ring in the accent (the sketch's snap circle), 3:1 or more on the canvas; a block under the pointer gets an outline.
@@ -3042,8 +3089,10 @@ public sealed partial class NativeSessionTests
                 "port-connect-started: every port is drawn as a square of at least 12 pixels.");
             var dcMark = portStarted.PortMarks.Single(p => p.Label == "DC input");
             NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: dcMark.X + dcMark.Width / 2, clickFromTop: dcMark.Y + dcMark.Height / 2);
-            var aimed = await Wait("connect-target-port", s => s.ConnectTarget?.Label == "DC input" && s.PortMarks.Any(p => p.Label == "DC input" && p.Active));
+            var aimed = await Wait("connect-target-port", s => s.ConnectTarget?.Label == "DC input" && s.PortMarks.Any(p => p.Label == "DC input" && p.Active)
+                && s.ConnectPreview.Count >= 2);
             var shot = await Shot("connect-port-target");
+            VerifyConnectPreview(shot, aimed, "connect-port-target", psu, "Rail", "DC input");
             var canvasColour = shot.At(aimed.CanvasWindowX + (int)aimed.CanvasPixelWidth - 12, aimed.CanvasWindowY + (int)aimed.CanvasPixelHeight - 12);
             var ring = aimed.ConnectTarget;
             int cx = ring.X + ring.Width / 2, cy = ring.Y + ring.Height / 2;
@@ -3059,6 +3108,7 @@ public sealed partial class NativeSessionTests
         var feedAdded = await Wait("feed-added", s => s.LevelDraft.NewConnections.Count == 2 && s.CaptionEditor == "");
         var feed = feedAdded.LevelDraft.NewConnections[1];
         Assert.AreEqual((P.DiagramEndpointKind.DekInterface, psu, rail), (feed.Endpoints[0].Kind, feed.Endpoints[0].BlockId, feed.Endpoints[0].InterfaceId));
+        Assert.AreEqual("Rail feed", feedAdded.ConnectionDraft?.Name, "The finished connection is selected.");
 
         // Palette Select, then move and resize the CPU; Escape also returns to Select.
         await Press("DiagramPaletteSelect"); await Wait("palette-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
@@ -3266,6 +3316,8 @@ public sealed partial class NativeSessionTests
                 $"saved: the selected wire {CapturedWindow.Describe(selectedWire)} stands 3:1 from the canvas and out from the unselected one {CapturedWindow.Describe(otherWire)}.");
             CollectionAssert.AreEquivalent(new[] { "Power", "Rail feed" }, saved.ConnectionCaptions.Where(c => c.Shown).Select(c => c.Label).ToArray(),
                 "saved: both connection captions are drawn.");
+            VerifyCaptions(shot, saved, "saved", new Dictionary<string, string> { [power.Selection.ConnectionId] = "Power", [feed.Selection.ConnectionId] = "Rail feed" },
+                "Power", "Rail feed");
             VerifyCanvasText(saved, "saved");
             var save = Find(saved, "RecursiveSave"); var decline = Find(saved, "RecursiveDecline");
             Assert.IsFalse(save.Enabled || decline.Enabled, "saved: nothing is left to save or decline.");
@@ -3456,6 +3508,10 @@ public sealed partial class NativeSessionTests
             VerifyToolStyling(shot, compact, "compact", "Select");
             VerifySelectionContrast(shot, compact, "compact", compact.Draft.Baseline.BlockId);
             VerifyCanvasText(compact, "compact");
+            // Design QA round 2, R2-P2-8: a caption with room is drawn whole in the compact window too ("Rail feed" was cut to
+            // "Rail f…" beside its short first leg although the canvas around it was empty).
+            VerifyCaptions(shot, compact, "compact", new Dictionary<string, string> { [power.Selection.ConnectionId] = "Power", [feed.Selection.ConnectionId] = "Rail feed" },
+                "Power", "Rail feed");
         }
         await Press("RecursiveToolConnect"); await Wait("compact-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         await Press("RecursiveToolSelect"); await Wait("compact-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
@@ -3798,7 +3854,11 @@ public sealed partial class NativeSessionTests
                 return DateTime.UtcNow - since >= TimeSpan.FromMilliseconds(400) && reached(s);
             });
         }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
+        }
         async Task<CapturedWindow> Shot(string name)
         {
             await Capture(name);
@@ -3951,9 +4011,19 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(0U, Chips(unknown, psu)!.HiddenChips);
         Assert.IsEmpty(Chips(unknown, psu)!.Marks, "Marks stand in for chips only when no chip fits.");
         Assert.IsNull(Chips(unknown, psu)!.More, "No \"+N more\" chip while every chip is drawn.");
-        StrengthRow(unknown, "default-width", null);
+        // Design QA round 2, R2-P2-7: at the default window size a facet's detail shows the strength choices' full labels; the
+        // inspector's default width counts its scroll bar, so they show whether or not the inspector scrolls.
+        StrengthRow(unknown, "default-width", false);
         {
+            var settled = await DetailSettled("detail-settled");
             var shot = await Shot("detail");
+            VerifyDetailLayout(shot, unknown, "choices-detail");
+            var informationChoice = Find(unknown, "RecursiveFacetStrengthInformation");
+            var informationInk = shot.InkRuns(informationChoice.X, informationChoice.Y, informationChoice.Width, informationChoice.Height,
+                shot.At(Find(unknown, "RecursiveInspector").X + 3, informationChoice.Y + informationChoice.Height / 2), rows: false, minimum: 2.0);
+            int informationWidth = informationInk.Count == 0 ? 0 : informationInk[^1].Last - informationInk[0].First + 1;
+            Assert.IsTrue(shot.Record("R2-P2-7 Information choice drawn width at the default size (px)", informationWidth) >= 70,
+                $"choices-detail: the Information choice is drawn {informationWidth} pixels wide, its whole word, not \"Info\".");
             VerifySelectionContrast(shot, unknown, "choices-detail", psu);
             // Design QA P2-10: Back to facet overview and Clear facet look like the canvas's link: underlined, in the link colour,
             // 4.5:1 on the inspector, and coloured apart from the inspector's static text ("Selected design: v1").
@@ -3965,7 +4035,22 @@ public sealed partial class NativeSessionTests
             // P2-9: the reason sits inside its box, not against the border.
             VerifyTextInset(shot, Find(unknown, "RecursiveFacetReason"), "choices-detail", "the Reason box");
             // P2-13: Comments is whole in the inspector's view, or a visible scroll bar shows that the inspector holds more.
-            VerifyInspectorScroll(shot, unknown, "choices-detail");
+            VerifyInspectorScroll(shot, settled, "choices-detail");
+            // Design QA round 2, P3 10: while a facet's detail is open the requirement box and Comments are two lines high, as
+            // sketch A4 draws them, so at the default window size Comments lies whole in the inspector's view with its 12-pixel
+            // margin below it (it was cut off at the view's lower edge), and its bottom border is drawn.
+            var inspector = Find(settled, "RecursiveInspector"); var comments = Find(settled, "RecursiveComments");
+            Assert.IsTrue(comments.Shown && comments.Y >= inspector.Y, "choices-detail: Comments is in the inspector's view.");
+            int commentsMargin = inspector.Y + inspector.Height - (comments.Y + comments.Height);
+            Assert.IsTrue(shot.Record("P3 10 Comments bottom to the inspector's lower edge (px)", commentsMargin) >= 12,
+                $"choices-detail: Comments ends {commentsMargin} pixels above the inspector's lower edge, at least 12.");
+            var belowComments = shot.At(inspector.X + 3, comments.Y + comments.Height + 6);
+            var commentsBorder = shot.MostContrasting(comments.X + 12, comments.Y + comments.Height - 3, comments.Width - 24, 3, belowComments);
+            Assert.IsTrue(shot.Contrast("P3 10 Comments bottom border on the inspector", commentsBorder, belowComments) >= 1.3,
+                $"choices-detail: Comments' bottom border {CapturedWindow.Describe(commentsBorder)} is drawn on {CapturedWindow.Describe(belowComments)}.");
+            var general = Find(settled, "RecursiveRequirements0");
+            Assert.IsTrue(general.Height < 90 && comments.Height < 72,
+                $"choices-detail: the requirement box ({general.Height} pixels) and Comments ({comments.Height} pixels) are two lines high beside the detail.");
         }
 
         // The strength labels collapse before the row would wrap and return when the inspector is wide enough, and the chosen
@@ -4057,20 +4142,23 @@ public sealed partial class NativeSessionTests
         (string, P.DefinitionChoiceStateData) typeChosen = ("type", P.DefinitionChoiceStateData.DcsdSelected);
         string[] fullStrengths = ["Information", "Preference", "Requirement"], briefStrengths = ["Info", "Pref.", "Req."];
         var clearSash = Find(await Read(), "RecursiveInspectorSash");
-        var cleared = await ClearPackage("default-width", null, ["type", "manufacturer"], typeChosen);
+        var cleared = await ClearPackage("default-width", false, ["type", "manufacturer"], typeChosen);
         CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
         // The labels switch at one width, and the integration run clear-facet-overlap-11e548 failed near such a width: the full
         // labels fitted the facet overview, which has no scroll bar, but not the Package detail once its scroll bar showed, and
-        // Clear facet was squeezed to nothing below the wrapped row. So the inspector is widened from the default width in 3-pixel
-        // steps until the full labels show with the Package detail open. At each width the detail is measured as the sash left it,
-        // and again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        // Clear facet was squeezed to nothing below the wrapped row. Since design QA round 2 (R2-P2-7) the default inspector shows
+        // the full labels, so the inspector is first narrowed by 30 pixels, below the switch, and then widened in 3-pixel steps
+        // until the full labels show with the Package detail open. At each width the detail is measured as the sash left it, and
+        // again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        var sweepFrom = Find(await Read(), "RecursiveInspectorSash");
+        await MoveSash("sweep-narrowed", sweepFrom.X + sweepFrom.Width / 2 + 30, s => Find(s, "RecursiveInspectorSash").X >= sweepFrom.X + 20);
         // The facet overview's column where the sweep starts, as drawn: each overview row fills the width inside the 12 DIP margins.
         int overviewColumn = Find(await Read(), "RecursiveFacetRowPackage").Width;
         var sweepStart = (await OpenPackage("sweep-00", true)).Detail;
         P.RecursiveDiagramEditorState lastShort = sweepStart, firstFull;
         for (int i = 1; ; ++i)
         {
-            Assert.IsTrue(i <= 20, "The full strength labels show within 60 pixels of the default width.");
+            Assert.IsTrue(i <= 20, "The full strength labels show within 60 pixels of where the sweep started.");
             string step = $"sweep-{i:00}";
             var sash = Find(await Read(), "RecursiveInspectorSash");
             await MoveSash(step, sash.X + sash.Width / 2 - 3, s => Find(s, "RecursiveInspectorSash").X < sash.X);
@@ -4127,22 +4215,39 @@ public sealed partial class NativeSessionTests
         var familyAdded = await Wait("family-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowFamily");
         (string, P.DefinitionChoiceStateData)[] three = [("type", P.DefinitionChoiceStateData.DcsdSelected), ("family", P.DefinitionChoiceStateData.DcsdCandidates),
             ("package", P.DefinitionChoiceStateData.DcsdCandidates)];
+        const string moreTip = "Family: TLV755P (candidate)\nPackage: SOT-23-5 (candidate)";
         void VerifyMore(P.RecursiveDiagramEditorState at, string step)
         {
             var chips = Chips(at, psu) ?? throw new AssertFailedException(step + ": the PSU reports its chips.");
-            CollectionAssert.AreEqual(new[] { "type", "family" }, chips.Chips.Select(c => c.Facet).ToArray(), step + ": two chips fit the block, in facet order.");
-            Assert.AreEqual("Type: linear regulator", chips.Chips[0].Text, step + ": the first chip keeps its whole text.");
-            StringAssert.StartsWith(chips.Chips[1].Text, "Family: ", step + ": the second chip names its facet.");
+            // Design QA round 2, R2-P2-6: a chip always shows its whole "Facet: value". Family's "TLV755P" does not fit the PSU's
+            // second chip row beside "+1 more" (the Rail port's name ends that row), so Family goes behind "+N more" with Package
+            // instead of being cut to "Family: T…"; the chip's tooltip names both with their values and states.
+            CollectionAssert.AreEqual(new[] { "type" }, chips.Chips.Select(c => c.Facet).ToArray(), step + ": the chips that fit whole, in facet order.");
+            Assert.AreEqual("Type: linear regulator", chips.Chips[0].Text, step + ": the chip keeps its whole text.");
+            Assert.IsFalse(chips.Chips.Any(c => c.Text.Contains('…')), step + ": no chip is shortened.");
             Assert.IsTrue(chips.More is { Shown: true }, step + ": the rest is shown as one \"+N more\" chip.");
-            Assert.AreEqual(1U, chips.HiddenChips, step + ": Package is the one choice behind \"+1 more\".");
+            Assert.AreEqual(2U, chips.HiddenChips, step + ": Family and Package are the choices behind \"+2 more\".");
+            Assert.AreEqual("+2 more", chips.More.Label, step + ": the chip counts the choices behind it.");
+            Assert.AreEqual(moreTip, chips.More.Tooltip, step + ": \"+2 more\" names the choices behind it with their values and states.");
             Assert.IsEmpty(chips.Marks, step + ": no state marks while chips fit.");
             Assert.HasCount(1, chips.PortNames, step + ": the PSU names its Rail port inside its edge, and the chips keep clear of it.");
             VerifyChoicesVisible(at, step, psu, three);
         }
         CollectionAssert.AreEqual(new[] { "type", "manufacturer", "family", "package" }, familyAdded.ShownFacets.ToArray(),
-            "The overview lists every facet with a value, including Package behind \"+1 more\".");
+            "The overview lists every facet with a value, including Family and Package behind \"+2 more\".");
         VerifyMore(familyAdded, "more");
         await Capture("more");
+        // On hover, "+2 more" shows the choices behind it (design QA round 2, R2-P2-6), and the tooltip goes when the pointer leaves.
+        var moreChip = Chips(familyAdded, psu)!.More;
+        ulong motionsBefore = (await Read()).CanvasMotions;
+        // The pointer first enters the canvas away from the chip, then moves onto it.
+        NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: moreChip.X + moreChip.Width / 2, clickFromTop: moreChip.Y + moreChip.Height + 40);
+        foreach (int dx in new[] { -3, 0, 2 })
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: moreChip.X + moreChip.Width / 2 + dx, clickFromTop: moreChip.Y + moreChip.Height / 2);
+        await Wait("more-hover", s => s.CanvasMotions > motionsBefore && s.CanvasTooltip == moreTip);
+        NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: familyAdded.CanvasWindowX + (int)familyAdded.CanvasPixelWidth - 30,
+            clickFromTop: familyAdded.CanvasWindowY + (int)familyAdded.CanvasPixelHeight - 30);
+        await Wait("more-hover-left", s => s.CanvasTooltip == "");
 
         // Save stores the choices in exactly one new revision of the PSU and nothing else about it; the CPU keeps its revision.
         var beforeChoices = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
@@ -4192,14 +4297,14 @@ public sealed partial class NativeSessionTests
         var historyOpen = await Wait("history-open", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D")
             && s.Rendered);
         var historyOpenChips = Chips(historyOpen, psu) ?? throw new AssertFailedException("history-open: the PSU still shows its chips.");
-        CollectionAssert.AreEqual(new[] { "type", "family" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
+        CollectionAssert.AreEqual(new[] { "type" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
         Assert.IsNull(historyOpenChips.ReviewFacets, "history-open: no Review facets link while the history is open.");
         Key("Down"); await Wait("history-older", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId != graph.SelectedRoot.RevisionId.ToString("D"));
         Key("Up"); await Wait("history-saved", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D"));
         Key("p", alt: true);
         var preview = await Wait("history-preview", s => s.DiagramHistory?.Preview?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D") && s.Rendered);
         var previewChips = Chips(preview, psu) ?? throw new AssertFailedException("history-preview: the previewed PSU still shows its chips.");
-        CollectionAssert.AreEqual(new[] { "type", "family" }, previewChips.Chips.Select(c => c.Facet).ToArray(), "history-preview: the same chips.");
+        CollectionAssert.AreEqual(new[] { "type" }, previewChips.Chips.Select(c => c.Facet).ToArray(), "history-preview: the same chips.");
         Assert.IsNull(previewChips.ReviewFacets, "history-preview: no Review facets link in a read-only preview.");
         await Capture("history-preview");
         Key("c", alt: true); await Wait("history-preview-closed", s => s.DiagramHistory is { Preview: null });
@@ -4249,10 +4354,31 @@ public sealed partial class NativeSessionTests
             VerifyCanvasText(compact, "choices-compact");
             ChoicesClear(compact, "choices-compact");
             VerifyInspectorScroll(shot, compact, "choices-compact");
+            // Design QA round 2, R2-P2-6 in the compact window: a chip is drawn whole or not at all; the choices that do not fit
+            // whole are behind "+N more", which counts them and names each with its value and state on hover.
+            var wholeChips = new Dictionary<string, (string Chip, string Tip)>
+            {
+                ["type"] = ("Type: linear regulator", "Type: linear regulator (chosen)"),
+                ["family"] = ("Family: TLV755P", "Family: TLV755P (candidate)"),
+                ["package"] = ("Package: SOT-23-5", "Package: SOT-23-5 (candidate)")
+            };
+            var compactChips = Chips(compact, psu)!;
+            foreach (var chip in compactChips.Chips)
+                Assert.AreEqual(wholeChips[chip.Facet].Chip, chip.Text, "choices-compact: the " + chip.Facet + " chip shows its whole facet and value.");
+            string[] behind = [.. wholeChips.Keys.Where(f => compactChips.Chips.All(c => c.Facet != f))];
+            Assert.AreEqual((uint)behind.Length, compactChips.HiddenChips, "choices-compact: every choice not drawn as a chip is counted behind \"+N more\".");
+            if (behind.Length > 0 && compactChips.More is { Shown: true } more)
+            {
+                Assert.AreEqual($"+{behind.Length} more", more.Label, "choices-compact: \"+N more\" counts the choices behind it.");
+                Assert.AreEqual(string.Join("\n", behind.Select(f => wholeChips[f].Tip)), more.Tooltip,
+                    "choices-compact: \"+N more\" names the choices behind it with their values and states.");
+            }
         }
         // The compact window keeps the Package detail's measured layout, and Clear facet still clears Package; undo leaves the
         // declined draft clean again.
-        await ClearPackage("compact", null, ["type", "manufacturer", "family"], ("type", P.DefinitionChoiceStateData.DcsdSelected),
+        // The compact window keeps the default inspector's width, so the Package detail shows the full strength labels there too;
+        // the short labels are the narrow inspector's fallback only (design QA round 2, R2-P2-7).
+        await ClearPackage("compact", false, ["type", "manufacturer", "family"], ("type", P.DefinitionChoiceStateData.DcsdSelected),
             ("family", P.DefinitionChoiceStateData.DcsdCandidates));
         // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
         // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
@@ -4442,7 +4568,39 @@ public sealed partial class NativeSessionTests
         }
         // + Add detail lists only the details the connection does not have yet, in the order signals, direction, domain, type.
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
+        }
+        async Task<CapturedWindow> Shot(string name)
+        {
+            await Capture(name);
+            return await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-details-" + name + ".png"), WindowOrigin(display, processId, title), token);
+        }
+        // Parks the pointer on an empty corner of the canvas, so a capture measures the controls rather than the pointer drawn
+        // over the one pressed last.
+        async Task ParkPointer()
+        {
+            var at = await Read();
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: at.CanvasWindowX + (int)at.CanvasPixelWidth - 6,
+                clickFromTop: at.CanvasWindowY + (int)at.CanvasPixelHeight - 6);
+        }
+        // The route the editor reports it drew for a connection, in window pixels.
+        async Task<(int X, int Y)[]> RoutePixels(P.RecursiveDiagramEditorState at, string connection)
+        {
+            var observed = await client.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentId"] = created.DocumentId, ["expectedSourceToken"] = at.SourceToken,
+                ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "canvas", pixelWidth = 800, pixelHeight = 600 } }
+            }, cancellationToken: token);
+            Assert.IsFalse(observed.IsError == true, "The level can be observed.");
+            var route = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0]
+                .GetProperty("resolvedLayout").GetProperty("routes").EnumerateArray().First(r => r.GetProperty("connectionId").GetString() == connection);
+            return [.. route.GetProperty("points").EnumerateArray().Select(p => Screen(at,
+                double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture)))];
+        }
         async Task Closed()
         {
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
@@ -4562,7 +4720,25 @@ public sealed partial class NativeSessionTests
         string supply = drawn.LevelDraft.NewConnections[0].Selection.ConnectionId;
         CaptionOnly(drawn, "new-connection");
         Assert.IsFalse(Find(drawn, "RecursiveSavedVersion").Shown, "A connection drawn in this draft has no saved version yet.");
-        await Capture("new-connection");
+        {
+            // Design QA round 2, R2-P2-1: the new connection's caption is drawn on the canvas, whole, in a clear place near its short
+            // route to the port on the level's boundary (whose own name stays beside the port), as every other caption is.
+            var shot = await Shot("new-connection");
+            VerifyCaptions(shot, drawn, "new-connection", new Dictionary<string, string> { [supply] = "Supply input", [power] = "Power", [feed] = "Rail feed" },
+                "Supply input");
+            var caption = drawn.ConnectionCaptions.Single(c => c.ObjectId == supply);
+            var route = await RoutePixels(drawn, supply);
+            double Distance((int X, int Y) a, (int X, int Y) b)
+            {
+                // From the caption's box to the segment a-b (both axis-aligned boxes): the gap between them, 0 when they touch.
+                int dx = Math.Max(0, Math.Max(Math.Min(a.X, b.X) - (caption.X + caption.Width), caption.X - Math.Max(a.X, b.X)));
+                int dy = Math.Max(0, Math.Max(Math.Min(a.Y, b.Y) - (caption.Y + caption.Height), caption.Y - Math.Max(a.Y, b.Y)));
+                return Math.Sqrt(dx * dx + dy * dy);
+            }
+            double nearest = route.Zip(route.Skip(1)).Min(pair => Distance(pair.First, pair.Second));
+            Assert.IsTrue(shot.Record("R2-P2-1 Supply input caption from its connection (px)", (int)Math.Round(nearest)) <= 64,
+                $"new-connection: the caption 'Supply input' lies {nearest:F0} pixels from its connection, beside it.");
+        }
         // Escape closes + Add detail without adding anything.
         await Press("RecursiveAddDetail"); await Popup(); Key("Escape"); await PopupClosed();
         var menuCancelled = await Wait("add-detail-cancelled", s => Details(s).Length == 0);
@@ -4670,6 +4846,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(psuName + " → " + cpuName, Find(direction, "RecursiveDirectionFromFirst").Label, "The direction names the connection's own ends.");
         Assert.AreEqual(cpuName + " → " + psuName, Find(direction, "RecursiveDirectionToFirst").Label);
         Assert.AreEqual("Both ways", Find(direction, "RecursiveDirectionBoth").Label);
+        Assert.IsTrue(new[] { "FromFirst", "ToFirst", "Both" }.All(n => Find(direction, "RecursiveDirection" + n).Tooltip == ""),
+            "No direction choice has a tooltip that only repeats its label (design QA round 2, P3 19).");
         await Capture("direction-row");
         await Press("RecursiveDetailRemoveDirection");
         var directionGone = await Wait("direction-row-removed", s => Details(s).Length == 0 && s.FocusedControl == "RecursiveAddDetail");
@@ -4722,12 +4900,20 @@ public sealed partial class NativeSessionTests
         Key("z", control: true);
         var bothBack = await Wait("drawn-signals-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && Details(s).SequenceEqual(["signals", "direction"]));
         Assert.AreEqual(twoSignals.LevelDraft, bothBack.LevelDraft, "Undo brings both drawn signals back exactly.");
-        await Capture("signals");
+        {
+            // Design QA round 2, R2-P2-5: the action that removes the whole Signals detail is a link that says so ("Remove signals"),
+            // visibly unlike each signal's own "×", which is named after the signal it removes on hover and for assistive technology.
+            await ParkPointer();
+            VerifySignalRemoves(await Shot("signals"), bothBack, "details-signals", "VBUS", "GND");
+        }
 
         // + Add detail > Type: a connection with signals cannot be a single signal; with exactly two signals it may be a pair.
         await AddDetail("Home", "Down");
         var type = await Wait("type-row", s => Details(s).SequenceEqual(["signals", "direction", "type"]));
         Assert.IsFalse(Find(type, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
+        Assert.AreEqual("A single signal has no signals of its own; remove its signals first.", Find(type, "RecursiveTypeSignal").Tooltip,
+            "The unavailable Signal says why on hover (design QA round 2, P3 20).");
+        Assert.AreEqual("", Find(type, "RecursiveTypeInterface").Tooltip, "An available type has no tooltip that repeats its label.");
         Assert.IsTrue(Find(type, "RecursiveTypeDifferentialPair").Enabled, "Two signals may form a differential pair.");
         await Press("RecursiveTypeInterface");
         await Wait("type-interface", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckInterface && Active(s, "RecursiveType").SequenceEqual(["Interface"]));
@@ -4748,7 +4934,28 @@ public sealed partial class NativeSessionTests
         await Press("RecursiveDomainPower");
         var all = await Wait("domain-power", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdPower && !Find(s, "RecursiveAddDetail").Shown);
         Assert.IsTrue(Find(all, "RecursiveAddRequirement").Shown, "+ Add requirement stays for the two requirement boxes not shown yet.");
-        await Capture("all-details");
+        {
+            // Design QA round 2, R2-P2-4: a chosen option has the drawing tools' accent style, told apart from the others by more
+            // than its fill; and under the pointer an option that is not chosen turns a neutral grey, never the accent.
+            await ParkPointer();
+            var shot = await Shot("all-details");
+            VerifyChoiceStyling(shot, all, "details-all-details", ["DirectionBoth", "DomainPower", "TypeSignalGroup"],
+                ["DirectionFromFirst", "DirectionToFirst", "DomainData", "DomainControl", "TypeInterface"]);
+            var hovered = Find(all, "RecursiveDomainData");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: hovered.X + 6, clickFromTop: hovered.Y + hovered.Height / 2);
+            await Task.Delay(300, token);
+            var hoverShot = await Shot("all-details-hover");
+            var hoverFill = hoverShot.At(hovered.X + 4, hovered.Y + hovered.Height / 2);
+            var restingFill = hoverShot.At(Find(all, "RecursiveDomainControl").X + 4, hovered.Y + hovered.Height / 2);
+            var chosenFill = hoverShot.At(Find(all, "RecursiveDomainPower").X + 4, hovered.Y + hovered.Height / 2);
+            int spread = Math.Max(hoverFill.R, Math.Max(hoverFill.G, hoverFill.B)) - Math.Min(hoverFill.R, Math.Min(hoverFill.G, hoverFill.B));
+            Assert.IsTrue(CapturedWindow.Distance(hoverFill, restingFill) >= 6 && spread <= 12,
+                $"details-all-details: under the pointer Data turns a neutral grey {CapturedWindow.Describe(hoverFill)} (at rest {CapturedWindow.Describe(restingFill)}).");
+            Assert.IsTrue(CapturedWindow.Distance(hoverFill, chosenFill) >= 12,
+                $"details-all-details: hover {CapturedWindow.Describe(hoverFill)} does not look like the chosen Power {CapturedWindow.Describe(chosenFill)}.");
+            var caption = Find(all, "RecursiveConnectionCaption");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: caption.X + caption.Width / 2, clickFromTop: caption.Y + caption.Height / 2);
+        }
         // Removing a row takes exactly that detail away; Undo brings it back.
         await Press("RecursiveDetailRemoveDomain");
         await Wait("domain-removed", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified && Details(s).SequenceEqual(["signals", "direction", "type"])
@@ -4937,8 +5144,24 @@ public sealed partial class NativeSessionTests
                     && choices[i].Y < choices[j].Y + choices[j].Height && choices[j].Y < choices[i].Y + choices[i].Height, choices[i].Name + " overlaps " + choices[j].Name);
         Assert.IsTrue(Inside(Find(compact, "RecursiveConnectionCaption"), compactInspector), "The caption is in view.");
         await Press("RecursiveDirectionFromFirst");
-        await Wait("compact-direction", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
-        await Capture("compact");
+        var compactChosen = await Wait("compact-direction", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
+        {
+            // Design QA round 2 in the compact window, measured: the chosen direction, domain and type have the drawing tools'
+            // accent style and the others do not (R2-P2-4); "Remove signals" is a link unlike each signal's own "×" (R2-P2-5); and
+            // every connection shows its whole caption on the canvas, the new "Supply input" beside its short route as well
+            // (R2-P2-1 and R2-P2-8).
+            await ParkPointer();
+            var shot = await Shot("compact");
+            string[] OneClick(bool chosen) => [.. compactChosen.Controls.Where(c => c.Shown && c.Enabled && c.Active == chosen
+                && (c.Name.StartsWith("RecursiveDirection", StringComparison.Ordinal) || c.Name.StartsWith("RecursiveDomain", StringComparison.Ordinal)
+                    || c.Name.StartsWith("RecursiveType", StringComparison.Ordinal))).Select(c => c.Name["Recursive".Length..])];
+            CollectionAssert.IsSubsetOf(new[] { "DirectionFromFirst", "DomainPower" }, OneClick(true), "details-compact: PSU → CPU and Power are chosen.");
+            VerifyChoiceStyling(shot, compactChosen, "details-compact", OneClick(true), OneClick(false));
+            VerifySignalRemoves(shot, compactChosen, "details-compact", "VBUS", "GND");
+            var compactNames = new[] { supply, power, feed }.ToDictionary(id => id,
+                id => links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == id)).Name);
+            VerifyCaptions(shot, compactChosen, "details-compact", compactNames, [.. compactNames.Values]);
+        }
         Key("z", control: true); await Wait("compact-undone", s => !s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
         await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
@@ -5747,6 +5970,18 @@ public sealed partial class NativeSessionTests
         var toolbar = shot.At(stripDelete.X + stripDelete.Width + 80, stripDelete.Y + stripDelete.Height / 2);
         string D(ValueTuple<byte, byte, byte> c) => CapturedWindow.Describe(c);
 
+        // Sketch 1 sets Delete apart from the drawing tools (design QA round 2, P3 4): the gap between Place port and Delete holds
+        // one thin line, drawn like the toolbar's own separator before Select.
+        var placePort = Find("RecursiveToolPlacePort"); var select = Find("RecursiveToolSelect");
+        int bandY = stripDelete.Y + stripDelete.Height / 4, bandHeight = stripDelete.Height / 2;
+        var beforeDelete = shot.InkRuns(placePort.X + placePort.Width, bandY, stripDelete.X - placePort.X - placePort.Width, bandHeight, toolbar, rows: false, minimum: 1.05);
+        var beforeSelect = shot.InkRuns(select.X - 12, bandY, 12, bandHeight, toolbar, rows: false, minimum: 1.05);
+        Assert.IsTrue(beforeDelete.Count == 1 && beforeDelete[0].Last - beforeDelete[0].First <= 1 && beforeSelect.Count == 1,
+            $"{step}: one thin separator stands between Place port and Delete ({beforeDelete.Count} runs of ink), as before Select ({beforeSelect.Count}).");
+        var deleteSeparator = shot.At(beforeDelete[0].First, bandY + bandHeight / 2); var selectSeparator = shot.At(beforeSelect[0].First, bandY + bandHeight / 2);
+        Assert.IsTrue(CapturedWindow.Distance(deleteSeparator, selectSeparator) <= 12,
+            $"{step}: the separator before Delete {D(deleteSeparator)} is drawn like the one before Select {D(selectSeparator)}.");
+
         // Strip: the active tool.
         var active = Find("RecursiveTool" + activeTool);
         Assert.IsTrue(active.Active, step + ": the strip shows " + activeTool + " as the active tool.");
@@ -5830,6 +6065,12 @@ public sealed partial class NativeSessionTests
         var addCell = Find("DiagramPaletteAddBlock");
         Assert.IsEmpty(shot.InkRuns(selectCell.X + selectCell.Width / 2, selectCell.Y + selectCell.Height, 1, addCell.Y - selectCell.Y - selectCell.Height,
             surface, rows: true, minimum: 1.1), step + ": no divider between the tools.");
+        // The card's outline is quiet in both themes (design QA round 2, P3 9: the dark theme's was near-white, 8.4:1 on the canvas,
+        // against the light theme's 1.7:1): measured across the card's left edge beside Select.
+        var canvasColour = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        var outline = shot.MostContrasting(selectCell.X - 9, selectCell.Y + selectCell.Height / 2, 7, 1, canvasColour);
+        Assert.IsTrue(shot.Contrast("P3 9 palette outline on the canvas", outline, canvasColour) <= 3.5,
+            $"{step}: the palette's outline {D(outline)} is quiet on the canvas {D(canvasColour)}.");
     }
 
     /// <summary>Design QA P1-1, measured in one capture: the selected block's border and its handles' outlines stand 3:1 or
@@ -6072,6 +6313,178 @@ public sealed partial class NativeSessionTests
         var bar = shot.MostContrasting(inspector.X + inspector.Width - 16, inspector.Y + 4, 16, inspector.Height - 8, background);
         Assert.IsTrue(shot.Contrast("P2-13 inspector scroll bar on the inspector", bar, background) >= 2.0,
             $"{step}: Comments runs below the inspector's view, and a scroll bar {CapturedWindow.Describe(bar)} shows it on {CapturedWindow.Describe(background)}.");
+    }
+
+    /// <summary>Design QA round 2: a capture waits this long for GTK's fade of a button that just became available (the round's
+    /// refuted "washed-out Save" was one frame of it).</summary>
+    private const int FadeSettleMilliseconds = 250;
+
+    private static bool RectsApart(P.DiagramControlRect a, P.DiagramControlRect b) =>
+        a.X + a.Width <= b.X || b.X + b.Width <= a.X || a.Y + a.Height <= b.Y || b.Y + b.Height <= a.Y;
+
+    /// <summary>Design QA round 2, R2-P2-1 and R2-P2-8, measured: every connection named in <paramref name="connections"/>
+    /// (id to caption) shows exactly one caption, drawn inside the canvas in a clear place, and its text's ink lies where the
+    /// editor reports it. Each caption in <paramref name="whole"/> is drawn whole; any other is whole or, only when no clear place
+    /// holds its whole text, shortened with "…" and naming its whole caption on hover. No caption covers a block, a port or
+    /// another caption (<see cref="VerifyCanvasText"/>).</summary>
+    private static void VerifyCaptions(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, IReadOnlyDictionary<string, string> connections,
+        params string[] whole)
+    {
+        var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        foreach (var (id, name) in connections)
+        {
+            var drawn = at.ConnectionCaptions.Where(c => c.ObjectId == id).ToArray();
+            Assert.HasCount(1, drawn, $"{step}: the connection {name} shows one caption.");
+            var caption = drawn[0];
+            Assert.IsTrue(caption.Shown, $"{step}: the caption of {name} is drawn inside the canvas.");
+            Assert.IsTrue(caption.Enabled, $"{step}: the caption of {name} has a clear place.");
+            if (caption.Label == name)
+                Assert.AreEqual("", caption.Tooltip, $"{step}: the whole caption {name} needs no tooltip.");
+            else
+            {
+                Assert.IsFalse(whole.Contains(name), $"{step}: the caption {name} is drawn whole, not as '{caption.Label}'.");
+                Assert.IsTrue(caption.Label.EndsWith('…') && caption.Label.Length >= 5 && name.StartsWith(caption.Label[..^1].TrimEnd(), StringComparison.Ordinal),
+                    $"{step}: the caption of {name} is whole or shortened with an ellipsis, not '{caption.Label}'.");
+                Assert.AreEqual(name, caption.Tooltip, $"{step}: the shortened caption '{caption.Label}' shows {name} on hover.");
+            }
+            var ink = shot.InkRuns(caption.X, caption.Y, caption.Width, caption.Height, canvas, rows: false, minimum: 2.0);
+            Assert.IsTrue(ink.Count >= 2 && ink[^1].Last - ink[0].First + 1 >= caption.Width / 2,
+                $"{step}: the caption '{caption.Label}' ({caption.X}, {caption.Y}, {caption.Width} x {caption.Height}) is drawn where it is reported.");
+        }
+        VerifyCanvasText(at, step);
+    }
+
+    /// <summary>Design QA round 2, R2-P2-4, measured in one capture: each chosen one-click option (a connection's direction,
+    /// domain or type) has the drawing tools' accent checked style: an accent border 3:1 or more from the inspector and from its
+    /// own pale accent tile, and an accent label 4.5:1 or more on the tile; each option that is not chosen has a label and a
+    /// border coloured apart from those. Assistive technology reads every option as a toggle button named by its label and
+    /// checked exactly while chosen.</summary>
+    private static void VerifyChoiceStyling(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string[] chosen, string[] idle)
+    {
+        P.DiagramControlRect Find(string name) => at.Controls.Single(c => c.Name == "Recursive" + name);
+        string D(ValueTuple<byte, byte, byte> c) => CapturedWindow.Describe(c);
+        var inspector = at.Controls.Single(c => c.Name == "RecursiveInspector");
+        (byte, byte, byte) Surface(P.DiagramControlRect c) => shot.At(inspector.X + 4, c.Y + c.Height / 2);
+        (byte, byte, byte) Label(P.DiagramControlRect c, (byte, byte, byte) behind) => shot.MostContrasting(c.X + 8, c.Y + 5, c.Width - 16, c.Height - 10, behind);
+        var chosenLabels = new List<(byte, byte, byte)>(); var chosenBorders = new List<(byte, byte, byte)>();
+        foreach (string name in chosen)
+        {
+            var choice = Find(name);
+            Assert.IsTrue(choice.Shown && choice.Active, $"{step}: {name} is shown as chosen.");
+            VerifyAccessible(choice, "toggle button", step);
+            Assert.IsTrue(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as checked.");
+            var surface = Surface(choice); var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option border on the inspector", border, surface) >= 3.0,
+                $"{step}: {name}'s border {D(border)} stands 3:1 from the inspector {D(surface)}.");
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option border on its tile", border, tile) >= 3.0,
+                $"{step}: {name}'s border {D(border)} stands 3:1 from its tile {D(tile)}.");
+            var label = Label(choice, tile);
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option label on its tile", label, tile) >= 4.5,
+                $"{step}: {name}'s label {D(label)} reads 4.5:1 on its tile {D(tile)}.");
+            chosenLabels.Add(label); chosenBorders.Add(border);
+        }
+        foreach (string name in idle)
+        {
+            var choice = Find(name);
+            Assert.IsTrue(choice.Shown && !choice.Active, $"{step}: {name} is shown and not chosen.");
+            VerifyAccessible(choice, "toggle button", step);
+            Assert.IsFalse(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as not checked.");
+            var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            var label = Label(choice, tile);
+            var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
+            Assert.IsTrue(chosenLabels.All(c => CapturedWindow.Distance(c, label) >= 60),
+                $"{step}: {name}'s label {D(label)} is coloured apart from a chosen option's {D(chosenLabels[0])}.");
+            Assert.IsTrue(chosenBorders.All(c => CapturedWindow.Distance(c, border) >= 60),
+                $"{step}: {name}'s border {D(border)} is coloured apart from a chosen option's {D(chosenBorders[0])}.");
+        }
+    }
+
+    /// <summary>Design QA round 2, R2-P2-5, measured in one capture: the action that removes the whole Signals detail is a link
+    /// that says so ("Remove signals"), drawn as a link and at least 4 pixels above the first signal's own "×"; each signal's
+    /// "×" is named after the signal it removes, on hover and for assistive technology, and its glyph is a quarter of the link's
+    /// width or less, so the two cannot be taken for each other.</summary>
+    private static void VerifySignalRemoves(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, params string[] signals)
+    {
+        P.DiagramControlRect Find(string name) => at.Controls.Single(c => c.Name == name);
+        var removeAll = Find("RecursiveDetailRemoveSignals");
+        Assert.IsTrue(removeAll.Shown, $"{step}: \"Remove signals\" is shown.");
+        Assert.AreEqual("Remove signals", removeAll.Label, $"{step}: the whole detail's remove action says what it removes.");
+        VerifyLink(shot, removeAll, Find("RecursiveSavedVersion"), step, "Remove signals");
+        var page = shot.At(Find("RecursiveInspector").X + 3, removeAll.Y + removeAll.Height / 2);
+        var linkInk = shot.InkRuns(removeAll.X, removeAll.Y, removeAll.Width, removeAll.Height, page, rows: false, minimum: 2.0);
+        Assert.IsNotEmpty(linkInk, $"{step}: \"Remove signals\" is drawn where it is reported.");
+        int linkWidth = linkInk[^1].Last - linkInk[0].First + 1;
+        for (int index = 0; index < signals.Length; ++index)
+        {
+            string name = signals[index];
+            var one = Find("RecursiveSignalRemove" + index);
+            Assert.AreEqual("×", one.Label, $"{step}: {name}'s own remove button is its \"×\".");
+            Assert.AreEqual("Remove signal " + name, one.Tooltip, $"{step}: {name}'s own remove button names its signal on hover.");
+            Assert.AreEqual("Remove signal " + name, one.Accessible?.Name, $"{step}: assistive technology names {name}'s own remove button after its signal.");
+            var ink = shot.InkRuns(one.X, one.Y, one.Width, one.Height, shot.At(one.X + 1, one.Y + 1), rows: false, minimum: 2.0);
+            int glyphWidth = ink.Count == 0 ? 0 : ink[^1].Last - ink[0].First + 1;
+            Assert.IsTrue(glyphWidth > 0 && glyphWidth * 4 <= linkWidth,
+                $"{step}: {name}'s \"×\" ({glyphWidth} pixels of ink) looks nothing like the {linkWidth}-pixel \"Remove signals\" link.");
+        }
+        var first = Find("RecursiveSignalRemove0");
+        Assert.IsTrue(shot.Record("R2-P2-5 Remove signals above the first signal's remove (px)", first.Y - (removeAll.Y + removeAll.Height)) >= 4,
+            $"{step}: \"Remove signals\" keeps apart from the first signal's own \"×\".");
+    }
+
+    /// <summary>Design QA round 2, R2-P2-2, measured: the Connect preview leaves the port it starts from outward (to the right, off
+    /// the block's right edge) for 8 pixels or more, runs through no block and across no boundary port's name, and ends on the
+    /// port under the pointer. Inside the source block, where the earlier preview struck through the port's name, no dash is
+    /// drawn; along the preview's longest run, its accent dash is.</summary>
+    private static void VerifyConnectPreview(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string sourceBlock, string sourcePort, string targetPort)
+    {
+        var points = at.ConnectPreview.Select(p => (X: p.X, Y: p.Y)).ToArray();
+        Assert.IsTrue(points.Length >= 2, step + ": the preview is reported as drawn.");
+        string Describe() => string.Join(" ", points.Select(p => p.X + "," + p.Y));
+        (int X, int Y) Centre(P.DiagramControlRect mark) => (mark.X + mark.Width / 2, mark.Y + mark.Height / 2);
+        var source = Centre(at.PortMarks.Single(p => p.Label == sourcePort)); var target = Centre(at.PortMarks.Single(p => p.Label == targetPort));
+        Assert.IsTrue(Math.Abs(points[0].X - source.X) <= 1 && Math.Abs(points[0].Y - source.Y) <= 1, $"{step}: the preview {Describe()} starts on {sourcePort} at {source}.");
+        Assert.IsTrue(Math.Abs(points[^1].X - target.X) <= 1 && Math.Abs(points[^1].Y - target.Y) <= 1, $"{step}: the preview {Describe()} ends on {targetPort} at {target}.");
+        Assert.IsTrue(points[1].Y == points[0].Y && shot.Record("R2-P2-2 preview leaves its port outward (px)", points[1].X - points[0].X) >= 8,
+            $"{step}: the preview {Describe()} leaves {sourcePort} outward, to the right, for 8 pixels or more.");
+        foreach (var text in at.BlockTexts)
+        {
+            var b = text.Block;
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), right = Math.Max(points[i - 1].X, points[i].X);
+                int top = Math.Min(points[i - 1].Y, points[i].Y), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                Assert.IsTrue(right <= b.X || left >= b.X + b.Width - 1 || bottom <= b.Y || top >= b.Y + b.Height - 1,
+                    $"{step}: the preview {Describe()} runs through no block; its run {points[i - 1]} to {points[i]} crosses ({b.X}, {b.Y}, {b.Width} x {b.Height}).");
+            }
+        }
+        foreach (var name in at.BoundaryPortNames)
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), right = Math.Max(points[i - 1].X, points[i].X);
+                int top = Math.Min(points[i - 1].Y, points[i].Y), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                Assert.IsTrue(right < name.X || left > name.X + name.Width || bottom < name.Y || top > name.Y + name.Height,
+                    $"{step}: the preview {Describe()} crosses no port's name ({name.Label}).");
+            }
+        var texts = at.BlockTexts.Single(b => b.BlockId == sourceBlock);
+        var block = texts.Block;
+        var fill = shot.At(block.X + block.Width / 2, block.Y + block.Height - 12);
+        // From just right of the block's caption to well left of the port's own name.
+        int stripFrom = texts.Caption is { } blockCaption ? blockCaption.X + blockCaption.Width + 6 : block.X + 12;
+        var inside = shot.MostContrasting(stripFrom, source.Y - 1, Math.Max(1, source.X - 60 - stripFrom), 3, fill);
+        Assert.IsTrue(shot.Contrast("R2-P2-2 ink inside the source block on its port's height", inside, fill) < 1.5,
+            $"{step}: nothing is drawn through the source block at its port's height ({CapturedWindow.Describe(inside)} on {CapturedWindow.Describe(fill)}).");
+        var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        int longest = 1;
+        for (int i = 2; i < points.Length; ++i)
+            if (Math.Abs(points[i].X - points[i - 1].X) + Math.Abs(points[i].Y - points[i - 1].Y)
+                > Math.Abs(points[longest].X - points[longest - 1].X) + Math.Abs(points[longest].Y - points[longest - 1].Y)) longest = i;
+        var (mx, my) = ((points[longest].X + points[longest - 1].X) / 2, (points[longest].Y + points[longest - 1].Y) / 2);
+        var dash = points[longest].Y == points[longest - 1].Y ? shot.MostContrasting(mx - 8, my - 1, 16, 3, canvas) : shot.MostContrasting(mx - 1, my - 8, 3, 16, canvas);
+        Assert.IsTrue(shot.Contrast("R2-P2-2 preview on the canvas", dash, canvas) >= 3.0,
+            $"{step}: the preview is drawn along its longest run in the accent {CapturedWindow.Describe(dash)}.");
+        Assert.IsNotNull(at.ConnectHint, step + ": the hint is drawn.");
+        Assert.IsTrue(at.BlockTexts.All(b => RectsApart(at.ConnectHint, b.Block)), step + ": the hint covers no block (design QA round 2, P3 1).");
     }
 
     /// <summary>Design QA P2-7: text is drawn whole inside its block, and each shown connection caption keeps clear of every

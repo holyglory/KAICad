@@ -404,6 +404,9 @@ private:
     RECURSIVE_DIAGRAM::RECT m_dragRect;
     int m_dragHandle = -1;
     bool m_dragMoved = false;
+    // How many distinct level geometries drags reached in this window (reported as drag_positions), and the latest one.
+    uint64_t m_dragPositions = 0;
+    std::string m_dragGeometry;
     double m_noteStartX = 0, m_noteStartY = 0;
     /// Requirement fields the user asked to add on an element whose fields are still empty.
     std::map<std::string, std::array<bool, 3>> m_revealed;

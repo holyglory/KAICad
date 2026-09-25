@@ -40,7 +40,12 @@ public sealed class RecursiveBlockProposalTests
 
     /// <summary>A whole-block proposal that rewrites the target's three fields. With <paramref name="refine"/>, it also
     /// refines that existing connection of the target's level (a new implementation of it with rewritten fields).</summary>
-    internal static BlockProposal CreateFor(RecursiveBlockGraph graph, DiagramRefinementInput input, ConnectionSelection? refine = null)
+    /// <summary>A test-only proposal for the input's target: two new blocks joined by a new signal group and, when
+    /// <paramref name="refine"/> names one of the target's connections, a refinement of it that rewrites its three fields. When
+    /// <paramref name="refineMember"/> names one of that connection's direct members, the proposal refines the member too: it
+    /// gets its own proposed implementation, which continues the member's field history, and the refined connection pins it.</summary>
+    internal static BlockProposal CreateFor(RecursiveBlockGraph graph, DiagramRefinementInput input, ConnectionSelection? refine = null,
+        ConnectionSelection? refineMember = null)
     {
         var baseline = input.BlockPath[^1]; var original = graph.Inspect(baseline);
         ProposedBlock Node(string name) => new(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), null, "Agent proposal", name,
@@ -54,13 +59,27 @@ public sealed class RecursiveBlockProposalTests
         ImmutableArray<ProposedConnection> proposed = [signal];
         if (refine is { } basis)
         {
-            var before = graph.Connections(baseline.BlockId).Inspect(basis);
+            var archive = graph.Connections(baseline.BlockId);
+            var before = archive.Inspect(basis); var members = before.Members;
+            ProposedConnection? member = null;
+            if (refineMember is { } memberBasis)
+            {
+                Assert.IsTrue(members.Contains(memberBasis), "The refined member is a direct member of the refined connection.");
+                var memberBefore = archive.Inspect(memberBasis);
+                member = new ProposedConnection(baseline.BlockId, new(memberBasis.ConnectionId, Guid.NewGuid(), Guid.NewGuid()), memberBasis,
+                    "Agent proposal", memberBefore.Name, memberBefore.Kind, Guid.NewGuid(),
+                    new("Carry both converted rails together.", "Draw the rails as one group.", "Route each rail beside its return."),
+                    memberBefore.Endpoints, memberBefore.Members, Guid.NewGuid(), Guid.NewGuid(), memberBefore.Domain, memberBefore.Direction, memberBefore.Realization);
+                members = members.Replace(memberBasis, member.Selection);
+            }
             var refined = new ProposedConnection(baseline.BlockId, new(basis.ConnectionId, Guid.NewGuid(), Guid.NewGuid()), basis,
                 "Agent proposal", before.Name, before.Kind, Guid.NewGuid(),
                 new("Carry the converted supply to the boundary port.", "Label the rail at both ends.", "Keep the rail short and wide."),
-                before.Endpoints, before.Members, Guid.NewGuid(), Guid.NewGuid(), before.Domain, before.Direction, before.Realization);
+                before.Endpoints, members, Guid.NewGuid(), Guid.NewGuid(), before.Domain, before.Direction, before.Realization);
             connections = connections.Replace(basis, refined.Selection); proposed = proposed.Add(refined);
+            if (member is not null) proposed = proposed.Add(member);
         }
+        else Assert.IsNull(refineMember, "A member is refined only with the connection that contains it.");
         var target = new ProposedBlock(new(baseline.BlockId, Guid.NewGuid(), Guid.NewGuid()), baseline, "Agent proposal", original.Name,
             Guid.NewGuid(), new("Refined implementation from the original request.", "Separate conversion and telemetry.", "Preserve the existing thermal region."),
             [.. original.Children, converter.Selection, telemetry.Selection],
@@ -149,6 +168,30 @@ public sealed class RecursiveBlockProposalTests
     // nested level on both sides, no member of a refined connection, chooses no proposal made from a chosen one, has no proposal below a
     // direct child of the root (so no outdated path through a containing block) and never takes the target out of the design; those
     // cases are only reachable here.
+    /// <summary>Which code a comparison that cannot be made reports beside a publication or refusal (review of pa48, finding 3).
+    /// The journey proves the realistic case over MCP: an outdated request that no longer prepares reports invalid_block_proposal.
+    /// A published proposal was validated when it was saved, so no real request makes comparing it fail without a code; that
+    /// comparer failure is reached only here, with a failing comparison, which is why this is an isolated test.</summary>
+    [TestMethod]
+    public void ComparisonThatCannotBeMadeNamesItsCauseWithoutBlamingAPublishedProposal()
+    {
+        static string? Code(object? unavailable) => unavailable is null ? null
+            : System.Text.Json.JsonSerializer.SerializeToElement(unavailable).GetProperty("code").GetString();
+        Func<BlockProposalComparison> malformed = () => throw new InvalidOperationException("The request names nothing it can compare.");
+        var (request, requestCause) = KiCad.Automation.Mcp.RecursiveEditorTools.Compare(malformed, retainedRequest: true);
+        Assert.IsNull(request); Assert.AreEqual("invalid_block_proposal", Code(requestCause), "An unpublished request that cannot be prepared is malformed.");
+        var (published, publishedCause) = KiCad.Automation.Mcp.RecursiveEditorTools.Compare(malformed, retainedRequest: false);
+        Assert.IsNull(published); Assert.AreEqual("proposal_comparison_failed", Code(publishedCause), "A saved proposal is not blamed for the comparer's failure.");
+        foreach (bool retained in new[] { true, false })
+            Assert.AreEqual("unknown_block_proposal", Code(KiCad.Automation.Mcp.RecursiveEditorTools.Compare(
+                () => throw new AutomationException("unknown_block_proposal", "No such proposal."), retained).Unavailable), "A coded failure keeps its code.");
+        var f = Fixture(); var prepared = BlockProposalCompiler.Prepare(f.Graph, f.Proposal);
+        var saved = prepared.Graph.WithProposal(new(f.Proposal.Id, f.Proposal.InputId, BlockProposalFiles.Fingerprint(f.Proposal), f.Proposal.BasePath,
+            f.Proposal.Candidate, f.Proposal.Issues, prepared.Graph.Inspect(f.Proposal.Candidate).Origin));
+        var (comparison, cause) = KiCad.Automation.Mcp.RecursiveEditorTools.Compare(() => BlockProposalComparer.Published(saved, f.Proposal.Id), retainedRequest: false);
+        Assert.IsNotNull(comparison); Assert.IsNull(cause, "A comparison that can be made reports no cause.");
+    }
+
     [TestMethod]
     public void StaleProposalComparisonNamesEachChangedElementOnEachSide()
     {
@@ -336,6 +379,15 @@ public sealed class RecursiveBlockProposalTests
             supplyEdited.SelectedRoot, [supplyEdited.SelectedRoot, plainPsu, stage], [Guid.NewGuid(), Guid.NewGuid()], agent)).Code);
         Assert.AreEqual("stale_root_revision", Assert.ThrowsExactly<AutomationException>(() => BlockProposalCompiler.Select(supplyEdited, stageProposal.Id,
             supplyEdited.SelectedRoot, [withStageProposal.SelectedRoot, plainPsu, stage], [Guid.NewGuid(), Guid.NewGuid()], agent)).Code);
+        // A path that is not a saved path of the blocks on today's path is not outdated but invalid: one that skips the supply, one
+        // that starts at the supply instead of the root, and one through a supply revision the diagram does not have.
+        foreach (var (malformed, what) in new (ImmutableArray<BlockSelection> Path, string What)[]
+        {
+            ([supplyEdited.SelectedRoot, stage], "skips the supply"), ([supplyToday, stage], "starts at the supply"),
+            ([supplyEdited.SelectedRoot, plainPsu with { RevisionId = Guid.NewGuid() }, stage], "names a supply revision the diagram does not have")
+        })
+            Assert.AreEqual("invalid_recursive_block_graph", Assert.ThrowsExactly<AutomationException>(() => BlockProposalCompiler.Select(supplyEdited,
+                stageProposal.Id, supplyEdited.SelectedRoot, malformed, [.. malformed.Skip(1).Select(_ => Guid.NewGuid())], agent)).Code, what);
         var stageToday = BlockProposalComparer.Published(supplyEdited, stageProposal.Id);
         Assert.IsFalse(stageToday.Stale); Assert.IsFalse(stageToday.CandidateAdopted); Assert.IsEmpty(stageToday.CurrentChanges);
         CollectionAssert.AreEqual(new[] { supplyEdited.SelectedRoot, supplyToday, stage }, stageToday.CurrentPath.ToArray());

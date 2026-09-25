@@ -1438,8 +1438,9 @@ void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open 
     if( GetValue() != open ) SetValue( open );
     if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
     m_value = value; m_state = choice.state(); m_isOpen = open;
-    // The label is the row's accessible name: its facet and value.
-    SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
+    // The label is the row's accessible name: its facet and value. GTK makes a toggle button's label a mnemonic label, so an
+    // "&" in a value (a manufacturer such as "C&K") is escaped: it is read as written and opens nothing.
+    SetLabel( wxControl::EscapeMnemonics( FacetLabel( m_facet ) + wxS( ": " ) + value ) ); SetToolTip( value );
     SetMinSize( DoGetBestSize() );
     Refresh();
 }
@@ -2971,6 +2972,7 @@ void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
     m_pointer = point;
     wxPoint delta = m_pointer - m_dragStart;
     if( !m_dragMoved && std::abs( delta.x ) + std::abs( delta.y ) < FromDIP( 4 ) ) return;
+    if( !m_dragMoved ) m_dragGeometry = m_dragBefore.scope().local_diagram().presentation().SerializeAsString();
     m_dragMoved = true;
     if( m_drag == DRAG::NOTE )
     {
@@ -3027,6 +3029,10 @@ void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
         }
     }
     followRoutes( before );
+    // Each distinct geometry the drag reaches is one position the level must be laid out for; a journey compares the
+    // layouts a drag made with these positions (the dense-level check).
+    if( std::string geometry = m_level.scope().local_diagram().presentation().SerializeAsString(); geometry != m_dragGeometry )
+    { m_dragGeometry = std::move( geometry ); ++m_dragPositions; }
     m_rendered = false; m_canvas->Refresh();
 }
 

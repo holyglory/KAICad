@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using KiCad.Automation.Model;
 using ModelContextProtocol.Server;
@@ -83,5 +84,20 @@ public sealed class RecursiveBlockToolSchemaTests
         var pair = new ConnectionMemberDefinition(link, "SYNC", [first, second], DiagramConnectionKind.DifferentialPair, "", "", "Match the pair's lengths.");
         CollectionAssert.AreEqual(new[] { first, second },
             JsonSerializer.Deserialize<ConnectionMemberDefinition>(JsonSerializer.Serialize(pair, options), options)!.MemberIdList.ToArray());
+        // Both member records compare their contents in order (contract rbg-v2 section 2.5), as the level-edit command does: the
+        // same definition read back from an agent's JSON is the same, an omitted member list equals an empty one, and a new
+        // order or a changed field is different.
+        Assert.IsTrue(pair.SameContents(JsonSerializer.Deserialize<ConnectionMemberDefinition>(JsonSerializer.Serialize(pair, options), options)));
+        Assert.IsTrue(signal.SameContents(signal with { MemberIds = [] }), "An omitted member list is an empty one.");
+        Assert.IsFalse(pair.SameContents(pair with { MemberIds = [second, first] }));
+        Assert.IsFalse(pair.SameContents(pair with { Routing = "Keep the pair short." }));
+        Assert.IsFalse(pair.SameContents(null));
+        var ends = ImmutableArray.Create(DiagramEndpointBinding.Unknown(Guid.NewGuid()), DiagramEndpointBinding.Unknown(Guid.NewGuid()));
+        var created = new NewConnectionMember(new(link, Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial", "SYNC", DiagramConnectionKind.DifferentialPair,
+            ends, new("", "", "Match the pair's lengths."), [first, second]);
+        Assert.IsTrue(created.SameContents(created with { Endpoints = [.. ends], Members = [first, second] }), "Copied lists with the same contents are the same member.");
+        Assert.IsFalse(created.SameContents(created with { Members = [second, first] }));
+        Assert.IsFalse(created.SameContents(created with { Endpoints = [ends[0]] }));
+        Assert.IsFalse(created.SameContents(created with { Name = "SYNC2" }));
     }
 }

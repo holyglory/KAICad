@@ -5,6 +5,7 @@
 #include <set>
 #include <utility>
 #include <wx/button.h>
+#include <wx/dcclient.h>
 #include <wx/listbox.h>
 #include <wx/sizer.h>
 #include <wx/statline.h>
@@ -45,10 +46,10 @@ std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> DiagramFieldHistoryRows(
     {
         // The same "name · version" form the implementation selector uses.
         wxString label = wxString::Format( "v%u", entry.context_version() );
-        if( wxString name = earlierImplementation( entry.context_revision_id() ); !name.IsEmpty() )
-            label = name + wxS( " · " ) + label;
+        wxString name = earlierImplementation( entry.context_revision_id() );
+        if( !name.IsEmpty() ) label = name + wxS( " · " ) + label;
         rows.push_back( { entry.requirement_revision_id(), label, wxString::FromUTF8( entry.origin().actor() ),
-                          wxString::FromUTF8( entry.text() ), wxEmptyString, entry.is_saved_text() } );
+                          wxString::FromUTF8( entry.text() ), wxEmptyString, entry.is_saved_text(), name } );
     }
     return rows;
 }
@@ -104,13 +105,16 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     comparison->Add( revisionColumn, 0, wxEXPAND | wxRIGHT, gap );
 
     auto* texts = new wxBoxSizer( wxVERTICAL );
-    // The heading also names the selected row's author, which a narrow revision list can cut off.
+    // The heading also names the selected row's author, which a narrow revision list can cut off. A heading too long for
+    // its column shortens only an earlier implementation's name (fitHeading), so "vN · Author" always stays readable; the
+    // end is cut only if even that does not fit.
     m_selectedHeading = new wxStaticText( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
-                                          wxST_ELLIPSIZE_MIDDLE );
+                                          wxST_ELLIPSIZE_END );
     m_selectedHeading->SetName( "DiagramFieldHistorySelectedHeading" );
     m_selectedHeading->SetFont( GetFont().Bold() );
     // Shorten a long heading instead of widening the dialog.
     m_selectedHeading->SetMinSize( wxSize( FromDIP( 120 ), -1 ) );
+    m_selectedHeading->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { fitHeading(); event.Skip(); } );
     texts->Add( m_selectedHeading, 0, wxEXPAND | wxBOTTOM, gap / 2 );
     m_selectedText = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
@@ -293,8 +297,15 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
     if( available )
     {
         const auto& entry = m_entries[selected];
-        m_selectedHeading->SetLabel( wxString::Format( _( "%s · %s — Selected text" ), entry.revisionLabel, entry.actor ) );
-        m_selectedHeading->SetToolTip( m_selectedHeading->GetLabel() );
+        m_headingImplementation = entry.implementation;
+        wxString version = entry.revisionLabel;
+        if( !entry.implementation.IsEmpty() && version.StartsWith( entry.implementation + wxS( " · " ) ) )
+            version = version.Mid( entry.implementation.length() + 3 );
+        m_headingRest = wxString::Format( _( "%s · %s — Selected text" ), version, entry.actor );
+        // The whole heading, until fitHeading shortens it to the laid-out column.
+        // Set as plain text: an "&" in a name or an author is shown, not taken as a keyboard mnemonic.
+        m_selectedHeading->SetLabelText( wxString::Format( _( "%s · %s — Selected text" ), entry.revisionLabel, entry.actor ) );
+        m_selectedHeading->SetToolTip( m_selectedHeading->GetLabelText() );
         m_selectedText->ChangeValue( entry.text );
         m_restore->SetLabel( wxString::Format( _( "Use %s text in draft" ), entry.revisionLabel ) );
         m_source->Show( m_openSource && !entry.sourceDescription.IsEmpty() );
@@ -302,10 +313,44 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
     }
     else
     {
-        m_selectedHeading->SetLabel( _( "No field history available" ) );
+        m_headingImplementation.clear(); m_headingRest = _( "No field history available" );
+        m_selectedHeading->SetLabelText( m_headingRest );
         m_selectedHeading->UnsetToolTip();
         m_selectedText->ChangeValue( wxEmptyString );
         m_source->Hide();
     }
     Layout();
+}
+
+
+bool DIALOG_DIAGRAM_FIELD_HISTORY::Layout()
+{
+    // Fitting after every layout, not only on the heading's own size event, keeps the heading right however the toolkit
+    // orders a resize: the sizer has just given the heading the width it will be drawn at.
+    bool laidOut = DIALOG_SHIM::Layout();
+    if( m_selectedHeading ) fitHeading();
+    return laidOut;
+}
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::fitHeading()
+{
+    // The whole heading when it fits its column; otherwise the earlier implementation's name is shortened with "…" (or
+    // left out when not even "…" fits) before anything of the version or the author is.
+    const wxString separator = wxS( " · " ), ellipsis = wxS( "…" );
+    wxString shown = m_headingImplementation.IsEmpty() ? m_headingRest : m_headingImplementation + separator + m_headingRest;
+    const int width = m_selectedHeading->GetClientSize().x;
+    if( !m_headingImplementation.IsEmpty() && width > 0 && m_selectedHeading->GetTextExtent( shown ).x > width )
+    {
+        wxClientDC dc( m_selectedHeading );
+        dc.SetFont( m_selectedHeading->GetFont() );
+        const int room = width - dc.GetTextExtent( separator + m_headingRest ).x;
+        wxString name = m_headingImplementation;
+        while( !name.IsEmpty() && dc.GetTextExtent( name + ellipsis ).x > room ) name.RemoveLast();
+        name.Trim();
+        if( !name.IsEmpty() ) name += ellipsis;
+        else if( dc.GetTextExtent( ellipsis ).x <= room ) name = ellipsis;
+        shown = name.IsEmpty() ? m_headingRest : name + separator + m_headingRest;
+    }
+    if( m_selectedHeading->GetLabelText() != shown ) m_selectedHeading->SetLabelText( shown );
 }

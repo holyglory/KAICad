@@ -2840,8 +2840,10 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                         || dynamic_cast<wxStaticText*>( item );
         // The connection's caption field and new-signal entry report the text they show (Round A3).
         auto* text = dynamic_cast<wxStaticText*>( item );
+        // A facet row reports its label as shown and read out, without the escaping of an "&" in its value.
+        auto* facetRow = dynamic_cast<R::FACET_ROW*>( item );
         wxString label = item == m_connectionCaption ? m_connectionCaption->GetValue() : item == m_signalEntry ? m_signalEntry->GetValue()
-                       : text ? text->GetLabelText() : labelled ? item->GetLabel() : wxString();
+                       : text ? text->GetLabelText() : facetRow ? facetRow->GetLabelText() : labelled ? item->GetLabel() : wxString();
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
                  ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label, item );
     }
@@ -2858,6 +2860,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     const R::ROUTE_STATS routes = R::RouteStats();
     result.set_route_layouts( routes.layouts ); result.set_slowest_route_layout_micros( routes.slowestMicros );
     result.set_latest_route_layout_micros( routes.latestMicros );
+    result.set_drag_positions( m_dragPositions );
     return result;
 }
 

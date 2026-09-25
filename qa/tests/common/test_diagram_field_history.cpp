@@ -313,7 +313,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         capture( dialog, evidence, "01-current.png" );
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );
-        selectedHeading = control<wxStaticText>( dialog, "DiagramFieldHistorySelectedHeading" )->GetLabel().utf8_string();
+        selectedHeading = control<wxStaticText>( dialog, "DiagramFieldHistorySelectedHeading" )->GetLabelText().utf8_string();
         restoreLabel = restore->GetLabel().utf8_string();
         BOOST_CHECK_EQUAL( saved->GetValue(), text( page.saved_text() ) );
         BOOST_CHECK( !dialog->RestoreRevision().has_value() );
@@ -323,7 +323,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     BOOST_CHECK_EQUAL( cancelled, wxID_CANCEL );
     BOOST_CHECK( !dialog->RestoreRevision().has_value() );
     bool cancelledWithoutRestore = cancelled == wxID_CANCEL && !dialog->RestoreRevision().has_value();
-    bool compactFits = false;
+    bool compactFits = false, compactAuthorShown = false;
+    std::string compactHeading;
 
     BOOST_CHECK_EQUAL( show( dialog, [&]
     {
@@ -336,6 +337,16 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         BOOST_CHECK( client.Contains( saved->GetScreenRect() ) );
         compactFits = client.Contains( restore->GetScreenRect() ) && client.Contains( close->GetScreenRect() )
             && client.Contains( saved->GetScreenRect() );
+        // The selected row's heading keeps its version and author whole at the compact size: only the name of the earlier
+        // implementation it was saved in is shortened, and the heading as shown fits its column, so nothing of it is cut.
+        auto* heading = control<wxStaticText>( dialog, "DiagramFieldHistorySelectedHeading" );
+        const auto& inspected = page.entries( 1 );
+        wxString shown = heading->GetLabelText();
+        wxString versionAndAuthor = wxString::Format( "v%u · %s — Selected text", inspected.context_version(), text( inspected.origin().actor() ) );
+        compactHeading = shown.utf8_string();
+        compactAuthorShown = heading->IsShownOnScreen() && client.Contains( heading->GetScreenRect() ) && shown.EndsWith( versionAndAuthor )
+            && heading->GetTextExtent( shown ).x <= heading->GetClientSize().x;
+        BOOST_CHECK_MESSAGE( compactAuthorShown, "The compact heading '" << compactHeading << "' shows its version and author whole." );
         capture( dialog, evidence, "03-compact.png" );
         dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
         click( restore );
@@ -372,6 +383,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         { "context_revision_id", page.context_revision_id() }, { "restore_requirement_revision_id", restored },
         { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
         { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits },
+        { "compact_author_visible", compactAuthorShown }, { "compact_heading", compactHeading },
         { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
 }

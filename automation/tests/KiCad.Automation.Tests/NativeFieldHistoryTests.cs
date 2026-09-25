@@ -99,7 +99,8 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual(page.ContextRevisionId.ToString("D"), result.GetProperty("context_revision_id").GetString());
             Guid restored = Guid.ParseExact(result.GetProperty("restore_requirement_revision_id").GetString()!, "D");
             Assert.AreEqual(page.Entries[1].RequirementRevisionId, restored);
-            foreach (string check in new[] { "cancelled_without_restore", "reopen_cleared_restore", "scope_isolation", "compact_controls_visible" })
+            foreach (string check in new[] { "cancelled_without_restore", "reopen_cleared_restore", "scope_isolation", "compact_controls_visible",
+                "compact_author_visible" })
                 Assert.IsTrue(result.GetProperty(check).GetBoolean(), check);
             // Both texts below the saved one were saved in the implementation the chosen one was made from; each row names it,
             // so its version 2 cannot be mistaken for version 2 of the chosen implementation. The selected row's heading
@@ -109,6 +110,11 @@ public sealed class NativeFieldHistoryTests
             CollectionAssert.AreEqual(new[] { "v2 · Saved · AI agent", $"{initialName} · v2 · Fixture user", $"{initialName} · v1 · Fixture user" },
                 result.GetProperty("row_labels").EnumerateArray().Select(r => r.GetString()).ToArray());
             Assert.AreEqual($"{initialName} · v2 · Fixture user — Selected text", result.GetProperty("selected_heading").GetString());
+            // In the compact dialog the heading is too narrow for the whole text: only the implementation's name is shortened, and
+            // the version and author stay whole (the native case also checks that the shown heading fits its column).
+            string compactHeading = result.GetProperty("compact_heading").GetString()!;
+            StringAssert.EndsWith(compactHeading, "v2 · Fixture user — Selected text");
+            Assert.AreNotEqual($"{initialName} · v2 · Fixture user — Selected text", compactHeading, "The compact heading shortens the implementation's name.");
             Assert.AreEqual($"Use {initialName} · v2 text in draft", result.GetProperty("restore_label").GetString());
             foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png", "04-conflict-unresolved.png", "05-conflict-resolved.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, "A rendered capture is required: " + capture);

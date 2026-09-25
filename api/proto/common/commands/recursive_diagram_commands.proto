@@ -200,6 +200,9 @@ message RecursiveDiagramEditorState {
   // microseconds.
   uint64 slowest_route_layout_micros = 230;
   uint64 latest_route_layout_micros = 231;
+  // How many distinct level geometries pointer drags reached in this window since it opened: each is one position the
+  // level must be laid out for, however many pointer motions reached it.
+  uint64 drag_positions = 232;
 }
 
 // The text a block shows on the canvas, relative to the editor window, in pixels. Text is drawn whole or not at all.

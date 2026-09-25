@@ -14,6 +14,15 @@ public sealed record NewConnectionMember(ConnectionSelection Selection, Guid Req
     DiagramConnectionDirection Direction = DiagramConnectionDirection.Unspecified)
 {
     [JsonIgnore] public ImmutableArray<Guid> MemberList => Members.IsDefault ? [] : Members;
+    [JsonIgnore] public ImmutableArray<DiagramEndpointBinding> EndpointList => Endpoints.IsDefault ? [] : Endpoints;
+
+    /// <summary>Record equality compares the ends and the member list by reference; this compares their contents in order
+    /// (contract rbg-v2 section 2.5).</summary>
+    public bool SameContents(NewConnectionMember? other) => other is not null && Selection == other.Selection
+        && RequirementRevisionId == other.RequirementRevisionId && ImplementationName == other.ImplementationName && Name == other.Name
+        && Kind == other.Kind && Requirements == other.Requirements && Domain == other.Domain && Direction == other.Direction
+        && MemberList.SequenceEqual(other.MemberList) && EndpointList.Length == other.EndpointList.Length
+        && EndpointList.Zip(other.EndpointList).All(p => p.First.SameDefinition(p.Second));
 }
 
 /// <summary>A new member an agent asks for when it refines a connection's members (kicad_diagram_connection_members_refine).
@@ -24,6 +33,12 @@ public sealed record ConnectionMemberDefinition(Guid ConnectionId, string Name, 
     DiagramConnectionKind Kind = DiagramConnectionKind.Signal, string General = "", string Schematic = "", string Routing = "")
 {
     [JsonIgnore] public ImmutableArray<Guid> MemberIdList => MemberIds.IsDefault ? [] : MemberIds;
+
+    /// <summary>Record equality compares the member list by reference; this compares its contents in order, an omitted list
+    /// being empty (contract rbg-v2 section 2.5).</summary>
+    public bool SameContents(ConnectionMemberDefinition? other) => other is not null && ConnectionId == other.ConnectionId
+        && Name == other.Name && Kind == other.Kind && General == other.General && Schematic == other.Schematic && Routing == other.Routing
+        && MemberIdList.SequenceEqual(other.MemberIdList);
 }
 
 public enum ConnectionEndpointAction { Bind, Unbind }

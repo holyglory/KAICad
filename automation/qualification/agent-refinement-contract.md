@@ -117,8 +117,8 @@ without activation, cancellation, invalid member rejection and stale-result reco
 
 ## Field history across implementations and proposals (ledger p390b40bed99e0ab2)
 
-A proposal that refines an existing block or connection, and a duplicated implementation, continue the field
-history of the implementation they were made from instead of starting a new one. The new implementation's first
+A proposal that refines an existing block, connection or member, and an implementation made with New or Duplicate,
+continue the field history of the implementation they were made from instead of starting a new one. The new implementation's first
 requirement revision names, as its parent, the exact requirement revision it was derived from; the proposal's
 rewrite is the next revision. Reading General, Schematic or Routing history (`kicad_diagram_field_history`, the
 editor's History action) therefore lists the rewrite and then every earlier text, each with its own author or
@@ -133,20 +133,27 @@ this rule keep the separate history they were saved with; no earlier link is inv
 
 Which implementation an entry came from is always shown. `kicad_diagram_field_history` gives every entry the
 implementation it was saved in (`contextStateId`, `contextImplementation`); its `contextRevisionId` and
-`contextVersion` belong to that implementation. The editor's history list names that implementation for a row saved
-in an earlier one, in the implementation selector's form ("Initial approach · v1 · Fixture user"), and the selected
-row's heading repeats its author, which a narrow list can cut off.
+`contextVersion` belong to that implementation, and `ownerName` is the name the block, connection or member had in
+that revision. The editor's history list names that implementation for a row saved in an earlier one, in the
+implementation selector's form ("Initial approach · v1 · Fixture user"), and the selected row's heading repeats its
+version and author, which a narrow list can cut off. When the heading is too narrow for all of it, only the earlier
+implementation's name is shortened ("Initial ap… · v2 · Fixture user — Selected text"); the version and author stay
+whole, and the whole heading is its tooltip.
 
 Evidence: `NativeRecursiveEditorJourney` (production MCP server and rendered editor: an unselected root proposal,
-a chosen supply proposal and its refined supply connection, the root after the choice, an agent's duplicate; then,
-in the rendered editor, the history list as shown and restoring the pre-proposal text of the chosen supply and of
-its refined supply connection, each saved and read back), `NativeFieldHistoryTests` (the rendered history dialog,
-labelled by the editor's own row builder, restores a text saved before an implementation switch), and the isolated
-rules in `RecursiveBlockProposalTests`, `RecursiveImplementationTests`, `DiagramFieldHistoryQueryTests` (a member
-restoring an earlier implementation's text, saved and read back through XML and the codec),
-`DiagramConnectionArchiveTests`, `DiagramRequirementHistoryTests` and `DiagramRequirementHistoryFileTests`. A
-member is refined through the same connection code; no rendered or MCP journey yet refines a member, because no
-journey level has a group whose member a proposal refines.
+a chosen supply proposal with its refined supply connection and the member it refines inside that connection, the
+root after the choice, an agent's duplicate; then, in the rendered editor, the history list as shown and restoring
+the pre-proposal text of the chosen supply and of its refined supply connection, each saved and read back). The
+member is made over MCP before the proposal: a supply agent groups the PSU level's Supply signals into a "Converted
+rails" group with `kicad_diagram_connection_members_refine`, citing a datasheet by page, table and part variant. After
+the choice the member's history is read over MCP (the proposal's rewrite, then the agent's text with that source), and
+its pre-proposal text is restored once through the diagram companion (the editor lists members only in the Signals
+row) and read back first in that history. Every MCP entry is compared field by field, owner name and each source
+statement included. `NativeFieldHistoryTests` (the rendered history dialog, labelled by the editor's own row builder,
+restores a text saved before an implementation switch, and at the compact size keeps the heading's version and author
+whole) and the isolated rules in `RecursiveBlockProposalTests`, `RecursiveImplementationTests`,
+`DiagramFieldHistoryQueryTests`, `DiagramConnectionArchiveTests`, `DiagramRequirementHistoryTests` and
+`DiagramRequirementHistoryFileTests`.
 
 ## Connection ends and members (ledger pf92d0ecdec8805b4)
 
@@ -168,16 +175,25 @@ same guarded connection save the diagram companion runs (`RFA_SAVE_CONNECTION`).
 
 Refusals write nothing: a changed file or stale target (`recursive_block_file_changed`,
 `stale_root_revision`, `stale_block_revision`, `stale_parent_revision`,
-`stale_connection_revision`), an identity the level does not have
+`stale_connection_revision`, and `stale_connection_parent` for a group containing the member
+that has a newer saved revision), an identity the level does not have
 (`connection_edit_target_missing`), an edit that does not say exactly one thing
 (`ambiguous_connection_edit`), a reused identity (`identity_reused`) and an invalid group or pair
-(`invalid_connection_refinement`). An edit that changes nothing writes nothing. The native editor
+(`invalid_connection_refinement`). An edit that changes nothing writes nothing.
+
+The connection's new revision takes the call's `operationId` as its identity, and every other
+identity the save creates (the groups containing it, the level and each level above it, new
+members) is derived from it. An agent whose call was cut off reads the connection: a revision
+with the operation's identity means the operation landed. Repeating a landed operation never
+saves a second copy: on the file it produced it finds nothing to change and writes nothing. The native editor
 shows the result after it reloads: bound or unresolved ends with what they say in the connection's
 Endpoints row, refined members in its Signals row. Native schematic and PCB files are not touched.
 
 Evidence: `RecursiveEditorFileCommandTests.AgentConnectionEditsBindEndsThroughTheLevelsAndRefineMembersInOneGuardedSave`
 (helper process, PSU/CPU fixture), the connection-details and PSU/CPU canvas steps of
-`NativeRecursiveEditorJourney` (production MCP server, rendered editor) and
+`NativeRecursiveEditorJourney` (production MCP server, rendered editor; the unbind's revision is its
+operation's identity and repeating it writes nothing; the grouped Supply revision before the PSU
+proposal likewise) and
 `RecursiveBlockLocalDiagramTests.AgentConnectionEditsNameExactlyOneCurrentTarget` (the refusal
 matrix of the isolated rules).
 
@@ -245,10 +261,16 @@ Nothing is merged or chosen silently:
   revision the design no longer pins although the target is unchanged (`stale_block_revision`), and a containing
   implementation with a newer saved revision (`stale_parent_revision`); the comparison's `currentPath` is today's path to
   the target. The refusal's `details` list one entry per change (`current_change`, `proposal_change`,
-  `changed_on_both_sides`) naming the level and element;
-- a comparison that cannot be made (for example, a retained request that is no longer a valid proposal) never replaces a
-  refusal's code or fails a saved publication: it is reported as `comparisonUnavailable` with its code
-  (`invalid_block_proposal` for a malformed proposal). Comparing such a request directly is refused with that code.
+  `changed_on_both_sides`) naming the level and element. A path is outdated only when it runs through saved revisions of
+  exactly the blocks on today's path to the target, each revision containing the next block. Any other path (a block
+  skipped or added, a start at another block, a revision the diagram does not have, or one that never contained the next
+  block) is not outdated but invalid: it is refused with `invalid_recursive_block_graph` and no comparison;
+- a comparison that cannot be made never replaces a refusal's code or fails a saved publication: it is reported as
+  `comparisonUnavailable` with its code. A request that was never published and no longer prepares against today's file
+  reports the code its publication would be refused with (`invalid_block_proposal` for a malformed proposal), and
+  comparing such a retained request directly is refused with that code. A published proposal was validated when it was
+  saved, so a comparison of it that fails without a code is the comparer's own failure (`proposal_comparison_failed`),
+  never blamed on the agent's proposal.
 
 **Cancellation and reattachment.** Operations are identified by the agent. Repeating the same proposal and operation
 identity after a cancelled or uncertain call returns the recorded candidate (`added=false`) with its publication
@@ -266,17 +288,26 @@ built on the original root is compared with today's root: its own changes exactl
 against the saved history comparison (`kicad_diagram_history_compare` for the root, the model for each changed child).
 The same comparison comes back when a second stale proposal's publication and the stale proposal's choice are refused.
 An outdated-token refusal and an outdated-path refusal (through an older root revision) report no change on today's
-side, and the latter today's path. After the choice, the already-chosen refusal reports the adopted candidate with
+side, and the latter today's path. A third request sent with the outdated token no longer prepares against today's file
+(its implementation name was taken meanwhile): its refusal keeps `block_proposal_source_changed`, carries no comparison
+and reports `comparisonUnavailable` `invalid_block_proposal`, nothing is written, and comparing the retained request is
+refused with `invalid_block_proposal`; a request whose block list holds an empty entry is refused with
+`invalid_block_proposal` before anything is read. After the choice, the already-chosen refusal reports the adopted candidate with
 nothing changed on today's side or on both; after the chosen supply is edited in the editor, the comparison is still
 adopted and today's side is exactly that edit (against the saved history comparison). Finally, with an unsaved edit
-open in the editor, an agent's publication and its choice are each abandoned by the agent in flight (the step fails
-unless the call was cancelled on the agent's side). Each time a new server reattaches the instance, reads the same
-context, inspects the receipt (resuming it if it was interrupted) and repeats the operation: one input, one candidate
-and one new root revision exist, and the draft is unchanged. Which server-side branch ran is recorded as `serverBranch`
-in the journey's `agent-reattachment` evidence; in the runs so far the server finished each operation before the cancel
-arrived, so the repeat returned the recorded outcome. The interrupted-phase branches (process death at each recorded
-phase, then resumption) are proved by `BlockProposalInterruptionTests` and `BlockProposalSelectionInterruptionTests`.
+open in the editor, an agent's publication and its choice are each abandoned by the agent in flight: the agent cancels
+as soon as the operation's first recorded phase appears in the server's state directory, so the server has started the
+operation and has not answered (the step fails unless the call was cancelled on the agent's side). Each time a new
+server reattaches the instance, reads the same context, inspects the receipt (resuming it if it was interrupted) and
+repeats the operation: one input, one candidate and one new root revision exist, and the draft is unchanged. Which
+server-side branch ran after each cancelled call, and only then, is recorded as `serverBranch` in the journey's
+`agent-reattachment` evidence. The interrupted-phase branches (process death at each recorded phase, then resumption)
+are also proved by `BlockProposalInterruptionTests` and `BlockProposalSelectionInterruptionTests`.
 `RecursiveBlockProposalTests.StaleProposalComparisonNamesEachChangedElementOnEachSide` covers what the journey's fixture
 cannot reach: a nested level changed on both sides, the parts of a refined connection and of its member, an adopted
 proposal edited later and one refined by a later chosen proposal, an outdated path through a containing block
-(`stale_block_revision`) and a nested target removed from the design at each depth.
+(`stale_block_revision`), paths that are invalid rather than outdated (one skipping a block, one starting below the
+root, one through a revision the diagram does not have) and a nested target removed from the design at each depth.
+`RecursiveBlockProposalTests.ComparisonThatCannotBeMadeNamesItsCauseWithoutBlamingAPublishedProposal` covers the one
+code no real request reaches: a published proposal whose comparison fails without a code reports
+`proposal_comparison_failed`.

@@ -22,6 +22,9 @@ struct DIAGRAM_FIELD_HISTORY_ENTRY
     wxString text;
     wxString sourceDescription;
     bool saved = false;
+    /// The name of the earlier implementation the row was saved in, empty for a row of the implementation shown; the
+    /// revision label then reads "name · vN".
+    wxString implementation;
 };
 
 /** The rows of one field-history page, newest first. An implementation made from another one continues that
@@ -60,8 +63,12 @@ public:
     /// Every loaded row as the list shows it: its revision label, the saved marker and the author.
     std::vector<wxString> RowLabels() const;
 
+    /// Lays the dialog out and then fits the selected row's heading to the width its column got.
+    bool Layout() override;
+
 private:
     void updateSelection();
+    void fitHeading();
     void updatePaging();
     void appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& aEntries );
 
@@ -76,7 +83,11 @@ private:
     wxStaticText* m_pageStatus;
     wxStaticText* m_pageError;
     wxButton* m_older;
-    wxStaticText* m_selectedHeading;
+    wxStaticText* m_selectedHeading = nullptr;
+    // The selected row's heading in two parts: the earlier implementation's name (possibly empty) and "vN · Author —
+    // Selected text". Only the name is shortened when the heading is too narrow, so the version and author stay readable.
+    wxString m_headingImplementation;
+    wxString m_headingRest;
     wxTextCtrl* m_selectedText;
     wxButton* m_source;
     wxButton* m_restore;

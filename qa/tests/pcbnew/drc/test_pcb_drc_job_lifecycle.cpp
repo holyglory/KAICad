@@ -1388,6 +1388,73 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
     BOOST_CHECK( !std::filesystem::exists( scratch.GetPath() / "fixture.kicad_pcb" ) );
 }
 
+// Isolated rule of the worker: custom rules that do not compile end the check failed with
+// design_rules_invalid and a message naming the file, item and line, never with findings. A new
+// check after the rules are corrected completes with the real copper finding.
+BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComplete )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_invalid_rules_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
+    const auto rulesPath = scratch.GetPath() / "fixture.kicad_dru";
+    { std::ofstream stream( rulesPath ); stream << "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n(not_a_rule)\n"; }
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    SETTINGS_MANAGER manager;
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    BOARD board;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    auto* netA = new NETINFO_ITEM( &board, "A", 1 );
+    auto* netB = new NETINFO_ITEM( &board, "B", 2 );
+    board.Add( netA ); board.Add( netB );
+    for( int i = 0; i < 2; ++i )
+    {
+        auto* footprint = new FOOTPRINT( &board );
+        footprint->SetPosition( { i * 300000, 0 } );
+        board.Add( footprint );
+        auto* pad = new PAD( footprint );
+        pad->SetNumber( "1" );
+        pad->SetPadstackMode( PADSTACK::MODE::NORMAL );
+        pad->SetAttribute( PAD_ATTRIB::SMD );
+        pad->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        pad->SetSize( PADSTACK::ALL_LAYERS, { 200000, 200000 } );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetPosition( footprint->GetPosition() );
+        pad->SetNet( i ? netB : netA );
+        footprint->Add( pad );
+    }
+    const std::string epoch = KIID().AsStdString();
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    // Capture only reads the rules bytes, so the check is admitted and fails in its worker.
+    auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    const PcbDrcJobState failed = Wait( jobs, board, *started );
+    BOOST_CHECK( failed.status() == PDRCJS_FAILED );
+    BOOST_CHECK_EQUAL( failed.error_code(), "design_rules_invalid" );
+    BOOST_CHECK_MESSAGE( failed.error_message().find( "fixture.kicad_dru" ) != std::string::npos
+                         && failed.error_message().find( "'not_a_rule'" ) != std::string::npos
+                         && failed.error_message().find( ", line " ) != std::string::npos, failed.error_message() );
+    BOOST_CHECK_EQUAL( failed.findings_size(), 0 );
+    BOOST_CHECK_LT( failed.progress(), 1.0 );
+    BOOST_CHECK( !failed.results_fresh() && !failed.snapshot_complete() && !failed.cancellation_requested() );
+    auto reread = jobs.Read( Query( failed ), board, epoch );
+    BOOST_REQUIRE( reread );
+    BOOST_CHECK( MessageDifferencer::Equals( *reread, failed ) );
+
+    { std::ofstream stream( rulesPath ); stream << "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n"; }
+    auto corrected = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( corrected.has_value(), ( corrected ? "" : corrected.error() ) );
+    const PcbDrcJobState completed = Wait( jobs, board, *corrected );
+    BOOST_REQUIRE_MESSAGE( completed.status() == PDRCJS_COMPLETED, completed.error_code() + ": " + completed.error_message() );
+    int clearance = 0;
+    for( const auto& finding : completed.findings() )
+        clearance += finding.marker().error_type() == kiapi::board::DRCET_CLEARANCE;
+    BOOST_CHECK_EQUAL( clearance, 1 );
+    BOOST_CHECK( !completed.results_fresh() && !completed.snapshot_complete() );
+}
+
 BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )
 {
     BOARD board;

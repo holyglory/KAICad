@@ -184,5 +184,8 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue((await Read()).Findings.All(finding => !finding.Excluded));
         // A detached DRC job's window-activation checkpoint needs this step's rendered editor windows.
         await VerifyPcbDrcJobActivation(client, board, processId, display, evidence, token);
+        // Checks in this project and its sibling KiCad at once, driven by one agent over MCP; it needs the rendered
+        // PCB editor of this step for the person's keyboard edit.
+        await VerifyPcbDrcTwoProjects(client, board, processId, display, evidence, token);
     }
 }

@@ -12,6 +12,7 @@
 #include <project.h>
 #include <project/project_file.h>
 #include <filename_resolver.h>
+#include <ki_exception.h>
 #include <pgm_base.h>
 #include <wx/fswatcher.h>
 #include <wx/evtloop.h>
@@ -45,6 +46,13 @@ bool SameDocument( const DocumentSpecifier& aLeft, const DocumentSpecifier& aRig
 {
     return google::protobuf::util::MessageDifferencer::Equals( aLeft, aRight );
 }
+
+// The captured custom rules do not compile: the check failed on an input the person
+// can correct. It is neither an internal error nor a result.
+struct DESIGN_RULES_INVALID : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
 }
 
 namespace
@@ -1057,6 +1065,10 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                     aRequest.expected_schematic_state(), aRequest.document(), aProcessEpoch ) );
         if( aBoard.GetTimeStamp() != sequence ) return tl::unexpected( "PCB changed during DRC capture" );
     }
+    catch( const IO_ERROR& error ) // what() points into a temporary buffer.
+    {
+        return tl::unexpected( "Could not snapshot PCB for DRC: " + error.Problem().ToStdString( wxConvUTF8 ) );
+    }
     catch( const std::exception& error )
     {
         return tl::unexpected( std::string( "Could not snapshot PCB for DRC: " ) + error.what() );
@@ -1117,7 +1129,16 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             auto& settings = board.GetDesignSettings();
             settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( &board, &settings );
             DRC_ENGINE& engine = *settings.m_DRCEngine;
-            inputs->InitializeEngine( engine );
+            try
+            {
+                inputs->InitializeEngine( engine );
+            }
+            catch( const PARSE_ERROR& error )
+            {
+                throw DESIGN_RULES_INVALID( "The custom design rules could not be compiled: "
+                        + error.Problem().ToStdString( wxConvUTF8 )
+                        + " Correct or remove the rules file, then start a new check." );
+            }
             bool running = false;
             DRC_RUN_SCOPE invocation( engine, running );
             inputs->BindInvocation( engine );
@@ -1171,6 +1192,17 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                 else { terminal = PDRCJS_INCOMPLETE; errorCode = "incomplete"; errorMessage = "DRC did not complete"; }
             }
         }
+        catch( const DESIGN_RULES_INVALID& error )
+        {
+            errorCode = "design_rules_invalid";
+            errorMessage = error.what();
+        }
+        // IO_ERROR::what() points into a temporary buffer; Problem() is its message.
+        catch( const IO_ERROR& error )
+        {
+            errorCode = "native_exception";
+            errorMessage = error.Problem().ToStdString( wxConvUTF8 );
+        }
         catch( const std::exception& error )
         {
             errorCode = "native_exception";
@@ -1192,7 +1224,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         job->status = terminal;
         job->errorCode = errorCode;
         job->errorMessage = errorMessage;
-        job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : job->reporter->Progress();
+        // A stopped check keeps the furthest progress it reported; it never goes back.
+        job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : std::max( job->progress, job->reporter->Progress() );
         job->phase = job->reporter->Phase();
         if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
         job->resultsFresh = false; // Full project/rule snapshot remains unqualified.

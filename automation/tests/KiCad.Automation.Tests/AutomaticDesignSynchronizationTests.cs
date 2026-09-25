@@ -281,6 +281,8 @@ public sealed class AutomaticDesignSynchronizationTests
             var preview = await Preview(advertising);
             Assert.AreEqual(reference.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
             Assert.AreEqual(reference.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
+            // The preview is the reference plan, including whether it realizes and the connections it would draw (CN-1 §9.5).
+            McpProcessTests.RequirePreviewPlan(reference, preview);
             var automatic = await Worker(advertising);
             if (reference.CanPrepare)
             {

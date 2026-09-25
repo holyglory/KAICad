@@ -118,7 +118,7 @@ public sealed class RecoveryTools
     }
 
     [McpServerTool(Name = "kicad_design_sync_plan", ReadOnly = true),
-     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
+     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. When the saved XML only adds connections and the instance's handshake recorded at attach advertises connection realization, connectionRealizationRequired is true, candidateDesignXml is null (the drawing is measured and made in KiCad during apply) and connectionIntent summarizes the planned connections: each net with its scope and global name, each sheet's island with its label text, members, roles, stub and join needs, the sheet ports and the number of native pin groups apply must prove. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
     public Task<CallToolResult> PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,
         CancellationToken cancellationToken) => ExecuteAsync(async () =>
     {
@@ -138,6 +138,9 @@ public sealed class RecoveryTools
             canPrepare = plan.CanPrepare, candidateDesignXml = plan.CandidateXml,
             nativeOperationsJson = plan.NativeOperations.Select(operation => SchematicJson.Formatter.Format(operation)).ToArray(),
             nativeConnectivityValidationRequired = plan.NativeConnectivityValidationRequired,
+            // CN-1 §9.5: a realization plan has no publishable XML; its preview is the planned connections.
+            connectionRealizationRequired = plan.NativeConnectionRealizationRequired,
+            connectionIntent = plan.Connections is { } connections ? SchematicConnectionIntentBuilder.Summary(connections) : null,
             hierarchyConflicts = plan.Hierarchy?.Conflicts.Select(x => new { x.InstancePath, x.Reason }),
             electricalConflicts = plan.Electrical?.Conflicts, netChanges = plan.Electrical?.NetChanges,
             restoredSymbolOccurrences = plan.Electrical?.RestoredSymbolOccurrences, restoredNetIds = plan.Electrical?.RestoredNetIds,

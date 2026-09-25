@@ -61,6 +61,11 @@ builder.Services.AddSingleton(pause);
 builder.Services.AddSingleton<IExecutionCheckpoint>(pause);
 builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause));
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), state));
+// As in the production server: the synchronization preview classifies with the handshake each instance gave when it
+// was attached, without contacting KiCad, so it classifies a saved revision exactly as apply does (decision
+// n39ac0ccc5c9270f2).
+builder.Services.AddSingleton<IAttachedHandshakes>(provider =>
+    new AttachedHandshakes(provider.GetRequiredService<InstanceRegistry>().AttachedHandshake));
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddMcpServer().WithStdioServerTransport()
     .WithTools<InstanceTools>().WithTools<RecoveryTools>().WithTools<SchematicViewTools>()

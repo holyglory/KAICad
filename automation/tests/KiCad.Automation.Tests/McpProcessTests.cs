@@ -973,8 +973,9 @@ public sealed class McpProcessTests
         finally { Directory.Delete(root, true); }
     }
 
-    // The public preview reports exactly the planner's own plan for the same record and handshake.
-    private static void RequirePreviewPlan(SchematicSynchronizationPlan expected, JsonElement preview)
+    // The public preview reports exactly the planner's own plan for the same record and handshake. The test sync host
+    // (SyncHarnessProcessTests) holds its preview to the same comparison.
+    internal static void RequirePreviewPlan(SchematicSynchronizationPlan expected, JsonElement preview)
     {
         Assert.AreEqual(expected.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
         Assert.AreEqual(expected.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
@@ -983,6 +984,104 @@ public sealed class McpProcessTests
             preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray(), preview.GetRawText());
         Assert.AreEqual(expected.NativeConnectivityValidationRequired, preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
             preview.GetRawText());
+
+        // CN-1 §9.5: whether apply draws the connections in KiCad, and a summary of what it will draw.
+        Assert.AreEqual(expected.NativeConnectionRealizationRequired, preview.GetProperty("connectionRealizationRequired").GetBoolean(),
+            preview.GetRawText());
+        var intent = preview.GetProperty("connectionIntent");
+        if (expected.Connections is not { } planned)
+        {
+            Assert.AreEqual(JsonValueKind.Null, intent.ValueKind, "Only a realization plan previews connections: " + preview.GetRawText());
+            return;
+        }
+        // A realization plan publishes no XML and sends no ready-made operations: apply measures KiCad and draws first.
+        Assert.IsTrue(preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(JsonValueKind.Null, preview.GetProperty("candidateDesignXml").ValueKind, preview.GetRawText());
+        Assert.AreEqual(0, preview.GetProperty("nativeOperationsJson").GetArrayLength(), preview.GetRawText());
+        Assert.IsTrue(preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(JsonValueKind.Object, intent.ValueKind, preview.GetRawText());
+        string json = intent.GetRawText();
+        Assert.AreEqual(planned.Version, intent.GetProperty("version").GetInt32(), json);
+        Assert.AreEqual(planned.CircuitId, intent.GetProperty("circuitId").GetGuid(), json);
+        Assert.AreEqual(planned.DesiredSha256, intent.GetProperty("desiredSha256").GetString(), json);
+        Assert.AreEqual(planned.NativeRevision.Epoch, intent.GetProperty("nativeRevision").GetProperty("epoch").GetString(), json);
+        Assert.AreEqual(planned.NativeRevision.Sequence, intent.GetProperty("nativeRevision").GetProperty("sequence").GetUInt64(), json);
+        static (Guid, string?) Pin(JsonElement pin) => (pin.GetProperty("componentId").GetGuid(), pin.GetProperty("pin").GetString());
+
+        // Every connected net with its scope and global name, and the pins it gains.
+        var nets = intent.GetProperty("nets").EnumerateArray().ToArray();
+        Assert.IsNotEmpty(planned.Nets, "A realization plan connects at least one net.");
+        Assert.HasCount(planned.Nets.Count, nets, json);
+        foreach (var (net, shown) in planned.Nets.Zip(nets))
+        {
+            Assert.AreEqual(net.NetId, shown.GetProperty("netId").GetGuid(), json);
+            Assert.AreEqual(net.Name, shown.GetProperty("name").GetString(), json);
+            Assert.AreEqual(net.Scope.ToString(), shown.GetProperty("scope").GetString(), json);
+            Assert.AreEqual(net.GlobalName, shown.GetProperty("globalName").GetString(), json);
+            CollectionAssert.AreEqual(net.AddedPins.Select(p => ((Guid, string?))(p.ComponentId, p.Pin)).ToArray(),
+                shown.GetProperty("addedPins").EnumerateArray().Select(Pin).ToArray(), json);
+        }
+
+        // Every sheet island to draw, with its label text, join need and each member's role and stub need.
+        var screens = intent.GetProperty("screens").EnumerateArray().ToArray();
+        Assert.HasCount(planned.Screens.Count, screens, json);
+        foreach (var (screen, shownScreen) in planned.Screens.Zip(screens))
+        {
+            Assert.AreEqual(screen.ScreenId, shownScreen.GetProperty("screenId").GetGuid(), json);
+            CollectionAssert.AreEqual(screen.InstancePathKeys.ToArray(),
+                shownScreen.GetProperty("instancePaths").EnumerateArray().Select(p => p.GetString()).ToArray(), json);
+            var islands = shownScreen.GetProperty("islands").EnumerateArray().ToArray();
+            Assert.HasCount(screen.Islands.Count, islands, json);
+            foreach (var (island, shown) in screen.Islands.Zip(islands))
+            {
+                Assert.AreEqual(island.NetId, shown.GetProperty("netId").GetGuid(), json);
+                Assert.AreEqual(island.SheetPathKey, shown.GetProperty("sheetPath").GetString(), json);
+                Assert.AreEqual(island.Scope.ToString(), shown.GetProperty("scope").GetString(), json);
+                Assert.AreEqual(island.LabelText, shown.GetProperty("labelText").GetString(), json);
+                Assert.AreEqual(island.JoinRequired, shown.GetProperty("joinRequired").GetBoolean(), json);
+                Assert.AreEqual(island.AnchorHasMatchingDriver, shown.GetProperty("anchorHasMatchingDriver").GetBoolean(), json);
+                CollectionAssert.AreEqual(island.JoinCandidates.Select(p => p.PlacedPinId).ToArray(),
+                    shown.GetProperty("joinCandidates").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+                Assert.AreEqual(island.UplinkSheetSymbolId?.ToString("D"), shown.GetProperty("uplinkSheetSymbolId").GetString(), json);
+                CollectionAssert.AreEqual(island.ChildSheetSymbolIds.ToArray(),
+                    shown.GetProperty("childSheetSymbolIds").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+                var members = shown.GetProperty("members").EnumerateArray().ToArray();
+                Assert.HasCount(island.Members.Count, members, json);
+                foreach (var (member, shownMember) in island.Members.Zip(members))
+                {
+                    Assert.AreEqual(((Guid, string?))(member.Pin.Endpoint.ComponentId, member.Pin.Endpoint.Pin), Pin(shownMember), json);
+                    Assert.AreEqual(member.Pin.PlacedPinId, shownMember.GetProperty("placedPinId").GetGuid(), json);
+                    Assert.AreEqual(member.Pin.SymbolId, shownMember.GetProperty("symbolId").GetGuid(), json);
+                    Assert.AreEqual(member.Pin.CreatedSymbol, shownMember.GetProperty("createdSymbol").GetBoolean(), json);
+                    Assert.AreEqual(member.Role.ToString(), shownMember.GetProperty("role").GetString(), json);
+                    Assert.AreEqual(member.AlreadyConnected, shownMember.GetProperty("alreadyConnected").GetBoolean(), json);
+                    Assert.AreEqual(member.RequiresStub, shownMember.GetProperty("requiresStub").GetBoolean(), json);
+                    Assert.AreEqual(member.PowerName, shownMember.GetProperty("powerName").GetString(), json);
+                }
+            }
+        }
+
+        // Every sheet crossing, and the number of native pin groups apply must prove in one commit.
+        var ports = intent.GetProperty("ports").EnumerateArray().ToArray();
+        Assert.HasCount(planned.Ports.Count, ports, json);
+        foreach (var (port, shown) in planned.Ports.Zip(ports))
+        {
+            Assert.AreEqual(port.NetId, shown.GetProperty("netId").GetGuid(), json);
+            Assert.AreEqual(port.ChildPathKey, shown.GetProperty("childPath").GetString(), json);
+            Assert.AreEqual(port.ParentPathKey, shown.GetProperty("parentPath").GetString(), json);
+            Assert.AreEqual(port.SheetSymbolId, shown.GetProperty("sheetSymbolId").GetGuid(), json);
+            Assert.AreEqual(port.PortText, shown.GetProperty("portText").GetString(), json);
+            Assert.AreEqual(port.SheetPinExists, shown.GetProperty("sheetPinExists").GetBoolean(), json);
+            Assert.AreEqual(port.UplinkLabelExists, shown.GetProperty("uplinkLabelExists").GetBoolean(), json);
+        }
+        Assert.AreEqual(planned.ExpectedGroups.Count, intent.GetProperty("expectedGroupCount").GetInt32(), json);
+        Assert.AreEqual(planned.ExpectedGroups.Sum(g => g.Count), intent.GetProperty("expectedPinCount").GetInt32(), json);
+        CollectionAssert.AreEqual(planned.CreatedSymbolIds.ToArray(),
+            intent.GetProperty("createdSymbolIds").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+        var drawn = planned.Screens.SelectMany(s => s.Islands).ToArray();
+        Console.WriteLine($"Previewed connections: nets [{string.Join(", ", planned.Nets.Select(n => $"{n.Name} {n.Scope}{(n.GlobalName is null ? "" : " " + n.GlobalName)}"))}]; "
+            + $"islands [{string.Join(", ", drawn.Select(i => $"'{i.LabelText}' {i.Members.Count(m => m.RequiresStub)}/{i.Members.Count} stubs"
+                + (i.JoinRequired ? " join" : "")))}]; ports {planned.Ports.Count}; expected native groups {planned.ExpectedGroups.Count}.");
     }
 
     // The planning fixture with one saved XML revision that only joins two drawn pins (as in

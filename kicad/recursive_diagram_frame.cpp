@@ -288,8 +288,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_linkChoiceRows[static_cast<int>( detail ) - 1] = flow;
     };
     auto* signalRow = detailRow( DETAIL::SIGNALS, "Signals" );
-    // The signals start a little below the row's "Remove signals", so it never sits against the first signal's own "×".
-    m_signalList = new wxBoxSizer( wxVERTICAL ); signalRow->Add( m_signalList, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
+    // The signals start 8 DIP below the row's "Remove signals", so it never sits against the first signal's own "×" (design QA
+    // round 2, R2-P2-5: at least 8 pixels between the two removes).
+    m_signalList = new wxBoxSizer( wxVERTICAL ); signalRow->Add( m_signalList, 0, wxEXPAND | wxTOP, FromDIP( 8 ) );
     m_signalEntry = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
     m_signalEntry->SetName( "RecursiveSignalEntry" ); m_signalEntry->SetHint( _( "Add a signal" ) );
     signalRow->Add( m_signalEntry, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
@@ -425,6 +426,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& event )
     {
         m_pointerInside = false;
+        // The canvas's tooltip goes with the pointer (review of design QA round 2).
+        updateCanvasTip();
         if( m_tool == TOOL::CONNECT ) { m_rendered = false; m_canvas->Refresh(); }
         event.Skip();
     } );
@@ -2922,7 +2925,8 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     result.set_route_layouts( routes.layouts ); result.set_slowest_route_layout_micros( routes.slowestMicros );
     result.set_latest_route_layout_micros( routes.latestMicros );
     result.set_drag_positions( m_dragPositions );
-    result.set_canvas_tooltip( Utf8( m_canvasTip ) );
+    // The tooltip as it is set on the canvas window itself, not the editor's own note of it.
+    result.set_canvas_tooltip( Utf8( m_canvas->GetToolTipText() ) );
     result.set_canvas_motions( m_canvasMotions );
     {
         wxPoint corner = m_canvas->GetScreenPosition() - GetScreenPosition();

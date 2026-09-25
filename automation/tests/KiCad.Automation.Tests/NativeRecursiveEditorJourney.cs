@@ -729,11 +729,21 @@ public sealed partial class NativeSessionTests
             // earlier editor left out the ones without a clear place); a caption shortened for want of room shows its whole text on
             // hover, and the tooltip goes when the pointer leaves it. Where not even a shortened caption has a clear place, it is
             // drawn shortened where it covers least, never over a block.
+            await Retain("dense-declined", denseDeclined);
             Assert.AreEqual(systemRevision.LocalDiagram.Connections.Length + 50, denseDeclined.ConnectionCaptions.Count(c => c.Shown),
                 "dense: every connection of the dense level shows its caption.");
+            // Where it covers least means over wires only here: a crowded caption covers no block, no port, no boundary port's name
+            // and no other caption (review of design QA round 2).
+            var denseShown = denseDeclined.ConnectionCaptions.Where(c => c.Shown).ToArray();
             foreach (var crowded in denseDeclined.ConnectionCaptions.Where(c => !c.Enabled))
+            {
                 Assert.IsTrue(denseDeclined.BlockTexts.All(b => RectsApart(crowded, b.Block)),
                     $"dense: the crowded caption '{crowded.Label}' covers no block.");
+                Assert.IsTrue(denseDeclined.PortMarks.All(p => RectsApart(crowded, p)), $"dense: the crowded caption '{crowded.Label}' covers no port.");
+                Assert.IsTrue(denseDeclined.BoundaryPortNames.All(n => RectsApart(crowded, n)), $"dense: the crowded caption '{crowded.Label}' covers no port's name.");
+                Assert.IsTrue(denseShown.Where(o => !ReferenceEquals(o, crowded)).All(o => RectsApart(crowded, o)),
+                    $"dense: the crowded caption '{crowded.Label}' covers no other caption.");
+            }
             var shortenedCaption = denseDeclined.ConnectionCaptions.FirstOrDefault(c => c.Shown && c.Tooltip != "" && c.X > denseDeclined.CanvasWindowX + 120);
             Assert.IsNotNull(shortenedCaption, "dense: the crowded level shortens a caption for want of room.");
             Assert.IsTrue(shortenedCaption.Label.EndsWith('…') && shortenedCaption.Tooltip.StartsWith(shortenedCaption.Label[..^1].TrimEnd(), StringComparison.Ordinal),
@@ -745,10 +755,47 @@ public sealed partial class NativeSessionTests
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: shortenedCaption.X + shortenedCaption.Width / 2 + dx,
                     clickFromTop: shortenedCaption.Y + shortenedCaption.Height / 2);
             await Wait("dense-caption-hover", s => s.CanvasMotions > denseMotions && s.CanvasTooltip == shortenedCaption.Tooltip);
+            // GTK shows a tooltip after the pointer rests for its delay; the capture waits past it. Only the reported tooltip, which
+            // is read back from the canvas window, is asserted: the capture is not measured for the tooltip's popup.
+            await Task.Delay(1500, token);
             await Capture("dense-caption-hover");
+            // Every motion has arrived by now: the pointer rests here from this reading on.
+            var hovered = await Wait("dense-caption-rested", s => s.CanvasTooltip == shortenedCaption.Tooltip);
+            // The tooltip follows the canvas while the pointer stays still (review of design QA round 2): it is what lies under the
+            // pointer on the level shown, found again after the canvas is drawn anew, not the text of the last hover.
+            static bool Under(P.DiagramControlRect r, P.DiagramCanvasPoint p) => p.X >= r.X && p.X < r.X + r.Width && p.Y >= r.Y && p.Y < r.Y + r.Height;
+            static string TipUnderPointer(P.RecursiveDiagramEditorState s) =>
+                s.ConnectionCaptions.FirstOrDefault(c => c.Tooltip != "" && Under(c, s.CanvasPointer))?.Tooltip
+                ?? s.BlockChips.Select(b => b.More).FirstOrDefault(m => m is not null && Under(m, s.CanvasPointer))?.Tooltip ?? "";
+            Assert.AreEqual(shortenedCaption.Tooltip, TipUnderPointer(hovered), "dense: the pointer rests on the shortened caption.");
+            // The keyboard selects the PSU (the arrows step through the level's blocks) and Enter opens its level.
+            Key("Escape");
+            for (int i = 0; i <= denseOpen.LevelDraft.Scope.Children.Count; ++i)
+            {
+                string selectedNow = (await Read()).Draft.Baseline.BlockId;
+                if (selectedNow == S(psu.BlockId)) break;
+                Key("Right"); await Wait($"dense-select-{i}", s => s.Draft.Baseline.BlockId != selectedNow);
+            }
+            await Wait("dense-psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Return");
+            var psuUnderPointer = await Wait("dense-tip-psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId)
+                && s.CanvasTooltip == TipUnderPointer(s));
+            Assert.AreEqual(hovered.CanvasMotions, psuUnderPointer.CanvasMotions, "dense: the pointer did not move while the level changed.");
+            Assert.AreNotEqual(shortenedCaption.Tooltip, psuUnderPointer.CanvasTooltip, "dense: on the PSU level the canvas no longer shows the System level's caption on hover.");
+            Key("BackSpace");
+            var backUnderPointer = await Wait("dense-tip-system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.CanvasTooltip == TipUnderPointer(s)
+                && s.CanvasTooltip == shortenedCaption.Tooltip);
+            Assert.AreEqual(hovered.CanvasMotions, backUnderPointer.CanvasMotions, "dense: back on the System level, the pointer still had not moved.");
+            // The tooltip goes when the pointer leaves the canvas, although the last place the canvas saw the pointer is still on the
+            // shortened caption.
+            var inspector = Find(backUnderPointer, "RecursiveInspector");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: inspector.X + inspector.Width / 2,
+                clickFromTop: inspector.Y + 40);
+            var left = await Wait("dense-caption-hover-left-canvas", s => s.CanvasTooltip == "");
+            Assert.AreEqual(shortenedCaption.Tooltip, TipUnderPointer(left), "dense: the canvas last saw the pointer on the shortened caption.");
             NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: denseDeclined.CanvasWindowX + (int)denseDeclined.CanvasPixelWidth - 4,
                 clickFromTop: denseDeclined.CanvasWindowY + (int)denseDeclined.CanvasPixelHeight - 4);
-            await Wait("dense-caption-hover-left", s => s.CanvasTooltip == "");
+            await Wait("dense-caption-hover-left", s => s.CanvasTooltip == "" && s.CanvasMotions > left.CanvasMotions);
             Key("w", control: true); await Closed();
         }
         finally { Directory.Delete(stateRoot, true); }
@@ -4905,6 +4952,7 @@ public sealed partial class NativeSessionTests
             // visibly unlike each signal's own "×", which is named after the signal it removes on hover and for assistive technology.
             await ParkPointer();
             VerifySignalRemoves(await Shot("signals"), bothBack, "details-signals", "VBUS", "GND");
+            VerifyCanvasText(bothBack, "details-signals");
         }
 
         // + Add detail > Type: a connection with signals cannot be a single signal; with exactly two signals it may be a pair.
@@ -6243,6 +6291,11 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(link.Shown && link.Enabled, $"{step}: {what} is shown and available.");
         VerifyAccessible(link, "link", step);
         var background = shot.At(link.X + 1, link.Y + 1);
+        // Review of design QA round 2: a link has no box of its own. Its background is the inspector's surface just left of it,
+        // where the earlier build drew each link on the colour wxWidgets reported, a faint box on the surface GTK drew.
+        var surface = shot.At(link.X - 3, link.Y + link.Height / 2);
+        Assert.IsTrue(CapturedWindow.Distance(background, surface) <= 3,
+            $"{step}: {what} has no box of its own: its background {CapturedWindow.Describe(background)} is the inspector's {CapturedWindow.Describe(surface)}.");
         var ink = shot.MostContrasting(link.X, link.Y, link.Width, link.Height, background);
         Assert.IsTrue(shot.Contrast("P2-10 " + what + " on the inspector", ink, background) >= 4.5,
             $"{step}: {what} {CapturedWindow.Describe(ink)} reads 4.5:1 on the inspector {CapturedWindow.Describe(background)}.");
@@ -6366,6 +6419,11 @@ public sealed partial class NativeSessionTests
         var inspector = at.Controls.Single(c => c.Name == "RecursiveInspector");
         (byte, byte, byte) Surface(P.DiagramControlRect c) => shot.At(inspector.X + 4, c.Y + c.Height / 2);
         (byte, byte, byte) Label(P.DiagramControlRect c, (byte, byte, byte) behind) => shot.MostContrasting(c.X + 8, c.Y + 5, c.Width - 16, c.Height - 10, behind);
+        // Review of design QA round 2: outside its rounded tile an option shows the inspector's own surface, not a box drawn in
+        // the colour wxWidgets reports for the inspector.
+        void VerifyCorner(P.DiagramControlRect c, string name, (byte, byte, byte) surface) =>
+            Assert.IsTrue(CapturedWindow.Distance(shot.At(c.X, c.Y), surface) <= 3,
+                $"{step}: {name}'s corner {D(shot.At(c.X, c.Y))} shows the inspector's surface {D(surface)}.");
         var chosenLabels = new List<(byte, byte, byte)>(); var chosenBorders = new List<(byte, byte, byte)>();
         foreach (string name in chosen)
         {
@@ -6374,6 +6432,7 @@ public sealed partial class NativeSessionTests
             VerifyAccessible(choice, "toggle button", step);
             Assert.IsTrue(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as checked.");
             var surface = Surface(choice); var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            VerifyCorner(choice, name, surface);
             var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
             Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option border on the inspector", border, surface) >= 3.0,
                 $"{step}: {name}'s border {D(border)} stands 3:1 from the inspector {D(surface)}.");
@@ -6391,6 +6450,7 @@ public sealed partial class NativeSessionTests
             VerifyAccessible(choice, "toggle button", step);
             Assert.IsFalse(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as not checked.");
             var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            VerifyCorner(choice, name, Surface(choice));
             var label = Label(choice, tile);
             var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
             Assert.IsTrue(chosenLabels.All(c => CapturedWindow.Distance(c, label) >= 60),
@@ -6401,7 +6461,7 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA round 2, R2-P2-5, measured in one capture: the action that removes the whole Signals detail is a link
-    /// that says so ("Remove signals"), drawn as a link and at least 4 pixels above the first signal's own "×"; each signal's
+    /// that says so ("Remove signals"), drawn as a link and at least 8 pixels above the first signal's own "×"; each signal's
     /// "×" is named after the signal it removes, on hover and for assistive technology, and its glyph is a quarter of the link's
     /// width or less, so the two cannot be taken for each other.</summary>
     private static void VerifySignalRemoves(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, params string[] signals)
@@ -6428,14 +6488,16 @@ public sealed partial class NativeSessionTests
                 $"{step}: {name}'s \"×\" ({glyphWidth} pixels of ink) looks nothing like the {linkWidth}-pixel \"Remove signals\" link.");
         }
         var first = Find("RecursiveSignalRemove0");
-        Assert.IsTrue(shot.Record("R2-P2-5 Remove signals above the first signal's remove (px)", first.Y - (removeAll.Y + removeAll.Height)) >= 4,
-            $"{step}: \"Remove signals\" keeps apart from the first signal's own \"×\".");
+        int apart = shot.Record("R2-P2-5 Remove signals above the first signal's remove (px)", first.Y - (removeAll.Y + removeAll.Height));
+        Assert.IsTrue(apart >= 8, $"{step}: \"Remove signals\" is {apart} pixels above the first signal's own \"×\", at least the 8 the design QA asks for.");
     }
 
     /// <summary>Design QA round 2, R2-P2-2, measured: the Connect preview leaves the port it starts from outward (to the right, off
     /// the block's right edge) for 8 pixels or more, runs through no block and across no boundary port's name, and ends on the
     /// port under the pointer. Inside the source block, where the earlier preview struck through the port's name, no dash is
-    /// drawn; along the preview's longest run, its accent dash is.</summary>
+    /// drawn; along the preview's longest run, its accent dash is. Only the preview is measured here: a finished connection
+    /// whose target lies behind its source still takes rule F4's three-segment path through the block, a difference that
+    /// awaits a contract decision of the integration owner.</summary>
     private static void VerifyConnectPreview(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string sourceBlock, string sourcePort, string targetPort)
     {
         var points = at.ConnectPreview.Select(p => (X: p.X, Y: p.Y)).ToArray();
@@ -6488,7 +6550,8 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-7: text is drawn whole inside its block, and each shown connection caption keeps clear of every
-    /// block (by the handle size plus 4 pixels), every port and every other caption.</summary>
+    /// block (by the handle size plus 4 pixels), every port and every other caption, and does not cross the level's dashed
+    /// boundary.</summary>
     private static void VerifyCanvasText(P.RecursiveDiagramEditorState at, string step)
     {
         static bool Inside(P.DiagramControlRect inner, int x, int y, int right, int bottom) =>
@@ -6513,6 +6576,12 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(Apart(caption, port.X, port.Y, port.X + port.Width, port.Y + port.Height), $"{step}: the caption '{caption.Label}' keeps clear of a port.");
             foreach (var other in shown.Where(o => !ReferenceEquals(o, caption)))
                 Assert.IsTrue(Apart(caption, other.X, other.Y, other.X + other.Width, other.Y + other.Height), $"{step}: the captions '{caption.Label}' and '{other.Label}' do not overlap.");
+            // Review of design QA round 2: no caption strikes through the level's dashed boundary. It lies wholly inside the frame
+            // or wholly outside it, as a connection to a boundary port may be captioned beside the port's own name.
+            if (at.LevelFrame is { } frame)
+                Assert.IsTrue(Apart(caption, frame.X, frame.Y, frame.X + frame.Width, frame.Y + frame.Height)
+                    || Inside(caption, frame.X + 1, frame.Y + 1, frame.X + frame.Width - 1, frame.Y + frame.Height - 1),
+                    $"{step}: the caption '{caption.Label}' ({caption.X}, {caption.Y}, {caption.Width} x {caption.Height}) lies wholly inside or outside the level's boundary ({frame.X}, {frame.Y}, {frame.Width} x {frame.Height}).");
         }
     }
 

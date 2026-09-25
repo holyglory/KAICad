@@ -1699,6 +1699,33 @@ void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter )
 #endif
 }
 
+wxColour DrawnSurface( wxWindow* aControl )
+{
+#if defined( __WXGTK__ )
+    // GTK draws a plain window with the background of the first widget above it whose theme gives it one, not with the colour
+    // wxWidgets reports for it: the inspector reports (241, 240, 238) in the light theme while GTK draws the window's
+    // (246, 245, 244) (review of design QA round 2).
+    struct RGBA { double red, green, blue, alpha; };
+    static const auto parentOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_parent" );
+    static const auto styleOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_style_context" );
+    static const auto stateOf = toolkit<unsigned ( * )( void* )>( "gtk_style_context_get_state" );
+    static const auto backgroundOf = toolkit<void ( * )( void*, unsigned, RGBA* )>( "gtk_style_context_get_background_color" );
+    if( aControl && aControl->GetHandle() && parentOf && styleOf && stateOf && backgroundOf )
+        for( void* widget = parentOf( aControl->GetHandle() ); widget; widget = parentOf( widget ) )
+        {
+            void* style = styleOf( widget );
+            RGBA colour{ 0, 0, 0, 0 };
+            if( style ) backgroundOf( style, stateOf( style ), &colour );
+            if( colour.alpha >= 0.99 )
+            {
+                auto channel = []( double value ) { return static_cast<unsigned char>( std::lround( std::clamp( value, 0.0, 1.0 ) * 255 ) ); };
+                return wxColour( channel( colour.red ), channel( colour.green ), channel( colour.blue ) );
+            }
+        }
+#endif
+    return aControl && aControl->GetParent() ? aControl->GetParent()->GetBackgroundColour() : wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE );
+}
+
 void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName )
 {
 #if defined( __WXGTK__ )
@@ -1927,8 +1954,9 @@ void LINK_BUTTON::SetLabel( const wxString& label )
 
 void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
 {
-    const wxColour background = GetParent()->GetBackgroundColour();
-    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( GetClientSize() ) );
+    // A link has no box of its own: GTK has already drawn the inspector's surface behind it, and its colours are chosen
+    // against that surface (review of design QA round 2: filling with the parent's reported colour drew a faint box).
+    const wxColour background = DrawnSurface( this );
     wxFont font = GetFont(); font.SetUnderlined( true ); dc.SetFont( font );
     wxColour colour = IsEnabled() ? LinkColour( background ) : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
     if( IsEnabled() && aHover ) colour = Readable( colour, { background }, 7.0 );
@@ -1988,9 +2016,10 @@ CHOICE_BUTTON::LOOK CHOICE_BUTTON::Look( const wxColour& surface, bool chosen, b
 
 void CHOICE_BUTTON::PaintButton( wxDC& dc, bool aHover, bool aDown )
 {
-    const wxColour surface = GetParent()->GetBackgroundColour();
+    // The tile's corners show the inspector's surface, which GTK has already drawn behind the choice; its colours are chosen
+    // against that surface (review of design QA round 2).
+    const wxColour surface = DrawnSurface( this );
     const wxRect area( GetClientSize() );
-    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( surface ) ); dc.DrawRectangle( area );
     const LOOK look = Look( surface, GetValue(), aHover || aDown, IsEnabled() );
     const wxRect tile = wxRect( area ).Deflate( FromDIP( 1 ) );
     const int radius = FromDIP( 4 );
@@ -2538,10 +2567,11 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     //     leg's end (past a bend, or beside a short leg) as long as it stays beside at least 8 pixels of the leg;
     //  3. the free space around the connection: the same places up to six steps further out from each leg.
     // Clear means inside the canvas, off the palette, and apart from every block by the handle size plus 4 pixels (so a resize
-    // handle never covers a caption), from every port and its name, from every note, from every wire and from the captions
-    // already placed. Only a caption whose whole text has no clear place is shortened with "…" (at least four characters kept)
-    // into the first clear place of 1 and 2, and shows its whole text on hover; one that has no clear place even so is drawn
-    // shortened to four characters where it covers least, on its knocked-out background, never left out.
+    // handle never covers a caption), from every port and its name, from every note, from every wire, from the level's dashed
+    // boundary and from the captions already placed. Only a caption whose whole text has no clear place is shortened with "…"
+    // (at least four characters kept) into the first clear place of 1 and 2, and shows its whole text on hover; one that has no
+    // clear place even so is drawn shortened to four characters where it covers least, on its knocked-out background, never
+    // left out.
     std::vector<CAPTION_PLACE> result;
     if( !m_ready || !current() ) return result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
@@ -2569,6 +2599,15 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
             for( const auto& point : route ) { wxPoint at = toScreen( point ); put( at.x ); put( at.y ); }
             for( size_t j = 1; j < route.size(); ++j ) wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
         }
+    // The level's dashed boundary is kept clear as a wire is, so a caption lies wholly inside the frame or wholly outside it,
+    // as a connection to a boundary port may be captioned beside the port's own name (review of design QA round 2).
+    if( auto frame = drawn.Frame() )
+    {
+        const wxRect outline = toScreen( *frame );
+        const wxPoint corners[] = { outline.GetTopLeft(), outline.GetTopRight(), outline.GetBottomRight(), outline.GetBottomLeft() };
+        for( int k = 0; k < 4; ++k ) wires.emplace_back( corners[k], corners[( k + 1 ) % 4] );
+        put( outline.x ); put( outline.y ); put( outline.width ); put( outline.height );
+    }
     put( area.x ); put( area.y ); put( GetFont().GetPointSize() );
     for( const wxRect& rect : obstacles ) { put( rect.x ); put( rect.y ); put( rect.width ); put( rect.height ); }
     // An unchanged canvas (a repaint, a state read, a pointer move) keeps the places already found.
@@ -2702,6 +2741,9 @@ std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAY
     // where its first end attaches and leaving it outward. Where that path would run through a block (the router's legs have
     // three segments) or across a port's name, the preview leaves its first end outward for at least 12 pixels and goes around
     // the blocks, 8 pixels clear of them, with as few turns as it can, into its target the way the target's edge faces.
+    // Only the preview goes around: the finished connection still takes rule F4's three-segment path, through the block when
+    // its target lies behind its source (Rail to DC input). Letting computed paths go around blocks too is a contract change
+    // of CN-2 F4 that awaits the integration owner (per-level-editor-design-qa.md, "Design QA round 2 fixes").
     if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || !m_ready || !current() ) return {};
     std::optional<D::DiagramEndpointBindingData> toEndpoint = m_connectTo;
     if( !toEndpoint )
@@ -2781,6 +2823,17 @@ std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAY
         corners.push_back( point );
     }
     return corners;
+}
+
+void RECURSIVE_DIAGRAM_FRAME::updateCanvasTip()
+{
+    m_canvasTipQueued = false;
+    wxString tip;
+    if( m_pointerInside && m_drag == DRAG::NONE && m_ready && !m_process && current() )
+        tip = canvasTipAt( layout( current(), !m_historyPreview ), m_pointer );
+    if( tip == m_canvasTip ) return;
+    m_canvasTip = tip;
+    if( tip.empty() ) m_canvas->UnsetToolTip(); else m_canvas->SetToolTip( tip );
 }
 
 wxString RECURSIVE_DIAGRAM_FRAME::canvasTipAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
@@ -3048,6 +3101,13 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     // canvas and against the selected block's fill), and handles that stand out from both.
     const R::CANVAS_COLOURS colours = R::CanvasColours();
     const wxColour &background = colours.background, &foreground = colours.foreground, &muted = colours.muted, &accent = colours.accent;
+    // What is drawn may have changed under a pointer that stays still (another level, a rename, a new fit, a history preview),
+    // so the canvas's tooltip is found again once this repaint is done (review of design QA round 2).
+    if( ( m_pointerInside || !m_canvasTip.empty() ) && !m_canvasTipQueued )
+    {
+        m_canvasTipQueued = true;
+        CallAfter( [this] { if( !m_closing ) updateCanvasTip(); } );
+    }
     dc.SetBackground( wxBrush( background ) ); dc.Clear(); dc.SetTextForeground( foreground );
     auto* scope = current(); if( !m_ready || !scope ) { dc.DrawText( m_error.empty() ? _( "Loading diagram…" ) : Text( m_error ), 24, 24 ); return; }
     const bool dark = colours.dark;
@@ -3350,15 +3410,7 @@ void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
     m_pointer = event.GetPosition(); m_pointerInside = true; ++m_canvasMotions;
     // A shortened connection caption shows its whole text on hover, and "+N more" the choices behind it (design QA round 2).
-    if( m_drag == DRAG::NONE && m_ready && !m_process && current() )
-    {
-        wxString tip = canvasTipAt( layout( current(), !m_historyPreview ), m_pointer );
-        if( tip != m_canvasTip )
-        {
-            m_canvasTip = tip;
-            if( tip.empty() ) m_canvas->UnsetToolTip(); else m_canvas->SetToolTip( tip );
-        }
-    }
+    updateCanvasTip();
     // The Connect tool follows the pointer: its preview, and the port or block it would start or finish on.
     if( m_tool == TOOL::CONNECT && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
     if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && facetLinkOffered() )

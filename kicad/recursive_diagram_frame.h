@@ -283,10 +283,15 @@ private:
     /// The Connect tool's preview of the connection in progress, in canvas pixels, from its first end to the pointer or to the
     /// port or block the pointer is on: the path the committed connection's router would draw, or, where that path would run
     /// through a block or across a port's name, the way around (design QA round 2, R2-P2-2); empty when none is in progress.
+    /// The finished connection does not go around: it keeps rule F4's three-segment path until that contract changes.
     std::vector<wxPoint> connectPreview( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, or the choices behind a
     /// "+N more" chip; empty elsewhere.
     wxString canvasTipAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    /// Sets the canvas's tooltip to what lies under the pointer now (canvasTipAt), or none while the pointer is off the canvas,
+    /// a drag is under way or no level is shown. Called on every pointer motion, when the pointer leaves, and after every
+    /// repaint, so the tooltip follows a canvas that changes under a pointer that stays still (review of design QA round 2).
+    void updateCanvasTip();
     /// Where the Connect hint ("Click a port to finish connection") is drawn beside the end of aPreview, in canvas pixels: the
     /// first of the four places around the pointer that covers no block, port name or part of the preview (design QA round 2,
     /// P3 1); nothing while no connection is in progress or its caption is being typed.
@@ -351,8 +356,9 @@ private:
     std::string m_pendingOwner;
     std::optional<kiapi::automation::diagrams::v1::DiagramEndpointBindingData> m_connectFrom, m_connectTo;
     wxPoint m_pointer;
-    /// The canvas's tooltip as set now (see canvasTipAt).
+    /// The canvas's tooltip as set now (see canvasTipAt), and whether a repaint has asked for it to be found again.
     wxString m_canvasTip;
+    bool m_canvasTipQueued = false;
     /// The connection captions last placed, and what they were placed for, so a repaint or a state read of an unchanged
     /// canvas does not search for their places again.
     mutable std::string m_captionKey;

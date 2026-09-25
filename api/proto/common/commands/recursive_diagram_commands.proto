@@ -205,8 +205,9 @@ message RecursiveDiagramEditorState {
   // How many distinct level geometries pointer drags reached in this window since it opened: each is one position the
   // level must be laid out for, however many pointer motions reached it.
   uint64 drag_positions = 232;
-  // The canvas's tooltip as it is set now: the full caption of a shortened connection caption, or the choices behind a
-  // "+N more" chip, under the pointer; empty when the pointer is over neither.
+  // The canvas's tooltip as it is set on the canvas now: the full caption of a shortened connection caption, or the choices
+  // behind a "+N more" chip, under the pointer; empty when the pointer is over neither or not over the canvas. It follows the
+  // canvas as it changes under a pointer that stays still (a level switch, a rename, a new fit or a history preview).
   string canvas_tooltip = 233;
   // The Connect tool's preview of the connection in progress as drawn, relative to the editor window, in pixels, from its
   // first end to the pointer or the port or block the pointer is on; empty when no connection is in progress.
@@ -315,8 +316,8 @@ message DiagramControlRect {
   // The diagram object the control is drawn for: the connection id of a connection caption; empty otherwise.
   string object_id = 11;
   // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, or
-  // the choices behind a "+N more" chip, one per line; empty when it shows none.
-  string tooltip = 12;
+  // the choices behind a "+N more" chip, one per line; empty when it shows none. (Lane 2B band, 200-299.)
+  string tooltip = 200;
 }
 
 // A control's accessible role, name and state, read back from the toolkit.

@@ -355,6 +355,10 @@ public:
 /// its role, its label as its name, its pressed state, its focus and its keys for assistive technology (wxGTK has no
 /// wxAccessible). A press leaves the keyboard focus where it was. Elsewhere the platform draws the button.
 void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter );
+/// The colour the toolkit draws behind aControl. On GTK that is the background of the first widget above it whose theme
+/// gives it one (on Adwaita the window's own), which can differ from the colour wxWidgets reports for its parent; elsewhere,
+/// the parent's background colour.
+wxColour DrawnSurface( wxWindow* aControl );
 /// Gives aWindow the accessible role aRole (an ATK role name such as "link" or "push button") and, when not empty, the
 /// accessible name aName (GTK; elsewhere nothing changes).
 void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName );

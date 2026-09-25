@@ -137,6 +137,7 @@ public sealed class CheckedSchematicToolTests
 
     // The MCP side of kicad_schematic_checked_view: KiCad's reply is published only when the checked state, the image and
     // the objects all belong to one checkpoint of this process, root and viewed sheet, and the image is the PNG it claims.
+    // Every inconsistent reply, including a checked state of another root or process, is refused as invalid_checked_view.
     // Isolated because a real KiCad never returns these inconsistent replies; NativeSessionTests.
     // AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits covers the consistent path end to end.
     [TestMethod]
@@ -172,7 +173,7 @@ public sealed class CheckedSchematicToolTests
                 change(invalid);
                 var error = Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(
                     () => CheckedSchematicTools.ValidateView(invalid, root, sheet, request.ExpectedState.ProcessEpoch), name);
-                Assert.IsTrue(error.Code is "invalid_checked_view" or "invalid_checked_batch", $"{name}: {error.Code}");
+                Assert.AreEqual("invalid_checked_view", error.Code, $"{name}: {error.Message}");
             }
         }
     }
@@ -216,6 +217,15 @@ public sealed class CheckedSchematicToolTests
             Assert.AreEqual("invalid_checked_view", JsonSerializer.SerializeToElement(refused.StructuredContent).GetProperty("code").GetString());
             Assert.IsFalse(refused.Content.OfType<ModelContextProtocol.Protocol.ImageContentBlock>().Any(), "A refused view carries no image.");
             Assert.AreEqual(2, transport.Views);
+
+            transport.View = View(request, child);
+            transport.View.Checked.State.ProcessEpoch = Guid.NewGuid().ToString("D");
+            var otherProcess = await tool.ObserveView(transport.Session.InstanceId, documentJson, default, childJson);
+            Assert.IsTrue(otherProcess.IsError);
+            Assert.AreEqual("invalid_checked_view", JsonSerializer.SerializeToElement(otherProcess.StructuredContent).GetProperty("code").GetString(),
+                "A checked state of another process is an inconsistent view too.");
+            Assert.IsFalse(otherProcess.Content.OfType<ModelContextProtocol.Protocol.ImageContentBlock>().Any(), "A refused view carries no image.");
+            Assert.AreEqual(3, transport.Views);
         }
         finally { Directory.Delete(root, true); }
     }

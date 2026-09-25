@@ -13,8 +13,9 @@ import "common/commands/automation_commands.proto";
 // request.  API requests run synchronously on KiCad's GUI thread, so no editor event (a keystroke,
 // a pointer edit, an undo) runs between those reads.  A state that differs afterwards, or an image
 // or object list of another revision or sheet, refuses the request (AS_NOT_READY) instead of
-// pairing an image with another revision.  A refusal of any of the three reads (for example
-// AS_BUSY while an edit is pending) is returned unchanged.
+// pairing an image with another revision.  A read KiCad refuses (for example with AS_BUSY while an
+// edit is pending) ends the request with exactly that refusal; a read that returns a reply with a
+// non-OK status, or one that is not that read's result, ends it as AS_BAD_REQUEST.
 message NativeCapabilityReadCheckedView {
   // The explicit schematic root, as for ReadCheckedSchematicState.
   kiapi.common.types.DocumentSpecifier document = 1;

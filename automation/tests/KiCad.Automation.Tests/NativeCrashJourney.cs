@@ -68,7 +68,8 @@ public sealed partial class NativeSessionTests
     //      partial result can never be synchronized as a user edit; then rolled back: U3 and U4 are removed, the XML is
     //      the synchronized baseline the record holds and the same design as the XML published before the edit, the edit
     //      is kept as the previous XML, and making the edit again applies it once.
-    // The baseline, desired XML and last completed synchronization are unchanged by every release itself.
+    // The baseline, desired XML and last completed synchronization are unchanged by every release itself. Calling again while
+    // a continuation waits journals nothing and reports that continuation with exactly the sheets it was planned from.
     private static Task VerifyPsuCpuExitedOperationRelease(NativeClient client, PsuCpuNativeContext context, Process native,
         int processId, string display, string evidence, string instanceId, CancellationToken token) =>
         RunPsuCpuNativeCrash(client, context, native, processId, evidence, instanceId, release: true, token);
@@ -244,6 +245,7 @@ public sealed partial class NativeSessionTests
             var commitCandidate = RequireResumed(first, kicad, commit.Held, resumedCommit, "after-commit", noteId);
             RequirePlaced(await Capture(kicad), 4, "after-commit: the release itself applies nothing");
             RequireNote(await Capture(kicad), power, noteId, noteText, "after-commit: the release itself keeps the note in KiCad");
+            var repeatedCommit = await RepeatPending(first, commit.Held, "resume", resumedCommit, "after-commit");
             first.Session = await StartSynchronization(first, kicad, "resuming the operation left by the commit kill");
             RequireCompleted(first, commit.Held.State.PendingPublication!.OperationId, commitCandidate, await Capture(kicad), 6, "after-commit resumed");
             await RequireKeptNote(first, kicad, power, first.PowerFile, noteId, noteText, "after-commit resumed");
@@ -261,7 +263,7 @@ public sealed partial class NativeSessionTests
             await RequireKeptNote(first, kicad, power, first.PowerFile, noteId, editedText, "the note edited after the continuation");
             cases.Add(new { moment = "after-native-commit", operationId = commit.Held.State.PendingPublication.OperationId,
                 killedEpoch = killed.Epoch, exit = commit.Exit, releasedBeforeRestart = releasedOnly, wireOnUntouchedSheetRefused = notCarried,
-                resumed = resumedCommit, keptNote = new { sheet = power, noteId, noteText, editedText },
+                resumed = resumedCommit, repeatedWhilePending = repeatedCommit, keptNote = new { sheet = power, noteId, noteText, editedText },
                 completedOperation = resumedOperation, noteEditSynchronizedBy = first.Store.Read()!.State.LastSynchronization!.OperationId,
                 placements = Expected(6).Length });
 
@@ -290,6 +292,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(0, resumedSave.GetProperty("sheetsWithOtherEdits").GetArrayLength(), resumedSave.GetRawText());
             var saveCandidate = RequireResumed(second, kicad, save.Held, resumedSave, "during-save", null);
             RequirePlaced(await Capture(kicad), 6, "during-save: the release itself applies nothing");
+            var repeatedSave = await RepeatPending(second, save.Held, "resume", resumedSave, "during-save");
             // The agent completes the continuation itself, with the operation ID and request token the release returned.
             var applied = await mcp.Tool("kicad_design_sync_apply", new { instanceId = kicad.Id, recoveryPath = second.Store.StatePath,
                 designPath = second.Design, expectedRevisionToken = resumedSave.GetProperty("requestedRecoveryRevisionToken").GetString(),
@@ -308,7 +311,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("completed", (await Repeat(second, save.Held, "resume")).GetProperty("outcome").GetString());
             cases.Add(new { moment = "during-checked-save", operationId = save.Held.State.PendingPublication.OperationId,
                 killedEpoch = killed.Epoch, exit = save.Exit, stoppedAt = save.StoppedAt, operationSheetEditRefused = editedResume,
-                operationSheetEditRollbackRefused = editedRollback, resumed = resumedSave, completedBy = appliedView,
+                operationSheetEditRollbackRefused = editedRollback, resumed = resumedSave, repeatedWhilePending = repeatedSave, completedBy = appliedView,
                 completedOperation = second.Store.Read()!.State.LastSynchronization!.OperationId, placements = Expected(8).Length });
 
             // ---- Third copy: killed during the save the same way; released, reattachment refused, rolled back ----------
@@ -348,6 +351,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(journaled.State.PendingMutation.Operations.All(operation => operation.TargetDocument is { } target
                 && SheetKey(target) != rootSheet), "The roll-back changes nothing on the root sheet, which holds the user's note.");
             RequirePlaced(await Capture(kicad), 6, "roll-back: the release itself changes nothing in KiCad");
+            var repeatedRollback = await RepeatPending(third, rolled.Held, "roll-back", rollback, "roll-back");
             third.Session = await StartSynchronization(third, kicad, "rolling back the operation left by the save kill");
             var back = await Capture(kicad);
             RequirePlaced(back, 4, "rolled back: U3 and U4 removed, everything else once");
@@ -384,7 +388,7 @@ public sealed partial class NativeSessionTests
             await RequireKeptNote(third, kicad, rootSheet, third.Root, rootNote, rootText, "all eight components again after the roll-back");
             cases.Add(new { moment = "roll-back-during-checked-save", operationId = rolled.Held.State.PendingPublication.OperationId,
                 killedEpoch = killed.Epoch, exit = rolled.Exit, releasedBeforeRestart = releasedRollback, ordinaryReattach = refusedReattach,
-                rolledBack = rollback, rollbackOperation = rollbackId, previousXml = previous, keptNote = new { sheet = rootSheet, rootNote, rootText },
+                rolledBack = rollback, repeatedWhilePending = repeatedRollback, rollbackOperation = rollbackId, previousXml = previous, keptNote = new { sheet = rootSheet, rootNote, rootText },
                 rolledBackXmlSha256 = Sha(rolledXml), synchronizedXmlSha256 = Sha(synchronizedXml),
                 byteIdenticalApartFromLoadFormat = WithoutLoadProvenance(synchronizedXml) == WithoutLoadProvenance(rolledWithoutNote),
                 firstDifferenceFromPublished = FirstDifference(WithoutLoadProvenance(synchronizedXml), WithoutLoadProvenance(rolledWithoutNote)),
@@ -590,6 +594,27 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(view.GetProperty("releasedNow").GetBoolean(), view.GetRawText());
             Assert.AreEqual(before.RevisionToken, copy.Store.Read()!.RevisionToken, "A repeated release changes nothing.");
             return view;
+        }
+
+        // Calling again while the continuation waits journals nothing and reports that same continuation with the sheets it was
+        // planned from: the recovery record's own observation of the running KiCad, compared again, gives exactly the sheet
+        // lists the continuing call reported.
+        async Task<JsonElement> RepeatPending(CrashCopy copy, StoredDesignRecovery held, string continuation, JsonElement continued, string moment)
+        {
+            var repeated = await Repeat(copy, held, continuation);
+            Assert.AreEqual(continued.GetProperty("outcome").GetString(), repeated.GetProperty("outcome").GetString(), $"{moment}: {repeated.GetRawText()}");
+            foreach (string name in new[] { "continuationOperationId", "continuedEpoch", "requestedRecoveryRevisionToken", "receiptPath", "releasedEpoch" })
+                Assert.AreEqual(continued.GetProperty(name).GetString(), repeated.GetProperty(name).GetString(), $"{moment}, repeated: {name}");
+            Assert.IsTrue(repeated.GetProperty("continuationPending").GetBoolean(), $"{moment}: {repeated.GetRawText()}");
+            Assert.AreEqual(continued.GetProperty("nativeOperations").GetInt32(), repeated.GetProperty("nativeOperations").GetInt32(), moment);
+            foreach (string name in new[] { "operationSheets", "sheetsWithOperationResult", "sheetsWithOtherEdits" })
+            {
+                Assert.AreEqual(JsonValueKind.Array, repeated.GetProperty(name).ValueKind, $"{moment}, repeated: {name} is known. {repeated.GetRawText()}");
+                CollectionAssert.AreEqual(ViewPaths(continued, name), ViewPaths(repeated, name), $"{moment}, repeated: {name}. {repeated.GetRawText()}");
+            }
+            if (ViewPaths(continued, "sheetsWithOtherEdits").Length != 0)
+                StringAssert.Contains(repeated.GetProperty("nextStep").GetString(), "stay exactly as they are", $"{moment}: the repeated call names the kept edits.");
+            return repeated;
         }
 
         // The PSU sheet the interrupted save had replaced holds the operation's result; the CPU sheet it had not reached does

@@ -143,7 +143,8 @@ struct LIFECYCLE_FIXTURE
 
 // A fake editor behind the checked view (NativeCapabilityReadCheckedView): it answers the three
 // reads the controller dispatches for one request, records them in order, and can refuse any of
-// them or answer with a state, image or object list of another revision or sheet.
+// them, answer with a state, image or object list of another revision or sheet, or alter the reply
+// it returns (for example a non-OK status in a returned reply, or a message of another type).
 struct CHECKED_VIEW_FIXTURE
 {
     std::string epoch = KIID().AsStdString();
@@ -153,6 +154,7 @@ struct CHECKED_VIEW_FIXTURE
     DocumentLifecycleState after;
     std::vector<std::string> calls;
     std::map<std::string, ApiResponseStatus> refusals;
+    std::map<std::string, std::function<void( ApiResponse& )>> alterations;
     DOCUMENT_LIFECYCLE_CONTROLLER controller;
 
     CHECKED_VIEW_FIXTURE()
@@ -227,6 +229,8 @@ struct CHECKED_VIEW_FIXTURE
             reply.mutable_message()->PackFrom( after );
         }
         else throw std::runtime_error( "Unexpected checked view dispatch " + type );
+        if( auto alteration = alterations.find( type ); alteration != alterations.end() )
+            alteration->second( reply );
         return reply;
     }
 
@@ -1006,6 +1010,39 @@ BOOST_AUTO_TEST_CASE( CheckedViewPassesARefusedReadThroughUnchanged )
                 BOOST_REQUIRE( !reply );
                 BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( reply.error(), refusal ) );
                 BOOST_CHECK( fixture.calls == std::vector<std::string>( order.begin(), order.begin() + refused + 1 ) );
+            }
+        }
+    }
+}
+
+// A read that returns a reply instead of refusing, but whose reply carries a non-OK status or is not
+// that read's result, is not a refusal KiCad made: the view ends as a bad request, and nothing is
+// dispatched after that read.
+BOOST_AUTO_TEST_CASE( CheckedViewRefusesAReadThatAnswersWithoutItsResult )
+{
+    const std::vector<std::string> order = CheckedViewReads();
+    const std::vector<std::pair<std::string, std::function<void( ApiResponse& )>>> answers = {
+        { "a returned reply with a non-OK status", []( ApiResponse& r )
+          {
+              r.mutable_status()->set_status( ApiStatusCode::AS_BUSY );
+              r.mutable_status()->set_error_message( "Fixture busy in a returned reply" );
+          } },
+        { "a returned reply of another message type", []( ApiResponse& r )
+          { r.mutable_message()->PackFrom( google::protobuf::Empty() ); } }
+    };
+    for( size_t failed = 0; failed < order.size(); ++failed )
+    {
+        for( const auto& [name, answer] : answers )
+        {
+            BOOST_TEST_CONTEXT( order[failed] << " answered with " << name )
+            {
+                CHECKED_VIEW_FIXTURE fixture;
+                fixture.alterations[order[failed]] = answer;
+                auto reply = fixture.Call( fixture.Request() );
+                BOOST_REQUIRE( !reply );
+                BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_BAD_REQUEST );
+                BOOST_CHECK( !Contains( reply.error().error_message(), "Fixture busy" ) );
+                BOOST_CHECK( fixture.calls == std::vector<std::string>( order.begin(), order.begin() + failed + 1 ) );
             }
         }
     }

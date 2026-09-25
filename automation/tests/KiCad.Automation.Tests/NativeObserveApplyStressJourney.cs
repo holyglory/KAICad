@@ -262,6 +262,20 @@ public sealed partial class NativeSessionTests
             return (await running, sent, offset);
         }
         void Raced(StressTiming timing, bool personFirst) => raceOffsets[timing] += personFirst ? RaceStep : -RaceStep;
+        // The unsaved-change flags a lone rotation of the person's note leaves after the given flags: unsaved, with only the
+        // root sheet modified (the note is on the root; nothing in this run changes another sheet), at the rotation's
+        // revision. Every BeforeApply iteration checks this model against KiCad's own reading right after the rotation; the
+        // apply race, where no reading can be taken between the key and the batch, relies on it.
+        SchematicSaveState AfterRotation(SchematicSaveState before, DocumentRevision rotated)
+        {
+            var flags = before.Clone();
+            flags.Revision = rotated.Clone();
+            flags.UnsavedSchematicChanges = true;
+            flags.ModifiedSheetInstances.Clear();
+            flags.ModifiedSheetInstances.Add(document.Clone());
+            return flags;
+        }
+        int rotationFlagsChecked = 0;
 
         // The agent, only through the compiled MCP STDIO server. Every call has its own deadline.
         await using var mcp = await StdioMcpFixture.StartAsync(Path.Combine(evidence, instanceId + "-stress-mcp"),
@@ -478,11 +492,24 @@ public sealed partial class NativeSessionTests
         async Task VerifySubSheetView(CheckedSchematicState initial)
         {
             const string What = "Viewing a sheet below the root";
+            // Each sheet below the root is named by its sheet symbol on the root, which gives the sheet file it shows.
+            var symbols = Root(initial).Values.Where(item => item.Is(SheetSymbol.Descriptor)).Select(item => item.Unpack<SheetSymbol>())
+                .ToDictionary(symbol => symbol.Id.Value, StringComparer.Ordinal);
+            string SheetFile(DocumentSpecifier sheet) => symbols[sheet.SheetPath.Path[1].Value].FilenameField.Text.Text_;
             var children = initial.Electrical.Hierarchy.Data.Instances.Select(screen => screen.Metadata.Document)
                 .Where(sheet => sheet.SheetPath.Path.Count == 2).OrderBy(sheet => sheet.SheetPath.Path[1].Value, StringComparer.Ordinal).ToList();
-            Assert.IsGreaterThanOrEqualTo(2, children.Count, What + ": the fixture has two instances of one sheet below the root.");
-            var (shown, hidden) = (children[0], children[1]);
-            var record = new Dictionary<string, object?> { ["sheet"] = shown.SheetPath.Path[1].Value, ["hiddenSheet"] = hidden.SheetPath.Path[1].Value };
+            var instances = children.GroupBy(SheetFile, StringComparer.Ordinal).FirstOrDefault(group => group.Count() >= 2)?.ToList();
+            Assert.IsNotNull(instances, What + ": the fixture has two instances of one sheet file below the root: "
+                + string.Join(", ", children.Select(sheet => $"{sheet.SheetPath.Path[1].Value} {SheetFile(sheet)}")));
+            var (shown, hidden) = (instances[0], instances[1]);
+            // The shown and the hidden sheet are two instances of the same sheet file, so the refusal below is of another
+            // instance of exactly the sheet the editor shows, not of another sheet.
+            Assert.AreEqual(SheetFile(shown), SheetFile(hidden), What + ": the shown and the hidden sheet show the same sheet file.");
+            Assert.IsFalse(string.IsNullOrEmpty(SheetFile(shown)), What + ": the shown sheet names its sheet file.");
+            Assert.AreEqual(Sheet(initial, shown).Metadata.ScreenId, Sheet(initial, hidden).Metadata.ScreenId,
+                What + ": KiCad loaded both instances from one screen, the same sheet file.");
+            var record = new Dictionary<string, object?> { ["sheet"] = shown.SheetPath.Path[1].Value, ["hiddenSheet"] = hidden.SheetPath.Path[1].Value,
+                ["sheetFile"] = SheetFile(shown) };
             subSheet = record;
             try
             {
@@ -637,9 +664,11 @@ public sealed partial class NativeSessionTests
                 trace["operationId"] = batch.Request.Batch.OperationId;
                 trace["operations"] = batch.Request.Batch.Operations.Select(operation => operation.OperationCase.ToString()).ToArray();
                 Dictionary<string, byte[]>? savedFiles = null;
+                SchematicSaveState? flagsBeforeRotation = null;
                 switch (timing)
                 {
                     case StressTiming.BeforeApply:
+                        flagsBeforeRotation = await Flags();
                         trace["personSequence"] = (await Rotate(observedSequence, what)).Sequence;
                         break;
                     case StressTiming.RotateThenUndo:
@@ -668,6 +697,14 @@ public sealed partial class NativeSessionTests
                 // compares against it through the receipt and the history instead.
                 DocumentLifecycleState? beforeApply = concurrent ? null : await State();
                 SchematicSaveState? flagsBeforeApply = concurrent ? null : await Flags();
+                if (flagsBeforeRotation is not null)
+                {
+                    // KiCad's own reading right after the lone rotation is exactly the modelled shape the apply race relies on.
+                    Assert.AreEqual(AfterRotation(flagsBeforeRotation, beforeApply!.Revision), flagsBeforeApply,
+                        what + ": the flags KiCad reports right after the person's rotation are the modelled after-rotation flags.");
+                    rotationFlagsChecked++;
+                    trace["rotationFlagsChecked"] = true;
+                }
                 CheckedSchematicBatchReceipt receipt;
                 if (concurrent)
                 {
@@ -692,14 +729,10 @@ public sealed partial class NativeSessionTests
                         Assert.AreEqual(change.Sequence, receipt.ObservedBefore.Revision.Sequence,
                             what + ": KiCad refused the batch against exactly the state the person's rotation left.");
                         Assert.IsTrue(receipt.ObservedBefore.NativeContentDirty, what + ": the person's rotation left unsaved work.");
-                        // The refused batch leaves exactly the flags KiCad reports right after the person's rotation:
-                        // unsaved, with the root sheet modified, at the rotation's revision.
-                        var rotated = flagsBeforeRace.Clone();
-                        rotated.Revision = receipt.ObservedBefore.Revision.Clone();
-                        rotated.UnsavedSchematicChanges = true;
-                        rotated.ModifiedSheetInstances.Clear();
-                        rotated.ModifiedSheetInstances.Add(document.Clone());
-                        flagsBeforeApply = rotated;
+                        // The refused batch leaves exactly the flags a lone rotation leaves (the model each BeforeApply
+                        // iteration checks against KiCad's own reading): unsaved, with the root sheet modified, at the
+                        // rotation's revision.
+                        flagsBeforeApply = AfterRotation(flagsBeforeRace, receipt.ObservedBefore.Revision);
                     }
                 }
                 else receipt = await Apply(batch, what);
@@ -821,6 +854,8 @@ public sealed partial class NativeSessionTests
             Assert.IsGreaterThanOrEqualTo(21, refused.Count, "The schedule's stale iterations are always refused.");
             Assert.AreEqual(Iterations, renderingCheckedAfter + renderingCheckedBefore,
                 "Every iteration proved the agent's image is KiCad's rendering of the state it received.");
+            Assert.AreEqual(schedule.Count(timing => timing == StressTiming.BeforeApply), rotationFlagsChecked,
+                "Every BeforeApply iteration checked the modelled after-rotation flags against KiCad's own reading.");
             completed = true;
         }
         finally
@@ -851,6 +886,7 @@ public sealed partial class NativeSessionTests
                 person = new { rotations, undos = personUndos, saves = personSaves },
                 viewRetries, undoSteps,
                 renderingChecks = new { capturedStraightAfterView = renderingCheckedAfter, capturedStraightBeforeRace = renderingCheckedBefore },
+                rotationFlagsChecked,
                 subSheet,
                 timingMilliseconds = timings.ToDictionary(entry => entry.Key, entry => Percentiles(entry.Value)),
                 records

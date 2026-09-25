@@ -12,9 +12,11 @@ namespace KiCad.Automation.Tests;
 // Isolated rules of continuing a released operation (ExitedOperationRelease). The native journey
 // NativeSessionTests.NativeCrashReleasesTheExitedOperation proves the continuation end to end against killed KiCad processes,
 // including a note carried on a sheet the operation does not change, a wire there refused, and edits on the operation's own
-// sheets refused. Two things it cannot reach are checked here: every kind of edit on such a sheet (the journey makes a note
-// and a wire, not every object type), and the advice of refusals that need a KiCad killed during the XML publication itself,
-// which the journey's kills (at the native commit and inside the native save) never produce.
+// sheets refused. Three things it cannot reach are checked here: every kind of edit on such a sheet (the journey makes a note
+// and a wire, not every object type); the advice of refusals that need a KiCad killed during the XML publication itself, or
+// while the operation was still resolving its native layout (before it had a candidate), which the journey's kills (at the
+// native commit and inside the native save) never produce; and a continuation that would reach beyond the operation's sheets,
+// which a real comparison of the running KiCad with the operation keeps from happening.
 [TestClass]
 public sealed class ExitedOperationReleaseTests
 {
@@ -66,6 +68,77 @@ public sealed class ExitedOperationReleaseTests
         Assert.AreEqual("changed the sheet's cached library symbols",
             ReleasedSheets.UncarriedEdit(new() { ReplaceLibraryCache = new() }, Live()));
         StringAssert.StartsWith(ReleasedSheets.UncarriedEdit(new() { SetErcSettings = new() }, Live()), "changed the sheet's setting");
+    }
+
+    // Changes on the operation's own sheets are refused with what they may be and the way out. Without a final candidate (the
+    // operation was still resolving its native layout when KiCad ended) nothing is known of its result, so they may be its
+    // partial result or other edits, which cannot be told apart; closing without saving helps only while the interrupted save
+    // had replaced no file. A continuation that would change a sheet the operation does not change is refused with a way out.
+    [TestMethod]
+    public void OperationSheetRefusalsSayWhatCannotBeToldApartAndTheWayOut()
+    {
+        string root = Guid.NewGuid().ToString("D"), psu = root + "/" + Guid.NewGuid().ToString("D"), cpu = root + "/" + Guid.NewGuid().ToString("D");
+        var names = new Dictionary<string, string> { [root] = "the root sheet", [psu] = "sheet PSU", [cpu] = "sheet CPU" };
+        var edited = new ReleasedSheets(root, [psu], [], [psu], [], [], names);
+        var clean = new ReleasedSheets(root, [psu], [], [], [], [], names);
+        string operation = Guid.NewGuid().ToString("D");
+        string sheetFile = Path.Combine(Path.GetTempPath(), "lane-2D-stress-and-release-fixes", "psu.kicad_sch");
+        var unchanged = new DesignReleasedFile(sheetFile, true, new string('a', 64), true, new string('a', 64));
+        var replaced = unchanged with { Sha256Now = new string('b', 64) };
+
+        var layout = Receipt(null, unchanged);
+        var error = Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() => edited.RequireOperationSheets(operation, layout));
+        Assert.AreEqual("released_operation_sheets_edited", error.Code);
+        StringAssert.Contains(error.Message, "no final XML candidate yet");
+        StringAssert.Contains(error.Message, "the operation's partial result or other edits, which cannot be told apart");
+        StringAssert.Contains(error.Message, "On sheet PSU (sheet path " + psu + ")");
+        StringAssert.Contains(error.Message, "The way out: in KiCad, make those sheets as the last synchronization left them");
+        StringAssert.Contains(error.Message, "close the schematic without saving and open it again");
+        error = Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() => edited.RequireOperationSheets(operation, Receipt(null, replaced)));
+        Assert.AreEqual("released_operation_sheets_edited", error.Code);
+        StringAssert.Contains(error.Message, "which cannot be told apart");
+        StringAssert.Contains(error.Message, "closing the schematic without saving does not help here, because the interrupted save had already replaced " + sheetFile);
+        Assert.IsFalse(error.Message.Contains("close the schematic without saving and open it again", StringComparison.Ordinal),
+            "Reopening is never offered when it would load the partial result again: " + error.Message);
+        clean.RequireOperationSheets(operation, layout);
+
+        // With a final candidate the operation's result is known: the edits are neither it nor the synchronized version.
+        var publication = DesignPublicationIntent.Create(Path.Combine(Path.GetTempPath(), "design.xml"), "<a/>"u8.ToArray(), "<b/>"u8.ToArray());
+        error = Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() => edited.RequireOperationSheets(operation, Receipt(publication, unchanged)));
+        Assert.AreEqual("released_operation_sheets_edited", error.Code);
+        StringAssert.Contains(error.Message, "neither as the last synchronization left them nor exactly as the operation left them");
+
+        // The continuation's own change stays on the operation's sheets; an operation without a target edits the root.
+        SchematicItemOperation Remove(string? sheet)
+        {
+            var remove = new SchematicItemOperation { Remove = new() { Value = Guid.NewGuid().ToString("D") } };
+            if (sheet is not null)
+            {
+                remove.TargetDocument = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic, SheetPath = new() };
+                remove.TargetDocument.SheetPath.Path.Add(sheet.Split('/').Select(id => new KIID { Value = id }));
+            }
+            return remove;
+        }
+        clean.RequireWithinOperation([Remove(psu)]);
+        foreach (var (outside, name) in new[] { (Remove(cpu), "sheet CPU (sheet path " + cpu + ")"), (Remove(null), "the root sheet (sheet path " + root + ")") })
+        {
+            error = Assert.ThrowsExactly<KiCad.Automation.Model.AutomationException>(() => clean.RequireWithinOperation([Remove(psu), outside]));
+            Assert.AreEqual("released_operation_diverged", error.Code);
+            StringAssert.Contains(error.Message, "The continuation would change " + name);
+            StringAssert.Contains(error.Message, "Nothing was journaled. The way out: undo the edits in KiCad that changed those sheets");
+            StringAssert.Contains(error.Message, "close the schematic without saving and open it again; then call this tool again");
+        }
+    }
+
+    // A release receipt with the given publication (none: the operation was still resolving its native layout) whose save
+    // named one sheet file.
+    private static DesignReleasedOperation Receipt(DesignPublicationIntent? publication, DesignReleasedFile file)
+    {
+        string epoch = Guid.NewGuid().ToString("D");
+        return new(DesignReleasedOperation.CurrentSchemaVersion, publication?.OperationId ?? Guid.NewGuid(), null, Guid.NewGuid(), Guid.NewGuid(), epoch,
+            new InstanceExit(Guid.NewGuid().ToString("D"), epoch, 4242, null, 9, InstanceExit.ExitStatusEvidence, DateTimeOffset.UtcNow), "token",
+            new KiCad.Automation.Model.DocumentRevision(Guid.NewGuid().ToString("D"), 3), new string('c', 64), new string('d', 64),
+            null, new DocumentLifecycleState().ToByteArray(), null, null, publication, null, [file], DateTimeOffset.UtcNow);
     }
 
     // Resume refuses a publication that had started when KiCad ended. The refusal points to roll-back whenever roll-back works

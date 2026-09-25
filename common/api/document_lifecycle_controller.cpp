@@ -151,7 +151,9 @@ bool FileCoverage( const DocumentLifecycleState& aState )
 // The rendered sheet an agent looks at and the checked state its next batch must name, taken at
 // one native checkpoint.  API dispatch runs synchronously on KiCad's GUI thread, so no editor
 // event (a keystroke, a pointer edit, an undo) runs between the three reads below; the closing
-// state read still refuses the pair if anything the state covers changed while rendering.
+// state read still refuses the pair if anything the state covers changed while rendering.  A read
+// KiCad refuses ends the view with exactly that refusal; a read that returns a reply with a non-OK
+// status, or one that is not that read's result, ends it as a bad request.
 API_RESULT ReadCheckedView( ApiRequest& aEnvelope, const std::string& aProcessEpoch,
                             const DOCUMENT_LIFECYCLE_CONTROLLER::DISPATCH& aDispatch )
 {

@@ -60,6 +60,13 @@ public sealed class SchematicNetReconciliationTests
     // (decision kicad-stacked-pins-one-node-20260924). Pins in <paramref name="wired"/> are also connected to that native
     // net since the baseline, as a wire drawn in KiCad would connect them.
     private static (DesignRecoveryState State, Func<string, string, PinEndpoint> Pin) PsuCpuSettled(params (string Reference, string Number)[] wired)
+        => PsuCpuState(null, [], wired);
+
+    // The same settled editor with the XML net LDO_SENSE holding <paramref name="xmlNet"/> in both the baseline and the
+    // desired XML (none when null). KiCad's net of the stacked U2 pins also holds <paramref name="baselineWired"/> in the
+    // saved baseline and <paramref name="observedWired"/> now.
+    private static (DesignRecoveryState State, Func<string, string, PinEndpoint> Pin) PsuCpuState((string Reference, string Number)[]? xmlNet,
+        (string Reference, string Number)[] baselineWired, (string Reference, string Number)[] observedWired)
     {
         var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
         var typed = components with { PartSymbols = SchematicSynchronizationPlanTests.WithLibraryPinTypes(components.PartSymbols!) };
@@ -68,6 +75,9 @@ public sealed class SchematicNetReconciliationTests
         var owners = circuit.Components.ToDictionary(c => c.Id);
         var references = circuit.Components.ToDictionary(c => c.Reference, c => c.Id);
         PinEndpoint Pin(string reference, string number) => new(references[reference], number);
+        if (xmlNet is not null)
+            placed = placed with { Engineering = placed.Engineering with { Circuit = circuit with
+                { Nets = [new(Guid.Parse("5d0e7f3c-2b41-4c8a-9e6d-1f2a3b4c5d6e"), "LDO_SENSE", [.. xmlNet.Select(p => Pin(p.Reference, p.Number))])] } } };
         SchematicNet Net(IEnumerable<(string Reference, string Number)> pins)
         {
             var net = new SchematicNet { Name = "Net-(U2-OUT-Pad1)" };
@@ -95,9 +105,9 @@ public sealed class SchematicNetReconciliationTests
         (string, string)[] stacked = [("U2", "1"), ("U2", "4")];
         var baseline = new SchematicElectricalState { Hierarchy = new() { Data = placed.Schematic.Clone(),
             Revision = new() { Epoch = "psu-cpu-settled", Sequence = 7 }, TrackingComplete = false } };
-        baseline.Nets.Add(Net(stacked));
+        baseline.Nets.Add(Net([.. stacked, .. baselineWired]));
         var observed = baseline.Clone(); observed.Hierarchy.Revision.Sequence = 8;
-        observed.Nets.Clear(); observed.Nets.Add(Net([.. stacked, .. wired]));
+        observed.Nets.Clear(); observed.Nets.Add(Net([.. stacked, .. observedWired]));
         return (new(Guid.NewGuid(), Guid.NewGuid(), new("psu-cpu-settled", 8), false, placed,
             Encoding.UTF8.GetBytes(SchematicDesignXml.Write(placed, [])), observed.Hierarchy.Data.Clone(), [],
             BaselineElectrical: baseline, ObservedElectrical: observed), Pin);
@@ -155,6 +165,55 @@ public sealed class SchematicNetReconciliationTests
         CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U2", "4"), pin("U3", "1") }, added.Pins.ToArray());
         Assert.AreEqual("Net-(U2-OUT-Pad1)", added.Name);
         Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+    }
+
+    // The settled plan when the XML already connects one of the stacked pins: the baseline and the desired XML both hold
+    // LDO_SENSE (U2.1 and U3.1), and KiCad showed and still shows that net with U2.4 joined. Nothing changed, so the
+    // candidate is exactly the XML and no net identity moves.
+    [TestMethod]
+    public void SettledXmlNetOnOneStackedPinStaysExactlyTheXml()
+    {
+        var (state, pin) = PsuCpuState([("U2", "1"), ("U3", "1")], [("U3", "1")], [("U3", "1")]);
+        var net = state.Baseline.Engineering.Circuit.Nets.Single();
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline, state.BaselineElectrical!, []).ConnectivityEquivalent,
+            "KiCad's net with U2.4 joined is exactly what the XML describes.");
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        Assert.AreEqual(EngineeringDesignXml.Write(state.Baseline.Engineering, []), EngineeringDesignXml.Write(result.Candidate, []));
+        var kept = result.Candidate.Circuit.Nets.Single();
+        Assert.AreEqual(net.Id, kept.Id); Assert.AreEqual(net.Name, kept.Name);
+        CollectionAssert.AreEqual(new[] { pin("U2", "1"), pin("U3", "1") }, kept.Pins.ToArray());
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+    }
+
+    // Decided result for a real native edit on such a net: deleting LDO_SENSE's wire in KiCad (U2.1 no longer reaches U3.1)
+    // splits it as any native split does (NativeSplitCreatesStableNewIdsAndRetainsRequirementsUnresolved). Each native group
+    // becomes a generated net as KiCad shows it: U2.1 with the U2.4 it stacks, under KiCad's net name, and U3.1 alone.
+    // LDO_SENSE is retired as a split whose binding needs resolution. Generated nets always hold KiCad's groups, stacked pins
+    // included (as in RealNativeConnectionOfStackedPinsIsStillReconciled); naming U2.1 without U2.4 is equivalent under the
+    // one-node rule (decision kicad-stacked-pins-one-node-20260924) but would describe less than the connection KiCad draws.
+    [TestMethod]
+    public void DeletedWireOfAStackedPinsNetSplitsAsKiCadShowsIt()
+    {
+        var (state, pin) = PsuCpuState([("U2", "1"), ("U3", "1")], [("U3", "1")], []);
+        var retired = state.Baseline.Engineering.Circuit.Nets.Single();
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        var nets = result.Candidate.Circuit.Nets;
+        Assert.HasCount(2, nets);
+        Assert.IsFalse(nets.Any(n => n.Id == retired.Id));
+        var joined = nets.Single(n => n.Pins.Contains(pin("U2", "1")));
+        CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U2", "4") }, joined.Pins.ToArray());
+        Assert.AreEqual("Net-(U2-OUT-Pad1)", joined.Name);
+        var alone = nets.Single(n => n.Id != joined.Id);
+        CollectionAssert.AreEqual(new[] { pin("U3", "1") }, alone.Pins.ToArray());
+        var change = result.NetChanges.Single();
+        Assert.AreEqual(retired.Id, change.FormerNetId);
+        Assert.AreEqual(NetBindingChangeKind.Split, change.Change);
+        CollectionAssert.AreEquivalent(new[] { joined.Id, alone.Id }, change.CandidateNetIds.ToArray());
+        Assert.IsEmpty(result.Conflicts);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline with { Engineering = result.Candidate }, state.ObservedElectrical!, [])
+            .ConnectivityEquivalent, "The candidate is exactly what the editor shows after the wire was deleted.");
     }
 
     [TestMethod]

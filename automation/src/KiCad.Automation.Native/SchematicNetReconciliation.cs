@@ -81,8 +81,10 @@ public static class SchematicNetReconciliation
             // A net is found by its own pins or by its pins with the unconnected
             // pins stacked on them, which KiCad joins to it.
             var desiredByGroup = desiredPartition.Nets;
+            // Only its single pins are looked up. Stacking only joins groups, so the partition as KiCad shows it has no
+            // single pin the plain partition lacks.
             var baselineGroups = Partition(state.Baseline.Engineering.Circuit, universe, []).Groups
-                .Concat(baselinePartition.Groups).Select(Key).ToHashSet(StringComparer.Ordinal);
+                .Select(Key).ToHashSet(StringComparer.Ordinal);
             var stackedNodes = stackedNow.Select(Key).ToHashSet(StringComparer.Ordinal);
             var nativeByGroup = current.PinPartitions!.ToDictionary(p => Key(p.Pins), StringComparer.Ordinal);
             var desiredIds = desired.Circuit.Nets.Select(n => n.Id).ToHashSet();
@@ -116,6 +118,8 @@ public static class SchematicNetReconciliation
                     && !desiredPins.Contains(group[0])) continue;
                 // Nor do unconnected pins that KiCad joins only because one symbol
                 // stacks them: exactly a stacked node, none of it named by the XML.
+                // Any other group comes from a native edit and becomes a net as KiCad
+                // shows it, its stacked pins included, like every native group.
                 if (stackedNodes.Contains(key) && !group.Any(desiredPins.Contains)) continue;
                 Guid id = GeneratedIdentity(state.OriginId, desired.Circuit.Id, group);
                 string name = nativeByGroup.TryGetValue(key, out var nativeGroup) && !string.IsNullOrWhiteSpace(nativeGroup.NativeName)

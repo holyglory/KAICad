@@ -46,13 +46,21 @@ public enum PresentationSeverity { Warning, Error, Unavailable }
 // One localized repair region; crossing findings may contain several regions
 // rather than requiring a close-up of the whole signal's bounding box.
 public sealed record PresentationLocation(PresentationBounds Bounds, IReadOnlyList<Guid> ObjectIds);
-// Measured and Limit share the rule's unit: millimetres for size, overflow and overlap depth, degrees
-// for reading direction and a count for crossings. Revision is the document revision the finding was
+// Measured and Limit share Unit: "mm" for text size, overflow, clipping, overlap depth and shared wire length,
+// "degrees" for reading direction, and "count" for crossings, joined signals and visible, annotated or present
+// reference designators (measured 0 against a required 1). Only the two Unavailable notices, which say a
+// measurement could not be made, carry no measurement. Revision is the document revision the finding was
 // measured at; SheetName is the human-readable sheet-instance path.
 public sealed record PresentationFinding(string Rule, PresentationSeverity Severity, string SheetPath,
     IReadOnlyList<Guid> ObjectIds, PresentationBounds? Bounds, decimal? Measured, decimal? Limit, string Message,
     string? SignalKey = null, IReadOnlyList<PresentationLocation>? Locations = null, DocumentRevision? Revision = null,
-    string? SheetName = null);
+    string? SheetName = null, string? Unit = null);
+public static class PresentationUnits
+{
+    public const string Millimetres = "mm";
+    public const string Degrees = "degrees";
+    public const string Count = "count";
+}
 // Every sheet instance the report covers, so a missing sheet is visible rather than silently clean.
 public sealed record PresentationSheetCoverage(string SheetPath, string? SheetName, int Objects, int Wires);
 public sealed record PresentationReport(Guid DocumentId, DocumentRevision Revision, bool CoverageComplete,
@@ -95,14 +103,14 @@ public static class PresentationVerifier
                 item.FullBounds.Validate(); item.ClipBounds?.Validate(); item.TextBounds?.Validate();
                 if (item.Visible && !sheet.PageBounds.Contains(item.FullBounds))
                     Add("page_overflow", PresentationSeverity.Error, [item.Id], item.FullBounds,
-                        Millimetres(Outside(sheet.PageBounds, item.FullBounds)), 0m,
+                        Millimetres(Outside(sheet.PageBounds, item.FullBounds)), 0m, PresentationUnits.Millimetres,
                         "Rendered content extends beyond this sheet's page.");
                 bool clipped = item.ClipBounds is not null && !item.ClipBounds.Contains(item.FullBounds);
                 if (item.Visible && item.Kind == PresentationObjectKind.Image
                     && (clipped || !sheet.PageBounds.Contains(item.FullBounds)))
                     Add("image_cropped", PresentationSeverity.Error, [item.Id], item.FullBounds,
                         Millimetres(Math.Max(Outside(sheet.PageBounds, item.FullBounds),
-                            item.ClipBounds is null ? 0 : Outside(item.ClipBounds, item.FullBounds))), 0m,
+                            item.ClipBounds is null ? 0 : Outside(item.ClipBounds, item.FullBounds))), 0m, PresentationUnits.Millimetres,
                         "Part of the image is outside its clip region or page.");
                 if (item.Visible && item.Kind is PresentationObjectKind.Text or PresentationObjectKind.ReferenceDesignator)
                 {
@@ -110,24 +118,24 @@ public static class PresentationVerifier
                     {
                         if (!item.FullBounds.Contains(textBounds))
                             Add("text_container_overflow", PresentationSeverity.Warning, [item.Id], textBounds,
-                                Millimetres(Outside(item.FullBounds, textBounds)), 0m,
+                                Millimetres(Outside(item.FullBounds, textBounds)), 0m, PresentationUnits.Millimetres,
                                 "Native text bounds extend beyond their container; enlarge the box or adjust the text layout.");
                         if (!sheet.PageBounds.Contains(textBounds) && sheet.PageBounds.Contains(item.FullBounds))
                             Add("page_overflow", PresentationSeverity.Error, [item.Id], textBounds,
-                                Millimetres(Outside(sheet.PageBounds, textBounds)), 0m,
+                                Millimetres(Outside(sheet.PageBounds, textBounds)), 0m, PresentationUnits.Millimetres,
                                 "Text extends beyond this sheet's page even though its container fits.");
                     }
                     if (item.TextHeightMm is not decimal height || height <= 0)
-                        Add("text_metrics_missing", PresentationSeverity.Unavailable, [item.Id], item.FullBounds, null, null,
+                        Add("text_metrics_missing", PresentationSeverity.Unavailable, [item.Id], item.FullBounds, null, null, null,
                             "Effective native text height was not supplied.");
                     else if (height < policy.MinimumTextHeightMm || height > policy.MaximumTextHeightMm)
                         Add("text_size", PresentationSeverity.Warning, [item.Id], item.FullBounds, height,
                             height < policy.MinimumTextHeightMm ? policy.MinimumTextHeightMm : policy.MaximumTextHeightMm,
-                            "Text height is outside the selected presentation policy.");
+                            PresentationUnits.Millimetres, "Text height is outside the selected presentation policy.");
                     if (item.ReadingAngleDegrees is decimal angle && !string.IsNullOrWhiteSpace(item.Text)
                         && ReadingAngle(angle) is var reading && reading > PresentationPolicy.MaximumReadingAngleDegrees)
                         Add("text_orientation", PresentationSeverity.Warning, [item.Id], item.FullBounds, reading,
-                            PresentationPolicy.MaximumReadingAngleDegrees,
+                            PresentationPolicy.MaximumReadingAngleDegrees, PresentationUnits.Degrees,
                             reading < 270m
                                 ? "Text is painted upside down; rotate it to read left to right or bottom to top."
                                 : "Text is painted reading top to bottom; rotate it to read left to right or bottom to top.");
@@ -136,23 +144,31 @@ public static class PresentationVerifier
             var objects = sheet.Objects.ToDictionary(o => o.Id);
             if (sheet.RequiredDesignators.Distinct().Count() != sheet.RequiredDesignators.Count
                 || sheet.RequiredDesignators.Contains(Guid.Empty)) throw Invalid("Invalid required designator identities.");
+            // A designator that cannot be read is measured as 0 visible (present, annotated) designators against the 1
+            // required; one the page edge or a clip cuts off is measured by how far its painted text reaches beyond it.
             foreach (var id in sheet.RequiredDesignators)
             {
                 if (!objects.TryGetValue(id, out var field))
-                    Add("designator_missing", PresentationSeverity.Error, [id], null, null, null,
+                    Add("designator_missing", PresentationSeverity.Error, [id], null, 0m, 1m, PresentationUnits.Count,
                         "Required reference designator is absent from the rendering facts.");
                 else if (field.Kind != PresentationObjectKind.ReferenceDesignator)
                     throw Invalid("Required designator identity resolves to another object kind.");
-                else if (!field.Visible || string.IsNullOrWhiteSpace(field.Text)
-                    || !sheet.PageBounds.Contains(field.FullBounds)
-                    || (field.ClipBounds is not null && !field.ClipBounds.Contains(field.FullBounds)))
-                    Add("designator_not_visible", PresentationSeverity.Error, [id], field.FullBounds, null, null,
-                        string.IsNullOrWhiteSpace(field.Text) ? "Required reference designator is empty."
-                        : !field.Visible ? $"Required reference designator '{field.Text}' is hidden."
-                        : !sheet.PageBounds.Contains(field.FullBounds) ? $"Required reference designator '{field.Text}' is cut off by the page edge."
-                        : $"Required reference designator '{field.Text}' is clipped.");
+                else if (string.IsNullOrWhiteSpace(field.Text))
+                    Add("designator_not_visible", PresentationSeverity.Error, [id], field.FullBounds, 0m, 1m, PresentationUnits.Count,
+                        "Required reference designator is empty.");
+                else if (!field.Visible)
+                    Add("designator_not_visible", PresentationSeverity.Error, [id], field.FullBounds, 0m, 1m, PresentationUnits.Count,
+                        $"Required reference designator '{field.Text}' is hidden.");
+                else if (!sheet.PageBounds.Contains(field.FullBounds))
+                    Add("designator_not_visible", PresentationSeverity.Error, [id], field.FullBounds,
+                        Millimetres(Outside(sheet.PageBounds, field.FullBounds)), 0m, PresentationUnits.Millimetres,
+                        $"Required reference designator '{field.Text}' is cut off by the page edge.");
+                else if (field.ClipBounds is not null && !field.ClipBounds.Contains(field.FullBounds))
+                    Add("designator_not_visible", PresentationSeverity.Error, [id], field.FullBounds,
+                        Millimetres(Outside(field.ClipBounds, field.FullBounds)), 0m, PresentationUnits.Millimetres,
+                        $"Required reference designator '{field.Text}' is clipped.");
                 else if (field.Text.Contains('?', StringComparison.Ordinal))
-                    Add("designator_unannotated", PresentationSeverity.Error, [id], field.FullBounds, null, null,
+                    Add("designator_unannotated", PresentationSeverity.Error, [id], field.FullBounds, 0m, 1m, PresentationUnits.Count,
                         $"Reference designator '{field.Text}' is not annotated; annotate the schematic so every symbol has its own designator.");
             }
             CheckOverlaps(sheet.Objects);
@@ -165,7 +181,8 @@ public static class PresentationVerifier
                 var bounds = WireBounds(wire);
                 if (!objects.ContainsKey(wire.Id) && !sheet.PageBounds.Contains(bounds))
                     Add("page_overflow", PresentationSeverity.Error, [wire.Id], bounds,
-                        Millimetres(Outside(sheet.PageBounds, bounds)), 0m, "Wire geometry extends beyond this sheet's page.");
+                        Millimetres(Outside(sheet.PageBounds, bounds)), 0m, PresentationUnits.Millimetres,
+                        "Wire geometry extends beyond this sheet's page.");
             }
             var crossings = new Dictionary<string, Dictionary<ExactIntersection, HashSet<Guid>>>(StringComparer.Ordinal);
             var ordered = sheet.Wires.OrderBy(w => Math.Min(w.Start.XNm, w.End.XNm)).ThenBy(w => w.Id).ToArray();
@@ -178,15 +195,18 @@ public static class PresentationVerifier
                 var crossing = Intersect(first, second);
                 if (crossing is null)
                 {
+                    // Measured as the length both signals share, against none allowed.
                     if (CollinearOverlap(first, second) is PresentationBounds overlap)
                         Add("overlapping_signals", PresentationSeverity.Warning, [first.Id, second.Id], overlap,
-                            null, null, "Unrelated signals share a segment, making connectivity visually ambiguous.");
+                            Millimetres(Math.Max(overlap.RightNm - overlap.LeftNm, overlap.BottomNm - overlap.TopNm)), 0m,
+                            PresentationUnits.Millimetres, "Unrelated signals share a segment, making connectivity visually ambiguous.");
                     continue;
                 }
                 if (sheet.Junctions.Any(p => crossing == ExactIntersection.At(p)))
                 {
-                    Add("junction_net_conflict", PresentationSeverity.Error, [first.Id, second.Id], crossing.Bounds, null, null,
-                        "A junction joins wires carrying different native signal identities; reconcile connectivity.");
+                    // Measured as the number of distinct signals the junction joins, against the one it may join.
+                    Add("junction_net_conflict", PresentationSeverity.Error, [first.Id, second.Id], crossing.Bounds, 2m, 1m,
+                        PresentationUnits.Count, "A junction joins wires carrying different native signal identities; reconcile connectivity.");
                     continue;
                 }
                 Count(first.SignalKey, crossing, first.Id, second.Id);
@@ -198,7 +218,7 @@ public static class PresentationVerifier
                         locations.Values.SelectMany(v => v).Distinct().Order().ToArray(),
                         new(locations.Keys.Min(p => p.Bounds.LeftNm), locations.Keys.Min(p => p.Bounds.TopNm),
                             locations.Keys.Max(p => p.Bounds.RightNm), locations.Keys.Max(p => p.Bounds.BottomNm)),
-                        locations.Count, policy.MaximumCrossingsPerSignal,
+                        locations.Count, policy.MaximumCrossingsPerSignal, PresentationUnits.Count,
                         "Signal crosses unrelated wiring too many times on this sheet.", signal,
                         locations.OrderBy(p => p.Key.Bounds.LeftNm).ThenBy(p => p.Key.Bounds.TopNm)
                             .ThenBy(p => p.Key.Bounds.RightNm).ThenBy(p => p.Key.Bounds.BottomNm)
@@ -234,20 +254,21 @@ public static class PresentationVerifier
                     Guid[] pair = first.Id.CompareTo(second.Id) < 0 ? [first.Id, second.Id] : [second.Id, first.Id];
                     if (first.Role == PresentationRole.Field || second.Role == PresentationRole.Field)
                         Add("field_overlap", PresentationSeverity.Warning, pair, shared, depth, policy.OverlapToleranceMm,
+                            PresentationUnits.Millimetres,
                             "A field's painted text overlaps another symbol, sheet, label or field; move the field or the object it covers.");
                     else if (first.Role == PresentationRole.Label || second.Role == PresentationRole.Label)
                         Add("label_overlap", PresentationSeverity.Warning, pair, shared, depth, policy.OverlapToleranceMm,
-                            "A label overlaps a symbol, sheet or another label; move the label clear of it.");
+                            PresentationUnits.Millimetres, "A label overlaps a symbol, sheet or another label; move the label clear of it.");
                     else
                         Add("body_overlap", PresentationSeverity.Error, pair, shared, depth, policy.OverlapToleranceMm,
-                            "Two symbol or sheet bodies overlap; move one of them clear of the other.");
+                            PresentationUnits.Millimetres, "Two symbol or sheet bodies overlap; move one of them clear of the other.");
                 }
             }
             void Add(string rule, PresentationSeverity severity, IReadOnlyList<Guid> objects,
-                PresentationBounds? bounds, decimal? measured, decimal? limit, string message, string? signal = null,
+                PresentationBounds? bounds, decimal? measured, decimal? limit, string? unit, string message, string? signal = null,
                 IReadOnlyList<PresentationLocation>? locations = null) =>
                 findings.Add(new(rule, severity, path, objects, bounds, measured, limit, message, signal, locations,
-                    snapshot.Revision, sheet.Name));
+                    snapshot.Revision, sheet.Name, unit));
         }
         if (snapshot.Sheets.Count == 0) throw Invalid("At least one sheet is required.");
         return new(snapshot.DocumentId, snapshot.Revision,

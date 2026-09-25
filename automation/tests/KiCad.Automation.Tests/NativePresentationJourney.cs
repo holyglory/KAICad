@@ -311,6 +311,7 @@ public sealed partial class NativeSessionTests
         batch.Operations.Clear();
         foreach (var id in created) batch.Operations.Add(new SchematicItemOperation { Remove = id });
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+        await VerifyRepeatedSheetPresentation(client, document, originalSymbol, policy, evidence, instanceId, token);
 
         SchematicLine AddWire(int x1, int y1, int x2, int y2, string name)
         {
@@ -325,5 +326,94 @@ public sealed partial class NativeSessionTests
             batch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(label) });
             return wire;
         }
+    }
+
+    // Hierarchy mode on this session's repeated sheets (ledger p0cd7a559e13ec029). The two instances of one shared child
+    // file are measured separately, each with its own references: a copy of the fixture symbol added to the shared child
+    // with an annotated reference on the first instance and the unannotated "?" form on the second is reported on the
+    // second instance only. A check started from either child instance covers only that instance. A revision observed
+    // before the design changed, and a sheet instance KiCad has not loaded, are refused by name.
+    private static async Task VerifyRepeatedSheetPresentation(NativeClient client, DocumentSpecifier document,
+        SchematicSymbolInstance template, PresentationPolicy policy, string evidence, string instanceId, CancellationToken token)
+    {
+        static string Key(DocumentSpecifier instance) => string.Join('/', instance.SheetPath.Path.Select(p => p.Value));
+        var before = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(
+            new() { Document = document.Clone() }, token);
+        var repeated = before.Data.Instances.Where(s => s.Metadata.Document.SheetPath.Path.Count > 1)
+            .GroupBy(s => s.Metadata.ScreenId.Value).First(g => g.Count() >= 2)
+            .Select(s => s.Metadata.Document).OrderBy(Key, StringComparer.Ordinal).Take(2).ToArray();
+        DocumentSpecifier first = repeated[0], second = repeated[1];
+        string prefix = new(template.ReferenceField.Text.Text_.TakeWhile(char.IsLetter).ToArray());
+        Assert.IsFalse(string.IsNullOrEmpty(prefix), "The fixture symbol's reference starts with its designator letters.");
+        string annotated = prefix + "900", unannotated = prefix + "?";
+
+        var symbol = template.Clone();
+        symbol.Id = new KIID { Value = Guid.NewGuid().ToString("D") };
+        long dx = 100_000_000 - symbol.Position.XNm, dy = 100_000_000 - symbol.Position.YNm;
+        foreach (var field in new[] { symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField }
+                     .Concat(symbol.UserFields).Where(f => f?.Text?.Position is not null))
+        {
+            field.Text.Position.XNm += dx; field.Text.Position.YNm += dy;
+        }
+        symbol.Position = new Vector2 { XNm = 100_000_000, YNm = 100_000_000 };
+        symbol.Path = first.SheetPath.Clone();
+        symbol.Locked = LockedState.LsUnlocked;
+        symbol.ReferenceField.Text.Text_ = annotated;
+        symbol.ReferenceField.Visible = true;
+        if (symbol.SeparatePinIdentities)
+            foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                if (pin.LibraryPinId is null) continue;
+                pin.Id = new KIID { Value = Guid.NewGuid().ToString("D") };
+                child.Item = Any.Pack(pin);
+            }
+        symbol.InstanceRecords = new();
+        foreach (var (instance, reference) in new[] { (first, annotated), (second, unannotated) })
+        {
+            var record = new SymbolSheetRecord { ProjectName = document.Project.Name, Reference = reference, Unit = symbol.Unit?.Unit ?? 1, Variants = new() };
+            record.Path.Add(instance.SheetPath.Path.Select(p => p.Clone()));
+            symbol.InstanceRecords.Records.Add(record);
+        }
+        var batch = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Presentation per-instance reference fixture" };
+        batch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(symbol) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+        Guid owner = Guid.Parse(symbol.Id.Value);
+
+        IEnumerable<PresentationFinding> About(NativePresentationCheck check, DocumentSpecifier instance)
+        {
+            var reference = check.RepairTargets.Single(t => t.OwnerId == owner && t.FieldName == "Reference" && t.SheetPath == Key(instance));
+            return check.Report.Findings.Where(f => f.SheetPath == Key(instance) && f.ObjectIds.Contains(reference.ObjectId));
+        }
+        var whole = await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-presentation-repeated-sheets.json"),
+            System.Text.Json.JsonSerializer.Serialize(whole), token);
+        CollectionAssert.AreEquivalent(before.Data.Instances.Select(s => Key(s.Metadata.Document)).ToArray(),
+            whole.Report.Sheets!.Select(s => s.SheetPath).ToArray(), "Every loaded sheet instance is checked, each repeated instance on its own.");
+        Assert.IsFalse(About(whole, first).Any(), $"The first instance shows '{annotated}' and reports nothing about it: "
+            + string.Join("; ", About(whole, first).Select(f => f.Rule + " " + f.Message)));
+        var reported = About(whole, second).Single();
+        Assert.AreEqual("designator_unannotated", reported.Rule);
+        StringAssert.Contains(reported.Message, "'" + unannotated + "'");
+        Assert.AreEqual(0m, reported.Measured); Assert.AreEqual(1m, reported.Limit); Assert.AreEqual(PresentationUnits.Count, reported.Unit);
+
+        // Started from one child instance, the check covers that instance only, with that instance's own reference.
+        foreach (var (instance, expectedRules) in new[] { (first, Array.Empty<string>()), (second, new[] { "designator_unannotated" }) })
+        {
+            var branch = await NativePresentationChecks.CheckHierarchyAsync(client, instance, policy, token);
+            CollectionAssert.AreEqual(new[] { Key(instance) }, branch.Report.Sheets!.Select(s => s.SheetPath).ToArray());
+            CollectionAssert.AreEqual(expectedRules, About(branch, instance).Select(f => f.Rule).ToArray(), Key(instance));
+        }
+
+        // The revision read before the symbol was added no longer holds, and a sheet instance below a leaf is not loaded.
+        Assert.AreEqual("presentation_revision_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            NativePresentationChecks.CheckHierarchyAsync(client, document, policy, token, before.Revision))).Code);
+        var absent = second.Clone(); absent.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+        Assert.AreEqual("presentation_sheet_not_loaded", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            NativePresentationChecks.CheckHierarchyAsync(client, absent, policy, token))).Code);
+
+        batch.Operations.Clear();
+        batch.Operations.Add(new SchematicItemOperation { Remove = symbol.Id.Clone() });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
     }
 }

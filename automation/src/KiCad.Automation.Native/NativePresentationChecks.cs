@@ -73,14 +73,19 @@ public static class NativePresentationChecks
         return issues;
     }
 
-    /// <summary>Check the sheet KiCad displays, from the facts of the displayed sheet only.</summary>
+    /// <summary>Check the sheet KiCad displays, from the facts of the displayed sheet only. With
+    /// <paramref name="expectedRevision"/>, the check is refused (presentation_revision_changed) unless KiCad
+    /// measured exactly that document revision.</summary>
     public static async Task<NativePresentationCheck> CheckAsync(NativeClient client, DocumentSpecifier document,
-        PresentationPolicy policy, CancellationToken cancellationToken = default)
+        PresentationPolicy policy, CancellationToken cancellationToken = default, Protocol.DocumentRevision? expectedRevision = null)
     {
+        RequireRevision(expectedRevision);
         var facts = await client.InvokeAsync<ReadSchematicPresentationFacts, SchematicPresentationFacts>(
             new() { Document = document }, cancellationToken);
         if (!facts.Document.Equals(document) || facts.Document.SheetPath is null || facts.Document.SheetPath.Path.Count == 0)
             throw Invalid("Native presentation facts identify another or missing sheet.");
+        if (expectedRevision is not null && !expectedRevision.Equals(facts.Revision))
+            throw RevisionChanged(expectedRevision, facts.Revision);
         var targets = new List<PresentationRepairTarget>();
         var sheet = Sheet(facts, perInstance: false, targets);
         var revision = new KiCad.Automation.Model.DocumentRevision(facts.Revision.Epoch, facts.Revision.Sequence);
@@ -93,26 +98,42 @@ public static class NativePresentationChecks
     /// <summary>Check the sheet instance <paramref name="document"/> names and every loaded sheet instance below it
     /// (the whole hierarchy for the root sheet), each measured by KiCad offscreen at its own instance: its own
     /// references, units and field text, painted field glyphs and native nets. Every sheet is measured at one
-    /// document revision, which each finding names; KiCad refuses the measurement if the design changes meanwhile.
-    /// Neither the design nor the displayed sheet changes.</summary>
+    /// document revision, which each finding names: <paramref name="expectedRevision"/> when the caller gives the
+    /// revision it observed, otherwise the revision KiCad holds when the check starts. If KiCad holds another revision
+    /// (the design changed before or during the check) the check is refused with presentation_revision_changed; a
+    /// sheet instance KiCad has not loaded is refused with presentation_sheet_not_loaded. Neither the design nor the
+    /// displayed sheet changes.</summary>
     public static async Task<NativePresentationCheck> CheckHierarchyAsync(NativeClient client, DocumentSpecifier document,
-        PresentationPolicy policy, CancellationToken cancellationToken = default)
+        PresentationPolicy policy, CancellationToken cancellationToken = default, Protocol.DocumentRevision? expectedRevision = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(document);
         if (document.SheetPath is null || document.SheetPath.Path.Count == 0)
             throw Invalid("An explicit sheet-instance path is required.");
-        var hierarchy = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(
-            new() { Document = document.Clone() }, cancellationToken);
-        if (hierarchy.Revision is null || string.IsNullOrWhiteSpace(hierarchy.Revision.Epoch) || hierarchy.Data is null)
-            throw Invalid("The native hierarchy has no identified revision.");
+        RequireRevision(expectedRevision);
+        // Read the hierarchy from its root sheet, which KiCad always has loaded, so that a request naming a sheet instance
+        // KiCad has not loaded is answered as exactly that rather than as a refused read.
+        var root = document.Clone();
+        root.SheetPath.Path.Clear();
+        root.SheetPath.Path.Add(document.SheetPath.Path[0].Clone());
+        async Task<SchematicHierarchyDataSnapshot> Hierarchy()
+        {
+            var read = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(
+                new() { Document = root.Clone() }, cancellationToken);
+            if (read.Revision is null || string.IsNullOrWhiteSpace(read.Revision.Epoch) || read.Data is null)
+                throw Invalid("The native hierarchy has no identified revision.");
+            return read;
+        }
+        var hierarchy = await Hierarchy();
+        var revision = expectedRevision ?? hierarchy.Revision;
         var prefix = document.SheetPath.Path.Select(id => id.Value).ToArray();
         var instances = hierarchy.Data.Instances.Select(s => s.Metadata?.Document)
             .Where(d => d?.SheetPath is not null && d.SheetPath.Path.Count >= prefix.Length
                 && d.SheetPath.Path.Take(prefix.Length).Select(id => id.Value).SequenceEqual(prefix))
             .Select(d => d!).ToArray();
         if (!instances.Any(d => d.SheetPath.Path.Count == prefix.Length))
-            throw new AutomationException("presentation_sheet_not_loaded", "The requested sheet instance is not loaded in KiCad.");
+            throw new AutomationException("presentation_sheet_not_loaded",
+                "KiCad has not loaded the sheet instance " + string.Join('/', prefix) + "; name a sheet instance of the open hierarchy.");
         var sheets = new List<PresentationSheet>();
         var targets = new List<PresentationRepairTarget>();
         var limitations = new List<string>();
@@ -124,27 +145,41 @@ public static class NativePresentationChecks
             {
                 measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
                 {
-                    Document = instance.Clone(), ExpectedRevision = hierarchy.Revision.Clone(), IncludePresentation = true
+                    Document = instance.Clone(), ExpectedRevision = revision.Clone(), IncludePresentation = true
                 }, cancellationToken);
             }
-            catch (NativeApiException error) when (error.Message.Contains("revision", StringComparison.OrdinalIgnoreCase)
-                || error.Message.Contains("changed", StringComparison.OrdinalIgnoreCase))
+            catch (NativeApiException)
             {
-                throw new AutomationException("presentation_revision_changed",
-                    "The design changed while its sheets were measured; check again. " + error.Message);
+                // KiCad measures only the exact revision it holds. Whether the design moved on is decided from the
+                // revision KiCad reports now, never from the wording of its refusal; any other refusal stands as it is.
+                var now = (await Hierarchy()).Revision;
+                if (!now.Equals(revision)) throw RevisionChanged(revision, now);
+                throw;
             }
             var facts = measured.Presentation;
-            if (facts is null || !facts.Document.Equals(instance) || !measured.Revision.Equals(hierarchy.Revision)
-                || !facts.Revision.Equals(hierarchy.Revision))
+            if (facts is null || !facts.Document.Equals(instance) || !measured.Revision.Equals(revision)
+                || !facts.Revision.Equals(revision))
                 throw Invalid("Native presentation facts identify another sheet or revision, or this KiCad build cannot measure them.");
             sheets.Add(Sheet(facts, perInstance: true, targets));
             limitations.AddRange(facts.Limitations.Where(l => !limitations.Contains(l, StringComparer.Ordinal)));
         }
-        var revision = new KiCad.Automation.Model.DocumentRevision(hierarchy.Revision.Epoch, hierarchy.Revision.Sequence);
-        var snapshot = new PresentationSnapshot(Identity(document.SheetPath.Path[0]), revision,
+        // Every measurement succeeded at the checked revision, so the sheet list read at the start belongs to it too.
+        if (!hierarchy.Revision.Equals(revision)) throw RevisionChanged(revision, hierarchy.Revision);
+        var reported = new KiCad.Automation.Model.DocumentRevision(revision.Epoch, revision.Sequence);
+        var snapshot = new PresentationSnapshot(Identity(document.SheetPath.Path[0]), reported,
             limitations.Count == 0 && sheets.Count > 0, sheets);
         return new(PresentationVerifier.Verify(snapshot, policy), targets, limitations);
     }
+
+    private static void RequireRevision(Protocol.DocumentRevision? expected)
+    {
+        if (expected is not null && string.IsNullOrWhiteSpace(expected.Epoch))
+            throw Invalid("An expected document revision names its document epoch.");
+    }
+
+    private static AutomationException RevisionChanged(Protocol.DocumentRevision checkedAt, Protocol.DocumentRevision now) =>
+        new("presentation_revision_changed", $"KiCad holds document revision {now.Epoch}:{now.Sequence}, not the revision "
+            + $"{checkedAt.Epoch}:{checkedAt.Sequence} the check measures; the design changed, so read it again and check the current revision.");
 
     // Facts from ReadSchematicPresentationFacts (the displayed sheet) predate the per-instance fields: every
     // reference designator is required and no object has a role, glyphs or reading direction. Per-instance

@@ -47,9 +47,16 @@ public sealed class PresentationVerificationTests
         CollectionAssert.AreEqual(new[] { tiny }, font.ObjectIds.ToArray());
         Assert.IsTrue(report.Findings.Any(f => f.Rule == "page_overflow" && f.ObjectIds.Contains(image)));
         Assert.IsTrue(report.Findings.Any(f => f.Rule == "image_cropped" && f.ObjectIds.Contains(image)));
-        Assert.IsTrue(report.Findings.Any(f => f.Rule == "designator_not_visible" && f.ObjectIds.Contains(hidden)));
-        Assert.IsTrue(report.Findings.Any(f => f.Rule == "designator_missing" && f.ObjectIds.Contains(missing)));
+        // A designator that cannot be read is measured as 0 against the 1 required, in designators.
+        var notShown = report.Findings.Single(f => f.Rule == "designator_not_visible" && f.ObjectIds.Contains(hidden));
+        Assert.AreEqual(0m, notShown.Measured); Assert.AreEqual(1m, notShown.Limit); Assert.AreEqual(PresentationUnits.Count, notShown.Unit);
+        var absent = report.Findings.Single(f => f.Rule == "designator_missing" && f.ObjectIds.Contains(missing));
+        Assert.AreEqual(0m, absent.Measured); Assert.AreEqual(1m, absent.Limit); Assert.AreEqual(PresentationUnits.Count, absent.Unit);
+        Assert.AreEqual(PresentationUnits.Millimetres, font.Unit);
+        Assert.AreEqual(0.000001m, report.Findings.Single(f => f.Rule == "image_cropped").Measured);
         Assert.IsTrue(report.Findings.All(f => f.SheetPath == sheet.SheetPath[0].ToString("D")));
+        Assert.IsTrue(report.Findings.All(f => f.Measured is not null && f.Limit is not null && f.Unit is not null),
+            "Every measurable finding carries its measured value, threshold and unit.");
     }
 
     [TestMethod]
@@ -63,8 +70,22 @@ public sealed class PresentationVerificationTests
             Objects = [image, reference], RequiredDesignators = [reference.Id]
         }), Policy);
         Assert.IsTrue(report.Findings.Any(f => f.Rule == "image_cropped"));
-        Assert.IsTrue(report.Findings.Any(f => f.Rule == "designator_not_visible"));
+        // Clipped by 1 nm: measured by how far the painted text reaches beyond its clip.
+        var clipped = report.Findings.Single(f => f.Rule == "designator_not_visible");
+        Assert.AreEqual(0.000001m, clipped.Measured); Assert.AreEqual(0m, clipped.Limit); Assert.AreEqual(PresentationUnits.Millimetres, clipped.Unit);
+        StringAssert.Contains(clipped.Message, "clipped");
         Assert.IsFalse(report.Findings.Any(f => f.Rule == "page_overflow"));
+        // Cut off by the left page edge by 5 nm, and empty.
+        var cut = Text(Guid.NewGuid()) with { FullBounds = new(-5, 10, 20, 20) };
+        var edge = PresentationVerifier.Verify(Snapshot(Sheet() with { Objects = [cut], RequiredDesignators = [cut.Id] }), Policy)
+            .Findings.Single(f => f.Rule == "designator_not_visible");
+        Assert.AreEqual(0.000005m, edge.Measured); Assert.AreEqual(0m, edge.Limit); Assert.AreEqual(PresentationUnits.Millimetres, edge.Unit);
+        StringAssert.Contains(edge.Message, "page edge");
+        var blank = Text(Guid.NewGuid()) with { Text = " " };
+        var empty = PresentationVerifier.Verify(Snapshot(Sheet() with { Objects = [blank], RequiredDesignators = [blank.Id] }), Policy)
+            .Findings.Single();
+        Assert.AreEqual("designator_not_visible", empty.Rule);
+        Assert.AreEqual(0m, empty.Measured); Assert.AreEqual(1m, empty.Limit); Assert.AreEqual(PresentationUnits.Count, empty.Unit);
     }
 
     [TestMethod]
@@ -135,6 +156,8 @@ public sealed class PresentationVerificationTests
         }), Policy with { MaximumCrossingsPerSignal = 0 }).Clear);
         report = PresentationVerifier.Verify(Snapshot(sheet with { Junctions = [new(20, 10)] }), Policy);
         Assert.IsTrue(report.Findings.All(f => f.Rule == "junction_net_conflict"));
+        Assert.IsTrue(report.Findings.All(f => f.Measured == 2 && f.Limit == 1 && f.Unit == PresentationUnits.Count),
+            "A conflicting junction is measured by the distinct signals it joins against the one allowed.");
         Assert.IsFalse(report.Clear);
     }
 
@@ -157,7 +180,10 @@ public sealed class PresentationVerificationTests
         var sheet = Sheet() with { Wires = [first, second] };
         var findings = PresentationVerifier.Verify(Snapshot(sheet), Policy).Findings;
         Assert.AreEqual(first.Id, findings.Single(f => f.Rule == "page_overflow").ObjectIds.Single());
-        Assert.AreEqual(new PresentationBounds(10, 20, 30, 20), findings.Single(f => f.Rule == "overlapping_signals").Bounds);
+        var shared = findings.Single(f => f.Rule == "overlapping_signals");
+        Assert.AreEqual(new PresentationBounds(10, 20, 30, 20), shared.Bounds);
+        Assert.AreEqual(0.00002m, shared.Measured); Assert.AreEqual(0m, shared.Limit); Assert.AreEqual(PresentationUnits.Millimetres, shared.Unit);
+        Assert.AreEqual(0.00001m, findings.Single(f => f.Rule == "page_overflow").Measured);
         var valid = sheet with { PageBounds = new(-10, 0, 40, 40), Wires = [first, second with { SignalKey = first.SignalKey }] };
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid), Policy).Clear);
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid with { Wires = [first, second with { Start = new(30, 20) }] }), Policy).Clear);
@@ -276,7 +302,8 @@ public sealed class PresentationVerificationTests
         foreach (var (text, unannotated) in new[] { ("R?", true), ("U?A", true), ("U1", false), ("U5A", false) })
         {
             var report = VerifyLayout(clean.All.Select(o => o == clean.U1Reference ? o with { Text = text } : o), required: [clean.U1Reference.Id]);
-            Assert.AreEqual(unannotated, report.Findings.Any(f => f.Rule == "designator_unannotated" && f.ObjectIds.Single() == clean.U1Reference.Id), text);
+            Assert.AreEqual(unannotated, report.Findings.Any(f => f.Rule == "designator_unannotated" && f.ObjectIds.Single() == clean.U1Reference.Id
+                && f.Measured == 0 && f.Limit == 1 && f.Unit == PresentationUnits.Count), text);
             Assert.AreEqual(unannotated ? 1 : 0, report.Findings.Count, text);
         }
         // A power symbol's hidden '#PWR' reference is not a required designator.

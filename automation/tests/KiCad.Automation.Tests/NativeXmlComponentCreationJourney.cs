@@ -264,7 +264,7 @@ public sealed partial class NativeSessionTests
 
         // Presentation findings across every sheet instance of the created hierarchy, through the public MCP tool.
         var presentationFindings = await VerifyPsuCpuPresentationFindings(client, host, instanceId, document, expected, sheetPaths,
-            synchronized.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId), Evidence, token);
+            synchronized.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId), processId, display, Evidence, token);
 
         // The published XML is retained in the recovery record; the proof names it by length and SHA-256.
         await NativeKeyboard.CaptureAsync(display, Evidence("window.png"), token);
@@ -694,19 +694,25 @@ public sealed partial class NativeSessionTests
     // ---- presentation findings across a hierarchy (ledger p0cd7a559e13ec029) ----
 
     /// <summary>The created PSU/CPU hierarchy checked through the public kicad_schematic_check_presentation tool with
-    /// includeSubsheets, from the root sheet, while KiCad keeps displaying the root. First every sheet instance (root,
-    /// PSU, CPU, CPU_POWER) must report nothing. Then real defects are made on the PSU child sheet in one native batch:
-    /// U4 moved onto U3 (overlapping bodies), J1 moved past the left page edge (page overflow), U1's value turned upside
-    /// down, U2's reference hidden, R1's reference unannotated ("R?"), and a new wire crossing three unrelated wires,
-    /// each with its own label. The check must name exactly those defects on the PSU sheet path, with the revision, the
-    /// affected objects, the measured value and the threshold, and the untouched root, CPU and CPU_POWER sheets must still
-    /// report nothing. The defects are then undone, the hierarchy reports nothing again, and the saved sheets are reloaded
-    /// so the editor ends as it began. The PSU sheet is rendered offscreen before and after as evidence.</summary>
+    /// includeSubsheets, while KiCad keeps displaying the root. First every sheet instance (root, PSU, CPU, CPU_POWER)
+    /// must report nothing. Then real defects are made on the PSU child sheet in one native batch: U4 moved onto U3 and U2
+    /// (overlapping bodies), J1 moved past the left page edge (page overflow), U1's value turned upside down, U2's
+    /// reference hidden, R1's reference unannotated ("R?"), a new wire crossing three unrelated wires, and a label moved
+    /// onto U2's body. Beside them sit intentional patterns that must stay quiet: a label anchored exactly on a U3 pin end,
+    /// a power symbol with a hidden '#PWR01' reference whose pin ends exactly on a U1 pin end, and a global label with a
+    /// field. The report must list exactly the expected PSU findings, each with its objects, measured value, threshold and
+    /// unit, and nothing on the untouched root, CPU and CPU_POWER sheets. KiCad's own painted pixels then confirm the
+    /// measured field glyphs at 0, 90 and 180 degrees, on a symbol rotated 90 degrees and on a global label, drawn with the
+    /// renderer's default pen. A check started from the PSU child sheet reports the same findings, one started from CPU
+    /// covers only CPU and CPU_POWER, and a stale revision or an unloaded sheet is refused by name. KiCad's Undo shortcut
+    /// then removes the defects, the hierarchy reports nothing again, and the saved sheets are reloaded so the editor ends
+    /// as it began.</summary>
     private static async Task<object> VerifyPsuCpuPresentationFindings(NativeClient client, IMcpToolClient host, string instanceId,
         DocumentSpecifier root, PsuCpuExpectedNative expected, IReadOnlyDictionary<string, string> sheetPaths,
-        IReadOnlyDictionary<Guid, Guid> nativeSymbols, Func<string, string> evidence, CancellationToken token)
+        IReadOnlyDictionary<Guid, Guid> nativeSymbols, int processId, string display, Func<string, string> evidence, CancellationToken token)
     {
         const long Grid = 1_270_000, Tolerance = 500_000;
+        const string Mm = PresentationUnits.Millimetres, Degrees = PresentationUnits.Degrees, Count = PresentationUnits.Count;
         string Key(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(p => p.Value));
         Task<CheckedSchematicState> State() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
@@ -715,25 +721,39 @@ public sealed partial class NativeSessionTests
         var sheetNames = new Dictionary<string, string>(StringComparer.Ordinal)
             { ["ROOT"] = "/", ["PSU"] = "/PSU/", ["CPU"] = "/CPU/", ["CPU_POWER"] = "/CPU/CPU_POWER/" };
         CollectionAssert.AreEquivalent(sheetNames.Keys.ToArray(), sheetPaths.Keys.ToArray());
+        string[] allSheets = [.. sheetNames.Keys];
 
-        // One call of the public tool over STDIO. Checking never edits the design, its revision or the displayed sheet;
-        // the report covers every sheet instance at the revision KiCad holds, and each finding names both.
-        async Task<(JsonElement Findings, JsonElement Targets, JsonElement Limitations, CheckedSchematicState State)> Check(string name)
+        Task<JsonElement> Call(DocumentSpecifier start, KiCad.Automation.Protocol.DocumentRevision? expectedRevision, bool subsheets = true)
+        {
+            var arguments = new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentJson"] = JsonFormatter.Default.Format(start),
+                ["minimumTextHeightMm"] = 1m, ["maximumTextHeightMm"] = 3m, ["includeSubsheets"] = subsheets
+            };
+            if (expectedRevision is not null) arguments["expectedRevisionJson"] = JsonFormatter.Default.Format(expectedRevision);
+            return host.Tool("kicad_schematic_check_presentation", arguments);
+        }
+
+        // One call of the public tool over STDIO from `start`, which must cover exactly `sheets`. Checking never edits the
+        // design, its revision or the displayed sheet; the report names the revision KiCad holds and every finding names it
+        // too, with its sheet name and, whenever it measures something, the measured value, the threshold and their unit.
+        async Task<(JsonElement Findings, JsonElement Targets, JsonElement Limitations, CheckedSchematicState State)> Check(string name,
+            DocumentSpecifier start, IReadOnlyCollection<string> sheets, KiCad.Automation.Protocol.DocumentRevision? expectedRevision = null)
         {
             var state = await State();
             var displayed = await Displayed();
-            var result = await host.Tool("kicad_schematic_check_presentation", new { instanceId, documentJson = JsonFormatter.Default.Format(root),
-                minimumTextHeightMm = 1m, maximumTextHeightMm = 3m, includeSubsheets = true });
+            var result = await Call(start, expectedRevision);
             await File.WriteAllTextAsync(evidence("presentation-" + name + ".json"), result.GetRawText(), token);
             RequireToolSuccess(result);
             Assert.AreEqual(state, await State(), name + ": checking presentation changes neither the design nor its revision.");
             Assert.AreEqual(displayed, await Displayed(), name + ": checking presentation never changes the displayed sheet.");
             var check = result.GetProperty("structuredContent").GetProperty("check");
             var report = check.GetProperty("report");
-            var sheets = report.GetProperty("sheets").EnumerateArray().ToDictionary(s => s.GetProperty("sheetPath").GetString()!,
+            var covered = report.GetProperty("sheets").EnumerateArray().ToDictionary(s => s.GetProperty("sheetPath").GetString()!,
                 s => s.GetProperty("sheetName").GetString());
-            CollectionAssert.AreEquivalent(sheetPaths.Values.ToArray(), sheets.Keys.ToArray(), name + ": every sheet instance is checked.");
-            foreach (var (sheet, path) in sheetPaths) Assert.AreEqual(sheetNames[sheet], sheets[path], name);
+            CollectionAssert.AreEquivalent(sheets.Select(s => sheetPaths[s]).ToArray(), covered.Keys.ToArray(),
+                name + ": exactly the sheet instances from the start sheet down are checked.");
+            foreach (var sheet in sheets) Assert.AreEqual(sheetNames[sheet], covered[sheetPaths[sheet]], name);
             string epoch = state.State.Revision.Epoch; ulong sequence = state.State.Revision.Sequence;
             Assert.AreEqual(epoch, report.GetProperty("revision").GetProperty("epoch").GetString(), name);
             Assert.AreEqual(sequence, report.GetProperty("revision").GetProperty("sequence").GetUInt64(), name);
@@ -746,16 +766,32 @@ public sealed partial class NativeSessionTests
             {
                 Assert.AreEqual(epoch, finding.GetProperty("revision").GetProperty("epoch").GetString(), name);
                 Assert.AreEqual(sequence, finding.GetProperty("revision").GetProperty("sequence").GetUInt64(), name);
-                if (finding.GetProperty("sheetPath").GetString() is { Length: > 0 } path)
-                    Assert.AreEqual(sheets[path], finding.GetProperty("sheetName").GetString(), name);
+                if (finding.GetProperty("sheetPath").GetString() is not { Length: > 0 } path) continue;
+                Assert.AreEqual(covered[path], finding.GetProperty("sheetName").GetString(), name);
+                Assert.IsTrue(Number(finding, "measured") is not null && Number(finding, "limit") is not null
+                    && finding.GetProperty("unit").ValueKind == JsonValueKind.String,
+                    name + ": every finding names its measured value, threshold and unit: " + Describe([finding]));
             }
             return (findings, check.GetProperty("repairTargets"), check.GetProperty("limitations"), state);
+        }
+        // A refused check changes nothing and names why.
+        async Task<string> Refused(string name, DocumentSpecifier start, KiCad.Automation.Protocol.DocumentRevision? expectedRevision,
+            bool subsheets = true)
+        {
+            var state = await State();
+            var result = await Call(start, expectedRevision, subsheets);
+            await File.WriteAllTextAsync(evidence("presentation-" + name + ".json"), result.GetRawText(), token);
+            Assert.IsTrue(result.TryGetProperty("isError", out var error) && error.GetBoolean(), name + ": " + result.GetRawText());
+            Assert.AreEqual(state, await State(), name + ": a refused check changes nothing.");
+            using var body = JsonDocument.Parse(result.GetProperty("content")[0].GetProperty("text").GetString()!);
+            return body.RootElement.GetProperty("code").GetString()!;
         }
         static IEnumerable<JsonElement> On(JsonElement findings, string path) =>
             findings.EnumerateArray().Where(f => f.GetProperty("sheetPath").GetString() == path);
         static string Describe(IEnumerable<JsonElement> findings) => string.Join("; ", findings.Select(f => f.GetProperty("rule").GetString()
             + " " + f.GetProperty("sheetName").GetString() + " [" + string.Join(",", f.GetProperty("objectIds").EnumerateArray().Select(i => i.GetString())) + "] "
-            + f.GetProperty("measured") + "/" + f.GetProperty("limit") + " " + f.GetProperty("message").GetString()));
+            + f.GetProperty("measured") + "/" + f.GetProperty("limit") + " " + (f.TryGetProperty("unit", out var unit) ? unit.ToString() : "") + " "
+            + f.GetProperty("message").GetString()));
         static Guid[] Ids(JsonElement finding) => [.. finding.GetProperty("objectIds").EnumerateArray().Select(i => Guid.Parse(i.GetString()!))];
         static decimal? Number(JsonElement finding, string property) =>
             finding.GetProperty(property).ValueKind == JsonValueKind.Number ? finding.GetProperty(property).GetDecimal() : null;
@@ -765,51 +801,69 @@ public sealed partial class NativeSessionTests
             return new(bounds.GetProperty("leftNm").GetInt64(), bounds.GetProperty("topNm").GetInt64(),
                 bounds.GetProperty("rightNm").GetInt64(), bounds.GetProperty("bottomNm").GetInt64());
         }
+        static PresentationBounds Box(Box2 box) => new(box.Position.XNm, box.Position.YNm,
+            box.Position.XNm + box.Size.XNm, box.Position.YNm + box.Size.YNm);
+        static string Fixed(decimal value) => value.ToString("0.##########", System.Globalization.CultureInfo.InvariantCulture);
         // Field runtime identities are not persistent: find a field through its owner and field name in that same report.
         static Guid Field(JsonElement targets, string path, Guid owner, string name) => Guid.Parse(targets.EnumerateArray().Single(t =>
             t.GetProperty("sheetPath").GetString() == path && t.GetProperty("ownerId").GetString() == owner.ToString("D")
             && t.GetProperty("fieldName").GetString() == name).GetProperty("objectId").GetString()!);
+        // A finding as rule, objects (a field named by its owner and field name), measured value, threshold and unit.
+        static string[] Canonical(IEnumerable<JsonElement> findings, JsonElement targets)
+        {
+            var names = targets.EnumerateArray().Where(t => t.GetProperty("fieldName").ValueKind == JsonValueKind.String)
+                .ToDictionary(t => t.GetProperty("objectId").GetString()!, t => t.GetProperty("ownerId").GetString() + "." + t.GetProperty("fieldName").GetString());
+            return [.. findings.Select(f => f.GetProperty("rule").GetString() + " [" + string.Join(",", f.GetProperty("objectIds").EnumerateArray()
+                .Select(i => names.GetValueOrDefault(i.GetString()!, i.GetString()!)).Order(StringComparer.Ordinal)) + "] "
+                + Fixed(Number(f, "measured") ?? -1) + "/" + Fixed(Number(f, "limit") ?? -1) + " " + f.GetProperty("unit").GetString())
+                .Order(StringComparer.Ordinal)];
+        }
 
         // The created layout breaks none of the measured rules on any sheet instance: only the report-level coverage notice
         // remains. The drawing-sheet frame is not measured (a stated limitation), so this is not a readability certificate.
-        var clean = await Check("clean");
+        var clean = await Check("clean", root, allSheets);
         var unexpected = clean.Findings.EnumerateArray().Where(f => f.GetProperty("sheetPath").GetString() != "").ToArray();
         Assert.IsEmpty(unexpected, "The created PSU/CPU layout must report nothing on any sheet: " + Describe(unexpected));
         Assert.IsTrue(clean.Limitations.EnumerateArray().Any(l => l.GetString()!.Contains("drawing-sheet frame", StringComparison.Ordinal)),
             "What the check does not measure is stated with its result.");
 
         string psuPath = sheetPaths["PSU"];
-        var psu = clean.State.Electrical.Hierarchy.Data.Instances.Single(s => Key(s.Metadata.Document) == psuPath).Metadata.Document;
+        DocumentSpecifier Instance(string sheet) => clean.State.Electrical.Hierarchy.Data.Instances
+            .Single(s => Key(s.Metadata.Document) == sheetPaths[sheet]).Metadata.Document;
+        var psu = Instance("PSU");
         Guid Symbol(string reference) => nativeSymbols[expected.Symbols.Single(s => s.Sheet == "PSU" && s.Reference == reference).Occurrence];
         Guid j1 = Symbol("J1"), u1 = Symbol("U1"), r1 = Symbol("R1"), u2 = Symbol("U2"), u3 = Symbol("U3"), u4 = Symbol("U4");
-        // KiCad's own body measurement of this instance, at the observed revision, through the native primitive the tool uses.
+        // KiCad's own measurement of this instance, at the observed revision, through the native primitive the tool uses.
         var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
             { Document = psu.Clone(), ExpectedRevision = clean.State.State.Revision.Clone(), IncludePresentation = true }, token);
         Assert.AreEqual(psu, measured.Presentation.Document);
         Assert.AreEqual("/PSU/", measured.Presentation.SheetName);
-        PresentationBounds Body(Guid id)
-        {
-            var box = measured.Presentation.Objects.Single(o => o.Id.Value == id.ToString("D") && o.PresentationRole == "symbol").Bounds;
-            return new(box.Position.XNm, box.Position.YNm, box.Position.XNm + box.Size.XNm, box.Position.YNm + box.Size.YNm);
-        }
+        static PresentationBounds Body(SchematicPlacementGeometry facts, Guid id) => Box(facts.Presentation.Objects
+            .Single(o => o.Id.Value == id.ToString("D") && o.PresentationRole == "symbol").Bounds);
+        // The topmost visible pin of a symbol whose body lies in the given direction from its connection point.
+        SchematicPinAnchor Pin(Guid symbol, int towardBodyX, int towardBodyY) => measured.Obstacles.Single(o => o.Id.Value == symbol.ToString("D"))
+            .SymbolPins.Pins.Where(p => p.Visible && p.BodyDirectionX == towardBodyX && p.BodyDirectionY == towardBodyY)
+            .OrderBy(p => p.Position.YNm).ThenBy(p => p.Position.XNm).First();
         var query = new GetItemsById { Header = new ItemHeader { Document = psu.Clone() } };
         foreach (var id in new[] { j1, u1, r1, u2, u4 }) query.Items.Add(new KIID { Value = id.ToString("D") });
         var originals = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(query, token)).Items
             .Select(i => i.Unpack<SchematicSymbolInstance>()).ToDictionary(s => Guid.Parse(s.Id.Value));
         Assert.HasCount(5, originals);
-        static SchematicSymbolInstance Moved(SchematicSymbolInstance symbol, long dx, long dy)
+        static void Shift(SchematicSymbolInstance symbol, long dx, long dy)
         {
-            var moved = symbol.Clone();
-            moved.Position.XNm += dx; moved.Position.YNm += dy;
-            foreach (var field in new[] { moved.ReferenceField, moved.ValueField, moved.FootprintField, moved.DatasheetField, moved.DescriptionField }
-                         .Concat(moved.UserFields).Where(f => f?.Text?.Position is not null))
+            symbol.Position.XNm += dx; symbol.Position.YNm += dy;
+            foreach (var field in new[] { symbol.ReferenceField, symbol.ValueField, symbol.FootprintField, symbol.DatasheetField, symbol.DescriptionField }
+                         .Concat(symbol.UserFields).Where(f => f?.Text?.Position is not null))
             {
                 field.Text.Position.XNm += dx; field.Text.Position.YNm += dy;
             }
-            return moved;
+        }
+        static SchematicSymbolInstance Moved(SchematicSymbolInstance symbol, long dx, long dy)
+        {
+            var moved = symbol.Clone(); Shift(moved, dx, dy); return moved;
         }
 
-        async Task RenderPsu(string name)
+        async Task<SchematicViewSet> RenderPsu(string name)
         {
             var request = new RenderSchematicViews { Document = psu.Clone() };
             request.Views.Add(new SchematicRenderView { Key = "page", WidthPixels = 1600, HeightPixels = 1132,
@@ -818,17 +872,27 @@ public sealed partial class NativeSessionTests
             var png = rendered.Views.Single().Preview.Png;
             Assert.IsTrue(png.Length > 0);
             await File.WriteAllBytesAsync(evidence(name + "-psu.png"), png.ToByteArray(), token);
+            return rendered;
         }
 
         // U4's body corner onto the centre of U3's body, on the 1.27 mm grid; J1 at least 5.08 mm past the left page edge.
-        PresentationBounds body3 = Body(u3), body4 = Body(u4), body1 = Body(j1);
+        PresentationBounds body2 = Body(measured, u2), body3 = Body(measured, u3), body4 = Body(measured, u4), body1 = Body(measured, j1);
         long dx4 = (long)Math.Round(((body3.LeftNm + body3.RightNm) / 2 - body4.LeftNm) / (double)Grid) * Grid;
         long dy4 = (long)Math.Round(((body3.TopNm + body3.BottomNm) / 2 - body4.TopNm) / (double)Grid) * Grid;
         var moved4 = new PresentationBounds(body4.LeftNm + dx4, body4.TopNm + dy4, body4.RightNm + dx4, body4.BottomNm + dy4);
-        var overlap = new PresentationBounds(Math.Max(body3.LeftNm, moved4.LeftNm), Math.Max(body3.TopNm, moved4.TopNm),
-            Math.Min(body3.RightNm, moved4.RightNm), Math.Min(body3.BottomNm, moved4.BottomNm));
-        Assert.IsTrue(Math.Min(overlap.RightNm - overlap.LeftNm, overlap.BottomNm - overlap.TopNm) > Tolerance,
-            "The seeded U4 must cover U3 by more than the overlap tolerance.");
+        static PresentationBounds? Shared(PresentationBounds a, PresentationBounds b)
+        {
+            long left = Math.Max(a.LeftNm, b.LeftNm), top = Math.Max(a.TopNm, b.TopNm), right = Math.Min(a.RightNm, b.RightNm), bottom = Math.Min(a.BottomNm, b.BottomNm);
+            return left < right && top < bottom ? new(left, top, right, bottom) : null;
+        }
+        // How deep two boxes overlap (the smaller side of their shared area) and how far a box reaches beyond the page, in mm.
+        static decimal Depth(PresentationBounds a, PresentationBounds b) => Shared(a, b) is { } shared
+            ? Math.Min(shared.RightNm - shared.LeftNm, shared.BottomNm - shared.TopNm) / 1_000_000m
+            : throw new AssertFailedException($"{a} and {b} do not overlap.");
+        static decimal Beyond(PresentationBounds page, PresentationBounds box) => Math.Max(Math.Max(page.LeftNm - box.LeftNm, page.TopNm - box.TopNm),
+            Math.Max(box.RightNm - page.RightNm, box.BottomNm - page.BottomNm)) / 1_000_000m;
+        var overlap = Shared(body3, moved4) ?? throw new AssertFailedException("The seeded U4 must cover U3.");
+        Assert.IsTrue(Depth(body3, moved4) > Tolerance / 1_000_000m, "The seeded U4 must cover U3 by more than the overlap tolerance.");
         long dx1 = -((body1.LeftNm + 5_080_000 + Grid - 1) / Grid) * Grid;
         var moved1 = body1 with { LeftNm = body1.LeftNm + dx1, RightNm = body1.RightNm + dx1 };
         Assert.IsTrue(moved1.LeftNm <= -5_080_000);
@@ -842,9 +906,13 @@ public sealed partial class NativeSessionTests
         var unannotated = originals[r1].Clone(); unannotated.ReferenceField.Text.Text_ = "R?";
         foreach (var record in unannotated.InstanceRecords?.Records.Where(r => string.Join('/', r.Path.Select(p => p.Value)) == psuPath) ?? [])
             record.Reference = "R?";
+        // Every probed field is drawn with the renderer's default pen: none sets its own stroke width.
+        foreach (var field in new[] { originals[u1].ValueField, originals[u4].ValueField, originals[r1].ReferenceField, originals[r1].ValueField })
+            Assert.AreEqual(0L, field.Text.Attributes.StrokeWidth?.ValueNm ?? 0, "Probed fields use the renderer's default pen.");
 
         // A new wire crossing three unrelated wires in the free strip above the title-block reserve, each with its own label.
         Vector2 Point(double xMm, double yMm) => new() { XNm = (long)Math.Round(xMm * 1_000_000), YNm = (long)Math.Round(yMm * 1_000_000) };
+        Vector2 Snap(long xNm, long yNm) => new() { XNm = (long)Math.Round(xNm / (double)Grid) * Grid, YNm = (long)Math.Round(yNm / (double)Grid) * Grid };
         var created = new List<(SchematicLine Wire, LocalLabel Label)>();
         void Wire(Vector2 start, Vector2 end, string name)
         {
@@ -858,78 +926,244 @@ public sealed partial class NativeSessionTests
         double[] crossings = [35.56, 50.8, 66.04];
         for (int i = 0; i < crossings.Length; i++) Wire(Point(crossings[i], 170.18), Point(crossings[i], 195.58), "PX" + i);
 
+        // Labels exactly as connected realization generates them: one on the end of U3's topmost left pin, facing away from
+        // U3 (intentional, must stay quiet), and one moved onto U2's body (must be reported); and a global label with a field
+        // in the empty middle of the page, whose field KiCad paints with the global label's text offset.
+        var policy = SchematicConnectionPolicy.FromSnapshot(clean.State.Electrical.Hierarchy.Data);
+        var u3Pin = Pin(u3, 1, 0);
+        Guid tapId = Guid.NewGuid(), onBodyId = Guid.NewGuid(), globalId = Guid.NewGuid();
+        var tap = (LocalLabel)SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Local, tapId, u3Pin.Position, "U3_TAP",
+            SchematicLabelSpinStyle.SlssLeft, policy);
+        var onBody = (LocalLabel)SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Local, onBodyId,
+            Snap(body2.LeftNm + 7_620_000, body2.TopNm + 3_810_000), "ON_U2", SchematicLabelSpinStyle.SlssRight, policy);
+        var global = (GlobalLabel)SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Global, globalId, Point(148.59, 101.6),
+            "PIXEL_PROBE", SchematicLabelSpinStyle.SlssRight, policy);
+        global.Fields.Add(new SchematicField { Name = "Pixel note", Visible = true, Text = new() { Text_ = "offset note",
+            Position = Point(148.59, 106.68), Attributes = new() { Size = new() { XNm = 1_270_000, YNm = 1_270_000 }, Multiline = true,
+                HorizontalAlignment = HorizontalAlignment.HaLeft, VerticalAlignment = VerticalAlignment.VaCenter, Angle = new() { ValueDegrees = 0 } } } });
+
+        // A power symbol built from R1's captured definition: global power, one visible power-input pin, value "+3V3" and
+        // its reference "#PWR01" hidden as KiCad hides power references. It is rotated by 90 degrees so that its pin faces
+        // U1's topmost right pin and ends exactly on that pin's end, the two bodies touching only there.
+        var u1Pin = Pin(u1, -1, 0);
+        SchematicSymbolInstance PowerProbe(Guid id, SchematicSymbolOrientation orientation, Vector2 position)
+        {
+            var power = originals[r1].Clone();
+            power.Id = new() { Value = id.ToString("D") };
+            power.Path = psu.SheetPath.Clone();
+            Shift(power, position.XNm - power.Position.XNm, position.YNm - power.Position.YNm);
+            power.Transform = new() { Orientation = orientation };
+            power.Locked = LockedState.LsUnlocked;
+            power.Definition.Type = SchematicSymbolType.SstGlobalPower;
+            power.Definition.Id = new() { LibraryNickname = "presentation", EntryName = "PowerProbe" };
+            power.LibraryId = power.Definition.Id.Clone(); power.LibName = "";
+            power.Definition.ReferenceField.Text.Text_ = "#PWR"; power.Definition.ValueField.Text.Text_ = "+3V3";
+            power.ReferenceField.Text.Text_ = "#PWR01"; power.ReferenceField.Visible = false;
+            power.ReferenceField.Text.Position = position.Clone();
+            power.ValueField.Text.Text_ = "+3V3";
+            foreach (var child in power.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).ToArray())
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                if (pin.Number != "1") { power.Definition.Items.Remove(child); continue; }
+                pin.Id = new() { Value = Guid.NewGuid().ToString("D") };
+                if (pin.LibraryPinId is not null) pin.LibraryPinId = new() { Value = Guid.NewGuid().ToString("D") };
+                pin.ElectricalType = ElectricalPinType.EptPowerInput;
+                child.Item = Any.Pack(pin);
+            }
+            if (power.InstanceRecords is not null) foreach (var record in power.InstanceRecords.Records) record.Reference = "#PWR01";
+            return power;
+        }
+        Assert.AreEqual(0, u1Pin.BodyDirectionY, "U1's probed pin is horizontal.");
+        var orientations = new[] { SchematicSymbolOrientation.Sso90, SchematicSymbolOrientation.Sso270 }
+            .Select(o => PowerProbe(Guid.NewGuid(), o, u1Pin.Position)).ToArray();
+        var probe = new MeasureSchematicPlacement { Document = psu.Clone(), ExpectedRevision = clean.State.State.Revision.Clone() };
+        probe.Candidates.Add(orientations);
+        probe.ItemCandidates.Add(new[] { Any.Pack(tap), Any.Pack(onBody), Any.Pack(global) });
+        var probed = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(probe, token);
+        var facing = orientations.Select(o => (Symbol: o, Pin: probed.Candidates.Single(c => c.Id.Equals(o.Id)).SymbolPins.Pins.Single()))
+            .Single(o => o.Pin.BodyDirectionX == -u1Pin.BodyDirectionX && o.Pin.BodyDirectionY == -u1Pin.BodyDirectionY);
+        var powerAt = new Vector2 { XNm = u1Pin.Position.XNm + (u1Pin.Position.XNm - facing.Pin.Position.XNm),
+            YNm = u1Pin.Position.YNm + (u1Pin.Position.YNm - facing.Pin.Position.YNm) };
+        Guid powerId = Guid.Parse(facing.Symbol.Id.Value);
+        var power = PowerProbe(powerId, facing.Symbol.Transform.Orientation, powerAt);
+        // The value sits on the middle of the body, where the library draws the resistor's own value: KiCad turns it to
+        // read left to right on the rotated symbol, and a field on its own body is an intentional pattern.
+        power.ValueField.Text.Position = powerAt.Clone();
+        var onBodyBox = Box(probed.ItemCandidates.Single(c => c.Id.Value == onBodyId.ToString("D")).Bounds);
+        Assert.IsTrue(body2.Contains(onBodyBox) && Depth(body2, onBodyBox) > Tolerance / 1_000_000m,
+            $"The seeded label must lie on U2's body ({body2}), not beside it: {onBodyBox}.");
+
         var seed = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Presentation must-catch fixture on the PSU sheet" };
         void Update(Google.Protobuf.IMessage item) => seed.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Update = Any.Pack(item) });
+        void Create(Google.Protobuf.IMessage item) => seed.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Create = Any.Pack(item) });
         Update(Moved(originals[u4], dx4, dy4)); Update(Moved(originals[j1], dx1, 0)); Update(upsideDown); Update(hidden); Update(unannotated);
-        foreach (var (wire, label) in created)
-        {
-            seed.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Create = Any.Pack(wire) });
-            seed.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Create = Any.Pack(label) });
-        }
+        foreach (var (wire, label) in created) { Create(wire); Create(label); }
+        Create(tap); Create(onBody); Create(global); Create(power);
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(seed, token);
-        await RenderPsu("presentation-defects");
+        var seeded = await State();
+        var page = await RenderPsu("presentation-defects");
+        var defects = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+            { Document = psu.Clone(), ExpectedRevision = seeded.State.Revision.Clone(), IncludePresentation = true }, token);
+        SchematicPresentationObject Fact(Guid id, string role) => defects.Presentation.Objects
+            .Single(o => o.Id.Value == id.ToString("D") && o.PresentationRole == role);
+        SchematicPresentationObject FieldFact(Guid owner, string name) => defects.Presentation.Objects
+            .Single(o => o.PresentationRole == "field" && o.OwnerId?.Value == owner.ToString("D") && o.FieldName == name);
+        PresentationBounds Glyphs(Guid owner, string name) => Box(FieldFact(owner, name).GlyphBounds);
 
-        var broken = await Check("defects");
+        // The intentional patterns are exactly what they claim: the power symbol's one pin ends on U1's pin end and joins
+        // "+3V3", the tap label sits on U3's pin end, and KiCad itself says the hidden '#PWR01' need not show.
+        var powerPin = defects.Obstacles.Single(o => o.Id.Value == powerId.ToString("D")).SymbolPins.Pins.Single();
+        Assert.AreEqual(u1Pin.Position, powerPin.Position, "The power symbol's pin ends exactly on U1's pin end.");
+        Assert.AreEqual(SchematicPinPowerScope.SppsGlobal, powerPin.PowerScope);
+        Assert.AreEqual("+3V3", powerPin.PowerNet);
+        Assert.AreEqual(u3Pin.Position, defects.Obstacles.Single(o => o.Id.Value == tapId.ToString("D")).Anchor, "The tap label sits on U3's pin end.");
+        var powerReference = FieldFact(powerId, "Reference");
+        Assert.AreEqual("#PWR01", powerReference.Text);
+        Assert.IsFalse(powerReference.Visible);
+        Assert.IsFalse(powerReference.DesignatorRequired, "KiCad does not require a power symbol's reference to show.");
+        Assert.IsTrue(FieldFact(r1, "Reference").DesignatorRequired);
+        CollectionAssert.AreEqual(new[] { body2, body3, moved4, moved1 }, new[] { u2, u3, u4, j1 }.Select(id => Body(defects, id)).ToArray(),
+            "KiCad measures the untouched and moved bodies exactly where they were put.");
+
+        // KiCad's own pixels confirm the measured field glyphs: each field is painted alone (only its own native layer) in a
+        // region 1.27 mm wider than its measured glyphs at 20 pixels per millimetre, and the painted ink must lie within two
+        // pixels of the measured glyph box on every side.
+        const long PixelNm = 50_000, Margin = 1_270_000;
+        int Layer(string name) => page.AvailableLayers.Single(l => l.Name == name).Id;
+        var probes = new (string Name, Guid Owner, string Field, string Layer, double Reading)[]
+        {
+            ("u1-value-upside-down", u1, "Value", "values", 180),
+            ("u4-value-left-to-right", u4, "Value", "values", 0),
+            ("r1-reference-bottom-to-top", r1, "Reference", "references", 90),
+            ("power-value-on-rotated-symbol", powerId, "Value", "values", 0),
+            ("global-label-field", globalId, "Pixel note", "fields", 0)
+        };
+        var pixels = new List<object>();
+        foreach (var batch in probes.Chunk(4))
+        {
+            var request = new RenderSchematicViews { Document = psu.Clone() };
+            foreach (var p in batch)
+            {
+                var fact = FieldFact(p.Owner, p.Field);
+                Assert.IsTrue(fact.Visible && fact.GlyphBounds is not null, p.Name + " is painted.");
+                Assert.AreEqual(p.Reading, fact.ReadingAngleDegrees, 1e-9, p.Name + " is painted at the expected reading direction.");
+                var glyphs = Box(fact.GlyphBounds);
+                var region = new Box2 { Position = new() { XNm = glyphs.LeftNm - Margin, YNm = glyphs.TopNm - Margin },
+                    Size = new() { XNm = glyphs.RightNm - glyphs.LeftNm + 2 * Margin, YNm = glyphs.BottomNm - glyphs.TopNm + 2 * Margin } };
+                var view = new SchematicRenderView { Key = p.Name, Region = region,
+                    WidthPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.XNm / (double)PixelNm), 64, 2048),
+                    HeightPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.YNm / (double)PixelNm), 64, 2048) };
+                view.NativeLayers.Add(Layer(p.Layer));
+                request.Views.Add(view);
+            }
+            var rendered = await client.InvokeAsync<RenderSchematicViews, SchematicViewSet>(request, token);
+            foreach (var p in batch)
+            {
+                var image = rendered.Views.Single(v => v.Key == p.Name).Preview;
+                byte[] png = image.Png.ToByteArray();
+                await File.WriteAllBytesAsync(evidence("presentation-glyphs-" + p.Name + ".png"), png, token);
+                var glyphs = Glyphs(p.Owner, p.Field);
+                var (ink, pixel) = NativePresentationRaster.InkBounds(png, image.Viewport);
+                long[] edges = [ink.LeftNm - glyphs.LeftNm, ink.TopNm - glyphs.TopNm, ink.RightNm - glyphs.RightNm, ink.BottomNm - glyphs.BottomNm];
+                pixels.Add(new { probe = p.Name, text = FieldFact(p.Owner, p.Field).Text, glyphs, ink, pixelNm = pixel, edgeDifferencesNm = edges });
+                Assert.IsTrue(edges.All(e => Math.Abs(e) <= 2 * pixel), $"{p.Name}: KiCad painted ink at {ink}, the check measured glyphs at "
+                    + $"{glyphs}; the left, top, right and bottom edges differ by {string.Join(", ", edges)} nm, more than two pixels ({2 * pixel} nm).");
+            }
+        }
+        await File.WriteAllTextAsync(evidence("presentation-glyph-pixels.json"), JsonSerializer.Serialize(pixels), token);
+
+        // The report names exactly the seeded defects on the PSU sheet, with measured values derived here from KiCad's own
+        // measurement of the moved bodies and painted glyphs, and nothing on the untouched sheets. The label on U3's pin end,
+        // the power symbol on U1's pin end and its hidden reference, and the global label with its field report nothing.
+        var broken = await Check("defects", root, allSheets, seeded.State.Revision);
         foreach (var sheet in new[] { "ROOT", "CPU", "CPU_POWER" })
             Assert.IsFalse(On(broken.Findings, sheetPaths[sheet]).Any(), $"The untouched {sheet} sheet must report nothing: "
                 + Describe(On(broken.Findings, sheetPaths[sheet])));
         var onPsu = On(broken.Findings, psuPath).ToArray();
-        JsonElement One(string rule, Func<JsonElement, bool> matches, string what)
+        Guid Target(Guid owner, string name) => Field(broken.Targets, psuPath, owner, name);
+        var pageBox = Box(defects.Presentation.PageBounds);
+        var wires = created.Select(c => Guid.Parse(c.Wire.Id.Value)).ToArray();
+        var expectedPsu = new (string Rule, Guid[] Ids, decimal Measured, decimal Limit, string Unit)[]
         {
-            var found = onPsu.Where(f => f.GetProperty("rule").GetString() == rule && matches(f)).ToArray();
-            Assert.HasCount(1, found, what + ": " + Describe(onPsu));
-            return found[0];
-        }
-        var bodies = One("body_overlap", f => Ids(f).ToHashSet().SetEquals(new[] { u3, u4 }), "U4 covering U3");
+            ("page_overflow", [j1], -moved1.LeftNm / 1_000_000m, 0m, Mm),
+            ("page_overflow", [Target(j1, "Reference")], Beyond(pageBox, Glyphs(j1, "Reference")), 0m, Mm),
+            ("page_overflow", [Target(j1, "Value")], Beyond(pageBox, Glyphs(j1, "Value")), 0m, Mm),
+            ("designator_not_visible", [Target(j1, "Reference")], Beyond(pageBox, Glyphs(j1, "Reference")), 0m, Mm),
+            ("designator_not_visible", [Target(u2, "Reference")], 0m, 1m, Count),
+            ("designator_unannotated", [Target(r1, "Reference")], 0m, 1m, Count),
+            ("text_orientation", [Target(u1, "Value")], 180m, 90m, Degrees),
+            ("body_overlap", [u3, u4], Depth(body3, moved4), 0.5m, Mm),
+            ("body_overlap", [u2, u4], Depth(body2, moved4), 0.5m, Mm),
+            ("field_overlap", [u2, Target(u4, "Value")], Depth(body2, Glyphs(u4, "Value")), 0.5m, Mm),
+            ("field_overlap", [Target(u1, "Reference"), Target(u1, "Value")], Depth(Glyphs(u1, "Reference"), Glyphs(u1, "Value")), 0.5m, Mm),
+            ("label_overlap", [u2, onBodyId], Depth(body2, Box(Fact(onBodyId, "label").Bounds)), 0.5m, Mm),
+            ("excessive_crossings", wires, 3m, 2m, Count)
+        };
+        static string Row(string rule, IEnumerable<Guid> ids, decimal measured, decimal limit, string unit) =>
+            rule + " [" + string.Join(",", ids.Select(id => id.ToString("D")).Order(StringComparer.Ordinal)) + "] " + Fixed(measured) + "/" + Fixed(limit) + " " + unit;
+        CollectionAssert.AreEquivalent(expectedPsu.Select(e => Row(e.Rule, e.Ids, e.Measured, e.Limit, e.Unit)).ToArray(),
+            onPsu.Select(f => Row(f.GetProperty("rule").GetString()!, Ids(f), Number(f, "measured")!.Value, Number(f, "limit")!.Value,
+                f.GetProperty("unit").GetString()!)).ToArray(),
+            "The PSU sheet reports exactly the seeded defects, once each, with their measured values: " + Describe(onPsu));
+        // The two field overlaps the moved U4 and the upside-down U1 value cause, as KiCad measures them on this fixture.
+        Assert.AreEqual(1.6038m, expectedPsu.Single(e => e.Rule == "field_overlap" && e.Ids.Contains(u2)).Measured);
+        Assert.AreEqual(1.3116m, expectedPsu.Single(e => e.Rule == "field_overlap" && !e.Ids.Contains(u2)).Measured);
+        var bodies = onPsu.Single(f => f.GetProperty("rule").GetString() == "body_overlap" && Ids(f).ToHashSet().SetEquals(new[] { u3, u4 }));
         Assert.AreEqual(overlap, Bounds(bodies), "The overlap is located exactly where KiCad draws both bodies.");
-        Assert.AreEqual(Math.Min(overlap.RightNm - overlap.LeftNm, overlap.BottomNm - overlap.TopNm) / 1_000_000m, Number(bodies, "measured"));
-        Assert.AreEqual(Tolerance / 1_000_000m, Number(bodies, "limit"));
-        var overflow = One("page_overflow", f => Ids(f).SequenceEqual(new[] { j1 }), "J1 past the page edge");
-        Assert.AreEqual(-moved1.LeftNm / 1_000_000m, Number(overflow, "measured"), "J1 reaches exactly this far past the left page edge.");
-        Assert.AreEqual(0m, Number(overflow, "limit"));
-        Assert.AreEqual(moved1, Bounds(overflow));
-        Guid value1 = Field(broken.Targets, psuPath, u1, "Value"), reference2 = Field(broken.Targets, psuPath, u2, "Reference"),
-            reference1 = Field(broken.Targets, psuPath, r1, "Reference");
-        var turned = One("text_orientation", f => Ids(f).SequenceEqual(new[] { value1 }), "U1's upside-down value");
-        Assert.AreEqual(180m, Number(turned, "measured")); Assert.AreEqual(90m, Number(turned, "limit"));
-        One("designator_not_visible", f => Ids(f).SequenceEqual(new[] { reference2 }), "U2's hidden reference");
-        StringAssert.Contains(One("designator_unannotated", f => Ids(f).SequenceEqual(new[] { reference1 }), "R1's unannotated reference")
-            .GetProperty("message").GetString(), "'R?'");
-        var main = created[0].Wire.Id.Value;
-        var crossed = One("excessive_crossings", f => f.GetProperty("objectIds").EnumerateArray().Any(i => i.GetString() == main), "PM crossing three wires");
-        Assert.AreEqual(3m, Number(crossed, "measured")); Assert.AreEqual(2m, Number(crossed, "limit"));
+        Assert.AreEqual(moved1, Bounds(onPsu.Single(f => f.GetProperty("rule").GetString() == "page_overflow" && Ids(f).SequenceEqual(new[] { j1 }))));
+        var crossed = onPsu.Single(f => f.GetProperty("rule").GetString() == "excessive_crossings");
         CollectionAssert.AreEqual(crossings.Select(x => Point(x, 182.88)).Select(p => new PresentationBounds(p.XNm, p.YNm, p.XNm, p.YNm)).ToArray(),
             crossed.GetProperty("locations").EnumerateArray().Select(l => Bounds(l)).ToArray());
-        // Precision: every PSU finding involves something the seed changed, never two untouched objects.
-        var seeded = new HashSet<Guid>([j1, u4, value1, reference2, reference1, .. created.SelectMany(c => new[] { Guid.Parse(c.Wire.Id.Value), Guid.Parse(c.Label.Id.Value) })]);
-        foreach (var target in broken.Targets.EnumerateArray().Where(t => t.GetProperty("sheetPath").GetString() == psuPath
-            && t.GetProperty("ownerId").ValueKind == JsonValueKind.String && Guid.Parse(t.GetProperty("ownerId").GetString()!) is var owner && (owner == j1 || owner == u4)))
-            seeded.Add(Guid.Parse(target.GetProperty("objectId").GetString()!));
-        var unattributed = onPsu.Where(f => !Ids(f).Any(seeded.Contains)).ToArray();
-        Assert.IsEmpty(unattributed, "A PSU finding between two untouched objects is a false positive: " + Describe(unattributed));
 
-        // Undo the defects in one batch; every sheet instance reports nothing again.
-        var restore = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Remove the presentation must-catch fixture" };
-        foreach (var original in originals.Values)
-            restore.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Update = Any.Pack(original) });
-        foreach (var (wire, label) in created)
+        // Started from a child sheet, the check covers that sheet and the sheets below it only: from PSU it reports the same
+        // PSU findings, from CPU it covers CPU and CPU_POWER and reports nothing.
+        var fromPsu = await Check("defects-from-psu", psu, ["PSU"], seeded.State.Revision);
+        CollectionAssert.AreEqual(Canonical(onPsu, broken.Targets), Canonical(On(fromPsu.Findings, psuPath), fromPsu.Targets),
+            "A check started on the PSU sheet reports exactly the PSU findings of the whole-hierarchy check.");
+        var fromCpu = await Check("defects-from-cpu", Instance("CPU"), ["CPU", "CPU_POWER"]);
+        Assert.IsFalse(fromCpu.Findings.EnumerateArray().Any(f => f.GetProperty("sheetPath").GetString() != ""),
+            "The CPU branch reports nothing: " + Describe(fromCpu.Findings.EnumerateArray()));
+        // A revision the caller observed before the design changed, or a sheet instance KiCad has not loaded, is refused by name.
+        string staleCode = await Refused("stale-revision", root, clean.State.State.Revision);
+        Assert.AreEqual("presentation_revision_changed", staleCode);
+        Assert.AreEqual("presentation_revision_changed", await Refused("stale-revision-displayed", root, clean.State.State.Revision, subsheets: false));
+        var unloaded = psu.Clone(); unloaded.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+        string unloadedCode = await Refused("unloaded-sheet", unloaded, null);
+        Assert.AreEqual("presentation_sheet_not_loaded", unloadedCode);
+
+        // KiCad's own Undo shortcut removes the whole defect batch from the PSU sheet while the root stays displayed, and
+        // every sheet instance reports nothing again.
+        static SchematicHierarchyData WithoutCache(CheckedSchematicState state)
         {
-            restore.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Remove = label.Id.Clone() });
-            restore.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Remove = wire.Id.Clone() });
+            var data = state.Electrical.Hierarchy.Data.Clone();
+            foreach (var screen in data.Instances) screen.CachedSymbols.Clear();
+            return data;
         }
-        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(restore, token);
-        await RenderPsu("presentation-restored");
-        var restored = await Check("restored");
-        unexpected = restored.Findings.EnumerateArray().Where(f => f.GetProperty("sheetPath").GetString() != "").ToArray();
+        bool Same(SchematicHierarchyData left, SchematicHierarchyData right) =>
+            SchematicHierarchyDelta.Plan(left, right, token).Count == 0 && SchematicHierarchyDelta.Plan(right, left, token).Count == 0;
+        await FocusedSchematicShortcut(client, root, processId, display, "z", token);
+        using (var wait = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            wait.CancelAfter(TimeSpan.FromSeconds(20));
+            while (!Same(WithoutCache(await State()), WithoutCache(clean.State)))
+            {
+                try { await Task.Delay(250, wait.Token); }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    throw new AssertFailedException("KiCad's Undo did not remove the presentation defects within 20 s.");
+                }
+            }
+        }
+        var undone = await Check("undone", root, allSheets);
+        unexpected = undone.Findings.EnumerateArray().Where(f => f.GetProperty("sheetPath").GetString() != "").ToArray();
         Assert.IsEmpty(unexpected, "Undoing the defects must leave every sheet reporting nothing: " + Describe(unexpected));
+        await RenderPsu("presentation-undone");
 
-        // Reload the saved sheets so the editor ends exactly as the journey left it.
+        // Reload the saved sheets so the editor ends exactly as the journey found it.
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
         var reverted = await State();
         Assert.IsFalse(reverted.State.NativeContentDirty);
-        Assert.IsTrue(SchematicHierarchyDelta.Plan(reverted.Electrical.Hierarchy.Data, clean.State.Electrical.Hierarchy.Data, token).Count == 0
-            && SchematicHierarchyDelta.Plan(clean.State.Electrical.Hierarchy.Data, reverted.Electrical.Hierarchy.Data, token).Count == 0,
-            "Reloading restores the saved sheets.");
+        Assert.IsTrue(Same(reverted.Electrical.Hierarchy.Data, clean.State.Electrical.Hierarchy.Data), "Reloading restores the saved sheets.");
 
         return new
         {
@@ -937,8 +1171,11 @@ public sealed partial class NativeSessionTests
             cleanRevision = new { clean.State.State.Revision.Epoch, clean.State.State.Revision.Sequence },
             defectsRevision = new { broken.State.State.Revision.Epoch, broken.State.State.Revision.Sequence },
             psuFindings = onPsu.Select(f => new { rule = f.GetProperty("rule").GetString(), objectIds = Ids(f), measured = Number(f, "measured"),
-                limit = Number(f, "limit") }).ToArray(),
-            untouchedSheetsReportNothing = true, restoredReportsNothing = true
+                limit = Number(f, "limit"), unit = f.GetProperty("unit").GetString() }).ToArray(),
+            quietPatterns = new { labelOnU3PinEnd = tapId, powerSymbolOnU1PinEnd = powerId, hiddenPowerReference = "#PWR01", globalLabelWithField = globalId },
+            glyphPixels = pixels, childStartPsuSameFindings = true, childStartCpuSheets = new[] { "/CPU/", "/CPU/CPU_POWER/" },
+            staleRevisionCode = staleCode, unloadedSheetCode = unloadedCode,
+            untouchedSheetsReportNothing = true, nativeUndoReportsNothing = true
         };
     }
 

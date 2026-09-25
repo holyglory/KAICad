@@ -260,19 +260,22 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_check_presentation", ReadOnly = true),
-     Description("Find presentation problems an AI or person must repair: page overflow, cropped images, text outside the font-size policy, text painted upside down or top to bottom, hidden, empty or unannotated reference designators, overlapping symbol bodies, labels and field text, and signals crossing unrelated wiring more than twice. Supply explicit minimum/maximum text height in millimetres. By default checks the sheet KiCad displays (documentJson must name it). With includeSubsheets=true, checks the sheet instance documentJson names and every loaded sheet instance below it (the whole hierarchy from the root sheet), each measured offscreen at its own instance with its own references and painted field glyphs, without changing the design or the displayed sheet; overlapToleranceMm (default 0.5) is the overlap depth allowed where objects are meant to touch, such as a label on a pin end. Every finding names its sheet path and sheet name, the document revision, the affected object IDs, the measured value and the threshold; repair targets name each field by its owner and field name. Coverage stays partial: text crossed by wires, pin names, graphics or the drawing-sheet frame and title block, and complete revision tracking, are not measured, so never read a report without findings as a complete verification pass.")]
+     Description("Find presentation problems an AI or person must repair: page overflow, cropped images, text outside the font-size policy, text painted upside down or top to bottom, hidden, empty or unannotated reference designators, overlapping symbol bodies, labels and field text, and signals crossing unrelated wiring more than twice. Supply explicit minimum/maximum text height in millimetres. By default checks the sheet KiCad displays (documentJson must name it); in that mode every reference designator must show, including the '#' references of power symbols, and overlap and reading-direction rules are not applied. With includeSubsheets=true, checks the sheet instance documentJson names and every loaded sheet instance below it (the whole hierarchy from the root sheet, or one branch from a child sheet), each measured offscreen at its own instance with its own references and painted field glyphs, without changing the design or the displayed sheet; power and '#' symbols need no visible reference there, and overlapToleranceMm (default 0.5) is the overlap depth allowed where objects are meant to touch, such as a label on a pin end. Optional expectedRevisionJson ({\"epoch\",\"sequence\"}) is the document revision the caller observed: the check is refused with presentation_revision_changed when KiCad holds another revision, as it is when the design changes during a hierarchy check; a sheet instance KiCad has not loaded is refused with presentation_sheet_not_loaded. Every finding names its sheet path and sheet name, the document revision, the affected object IDs, the measured value, the threshold and their unit (mm, degrees or count; an unreadable reference is measured as 0 visible designators against 1 required), except the notices that a measurement is unavailable; repair targets name each field by its owner and field name. Coverage stays partial: text crossed by wires, pin names, graphics or the drawing-sheet frame and title block, and complete revision tracking, are not measured, so never read a report without findings as a complete verification pass.")]
     public Task<CallToolResult> CheckPresentation(string instanceId, string documentJson,
         decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken,
-        bool includeSubsheets = false, decimal overlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm) =>
+        bool includeSubsheets = false, decimal overlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm,
+        string? expectedRevisionJson = null) =>
         Execute(async () =>
         {
             var policy = new PresentationPolicy(minimumTextHeightMm, maximumTextHeightMm,
                 OverlapToleranceMm: overlapToleranceMm);
             var client = registry.Client(instanceId);
             var document = ParseDocument(documentJson);
+            var expected = string.IsNullOrWhiteSpace(expectedRevisionJson) ? null
+                : SchematicJson.Parser.Parse<Protocol.DocumentRevision>(expectedRevisionJson);
             var check = includeSubsheets
-                ? await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, cancellationToken)
-                : await NativePresentationChecks.CheckAsync(client, document, policy, cancellationToken);
+                ? await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, cancellationToken, expected)
+                : await NativePresentationChecks.CheckAsync(client, document, policy, cancellationToken, expected);
             var result = JsonSerializer.SerializeToElement(new { instanceId, includeSubsheets, check },
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     Converters = { new JsonStringEnumConverter() } });

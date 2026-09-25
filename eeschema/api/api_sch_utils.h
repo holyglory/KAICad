@@ -49,6 +49,11 @@ class SchematicSymbolPinGeometry;
 /// visible pins for the unit and body style selected there, without fields.
 BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
 
+/// The drawn body and visible pins of a placed symbol at an explicit sheet instance, as a presentation check sees
+/// it: like MeasureSchematicSymbolBody, but without the circle the editor draws at an unconnected pin end, which a
+/// touching wire, label or power symbol removes and which is never printed.
+BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
+
 /// Extent of the glyphs SCH_PAINTER::draw( SCH_FIELD ) paints for @a aField at an explicit sheet
 /// instance, from the exact native glyph geometry: the text KiCad shows there, centred on the
 /// field's bounding box (offset like the painter for a global label), at the field's draw

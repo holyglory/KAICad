@@ -194,6 +194,26 @@ BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH
 }
 
 
+BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path )
+{
+    // A library pin's box includes the circle the editor draws at an unconnected pin end (TARGET_PIN_RADIUS),
+    // because library pins are never connected. That circle disappears as soon as a wire, label or power symbol
+    // touches the pin end, and it is never printed, so the drawn body leaves it out: measure a private copy of the
+    // definition whose pins count as connected.
+    const LIB_SYMBOL* definition = symbol.GetEffectiveLibSymbol( &path );
+    if( !definition )
+        definition = LIB_SYMBOL::GetDummy();
+    LIB_SYMBOL drawn( *definition, nullptr, false );
+    for( SCH_PIN* pin : drawn.GetPins() )
+        pin->SetIsDangling( false );
+    BOX2I bounds = drawn.GetBodyBoundingBox( symbol.GetUnitSelection( &path ), symbol.GetBodyStyle(), true, false );
+    bounds = symbol.GetTransform().TransformCoordinate( bounds );
+    bounds.Normalize();
+    bounds.Offset( symbol.GetPosition() );
+    return bounds;
+}
+
+
 BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
                                     const wxString& variant )
 {
@@ -1052,7 +1072,7 @@ void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_REND
 
         if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( copy.get() ) )
         {
-            object( *symbol, nullptr, "symbol", Fact::GRAPHIC, MeasureSchematicSymbolBody( *symbol, aPath ), true );
+            object( *symbol, nullptr, "symbol", Fact::GRAPHIC, MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
             // Power and virtual ('#') symbols hide their references by design.
             const bool required = !symbol->IsPower() && !symbol->GetRef( &aPath ).StartsWith( wxT( "#" ) );
             for( const SCH_FIELD& symbolField : symbol->GetFields() )

@@ -59,3 +59,16 @@ API_RESULT API_HANDLER::Handle( ApiRequest& aMsg )
     // This response is used internally; no need for an error message
     return tl::unexpected( status );
 }
+
+
+std::vector<std::string> API_HANDLER::HandledMessageTypes() const
+{
+    std::vector<std::string> types;
+    types.reserve( m_handlers.size() );
+
+    // std::map keeps its keys in ordinal order.
+    for( const auto& [typeName, handler] : m_handlers )
+        types.push_back( typeName );
+
+    return types;
+}

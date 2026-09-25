@@ -24,6 +24,7 @@
 #include <memory>
 #include <tl/expected.hpp>
 #include <core/typeinfo.h>
+#include <math/box2.h>
 #include <api/common/envelope.pb.h>
 #include <api/schematic/schematic_types.pb.h>
 #include <pin_map.h>
@@ -35,6 +36,15 @@ class SCH_SHEET_PATH;
 class SCHEMATIC;
 
 namespace kiapi::automation::v1 { class SchematicSymbolPinGeometry; }
+
+/// Sheet-space bounds a placement measurement reports for a symbol at an explicit sheet
+/// instance: its body and visible pins for the selected unit and body style (every visible
+/// pin with the target KiCad draws on an unconnected pin end) plus its visible fields.
+/// A symbol whose library definition cannot be resolved is measured the way KiCad draws
+/// and bounds it, as its placeholder body with no pins; its pin geometry is reported as
+/// incomplete by #PackSchematicPinGeometry instead of refusing the whole sheet.
+BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
+                                    const wxString& aVariant );
 
 /// Observe exact active pin identities and sheet-space anchors. Incomplete
 /// mappings return no pins; previous output is cleared before every observation.

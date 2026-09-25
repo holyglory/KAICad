@@ -234,6 +234,9 @@ internal static class SchematicNativeCreationProjection
         if (!report.IdentitiesResolved)
             throw Invalid("created_binding_invalid", "The generated native identities did not resolve exactly: "
                 + string.Join(",", report.Issues.Select(issue => issue.Code)));
+        // Every created symbol now has its exact definition geometry. Pins that one symbol stacks at one
+        // point are one connection in KiCad, so nets that split them are refused before anything is sent.
+        SchematicPlacedPins.RequireStackedPinsOnOneNet(candidate, token);
         var operations = SchematicHierarchyDelta.Plan(baseline.Schematic, candidate.Schematic, token);
         return new(candidate, operations, created.Order().ToArray());
     }
@@ -366,16 +369,21 @@ internal static class SchematicNativeCreationProjection
         if (new[] { definition.ReferenceField, definition.ValueField, definition.FootprintField,
                 definition.DatasheetField, definition.DescriptionField }.Any(f => f?.Text?.Position is null))
             throw Invalid("incomplete_symbol_fields", "A declared symbol requires all five standard fields with explicit local positions.");
+        // The created symbol takes the form KiCad saves and loads, so a save and reload shows it unchanged: a cache alias
+        // equal to the library identifier is not kept (KiCad's reader drops it), and pin-name spacing lives on the
+        // library definition only, because a placed symbol never saves its own value.
+        string libraryKey = (source.LibraryId.LibraryNickname.Length == 0 ? "" : source.LibraryId.LibraryNickname + ":") + source.LibraryId.EntryName;
         var result = new SchematicSymbolInstance
         {
-            Definition = definition.Clone(), LibraryId = source.LibraryId.Clone(), LibName = source.Symbol.CacheKey,
+            Definition = definition.Clone(), LibraryId = source.LibraryId.Clone(),
+            LibName = source.Symbol.CacheKey == libraryKey ? "" : source.Symbol.CacheKey,
             Position = new(), Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 },
             Locked = LockedState.LsUnlocked,
             BodyStyle = definition.BodyStyle.Count > 1 ? new() { Style = source.BodyStyle } : null,
             Passthrough = SchematicPassthroughMode.SpmDefault,
             SeparatePinIdentities = true, InstanceRecords = new(), Variants = new(),
             ShowPinNames = source.Symbol.ShowPinNames, ShowPinNumbers = source.Symbol.ShowPinNumbers,
-            PinNameOffset = source.Symbol.PinNameOffset.Clone(), DefinitionPinNameOffset = source.Symbol.PinNameOffset.Clone(),
+            PinNameOffset = new(), DefinitionPinNameOffset = source.Symbol.PinNameOffset.Clone(),
             Attributes = definition.Attributes?.Clone() ?? new(),
             ReferenceField = definition.ReferenceField.Clone(), ValueField = definition.ValueField.Clone(),
             FootprintField = definition.FootprintField.Clone(), DatasheetField = definition.DatasheetField.Clone(),
@@ -452,7 +460,12 @@ internal static class SchematicNativeCreationProjection
         var existing = target.CachedSymbols.SingleOrDefault(c => c.CacheKey == entry.CacheKey);
         if (existing is not null && !SchematicLibraryCacheEquivalence.Equal(existing, entry))
             throw Invalid("created_symbol_cache_conflict", "The target screen has a different definition for the selected library key.");
-        if (existing is null) target.CachedSymbols.Add(entry.Clone());
+        if (existing is not null) return;
+        // KiCad keeps a screen's library cache ordered by key and always reports it in that order, so the created cache
+        // entry takes its place there: the published XML then lists the cache exactly as KiCad shows, saves and reloads it.
+        int index = 0;
+        while (index < target.CachedSymbols.Count && string.CompareOrdinal(target.CachedSymbols[index].CacheKey, entry.CacheKey) < 0) ++index;
+        target.CachedSymbols.Insert(index, entry);
     }
 
     /// <summary>Partition created occurrences into the physical native symbols they will occupy.
@@ -471,10 +484,18 @@ internal static class SchematicNativeCreationProjection
     /// same creation, so every component of a definition, and every occurrence of it, is projected in one
     /// call. A later caller that projects a subset of a definition's occurrences (for example a rebuild of
     /// one sheet) must pass the definition's complete occurrence set, or it will compute different
-    /// native identities.</para></summary>
+    /// native identities. That precondition is enforced: when a definition appears in
+    /// <paramref name="added"/>, every occurrence of it in <paramref name="desired"/> must be supplied,
+    /// otherwise this throws <see cref="InvalidOperationException"/> (a caller defect, not a user
+    /// refusal).</para></summary>
     internal static IReadOnlyList<SchematicCreatedSymbolGroup> PhysicalSymbols(SchematicDesign baseline, Circuit desired,
         IEnumerable<SymbolOccurrence> added, CancellationToken token = default)
     {
+        var supplied = added.ToArray();
+        var omitted = OmittedOccurrences(desired, supplied);
+        if (omitted.Count != 0)
+            throw new InvalidOperationException("Created native identities depend on every occurrence of a definition; supply all of them. Omitted: "
+                + string.Join(", ", omitted.Select(id => id.ToString("D"))));
         var components = desired.Components.ToDictionary(c => c.Id);
         var paths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
         var screens = baseline.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), s => s.Metadata.ScreenId.Value,
@@ -482,7 +503,7 @@ internal static class SchematicNativeCreationProjection
         var instancesOfScreen = screens.GroupBy(pair => pair.Value, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal), StringComparer.Ordinal);
         var located = new List<(SymbolOccurrence Occurrence, string Path, string Screen, Guid Definition)>();
-        foreach (var occurrence in added)
+        foreach (var occurrence in supplied)
         {
             token.ThrowIfCancellationRequested();
             if (!components.TryGetValue(occurrence.ComponentId, out var component))
@@ -511,6 +532,23 @@ internal static class SchematicNativeCreationProjection
         }
         return result.OrderBy(g => g.Key.PhysicalScreen, StringComparer.Ordinal).ThenBy(g => g.Key.Definition)
             .ThenBy(g => g.Key.Unit).ThenBy(g => g.Key.Component ?? Guid.Empty).ToArray();
+    }
+
+    /// <summary>The occurrences in <paramref name="desired"/> of definitions that <paramref name="added"/>
+    /// mentions but does not supply, in identity order. Empty exactly when <see cref="PhysicalSymbols"/>
+    /// may compute identities for <paramref name="added"/>. Creation always satisfies this, because a new
+    /// component needs a new definition and may bring units only for itself; a caller that meets another
+    /// shape (a new unit of an existing component) reports creation's own refusal instead.</summary>
+    internal static IReadOnlyList<Guid> OmittedOccurrences(Circuit desired, IEnumerable<SymbolOccurrence> added)
+    {
+        var components = new Dictionary<Guid, ComponentInstance>();
+        foreach (var component in desired.Components) components.TryAdd(component.Id, component);
+        var supplied = added.ToArray();
+        var suppliedIds = supplied.Select(s => s.Id).ToHashSet();
+        var definitions = supplied.Where(s => components.ContainsKey(s.ComponentId))
+            .Select(s => components[s.ComponentId].DefinitionId).ToHashSet();
+        return [.. desired.Symbols.Where(s => !suppliedIds.Contains(s.Id) && components.TryGetValue(s.ComponentId, out var owner)
+            && definitions.Contains(owner.DefinitionId)).Select(s => s.Id).Order()];
     }
 
     private static string StablePhysicalId(SchematicCreatedSymbolKey key)

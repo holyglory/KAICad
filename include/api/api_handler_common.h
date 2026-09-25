@@ -47,20 +47,17 @@ public:
 
     ~API_HANDLER_COMMON() override {}
 
-    void SetOpenDocumentHandler( OPEN_DOCUMENT_HANDLER aHandler )
-    {
-        m_openDocumentHandler = std::move( aHandler );
-    }
+    /**
+     * OpenDocument, CloseDocument and CloseAllDocuments are served only by the KiCad mode that
+     * provides them, so each request is registered only while its callback is set.  A process that
+     * never sets one does not dispatch that request (a caller gets AS_UNHANDLED), and the automation
+     * handshake does not list it.  Setting an empty callback removes the registration again.
+     */
+    void SetOpenDocumentHandler( OPEN_DOCUMENT_HANDLER aHandler );
 
-    void SetCloseDocumentHandler( CLOSE_DOCUMENT_HANDLER aHandler )
-    {
-        m_closeDocumentHandler = std::move( aHandler );
-    }
+    void SetCloseDocumentHandler( CLOSE_DOCUMENT_HANDLER aHandler );
 
-    void SetCloseAllDocumentsHandler( CLOSE_ALL_DOCUMENTS_HANDLER aHandler )
-    {
-        m_closeAllDocumentsHandler = std::move( aHandler );
-    }
+    void SetCloseAllDocumentsHandler( CLOSE_ALL_DOCUMENTS_HANDLER aHandler );
 
 private:
     HANDLER_RESULT<commands::GetVersionResponse> handleGetVersion(

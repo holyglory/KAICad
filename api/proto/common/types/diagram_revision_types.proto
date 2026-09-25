@@ -251,8 +251,10 @@ message RecursiveBlockGraphData {
   repeated ImplementationChangeData implementation_changes = 8;
   repeated DiagramRefinementInputData refinement_inputs = 9;
   repeated BlockProposalRecordData proposals = 10;
-  // Present only on a graph created by converting a flat structural diagram.
-  DiagramMigrationReceiptData migration = 11;
+  // 11 was the flat-diagram conversion receipt, retired unused: legacy flat diagrams are discarded, not
+  // converted (owner decision n9af098253fec71da). A sender still setting it is refused as an unknown field.
+  reserved 11;
+  reserved "migration";
   // -- lane 2A (100-199) --
   // -- end lane 2A --
   // -- lane 2B (200-299) --
@@ -303,8 +305,11 @@ enum RecursiveFileAction {
   RFA_PREPARE_REPARENT = 14;
   RFA_REPARENT_BLOCK = 15;
   RFA_CREATE_DIAGRAM = 16;
-  RFA_PREPARE_MIGRATION = 17;
-  RFA_MIGRATE_FLAT_DIAGRAM = 18;
+  // 17 and 18 were the flat-diagram conversion (prepare and convert), retired unimplemented (owner decision
+  // n9af098253fec71da). The helper refuses a request naming either as unsupported_diagram_file_request
+  // before any file access.
+  reserved 17, 18;
+  reserved "RFA_PREPARE_MIGRATION", "RFA_MIGRATE_FLAT_DIAGRAM";
   RFA_DISCOVER_DIAGRAMS = 19;
   // -- lane 2B (200-299) --
   // -- end lane 2B --
@@ -440,7 +445,9 @@ message RecursiveFileRequest {
   RebaseLevelData rebase_level = 20;
   ReparentBlockData reparent = 21;
   CreateDiagramData create = 22;
-  MigrateFlatDiagramData migrate = 23;
+  // 23 was the retired flat-diagram conversion payload (see RecursiveFileAction 17 and 18).
+  reserved 23;
+  reserved "migrate";
   DiscoverDiagramsData discover = 24;
   // -- lane 2B (200-299) --
   // -- end lane 2B --
@@ -463,7 +470,9 @@ message RecursiveFileResult {
   LevelMergeData level_merge = 14;
   ReparentPreviewData reparent_preview = 15;
   DiagramDiscoveryData discovery = 16;
-  MigrationResultData migration = 17;
+  // 17 was the retired flat-diagram conversion result (see RecursiveFileAction 17 and 18).
+  reserved 17;
+  reserved "migration";
   SaveSummaryData save_summary = 18;
   repeated DiagramErrorDetailData error_details = 19;
   bool created = 20;
@@ -734,6 +743,10 @@ message NewConnectionData {
   RequirementFieldsData fields = 9;
   InterconnectRealizationData realization = 10;
   // -- lane 2B (200-299) --
+  // Round A3 (owner decision nf53af9d74841b7d3): a signal drawn into a connection of this level. It names
+  // that root connection (a connection drawn in this draft, or one this draft edits and lists it among its
+  // members); it is a member of that connection and never a root of its own. Unset for a root connection.
+  optional string member_of = 200;
   // -- end lane 2B --
 }
 message LevelDraftData {
@@ -785,6 +798,9 @@ enum LevelEditCommandKind {
   LECK_REMOVE_CONNECTION = 2;
   LECK_REMOVE_INTERFACE = 3;
   // -- lane 2B (200-299) --
+  // Removes signals (members) of one connection of the level: connection_id names the connection and
+  // member_ids the signals; notes and realizations on them are cascaded as for a removed connection.
+  LECK_REMOVE_CONNECTION_MEMBERS = 200;
   // -- end lane 2B --
 }
 message LevelEditCommandData {
@@ -798,6 +814,8 @@ message LevelEditCommandData {
   bool detach_connections = 8;
   DiagramRevisionOriginData origin = 9;
   // -- lane 2B (200-299) --
+  // The signals LECK_REMOVE_CONNECTION_MEMBERS removes; empty for every other removal.
+  repeated string member_ids = 200;
   // -- end lane 2B --
 }
 enum LevelEditEffectKind {
@@ -891,25 +909,14 @@ message ReparentPreviewData {
   // -- end lane 2B --
 }
 
-// Creating a diagram, the one-time flat-diagram conversion and its receipt, and discovery.
+// Creating a diagram and finding a project's diagrams. Legacy flat structural diagrams are discarded, not
+// converted (owner decision n9af098253fec71da): the conversion request, result and receipt are retired.
 message CreateDiagramData {
   string operation_id = 1;
   string root_name = 2;
   string implementation_name = 3;
   RequirementFieldsData fields = 4;
   DiagramRevisionOriginData origin = 5;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-message MigrateFlatDiagramData {
-  string operation_id = 1;
-  string flat_source_path = 2;
-  string expected_flat_source_token = 3;
-  string root_name = 4;
-  string implementation_name = 5;
-  optional string manifest_path = 6;
-  optional string expected_manifest_token = 7;
-  DiagramRevisionOriginData origin = 8;
   // -- lane 2B (200-299) --
   // -- end lane 2B --
 }
@@ -926,29 +933,12 @@ message DiscoveredDiagramData {
   uint32 stored_schema_version = 4;
   string source_token = 5;
   string root_name = 6;
-  optional string migrated_from_structure_id = 7;
-  optional string migrated_from_path = 8;
+  // 7 and 8 named the flat diagram a converted diagram came from; retired with the conversion.
+  reserved 7, 8;
+  reserved "migrated_from_structure_id", "migrated_from_path";
   string error_code = 9;
   string error_message = 10;
   bool conventional = 11;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-enum FlatDiagramStatus { FDS_UNSPECIFIED = 0; FDS_CONVERTIBLE = 1; FDS_ALREADY_CONVERTED = 2; FDS_INVALID = 3; FDS_UNREADABLE = 4; }
-message DiscoveredFlatDiagramData {
-  string path = 1;
-  FlatDiagramStatus status = 2;
-  string structure_id = 3;
-  string source_token = 4;
-  uint32 block_count = 5;
-  uint32 port_count = 6;
-  uint32 connection_count = 7;
-  optional string declared_design_id = 8;
-  string converted_by_path = 9;
-  string converted_by_document_id = 10;
-  bool changed_since_conversion = 11;
-  string error_code = 12;
-  string error_message = 13;
   // -- lane 2B (200-299) --
   // -- end lane 2B --
 }
@@ -956,135 +946,14 @@ message DiagramDiscoveryData {
   string repository_root = 1;
   string project_file = 2;
   repeated DiscoveredDiagramData diagrams = 3;
-  repeated DiscoveredFlatDiagramData flat_diagrams = 4;
+  // 4 listed legacy flat diagrams for conversion; discovery never lists them.
+  reserved 4;
+  reserved "flat_diagrams";
   string suggested_new_path = 5;
   bool suggested_path_exists = 6;
   optional string manifest_path = 7;
   optional string manifest_token = 8;
   bool truncated = 9;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-enum MigrationItemKind {
-  MIK_UNSPECIFIED = 0;
-  MIK_STRUCTURE = 1;
-  MIK_BLOCK = 2;
-  MIK_PORT = 3;
-  MIK_CONNECTION = 4;
-  MIK_CONNECTION_ENDPOINT = 5;
-  MIK_BLOCK_PURPOSE = 6;
-  MIK_COMPONENT_LINK = 7;
-  MIK_NET_LINK = 8;
-  MIK_CONNECTION_DESCRIPTION = 9;
-  MIK_STATEMENT = 10;
-  MIK_PROPERTY = 11;
-  MIK_UNRESOLVED_NET_BINDING = 12;
-  MIK_UNRESOLVED_COMPONENT_REFERENCE = 13;
-  MIK_BLOCK_PLACEMENT = 14;
-  MIK_PORT_PLACEMENT = 15;
-  MIK_CONNECTION_PLACEMENT = 16;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-enum MigrationOutcome { MO_UNSPECIFIED = 0; MO_CONVERTED = 1; MO_PARTIAL = 2; MO_RETAINED = 3; }
-enum MigrationTargetKind {
-  MTK_UNSPECIFIED = 0;
-  MTK_NONE = 1;
-  MTK_BLOCK = 2;
-  MTK_INTERFACE = 3;
-  MTK_CONNECTION = 4;
-  MTK_UNRESOLVED_ENDPOINT = 5;
-  MTK_DEFINITION_PURPOSE = 6;
-  MTK_COMPONENT_BINDING = 7;
-  MTK_INTERCONNECT_SEGMENT = 8;
-  MTK_CONNECTION_NAME = 9;
-  MTK_BLOCK_PLACEMENT = 10;
-  MTK_PORT_PLACEMENT = 11;
-  MTK_CONNECTION_ROUTE = 12;
-  MTK_RETAINED_GUIDANCE = 13;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-enum MigrationReason {
-  MR_UNSPECIFIED = 0;
-  MR_EXACT = 1;
-  MR_NAME_DERIVED_FROM_PORT_NAMES = 2;
-  MR_NAME_FROM_DESCRIPTION_FIRST_LINE = 3;
-  MR_CROSS_LEVEL_ENDPOINT = 4;
-  MR_SAME_BLOCK_CONNECTION = 5;
-  MR_NO_MANIFEST_SUPPLIED = 6;
-  MR_DESIGN_NOT_DECLARED_IN_MANIFEST = 7;
-  MR_GUIDANCE_UNCLASSIFIED = 8;
-  MR_UNRESOLVED_REFERENCE_RETAINED = 9;
-  MR_TARGET_IS_ELECTRICAL = 10;
-  MR_NET_COMPLETENESS_UNRECORDED = 11;
-  MR_PURPOSE_STRENGTH_UNRECORDED = 12;
-  MR_PLACEMENT_REUSED_AS_FRAME = 13;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-enum MigrationSourceEnvelope { MSE_UNSPECIFIED = 0; MSE_ENGINEERING_DESIGN = 1; MSE_NATIVE_SCHEMATIC_DESIGN = 2; }
-enum RetainedGuidanceKind { RGK_UNSPECIFIED = 0; RGK_STATEMENT = 1; RGK_PROPERTY = 2; RGK_CONNECTION_DESCRIPTION = 3; }
-message MigrationItemData {
-  MigrationItemKind kind = 1;
-  string source_id = 2;
-  string source_key = 3;
-  MigrationOutcome outcome = 4;
-  MigrationTargetKind target_kind = 5;
-  optional string target_id = 6;
-  optional string scope_block_id = 7;
-  MigrationReason reason = 8;
-  optional string detail = 9;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-message RetainedGuidanceData {
-  RetainedGuidanceKind kind = 1;
-  string source_id = 2;
-  string target_id = 3;
-  optional string scope_block_id = 4;
-  optional kiapi.automation.structure.v1.StructuralStatementRole role = 5;
-  optional kiapi.automation.structure.v1.StructuralGuidanceStrength strength = 6;
-  optional string key = 7;
-  optional string category = 8;
-  string text = 9;
-  bool has_quantity = 10;
-  bool has_pin_connection = 11;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-message DiagramMigrationReceiptData {
-  string id = 1;
-  string source_path = 2;
-  string source_sha256 = 3;
-  string source_structure_id = 4;
-  string source_circuit_id = 5;
-  MigrationSourceEnvelope source_envelope = 6;
-  string converter = 7;
-  uint64 nanometres_per_diagram_unit = 8;
-  BlockSelectionData root = 9;
-  DiagramRevisionOriginData origin = 10;
-  optional string manifest_path = 11;
-  optional string manifest_sha256 = 12;
-  optional string design_id = 13;
-  MigrationReason design_resolution = 14;
-  repeated MigrationItemData items = 15;
-  repeated RetainedGuidanceData retained_guidance = 16;
-  string source_structure_xml = 17;
-  string source_structure_sha256 = 18;
-  // -- lane 2B (200-299) --
-  // -- end lane 2B --
-}
-message MigrationResultData {
-  DiagramMigrationReceiptData receipt = 1;
-  bool written = 2;
-  bool target_exists = 3;
-  bool already_converted = 4;
-  string existing_path = 5;
-  string existing_document_id = 6;
-  uint32 converted_count = 7;
-  uint32 partial_count = 8;
-  uint32 retained_count = 9;
   // -- lane 2B (200-299) --
   // -- end lane 2B --
 }

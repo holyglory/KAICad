@@ -111,14 +111,25 @@ struct BLOCK_CHIPS
     std::vector<CHOICE_MARK> marks;
     /// The caption text as drawn, clipped to the block's content area.
     wxRect caption;
+    /// The names of the block's ports drawn inside its edge; the chips, "+N more", the marks and the link keep clear of them.
+    std::vector<wxRect> portNames;
 };
 
 /// The block caption's text rectangle inside aInner, the block's content area in canvas pixels, drawn with
 /// aCaptionFont and clipped to aInner. The canvas draws the caption there and the chips are laid out below it.
 wxRect CaptionRect( wxDC& aDC, const NODE& aNode, const wxRect& aInner, const wxFont& aCaptionFont );
 /// Lays out a block's chips inside aBox, the block's content area in canvas pixels, with aSmall, the chip font.
-/// aCaption is the caption as CaptionRect placed it.
-BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, const wxRect& aCaption );
+/// aCaption is the caption as CaptionRect placed it. aPortNames are the names of the block's ports drawn inside its
+/// edge (see PortNameRect); a row that shares their height stops short of them.
+BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, const wxRect& aCaption,
+                         const std::vector<wxRect>& aPortNames = {} );
+/// Where a block port on aSide at aAt names itself just inside the block edge, as KiCad labels sheet pins, with
+/// aDC's font (the chip font).
+wxRect PortNameRect( wxDC& aDC, const wxString& aName, D::DiagramPortSide aSide, const wxPoint& aAt );
+/// The lines a canvas note shows in a text area of aWidth by aHeight pixels with aDC's font. Lines break between
+/// words (only a word wider than the note breaks inside it), the note's own line breaks are kept, and text that
+/// does not fit ends its last shown line with "…".
+std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight );
 /// Draws the chips and link LayoutChips placed.
 void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool aDark,
                 const wxColour& aForeground, const wxColour& aLink );
@@ -152,6 +163,8 @@ struct LINK
     std::string id, name;
     bool isNew = false;
     std::vector<D::DiagramEndpointBindingData> endpoints;
+    /// Its direction detail (Round A3); the canvas draws arrowheads for it.
+    D::DiagramConnectionDirection direction = D::DCDR_UNSPECIFIED;
 };
 
 /// A port anchor as drawn: stored (PLACED) or from the deterministic fallback (FALLBACK).

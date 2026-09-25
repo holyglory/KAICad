@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Google.Protobuf;
 using KiCad.Automation.Mcp;
@@ -359,30 +360,30 @@ public sealed class RecursiveEditorFileCommandTests
             string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
             await File.WriteAllTextAsync(path, xml);
             var read = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
-            var loaded = await Run(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var loaded = await Run(JsonFormatter.Default.Format(read)); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
             var rebase = read.Clone(); rebase.Action = P.RecursiveFileAction.RfaRebaseRequirements; rebase.ExpectedSourceToken = loaded.SourceToken;
             rebase.Rebase = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)) };
-            var compared = await Run(rebase); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
-            var probes = new List<(string Name, P.RecursiveFileRequest Request)>();
-            var old = read.Clone(); old.SchemaVersion = 1; probes.Add(("schema 1 read", old));
-            var oldRebase = rebase.Clone(); oldRebase.SchemaVersion = 1; probes.Add(("schema 1 rebase", oldRebase));
-            // Flat-diagram conversion is never implemented (owner decision n9af098253fec71da).
-            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram })
-            { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe)); }
-            var migrate = read.Clone(); migrate.Migrate = new(); probes.Add(("migrate", migrate));
-            foreach (var (name, probe) in probes)
+            var compared = await Run(JsonFormatter.Default.Format(rebase)); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
+            var probes = new List<(string Name, string Json)>();
+            var old = read.Clone(); old.SchemaVersion = 1; probes.Add(("schema 1 read", JsonFormatter.Default.Format(old)));
+            var oldRebase = rebase.Clone(); oldRebase.SchemaVersion = 1; probes.Add(("schema 1 rebase", JsonFormatter.Default.Format(oldRebase)));
+            // The retired flat-diagram conversion (owner decision n9af098253fec71da), as an earlier client wrote it: this build's
+            // protocol can no longer express it, so it arrives as reserved names and numbers.
+            foreach (var action in RetiredConversionActions) probes.Add((action.ToJsonString(), WithRetired(read, action)));
+            probes.Add(("migrate", WithRetired(read, migrate: new JsonObject())));
+            foreach (var (name, json) in probes)
             {
-                var rejected = await Run(probe);
+                var rejected = await Run(json);
                 Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
             }
             Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
         }
         finally { Directory.Delete(root, true); }
 
-        static async Task<P.RecursiveFileResult> Run(P.RecursiveFileRequest request)
+        static async Task<P.RecursiveFileResult> Run(string json)
         {
             using var response = new StringWriter();
-            await RecursiveFileCommand.RunAsync(new StringReader(JsonFormatter.Default.Format(request)), response, CancellationToken.None);
+            await RecursiveFileCommand.RunAsync(new StringReader(json), response, CancellationToken.None);
             return P.RecursiveFileResult.Parser.ParseJson(response.ToString());
         }
     }
@@ -901,12 +902,29 @@ public sealed class RecursiveEditorFileCommandTests
             var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
             string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
             var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            // Flat-diagram conversion (actions 17 and 18 and its migrate payload) was retired unimplemented: legacy flat diagrams are
+            // discarded, not converted (owner decision n9af098253fec71da). An earlier client's request names reserved entries and is
+            // refused through the compiled helper before any file access, saying the entry was retired.
+            var retired = new List<(string Name, string Json)>();
+            foreach (var action in RetiredConversionActions) retired.Add((action.ToJsonString(), WithRetired(read, action)));
+            retired.Add(("migrate payload on a read", WithRetired(read, migrate: new JsonObject())));
+            var conversion = read.Clone(); conversion.DocumentId = "";
+            retired.Add(("complete conversion request", WithRetired(conversion, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!,
+                RetiredConversionPayload(Path.Combine(root, "flat.engineering.xml"), new string('a', 64)))));
+            foreach (var (name, json) in retired)
+            {
+                var (rejected, _) = await InvokeJson(json);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
+                StringAssert.Contains(rejected.ErrorMessage, "was retired from the recursive diagram protocol", name);
+                Assert.IsNull(rejected.Document, name);
+            }
+            // Precision: an unknown name that was never declared is refused the same way (strict unknown-field rejection,
+            // contract rbg-v2 section 2.3) without being called retired.
+            var future = JsonNode.Parse(JsonFormatter.Default.Format(read))!.AsObject(); future["action"] = "RFA_OPEN_CANVAS";
+            var (unknown, _) = await InvokeJson(future.ToJsonString());
+            Assert.AreEqual("unsupported_diagram_file_request", unknown.ErrorCode, unknown.ErrorMessage);
+            Assert.IsFalse(unknown.ErrorMessage.Contains("retired", StringComparison.Ordinal), unknown.ErrorMessage);
             var probes = new List<(string Name, P.RecursiveFileRequest Request, string Code)>();
-            // Flat-diagram conversion (17, 18 and its payload) is never implemented: legacy flat diagrams are discarded,
-            // not converted (owner decision n9af098253fec71da).
-            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareMigration, P.RecursiveFileAction.RfaMigrateFlatDiagram })
-            { var probe = read.Clone(); probe.Action = action; probes.Add((action.ToString(), probe, "unsupported_diagram_file_request")); }
-            { var probe = read.Clone(); probe.Migrate = new(); probes.Add(("migrate", probe, "unsupported_diagram_file_request")); }
             // The level actions (11-13) accept only their own payloads (contract rbg-v2 section 7).
             foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
             {
@@ -927,10 +945,6 @@ public sealed class RecursiveEditorFileCommandTests
             var malformedToken = read.Clone(); malformedToken.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; malformedToken.LevelEdit = new();
             malformedToken.ExpectedSourceToken = "not-a-file-token";
             probes.Add(("removal with a malformed token", malformedToken, "ambiguous_diagram_file_request"));
-            var conversion = read.Clone(); conversion.DocumentId = ""; conversion.Action = P.RecursiveFileAction.RfaMigrateFlatDiagram;
-            conversion.Migrate = new() { OperationId = Guid.NewGuid().ToString("D"), FlatSourcePath = Path.Combine(root, "flat.engineering.xml"),
-                RootName = "System", ImplementationName = "Initial" };
-            probes.Add(("complete conversion request", conversion, "unsupported_diagram_file_request"));
             // Create and discover (actions 16 and 19) are implemented (RecursiveDiagramCreationTests); they name no existing
             // document, so a document identity, and their payloads on any other action, are ambiguous (section 7).
             foreach (var action in new[] { P.RecursiveFileAction.RfaCreateDiagram, P.RecursiveFileAction.RfaDiscoverDiagrams })
@@ -1219,6 +1233,172 @@ public sealed class RecursiveEditorFileCommandTests
         static P.RequirementFieldsData Fields(DiagramRequirements value) => new() { General = value.General, Schematic = value.Schematic, Routing = value.Routing };
     }
 
+    // ---- Connection signals (Round A3, owner decision nf53af9d74841b7d3) ----
+    // The native journey (VerifyConnectionDetails) adds and removes signals through the rendered inspector; this test drives the
+    // same compiled helper with the drafts the editor never sends, to prove each member-list rule fails closed without writing.
+
+    [TestMethod]
+    public async Task ConnectionSignalsSaveAsMembersAndSavedSignalsLeaveThroughTheRemovalCascade()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-signals-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, original);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"]; var powerLink = f.Links["System/Power"];
+            var archive = graph.Connections(system.BlockId);
+            ImmutableArray<DiagramEndpointBinding> ends = [DiagramEndpointBinding.Unknown(psu.BlockId), DiagramEndpointBinding.Unknown(cpu.BlockId)];
+            static ConnectionSelection Fresh() => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            NewConnectionOccurrence Signal(string name, Guid parent, ImmutableArray<DiagramEndpointBinding> at) => new(Fresh(), Guid.NewGuid(), "Initial", name,
+                DiagramConnectionKind.Signal, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, at, DiagramRequirements.Empty, null, parent);
+            // Drawn in one level draft: I2C with its signals SDA and SCL and three more details, and the saved Power gaining GND. The
+            // level also gains a Debug port on its boundary, where an agent's SCL ends instead of the CPU.
+            var i2c = Fresh(); var debug = Guid.NewGuid();
+            var drawnI2c = new NewConnectionOccurrence(i2c, Guid.NewGuid(), "Initial", "I2C", DiagramConnectionKind.Interface, DiagramDomain.Data,
+                DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null);
+            var sda = Signal("SDA", i2c.ConnectionId, ends);
+            var scl = Signal("SCL", i2c.ConnectionId, [ends[0], new(DiagramEndpointKind.Interface, system.BlockId, debug, "", null, [], null)]);
+            var gnd = Signal("GND", powerLink.ConnectionId, archive.Inspect(powerLink).Endpoints);
+            var power = archive.StartDraft(powerLink) with { Members = [gnd.Selection], Direction = DiagramConnectionDirection.FromFirst, Domain = DiagramDomain.Power };
+            var level = graph.StartLevelDraft(system);
+            level = level with
+            {
+                Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(i2c),
+                    Interfaces = level.Scope.LocalDiagram.Interfaces.Add(new(debug, "Debug", "Test-only boundary port.")) } },
+                ConnectionDrafts = [power], NewConnections = [drawnI2c, sda, scl, gnd]
+            };
+            // Each malformed member list is refused and leaves the file unchanged.
+            var refusals = new List<(string Name, RecursiveLevelDraft Draft, string Code)>
+            {
+                ("a signal that is also a root", level with { Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with {
+                    Connections = level.Scope.LocalDiagram.Connections.Add(sda.Selection) } } }, "invalid_level_draft"),
+                ("a signal of a connection not on this level", level with { NewConnections = [drawnI2c, sda, scl, gnd with { MemberOf = Guid.NewGuid() }] },
+                    "invalid_level_draft"),
+                ("a signal of a saved connection the draft does not edit", level with { ConnectionDrafts = [] }, "invalid_level_draft"),
+                ("a signal of another signal", level with { NewConnections = [drawnI2c, sda, scl with { MemberOf = sda.Selection.ConnectionId }, gnd] }, "invalid_level_draft"),
+                ("a signal the connection does not list", level with { ConnectionDrafts = [power with { Members = [] }] }, "connection_member_edit_requires_member_path"),
+                ("a signal listed twice", level with { ConnectionDrafts = [power with { Members = [gnd.Selection, gnd.Selection] }] },
+                    "connection_member_edit_requires_member_path"),
+                ("a single signal with signals", level with { NewConnections = [drawnI2c with { Kind = DiagramConnectionKind.Signal }, sda, scl, gnd] },
+                    "invalid_diagram_connection_archive"),
+            };
+            foreach (var (name, draft, code) in refusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            var saved = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], level));
+            Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            Assert.HasCount(5, saved.SaveSummary.CreatedConnectionRevisions, "I2C, SDA, SCL, GND and the Power successor.");
+            string savedXml = await File.ReadAllTextAsync(path); var stored = RecursiveBlockGraphXml.Read(savedXml);
+            Assert.AreEqual(savedXml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(saved.Document.Graph)));
+            var top = stored.Inspect(stored.SelectedRoot); var links = stored.Connections(system.BlockId);
+            var i2cSaved = links.Inspect(top.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL" }, i2cSaved.Members.Select(m => links.Inspect(m).Name).ToArray(), "The signals keep the order they were added in.");
+            Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Members.IsEmpty));
+            Assert.IsTrue(links.Inspect(i2cSaved.Members[0]).Endpoints.Length == ends.Length
+                && links.Inspect(i2cSaved.Members[0]).Endpoints.Zip(ends).All(e => e.First.SameDefinition(e.Second)), "SDA runs between its connection's ends.");
+            Assert.AreEqual(debug, links.Inspect(i2cSaved.Members[1]).Endpoints[1].InterfaceId, "SCL ends on the level's Debug port.");
+            Assert.AreEqual((DiagramConnectionKind.Interface, DiagramDomain.Data, DiagramConnectionDirection.FromFirst), (i2cSaved.Kind, i2cSaved.Domain, i2cSaved.Direction));
+            Assert.IsFalse(top.LocalDiagram.Connections.Any(c => c.ConnectionId == sda.Selection.ConnectionId), "A signal is never a connection of the level itself.");
+            var powerSaved = top.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId);
+            Assert.AreNotEqual(powerLink, powerSaved);
+            Assert.AreEqual(gnd.Selection, links.Inspect(powerSaved).Members.Single());
+            Assert.AreEqual((DiagramDomain.Power, DiagramConnectionDirection.FromFirst), (links.Inspect(powerSaved).Domain, links.Inspect(powerSaved).Direction));
+            Assert.IsTrue(links.Inspect(powerLink).Members.IsEmpty, "The earlier Power revision keeps its history unchanged.");
+
+            // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
+            var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",
+                new(DiagramAnnotationTargetKind.Connection, gnd.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+            var current = stored.StartLevelDraft(stored.SelectedRoot);
+            current = current with { Scope = current.Scope with { Diagram = current.Scope.LocalDiagram with {
+                Annotations = current.Scope.LocalDiagram.Notes.Add(note) } } };
+            var removed = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: powerLink.ConnectionId, members: [gnd.Selection.ConnectionId]));
+            Assert.IsTrue(removed.Success, removed.ErrorMessage);
+            CollectionAssert.AreEquivalent(new[] { (P.LevelEditEffectKind.LeekConnectionRemoved, "GND"),
+                (P.LevelEditEffectKind.LeekAnnotationUnresolved, "Target removed from this diagram level.") },
+                removed.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray());
+            var withoutGnd = RecursiveBlockCodec.Decode(removed.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutGnd.ConnectionDrafts.Single(d => d.Baseline.ConnectionId == powerLink.ConnectionId).Members.IsEmpty);
+            Assert.AreEqual(powerSaved, withoutGnd.Scope.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId), "Power itself stays.");
+            Assert.IsNotNull(withoutGnd.Scope.LocalDiagram.Notes.Single().Target.UnresolvedReason);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Preparing a removal never writes.");
+            var afterRemoval = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], withoutGnd));
+            Assert.IsTrue(afterRemoval.Success, afterRemoval.ErrorMessage);
+            var removedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var removedLinks = removedGraph.Connections(system.BlockId);
+            var powerNow = removedLinks.Inspect(removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId));
+            Assert.IsTrue(powerNow.Members.IsEmpty); Assert.AreEqual(DiagramDomain.Power, powerNow.Domain, "Only the signal left.");
+            Assert.AreEqual("GND", removedLinks.Inspect(gnd.Selection).Name, "The removed signal's saved revision stays in history.");
+
+            // A signal drawn in a draft simply goes; removing its connection takes its drawn signals with it.
+            var later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var i2cNow = removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId);
+            var intLine = Signal("INT", i2c.ConnectionId, ends);
+            var i2cDraft = removedLinks.StartDraft(i2cNow); i2cDraft = i2cDraft with { Members = i2cDraft.Members.Add(intLine.Selection) };
+            later = later with { ConnectionDrafts = [i2cDraft], NewConnections = [intLine] };
+            string token = afterRemoval.SourceToken;
+            var dropped = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [intLine.Selection.ConnectionId]));
+            Assert.IsTrue(dropped.Success, dropped.ErrorMessage);
+            var droppedDraft = RecursiveBlockCodec.Decode(dropped.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsEmpty(droppedDraft.NewConnections);
+            CollectionAssert.AreEqual(removedLinks.Inspect(i2cNow).Members.ToArray(), droppedDraft.ConnectionDrafts.Single().Members.ToArray(),
+                "Only the drawn signal left the connection's member list.");
+            var gone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnection, connection: i2c.ConnectionId));
+            Assert.IsTrue(gone.Success, gone.ErrorMessage);
+            Assert.IsEmpty(RecursiveBlockCodec.Decode(gone.LevelEdit.Draft, graph.DocumentId).NewConnections, "The drawn signal goes with its connection.");
+            // Removals read the signals the draft keeps, one list for what a connection touches and for what goes with it. While I2C
+            // keeps SCL, removing the Debug port is refused until I2C is detached, and detaching takes I2C with it. Once SCL has left I2C
+            // in the draft, Debug goes alone, I2C stays with SDA, and the level saves.
+            var fresh = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var inUse = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsFalse(inUse.Success); Assert.AreEqual("boundary_interface_in_use", inUse.ErrorCode);
+            var detached = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug, detach: true));
+            Assert.IsTrue(detached.Success, detached.ErrorMessage);
+            Assert.IsTrue(detached.LevelEdit.Effects.Any(e => (e.Kind, e.Detail) == (P.LevelEditEffectKind.LeekConnectionRemoved, "I2C")), "Detaching takes I2C with SCL.");
+            var sclLeft = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [scl.Selection.ConnectionId]));
+            Assert.IsTrue(sclLeft.Success, sclLeft.ErrorMessage);
+            var debugAlone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot],
+                RecursiveBlockCodec.Decode(sclLeft.LevelEdit.Draft, graph.DocumentId), P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsTrue(debugAlone.Success, debugAlone.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { (P.LevelEditEffectKind.LeekInterfaceRemoved, "Debug") },
+                debugAlone.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray(), "Only the port goes; no connection uses it any more.");
+            var withoutDebug = RecursiveBlockCodec.Decode(debugAlone.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutDebug.Scope.LocalDiagram.Connections.Any(c => c.ConnectionId == i2c.ConnectionId), "I2C stays.");
+            var debugSaved = await Invoke(SaveLevelRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], withoutDebug));
+            Assert.IsTrue(debugSaved.Success, debugSaved.ErrorMessage);
+            var debugGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var debugLinks = debugGraph.Connections(system.BlockId);
+            var debugTop = debugGraph.Inspect(debugGraph.SelectedRoot);
+            Assert.IsFalse(debugTop.LocalDiagram.Interfaces.Any(i => i.Id == debug));
+            CollectionAssert.AreEqual(new[] { "SDA" }, debugLinks.Inspect(debugTop.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId))
+                .Members.Select(m => debugLinks.Inspect(m).Name).ToArray());
+            token = debugSaved.SourceToken; removedGraph = debugGraph;
+            later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            // Removals that name no signal of that connection, or the same one twice, or signals on another kind of removal, fail closed.
+            foreach (var (members, kind, code) in new (Guid[] Members, P.LevelEditCommandKind Kind, string Code)[]
+            {
+                ([Guid.NewGuid()], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId, sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnection, "invalid_level_draft"),
+            })
+            {
+                var refused = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later, kind,
+                    connection: i2c.ConnectionId, members: members));
+                Assert.IsFalse(refused.Success, code); Assert.AreEqual(code, refused.ErrorCode);
+            }
+            Assert.AreEqual(await File.ReadAllTextAsync(path), RecursiveBlockGraphXml.Write(removedGraph));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static P.RecursiveFileRequest SaveLevelRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft)
     {
@@ -1237,7 +1417,7 @@ public sealed class RecursiveEditorFileCommandTests
 
     private static P.RecursiveFileRequest LevelEditRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
         ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft, P.LevelEditCommandKind kind, Guid? block = null, Guid? connection = null,
-        Guid? boundary = null, bool detach = false)
+        Guid? boundary = null, bool detach = false, IEnumerable<Guid>? members = null)
     {
         var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; request.ExpectedSourceToken = token;
         request.LevelEdit = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft), Kind = kind, DetachConnections = detach,
@@ -1246,6 +1426,7 @@ public sealed class RecursiveEditorFileCommandTests
         if (block is { } owner) request.LevelEdit.BlockId = owner.ToString("D");
         if (connection is { } link) request.LevelEdit.ConnectionId = link.ToString("D");
         if (boundary is { } port) request.LevelEdit.InterfaceId = port.ToString("D");
+        request.LevelEdit.MemberIds.Add((members ?? []).Select(m => m.ToString("D")));
         return request;
     }
 
@@ -1257,7 +1438,35 @@ public sealed class RecursiveEditorFileCommandTests
     }
 
     /// <summary>Runs one request through the production helper process (<c>kicad-mcp --diagram-file</c>).</summary>
-    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request)
+    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request) =>
+        (await InvokeJson(JsonFormatter.Default.Format(request))).Result;
+
+    /// <summary>The retired flat-diagram conversion actions (reserved 17 and 18) as an earlier client wrote them: by name, as
+    /// protobuf JSON prints enum values, and by number.</summary>
+    internal static readonly JsonNode[] RetiredConversionActions =
+        [JsonValue.Create("RFA_PREPARE_MIGRATION")!, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!, JsonValue.Create(17), JsonValue.Create(18)];
+
+    /// <summary>The request as JSON with the retired action and/or migrate payload an earlier build could send.</summary>
+    internal static string WithRetired(P.RecursiveFileRequest request, JsonNode? action = null, JsonObject? migrate = null)
+    {
+        var json = JsonNode.Parse(JsonFormatter.Default.Format(request))!.AsObject();
+        if (action is not null) json["action"] = action.DeepClone();
+        if (migrate is not null) json["migrate"] = migrate;
+        return json.ToJsonString();
+    }
+
+    /// <summary>A complete payload of the retired conversion request (the removed MigrateFlatDiagramData).</summary>
+    internal static JsonObject RetiredConversionPayload(string flatSourcePath, string flatSourceToken) => new()
+    {
+        ["operationId"] = Guid.NewGuid().ToString("D"), ["flatSourcePath"] = flatSourcePath, ["expectedFlatSourceToken"] = flatSourceToken,
+        ["rootName"] = "System", ["implementationName"] = "Initial",
+        ["origin"] = new JsonObject { ["kind"] = "DAK_IMPORT", ["actor"] = "Earlier project manager", ["recordedAt"] = "2026-09-23T00:00:00Z",
+            ["summary"] = "Convert the flat structural diagram" },
+    };
+
+    /// <summary>Runs the compiled helper (<c>kicad-mcp --diagram-file</c>, the process the native editor starts) on raw request
+    /// JSON and returns its parsed result and the exact JSON it wrote.</summary>
+    internal static async Task<(P.RecursiveFileResult Result, string Json)> InvokeJson(string json)
     {
         string? root = null;
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -1274,11 +1483,12 @@ public sealed class RecursiveEditorFileCommandTests
         {
             var diagnostics = process.StandardError.ReadToEndAsync(timeout.Token);
             var response = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            await process.StandardInput.WriteAsync(JsonFormatter.Default.Format(request)); process.StandardInput.Close();
+            await process.StandardInput.WriteAsync(json); process.StandardInput.Close();
             await process.WaitForExitAsync(timeout.Token);
-            var result = P.RecursiveFileResult.Parser.ParseJson(await response);
+            string written = await response;
+            var result = P.RecursiveFileResult.Parser.ParseJson(written);
             Assert.AreEqual(result.Success ? 0 : 1, process.ExitCode, await diagnostics);
-            return result;
+            return (result, written);
         }
         finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
     }

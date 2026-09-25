@@ -83,10 +83,19 @@ public sealed partial class NativeSessionTests
             await Assert.ThrowsExactlyAsync<InvalidDataException>(() => UpdateOrigin.VerifyAsync(origin with { Epoch = "stale-origin" },
                 Guid.Parse(instance), "", deadline.Token));
             Assert.IsFalse(native.HasExited, "Origin rejection must leave the original native window alive.");
-            Assert.AreEqual(origin.Epoch, (await client.HandshakeAsync(deadline.Token)).Epoch);
+            var managerSession = await client.HandshakeAsync(deadline.Token);
+            Assert.AreEqual(origin.Epoch, managerSession.Epoch);
+            // The update manager provides none of the document callbacks, so its handshake lists none
+            // of those requests and it does not dispatch them at all.
+            string[] managerRequests = managerSession.HandledRequests.ToArray();
+            CollectionAssert.Contains(managerRequests, KiCad.Automation.Protocol.GetAutomationSession.Descriptor.FullName,
+                "This build's handshake lists the requests it handles.");
+            foreach (string type in new[] { Kiapi.Common.Commands.OpenDocument.Descriptor.FullName,
+                         Kiapi.Common.Commands.CloseDocument.Descriptor.FullName, Kiapi.Common.Commands.CloseAllDocuments.Descriptor.FullName })
+                CollectionAssert.DoesNotContain(managerRequests, type, "The update manager has no callback for " + type + ".");
             var rejectedCreate = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                 client.CreateRootSchematicAsync(forbidden, deadline.Token));
-            Assert.AreEqual(8, rejectedCreate.Status);
+            Assert.AreEqual(5, rejectedCreate.Status, "OpenDocument must not be dispatched by the update manager (AS_UNHANDLED).");
             Assert.IsFalse(File.Exists(forbidden));
             CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(project, deadline.Token));
             await NativeKeyboard.CaptureAsync(displayName, Path.Combine(evidence, "empty-manager.png"), deadline.Token);

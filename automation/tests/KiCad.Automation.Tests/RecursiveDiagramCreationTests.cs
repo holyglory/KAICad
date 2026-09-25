@@ -70,7 +70,7 @@ public sealed class RecursiveDiagramCreationTests
             string conventional = Path.Combine(root, "board.system-diagram.xml");
             Assert.AreEqual(root, empty.Discovery.RepositoryRoot); Assert.AreEqual(project, empty.Discovery.ProjectFile);
             Assert.AreEqual(conventional, empty.Discovery.SuggestedNewPath); Assert.IsFalse(empty.Discovery.SuggestedPathExists);
-            Assert.IsEmpty(empty.Discovery.Diagrams); Assert.IsEmpty(empty.Discovery.FlatDiagrams); Assert.IsFalse(empty.Discovery.Truncated);
+            Assert.IsEmpty(empty.Discovery.Diagrams); Assert.IsFalse(empty.Discovery.Truncated);
 
             Guid operation = Guid.NewGuid();
             var created = await Invoke(Create(root, conventional, operation));
@@ -114,7 +114,7 @@ public sealed class RecursiveDiagramCreationTests
             var diagram = listed.Discovery.Diagrams.Single();
             Assert.AreEqual((conventional, P.DiscoveredDiagramStatus.DdsReady, true, created.Document.DocumentId, 2U, "fixture", created.SourceToken),
                 (diagram.Path, diagram.Status, diagram.Conventional, diagram.DocumentId, diagram.StoredSchemaVersion, diagram.RootName, diagram.SourceToken));
-            Assert.IsTrue(listed.Discovery.SuggestedPathExists); Assert.IsFalse(diagram.HasMigratedFromStructureId);
+            Assert.IsTrue(listed.Discovery.SuggestedPathExists);
 
             // Invalid targets and request shapes are refused before anything is written.
             Directory.CreateDirectory(locked);
@@ -207,7 +207,7 @@ public sealed class RecursiveDiagramCreationTests
             await File.WriteAllTextAsync(Path.Combine(board, "notes.xml"), "<unrelated/>\n");
             await File.WriteAllTextAsync(Path.Combine(board, ".hidden.xml"), "<unrelated/>\n");
             var before = Snapshot(root);
-            var found = await Invoke(Discover(project));
+            var (found, foundJson) = await RecursiveEditorFileCommandTests.InvokeJson(Google.Protobuf.JsonFormatter.Default.Format(Discover(project)));
             Assert.IsTrue(found.Success, found.ErrorMessage);
             // The repository root is the nearest folder holding hardware.xml; creating there keeps the diagram inside it.
             Assert.AreEqual((root, project, Path.Combine(board, "fixture.system-diagram.xml"), false),
@@ -217,8 +217,36 @@ public sealed class RecursiveDiagramCreationTests
             Assert.AreEqual((Path.Combine(board, "system.blocks.xml"), P.DiscoveredDiagramStatus.DdsReady, 1U, false, "System", PsuCpuIds.Id(0x10, 1).ToString("D")),
                 (blocks.Path, blocks.Status, blocks.StoredSchemaVersion, blocks.Conventional, blocks.RootName, blocks.DocumentId));
             Assert.AreEqual(Sha(await File.ReadAllBytesAsync(blocks.Path)), blocks.SourceToken);
-            Assert.IsEmpty(found.Discovery.FlatDiagrams); Assert.IsFalse(found.Discovery.HasManifestPath);
+            Assert.IsFalse(found.Discovery.HasManifestPath);
+            // The helper's own output has no flat-diagram rows or conversion origin (those fields are retired, not left empty).
+            foreach (string retired in new[] { "flatDiagrams", "flat_diagrams", "migratedFrom", "migrated_from", "migration" })
+                Assert.IsFalse(foundJson.Contains(retired, StringComparison.Ordinal), retired + ": " + foundJson);
             Unchanged(before, root, "discovery");
+
+            // An earlier project manager converting the listed legacy flat structure (the retired conversion, owner decision
+            // n9af098253fec71da): preparing or converting, by action name or number and with the complete conversion payload, is
+            // refused as unsupported before any file access. Nothing is read, written or staged, and the suggested path stays free.
+            string flat = Path.Combine(board, "flat-structure.engineering.xml"), flatToken = Sha(await File.ReadAllBytesAsync(flat));
+            var target = new P.RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = root,
+                SourcePath = found.Discovery.SuggestedNewPath };
+            foreach (var action in RecursiveEditorFileCommandTests.RetiredConversionActions)
+            {
+                var (refused, _) = await RecursiveEditorFileCommandTests.InvokeJson(RecursiveEditorFileCommandTests.WithRetired(target, action,
+                    RecursiveEditorFileCommandTests.RetiredConversionPayload(flat, flatToken)));
+                Refused(refused, "unsupported_diagram_file_request", "earlier conversion " + action.ToJsonString());
+                StringAssert.Contains(refused.ErrorMessage, "Nothing was read or changed", action.ToJsonString());
+            }
+            // Before any file access: aimed at a repository that does not exist, the old request is refused the same way, while an
+            // ordinary create aimed there is refused for the missing folder it looked at.
+            string absent = Path.Combine(root, "missing-repository");
+            var nowhere = new P.RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion, RepositoryRoot = absent,
+                SourcePath = Path.Combine(absent, "fixture.system-diagram.xml") };
+            Refused((await RecursiveEditorFileCommandTests.InvokeJson(RecursiveEditorFileCommandTests.WithRetired(nowhere,
+                    System.Text.Json.Nodes.JsonValue.Create(18), RecursiveEditorFileCommandTests.RetiredConversionPayload(Path.Combine(absent, "flat.xml"), flatToken)))).Result,
+                "unsupported_diagram_file_request", "earlier conversion into a missing repository");
+            Refused(await Invoke(Create(absent, nowhere.SourcePath, Guid.NewGuid())), "invalid_diagram_path", "precision: create looks at the missing repository");
+            Unchanged(before, root, "earlier conversion requests");
+            Assert.IsFalse(Directory.Exists(absent));
             // Creating at the suggested path inside the repository root; the version 1 graph and the flat file stay as they were.
             Guid operation = Guid.NewGuid();
             var created = await Invoke(Create(found.Discovery.RepositoryRoot, found.Discovery.SuggestedNewPath, operation, "Fixture board"));

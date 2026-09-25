@@ -505,6 +505,21 @@ bool PGM_KICAD::OnPgmInit()
 
         bool loaded = false;
 
+        // An automation start that fails after the manager window was built destroys that window
+        // here, so APP_KICAD::OnInit() deletes it while the program it uses still exists. Left to
+        // wxWidgets, the window was deleted only after OnPgmExit() and KiCad crashed on its way
+        // out (SIGSEGV) instead of ending with its normal failed-start exit code.
+        auto failAutomationStart = [&]()
+        {
+            if( managerFrame )
+            {
+                Kiway.SetTop( nullptr );
+                managerFrame->Destroy();
+            }
+
+            return false;
+        };
+
         // Do not attempt to load a non-existent project file.
         if( !projToLoad.empty() )
         {
@@ -527,7 +542,7 @@ bool PGM_KICAD::OnPgmInit()
                             throw;
 
                         wxLogError( "Automation startup failed: %s", error.What() );
-                        return false;
+                        return failAutomationStart();
                     }
                 }
             }
@@ -536,7 +551,7 @@ bool PGM_KICAD::OnPgmInit()
         if( !loaded && automationMode && !updateManagerMode )
         {
             wxLogError( "Automation project could not be loaded: %s", automationProject );
-            return false;
+            return failAutomationStart();
         }
 
         if( !loaded && appType == KICAD_MAIN_FRAME_T )
@@ -865,6 +880,9 @@ struct APP_KICAD : public wxApp
 
         if( !program.OnPgmInit() )
         {
+            // Delete the windows a failed start destroyed (PGM_KICAD::OnPgmInit()) while the
+            // program they use still exists, as a normal exit does before OnPgmExit().
+            DeletePendingObjects();
             program.OnPgmExit();
             return false;
         }

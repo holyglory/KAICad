@@ -45,7 +45,8 @@ public sealed class RecursiveBlockCodecTests
     [DataRow("unknown-nested-field")]
     // Schema 1 graph messages are refused outright (contract rbg-v2 section 2.3), whatever they carry; a message
     // decoded for schema 1 cannot carry any schema 2 field, each being refused as the unsupported field it is for
-    // that version. The flat-diagram conversion receipt is refused in every schema: flat diagrams are discarded.
+    // that version. The retired flat-diagram conversion receipt (graph field 11, now reserved: flat diagrams are
+    // discarded, not converted) from an older sender is refused as the unknown field it now is.
     [DataRow("v2-interface-domain")]
     [DataRow("v2-interface-direction")]
     [DataRow("v2-level-presentation")]
@@ -53,7 +54,7 @@ public sealed class RecursiveBlockCodecTests
     [DataRow("v2-connection-domain")]
     [DataRow("v2-connection-direction")]
     [DataRow("v2-connection-realization")]
-    [DataRow("v2-migration")]
+    [DataRow("retired-migration-receipt")]
     [DataRow("v2-block-draft-interface-domain")]
     [DataRow("v2-block-draft-presentation")]
     [DataRow("v2-connection-draft-domain")]
@@ -62,7 +63,7 @@ public sealed class RecursiveBlockCodecTests
     public void UnknownFieldsBadTargetsMissingFieldsAndUnsupportedPrecisionAreRejected(string scenario)
     {
         bool schemaTwo = scenario.StartsWith("v2-", StringComparison.Ordinal);
-        bool schemaOneGraph = schemaTwo && scenario != "v2-migration" && !scenario.Contains("draft", StringComparison.Ordinal);
+        bool schemaOneGraph = schemaTwo && !scenario.Contains("draft", StringComparison.Ordinal);
         var linked = LinkedDiagramFixture.Create();
         var data = RecursiveBlockCodec.Encode(schemaTwo ? linked.Graph : RecursiveBlockFixture.Create().Graph);
         var blockDraft = RecursiveBlockCodec.Encode(linked.Graph.StartDraft(linked.Blocks["PSU"]));
@@ -108,7 +109,13 @@ public sealed class RecursiveBlockCodecTests
             case "v2-connection-direction": Link().Direction = P.DiagramConnectionDirection.DcdrFromFirst; break;
             case "v2-connection-realization":
                 Link().Realization = new() { State = P.DiagramRealizationState.DrsUnknown, UnresolvedReason = "Test-only: not yet decided." }; break;
-            case "v2-migration": data.Migration = new() { Id = Guid.NewGuid().ToString("D") }; break;
+            case "retired-migration-receipt":
+                // Field 11 (length-delimited) holding a receipt with only its id (field 1), as an earlier build could encode it.
+                byte[] receipt = System.Text.Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("D"));
+                byte[] withReceipt = [.. data.ToByteArray(), 0x5a, (byte)(receipt.Length + 2), 0x0a, (byte)receipt.Length, .. receipt];
+                data = P.RecursiveBlockGraphData.Parser.ParseFrom(withReceipt);
+                Assert.IsNull(P.RecursiveBlockGraphData.Descriptor.FindFieldByNumber(11), "Graph field 11 is reserved, not declared.");
+                break;
             case "v2-block-draft-interface-domain":
                 blockDraft.LocalDiagram.Interfaces[0].Domain = P.DiagramDomain.DdPower; decode = () => RecursiveBlockCodec.Decode(blockDraft, document, 1); break;
             case "v2-block-draft-presentation":
@@ -125,7 +132,7 @@ public sealed class RecursiveBlockCodecTests
         }
         var error = Assert.ThrowsExactly<AutomationException>(decode);
         if (schemaOneGraph) Assert.AreEqual("Use the supported recursive diagram message version.", error.Message, scenario);
-        else if (schemaTwo || scenario is "unknown-root-field" or "unknown-nested-field")
+        else if (schemaTwo || scenario is "unknown-root-field" or "unknown-nested-field" or "retired-migration-receipt")
             Assert.AreEqual("The recursive diagram message contains unsupported fields; no history was simplified.", error.Message, scenario);
     }
 
@@ -133,10 +140,10 @@ public sealed class RecursiveBlockCodecTests
     private static readonly byte[] UnknownField = [0xc0, 0x3e, 0x01];
 
     [TestMethod]
-    public void SchemaTwoObservationsReportTheEditorStateAndOmitOnlyFlatConversion()
+    public void SchemaTwoObservationsReportTheEditorState()
     {
         // The native per-level editor speaks schema 2 (contract rbg-v2 section 9.1): its level draft, tool, viewports and
-        // resolved layout are reported; only the never-implemented flat-conversion fields stay out.
+        // resolved layout are reported, and schema 2 leaves nothing out (the flat-conversion fields are retired, not omitted).
         var linked = LinkedDiagramFixture.Create();
         var graph = RecursiveBlockCodec.Encode(linked.Graph);
         var diagram = graph.Revisions.First(r => r.LocalDiagram?.Interfaces.Count > 0).Clone();
@@ -152,7 +159,8 @@ public sealed class RecursiveBlockCodecTests
         observation.Editor.LevelViewports.Add(new P.DiagramLevelViewportState { BlockId = diagram.Selection.BlockId, Scale = 1 });
         var view = new P.RecursiveDiagramView { ViewId = "current", Units = "diagram-unit", Diagram = diagram, ResolvedLayout = new() { DormantEntries = 1 } };
         view.Connections.Add(link); observation.Views.Add(view);
-        Assert.IsFalse(RecursiveBlockCodec.CarriesUnimplementedField(observation), "The per-level editor produces its schema 2 state.");
+        Assert.IsFalse(RecursiveBlockCodec.CarriesFieldBeyondSchema(observation, RecursiveBlockCodec.NativeEditorSchemaVersion),
+            "The per-level editor produces its schema 2 state.");
         Assert.IsTrue(RecursiveBlockCodec.CarriesFieldBeyondSchema(observation, 1), "Recall: schema 1 could not carry this state.");
         var formatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
         string[] editorFields = ["storedSchemaVersion", "sourceWritable", "levelDraft", "levelViewports", "canvasTool", "selectedInterfaceId", "resolvedLayout"];
@@ -165,10 +173,10 @@ public sealed class RecursiveBlockCodecTests
         Assert.AreEqual("DCDR_FROM_FIRST", schemaTwo["views"]![0]!["connections"]![0]!["direction"]!.GetValue<string>());
         Assert.AreEqual(1U, schemaTwo["views"]![0]!["resolvedLayout"]!["dormantEntries"]!.GetValue<uint>());
         Assert.IsFalse(schemaTwo["editor"]!["dirty"]!.GetValue<bool>());
-        // Precision of the remaining refusal: a flat-conversion receipt is still never produced or accepted.
-        var receipt = graph.Clone(); receipt.Migration = new();
-        Assert.IsTrue(RecursiveBlockCodec.CarriesUnimplementedField(receipt));
-        Assert.IsFalse(RecursiveBlockCodec.CarriesUnimplementedField(RecursiveBlockCodec.Encode(linked.Graph)));
+        var schemaTwoJson = JsonFormatter.Default.Format(graph);
+        var omitted = System.Text.Json.Nodes.JsonNode.Parse(schemaTwoJson)!.AsObject();
+        RecursiveBlockCodec.OmitFieldsBeyondSchema(graph, omitted, RecursiveBlockCodec.NativeEditorSchemaVersion);
+        Assert.AreEqual(System.Text.Json.Nodes.JsonNode.Parse(schemaTwoJson)!.ToJsonString(), omitted.ToJsonString(), "Schema 2 omits no graph field.");
         Assert.IsFalse(RecursiveBlockCodec.IsSupportedSchema(1));
         Assert.AreEqual("invalid_recursive_diagram_data", Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockCodec.Encode(linked.Graph, 1)).Code);
     }

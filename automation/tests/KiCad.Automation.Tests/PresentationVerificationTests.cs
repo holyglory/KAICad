@@ -1,4 +1,5 @@
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -160,5 +161,36 @@ public sealed class PresentationVerificationTests
         var valid = sheet with { PageBounds = new(-10, 0, 40, 40), Wires = [first, second with { SignalKey = first.SignalKey }] };
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid), Policy).Clear);
         Assert.IsTrue(PresentationVerifier.Verify(Snapshot(valid with { Wires = [first, second with { Start = new(30, 20) }] }), Policy).Clear);
+    }
+    // Isolated geometry of NativePresentationChecks.CheckSymbolPlacementAsync. The live PSU/CPU creation
+    // journey exercises it only on a clean layout; the layout planner never produces the must-catch cases,
+    // so they are proven here.
+    [TestMethod]
+    public void SymbolPlacementCatchesBodyOverlapAndRegionExitButAllowsFieldOverhang()
+    {
+        var usable = new PresentationBounds(10, 10, 1_000, 800);
+        Guid a = Guid.NewGuid(), b = Guid.NewGuid(), c = Guid.NewGuid();
+        PresentationBounds[] bodies = [new(100, 100, 200, 200), new(200, 100, 300, 200), new(400, 100, 500, 200)];
+        // Fields overhang onto a neighbour's body and fields, but every body only touches or clears the others.
+        PresentationBounds[] fields = [new(90, 90, 260, 210), new(150, 90, 330, 210), new(380, 60, 520, 220)];
+        Assert.IsEmpty(NativePresentationChecks.SymbolPlacementIssues([a, b, c], bodies, fields, usable));
+
+        var overlap = NativePresentationChecks.SymbolPlacementIssues([a, b, c],
+            [bodies[0], bodies[1] with { LeftNm = 199 }, bodies[2]], fields, usable);
+        Assert.AreEqual(NativePresentationChecks.SymbolBodiesOverlap, overlap.Single().Code);
+        CollectionAssert.AreEqual(new[] { a, b }, overlap.Single().Symbols.ToArray());
+
+        foreach (var (problem, body, field) in new (string, PresentationBounds, PresentationBounds)[]
+        {
+            ("a field in the title-block reserve", bodies[2], fields[2] with { BottomNm = 801 }),
+            ("a field in the page inset", bodies[2], fields[2] with { TopNm = 9 }),
+            ("a body outside the region", bodies[2] with { RightNm = 1_001 }, fields[2] with { RightNm = 1_001 })
+        })
+        {
+            var issues = NativePresentationChecks.SymbolPlacementIssues([a, b, c], [bodies[0], bodies[1], body], [fields[0], fields[1], field], usable);
+            Assert.AreEqual(NativePresentationChecks.SymbolOutsideUsableRegion, issues.Single().Code, problem);
+            CollectionAssert.AreEqual(new[] { c }, issues.Single().Symbols.ToArray(), problem);
+        }
+        Assert.ThrowsExactly<ArgumentException>(() => NativePresentationChecks.SymbolPlacementIssues([a, b], bodies, fields, usable));
     }
 }

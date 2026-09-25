@@ -22,7 +22,10 @@
 #define KICAD_API_HANDLER_H
 
 #include <functional>
+#include <map>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <fmt/format.h>
 #include <tl/expected.hpp>
@@ -66,6 +69,16 @@ public:
      * @return a response to send to the client, or an appropriate error
      */
     API_RESULT Handle( ApiRequest& aMsg );
+
+    /**
+     * The fully qualified protobuf type names of the request messages that Handle() dispatches,
+     * in ordinal order.  This is the registration table itself, so an automation handshake that
+     * advertises it cannot claim a request this handler would not dispatch.  A handler that cannot
+     * serve a request in the current process mode should leave it unregistered rather than refuse
+     * it.  A dispatched request can still be rejected for its target, its arguments or the
+     * editor's state.
+     */
+    std::vector<std::string> HandledMessageTypes() const;
 
 protected:
 

@@ -313,6 +313,13 @@ message LifecycleOperationResult {
   string error_message = 6;
   DocumentLifecycleState observed_state = 7;
   // -- lane 2D (400-499) --
+  // Observed document files this save replaced on disk, in write order. A failed save that lists
+  // files here left the disk partly updated; the editor still holds the complete design.
+  repeated string written_files = 400;
+  // Observed document files the file system would not let KiCad write (a read-only file or folder,
+  // a full disk, ...). A refusal that writable files would not fix never lists a file here. The
+  // error message says why for each one.
+  repeated string blocked_files = 401;
   // -- end lane 2D --
 }
 
@@ -399,6 +406,16 @@ message AutomationSession {
   // -- lane 2C (300-399) --
   // -- end lane 2C --
   // -- lane 2D (400-499) --
+  // 400 held a format marker for capabilities during lane 2D development and is not reused.
+  reserved 400;
+  reserved "capability_format";
+  // The fully qualified request message types this process dispatches at the time of the reply,
+  // in ordinal order, read from its registered handlers and automation controllers. Editors add
+  // their types when they open and remove them when they close. A dispatched request can still be
+  // rejected for its target, its arguments or the editor's state. capabilities (5) keeps the named
+  // feature contracts. A peer that answers this handshake always dispatches GetAutomationSession,
+  // so an empty list means a peer built before this field, whose request coverage is unknown.
+  repeated string handled_requests = 401;
   // -- end lane 2D --
 }
 

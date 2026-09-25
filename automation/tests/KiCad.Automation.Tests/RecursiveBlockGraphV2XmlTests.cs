@@ -270,7 +270,8 @@ public sealed class RecursiveBlockGraphV2XmlTests
     public void FlatConversionReceiptsAreAlwaysRefusedBecauseFlatDiagramsAreNotConverted()
     {
         // Owner decision n9af098253fec71da: legacy flat diagrams are discarded, not converted, so no build
-        // writes a receipt and a file claiming one is refused instead of being silently dropped on save.
+        // writes a receipt, schema 2 no longer declares one, and a file claiming one is refused instead of
+        // being silently dropped on save.
         var f = SchemaTwoFixture.Create(); var graph = f.Graph;
         var root = XElement.Parse(RecursiveBlockGraphXml.Write(graph), LoadOptions.PreserveWhitespace);
         string op = Guid.NewGuid().ToString("D"), sha = new('a', 64);
@@ -287,9 +288,16 @@ public sealed class RecursiveBlockGraphV2XmlTests
             new XElement(Ns + "items"), new XElement(Ns + "retained-guidance"),
             new XElement(Ns + "source-structure", new XAttribute("sha256", sha), "<structure/>")));
         var set = RecursiveBlockGraphXml.CreateSchemaSet();
-        new XDocument(root).Validate(set, null); // The receipt itself is valid schema 2 text...
+        // The receipt is no longer schema 2 text: the retired element and its types are gone from the schema...
+        var invalid = Assert.ThrowsExactly<XmlSchemaValidationException>(() => new XDocument(root).Validate(set, null));
+        StringAssert.Contains(invalid.Message, "migration");
+        // ...and the reader names it, so a person learns why the file is refused.
         var error = Assert.ThrowsExactly<AutomationException>(() => RecursiveBlockGraphXml.Read(root.ToString(SaveOptions.DisableFormatting)));
-        Assert.AreEqual("invalid_recursive_block_graph_xml", error.Code); // ...but no build keeps one, so the file is refused.
+        Assert.AreEqual("invalid_recursive_block_graph_xml", error.Code);
         StringAssert.Contains(error.Message, "conversion receipt");
+        // Precision: the same file without the receipt is valid and reads.
+        root.Element(Ns + "migration")!.Remove();
+        new XDocument(root).Validate(set, null);
+        Assert.AreEqual(graph.DocumentId, RecursiveBlockGraphXml.Read(root.ToString(SaveOptions.DisableFormatting)).DocumentId);
     }
 }

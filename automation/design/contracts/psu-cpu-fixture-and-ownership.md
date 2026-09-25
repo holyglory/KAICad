@@ -14,6 +14,17 @@
 > version-10 rule and `AbandonRejectedRealization` are landed by the parent at the freeze integration. The rebuild
 > seam used by lane 2C is provisional.
 
+> **Errata 2026-09-24** (decision `kicad-stacked-pins-one-node-20260924`, ne741e8800f5b394f): the LP3982 symbol draws
+> pins 1 and 4 at the same point, and KiCad always joins pins that one placed symbol's own definition stacks at one
+> point. §1.6.3 "Other stages" therefore reads: `Components`: same sheets and symbols; every pin is alone in its native
+> net except U2 pins 1 and 4, which KiCad shows joined in one native net of exactly those two pins; no labels or sheet
+> pins. The same holds for `PsuComponents`, which places the same U2. `ExpectedNative` lists the pair as `JoinedPins`
+> (derived from the exact definition geometry of `lib_symbols.kicad_sexpr`, never from names) and leaves it out of
+> `IsolatedPins`: 220 isolated pins in `Components`, 35 in `PsuComponents`. `Complete` is unchanged: both pins are
+> already in RAIL_B. The electrical comparison treats each stacked group as one node, and XML that puts stacked pins of
+> one symbol on different nets is refused while planning with `stacked_pins_on_different_nets`, before KiCad changes.
+> The frozen fixture files are unchanged.
+
 # KAICad Phase 2 shared contract — PSU→CPU acceptance fixture and lane file ownership
 
 Base read: worktree `the codex/finalization-integration worktree`, branch `codex/finalization-integration`. HEAD moved from `0da1dcdbd8` to `86dbd67c5d` while I was reading. That merge touched only `NativeStructuralEditorJourney.cs` and `pcbnew/api/pcb_drc_run_inputs.h`, so nothing below is affected. The work was read-only: I edited nothing, ran no build or test, and wrote no Coordinator record.
@@ -776,3 +787,22 @@ Error codes (the message prefix of the `AssertFailedException` raised by the loa
 - The same bands apply to new values in shared enums and to new members of existing `oneof`s.
 - Marker lines: `// -- lane 2X (NNN-MMM) --` and `// -- end lane 2X --`. Messages a lane adds to a shared file go between `// == lane 2X messages ==` and `// == end ==` at the end of the file.
 - New enum types and messages use lane prefixes, because C++ enum values share package scope.
+
+## Erratum 2026-09-24: flat-diagram conversion retired
+
+Owner decision `n9af098253fec71da`: legacy flat structural diagrams are discarded, not converted. This erratum (integration
+grant for item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`) overrides the earlier sections; the full protocol list is in
+the matching erratum of `cn2-recursive-diagram-v2.md`.
+
+- **§1.8 and §1.9.** `flat-structure.engineering.xml`, `expected-migration.json` and `PsuCpuExpectedMigration` stay frozen
+  fixture data (version 1 is immutable), but nothing converts them. The `StructuralMigration` harness row
+  (`FlatStructureConvertsOnceIntoARootBlock`, `native-structural-migration`) is retired and is not built.
+- **§2.4 lane 2B.** Retired flat-editor and conversion files, removed or never created: `StructuralMigration.cs`,
+  `StructuralEditorCodec.cs`, `StructuralEditorFiles.cs`, `StructuralEditorTools.cs`, `StructuralFileCommand.cs`,
+  `kicad/structural_editor_control.{h,cpp}`, `kicad/structural_editor_frame.{h,cpp}`, `kicad/structural_editor_admission.h`,
+  `api/proto/common/commands/structural_commands.proto`, `NativeStructuralEditorJourney.cs`,
+  `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs`, `NativeStructuralMigrationJourney.cs` and
+  `StructuralMigrationTests.cs`. `RecursiveEditorTools.cs` gains `kicad_diagram_create` only, never `kicad_diagram_migrate`.
+- **§3.** The retired conversion numbers in `diagram_revision_types.proto` are reserved (including frozen numbers below 100)
+  and are never reused. `SharedProtoBandTests` records them and no longer grants lane 2B the `StructuralMigration` type
+  prefix or the `SMG_` value prefix.

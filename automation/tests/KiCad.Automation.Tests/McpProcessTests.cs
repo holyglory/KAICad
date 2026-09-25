@@ -7,6 +7,7 @@ using KiCad.Automation.Native;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Schematic.Types;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Protocol = KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Tests;
 
@@ -45,6 +46,7 @@ public sealed class McpProcessTests
                 .Select(t => t.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.Contains(names, "kicad_instances_list");
             CollectionAssert.Contains(names, "kicad_instance_capabilities");
+            CollectionAssert.Contains(names, "kicad_service_capabilities");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");
             CollectionAssert.Contains(names, "kicad_pcb_drc_job");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
@@ -827,6 +829,284 @@ public sealed class McpProcessTests
                 if (response.RootElement.TryGetProperty("id", out var responseId) && responseId.GetInt32() == id)
                     return response.RootElement.Clone();
             }
+        }
+    }
+
+    // Decision n39ac0ccc5c9270f2 / ledger pbfcccd896f17cf27 through the compiled server. kicad_design_sync_plan
+    // classifies a saved connection-only revision with the handshake this server recorded when it attached the
+    // instance and never contacts KiCad for it; with no attached instance it is today's plan; reattaching refreshes
+    // the record. The automatic worker and apply take their own live handshakes and classify the same revision the
+    // same way. No KiCad build advertises schematic.connection-realization.v1 yet (CN-1 §8.3), so a scripted editor
+    // on the real NNG transport stands in for one; NativeSessionTests (VerifyRecordedHandshakePlanning) proves the
+    // unadvertised case against a real KiCad. With the capability the planner plans the connection's realization
+    // (CN-1 §4.3), and the scripted editor refuses the realization's measurement, so the worker and apply must both
+    // stop with that measurement's code (CN-1 §13) after sending the editor the same requests.
+    [TestMethod]
+    public async Task SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-mcp-handshake-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        try
+        {
+            string project = Directory.CreateDirectory(Path.Combine(root, "project")).FullName;
+            var state = ConnectionOnlyRevision(project);
+            string instanceId = state.InstanceId.ToString("D");
+            using var editor = new ScriptedNngEditor(root, state, Path.Combine(project, "fixture.kicad_pro"));
+            string handshake = Protocol.GetAutomationSession.Descriptor.FullName, capture = Protocol.ReadCheckedSchematicState.Descriptor.FullName,
+                observe = Protocol.ReadSchematicElectricalState.Descriptor.FullName, measure = Protocol.MeasureSchematicPlacement.Descriptor.FullName;
+            var advertising = editor.Session(advertises: true);
+            Assert.AreEqual(SchematicConnectedAdditionKind.Admitted,
+                SchematicConnectedAddition.Classify(state, DesignRecoveryStore.ReadDesired(state), advertising).Kind,
+                "The saved revision only adds a connection over drawn pins.");
+            var today = SchematicSynchronizationPlanner.Plan(state);
+            var realizing = SchematicSynchronizationPlanner.Plan(state, advertising);
+            Assert.IsTrue(today.CanPrepare, today.ErrorMessage);
+            Assert.IsFalse(today.NativeConnectionRealizationRequired);
+            Assert.IsTrue(realizing.CanPrepare, realizing.ErrorCode + ": " + realizing.ErrorMessage);
+            Assert.IsTrue(realizing.NativeConnectionRealizationRequired,
+                "With the capability an admitted connection-only revision plans a native realization (CN-1 §4.3): " + realizing.ErrorMessage);
+
+            int records = 0;
+            (string Recovery, string Design, string Token) Record()
+            {
+                string folder = Directory.CreateDirectory(Path.Combine(root, "records", (++records).ToString())).FullName;
+                string recovery = Path.Combine(folder, "recovery.json"), design = Path.Combine(folder, "design.xml");
+                File.WriteAllBytes(design, state.DesiredFileBytes);
+                return (recovery, design, new DesignRecoveryStore(recovery).Save(state, null).RevisionToken);
+            }
+            await using var mcp = await StdioMcpFixture.StartAsync(Path.Combine(root, "mcp-state"), Path.Combine(root, "mcp.stderr.log"), timeout.Token);
+            var preview = Record();
+            async Task<JsonElement> Preview() => (await mcp.Tool("kicad_design_sync_plan", new { instanceId,
+                recoveryPath = preview.Recovery, expectedRevisionToken = preview.Token })).GetProperty("structuredContent");
+            // The worker discovers the editor, refreshes its observation, plans with its own handshake and applies.
+            async Task<(string? Code, string[] Requests, DesignRecoveryState Record)> Worker()
+            {
+                var target = Record(); int from = editor.Requests.Length;
+                var started = await mcp.Tool("kicad_design_automatic_sync_start", new { instanceId, recoveryPath = target.Recovery,
+                    designPath = target.Design, expectedRecoveryRevision = target.Token });
+                Assert.IsFalse(started.TryGetProperty("isError", out var failed) && failed.GetBoolean(), started.GetRawText());
+                string sessionId = started.GetProperty("structuredContent").GetProperty("sessionId").GetString()!;
+                var status = started.GetProperty("structuredContent").GetProperty("status");
+                while (status.GetProperty("phase").GetString() is not ("Paused" or "Watching" or "Stopped" or "InvalidDesign"))
+                    status = (await mcp.Tool("kicad_design_automatic_sync_wait", new { instanceId, sessionId,
+                        afterSequence = status.GetProperty("sequence").GetUInt64() })).GetProperty("structuredContent").GetProperty("status");
+                var stopped = await mcp.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId });
+                Assert.AreEqual("Stopped", stopped.GetProperty("structuredContent").GetProperty("status").GetProperty("phase").GetString(), stopped.GetRawText());
+                Assert.AreEqual("Paused", status.GetProperty("phase").GetString(), status.GetRawText());
+                return (status.GetProperty("errorCode").GetString(), editor.Requests[from..], new DesignRecoveryStore(target.Recovery).Read()!.State);
+            }
+            async Task<(string? Code, string[] Requests, DesignRecoveryState Record)> Apply()
+            {
+                var target = Record(); int from = editor.Requests.Length;
+                var result = await mcp.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = target.Recovery,
+                    designPath = target.Design, expectedRevisionToken = target.Token, operationId = Guid.NewGuid().ToString("D") });
+                Assert.IsTrue(result.GetProperty("isError").GetBoolean(), "The scripted editor cannot complete an application: " + result.GetRawText());
+                return (result.GetProperty("structuredContent").GetProperty("errorCode").GetString(), editor.Requests[from..],
+                    new DesignRecoveryStore(target.Recovery).Read()!.State);
+            }
+            string[] workerStart = [handshake, capture, handshake, observe];
+
+            // Without an attached instance the preview is today's plan, and nothing contacts the editor.
+            var unattached = await Preview();
+            RequirePreviewPlan(today, unattached);
+            Assert.IsEmpty(editor.Requests);
+
+            // Attached to an editor that advertises realization, the preview classifies with the recorded handshake.
+            editor.Advertises = true;
+            var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = editor.Endpoint, expectedInstanceId = instanceId });
+            Assert.IsFalse(attached.TryGetProperty("isError", out var attachFailed) && attachFailed.GetBoolean(), attached.GetRawText());
+            CollectionAssert.AreEqual(new[] { handshake }, editor.Requests, "Attaching reads one handshake.");
+            var recorded = await Preview();
+            RequirePreviewPlan(realizing, recorded);
+            Assert.AreNotEqual(unattached.GetRawText(), recorded.GetRawText(), "The recorded handshake decides the classification.");
+            Assert.HasCount(1, editor.Requests, "The preview never contacts KiCad.");
+
+            // The worker and apply, each with its own advertising handshake, classify the revision the same way.
+            var worker = await Worker();
+            var apply = await Apply();
+            CollectionAssert.AreEqual(workerStart, worker.Requests.Take(4).ToArray(), string.Join(", ", worker.Requests));
+            // Both hand the realization to its measurement of the captured checkpoint (CN-1 §9.1). The scripted editor
+            // refuses the measurement, so both stop with the same code and nothing is journaled, drawn or saved.
+            CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
+            CollectionAssert.AreEqual(new[] { handshake, capture }, apply.Requests.Take(2).ToArray(), string.Join(", ", apply.Requests));
+            Assert.IsGreaterThan(2, apply.Requests.Length, "After the capture the realization measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.IsTrue(apply.Requests.Skip(2).All(r => r == measure),
+                "After the capture the realization only measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.AreEqual(SchematicConnectionErrors.RealizationMeasurementUnsupported, apply.Code, "Apply stops at the refused measurement.");
+            Assert.AreEqual(apply.Code, worker.Code, "The worker pauses with apply's code.");
+            Assert.IsFalse(worker.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
+            Assert.IsFalse(apply.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
+            Console.WriteLine($"Advertised handshake: the planner plans a native realization; "
+                + $"worker {worker.Code} after [{string.Join(", ", worker.Requests)}]; apply {apply.Code} after [{string.Join(", ", apply.Requests)}].");
+
+            // The preview reads the record made at attach, not the live editor: after the editor stops advertising the
+            // preview is unchanged until the instance is reattached, which refreshes the record.
+            editor.Advertises = false;
+            int beforeReattach = editor.Requests.Length;
+            Assert.AreEqual(recorded.GetRawText(), (await Preview()).GetRawText(), "Only attachment records a handshake.");
+            Assert.HasCount(beforeReattach, editor.Requests, "The preview never contacts KiCad.");
+            var reattached = await mcp.Tool("kicad_instance_reattach", new { instanceId });
+            Assert.IsFalse(reattached.TryGetProperty("isError", out var reattachFailed) && reattachFailed.GetBoolean(), reattached.GetRawText());
+            Assert.AreEqual(unattached.GetRawText(), (await Preview()).GetRawText(),
+                "Reattaching refreshes the recorded handshake; without the capability the preview is today's plan.");
+
+            // Without the capability the worker and apply take today's general path: both journal the XML publication
+            // and refuse it, because the editor does not show the new connection.
+            worker = await Worker();
+            apply = await Apply();
+            CollectionAssert.AreEqual(workerStart, worker.Requests.Take(4).ToArray(), string.Join(", ", worker.Requests));
+            CollectionAssert.AreEqual(new[] { handshake, capture, capture }, apply.Requests, string.Join(", ", apply.Requests));
+            CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
+            foreach (var (name, result) in new[] { ("worker", worker), ("apply", apply) })
+            {
+                Assert.AreEqual("native_sync_connectivity_mismatch", result.Code, name);
+                Assert.IsNotNull(result.Record.PendingPublication, $"The {name} journals the general path's XML publication.");
+                Assert.IsNull(result.Record.PendingLayout, $"The {name} must not plan a connection realization.");
+                Assert.IsNull(result.Record.PendingMutation, $"The {name} has no native batch to send.");
+            }
+            Console.WriteLine($"Unadvertised handshake after reattach: worker {worker.Code} after [{string.Join(", ", worker.Requests)}]; "
+                + $"apply {apply.Code} after [{string.Join(", ", apply.Requests)}].");
+            CollectionAssert.DoesNotContain(editor.Requests, Protocol.CheckedSchematicBatch.Descriptor.FullName, "Nothing is drawn.");
+            CollectionAssert.DoesNotContain(editor.Requests, Protocol.CheckedSaveDocument.Descriptor.FullName, "Nothing is saved.");
+            Assert.AreEqual(preview.Token, new DesignRecoveryStore(preview.Recovery).Read()!.RevisionToken, "The preview writes nothing.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // The public preview reports exactly the planner's own plan for the same record and handshake.
+    private static void RequirePreviewPlan(SchematicSynchronizationPlan expected, JsonElement preview)
+    {
+        Assert.AreEqual(expected.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(expected.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
+        Assert.AreEqual(expected.CandidateXml, preview.GetProperty("candidateDesignXml").GetString(), preview.GetRawText());
+        CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
+            preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray(), preview.GetRawText());
+        Assert.AreEqual(expected.NativeConnectivityValidationRequired, preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
+            preview.GetRawText());
+    }
+
+    // The planning fixture with one saved XML revision that only joins two drawn pins (as in
+    // AutomaticDesignSynchronizationTests), moved into a real project folder where an automatic worker keeps its
+    // history. The editor checkpoint carries one exact native revision, and every sheet reports the connection
+    // grid realization draws on (CN-1 §6.1).
+    private static DesignRecoveryState ConnectionOnlyRevision(string projectDirectory)
+    {
+        var state = SchematicSynchronizationPlanTests.Fixture();
+        var schematic = state.Baseline.Schematic.Clone();
+        schematic.Document.Project.Path = projectDirectory;
+        foreach (var screen in schematic.Instances)
+        {
+            if (screen.Metadata.Document?.Project is { } owner) owner.Path = projectDirectory;
+            screen.Metadata.Formatting = SchematicFormattingTests.Formatting();
+        }
+        var revision = new Protocol.DocumentRevision { Epoch = Guid.NewGuid().ToString("D"), Sequence = state.NativeRevision.Sequence };
+        var baselineElectrical = state.BaselineElectrical!.Clone();
+        baselineElectrical.Hierarchy.Data = schematic.Clone(); baselineElectrical.Hierarchy.Revision = revision.Clone();
+        var observedElectrical = state.ObservedElectrical!.Clone();
+        observedElectrical.Hierarchy.Data = schematic.Clone(); observedElectrical.Hierarchy.Revision = revision.Clone();
+        state = state with { Baseline = state.Baseline with { Schematic = schematic }, Observed = schematic.Clone(),
+            NativeRevision = new(revision.Epoch, revision.Sequence), BaselineElectrical = baselineElectrical, ObservedElectrical = observedElectrical };
+        var circuit = state.Baseline.Engineering.Circuit;
+        var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with { Nets =
+            [.. circuit.Nets, new CircuitNet(Guid.NewGuid(), "SIG", [new(circuit.Components[0].Id, "1"), new(circuit.Components[1].Id, "1")])] } } };
+        return state with { DesiredFileBytes = System.Text.Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, state.KnowledgeLibraries)) };
+    }
+
+    /// <summary>An editor on the real NNG request/reply transport. It answers its handshake, the checked checkpoint
+    /// capture and the electrical observation of one saved state, refuses every other request, and records each
+    /// request by message name. It stands in only for a KiCad that advertises schematic.connection-realization.v1,
+    /// which no native build does yet (CN-1 §8.3).</summary>
+    private sealed class ScriptedNngEditor : IDisposable
+    {
+        private readonly Nng.Socket socket;
+        private readonly Task serving;
+        private readonly object gate = new();
+        private readonly List<string> requests = [];
+        private readonly string instanceId, projectPath, eventEndpoint, epoch = Guid.NewGuid().ToString("D");
+        private readonly Protocol.CheckedSchematicState checkpoint;
+        private readonly Protocol.SchematicElectricalState electrical;
+        private volatile bool advertises;
+        internal string Endpoint { get; }
+        internal bool Advertises { get => advertises; set => advertises = value; }
+        internal string[] Requests { get { lock (gate) return [.. requests]; } }
+
+        internal ScriptedNngEditor(string directory, DesignRecoveryState state, string projectPath)
+        {
+            instanceId = state.InstanceId.ToString("D"); this.projectPath = projectPath;
+            Endpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "editor.sock"));
+            // Nothing publishes here: the worker's event subscription waits, which is all this check needs.
+            eventEndpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "events.sock"));
+            electrical = state.ObservedElectrical!.Clone();
+            checkpoint = new Protocol.CheckedSchematicState
+            {
+                Electrical = electrical.Clone(),
+                State = new() { Document = state.Baseline.Schematic.Document.Clone(), ProcessEpoch = epoch,
+                    NativeIdentity = Guid.NewGuid().ToString("D"), Revision = electrical.Hierarchy.Revision.Clone(),
+                    Scope = Protocol.DocumentLifecycleScope.DlsSchematicHierarchy, ProjectSettingsIncluded = true,
+                    StateSha256 = new string('a', 64) }
+            };
+            string file = Path.Combine(Path.GetDirectoryName(projectPath)!, "fixture.kicad_sch");
+            checkpoint.State.NativeFiles.Add(file);
+            checkpoint.State.FileBaselines.Add(new Protocol.NativeFileBaselineState { Path = file, BaselinePath = file,
+                BaselineKnown = true, BaselineExists = true, BaselineSha256 = new string('b', 64), BaselineBytes = 1,
+                CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('b', 64), CurrentBytes = 1,
+                Status = Protocol.NativeFileBaselineStatus.NfbsUnchanged });
+            Nng.Check(Nng.nng_rep0_open(out socket));
+            try
+            {
+                Nng.Check(Nng.nng_setopt_size(socket, "recv-size-max", 8 * 1024 * 1024));
+                Nng.Check(Nng.nng_listen(socket, Endpoint, IntPtr.Zero, 0));
+            }
+            catch { Nng.nng_close(socket); throw; }
+            serving = Task.Factory.StartNew(Serve, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+
+        internal Protocol.AutomationSession Session(bool advertises)
+        {
+            var session = new Protocol.AutomationSession { ProtocolVersion = 1, InstanceId = instanceId, ProjectPath = projectPath,
+                Epoch = epoch, EventEndpoint = eventEndpoint, EventEpoch = epoch };
+            session.Capabilities.Add("session.info");
+            if (advertises) session.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            return session;
+        }
+
+        private void Serve()
+        {
+            // Closing the socket ends the blocked receive.
+            while (true)
+            {
+                nuint size = 0;
+                if (Nng.nng_recv(socket, out IntPtr buffer, ref size, 1) != 0) return;
+                byte[] request = new byte[checked((int)size)];
+                try { System.Runtime.InteropServices.Marshal.Copy(buffer, request, 0, request.Length); }
+                finally { Nng.nng_free(buffer, size); }
+                byte[] reply = Answer(request);
+                if (Nng.nng_send(socket, reply, (nuint)reply.Length, 0) != 0) return;
+            }
+        }
+
+        private byte[] Answer(byte[] bytes)
+        {
+            var message = Kiapi.Common.ApiRequest.Parser.ParseFrom(bytes).Message;
+            lock (gate) requests.Add(message.TypeUrl[(message.TypeUrl.LastIndexOf('/') + 1)..]);
+            Google.Protobuf.IMessage? reply = message.Is(Protocol.GetAutomationSession.Descriptor) ? Session(advertises)
+                : message.Is(Protocol.ReadCheckedSchematicState.Descriptor) ? checkpoint.Clone()
+                : message.Is(Protocol.ReadSchematicElectricalState.Descriptor) ? electrical.Clone() : null;
+            var response = new Kiapi.Common.ApiResponse
+            {
+                Header = new() { KicadToken = epoch },
+                Status = new() { Status = (Kiapi.Common.ApiStatusCode)(reply is null ? 3 : 1),
+                    ErrorMessage = reply is null ? "Refused by the scripted editor" : "" }
+            };
+            if (reply is not null) response.Message = Any.Pack(reply);
+            return Google.Protobuf.MessageExtensions.ToByteArray(response);
+        }
+
+        public void Dispose()
+        {
+            Nng.nng_close(socket);
+            try { serving.Wait(TimeSpan.FromSeconds(5)); }
+            catch (AggregateException) { }
         }
     }
 

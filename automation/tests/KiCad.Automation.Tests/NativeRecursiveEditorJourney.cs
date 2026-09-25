@@ -574,6 +574,66 @@ public sealed partial class NativeSessionTests
             Key("w", control: true); await Closed();
             Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening, drawing, declining and closing write nothing.");
 
+            // An agent refines the shared design's connections with the agent tools (ledger pf92d0ecdec8805b4) while no editor is
+            // open. On the PSU level, Rail B's end on the PSU's own Power port is left explicitly unresolved and then bound to that
+            // port again; the tool reports how the port maps through the levels, to the System's Power connection and its three rails.
+            // On the System level, Power's Rail A and Rail B become one group beside Return, each keeping its exact revision.
+            static Guid K(int kind, long n) => PsuCpuIds.Id(kind, n);
+            var agentBase = RecursiveBlockGraphXml.Read(savedXml); var agentPsu = agentBase.Inspect(agentBase.SelectedRoot).Children[0];
+            var railB = agentBase.Inspect(agentPsu).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x0c));
+            var agentCall = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch,
+                ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId,
+                ["expectedSourceToken"] = saved.SourceToken, ["expectedRoot"] = agentBase.SelectedRoot, ["blockPath"] = new[] { agentBase.SelectedRoot, agentPsu },
+                ["connectionPath"] = new[] { railB }, ["endpointIndex"] = 1, ["operationId"] = Guid.NewGuid(), ["actor"] = "PSU/CPU agent" };
+            async Task<JsonElement> Edited(string tool, Dictionary<string, object?> call, params (string Key, object? Value)[] values)
+            {
+                var next = new Dictionary<string, object?>(call);
+                foreach (var (key, value) in values) next[key] = value;
+                var result = await mcp.CallToolAsync(tool, next, cancellationToken: token);
+                var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-agent-" + tool + "-" + Guid.NewGuid().ToString("N")[..8] + ".json"),
+                    data.GetRawText(), token);
+                Assert.IsFalse(result.IsError == true, tool + ": " + data.GetRawText());
+                Assert.IsTrue(data.GetProperty("changed").GetBoolean(), tool + " saves a change.");
+                return data;
+            }
+            var railBUnbound = await Edited("kicad_diagram_connection_endpoint_set", agentCall, ("action", "unbind"), ("intent", "Which output carries Rail B is open."));
+            Assert.AreEqual(("Unresolved", S(agentPsu.BlockId)), (railBUnbound.GetProperty("endpoint").GetProperty("kind").GetString(),
+                railBUnbound.GetProperty("endpoint").GetProperty("blockId").GetString()));
+            var railBBound = await Edited("kicad_diagram_connection_endpoint_set", agentCall, ("expectedSourceToken", railBUnbound.GetProperty("sourceToken").GetString()),
+                ("expectedRoot", railBUnbound.GetProperty("selectedRoot")), ("blockPath", railBUnbound.GetProperty("blockPath")),
+                ("connectionPath", railBUnbound.GetProperty("connectionPath")), ("operationId", Guid.NewGuid()), ("action", "bind"), ("blockId", agentPsu.BlockId),
+                ("interfaceId", K(0x15, 3)), ("intent", "Rail B leaves the PSU through its Power port."));
+            var railBMapping = railBBound.GetProperty("boundaryMapping");
+            Assert.AreEqual(("Power", railBBound.GetProperty("blockPath")[0].GetProperty("revisionId").GetString()),
+                (railBMapping.GetProperty("interfaceName").GetString(), railBMapping.GetProperty("parentLevel").GetProperty("revisionId").GetString()));
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), K(0x16, 3), K(0x16, 4), K(0x16, 5) }.Select(S).ToArray(),
+                railBMapping.GetProperty("parentConnections").EnumerateArray().Select(c => c.GetProperty("connectionId").GetString()).ToArray(),
+                "Through the PSU's Power port Rail B reaches the System's Power connection and its three rails.");
+            var boundGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(context.BlocksPath, token));
+            var agentPower = boundGraph.Inspect(boundGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2));
+            Guid supplyRails = Guid.NewGuid();
+            var railsGrouped = await Edited("kicad_diagram_connection_members_refine", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                ["expectedInstanceEpoch"] = native.Epoch, ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId,
+                ["expectedSourceToken"] = railBBound.GetProperty("sourceToken").GetString(), ["expectedRoot"] = boundGraph.SelectedRoot,
+                ["blockPath"] = new[] { boundGraph.SelectedRoot }, ["connectionPath"] = new[] { agentPower }, ["memberIds"] = new[] { supplyRails, K(0x16, 5) },
+                ["newMembers"] = JsonSerializer.SerializeToElement(new[] { new ConnectionMemberDefinition(supplyRails, "Supply rails", [K(0x16, 3), K(0x16, 4)],
+                    DiagramConnectionKind.SignalGroup, "Deliver both regulated rails to the CPU.") },
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }),
+                ["operationId"] = Guid.NewGuid(), ["actor"] = "PSU/CPU agent" });
+            CollectionAssert.AreEqual(new[] { "Supply rails", "Rail A", "Rail B", "Return" }, railsGrouped.GetProperty("members").EnumerateArray()
+                .Select(m => m.GetProperty("revision").GetProperty("name").GetString()).ToArray());
+            var agentStored = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(context.BlocksPath, token));
+            var agentSystem = agentStored.Inspect(agentStored.SelectedRoot); var systemLinks = agentStored.Connections(system.BlockId);
+            var powerGrouped = systemLinks.Inspect(agentSystem.LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2)));
+            CollectionAssert.AreEqual(fixture.Connections(system.BlockId).Inspect(systemRevision.LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2)))
+                .Members.Take(2).ToArray(), systemLinks.Inspect(powerGrouped.Members[0]).Members.ToArray(), "Rail A and Rail B keep their fixture revisions.");
+            var railBStored = agentStored.Connections(psu.BlockId).Inspect(agentStored.Inspect(agentSystem.Children[0]).LocalDiagram.Connections
+                .Single(c => c.ConnectionId == K(0x16, 0x0c)));
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)K(0x15, 3)), (railBStored.Endpoints[1].Kind, railBStored.Endpoints[1].BlockId,
+                railBStored.Endpoints[1].InterfaceId), "Rail B ends on the PSU's Power port, which the System's Power connection uses from outside.");
+            savedXml = await File.ReadAllTextAsync(context.BlocksPath, token);
+
             // A dense level stays responsive (review of design QA P2-5): another agent draws twelve blocks with eight ports each and
             // fifty connections between them on the System level. The editor lays a level's connection paths out once for each
             // change of its geometry and reuses that layout for every repaint and every state read; a drag of one block lays the
@@ -4418,6 +4478,162 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(Find(supplyReopened, "RecursiveSignalRemove0").Enabled || Find(supplyReopened, "RecursiveSignalEntry").Enabled,
             "The saved pair keeps its two signals.");
         Assert.IsFalse(feedReopened.Dirty || supplyReopened.Dirty, "Selecting connections changes nothing.");
+
+        // An agent binds and unbinds connection ends and refines a connection's members with the agent tools (ledger
+        // pf92d0ecdec8805b4), through the production MCP server while the clean editor stays open. Each call names the exact file,
+        // root, level and connection it edits; a stale, ambiguous or missing target is refused and writes nothing. Once the editor
+        // reloads the file, an end the agent left unresolved or bound, with what it says about that end, shows in the connection's
+        // existing Endpoints row, and the refined members in its Signals row.
+        var agentGraph = RecursiveBlockGraphXml.Read(savedXml); var agentTop = agentGraph.Inspect(agentGraph.SelectedRoot);
+        var agentLinks = agentGraph.Connections(agentGraph.SelectedRoot.BlockId);
+        ConnectionSelection AgentLink(RecursiveBlockGraph at, string id) =>
+            at.Inspect(at.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == id);
+        var railFeed = agentLinks.Inspect(AgentLink(agentGraph, feed));
+        Guid psuBlock = railFeed.Endpoints[0].BlockId, railPort = railFeed.Endpoints[0].InterfaceId!.Value, cpuBlock = railFeed.Endpoints[1].BlockId;
+        Assert.AreEqual((psuName, "Rail"), (agentGraph.Inspect(agentTop.Children.Single(c => c.BlockId == psuBlock)).Name,
+            agentGraph.Inspect(agentTop.Children.Single(c => c.BlockId == psuBlock)).LocalDiagram.Interfaces.Single(i => i.Id == railPort).Name),
+            "Rail feed starts on the PSU's Rail port.");
+        var agentEdit = new Dictionary<string, object?>(arguments) { ["expectedSourceToken"] = supplyReopened.SourceToken,
+            ["expectedRoot"] = agentGraph.SelectedRoot, ["blockPath"] = new[] { agentGraph.SelectedRoot }, ["connectionPath"] = new[] { AgentLink(agentGraph, feed) },
+            ["endpointIndex"] = 0, ["operationId"] = Guid.NewGuid(), ["actor"] = "Agent console" };
+        static Dictionary<string, object?> With(Dictionary<string, object?> call, params (string Key, object? Value)[] values)
+        {
+            var next = new Dictionary<string, object?>(call);
+            foreach (var (key, value) in values) next[key] = value;
+            return next;
+        }
+        async Task<JsonElement> AgentTool(string tool, Dictionary<string, object?> call, string step, string? refusedWith = null)
+        {
+            var result = await client.CallToolAsync(tool, call, cancellationToken: token);
+            var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-" + step + ".json"), data.GetRawText(), token);
+            if (refusedWith is null) Assert.IsFalse(result.IsError == true, step + ": " + data.GetRawText());
+            else
+            {
+                Assert.IsTrue(result.IsError == true, step + " is refused: " + data.GetRawText());
+                Assert.AreEqual(refusedWith, data.GetProperty("code").GetString(), step + ": " + data.GetRawText());
+                Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), step + ": a refused edit writes nothing.");
+            }
+            return data;
+        }
+        // The tool's next call names the revisions this one saved.
+        static Dictionary<string, object?> After(Dictionary<string, object?> call, JsonElement saved) => With(call,
+            ("expectedSourceToken", saved.GetProperty("sourceToken").GetString()), ("expectedRoot", saved.GetProperty("selectedRoot")),
+            ("blockPath", saved.GetProperty("blockPath")), ("operationId", Guid.NewGuid()));
+        async Task<P.RecursiveDiagramEditorState> Reloaded(string step, JsonElement saved, string connection, Func<P.RecursiveDiagramEditorState, bool> shown)
+        {
+            string written = saved.GetProperty("sourceToken").GetString()!;
+            Key("r", control: true);
+            await Wait(step + "-reloaded", s => s.Ready && !s.Dirty && s.SourceToken == written);
+            await SelectConnection(step + "-selected", connection);
+            var at = await Wait(step, shown);
+            await Capture(step);
+            return at;
+        }
+        // The row wraps a long line between words to the inspector's width; read back, each line break is the space it replaced.
+        string EndpointsRow(P.RecursiveDiagramEditorState at) => Find(at, "RecursiveConnectionEndpoints").Label.Replace('\n', ' ');
+        const string feedIntent = "Choose which PSU output feeds the CPU.";
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("expectedSourceToken", savedToken)),
+            "agent-edit-stale-file", "recursive_block_file_changed");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("expectedRoot", created.Root)),
+            "agent-edit-stale-root", "stale_root_revision");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "bind"), ("blockId", psuBlock)),
+            "agent-edit-bind-without-port", "ambiguous_connection_edit");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "bind"), ("blockId", cpuBlock), ("interfaceId", railPort)),
+            "agent-edit-port-of-another-block", "connection_edit_target_missing");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("endpointIndex", 2)),
+            "agent-edit-missing-end", "connection_edit_target_missing");
+
+        // Rail feed's first end is left explicitly unresolved on the PSU. The earlier binding stays in history.
+        var unbound = await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("intent", feedIntent)), "agent-unbind");
+        Assert.IsTrue(unbound.GetProperty("changed").GetBoolean());
+        Assert.AreEqual(("Interface", railPort.ToString("D")), (unbound.GetProperty("previousEndpoint").GetProperty("kind").GetString(),
+            unbound.GetProperty("previousEndpoint").GetProperty("interfaceId").GetString()));
+        var unboundEnd = unbound.GetProperty("endpoint");
+        Assert.AreEqual(("Unresolved", psuBlock.ToString("D"), JsonValueKind.Null, feedIntent), (unboundEnd.GetProperty("kind").GetString(),
+            unboundEnd.GetProperty("blockId").GetString(), unboundEnd.GetProperty("interfaceId").ValueKind, unboundEnd.GetProperty("intent").GetString()));
+        Assert.AreEqual(JsonValueKind.Null, unbound.GetProperty("boundaryMapping").ValueKind, "An end on a block of the level maps through no boundary port.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var unboundGraph = RecursiveBlockGraphXml.Read(savedXml); var unboundLinks = unboundGraph.Connections(unboundGraph.SelectedRoot.BlockId);
+        var feedUnbound = unboundLinks.Inspect(AgentLink(unboundGraph, feed));
+        Assert.IsTrue(feedUnbound.Endpoints[0].SameDefinition(DiagramEndpointBinding.Unknown(psuBlock, feedIntent))
+            && feedUnbound.Endpoints[1].SameDefinition(railFeed.Endpoints[1]), "Only Rail feed's first end changed, and it is Unresolved on the PSU.");
+        Assert.AreEqual((railFeed.Selection.RevisionId, "Agent console"), (feedUnbound.ParentRevisionId!.Value, feedUnbound.Origin.Actor));
+        Assert.AreEqual(agentLinks.Requirements(railFeed.Selection).Requirements, unboundLinks.Requirements(feedUnbound.Selection).Requirements,
+            "Rail feed's requirement fields are unchanged.");
+        Assert.AreEqual(unbound.GetProperty("connectionPath")[0].GetProperty("revisionId").GetString(), feedUnbound.Selection.RevisionId.ToString("D"));
+        await Reloaded("agent-unbound", unbound, feed, s => Details(s).SequenceEqual(["direction", "endpoints"])
+            && EndpointsRow(s) == psuName + " \u2014 " + feedIntent);
+
+        // Bound to the PSU's Rail port again, with what it carries: the Endpoints row names the block and the port.
+        const string railIntent = "Regulated supply from the Rail output.";
+        var bound = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, unbound), ("connectionPath", unbound.GetProperty("connectionPath")),
+            ("action", "bind"), ("blockId", psuBlock), ("interfaceId", railPort), ("intent", railIntent)), "agent-bind");
+        var boundEnd = bound.GetProperty("endpoint");
+        Assert.AreEqual(("Interface", railPort.ToString("D"), railIntent), (boundEnd.GetProperty("kind").GetString(),
+            boundEnd.GetProperty("interfaceId").GetString(), boundEnd.GetProperty("intent").GetString()));
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        await Reloaded("agent-bound", bound, feed, s => Details(s).SequenceEqual(["direction", "endpoints"])
+            && EndpointsRow(s) == psuName + " \u00b7 Rail \u2014 " + railIntent);
+        var sameAgain = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, bound), ("connectionPath", bound.GetProperty("connectionPath")),
+            ("action", "bind"), ("blockId", psuBlock), ("interfaceId", railPort)), "agent-bind-again");
+        Assert.IsFalse(sameAgain.GetProperty("changed").GetBoolean(), "Binding the end the way it already is writes nothing.");
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // Supply input's end on the level's own boundary port is bound with what enters there; the tool reports the port and, on
+        // this root level, no level above it that uses the port.
+        const string entryIntent = "The system's supply enters here.";
+        var boundGraph = RecursiveBlockGraphXml.Read(savedXml);
+        var entry = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, bound), ("connectionPath", new[] { AgentLink(boundGraph, supply) }),
+            ("endpointIndex", 1), ("action", "bind"), ("blockId", boundGraph.SelectedRoot.BlockId), ("interfaceId", boundary.Id), ("intent", entryIntent)),
+            "agent-bind-boundary-port");
+        var entryMapping = entry.GetProperty("boundaryMapping");
+        Assert.AreEqual((boundary.Id.ToString("D"), boundary.Name, JsonValueKind.Null, 0), (entryMapping.GetProperty("interfaceId").GetString(),
+            entryMapping.GetProperty("interfaceName").GetString(), entryMapping.GetProperty("parentLevel").ValueKind,
+            entryMapping.GetProperty("parentConnections").GetArrayLength()));
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        await Reloaded("agent-boundary-port", entry, supply, s => Details(s).SequenceEqual(["signals", "type", "endpoints"])
+            && EndpointsRow(s) == boundary.Name + " \u2014 " + entryIntent);
+
+        // Power's two signals become a USB power group, beside a new USB data differential pair of two new signals. A refinement that
+        // would leave GND out is refused first.
+        var enums = new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+        var entryGraph = RecursiveBlockGraphXml.Read(savedXml); var entryLinks = entryGraph.Connections(entryGraph.SelectedRoot.BlockId);
+        var powerBefore = entryLinks.Inspect(AgentLink(entryGraph, power));
+        Guid vbus = powerBefore.Members[0].ConnectionId, gnd = powerBefore.Members[1].ConnectionId;
+        Guid usbPower = Guid.NewGuid(), usbData = Guid.NewGuid(), dPlus = Guid.NewGuid(), dMinus = Guid.NewGuid();
+        var refine = With(After(agentEdit, entry), ("connectionPath", new[] { AgentLink(entryGraph, power) }),
+            ("sources", new[] { new SourceReference("usb-interface-notes", "draft-1", 1, null, null) }));
+        refine.Remove("endpointIndex");
+        await AgentTool("kicad_diagram_connection_members_refine", With(refine, ("memberIds", new[] { usbPower }),
+            ("newMembers", JsonSerializer.SerializeToElement(new[] { new ConnectionMemberDefinition(usbPower, "USB power", [vbus], DiagramConnectionKind.SignalGroup) }, enums))),
+            "agent-refine-leaving-a-signal-out", "ambiguous_connection_edit");
+        var refinedMembers = await AgentTool("kicad_diagram_connection_members_refine", With(refine, ("memberIds", new[] { usbPower, usbData }),
+            ("newMembers", JsonSerializer.SerializeToElement(new[]
+            {
+                new ConnectionMemberDefinition(usbPower, "USB power", [vbus, gnd], DiagramConnectionKind.SignalGroup, "Carry the USB supply and its return."),
+                new ConnectionMemberDefinition(usbData, "USB data", [dPlus, dMinus], DiagramConnectionKind.DifferentialPair, "", "", "Route D+ and D- as one matched pair."),
+                new ConnectionMemberDefinition(dPlus, "D+", []), new ConnectionMemberDefinition(dMinus, "D-", [])
+            }, enums))), "agent-refine");
+        Assert.IsTrue(refinedMembers.GetProperty("changed").GetBoolean());
+        CollectionAssert.AreEqual(new[] { ("USB power", true), ("VBUS", false), ("GND", false), ("USB data", true), ("D+", true), ("D-", true) },
+            refinedMembers.GetProperty("members").EnumerateArray().Select(m => (m.GetProperty("revision").GetProperty("name").GetString(),
+                m.GetProperty("created").GetBoolean())).ToArray(), "The tool returns Power's members below it, marking the new ones.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var refinedGraph = RecursiveBlockGraphXml.Read(savedXml); var refinedLinks = refinedGraph.Connections(refinedGraph.SelectedRoot.BlockId);
+        var powerRefined = refinedLinks.Inspect(AgentLink(refinedGraph, power));
+        CollectionAssert.AreEqual(new[] { usbPower, usbData }, powerRefined.Members.Select(m => m.ConnectionId).ToArray());
+        CollectionAssert.AreEqual(powerBefore.Members.ToArray(), refinedLinks.Inspect(powerRefined.Members[0]).Members.ToArray(),
+            "VBUS and GND keep their exact saved revisions inside the USB power group.");
+        foreach (var kept in powerBefore.Members)
+            Assert.AreEqual(entryLinks.Requirements(kept), refinedLinks.Requirements(kept), "A kept signal keeps its requirement history.");
+        Assert.AreEqual(new DiagramRequirements("", "", "Route D+ and D- as one matched pair."), refinedLinks.Requirements(powerRefined.Members[1]).Requirements);
+        Assert.AreEqual("usb-interface-notes", refinedLinks.Inspect(powerRefined.Members[1]).Origin.Sources.Single().DocumentId,
+            "The new member records the agent's source.");
+        Assert.AreEqual(entryLinks.Requirements(powerBefore.Selection).Requirements, refinedLinks.Requirements(powerRefined.Selection).Requirements,
+            "Power's own requirement fields are unchanged.");
+        await Reloaded("agent-refined-members", refinedMembers, power, s => Signals(s).SequenceEqual(["USB power", "USB data"])
+            && Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
     }

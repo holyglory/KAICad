@@ -70,5 +70,18 @@ public sealed class RecursiveBlockToolSchemaTests
         Assert.IsTrue(signals.SameContents(signals with { MemberIds = [first, second] }), "The same signals in the same order are the same removal.");
         Assert.IsFalse(signals.SameContents(signals with { MemberIds = [second, first] }));
         Assert.IsFalse(signals.SameContents(removal));
+        // The new members kicad_diagram_connection_members_refine takes (ledger pf92d0ecdec8805b4) follow the same rules: the record
+        // describes itself, an omitted member list reads as empty and an omitted type is a single signal, so a new signal is only
+        // its identity and caption.
+        string definitionSchema = McpServerTool.Create((ConnectionMemberDefinition definition) => true).ProtocolTool.InputSchema.GetRawText();
+        foreach (string property in new[] { "connectionId", "name", "memberIds", "kind", "general", "schematic", "routing" })
+            StringAssert.Contains(definitionSchema, "\"" + property + "\"", property);
+        var signal = JsonSerializer.Deserialize<ConnectionMemberDefinition>("{\"connectionId\":\"" + first + "\",\"name\":\"SYNC+\"}", options)!;
+        Assert.IsTrue(signal.MemberIds.IsDefault); Assert.IsEmpty(signal.MemberIdList);
+        Assert.AreEqual((first, "SYNC+", DiagramConnectionKind.Signal, "", "", ""), (signal.ConnectionId, signal.Name, signal.Kind, signal.General,
+            signal.Schematic, signal.Routing));
+        var pair = new ConnectionMemberDefinition(link, "SYNC", [first, second], DiagramConnectionKind.DifferentialPair, "", "", "Match the pair's lengths.");
+        CollectionAssert.AreEqual(new[] { first, second },
+            JsonSerializer.Deserialize<ConnectionMemberDefinition>(JsonSerializer.Serialize(pair, options), options)!.MemberIdList.ToArray());
     }
 }

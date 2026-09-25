@@ -114,3 +114,36 @@ a signal bundle with partly resolved endpoints. These are test-only synthetic de
 not claimed engineering recommendations. Verify rewritten current General/Schematic/
 Routing text with original history, exact unrelated-sibling preservation, preview
 without activation, cancellation, invalid member rejection and stale-result recovery.
+
+## Connection ends and members (ledger pf92d0ecdec8805b4)
+
+Two agent tools change one exact connection or member of a saved diagram level without a
+whole-block proposal. Both name the observed file token, the selected root, the root-to-level
+block path and the root-to-member connection path by exact revision, and both save through the
+same guarded connection save the diagram companion runs (`RFA_SAVE_CONNECTION`).
+
+- `kicad_diagram_connection_endpoint_set` binds one end to a port of one of the level's blocks,
+  or to a port on the level's own boundary, or leaves it explicitly Unresolved on its block with
+  what is still open. An end that states pins, candidates or a compatibility selector keeps them
+  while it stays on its block. For a boundary port the result reports how that port maps through
+  the levels: the parent level's connections that use it and the level's stated realization.
+- `kicad_diagram_connection_members_refine` restructures a connection's members into groups,
+  differential pairs and new signals. Every current member keeps its exact revision, requirement
+  history and notes, and interface realizations naming it stay exact. A refinement never drops a
+  member. New members start their own three requirement fields; the agent's sources and original
+  input are recorded in their origin.
+
+Refusals write nothing: a changed file or stale target (`recursive_block_file_changed`,
+`stale_root_revision`, `stale_block_revision`, `stale_parent_revision`,
+`stale_connection_revision`), an identity the level does not have
+(`connection_edit_target_missing`), an edit that does not say exactly one thing
+(`ambiguous_connection_edit`), a reused identity (`identity_reused`) and an invalid group or pair
+(`invalid_connection_refinement`). An edit that changes nothing writes nothing. The native editor
+shows the result after it reloads: bound or unresolved ends with what they say in the connection's
+Endpoints row, refined members in its Signals row. Native schematic and PCB files are not touched.
+
+Evidence: `RecursiveEditorFileCommandTests.AgentConnectionEditsBindEndsThroughTheLevelsAndRefineMembersInOneGuardedSave`
+(helper process, PSU/CPU fixture), the connection-details and PSU/CPU canvas steps of
+`NativeRecursiveEditorJourney` (production MCP server, rendered editor) and
+`RecursiveBlockLocalDiagramTests.AgentConnectionEditsNameExactlyOneCurrentTarget` (the refusal
+matrix of the isolated rules).

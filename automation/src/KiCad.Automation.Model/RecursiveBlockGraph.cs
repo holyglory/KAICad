@@ -549,13 +549,31 @@ public sealed partial class RecursiveBlockGraph
     public RecursiveBlockSelectionResult SaveConnectionDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
         ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, Guid connectionRevisionId,
         Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorRevisionIds, Guid blockRevisionId,
+        Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorRevisionIds, RequirementRevisionOrigin origin) =>
+        SaveConnectionDraft(expectedRoot, blockPath, connectionPath, draft, [], connectionRevisionId, requirementRevisionId,
+            connectionAncestorRevisionIds, blockRevisionId, blockRequirementRevisionId, blockAncestorRevisionIds, origin);
+
+    /// <summary>As the save above, also creating the members that refine the connection's members into groups, pairs and
+    /// signals (<see cref="NewConnectionMember"/>). Every end of the draft and of each new member must name this level or one
+    /// of its blocks, and a port that block has in the pinned revision (<c>connection_edit_target_missing</c> otherwise).
+    /// Nothing is published unless the whole save is valid.</summary>
+    public RecursiveBlockSelectionResult SaveConnectionDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
+        ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, ImmutableArray<NewConnectionMember> newMembers,
+        Guid connectionRevisionId, Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorRevisionIds, Guid blockRevisionId,
         Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorRevisionIds, RequirementRevisionOrigin origin)
     {
-        if (blockPath.IsDefaultOrEmpty || connectionPath.IsDefaultOrEmpty || draft is null || connectionPath[^1] != draft.Baseline)
+        if (blockPath.IsDefaultOrEmpty || connectionPath.IsDefaultOrEmpty || draft is null || connectionPath[^1] != draft.Baseline
+            || newMembers.IsDefault || draft.Endpoints.IsDefault || draft.Members.IsDefault)
             throw Invalid("Connection edits need their exact containing block and member paths.");
         _ = Select(expectedRoot, blockPath, blockPath[^1], blockAncestorRevisionIds, origin);
         var block = Inspect(blockPath[^1]); var archive = Connections(block.Selection.BlockId);
         _ = archive.Select(block.LocalDiagram.Connections, connectionPath, draft.Baseline, connectionAncestorRevisionIds, origin);
+        CheckEndpointTargets(block, draft.Endpoints.Concat(newMembers.Where(m => m is not null && !m.Endpoints.IsDefault).SelectMany(m => m.Endpoints)));
+        // Both ancestor lists were checked above: the block path by Select and the member path by the archive's Select.
+        if (!newMembers.IsEmpty)
+            archive = WithNewMembers(archive, draft, newMembers, origin,
+                [connectionRevisionId, requirementRevisionId, blockRevisionId, blockRequirementRevisionId,
+                 .. connectionAncestorRevisionIds, .. blockAncestorRevisionIds]);
         var committed = archive.SaveDraft(draft, connectionRevisionId, requirementRevisionId, origin);
         if (!committed.Changed && draft.DiagramAnnotations.IsDefault) return new(this, [], false);
         var selected = committed.Archive.Select(block.LocalDiagram.Connections, connectionPath, committed.Revision.Selection,

@@ -41,7 +41,59 @@ coverage are still being qualified; native Mac Setup evidence and full automatic
 XML synchronization remain open. The authoritative completion state is in
 DevCoordinator, not this usage guide.
 
-## Linux preview — September 24, 2026
+## Linux preview — September 25, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-source.tar.gz)
+identify `51abb3af7e054f42487da42df28fc63e8e11dc68`, signed preview sequence 24.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 23 it adds, as preliminary features:
+
+- **XML connections become labelled wires.** When saved XML adds connections, apply
+  draws a short wire and a net label from each new pin, with hierarchical labels and
+  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
+  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
+  started for a project advertises `schematic.connection-realization.v1`; the empty update
+  manager does not. `kicad_design_sync_plan` says beforehand which connections apply will
+  draw (`connectionRealizationRequired`, `connectionIntent`).
+- **Lost schematic files are rebuilt from XML.** After the `.kicad_sch` files of a project
+  are deleted, reattaching the recovery record and applying rebuilds every sheet, symbol,
+  label and sheet pin from the last synchronized XML, byte for byte, keeping the project
+  file. New empty sheets added in XML are created in KiCad.
+- **Crash recovery.** If KiCad is killed while applying or saving an XML change,
+  `kicad_design_recovery_release_exited` resumes or rolls back that operation in the KiCad
+  started again, and never takes its partial result for a user edit.
+- **Steadier synchronization.** After a reload, KiCad's own join of a symbol's stacked pins
+  no longer adds a net to the XML, and the first save of a project KiCad never saved no
+  longer leaves the apply unfinished.
+- **Diagram editor polish.** Design review fixes (clearer dark-theme selection, active tools
+  and ports), each drawn connection gets its own path, and Clear facet no longer overlaps
+  the strength choices.
+- **Presentation checks** can cover a whole loaded sheet hierarchy, and new connected parts
+  are placed next to the pins they join, with room for each connection.
+
+The diagram editor stays preliminary: its design audit still finds eight moderate differences
+from the approved sketches, for example a new connection's name not yet shown on the canvas.
+
+Not yet included: wires routed between pins (connections are drawn as labelled stubs),
+opening a diagram from the project manager, rebuilding designs with net chains or with one
+sheet file shown by several sheets, and full two-way ownership synchronization of parts
+added in KiCad. Mac and Windows builds stay on hold until the XML editing workflow is
+complete.
+
+Every gate ran on the exact commit before publication: the composed native acceptance,
+now 24 checks including the PSU/CPU creation, connection, rebuild, crash and diagram
+canvas journeys (`t20260925T110834Z-6b2cf9`: 23 passed; its BOM settings journey missed a
+5-second popup wait on a fully loaded host and passed on the same commit in a clean
+checkout, `t20260925T141858Z-7e9653`), the PSU/CPU fixture with the lost-files rebuild,
+the update manager, a cold checkout's Setup, the unit suites and the installed-package
+journey. Public run `t20260925T143552Z-6876f7` verified the downloads, the signed caption
+update from sequence 23 and the landing page; delivery receipts `t20260925T144525Z-069be7`.
+Existing Mac and Windows downloads stay available.
+
+### Earlier Linux preview — September 24, 2026
 
 [Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-debian13-x64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-source.tar.gz)
@@ -71,14 +123,9 @@ Compared with sequence 22 it adds, as preliminary features:
   MCP server without contacting KiCad.
 - **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
   `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
-- **XML connections become labelled wires.** When saved XML adds connections, apply
-  draws a short wire and a net label from each new pin, with hierarchical labels and
-  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
-  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
-  started for a project advertises `schematic.connection-realization.v1`; the empty update
-  manager does not. Wires routed between pins are not built yet.
 
-Known limitations: the
+Groundwork for turning XML connections into wires is included but switched off: KiCad
+does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
 diagram editor's dark-theme selection and other design-QA polish are still being fixed,
 Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
 from the project manager is not built yet.

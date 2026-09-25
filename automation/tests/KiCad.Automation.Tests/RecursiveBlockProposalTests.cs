@@ -38,7 +38,9 @@ public sealed class RecursiveBlockProposalTests
         return (graph, proposal, f.Blocks["CPU"]);
     }
 
-    internal static BlockProposal CreateFor(RecursiveBlockGraph graph, DiagramRefinementInput input)
+    /// <summary>A whole-block proposal that rewrites the target's three fields. With <paramref name="refine"/>, it also
+    /// refines that existing connection of the target's level (a new implementation of it with rewritten fields).</summary>
+    internal static BlockProposal CreateFor(RecursiveBlockGraph graph, DiagramRefinementInput input, ConnectionSelection? refine = null)
     {
         var baseline = input.BlockPath[^1]; var original = graph.Inspect(baseline);
         ProposedBlock Node(string name) => new(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), null, "Agent proposal", name,
@@ -48,13 +50,24 @@ public sealed class RecursiveBlockProposalTests
             "Agent proposal", "Telemetry bundle", DiagramConnectionKind.SignalGroup, Guid.NewGuid(),
             new("Expose supply status.", "Show the bundle as a grouped signal.", "Keep it away from switching paths."),
             [DiagramEndpointBinding.Unknown(converter.Selection.BlockId), DiagramEndpointBinding.Unknown(telemetry.Selection.BlockId)], []);
+        var connections = original.LocalDiagram.Connections.Add(signal.Selection);
+        ImmutableArray<ProposedConnection> proposed = [signal];
+        if (refine is { } basis)
+        {
+            var before = graph.Connections(baseline.BlockId).Inspect(basis);
+            var refined = new ProposedConnection(baseline.BlockId, new(basis.ConnectionId, Guid.NewGuid(), Guid.NewGuid()), basis,
+                "Agent proposal", before.Name, before.Kind, Guid.NewGuid(),
+                new("Carry the converted supply to the boundary port.", "Label the rail at both ends.", "Keep the rail short and wide."),
+                before.Endpoints, before.Members, Guid.NewGuid(), Guid.NewGuid(), before.Domain, before.Direction, before.Realization);
+            connections = connections.Replace(basis, refined.Selection); proposed = proposed.Add(refined);
+        }
         var target = new ProposedBlock(new(baseline.BlockId, Guid.NewGuid(), Guid.NewGuid()), baseline, "Agent proposal", original.Name,
             Guid.NewGuid(), new("Refined implementation from the original request.", "Separate conversion and telemetry.", "Preserve the existing thermal region."),
             [.. original.Children, converter.Selection, telemetry.Selection],
-            original.LocalDiagram with { Connections = original.LocalDiagram.Connections.Add(signal.Selection) },
+            original.LocalDiagram with { Connections = connections },
             Definition: RecursiveBlockDefinitionTests.Partial(), ForkRevisionId: Guid.NewGuid(), ForkRequirementRevisionId: Guid.NewGuid());
         return new BlockProposal(Guid.NewGuid(), input.Id, input.BlockPath, target.Selection,
-            [target, converter, telemetry], [signal],
+            [target, converter, telemetry], proposed,
             [new(Guid.NewGuid(), BlockProposalIssueKind.Unresolved, "Exact models and rails remain open.", target.Selection.BlockId, [])],
             RecursiveBlockFixture.Origin("Compatible agent fixture"));
     }
@@ -79,8 +92,33 @@ public sealed class RecursiveBlockProposalTests
         Assert.AreEqual(DiagramEndpointKind.Unresolved, signal.Endpoints[0].Kind);
         Assert.AreEqual(DiagramEndpointKind.Compatible, signal.Endpoints[1].Kind);
         Assert.IsTrue(signal.Endpoints.All(e => e.Pin is null));
+        // The proposed implementation continues the baseline's field history (ledger p390b40bed99e0ab2): its copy of the
+        // baseline names the exact revision it was derived from, earlier texts keep their author, and the rewrite follows.
+        var baselineText = f.Graph.Requirements(f.Proposal.BasePath[^1]);
+        var candidateHistory = graph.RequirementHistories.Single(h => h.Scope.DesignStateId == f.Proposal.Candidate.StateId);
+        Assert.AreEqual(baselineText.RevisionId, candidateHistory.DerivedFrom);
+        Assert.AreEqual(baselineText.RevisionId, candidateHistory.Lineage[^1].Id);
+        var general = DiagramFieldHistoryQuery.Block(graph, f.Proposal.Candidate, DiagramRequirementField.General);
+        Assert.AreEqual(2, general.ContextVersion);
+        CollectionAssert.AreEqual(new[] { f.Proposal.Blocks[0].RequirementRevisionId, baselineText.RevisionId },
+            general.Entries.Select(e => e.RequirementRevisionId).ToArray());
+        Assert.AreEqual(f.Proposal.Origin.Actor, general.Entries[0].Origin.Actor);
+        CollectionAssert.IsSubsetOf(new[] { f.Proposal.InputId, f.Proposal.Id }, general.Entries[0].Origin.InputIds.ToArray());
+        Assert.AreEqual(f.Graph.Requirements(f.Proposal.BasePath[^1]).Requirements.General, general.Entries[1].Text);
+        Assert.AreEqual("Fixture user", general.Entries[1].Origin.Actor);
+        Assert.AreEqual(f.Proposal.BasePath[^1].RevisionId, general.Entries[1].ContextRevisionId); Assert.AreEqual(1, general.Entries[1].ContextVersion);
+        var refined = f.Proposal.Connections.Single(c => c.BasedOn is not null);
+        var linkText = f.Graph.Connections(refined.OwnerBlockId).Requirements(refined.BasedOn!);
+        var links = graph.Connections(refined.OwnerBlockId);
+        Assert.AreEqual(linkText.RevisionId, links.RequirementHistories.Single(h => h.Scope.DesignStateId == refined.Selection.StateId).DerivedFrom);
+        var linkPage = DiagramFieldHistoryQuery.Connection(links, refined.Selection, DiagramRequirementField.General);
+        CollectionAssert.AreEqual(new[] { refined.RequirementRevisionId, linkText.RevisionId }, linkPage.Entries.Select(e => e.RequirementRevisionId).ToArray());
+        Assert.AreEqual(refined.BasedOn!.RevisionId, linkPage.Entries[1].ContextRevisionId);
         var selected = graph.Select(graph.SelectedRoot, f.Proposal.BasePath, f.Proposal.Candidate, [Guid.NewGuid()], f.Proposal.Origin).Graph;
         Assert.AreEqual(f.Sibling, selected.Inspect(selected.SelectedRoot).Children[1]);
+        CollectionAssert.AreEqual(general.Entries.Select(e => e.RequirementRevisionId).ToArray(), DiagramFieldHistoryQuery.Block(selected,
+            selected.Inspect(selected.SelectedRoot).Children[0], DiagramRequirementField.General).Entries.Select(e => e.RequirementRevisionId).ToArray(),
+            "Choosing the proposal keeps the field history it continues.");
         Assert.AreEqual(f.Proposal.Candidate, selected.Inspect(selected.SelectedRoot).Children[0]);
         Assert.AreEqual(before, RecursiveBlockGraphXml.Write(f.Graph));
         string xml = RecursiveBlockGraphXml.Write(graph);

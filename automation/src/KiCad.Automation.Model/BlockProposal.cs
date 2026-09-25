@@ -73,7 +73,10 @@ public static class BlockProposalCompiler
                 var fork = new BlockSelection(selection.BlockId, selection.StateId, block.ForkRevisionId!.Value);
                 revisions.Add(before with { Selection = fork, ParentRevisionId = null, RequirementRevisionId = block.ForkRequirementRevisionId!.Value,
                     Origin = origin, RestoredFrom = null });
-                requirementHistory = [new(block.ForkRequirementRevisionId.Value, null, graph.Requirements(basedOn).Requirements, origin, [])];
+                // The proposed implementation continues the baseline's field history: earlier texts keep their
+                // authors, sources and linked inputs, and the proposal's rewrite is the next revision.
+                var baselineText = graph.Requirements(basedOn);
+                requirementHistory = [new(block.ForkRequirementRevisionId.Value, baselineText.RevisionId, baselineText.Requirements, origin, [])];
             }
             else
             {
@@ -117,7 +120,8 @@ public static class BlockProposalCompiler
                     Fresh(item.ForkRevisionId ?? Guid.Empty); Fresh(item.ForkRequirementRevisionId ?? Guid.Empty);
                     connectionRevisions.Add(before with { Selection = new(selection.ConnectionId, selection.StateId, item.ForkRevisionId!.Value),
                         ParentRevisionId = null, RequirementRevisionId = item.ForkRequirementRevisionId!.Value, Origin = origin });
-                    requirementHistory = [new(item.ForkRequirementRevisionId.Value, null, existing.Requirements(basedOn).Requirements, origin, [])];
+                    var baselineText = existing.Requirements(basedOn);
+                    requirementHistory = [new(item.ForkRequirementRevisionId.Value, baselineText.RevisionId, baselineText.Requirements, origin, [])];
                 }
                 else
                 {

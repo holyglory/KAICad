@@ -25,15 +25,28 @@ public sealed class NativeFieldHistoryTests
         try
         {
             var fixture = RecursiveBlockFixture.Create(); var graph = fixture.Graph; var psu = fixture.Selected["PSU"];
-            foreach (string text in new[] { "Keep power paths short.", "Keep high-current paths away from sensing." })
-            {
-                var draft = graph.StartDraft(psu);
-                draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing, text) };
-                graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psu], draft, Guid.NewGuid(), Guid.NewGuid(),
-                    [Guid.NewGuid()], RecursiveBlockFixture.Origin(text.Contains("sensing", StringComparison.Ordinal) ? "AI agent" : "Fixture user")).Graph;
-                psu = graph.Inspect(graph.SelectedRoot).Children[0];
-            }
+            // The first text is saved in the PSU's initial implementation. An agent then duplicates that implementation,
+            // rewrites the text in the duplicate and chooses it: the duplicate's field history continues the initial one's,
+            // so the dialog lists (and can restore) the text saved before the switch (ledger p390b40bed99e0ab2).
+            var draft = graph.StartDraft(psu);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing, "Keep power paths short.") };
+            graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psu], draft, Guid.NewGuid(), Guid.NewGuid(),
+                [Guid.NewGuid()], RecursiveBlockFixture.Origin("Fixture user")).Graph;
+            var initialPsu = graph.Inspect(graph.SelectedRoot).Children[0];
+            Guid duplicate = Guid.NewGuid(), duplicateRevision = Guid.NewGuid();
+            graph = graph.ForkImplementation(initialPsu, duplicate, duplicateRevision, Guid.NewGuid(), "Sensing-aware supply",
+                RecursiveBlockFixture.Origin("AI agent"));
+            var agentDraft = graph.StartDraft(new(initialPsu.BlockId, duplicate, duplicateRevision));
+            agentDraft = agentDraft with { Requirements = agentDraft.Requirements.Edit(DiagramRequirementField.Routing, "Keep high-current paths away from sensing.") };
+            graph = graph.SaveImplementationDraft(graph.SelectedRoot, [graph.SelectedRoot, initialPsu], agentDraft, Guid.NewGuid(), Guid.NewGuid(),
+                [Guid.NewGuid()], RecursiveBlockFixture.Origin("AI agent")).Graph;
+            psu = graph.Inspect(graph.SelectedRoot).Children[0];
+            Assert.AreEqual(duplicate, psu.StateId);
             var page = DiagramFieldHistoryQuery.Block(graph, psu, DiagramRequirementField.Routing);
+            CollectionAssert.AreEqual(new[] { "Keep high-current paths away from sensing.", "Keep power paths short.", "" },
+                page.Entries.Select(e => e.Text).ToArray());
+            CollectionAssert.AreEqual(new[] { duplicate, initialPsu.StateId, initialPsu.StateId }, page.Entries.Select(e =>
+                graph.Revisions.Single(r => r.Selection.RevisionId == e.ContextRevisionId).Selection.StateId).ToArray());
             string input = Path.Combine(temporary, "field-history.pb");
             await File.WriteAllBytesAsync(input, RecursiveBlockCodec.Encode(page).ToByteArray());
             var longGraph = RecursiveBlockFixture.RefineRoot(fixture.Graph, DiagramRequirementField.General, 205);
@@ -95,6 +108,19 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual("Independent unsaved text.", restoredDraft.Requirements.General);
             Assert.AreEqual("Keep power paths short.", restoredDraft.Requirements.Routing);
             Assert.AreEqual("Keep high-current paths away from sensing.", graph.Requirements(psu).Requirements.Routing);
+            // Saving the restored text written before the switch is a new revision of the chosen implementation that
+            // names the earlier implementation's revision it came from; it survives the diagram file.
+            var restoring = graph.StartDraft(psu) with { Requirements = restoredDraft };
+            var restoredGraph = RecursiveBlockGraphXml.Read(RecursiveBlockGraphXml.Write(graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psu],
+                restoring, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin("Fixture user")).Graph));
+            var restoredHistory = restoredGraph.RequirementHistories.Single(h => h.Scope.DesignStateId == duplicate);
+            Assert.AreEqual(history.Current.Id, restoredHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.Routing, restored), restoredHistory.Current.Restorations.Single());
+            var afterRestore = DiagramFieldHistoryQuery.Block(restoredGraph, restoredGraph.Inspect(restoredGraph.SelectedRoot).Children[0],
+                DiagramRequirementField.Routing);
+            CollectionAssert.AreEqual(new[] { restoredHistory.Current.Id }.Concat(page.Entries.Select(e => e.RequirementRevisionId)).ToArray(),
+                afterRestore.Entries.Select(e => e.RequirementRevisionId).ToArray());
+            Assert.AreEqual("Keep power paths short.", afterRestore.SavedText);
             using var conflict = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "conflict-interaction.json")));
             Assert.IsTrue(conflict.RootElement.GetProperty("no_default_choice").GetBoolean());
             Assert.IsTrue(conflict.RootElement.GetProperty("partial_resolution_blocked").GetBoolean());

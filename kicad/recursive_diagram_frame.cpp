@@ -72,6 +72,43 @@ void setField( D::RequirementFieldsData* fields, int which, const std::string& v
 void dropRestoration( google::protobuf::RepeatedPtrField<D::FieldRestorationData>* restores, int which )
 { for( int n = restores->size() - 1; n >= 0; --n ) if( static_cast<int>( restores->Get( n ).field() ) == which + 1 ) restores->DeleteSubrange( n, 1 ); }
 const wxString FIELD_LABELS[] = { _( "General requirements" ), _( "Schematic requirements" ), _( "Routing requirements" ) };
+/// One field-history row per entry. An implementation made from another one continues that implementation's field
+/// history, whose rows keep the version they have there; those rows name that implementation (for example
+/// "Initial approach v3") so they cannot be mistaken for this implementation's own versions.
+std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> historyRows( const D::RecursiveBlockGraphData& graph,
+                                                      const D::FieldHistoryPageData& page, bool link )
+{
+    auto implementation = [&]( const std::string& revisionId ) -> wxString
+    {
+        std::string stateId;
+        if( link )
+        {
+            for( const auto& archive : graph.connection_archives() )
+                for( const auto& item : archive.revisions() )
+                    if( item.selection().revision_id() == revisionId && item.selection().connection_id() == page.owner_id() )
+                        stateId = item.selection().state_id();
+            if( stateId.empty() || stateId == page.state_id() ) return wxEmptyString;
+            for( const auto& archive : graph.connection_archives() )
+                for( const auto& state : archive.states() ) if( state.id() == stateId ) return Text( state.name() );
+            return wxEmptyString;
+        }
+        for( const auto& item : graph.revisions() )
+            if( item.selection().revision_id() == revisionId && item.selection().block_id() == page.owner_id() )
+                stateId = item.selection().state_id();
+        if( stateId.empty() || stateId == page.state_id() ) return wxEmptyString;
+        for( const auto& state : graph.states() ) if( state.id() == stateId ) return Text( state.name() );
+        return wxEmptyString;
+    };
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
+    for( const auto& row : page.entries() )
+    {
+        wxString label = wxString::Format( "v%u", row.context_version() );
+        if( wxString name = implementation( row.context_revision_id() ); !name.IsEmpty() ) label = name + wxS( " " ) + label;
+        rows.push_back( { row.requirement_revision_id(), label, Text( row.origin().actor() ), Text( row.text() ), wxEmptyString,
+                          row.is_saved_text() } );
+    }
+    return rows;
+}
 /// The gap between one-click choices, in DIP; each choice already pads its own label.
 constexpr int FACET_CHOICE_GAP = 2;
 /// The strength choices' full and short labels (StructuralGuidanceStrength Information, Preference, Requirement).
@@ -849,10 +886,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             if( m_historyDialog ) m_historyDialog->PageFailed( _( "Older changes did not match this history. Try again." ) );
             refresh(); return;
         }
-        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
-        for( const auto& row : result.history().entries() )
-            rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-                Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
+        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows = historyRows( m_document.graph(), result.history(), link );
         if( olderHistory )
         {
             if( !m_historyDialog->AppendPage( result.history().offset(), result.history().total(), std::move( rows ) ) )
@@ -2423,10 +2457,7 @@ void RECURSIVE_DIAGRAM_FRAME::showHistory( const D::RecursiveFileResult& result,
     int which = static_cast<int>( page.field() ) - 1;
     bool stillSelected = link ? m_connectionId == owner : m_connectionId.empty() && m_selected == owner;
     if( result.source_token() != m_document.source_token() || page.owner_id() != owner || !stillSelected || which < 0 || which > 2 ) return;
-    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
-    for( const auto& row : page.entries() )
-        rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-            Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows = historyRows( m_document.graph(), page, link );
     DIALOG_DIAGRAM_FIELD_HISTORY dialog( this, FIELD_LABELS[which], m_owner->GetLabel(),
             wxString::Format( "v%u", page.context_version() ), Text( page.saved_text() ), std::move( rows ) );
     m_historyContext = page;

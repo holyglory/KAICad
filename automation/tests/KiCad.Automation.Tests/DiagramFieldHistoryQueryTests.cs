@@ -68,6 +68,36 @@ public sealed class DiagramFieldHistoryQueryTests
         Assert.AreEqual(selection.ConnectionId, page.Scope.OwnerId); Assert.AreEqual(2, page.ContextVersion);
         Assert.AreEqual("Agent client", page.Entries[0].Origin.Actor);
         Assert.AreEqual("Label this member clearly.", page.SavedText);
+        // A member implementation made from another one continues that one's field history: the earlier text keeps its
+        // author and its own implementation's version, and the member's own rewrite follows it.
+        var alternative = f.Alternatives["Data+"];
+        var altHistory = appended.RequirementHistories.Single(h => h.Scope.DesignStateId == alternative.StateId);
+        var continuing = new DiagramRequirementHistory(altHistory.Scope, [altHistory.Revisions[0] with { ParentId = changed.Current.Id,
+            Requirements = altHistory.Revisions[0].Requirements with { Schematic = "Label this member clearly." } }]);
+        var rewrite = continuing.Commit(continuing.Current.Id, continuing.StartDraft().Edit(DiagramRequirementField.Schematic, "Label the positive leg."),
+            Guid.NewGuid(), RecursiveBlockFixture.Origin("Member agent")).History;
+        var altRevision = appended.Inspect(alternative);
+        var altNext = altRevision with { Selection = alternative with { RevisionId = Guid.NewGuid() }, ParentRevisionId = alternative.RevisionId,
+            RequirementRevisionId = rewrite.Current.Id };
+        var lineage = new DiagramConnectionArchive(appended.DocumentId, appended.OwnerBlockId, appended.States.Select(s => s.Id == alternative.StateId
+                ? s with { HeadRevisionId = altNext.Selection.RevisionId } : s), appended.Revisions.Add(altNext),
+            appended.RequirementHistories.Select(h => h.Scope == rewrite.Scope ? new DiagramRequirementHistory(h.Scope, rewrite.Revisions) : h));
+        var member = DiagramFieldHistoryQuery.Connection(lineage, altNext.Selection, DiagramRequirementField.Schematic);
+        Assert.AreEqual(2, member.ContextVersion); Assert.AreEqual(alternative.StateId, member.Scope.DesignStateId);
+        CollectionAssert.AreEqual(new[] { rewrite.Current.Id, changed.Current.Id, history.Current.Id },
+            member.Entries.Select(e => e.RequirementRevisionId).ToArray());
+        CollectionAssert.AreEqual(new[] { "Member agent", "Agent client", "Fixture user" }, member.Entries.Select(e => e.Origin.Actor).ToArray());
+        CollectionAssert.AreEqual(new[] { altNext.Selection.RevisionId, candidate.Selection.RevisionId, selection.RevisionId },
+            member.Entries.Select(e => e.ContextRevisionId).ToArray());
+        CollectionAssert.AreEqual(new[] { 2, 2, 1 }, member.Entries.Select(e => e.ContextVersion).ToArray());
+        // Later revisions of the earlier implementation stay out of this one's history.
+        var laterSource = changed.Commit(changed.Current.Id, changed.StartDraft().Edit(DiagramRequirementField.Schematic, "A later source text."),
+            Guid.NewGuid(), RecursiveBlockFixture.Origin("Agent client")).History;
+        var laterRevision = candidate with { Selection = candidate.Selection with { RevisionId = Guid.NewGuid() }, ParentRevisionId = candidate.Selection.RevisionId,
+            RequirementRevisionId = laterSource.Current.Id };
+        var advanced = lineage.AppendRevision(candidate.Selection.RevisionId, laterRevision, laterSource);
+        CollectionAssert.AreEqual(member.Entries.Select(e => e.RequirementRevisionId).ToArray(),
+            DiagramFieldHistoryQuery.Connection(advanced, altNext.Selection, DiagramRequirementField.Schematic).Entries.Select(e => e.RequirementRevisionId).ToArray());
     }
 
     [TestMethod]

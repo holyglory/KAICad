@@ -67,7 +67,8 @@ public sealed partial class RecursiveBlockGraph
             || requirementHistories is null) throw Invalid("Supply a document, selected root and immutable block histories.");
         DocumentId = documentId; SelectedRoot = selectedRoot;
         States = states.ToImmutableArray(); Revisions = revisions.ToImmutableArray();
-        RequirementHistories = requirementHistories.ToImmutableArray();
+        // A derived implementation's history continues the one it was made from (checked below).
+        RequirementHistories = DiagramRequirementHistory.Link(requirementHistories.ToImmutableArray());
         ConnectionArchives = connectionArchives?.ToImmutableArray() ?? [];
         ImplementationChanges = implementationChanges?.ToImmutableArray() ?? [];
         RefinementInputs = refinementInputs?.ToImmutableArray() ?? [];
@@ -193,6 +194,11 @@ public sealed partial class RecursiveBlockGraph
                     throw Invalid("An implementation source must be an exact revision of the same block without circular derivation.");
                 current = _states[source.StateId];
             }
+            // Field history continues from the exact revision the implementation was made from. An implementation saved
+            // before histories were continued keeps the separate history it was saved with.
+            if (_requirements[state.Id].DerivedFrom is { } derived
+                && (state.ForkedFrom is not { } madeFrom || _revisions[madeFrom.RevisionId].RequirementRevisionId != derived))
+                throw Invalid("An implementation's field history can only continue the exact revision it was made from.");
         }
         foreach (var revision in Revisions)
         {
@@ -410,8 +416,9 @@ public sealed partial class RecursiveBlockGraph
         var originalRequirements = Requirements(source);
         var state = new BlockDesignState(stateId, source.BlockId, name, revisionId, source);
         var selection = new BlockSelection(source.BlockId, stateId, revisionId);
+        // The new implementation continues the source's field history from its exact revision.
         var history = new DiagramRequirementHistory(new(DocumentId, source.BlockId, stateId),
-            [new(requirementRevisionId, null, originalRequirements.Requirements, origin, [])]);
+            [new(requirementRevisionId, originalRequirements.RevisionId, originalRequirements.Requirements, origin, [])]);
         BlockLocalDiagram? diagram = original.Diagram;
         if (emptyInterior)
         {

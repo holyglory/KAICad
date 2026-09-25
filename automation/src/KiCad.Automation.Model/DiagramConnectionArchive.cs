@@ -51,7 +51,9 @@ public sealed class DiagramConnectionArchive
         if (documentId == Guid.Empty || ownerBlockId == Guid.Empty || states is null || revisions is null || requirementHistories is null)
             throw Invalid("A local connection archive needs an exact document and owning block.");
         DocumentId = documentId; OwnerBlockId = ownerBlockId;
-        States = states.ToImmutableArray(); Revisions = revisions.ToImmutableArray(); RequirementHistories = requirementHistories.ToImmutableArray();
+        States = states.ToImmutableArray(); Revisions = revisions.ToImmutableArray();
+        // A refined connection's history continues the implementation it was refined from (checked below).
+        RequirementHistories = DiagramRequirementHistory.Link(requirementHistories.ToImmutableArray());
         var statesById = ImmutableDictionary.CreateBuilder<Guid, ConnectionDesignState>();
         foreach (var state in States)
         {
@@ -113,6 +115,10 @@ public sealed class DiagramConnectionArchive
             }
             if (seen.Count != Revisions.Count(r => r.Selection.StateId == state.Id))
                 throw Invalid("No connection revision can be orphaned outside its implementation history.");
+            // A continued field history starts at a text a saved revision of the earlier implementation carries.
+            if (_requirements[state.Id].DerivedFrom is { } derived && !Revisions.Any(r => r.RequirementRevisionId == derived
+                    && r.Selection.ConnectionId == state.ConnectionId && r.Selection.StateId != state.Id))
+                throw Invalid("A connection's field history can only continue a saved revision of another implementation of that connection.");
         }
         foreach (var revision in Revisions)
         {

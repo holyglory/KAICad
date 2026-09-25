@@ -115,6 +115,28 @@ not claimed engineering recommendations. Verify rewritten current General/Schema
 Routing text with original history, exact unrelated-sibling preservation, preview
 without activation, cancellation, invalid member rejection and stale-result recovery.
 
+## Field history across implementations and proposals (ledger p390b40bed99e0ab2)
+
+A proposal that refines an existing block or connection, and a duplicated implementation, continue the field
+history of the implementation they were made from instead of starting a new one. The new implementation's first
+requirement revision names, as its parent, the exact requirement revision it was derived from; the proposal's
+rewrite is the next revision. Reading General, Schematic or Routing history (`kicad_diagram_field_history`, the
+editor's History action) therefore lists the rewrite and then every earlier text, each with its own author or
+agent, sources, linked input and proposal identities, and the version it has in its own implementation's diagram
+history. Choosing the proposal or switching implementations keeps that history, and restoring an earlier text,
+including one written before the switch, saves a new revision that names the revision the text came from. The
+diagram file checks every link: it must name a saved revision of another implementation of the same block or
+connection (for a block, the exact revision the implementation was made from) and cannot be circular. A separate
+requirement-history file cannot hold a continued history and is refused. Implementations saved before this rule
+keep the separate history they were saved with; no earlier link is invented.
+
+Evidence: `NativeRecursiveEditorJourney` (production MCP server and rendered editor: an unselected root proposal,
+a chosen supply proposal and its refined supply connection, the root after the choice, an agent's duplicate, and
+restoring the pre-proposal text in the editor), `NativeFieldHistoryTests` (the rendered history dialog restores a
+text saved before an implementation switch), and the isolated rules in `RecursiveBlockProposalTests`,
+`RecursiveImplementationTests`, `DiagramFieldHistoryQueryTests`, `DiagramConnectionArchiveTests`,
+`DiagramRequirementHistoryTests` and `DiagramRequirementHistoryFileTests`.
+
 ## Connection ends and members (ledger pf92d0ecdec8805b4)
 
 Two agent tools change one exact connection or member of a saved diagram level without a

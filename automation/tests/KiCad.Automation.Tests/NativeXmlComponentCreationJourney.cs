@@ -1895,6 +1895,51 @@ public sealed partial class NativeSessionTests
     }
 
     // This KiCad serves every piece CN-1 §8.3 requires and advertises connection realization, so plans use its own handshake.
+    // CN-1 §8.1 checked on KiCad's own captures before and after a commit: the pin partition after is exactly the one before,
+    // with every group that shares a pin with the expected groups replaced by those groups. Pins are compared by exact sheet
+    // instance path and placed pin identity ("path/pin"); a pin in no native net is a group of its own.
+    internal static void RequireAssertedPartition(CheckedSchematicState before, CheckedSchematicState after,
+        IEnumerable<IEnumerable<string>> expected, string what)
+    {
+        var groups = expected.Select(g => string.Join(",", g.Order(StringComparer.Ordinal))).ToHashSet(StringComparer.Ordinal);
+        var asserted = groups.SelectMany(g => g.Split(',')).ToHashSet(StringComparer.Ordinal);
+        var wanted = Partition(before).Where(g => !g.Split(',').Any(asserted.Contains)).Concat(groups).ToHashSet(StringComparer.Ordinal);
+        var actual = Partition(after);
+        var missing = wanted.Except(actual).Order(StringComparer.Ordinal).ToArray();
+        var unexpected = actual.Except(wanted).Order(StringComparer.Ordinal).ToArray();
+        Assert.IsTrue(missing.Length == 0 && unexpected.Length == 0, what + ": KiCad's pin partition differs from the asserted one. Missing groups: "
+            + string.Join(" | ", missing.Take(4)) + "; unexpected groups: " + string.Join(" | ", unexpected.Take(4)));
+
+        static HashSet<string> Partition(CheckedSchematicState state)
+        {
+            var pins = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var screen in state.Electrical.Hierarchy.Data.Instances)
+                foreach (var item in screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)))
+                {
+                    var symbol = item.Unpack<SchematicSymbolInstance>();
+                    foreach (var pin in SchematicPlacedPins.Active(symbol, symbol.Unit?.Unit ?? 1))
+                        pins.Add(PinKey(screen.Metadata.Document.SheetPath, pin.Id.Value));
+                }
+            var result = new HashSet<string>(StringComparer.Ordinal);
+            var grouped = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var net in state.Electrical.Nets)
+            {
+                var members = net.Sheets.SelectMany(s => s.Items.Select(i => PinKey(s.Path, i.Value))).Where(pins.Contains).Order(StringComparer.Ordinal).ToArray();
+                if (members.Length == 0) continue;
+                grouped.UnionWith(members);
+                result.Add(string.Join(",", members));
+            }
+            result.UnionWith(pins.Where(p => !grouped.Contains(p)));
+            return result;
+        }
+    }
+
+    // The groups of a connectivity assertion in the "path/pin" form of RequireAssertedPartition.
+    internal static IEnumerable<IEnumerable<string>> AssertedGroups(SchematicConnectivityAssertion assertion) =>
+        assertion.ExpectedGroups.Select(g => g.Pins.Select(p => PinKey(p.Path, p.Pin.Value)));
+
+    private static string PinKey(SheetPath path, string pin) => string.Join('/', path.Path.Select(p => p.Value)) + "/" + pin;
+
     private static AutomationSession RequireRealizationAdvertised(AutomationSession session)
     {
         Assert.IsTrue(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
@@ -2653,6 +2698,11 @@ public sealed partial class NativeSessionTests
                 var recovered = await Capture();
                 Assert.AreEqual(interruptedNativeRevision, new DocumentRevision(recovered.State.Revision.Epoch, recovered.State.Revision.Sequence));
             }
+            // Precision of the assertion the seam request for ledger pb41c5714361c378a asks the executor to append to an
+            // unconnected creation: KiCad's own pin partition after this real creation (repeated channel sheets and, in the
+            // declared editor, a three-unit part drawn in its second body style) is exactly what that assertion states.
+            RequireAssertedPartition(before, await Capture(), AssertedGroups(SchematicNativeCreationProjection.CreationAssertion(baseline, plan.Candidate!, token)
+                .AssertConnectivity), "The unconnected creation of the probes");
             var replay = await host.Tool("kicad_design_sync_apply", args); RequireToolSuccess(replay);
             Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
             await RequireAgreement(createdIds.Count);
@@ -2752,6 +2802,9 @@ public sealed partial class NativeSessionTests
         await VerifyCreatedFieldLayout(client, document, store, path, createdIds, evidence, instanceId, processId, display, token);
         var anchorLabelJoin = await RequireAnchorLabelJoin();
         var unresolvedSymbol = await RequireUnresolvedSymbolMeasured();
+        // Ledger pb41c5714361c378a runs in one of the two editors, which keeps this journey's time bounded; both would run the
+        // same code on the same probe fixture.
+        var hiddenPowerPin = interruptAfterNativeEdit ? null : await RequireHiddenPowerPinCreation();
         var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document.Clone() }, token);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-creation-render.png"), image.Preview.Png.ToByteArray(), token);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-creation-window.png"), token);
@@ -2763,11 +2816,288 @@ public sealed partial class NativeSessionTests
             interruptedNativeOperation, saveReloadVerified = true, publicMcpReattachmentVerified = true,
             exactReplay = true, declaredPartCreation = declaration is not null, declaredUnits = part.Units,
             selectedBodyStyle = declaration?.BodyStyle, crossSheetUnits = crossSheet.Length,
-            crossSheetRejection, connectionGate, anchorLabelJoin, unresolvedSymbol,
+            crossSheetRejection, connectionGate, anchorLabelJoin, unresolvedSymbol, hiddenPowerPin,
             crossPlatformReady = false }), token);
 
         Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+
+        // Ledger pb41c5714361c378a on this editor, through the production MCP server with this editor's own handshake, which
+        // advertises schematic.connection-realization.v1. The part is the fixture probe with a second pin: a hidden power input
+        // named VPROBE, which KiCad joins to every other VPROBE in the design without any wire.
+        // 1. The recovery record adopts the reloaded editor, and the XML adds VP1 and VP2 of that part with the net VPROBE
+        //    holding both hidden pins. The connection-aware layout tool places them, and apply creates them in one checked KiCad
+        //    commit whose pin-partition assertion KiCad verified: this is the existing global power net of the next steps.
+        // 2. The XML adds VP3 with its hidden pin in no net. The public preview, apply and layout tools all refuse it while
+        //    planning with connected_implicit_power_conflict, naming the pin and the name it would silently join; KiCad, its
+        //    change journal, the XML file and the recovery record stay unchanged.
+        // 3. The same creation as the unconnected path sent it before this fix, with the creation assertion that the seam request
+        //    asks the executor to append, is refused by KiCad itself (connectivity_postcondition_failed, unexpected_join) with no
+        //    change at all: the assertion also stops joins no plan can foresee.
+        // 4. The XML declares VP3's hidden pin in VPROBE: apply creates VP3 in one checked commit, and KiCad's pin partition is
+        //    exactly the one before, with VP3's hidden pin added to VPROBE and its other pin alone.
+        async Task<object> RequireHiddenPowerPinCreation()
+        {
+            string Evidence(string name) => Path.Combine(evidence, instanceId + "-hidden-power-" + name);
+            var session = RequireRealizationAdvertised(await client.HandshakeAsync(token));
+            await using var host = await StdioMcpFixture.StartAsync(Evidence("mcp"), Evidence("mcp.stderr.log"), token);
+            RequireToolSuccess(await host.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+
+            // 1. Adopt the editor reloaded from its saved sheets, publish what the reload changed (only loaded-format provenance),
+            // then create VP1 and VP2 with VPROBE declared.
+            var reloaded = await Capture();
+            Assert.IsFalse(reloaded.State.NativeContentDirty, "The editor holds its saved sheets.");
+            var adopted = store.Read()!;
+            Assert.IsFalse(adopted.State.HasPendingWork);
+            if (adopted.State.NativeRevision != new DocumentRevision(reloaded.State.Revision.Epoch, reloaded.State.Revision.Sequence))
+                RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = adopted.RevisionToken, expectedDocumentEpoch = reloaded.State.Revision.Epoch }));
+            var settle = await Apply("settle");
+            RequireToolSuccess(settle);
+            var model = store.Read()!.State.Baseline;
+            var circuit = model.Engineering.Circuit;
+            var rootSheet = circuit.SheetInstances.Single(s => s.ParentId is null);
+            var rootScreen = model.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+            var link = circuit.Nets.Single(n => n.Pins.Count == 2 && n.Pins.All(p => !createdIds.Contains(p.ComponentId)));
+            var probe = SchematicModelProjection.NativeSymbols(model, model.Schematic)[circuit.Symbols.First(s => s.ComponentId == link.Pins.Min(p => p.ComponentId)).Id];
+            var probeLibrary = probe.LibraryId ?? probe.Definition.Id;
+            string probeKey = probe.LibName.Length != 0 ? probe.LibName
+                : (probeLibrary.LibraryNickname.Length == 0 ? "" : probeLibrary.LibraryNickname + ":") + probeLibrary.EntryName;
+            var symbol = rootScreen.CachedSymbols.Single(c => c.CacheKey == probeKey).Clone();
+            symbol.CacheKey = "Automation:HiddenPowerProbe";
+            symbol.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "HiddenPowerProbeDefinition" };
+            var partPins = new List<PartPin>();
+            foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                pin.Id.Value = Guid.NewGuid().ToString("D");
+                child.Unit = new() { Unit = 1 };
+                child.Item = Any.Pack(pin);
+                partPins.Add(new(pin.Number, pin.Name, 1));
+            }
+            // The hidden power input: a copy of the probe pin 5.08 mm to its right, inside the probe's drawing and never stacked
+            // on its first pin.
+            var hiddenChild = symbol.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+            var hidden = hiddenChild.Item.Unpack<SchematicPin>();
+            hidden.Id = new() { Value = Guid.NewGuid().ToString("D") }; hidden.Number = "2"; hidden.Name = "VPROBE";
+            hidden.ElectricalType = ElectricalPinType.EptPowerInput; hidden.Visible = false;
+            hidden.Position = new() { XNm = (hidden.Position?.XNm ?? 0) + 5_080_000, YNm = hidden.Position?.YNm ?? 0 };
+            hiddenChild.Item = Any.Pack(hidden);
+            symbol.Definition.Items.Add(hiddenChild);
+            partPins.Add(new("2", "VPROBE", 1));
+            var vPart = new PartDefinition(Guid.NewGuid(), "XML hidden power probe", 1, partPins);
+            var vDeclaration = new SchematicPartSymbol(vPart.Id, new() { LibraryNickname = "Declared", EntryName = "HiddenPowerProbe" }, symbol);
+            (ComponentInstance Component, ComponentDefinition Definition, SymbolOccurrence Occurrence) Probe(string reference)
+            {
+                var definition = new ComponentDefinition(Guid.NewGuid(), vPart.Id, "Hidden power probe");
+                var component = new ComponentInstance(Guid.NewGuid(), definition.Id, rootSheet.Id, reference);
+                return (component, definition, new SymbolOccurrence(Guid.NewGuid(), component.Id, 1, null));
+            }
+            var vp1 = Probe("VP1"); var vp2 = Probe("VP2"); var vp3 = Probe("VP3");
+            Guid vprobe = Guid.NewGuid();
+            static SchematicDesign Adding(SchematicDesign design, Guid rootDefinition, IReadOnlyList<(ComponentInstance Component, ComponentDefinition Definition, SymbolOccurrence Occurrence)> probes,
+                Func<IReadOnlyList<CircuitNet>, IReadOnlyList<CircuitNet>> nets, PartDefinition? addedPart = null, SchematicPartSymbol? addedSymbol = null)
+            {
+                var c = design.Engineering.Circuit;
+                return design with
+                {
+                    PartSymbols = addedSymbol is null ? design.PartSymbols : [.. design.PartSymbols ?? [], addedSymbol],
+                    Engineering = design.Engineering with { Circuit = c with
+                    {
+                        Parts = addedPart is null ? c.Parts : [.. c.Parts, addedPart],
+                        Sheets = c.Sheets.Select(s => s.Id == rootDefinition ? s with { Components = [.. s.Components, .. probes.Select(p => p.Definition)] } : s).ToArray(),
+                        Components = [.. c.Components, .. probes.Select(p => p.Component)],
+                        Symbols = [.. c.Symbols, .. probes.Select(p => p.Occurrence)],
+                        Nets = nets(c.Nets)
+                    } }
+                };
+            }
+            var setupDesign = await Laid(Adding(model, rootSheet.DefinitionId, [vp1, vp2],
+                nets => [.. nets, new CircuitNet(vprobe, "VPROBE", [new(vp1.Component.Id, "2"), new(vp2.Component.Id, "2")])], vPart, vDeclaration), "setup");
+            Write(setupDesign);
+            var setup = await Committed("setup", created: 2);
+            var existingNet = store.Read()!.State.Baseline;
+            RequireAssertedPartition(setup.Before, setup.After, [Keys(existingNet, (vp1.Component.Id, "2"), (vp2.Component.Id, "2")),
+                Keys(existingNet, (vp1.Component.Id, "1")), Keys(existingNet, (vp2.Component.Id, "1"))], "VP1 and VP2 created with VPROBE");
+
+            // 2. VP3 placed by the layout tool for its declared revision, then saved without its hidden pin in any net.
+            var declared = await Laid(Adding(existingNet, rootSheet.DefinitionId, [vp3],
+                nets => [.. nets.Select(n => n.Id == vprobe ? n with { Pins = [.. n.Pins, new(vp3.Component.Id, "2")] } : n)]), "declared");
+            var vp3Placement = declared.Engineering.Circuit.Symbols.Single(s => s.Id == vp3.Occurrence.Id).Placement
+                ?? throw new AssertFailedException("The layout tool places VP3.");
+            var undeclared = Adding(existingNet, rootSheet.DefinitionId, [(vp3.Component, vp3.Definition, vp3.Occurrence with { Placement = vp3Placement })], nets => nets);
+            var refusedRecord = Write(undeclared);
+            byte[] refusedXml = await File.ReadAllBytesAsync(path, token);
+            string baselineXml = SchematicDesignXml.Write(refusedRecord.State.Baseline, []);
+            var nativeBefore = await Capture();
+            var journal = await Journal(null);
+            // Nothing is changed anywhere: KiCad, its change journal, the saved XML (the refused revision is still the file) and
+            // the recovery record, whose baseline does not advance and which holds no pending operation.
+            async Task RequireUnchanged(string what, string revision)
+            {
+                Assert.AreEqual(nativeBefore, await Capture(), what + " must not reach KiCad.");
+                Assert.IsEmpty((await Journal(journal)).Changes, what + " adds no KiCad change.");
+                var current = store.Read()!;
+                Assert.AreEqual(revision, current.RevisionToken, what + " does not write the recovery record.");
+                Assert.IsFalse(current.State.HasPendingWork, what + " leaves no pending operation.");
+                Assert.AreEqual(baselineXml, SchematicDesignXml.Write(current.State.Baseline, []), what + " does not advance the baseline.");
+            }
+            var preview = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = refusedRecord.RevisionToken });
+            await File.WriteAllTextAsync(Evidence("undeclared-plan.json"), RetainedToolEvidence(preview), token);
+            var previewContent = preview.GetProperty("structuredContent");
+            Assert.IsFalse(previewContent.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, previewContent.GetProperty("errorCode").GetString(), preview.GetRawText());
+            string message = previewContent.GetProperty("errorMessage").GetString()!;
+            StringAssert.Contains(message, "Hidden power pin VP3.2 is named 'VPROBE'");
+            StringAssert.Contains(message, "including hidden power pin VP");
+            StringAssert.Contains(message, "Add VP3.2 to the XML net that carries 'VPROBE'");
+            Assert.AreEqual(JsonValueKind.Null, previewContent.GetProperty("candidateDesignXml").ValueKind);
+            Assert.AreEqual(0, previewContent.GetProperty("nativeOperationsJson").GetArrayLength());
+            var refusedApply = await Apply("undeclared");
+            Assert.IsTrue(refusedApply.TryGetProperty("isError", out var failed) && failed.GetBoolean(), refusedApply.GetRawText());
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict,
+                refusedApply.GetProperty("structuredContent").GetProperty("errorCode").GetString(), refusedApply.GetRawText());
+            await RequireUnchanged("The refused preview and apply", refusedRecord.RevisionToken);
+            CollectionAssert.AreEqual(refusedXml, await File.ReadAllBytesAsync(path, token), "A refused apply publishes no XML.");
+            // The same revision without coordinates: the layout tool refuses it too, after measuring KiCad read-only.
+            var coordinateFree = Write(Adding(existingNet, rootSheet.DefinitionId, [vp3], nets => nets));
+            var layoutRefusal = await host.Tool("kicad_design_propose_initial_layout", LayoutArguments(coordinateFree.RevisionToken));
+            await File.WriteAllTextAsync(Evidence("undeclared-layout.json"), RetainedToolEvidence(layoutRefusal), token);
+            Assert.IsTrue(layoutRefusal.GetProperty("isError").GetBoolean(), layoutRefusal.GetRawText());
+            string? layoutCode = JsonDocument.Parse(layoutRefusal.GetProperty("content")[0].GetProperty("text").GetString()!).RootElement.GetProperty("code").GetString();
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, layoutCode, layoutRefusal.GetRawText());
+            await RequireUnchanged("The refused layout", coordinateFree.RevisionToken);
+            Write(undeclared);
+
+            // 3. The unconnected creation as it was sent before this fix, with the creation assertion appended, sent to KiCad.
+            var record = store.Read()!.State;
+            var checkpoint = await Capture();
+            Assert.AreEqual(record.NativeRevision, new DocumentRevision(checkpoint.State.Revision.Epoch, checkpoint.State.Revision.Sequence));
+            var unguarded = SchematicNativeCreationProjection.Project(record.Baseline, undeclared, record.KnowledgeLibraries, token, allowConnected: true);
+            var batch = new ApplySchematicItemBatch { Document = checkpoint.State.Document.Clone(), DocumentEpoch = checkpoint.State.Revision.Epoch,
+                ExpectedRevision = checkpoint.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
+                OriginId = record.OriginId.ToString("D"), Description = "Apply XML synchronization candidate" };
+            batch.Operations.Add(SchematicHierarchyDelta.Plan(record.Observed, unguarded.Candidate.Schematic, token).Select(o => o.Clone()));
+            Assert.IsTrue(batch.Operations.Any(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true), "The unguarded batch creates VP3.");
+            batch.Operations.Add(SchematicNativeCreationProjection.CreationAssertion(record.Baseline, unguarded.Candidate, token));
+            var guarded = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = batch, ExpectedState = checkpoint.State.Clone() }, token);
+            await File.WriteAllTextAsync(Evidence("creation-assertion-receipt.json"), SchematicJson.Formatter.Format(guarded), token);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsRejected, guarded.Status, guarded.ErrorCode + ": " + guarded.ErrorMessage);
+            Assert.AreEqual(SchematicConnectionErrors.ConnectivityPostconditionFailed, guarded.ErrorCode, guarded.ErrorMessage);
+            StringAssert.Contains(guarded.ErrorMessage, "unexpected_join", "KiCad names the silent join.");
+            foreach (var joinedPin in Keys(existingNet, (vp1.Component.Id, "2"), (vp2.Component.Id, "2")))
+                StringAssert.Contains(guarded.ErrorMessage, joinedPin.Split('/')[^1], "KiCad names the VPROBE pins VP3.2 would join.");
+            Assert.AreEqual(checkpoint, await Capture(), "KiCad refuses the whole creation without any change.");
+            Assert.IsEmpty((await Journal(journal)).Changes, "The refused batch adds no KiCad change.");
+
+            // 4. The declared revision: VP3's hidden pin in VPROBE, created in one checked commit.
+            Write(declared);
+            var realizationPreview = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken });
+            await File.WriteAllTextAsync(Evidence("declared-plan.json"), RetainedToolEvidence(realizationPreview), token);
+            RequireToolSuccess(realizationPreview);
+            var planned = realizationPreview.GetProperty("structuredContent");
+            Assert.IsTrue(planned.GetProperty("connectionRealizationRequired").GetBoolean(), realizationPreview.GetRawText());
+            var intent = planned.GetProperty("connectionIntent");
+            var net = intent.GetProperty("nets").EnumerateArray().Single();
+            Assert.AreEqual("VPROBE", net.GetProperty("globalName").GetString(), "The hidden pins name the net globally.");
+            Assert.AreEqual(0, intent.GetProperty("screens").EnumerateArray().Sum(s => s.GetProperty("islands").GetArrayLength()),
+                "A hidden power pin needs nothing drawn.");
+            Assert.AreEqual(2, intent.GetProperty("expectedGroupCount").GetInt32(), "VPROBE with VP3.2, and VP3.1 alone.");
+            var joined = await Committed("declared", created: 1);
+            var connected = store.Read()!.State.Baseline;
+            RequireAssertedPartition(joined.Before, joined.After, [Keys(connected, (vp1.Component.Id, "2"), (vp2.Component.Id, "2"), (vp3.Component.Id, "2")),
+                Keys(connected, (vp3.Component.Id, "1"))], "VP3 created into VPROBE");
+            var after = await Capture();
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(after.Electrical.Hierarchy.Data, SchematicDesignXml.Read(await File.ReadAllTextAsync(path, token), []).Schematic, token),
+                "The published XML is what KiCad shows.");
+            var settled = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
+            Assert.IsTrue(settled.CanPrepare && settled.NativeOperations.Count == 0 && settled.Connections is null, settled.ErrorCode + ": " + settled.ErrorMessage);
+            var result = new
+            {
+                part = new { vPart.Name, hiddenPin = "2", powerName = "VPROBE" },
+                settleCommitted = settle.GetProperty("structuredContent").GetProperty("nativeMutationCommitted").GetBoolean(),
+                setup = setup.Proof, declaredJoin = joined.Proof,
+                undeclared = new { planErrorCode = previewContent.GetProperty("errorCode").GetString(), message,
+                    applyErrorCode = refusedApply.GetProperty("structuredContent").GetProperty("errorCode").GetString(), layoutErrorCode = layoutCode,
+                    nativeUnchanged = true, journalUnchanged = true, xmlUnchanged = true, recordUnchanged = true },
+                creationAssertion = new { status = guarded.Status.ToString(), guarded.ErrorCode, guarded.ErrorMessage, nativeUnchanged = true }
+            };
+            await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(result), token);
+            return result;
+
+            // The tool takes exactly one usable region per screen the addition touches: here only the root sheet.
+            object LayoutArguments(string revision) => new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = revision,
+                gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L,
+                regions = regions.Where(r => r.ScreenId == Guid.Parse(rootScreen.Metadata.ScreenId.Value)).ToList(),
+                userInstructions = "Place the new probes where they have room; keep existing work where it is." };
+
+            // Write a design as the saved XML and the record's desired revision.
+            StoredDesignRecovery Write(SchematicDesign design)
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, []));
+                File.WriteAllBytes(path, bytes);
+                var current = store.Read()!;
+                return store.Save(current.State with { DesiredFileBytes = bytes }, current.RevisionToken);
+            }
+
+            // The connection-aware layout tool's placement of a revision's coordinate-free probes, read-only.
+            async Task<SchematicDesign> Laid(SchematicDesign design, string name)
+            {
+                var current = Write(design);
+                var nativeBeforeLayout = await Capture();
+                var reply = await host.Tool("kicad_design_propose_initial_layout", LayoutArguments(current.RevisionToken));
+                await File.WriteAllTextAsync(Evidence(name + "-layout.json"), RetainedToolEvidence(reply), token);
+                RequireToolSuccess(reply);
+                var content = reply.GetProperty("structuredContent");
+                Assert.IsTrue(content.GetProperty("canPropose").GetBoolean(), reply.GetRawText());
+                Assert.AreEqual(nativeBeforeLayout, await Capture(), name + ": layout must not change KiCad.");
+                return SchematicDesignXml.Read(content.GetProperty("desiredXml").GetString()!, []);
+            }
+
+            async Task<JsonElement> Apply(string name)
+            {
+                var reply = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = store.StatePath, designPath = path,
+                    expectedRevisionToken = store.Read()!.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+                await File.WriteAllTextAsync(Evidence(name + "-apply.json"), RetainedToolEvidence(reply), token);
+                return reply;
+            }
+
+            // Apply the saved revision and require exactly one checked KiCad commit whose connectivity assertion KiCad verified,
+            // adding exactly the created symbols and nothing else, with the XML published.
+            async Task<(CheckedSchematicState Before, CheckedSchematicState After, object Proof)> Committed(string name, int created)
+            {
+                var before = await Capture();
+                var mark = await Journal(null);
+                var reply = await Apply(name);
+                RequireToolSuccess(reply);
+                Assert.IsTrue(reply.GetProperty("structuredContent").GetProperty("nativeMutationCommitted").GetBoolean(), reply.GetRawText());
+                var after = await Capture();
+                var saved = store.Read()!;
+                var receipt = saved.State.LastSynchronization!.Result(saved.RevisionToken, false).NativeReceipt!;
+                Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status);
+                Assert.IsTrue(receipt.Result.ConnectivityAssertionVerified, name + ": KiCad verified the pin partition before committing.");
+                var change = (await Journal(mark)).Changes.Single();
+                Assert.AreEqual(SchematicChange.Types.Kind.Commit, change.Kind);
+                Assert.AreEqual(receipt.OperationId, change.OperationId, name + ": the one change is the checked batch.");
+                var added = Items(after).Except(Items(before)).ToArray();
+                Assert.IsEmpty(Items(before).Except(Items(after)).ToArray(), name + ": nothing existing is removed.");
+                Assert.HasCount(created, added, name + ": only the created symbols are added.");
+                var natives = saved.State.Baseline.SymbolBindings.Select(b => b.NativeObjectId.ToString("D")).ToHashSet(StringComparer.Ordinal);
+                Assert.IsTrue(added.All(id => natives.Contains(id.Split('#')[1])), name + ": every added item is a bound symbol.");
+                CollectionAssert.AreEqual(saved.State.DesiredFileBytes, await File.ReadAllBytesAsync(path, token), name + ": the XML is published.");
+                return (before, after, new { operationId = receipt.OperationId, assertionVerified = true, journalChanges = 1, createdSymbols = created });
+            }
+
+            static IEnumerable<string> Items(CheckedSchematicState state) => state.Electrical.Hierarchy.Data.Instances.SelectMany(screen =>
+                SchematicItemDelta.Index(screen.Items).Keys.Select(id => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value)) + "#" + id.ToString("D")));
+
+            async Task<SchematicChangeJournal> Journal(SchematicChangeJournal? after) => await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
+                after is null ? new() { Document = document.Clone() } : new() { Document = document.Clone(), DocumentEpoch = after.DocumentEpoch, AfterSequence = after.Sequence }, token);
+
+            static string[] Keys(SchematicDesign design, params (Guid Component, string Number)[] pins) =>
+                [.. SchematicConnectionIntentBuilderTests.Keys(design, pins).Select(k => k.SheetPathKey + "/" + k.PlacedPinId.ToString("D"))];
+        }
 
         // A sheet holding a symbol whose library definition KiCad cannot resolve (here its cache entry is missing, as in a
         // project copied without its libraries) is still measured for generated connections: KiCad reports that symbol as

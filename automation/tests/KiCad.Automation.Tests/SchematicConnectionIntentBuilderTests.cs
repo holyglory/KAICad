@@ -395,6 +395,22 @@ public sealed class SchematicConnectionIntentBuilderTests
         var placed = RequireRealizationPlan(placedInVcc);
         Assert.AreEqual("VCC", placed.Nets.Single(n => n.Name == "VCC").GlobalName);
         Assert.AreEqual(ConnectionScope.Local, placed.Nets.Single(n => n.Name == "OUT").Scope);
+
+        // The unconnected creation path applies the same rule (ledger pb41c5714361c378a): the same new ICs with no new net at
+        // all are refused while planning, with a handshake or without one, because KiCad would join their hidden VCC pins to
+        // U8's anyway. Only the declared form above, U10.2 in VCC, is planned.
+        foreach (var (unconnected, design, pin) in new[] { (loneState, withU9, "U9.2"), (singleState, withIc, "U10.2") })
+        {
+            Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(unconnected.Baseline, design.Engineering), pin + " is an unconnected creation.");
+            var (unconnectedSaved, _) = Revise(unconnected, _ => design);
+            foreach (var refusal in new[] { Plan(unconnectedSaved), SchematicSynchronizationPlanner.Plan(unconnectedSaved) })
+            {
+                Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, refusal.ErrorCode, refusal.ErrorMessage);
+                StringAssert.Contains(refusal.ErrorMessage!, "Hidden power pin " + pin + " is named 'VCC'");
+                StringAssert.Contains(refusal.ErrorMessage!, "including hidden power pin U8.2");
+                Assert.IsNull(refusal.Candidate); Assert.IsNull(refusal.CandidateXml); Assert.IsEmpty(refusal.NativeOperations); Assert.IsNull(refusal.Connections);
+            }
+        }
     }
 
     [TestMethod]

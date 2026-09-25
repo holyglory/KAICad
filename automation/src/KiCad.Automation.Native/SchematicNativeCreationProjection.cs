@@ -237,9 +237,174 @@ internal static class SchematicNativeCreationProjection
         // Every created symbol now has its exact definition geometry. Pins that one symbol stacks at one
         // point are one connection in KiCad, so nets that split them are refused before anything is sent.
         SchematicPlacedPins.RequireStackedPinsOnOneNet(candidate, token);
+        // A created power pin that the XML leaves out of every net is joined by KiCad to every other source of its global
+        // name (cn1-wiring-intent.md §5.3), so it must be the only one. An admitted connected addition applies the whole
+        // rule, with the nets it declares, in its connection intent instead.
+        if (!allowConnected) RequireUndeclaredPowerPinsAlone(baseline, candidate, created, token);
         var operations = SchematicHierarchyDelta.Plan(baseline.Schematic, candidate.Schematic, token);
         return new(candidate, operations, created.Order().ToArray());
     }
+
+    /// <summary>Refuse an unconnected creation in which KiCad would join a created pin to a net by name alone (ledger
+    /// pb41c5714361c378a, cn1-wiring-intent.md §5.3 for created symbols). A power input of a new global power symbol, and a
+    /// hidden power input of a new ordinary symbol, joins every other source of the same global name: a global label, a power
+    /// symbol or a hidden power input already on any sheet, or another such pin of the creation itself. The XML leaves every
+    /// created pin out of every net here, so each of them may keep its name only when nothing else in the design has it;
+    /// otherwise KiCad would connect it silently and the published XML would no longer describe the schematic. Pins that one
+    /// symbol stacks at one point are one connection in KiCad and may share a name. Local power symbols and local labels
+    /// join only within their sheet and are not global sources. Throws <c>connected_implicit_power_conflict</c> for a hidden
+    /// power input, <c>connected_global_name_conflict</c> for a power symbol and <c>connected_power_name_unresolved</c> for a
+    /// power symbol without a literal name, before anything reaches KiCad.</summary>
+    internal static void RequireUndeclaredPowerPinsAlone(SchematicDesign baseline, SchematicDesign candidate,
+        IReadOnlyCollection<Guid> createdOccurrences, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(candidate);
+        ArgumentNullException.ThrowIfNull(createdOccurrences);
+        var sources = CreatedPowerSources(candidate, createdOccurrences, token);
+        if (sources.Count == 0) return;
+        var names = sources.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        // One existing source of each wanted name, in sheet and item order: global labels and every pin joined by name.
+        var existing = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var screen in baseline.Schematic.Instances)
+            foreach (var packed in screen.Items)
+            {
+                token.ThrowIfCancellationRequested();
+                if (packed.Is(GlobalLabel.Descriptor))
+                {
+                    string text = packed.Unpack<GlobalLabel>().Text?.Text_ ?? "";
+                    if (names.Contains(text)) existing.TryAdd(text, "the global label '" + text + "'");
+                }
+                else if (packed.Is(SchematicSymbolInstance.Descriptor))
+                {
+                    var symbol = packed.Unpack<SchematicSymbolInstance>();
+                    foreach (var pin in SchematicPlacedPins.Active(symbol, symbol.Unit?.Unit ?? 1))
+                    {
+                        if (!SchematicPowerPins.IsGlobalPowerPin(symbol, pin)) continue;
+                        string name = SchematicPowerPins.PowerName(symbol, pin);
+                        if (names.Contains(name)) existing.TryAdd(name, PowerSource(symbol, pin, Reference(symbol, screen.Metadata.Document.SheetPath)));
+                    }
+                }
+            }
+        foreach (var source in sources)
+        {
+            string? other = existing.GetValueOrDefault(source.Name)
+                ?? sources.Where(s => s.Name == source.Name && s.Node != source.Node).Select(s => s.What).FirstOrDefault();
+            if (other is null) continue;
+            string subject = source.Carrier ? "the pin of power symbol " + source.Reference : source.Reference + "." + source.Number;
+            throw Invalid(source.Carrier ? SchematicConnectionErrors.ConnectedGlobalNameConflict : SchematicConnectionErrors.ConnectedImplicitPowerConflict,
+                char.ToUpperInvariant(source.What[0]) + source.What[1..] + " is named '" + source.Name + "', and KiCad joins everything with that name into one net, "
+                + "including " + other + ", but the XML leaves " + subject + " out of every net. Add " + subject
+                + " to the XML net that carries '" + source.Name + "' so the connection is declared; nothing was changed.");
+        }
+    }
+
+    /// <summary>The exact pin partition an unconnected creation must leave in KiCad, as the batch's final
+    /// <c>assert_connectivity</c> operation (cn1-wiring-intent.md §8.1): every placed pin of every created symbol alone, one
+    /// group per sheet instance that shows it, except pins one symbol stacks at one point, which KiCad always joins; every
+    /// group that existed before stays exactly as it was, because the assertion names only created pins. Groups are ordered
+    /// as §5.8 orders expected groups. This is the lane half of the seam request for ledger pb41c5714361c378a: the executor
+    /// sends an unconnected creation with this as its last operation to a KiCad that advertises
+    /// <see cref="SchematicConnectedAddition.NativeCapability"/>, so a join no plan can foresee (such as a new pin placed on
+    /// an existing wire end) is refused by KiCad without any change instead of being found after the commit.</summary>
+    internal static SchematicItemOperation CreationAssertion(SchematicDesign baseline, SchematicDesign candidate, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(candidate);
+        var existing = baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+        var groups = new List<(string Path, Guid Pin)[]>();
+        var seen = new HashSet<(string Path, Guid Pin)>();
+        var documents = new Dictionary<string, SheetPath>(StringComparer.Ordinal);
+        foreach (var (occurrence, path, screen, symbol) in CreatedSymbols(candidate, candidate.Engineering.Circuit.Symbols.Where(s => !existing.Contains(s.Id)), token))
+        {
+            documents.TryAdd(path, screen.Metadata.Document.SheetPath);
+            var stacked = SchematicElectricalComparison.StackedDefinitionPins(symbol, occurrence.Unit);
+            var together = stacked.SelectMany(g => g).Select(p => p.Id.Value).ToHashSet(StringComparer.Ordinal);
+            var own = stacked.Select(g => g.Select(p => Key(path, p)).ToArray())
+                .Concat(SchematicPlacedPins.Active(symbol, occurrence.Unit).Where(p => !together.Contains(p.Id.Value)).Select(p => new[] { Key(path, p) }));
+            foreach (var group in own)
+            {
+                if (!group.All(seen.Add))
+                    throw new InvalidOperationException("A created placed pin appears twice in the creation's pin partition.");
+                groups.Add([.. group.OrderBy(k => k.Path, StringComparer.Ordinal).ThenBy(k => k.Pin)]);
+            }
+        }
+        var assertion = new SchematicConnectivityAssertion { Version = 1 };
+        foreach (var group in groups.OrderBy(g => g[0].Path, StringComparer.Ordinal).ThenBy(g => g[0].Pin))
+        {
+            var pins = new SchematicPinGroup();
+            pins.Pins.Add(group.Select(k => new SchematicNetChainPinAnchor { Path = documents[k.Path].Clone(), Pin = new() { Value = k.Pin.ToString("D") } }));
+            assertion.ExpectedGroups.Add(pins);
+        }
+        return new SchematicItemOperation { AssertConnectivity = assertion };
+
+        static (string Path, Guid Pin) Key(string path, SchematicPin pin) => Guid.TryParseExact(pin.Id?.Value, "D", out var id)
+            ? (path, id) : throw new InvalidOperationException("A created placed pin has no canonical identity.");
+    }
+
+    private sealed record PowerSourcePin(string Name, bool Carrier, string Reference, string Number, string What, string Node);
+
+    // Every power pin of the created symbols that KiCad joins to a global net by name, in reference, unit and occurrence order.
+    private static List<PowerSourcePin> CreatedPowerSources(SchematicDesign candidate, IReadOnlyCollection<Guid> createdOccurrences, CancellationToken token)
+    {
+        var wanted = createdOccurrences.ToHashSet();
+        var components = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Id);
+        var result = new List<PowerSourcePin>();
+        var created = candidate.Engineering.Circuit.Symbols.Where(s => wanted.Contains(s.Id))
+            .OrderBy(s => components[s.ComponentId].Reference, StringComparer.Ordinal).ThenBy(s => s.Unit).ThenBy(s => s.Id);
+        foreach (var (occurrence, path, _, symbol) in CreatedSymbols(candidate, created, token))
+        {
+            string reference = components[occurrence.ComponentId].Reference;
+            bool carrier = SchematicPowerPins.IsGlobalPowerSymbol(symbol);
+            // Pins the symbol stacks at one point are one connection in KiCad, so they may share a name.
+            var stack = new Dictionary<string, int>(StringComparer.Ordinal);
+            var stacked = SchematicElectricalComparison.StackedDefinitionPins(symbol, occurrence.Unit);
+            for (int i = 0; i < stacked.Count; i++)
+                foreach (var pin in stacked[i]) stack[pin.Id.Value] = i;
+            foreach (var pin in SchematicPlacedPins.Active(symbol, occurrence.Unit))
+            {
+                if (!SchematicPowerPins.IsGlobalPowerPin(symbol, pin)) continue;
+                string name = SchematicPowerPins.PowerName(symbol, pin);
+                if (carrier && (name.Length == 0 || name.Contains("${", StringComparison.Ordinal)))
+                    throw Invalid(SchematicConnectionErrors.ConnectedPowerNameUnresolved, "Power symbol " + reference + " is named '" + name
+                        + "', which is empty or still contains a text variable, so the net KiCad would join it to cannot be known. "
+                        + "Give it a literal power name; nothing was changed.");
+                string node = path + "/" + symbol.Id.Value + "/" + (stack.TryGetValue(pin.Id.Value, out int group)
+                    ? "stack-" + group.ToString(System.Globalization.CultureInfo.InvariantCulture) : pin.Id.Value);
+                result.Add(new(name, carrier, reference, pin.Number, PowerSource(symbol, pin, reference), node));
+            }
+        }
+        return result;
+    }
+
+    // The native symbol each created occurrence is bound to, with its sheet instance path and screen.
+    private static IEnumerable<(SymbolOccurrence Occurrence, string Path, SchematicScreenData Screen, SchematicSymbolInstance Symbol)> CreatedSymbols(
+        SchematicDesign candidate, IEnumerable<SymbolOccurrence> occurrences, CancellationToken token)
+    {
+        var components = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Id);
+        var paths = candidate.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+        var natives = candidate.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId.ToString("D"));
+        var screens = candidate.Schematic.Instances.ToDictionary(s => Path(s.Metadata.Document), StringComparer.Ordinal);
+        foreach (var occurrence in occurrences)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!components.TryGetValue(occurrence.ComponentId, out var component)
+                || !paths.TryGetValue(occurrence.EffectiveSheetInstanceId(component), out var path) || !screens.TryGetValue(path, out var screen)
+                || !natives.TryGetValue(occurrence.Id, out var native))
+                throw Invalid("created_binding_invalid", "A created symbol occurrence has no exact native symbol.");
+            var symbol = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .SingleOrDefault(s => s.Id?.Value == native) ?? throw Invalid("created_binding_invalid", "A created symbol occurrence has no exact native symbol.");
+            yield return (occurrence, path, screen, symbol);
+        }
+    }
+
+    private static string PowerSource(SchematicSymbolInstance symbol, SchematicPin pin, string reference) =>
+        SchematicPowerPins.IsGlobalPowerSymbol(symbol) ? "power symbol " + reference : "hidden power pin " + reference + "." + pin.Number;
+
+    // The reference a symbol shows on one sheet instance.
+    private static string Reference(SchematicSymbolInstance symbol, SheetPath path) =>
+        symbol.InstanceRecords?.Records.FirstOrDefault(r => r.Path.SequenceEqual(path.Path))?.Reference is { Length: > 0 } reference ? reference
+        : symbol.ReferenceField?.Text?.Text_ is { Length: > 0 } text ? text : symbol.Id?.Value ?? "";
 
     private static (SchematicSymbolInstance Symbol, string Path) FindTemplate(SchematicDesign baseline,
         Circuit circuit, IReadOnlyDictionary<Guid, ComponentInstance> components,

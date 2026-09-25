@@ -69,6 +69,44 @@ internal static class SchematicPlacedPins
     }
 }
 
+/// <summary>How KiCad connects a placed pin without any wire (cn1-wiring-intent.md §2, "Carrier" and "Implicit power pin"):
+/// a power-input pin of a global power symbol joins the global net named by the symbol's value; a hidden power-input pin
+/// of an ordinary symbol joins the global net of its own name; a power-input pin of a local power symbol joins the local
+/// net of the symbol's value on its sheet. An active alternate supplies the pin's type and name, as in
+/// <c>SCH_PIN::IsGlobalPower</c>, <c>GetType</c> and <c>GetShownName</c>. Global labels join the same global nets.</summary>
+internal static class SchematicPowerPins
+{
+    internal static bool IsPowerSymbol(SchematicSymbolInstance symbol) =>
+        symbol.Definition?.Type is SchematicSymbolType.SstGlobalPower or SchematicSymbolType.SstLocalPower;
+
+    internal static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => symbol.Definition?.Type == SchematicSymbolType.SstGlobalPower;
+
+    /// <summary>The name a power symbol gives its net: its value.</summary>
+    internal static string CarrierName(SchematicSymbolInstance symbol) => symbol.ValueField?.Text?.Text_ ?? "";
+
+    internal static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
+        ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
+        : pin.ElectricalType;
+
+    internal static string ImplicitName(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0 ? pin.ActiveAlternate : pin.Name;
+
+    /// <summary>A hidden power input on an ordinary symbol, which joins the global net of its name (legacy implicit power).</summary>
+    internal static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        !IsPowerSymbol(symbol) && !pin.Visible && EffectiveType(pin) == ElectricalPinType.EptPowerInput;
+
+    /// <summary>A pin KiCad joins to a global net by name alone: a power input of a global power symbol, or a hidden power
+    /// input of any symbol that is not a local power symbol.</summary>
+    internal static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        EffectiveType(pin) == ElectricalPinType.EptPowerInput
+        && (IsGlobalPowerSymbol(symbol) || (symbol.Definition?.Type != SchematicSymbolType.SstLocalPower && !pin.Visible));
+
+    internal static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        EffectiveType(pin) == ElectricalPinType.EptPowerInput && symbol.Definition?.Type == SchematicSymbolType.SstLocalPower;
+
+    /// <summary>The net name a power pin joins: the power symbol's value, or the hidden pin's own name.</summary>
+    internal static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => IsPowerSymbol(symbol) ? CarrierName(symbol) : ImplicitName(pin);
+}
+
 /// <summary>Builds the frozen <see cref="SchematicConnectionIntent"/> for an admitted connected addition
 /// (cn1-wiring-intent.md §5). Every refusal is an <see cref="AutomationException"/> with a §13 planning code
 /// and a message that names the net, pin or sheet to change; nothing reaches the editor.</summary>
@@ -1017,32 +1055,21 @@ public static partial class SchematicConnectionIntentBuilder
                     + "', which is not a valid label: use 1 to 128 characters without spaces, control characters or any of { } [ ] / \\ $ ~ ^ , \" and not starting with #.");
         }
 
-        private static bool IsPowerSymbol(SchematicSymbolInstance symbol) =>
-            symbol.Definition?.Type is SchematicSymbolType.SstGlobalPower or SchematicSymbolType.SstLocalPower;
+        private static bool IsPowerSymbol(SchematicSymbolInstance symbol) => SchematicPowerPins.IsPowerSymbol(symbol);
 
-        private static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => symbol.Definition?.Type == SchematicSymbolType.SstGlobalPower;
+        private static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => SchematicPowerPins.IsGlobalPowerSymbol(symbol);
 
-        private static string CarrierName(SchematicSymbolInstance symbol) => symbol.ValueField?.Text?.Text_ ?? "";
+        private static string CarrierName(SchematicSymbolInstance symbol) => SchematicPowerPins.CarrierName(symbol);
 
-        // KiCad applies an active alternate's electrical type and name.
-        private static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
-            ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
-            : pin.ElectricalType;
+        private static string ImplicitName(SchematicPin pin) => SchematicPowerPins.ImplicitName(pin);
 
-        private static string ImplicitName(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0 ? pin.ActiveAlternate : pin.Name;
+        private static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsImplicitPower(symbol, pin);
 
-        // A hidden power input on an ordinary symbol joins the global net of its name (legacy implicit power).
-        private static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            !IsPowerSymbol(symbol) && !pin.Visible && EffectiveType(pin) == ElectricalPinType.EptPowerInput;
+        private static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsGlobalPowerPin(symbol, pin);
 
-        private static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            EffectiveType(pin) == ElectricalPinType.EptPowerInput
-            && (IsGlobalPowerSymbol(symbol) || (symbol.Definition?.Type != SchematicSymbolType.SstLocalPower && !pin.Visible));
+        private static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsLocalPowerPin(symbol, pin);
 
-        private static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            EffectiveType(pin) == ElectricalPinType.EptPowerInput && symbol.Definition?.Type == SchematicSymbolType.SstLocalPower;
-
-        private static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => IsPowerSymbol(symbol) ? CarrierName(symbol) : ImplicitName(pin);
+        private static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.PowerName(symbol, pin);
 
         [GeneratedRegex("^NET-[0-9a-f]{12}$", RegexOptions.CultureInvariant)]
         private static partial Regex GeneratedName();

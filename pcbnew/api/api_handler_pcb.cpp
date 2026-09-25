@@ -132,6 +132,15 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
         API_HANDLER_BOARD( std::move( aContext ), aFrame ),
         m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } )
 {
+    // Only the editor frame detaches before it replaces or destroys its board.
+    if( aFrame )
+    {
+        m_drcJobs.EnableNativeEvents( [this]( BOARD& source ) -> FOOTPRINT_LIBRARY_ADAPTER*
+        {
+            return &source == board() ? PROJECT_PCB::FootprintLibAdapter( &project() ) : nullptr;
+        } );
+    }
+
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>(
             &API_HANDLER_PCB::handleGetOpenDocuments );
     registerHandler<SaveDocument, Empty>( &API_HANDLER_PCB::handleSaveDocument );
@@ -485,6 +494,14 @@ tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOA
     auto captured = DRC_LIBRARY_INPUTS::Capture( source, *libraries );
     if( !captured ) return tl::unexpected( "Native footprint library observation was cancelled" );
     return captured->ContentFingerprint();
+}
+
+void API_HANDLER_PCB::ObserveNativeDrcInputs()
+{
+    if( !board() || !Pgm().ApiServerOrNull() ) return;
+    m_drcJobs.ObserveInputs( *board(), Pgm().GetApiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
 }
 
 tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcAuxiliary( BOARD& source )

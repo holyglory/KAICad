@@ -186,6 +186,11 @@ std::string PCB_DRC_RUN_INPUTS::LibraryFingerprint() const
     return m_libraries->ContentFingerprint();
 }
 
+std::map<wxString, std::string> PCB_DRC_RUN_INPUTS::LibraryFingerprints() const
+{
+    return m_libraries->LibraryFingerprints();
+}
+
 tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateItems(
         const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems )
 {

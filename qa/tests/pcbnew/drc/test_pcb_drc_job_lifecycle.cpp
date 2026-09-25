@@ -5,6 +5,8 @@
 #include <api/pcb_drc_run_inputs.h>
 #include <api/native_state_digest.h>
 #include <board.h>
+#include <board_commit.h>
+#include <tool/tool_manager.h>
 #include <pcb_track.h>
 #include <netinfo.h>
 #include <netclass.h>
@@ -12,6 +14,8 @@
 #include <pad.h>
 #include <footprint_library_adapter.h>
 #include <libraries/library_manager.h>
+#include <libraries/library_table.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <drawing_sheet/ds_data_item.h>
 #include <board_design_settings.h>
@@ -30,6 +34,8 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <chrono>
 #include <thread>
+#include <wx/app.h>
+#include <wx/evtloop.h>
 
 using namespace kiapi::automation::v1;
 using google::protobuf::util::MessageDifferencer;
@@ -40,15 +46,499 @@ struct DRC_CAPTURE_FIXTURE
     FOOTPRINT_LIBRARY_ADAPTER adapter{ libraries };
     DS_DATA_MODEL drawing;
     PCB_DRC_CAPTURE_CONTEXT context{ adapter, drawing, KIID() };
+    bool libraryOwnerAvailable = true;
     DRC_CAPTURE_FIXTURE() { drawing.ClearList(); drawing.AllowVoidList( true ); }
     PCB_DRC_JOB_MANAGER::AUXILIARY_OBSERVER auxiliaryObserver()
     {
         return [this]( BOARD& ) -> tl::expected<std::string, std::string>
         { return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint(); };
     }
+    // Simulates the native editor owner: it runs on this thread and detaches every
+    // board before replacing or destroying it (see PCB_EDIT_FRAME::SetBoard).
+    void EnableEvents( PCB_DRC_JOB_MANAGER& jobs )
+    {
+        jobs.EnableNativeEvents( [this]( BOARD& ) -> FOOTPRINT_LIBRARY_ADAPTER*
+                                 { return libraryOwnerAvailable ? &adapter : nullptr; } );
+    }
+    static void LoseEvents( PCB_DRC_JOB_MANAGER& jobs, BOARD& board ) { jobs.InputEventsLost( &board ); }
+    static void Detach( PCB_DRC_JOB_MANAGER& jobs, BOARD& board ) { jobs.DetachBoard( &board ); }
+    static size_t WatchCount( const PCB_DRC_JOB_MANAGER& jobs ) { return jobs.m_watches.size(); }
+    static void Observe( PCB_DRC_JOB_MANAGER& jobs, BOARD& board, const std::string& epoch,
+                         const PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER& observer = {} )
+    { jobs.ObserveInputs( board, epoch, {}, observer ); }
+    static void AddTracks( BOARD& board, int count )
+    {
+        for( int i = 0; i < count; ++i )
+        {
+            auto* track = new PCB_TRACK( &board );
+            track->SetStart( { i * 10000, 0 } ); track->SetEnd( { i * 10000, 1000000 } );
+            track->SetWidth( 10000 ); track->SetLayer( F_Cu ); board.Add( track );
+        }
+    }
+
+    static StartPcbDrcJob Request( BOARD& board, const std::string& epoch )
+    {
+        StartPcbDrcJob request;
+        request.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+        request.mutable_document()->set_board_filename( board.GetFileName().ToStdString() );
+        request.set_process_epoch( epoch ); request.set_operation_id( KIID().AsStdString() );
+        request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
+        request.mutable_expected_revision()->set_sequence( board.GetTimeStamp() );
+        return request;
+    }
+
+    static ReadPcbDrcJob Query( const PcbDrcJobState& state )
+    {
+        ReadPcbDrcJob query;
+        query.mutable_document()->CopyFrom( state.document() );
+        query.set_process_epoch( state.process_epoch() ); query.set_job_id( state.job_id() );
+        return query;
+    }
+
+    static PcbDrcJobState Wait( PCB_DRC_JOB_MANAGER& jobs, BOARD& board, const PcbDrcJobState& start,
+                              const PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER& observer = {} )
+    {
+        const auto query = Query( start );
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+        auto current = jobs.Read( query, board, start.process_epoch(), {}, observer );
+        while( current && !current->worker_finished() && std::chrono::steady_clock::now() < deadline )
+        {
+            BOOST_CHECK_EQUAL( current->findings_size(), 0 );
+            std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+            current = jobs.Read( query, board, start.process_epoch(), {}, observer );
+        }
+        BOOST_REQUIRE_MESSAGE( current.has_value(), ( current ? "" : current.error() ) );
+        BOOST_REQUIRE( current->worker_finished() );
+        return *current;
+    }
+
+    static void DispatchFiles( wxEventLoopBase& loop )
+    {
+        // Deliver native filesystem notifications without a job read. The
+        // assertions after this bounded window, not elapsed time, prove success.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 1 );
+        while( std::chrono::steady_clock::now() < deadline )
+        {
+            loop.DispatchTimeout( 10 );
+            wxTheApp->ProcessPendingEvents();
+        }
+    }
 };
 
 BOOST_FIXTURE_TEST_SUITE( PcbDrcJobLifecycle, DRC_CAPTURE_FIXTURE )
+
+BOOST_AUTO_TEST_CASE( HeadlessBoardReplacementDoesNotRetainNativeListeners )
+{
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    // A worker owns only its snapshot. Destroying the source board while it runs
+    // leaves a stale receipt without findings once the worker has stopped.
+    auto busy = std::make_unique<BOARD>();
+    busy->SetFileName( "headless-replacement.kicad_pcb" );
+    AddTracks( *busy, 4000 );
+    auto running = jobs.Start( Request( *busy, epoch ), *busy, epoch, context );
+    BOOST_REQUIRE_MESSAGE( running.has_value(), ( running ? "" : running.error() ) );
+    BOOST_CHECK_EQUAL( WatchCount( jobs ), 0 );
+    busy.reset();
+    auto board = std::make_unique<BOARD>();
+    board->SetFileName( "headless-replacement.kicad_pcb" );
+    auto orphan = jobs.Read( Query( *running ), *board, epoch );
+    BOOST_REQUIRE_MESSAGE( orphan.has_value(), ( orphan ? "" : orphan.error() ) );
+    BOOST_CHECK( orphan->cancellation_requested() );
+    BOOST_CHECK_EQUAL( orphan->findings_size(), 0 );
+    if( !orphan->worker_finished() )
+        BOOST_CHECK( orphan->status() == PDRCJS_QUEUED || orphan->status() == PDRCJS_RUNNING );
+    const auto quiesced = Wait( jobs, *board, *running );
+    BOOST_CHECK( quiesced.status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( quiesced.error_code(), "document_changed" );
+    BOOST_CHECK_EQUAL( quiesced.findings_size(), 0 );
+
+    auto first = jobs.Start( Request( *board, epoch ), *board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( first.has_value(), ( first ? "" : first.error() ) );
+    BOOST_REQUIRE( Wait( jobs, *board, *first ).status() == PDRCJS_COMPLETED );
+    BOOST_CHECK_EQUAL( WatchCount( jobs ), 0 );
+    // Keep a failing old implementation safe while recording its regression.
+    if( WatchCount( jobs ) ) Detach( jobs, *board );
+    board.reset();
+    auto replacement = std::make_unique<BOARD>();
+    replacement->SetFileName( "headless-replacement.kicad_pcb" );
+    auto old = jobs.Read( Query( *first ), *replacement, epoch );
+    BOOST_REQUIRE( old );
+    BOOST_CHECK( old->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( old->findings_size(), 0 );
+    auto second = jobs.Start( Request( *replacement, epoch ), *replacement, epoch, context );
+    BOOST_REQUIRE_MESSAGE( second.has_value(), ( second ? "" : second.error() ) );
+    BOOST_REQUIRE( Wait( jobs, *replacement, *second ).status() == PDRCJS_COMPLETED );
+    BOOST_CHECK_EQUAL( WatchCount( jobs ), 0 );
+    if( WatchCount( jobs ) ) Detach( jobs, *replacement );
+    replacement.reset(); // The job owner is destroyed afterwards, with no source listener.
+}
+
+BOOST_AUTO_TEST_CASE( NativeCommitInvalidatesBeforeReadAndPreservesIndependentOwners )
+{
+    BOARD board, other;
+    board.SetFileName( "native-edit.kicad_pcb" ); other.SetFileName( "independent.kicad_pcb" );
+    auto* track = new PCB_TRACK( &board );
+    track->SetStart( { 0, 0 } ); track->SetEnd( { 1000000, 0 } ); track->SetWidth( 100000 );
+    board.Add( track );
+    TOOL_MANAGER tools;
+    tools.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+    tools.RegisterTool( new KI_TEST::DUMMY_TOOL );
+    int observations = 0;
+    const auto ownerThread = std::this_thread::get_id();
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    {
+        BOOST_CHECK( std::this_thread::get_id() == ownerThread );
+        ++observations;
+        return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
+    } );
+    EnableEvents( jobs );
+    PCB_DRC_JOB_MANAGER independent( auxiliaryObserver() );
+    EnableEvents( independent );
+    const std::string epoch = KIID().AsStdString();
+    auto request = Request( board, epoch );
+    auto started = jobs.Start( request, board, epoch, context );
+    auto separate = independent.Start( Request( other, epoch ), other, epoch, context );
+    BOOST_REQUIRE( started ); BOOST_REQUIRE( separate );
+    BOOST_REQUIRE( Wait( jobs, board, *started ).status() == PDRCJS_COMPLETED );
+    BOOST_REQUIRE( Wait( independent, other, *separate ).status() == PDRCJS_COMPLETED );
+    board.OnBoardSelectionChanged(); board.OnRatsnestChanged();
+    BOOST_CHECK( jobs.Read( Query( *started ), board, epoch )->status() == PDRCJS_COMPLETED );
+
+    BOARD_COMMIT commit( &tools, true, false );
+    commit.Modify( track ); track->SetEnd( { 2000000, 0 } );
+    commit.Push( "Native edit", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    observations = 0;
+    auto stale = jobs.Read( Query( *started ), board, epoch );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( stale->error_code(), "document_changed" );
+    BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    BOOST_CHECK_EQUAL( observations, 0 ); // The commit already invalidated it.
+    BOOST_CHECK( independent.Read( Query( *separate ), other, epoch )->status() == PDRCJS_COMPLETED );
+
+    BOARD_COMMIT restore( &tools, true, false );
+    restore.Modify( track ); track->SetEnd( { 1000000, 0 } );
+    restore.Push( "Restore geometry", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    auto replay = jobs.ReadOperation( request, board, epoch );
+    BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+    BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( ( **replay ).findings_size(), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( NativeChangeCancelsActiveWorkerWithoutPrematureTerminalAcknowledgement )
+{
+    BOARD board;
+    board.SetFileName( "native-cancel.kicad_pcb" );
+    AddTracks( board, 4000 );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    EnableEvents( jobs );
+    const auto epoch = KIID().AsStdString();
+    auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( started );
+    board.OnItemChanged( board.Tracks().front() );
+    auto current = jobs.Read( Query( *started ), board, epoch );
+    BOOST_REQUIRE( current );
+    BOOST_CHECK( current->cancellation_requested() );
+    BOOST_CHECK_EQUAL( current->findings_size(), 0 );
+    if( !current->worker_finished() )
+        BOOST_CHECK( current->status() == PDRCJS_QUEUED || current->status() == PDRCJS_RUNNING );
+    const auto terminal = Wait( jobs, board, *started );
+    BOOST_CHECK( terminal.status() == PDRCJS_STALE );
+    BOOST_CHECK( terminal.worker_finished() );
+    BOOST_CHECK_EQUAL( terminal.findings_size(), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( LostEventsRequireFreshObservationAndDetachedBoardsCannotReviveReceipts )
+{
+    auto board = std::make_unique<BOARD>();
+    board->SetFileName( "lost-events.kicad_pcb" );
+    int observations = 0;
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    {
+        ++observations;
+        return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
+    } );
+    EnableEvents( jobs );
+    const auto epoch = KIID().AsStdString();
+    const auto request = Request( *board, epoch );
+    auto started = jobs.Start( request, *board, epoch, context );
+    BOOST_REQUIRE( started );
+    BOOST_REQUIRE( Wait( jobs, *board, *started ).status() == PDRCJS_COMPLETED );
+    LoseEvents( jobs, *board );
+    observations = 0;
+    auto stale = jobs.Read( Query( *started ), *board, epoch );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( stale->error_code(), "input_events_lost" );
+    BOOST_CHECK_EQUAL( observations, 0 );
+    Observe( jobs, *board, epoch );
+    auto replay = jobs.ReadOperation( request, *board, epoch );
+    BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+    BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+    auto fresh = jobs.Start( Request( *board, epoch ), *board, epoch, context );
+    BOOST_REQUIRE( fresh );
+    BOOST_CHECK_GT( observations, 0 );
+    BOOST_REQUIRE( Wait( jobs, *board, *fresh ).status() == PDRCJS_COMPLETED );
+    Detach( jobs, *board );
+    board.reset(); // The native owner can replace/delete the source before the manager.
+    BOARD replacement;
+    auto old = jobs.Read( Query( *fresh ), replacement, epoch );
+    BOOST_REQUIRE( old );
+    BOOST_CHECK( old->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( old->findings_size(), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEventDispatch )
+{
+    wxConsoleEventLoop loop;
+    wxEventLoopActivator active( &loop );
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_events_" + KIID().AsStdString(), "" );
+    const auto libPath = scratch.GetPath() / "local.pretty";
+    std::filesystem::create_directory( libPath );
+    const wxString uri = wxString::FromUTF8( libPath.string() );
+    FOOTPRINT original( nullptr );
+    original.SetFPID( LIB_ID( "EventLibrary", "Part" ) );
+    PCB_IO_KICAD_SEXPR io;
+    io.FootprintSave( uri, &original );
+    LIBRARY_TABLE table( wxFileName( wxString::FromUTF8( ( scratch.GetPath() / "fp-lib-table" ).string() ) ),
+                         LIBRARY_TABLE_SCOPE::PROJECT, LIBRARY_TABLE_TYPE::FOOTPRINT );
+    table.SetType( LIBRARY_TABLE_TYPE::FOOTPRINT ); table.SetOk();
+    auto& row = table.InsertRow();
+    row.SetNickname( "EventLibrary" ); row.SetType( "KiCad" ); row.SetURI( uri );
+    // A second library the board also uses: a notification must recheck only the
+    // library it names, never every library.
+    const auto otherPath = scratch.GetPath() / "other.pretty";
+    std::filesystem::create_directory( otherPath );
+    const wxString otherUri = wxString::FromUTF8( otherPath.string() );
+    FOOTPRINT otherPart( nullptr );
+    otherPart.SetFPID( LIB_ID( "OtherLibrary", "Part" ) );
+    io.FootprintSave( otherUri, &otherPart );
+    auto& otherRow = table.InsertRow();
+    otherRow.SetNickname( "OtherLibrary" ); otherRow.SetType( "KiCad" ); otherRow.SetURI( otherUri );
+    BOOST_REQUIRE( table.Save().has_value() );
+    libraries.LoadProjectTables( wxString::FromUTF8( scratch.GetPath().string() ),
+                                  { LIBRARY_TABLE_TYPE::FOOTPRINT } );
+    auto loaded = adapter.LoadOne( "EventLibrary" );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+    auto otherLoaded = adapter.LoadOne( "OtherLibrary" );
+    BOOST_REQUIRE( otherLoaded && otherLoaded->load_status == LOAD_STATUS::LOADED );
+    BOARD board;
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "events.kicad_pcb" ).string() ) );
+    auto* placed = static_cast<FOOTPRINT*>( original.Clone() );
+    placed->SetParent( &board ); board.Add( placed );
+    auto* otherPlaced = static_cast<FOOTPRINT*>( otherPart.Clone() );
+    otherPlaced->SetParent( &board ); board.Add( otherPlaced );
+    int libraryReads = 0, auxiliaryReads = 0;
+    PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER observer = [&]( BOARD& source )
+            -> tl::expected<std::string, std::string>
+    {
+        ++libraryReads;
+        if( !libraryOwnerAvailable ) return tl::unexpected( "Native footprint library owner is unavailable" );
+        return DRC_LIBRARY_INPUTS::Capture( source, adapter )->ContentFingerprint();
+    };
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    {
+        ++auxiliaryReads;
+        return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
+    } );
+    EnableEvents( jobs );
+    const auto epoch = KIID().AsStdString();
+    auto request = Request( board, epoch );
+    auto start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( start.has_value(), ( start ? "" : start.error() ) );
+    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
+    libraryReads = 0;
+    for( int i = 0; i < 10; ++i )
+        BOOST_CHECK( jobs.Read( Query( *start ), board, epoch, {}, observer )->status() == PDRCJS_COMPLETED );
+    // Native watch registration cannot rule out a queued change. Until a safe
+    // completeness barrier exists, every live read must retain content fallback.
+    BOOST_CHECK_EQUAL( libraryReads, 10 );
+    original.SetLibDescription( "changed before event dispatch" );
+    io.FootprintSave( uri, &original );
+    auto queued = jobs.Read( Query( *start ), board, epoch, {}, observer );
+    BOOST_REQUIRE( queued );
+    BOOST_CHECK( queued->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( queued->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( queued->findings_size(), 0 );
+    original.SetLibDescription( "" ); io.FootprintSave( uri, &original );
+    auto queuedReplay = jobs.ReadOperation( request, board, epoch, {}, observer );
+    BOOST_REQUIRE( queuedReplay ); BOOST_REQUIRE( queuedReplay->has_value() );
+    BOOST_CHECK( ( **queuedReplay ).status() == PDRCJS_STALE );
+    DispatchFiles( loop );
+    request = Request( board, epoch );
+    start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE( start );
+    BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
+    { std::ofstream file( scratch.GetPath() / "unrelated.txt" ); file << "unrelated"; }
+    DispatchFiles( loop );
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch, {}, observer )->status() == PDRCJS_COMPLETED );
+    // Native serialization generates fresh UUIDs; unchanged content must stay valid.
+    io.FootprintSave( uri, &original );
+    DispatchFiles( loop );
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch, {}, observer )->status() == PDRCJS_COMPLETED );
+
+    // Change OtherLibrary in memory only, so no notification names it. A
+    // same-content rewrite of EventLibrary must recheck EventLibrary alone: the
+    // receipt stays live for the next read, whose full comparison then finds the
+    // in-memory change. A recheck of every library would have made it stale early.
+    auto otherTableRow = adapter.GetRow( "OtherLibrary" );
+    BOOST_REQUIRE( otherTableRow );
+    ( *otherTableRow )->SetDisabled( true );
+    io.FootprintSave( uri, &original );
+    DispatchFiles( loop );
+    auxiliaryReads = 0;
+    auto observed = jobs.Read( Query( *start ), board, epoch, {}, observer );
+    BOOST_REQUIRE( observed );
+    BOOST_CHECK_EQUAL( auxiliaryReads, 1 );
+    BOOST_CHECK( observed->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( observed->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( observed->findings_size(), 0 );
+    ( *otherTableRow )->SetDisabled( false );
+    request = Request( board, epoch );
+    start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE( start );
+    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
+    // A changed OtherLibrary definition reaches the receipt through its own notification.
+    otherPart.SetLibDescription( "changed other library" ); io.FootprintSave( otherUri, &otherPart );
+    DispatchFiles( loop );
+    auxiliaryReads = 0;
+    auto otherStale = jobs.Read( Query( *start ), board, epoch, {}, observer );
+    BOOST_REQUIRE( otherStale );
+    BOOST_CHECK( otherStale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( otherStale->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( auxiliaryReads, 0 );
+    otherPart.SetLibDescription( "" ); io.FootprintSave( otherUri, &otherPart );
+    DispatchFiles( loop );
+    request = Request( board, epoch );
+    start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE( start );
+    BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
+
+    const auto file = libPath / "Part.kicad_mod";
+    const auto timestamp = std::filesystem::last_write_time( file );
+    original.SetLibDescription( "changed native content" ); io.FootprintSave( uri, &original );
+    std::filesystem::last_write_time( file, timestamp );
+    DispatchFiles( loop ); // No Start/Read/Cancel call between the edit and delivery.
+    auxiliaryReads = 0;
+    auto stale = jobs.Read( Query( *start ), board, epoch, {}, observer );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( stale->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    BOOST_CHECK_EQUAL( auxiliaryReads, 0 );
+    original.SetLibDescription( "" ); io.FootprintSave( uri, &original );
+    DispatchFiles( loop );
+    auto replay = jobs.ReadOperation( request, board, epoch, {}, observer );
+    BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+    BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+    auto fresh = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( fresh );
+    BOOST_CHECK( Wait( jobs, board, *fresh, observer ).status() == PDRCJS_COMPLETED );
+    libraryOwnerAvailable = false;
+    auto unavailable = jobs.Read( Query( *fresh ), board, epoch, {}, observer );
+    BOOST_REQUIRE( unavailable );
+    BOOST_CHECK( unavailable->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( unavailable->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( unavailable->findings_size(), 0 );
+    libraryOwnerAvailable = true;
+    Observe( jobs, board, epoch, observer );
+    BOOST_CHECK( jobs.Read( Query( *fresh ), board, epoch, {}, observer )->status() == PDRCJS_STALE );
+}
+
+BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent )
+{
+    wxConsoleEventLoop loop;
+    wxEventLoopActivator active( &loop );
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_rule_events_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    const auto rulesPath = scratch.GetPath() / "fixture.kicad_dru";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    const std::string original = "(version 1)\n(rule \"limit\" (constraint clearance (min 0.4mm)))\n";
+    const std::string changed = "(version 1)\n(rule \"limit\" (constraint clearance (min 0.5mm)))\n";
+    { std::ofstream file( rulesPath ); file << original; }
+    SETTINGS_MANAGER settings;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( settings.LoadProject( projectName, false ) );
+    BOARD board;
+    board.SetProject( settings.GetProject( projectName ) );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    int observations = 0;
+    PCB_DRC_JOB_MANAGER jobs( [&]( BOARD& ) -> tl::expected<std::string, std::string>
+    {
+        ++observations;
+        return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
+    } );
+    EnableEvents( jobs );
+    const auto epoch = KIID().AsStdString();
+    const auto request = Request( board, epoch );
+    auto start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( start.has_value(), ( start ? "" : start.error() ) );
+    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_REQUIRE( Wait( jobs, board, *start ).status() == PDRCJS_COMPLETED );
+    { std::ofstream file( rulesPath ); file << changed; }
+    // Do not dispatch any wx event between the file edit and this status read.
+    auto queued = jobs.Read( Query( *start ), board, epoch );
+    BOOST_REQUIRE( queued );
+    BOOST_CHECK( queued->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( queued->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( queued->findings_size(), 0 );
+    { std::ofstream file( rulesPath ); file << original; }
+    auto queuedReplay = jobs.ReadOperation( request, board, epoch );
+    BOOST_REQUIRE( queuedReplay ); BOOST_REQUIRE( queuedReplay->has_value() );
+    BOOST_CHECK( ( **queuedReplay ).status() == PDRCJS_STALE );
+    DispatchFiles( loop );
+    start = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( start );
+    BOOST_REQUIRE( Wait( jobs, board, *start ).status() == PDRCJS_COMPLETED );
+    Observe( jobs, board, epoch ); // An unchanged recovery checkpoint preserves the receipt.
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch )->status() == PDRCJS_COMPLETED );
+    const auto timestamp = std::filesystem::last_write_time( rulesPath );
+    { std::ofstream file( rulesPath ); file << changed; }
+    std::filesystem::last_write_time( rulesPath, timestamp );
+    BOOST_REQUIRE_EQUAL( original.size(), changed.size() );
+    DispatchFiles( loop );
+    observations = 0;
+    auto stale = jobs.Read( Query( *start ), board, epoch );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( stale->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( observations, 0 );
+    BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    { std::ofstream file( rulesPath ); file << original; }
+    DispatchFiles( loop );
+    auto fresh = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( fresh );
+    BOOST_REQUIRE( Wait( jobs, board, *fresh ).status() == PDRCJS_COMPLETED );
+
+    // A save rewrites the project file on disk. The check used the in-memory
+    // project settings, which every read compares, and they did not change.
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})" << "\n"; }
+    DispatchFiles( loop );
+    observations = 0;
+    auto saved = jobs.Read( Query( *fresh ), board, epoch );
+    BOOST_REQUIRE( saved );
+    BOOST_CHECK( saved->status() == PDRCJS_COMPLETED );
+    BOOST_CHECK_EQUAL( observations, 1 );
+
+    // A changed file without dispatching its event models a suspended native
+    // event loop. Reactivation must perform a fresh content observation.
+    const auto replacement = scratch.GetPath() / "replacement.kicad_dru";
+    { std::ofstream file( replacement ); file << changed; }
+    std::filesystem::rename( replacement, rulesPath );
+    Observe( jobs, board, epoch );
+    observations = 0;
+    auto recovered = jobs.Read( Query( *fresh ), board, epoch );
+    BOOST_REQUIRE( recovered );
+    BOOST_CHECK( recovered->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( recovered->findings_size(), 0 );
+    BOOST_CHECK_EQUAL( observations, 0 );
+    auto replay = jobs.ReadOperation( request, board, epoch );
+    BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
+    BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+}
 
 BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument )
 {

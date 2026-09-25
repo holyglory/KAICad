@@ -44,6 +44,13 @@ public:
     API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame );
     API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame = nullptr );
 
+    // Native editor boundaries for PCB DRC jobs; the owning frame calls these on
+    // its UI thread. A handler without a frame never subscribes to board events.
+    void DetachDrcBoard( const BOARD* aBoard ) { m_drcJobs.DetachBoard( aBoard ); }
+    void DrcBoardChanged( const BOARD* aBoard ) { m_drcJobs.BoardChanged( aBoard ); }
+    // Recovery checkpoint after activation or a settings notification.
+    void ObserveNativeDrcInputs();
+
 private:
     typedef std::map<std::string, PROPERTY_BASE*> PROTO_PROPERTY_MAP;
 

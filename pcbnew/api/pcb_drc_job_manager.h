@@ -13,6 +13,8 @@
 #include <optional>
 
 class BOARD;
+class FOOTPRINT_LIBRARY_ADAPTER;
+class wxFileSystemWatcherEvent;
 struct PCB_DRC_CAPTURE_CONTEXT;
 
 /**
@@ -28,7 +30,10 @@ public:
                     const kiapi::common::types::DocumentSpecifier& )>;
     using LIBRARY_OBSERVER = std::function<tl::expected<std::string, std::string>( BOARD& )>;
     using AUXILIARY_OBSERVER = std::function<tl::expected<std::string, std::string>( BOARD& )>;
-    // Owner-thread callback resolves current editor settings on each read. It is
+    // Resolves the owner's current footprint library adapter for a board, or
+    // null when that board is not (or no longer) the owner's live board.
+    using LIBRARY_RESOLVER = std::function<FOOTPRINT_LIBRARY_ADAPTER*( BOARD& )>;
+    // Owner-thread callback resolves current editor settings at observations. It is
     // never passed to the worker or invoked during destruction.
     explicit PCB_DRC_JOB_MANAGER( AUXILIARY_OBSERVER aObserveAuxiliary );
     ~PCB_DRC_JOB_MANAGER();
@@ -57,8 +62,40 @@ public:
             const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
             const LIBRARY_OBSERVER& aObserveLibraries = {} );
 
+    /*
+     * Native event ownership. Only an editor owner that runs on the native UI
+     * thread and calls DetachBoard() before it replaces or destroys a board may
+     * enable events; later jobs then subscribe to board commits and to native
+     * notifications for their external rule and library files. A headless owner
+     * never enables them: its jobs hold no reference to the source board and keep
+     * the complete read-time comparisons, so the board may be replaced or
+     * destroyed at any time. Live reads keep those comparisons in both modes
+     * until a notification completeness barrier exists (n456d6b796cd7a9a3).
+     */
+    void EnableNativeEvents( LIBRARY_RESOLVER aResolveLibraries );
+    // The board is about to be replaced or destroyed: its receipts become stale
+    // (input_events_lost) and every subscription to it is released.
+    void DetachBoard( const BOARD* aBoard );
+    // A native committed change, undo/redo or settings edit reached the owner.
+    void BoardChanged( const BOARD* aBoard );
+    // Native notifications for this board may have been missed.
+    void InputEventsLost( const BOARD* aBoard );
+    // A recovery checkpoint (activation or settings notification): observe every
+    // live receipt of this board again. Already stale receipts never revive.
+    void ObserveInputs( BOARD& aBoard, const std::string& aProcessEpoch,
+                        const SCHEMATIC_OBSERVER& aObserveSchematic,
+                        const LIBRARY_OBSERVER& aObserveLibraries );
+
 private:
+    friend struct DRC_CAPTURE_FIXTURE;
+    struct INPUT_WATCHER;
+    struct FILE_EVENTS;
     struct JOB;
+    static void invalidate( const std::shared_ptr<JOB>& aJob, const std::string& aCode,
+                            const std::string& aMessage );
+    std::unique_ptr<INPUT_WATCHER> watchInputs( BOARD& aBoard, const PCB_DRC_CAPTURE_CONTEXT& aContext );
+    void fileEvent( wxFileSystemWatcherEvent& aEvent );
+    void retireWatches();
     std::shared_ptr<JOB> find( const std::string& aJobId ) const;
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
             const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
@@ -68,6 +105,11 @@ private:
     mutable std::mutex m_mutex;
     const AUXILIARY_OBSERVER m_observeAuxiliary;
     std::map<std::string, std::shared_ptr<JOB>> m_jobs;
+    // Owner-thread native subscriptions. Workers never see these objects.
+    LIBRARY_RESOLVER m_resolveLibraries;
+    bool m_eventsEnabled = false;
+    std::unique_ptr<FILE_EVENTS> m_files;
+    std::map<std::string, std::unique_ptr<INPUT_WATCHER>> m_watches;
 };
 
 #endif

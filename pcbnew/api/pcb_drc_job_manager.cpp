@@ -5,6 +5,17 @@
 
 #include <board.h>
 #include <board_design_settings.h>
+#include <footprint.h>
+#include <footprint_library_adapter.h>
+#include <libraries/library_manager.h>
+#include <libraries/library_table.h>
+#include <project.h>
+#include <project/project_file.h>
+#include <filename_resolver.h>
+#include <pgm_base.h>
+#include <wx/fswatcher.h>
+#include <wx/evtloop.h>
+#include <wx/log.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_item.h>
 #include <drc/drc_library_inputs.h>
@@ -16,12 +27,14 @@
 #include <atomic>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <set>
 
 using namespace kiapi::automation::v1;
 using kiapi::common::types::DocumentSpecifier;
@@ -94,6 +107,7 @@ struct PCB_DRC_JOB_MANAGER::JOB
     DocumentLifecycleState schematicState;
     PCB_DRC_PROJECT_BASELINE projectBaseline;
     std::string libraryFingerprint;
+    std::map<wxString, std::string> libraryFingerprints;
     std::string auxiliaryFingerprint;
     bool hasLibraryDependencies = false;
     bool candidateDryRun = false;
@@ -113,12 +127,503 @@ struct PCB_DRC_JOB_MANAGER::JOB
     mutable std::mutex mutex;
 };
 
+namespace
+{
+constexpr int NATIVE_FILE_EVENTS = wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE | wxFSW_EVENT_RENAME
+                                   | wxFSW_EVENT_MODIFY | wxFSW_EVENT_ATTRIB | wxFSW_EVENT_WARNING
+                                   | wxFSW_EVENT_ERROR;
+
+// Normalized absolute path without a trailing separator, so a directory named by a
+// notification compares equal to the same directory named by a watch.
+wxString NormalizedPath( wxFileName aName )
+{
+    aName.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    wxString path = aName.GetFullPath();
+    while( path.length() > 1 && wxFileName::IsPathSeparator( path.Last() ) ) path.RemoveLast();
+    return path;
+}
+
+wxString NormalizedPath( const wxString& aPath ) { return NormalizedPath( wxFileName( aPath ) ); }
+
+bool Within( const wxString& aPath, const wxString& aDirectory )
+{
+    return aPath.StartsWith( aDirectory + wxFileName::GetPathSeparator() );
+}
+
+std::string ChangeMessage( const std::string& aCode )
+{
+    if( aCode == "project_inputs_changed" )
+        return "Project settings, exclusions or custom rules changed or could not be observed";
+    if( aCode == "library_inputs_changed" )
+        return "Footprint library inputs changed or could not be observed";
+    if( aCode == "auxiliary_inputs_changed" )
+        return "Drawing-sheet or router inputs changed or could not be observed";
+    return "A native DRC input changed or could not be observed";
+}
+
+const char* const LOST_EVENTS_MESSAGE =
+        "Native input notifications were lost; start a new job from a fresh capture";
+}
+
+// One native file subscription for every receipt of this owner. A single kernel
+// queue serves all of them, so an overflow concerns every receipt that relied on it.
+// wx delivers these notifications on the owner thread, never to a worker.
+struct PCB_DRC_JOB_MANAGER::FILE_EVENTS : wxEvtHandler
+{
+    struct PATH
+    {
+        bool tree = false;
+        int references = 0;
+    };
+
+    PCB_DRC_JOB_MANAGER& owner;
+    std::unique_ptr<wxFileSystemWatcher> native;
+    std::map<wxString, PATH> paths;
+    // Receipts remember the generation they subscribed under; a reset makes their
+    // later releases harmless for subscriptions that newer receipts own.
+    uint64_t generation = 1;
+    bool retired = false;
+
+    explicit FILE_EVENTS( PCB_DRC_JOB_MANAGER& aOwner ) : owner( aOwner )
+    {
+        Bind( wxEVT_FSWATCHER, &FILE_EVENTS::onEvent, this );
+    }
+
+    ~FILE_EVENTS() override { reset(); }
+
+    void reset()
+    {
+        wxLogNull quiet; // A watch the kernel already dropped is not a user-facing error.
+        if( native )
+        {
+            native->SetOwner( nullptr );
+            native.reset();
+        }
+        DeletePendingEvents();
+        paths.clear();
+        ++generation;
+        retired = false;
+    }
+
+    // Safe inside a native notification: the watcher is replaced at the next
+    // owner call, never while it is dispatching its own events.
+    void retire() { retired = true; }
+
+    bool acquire( const wxString& aDirectory, bool aTree )
+    {
+        if( retired ) return false; // Replaced by the owner before new receipts subscribe.
+        auto found = paths.find( aDirectory );
+        if( found != paths.end() )
+        {
+            if( found->second.tree != aTree ) return false;
+            ++found->second.references;
+            return true;
+        }
+        // Failed registration is reported as incomplete coverage on the job, not
+        // as a modal error in the editor.
+        wxLogNull quiet;
+        if( !native )
+        {
+            native = std::make_unique<wxFileSystemWatcher>();
+            native->SetOwner( this );
+        }
+        const wxFileName directory = wxFileName::DirName( aDirectory );
+        if( !( aTree ? native->AddTree( directory, NATIVE_FILE_EVENTS )
+                     : native->Add( directory, NATIVE_FILE_EVENTS ) ) )
+            return false;
+        paths.emplace( aDirectory, PATH{ aTree, 1 } );
+        return true;
+    }
+
+    void release( const wxString& aDirectory, uint64_t aGeneration )
+    {
+        if( aGeneration != generation ) return;
+        auto found = paths.find( aDirectory );
+        if( found == paths.end() || --found->second.references > 0 ) return;
+        wxLogNull quiet;
+        const wxFileName directory = wxFileName::DirName( aDirectory );
+        if( native ) found->second.tree ? native->RemoveTree( directory ) : native->Remove( directory );
+        paths.erase( found );
+    }
+
+    void onEvent( wxFileSystemWatcherEvent& aEvent ) { owner.fileEvent( aEvent ); }
+};
+
+// Native owner-thread subscriptions of one receipt. The worker owns neither this
+// object nor any callback into the live board, project, library adapter or editor.
+struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
+{
+    struct FILE_INPUT
+    {
+        wxString path;
+        bool tree = false;              // A library directory: nested entries are inputs.
+        std::string code;
+        FILE_CONTENT_BASELINE baseline; // Single non-library files.
+        std::set<wxString> libraries;   // Library nicknames whose content this path provides.
+    };
+    using LIBRARY_CONTENT = std::function<std::map<wxString, std::string>( const std::set<wxString>& )>;
+
+    PCB_DRC_JOB_MANAGER& owner;
+    BOARD& board;
+    std::weak_ptr<JOB> job;
+    std::vector<FILE_INPUT> inputs;
+    std::set<wxString> subscriptions;
+    uint64_t generation = 0;
+    LIBRARY_CONTENT libraryContent;
+    bool covered = false;
+
+    INPUT_WATCHER( PCB_DRC_JOB_MANAGER& aOwner, BOARD& aBoard ) : owner( aOwner ), board( aBoard )
+    {
+        board.AddListener( this );
+    }
+
+    ~INPUT_WATCHER() override
+    {
+        if( owner.m_files )
+            for( const auto& directory : subscriptions ) owner.m_files->release( directory, generation );
+        board.RemoveListener( this );
+    }
+
+    void changed()
+    {
+        if( auto receipt = job.lock() )
+            invalidate( receipt, "document_changed", "The live PCB changed after DRC capture" );
+    }
+
+    void OnBoardItemAdded( BOARD&, BOARD_ITEM* ) override { changed(); }
+    void OnBoardItemsAdded( BOARD&, std::vector<BOARD_ITEM*>& items ) override
+    { if( !items.empty() ) changed(); }
+    void OnBoardItemRemoved( BOARD&, BOARD_ITEM* ) override { changed(); }
+    void OnBoardItemsRemoved( BOARD&, std::vector<BOARD_ITEM*>& items ) override
+    { if( !items.empty() ) changed(); }
+    void OnBoardItemChanged( BOARD&, BOARD_ITEM* ) override { changed(); }
+    void OnBoardItemsChanged( BOARD&, std::vector<BOARD_ITEM*>& items ) override
+    { if( !items.empty() ) changed(); }
+    void OnBoardNetSettingsChanged( BOARD& ) override { changed(); }
+    void OnBoardCompositeUpdate( BOARD&, std::vector<BOARD_ITEM*>& added,
+                                std::vector<BOARD_ITEM*>& removed,
+                                std::vector<BOARD_ITEM*>& modified ) override
+    { if( !added.empty() || !removed.empty() || !modified.empty() ) changed(); }
+
+    void lostEvents()
+    {
+        covered = false;
+        if( auto receipt = job.lock() ) invalidate( receipt, "input_events_lost", LOST_EVENTS_MESSAGE );
+    }
+
+    bool subscribe( const wxString& aDirectory, bool aTree )
+    {
+        if( subscriptions.contains( aDirectory ) ) return true;
+        if( !owner.m_files->acquire( aDirectory, aTree ) ) return false;
+        subscriptions.insert( aDirectory );
+        return true;
+    }
+
+    // Observe the nearest existing directory: atomic replacement, deletion and
+    // creation of a previously missing input must all reach this receipt.
+    // A missing directory chain is watched from its nearest existing ancestor for
+    // early invalidation, but it is not complete coverage: entries created inside a
+    // new directory would not reach this receipt.
+    bool watchParent( const wxString& aPath )
+    {
+        const wxFileName parent = wxFileName::DirName( wxFileName( aPath ).GetPath() );
+        wxFileName directory = parent;
+        while( !directory.DirExists() && directory.GetDirCount() ) directory.RemoveLastDir();
+        return directory.DirExists() && subscribe( NormalizedPath( directory ), false )
+               && parent.DirExists();
+    }
+
+    // Notifications name the directory entry that changed, not the target of a
+    // symbolic link, so a linked input is not complete coverage.
+    static bool linked( const wxString& aPath )
+    {
+        std::error_code error;
+#ifdef __WXMSW__
+        const std::filesystem::path path( std::wstring( aPath.wc_str() ) );
+#else
+        const std::filesystem::path path( aPath.utf8_string() );
+#endif
+        const auto status = std::filesystem::symlink_status( path, error );
+        // A missing input is watched through its directory; that is not a link.
+        if( status.type() == std::filesystem::file_type::not_found ) return false;
+        return error || status.type() == std::filesystem::file_type::symlink;
+    }
+
+    bool addFile( const wxString& aPath, const std::string& aCode )
+    {
+        if( aPath.empty() ) return true;
+        if( !wxFileName( aPath ).IsAbsolute() ) return false;
+        FILE_INPUT input;
+        input.path = NormalizedPath( aPath );
+        input.code = aCode;
+        input.baseline = FILE_CONTENT_BASELINE::Read( input.path );
+        if( !input.baseline.Known() ) return false;
+        inputs.push_back( std::move( input ) );
+        return watchParent( inputs.back().path ) && !linked( inputs.back().path );
+    }
+
+    bool addLibrary( const wxString& aUri, const std::set<wxString>& aLibraries )
+    {
+        if( !wxFileName( aUri ).IsAbsolute() ) return false;
+        FILE_INPUT input;
+        input.path = NormalizedPath( aUri );
+        input.code = "library_inputs_changed";
+        input.libraries = aLibraries;
+        input.tree = wxDirExists( input.path );
+        const bool exists = input.tree || wxFileExists( input.path );
+        inputs.push_back( input );
+        // KiCad library directories are watched as trees. Native AddTree installs
+        // notifications; it does not poll their contents. A missing library is
+        // watched for its creation, but its later contents would not be.
+        return watchParent( input.path ) && ( !input.tree || subscribe( input.path, true ) )
+               && exists && !linked( input.path );
+    }
+
+    bool matches( const FILE_INPUT& aInput, const wxString& aPath ) const
+    {
+        return !aPath.empty() && ( aPath == aInput.path || Within( aInput.path, aPath )
+                                   || ( aInput.tree && Within( aPath, aInput.path ) ) );
+    }
+
+    bool unchanged( const FILE_INPUT& aInput, JOB& aReceipt ) const
+    {
+        try
+        {
+            if( aInput.libraries.empty() )
+                return aInput.baseline.Check( aInput.path ) == FILE_BASELINE_CHECK::UNCHANGED;
+            // Recheck only the libraries this path provides, never every library.
+            const auto current = libraryContent( aInput.libraries );
+            for( const auto& nickname : aInput.libraries )
+            {
+                const auto now = current.find( nickname );
+                const auto then = aReceipt.libraryFingerprints.find( nickname );
+                if( ( now == current.end() ) != ( then == aReceipt.libraryFingerprints.end() )
+                    || ( now != current.end() && now->second != then->second ) )
+                    return false;
+            }
+            return true;
+        }
+        catch( const std::exception& ) { return false; }
+    }
+
+    void fileChanged( const wxString& aPath, const wxString& aRenamed )
+    {
+        auto receipt = job.lock();
+        if( !receipt ) return;
+        {
+            std::lock_guard lock( receipt->mutex );
+            if( receipt->invalidated ) return;
+        }
+        for( const auto& input : inputs )
+        {
+            if( ( matches( input, aPath ) || matches( input, aRenamed ) ) && !unchanged( input, *receipt ) )
+            {
+                invalidate( receipt, input.code, ChangeMessage( input.code ) );
+                return;
+            }
+        }
+    }
+};
+
+void PCB_DRC_JOB_MANAGER::invalidate( const std::shared_ptr<JOB>& job,
+                                     const std::string& code, const std::string& message )
+{
+    std::lock_guard lock( job->mutex );
+    if( job->invalidated || ( job->status != PDRCJS_QUEUED && job->status != PDRCJS_RUNNING
+                             && job->status != PDRCJS_COMPLETED ) ) return;
+    job->invalidated = true;
+    job->findings.clear();
+    job->resultsFresh = false;
+    job->errorCode = code;
+    job->errorMessage = message;
+    job->reporter->Cancel();
+    // Cancellation is requested immediately; STALE acknowledges quiescence.
+    if( job->workerFinished ) job->status = PDRCJS_STALE;
+}
+
+void PCB_DRC_JOB_MANAGER::EnableNativeEvents( LIBRARY_RESOLVER aResolveLibraries )
+{
+    m_resolveLibraries = std::move( aResolveLibraries );
+    m_eventsEnabled = true;
+}
+
+void PCB_DRC_JOB_MANAGER::BoardChanged( const BOARD* board )
+{
+    for( auto& [id, watch] : m_watches )
+        if( &watch->board == board ) watch->changed();
+}
+
+void PCB_DRC_JOB_MANAGER::DetachBoard( const BOARD* board )
+{
+    for( auto it = m_watches.begin(); it != m_watches.end(); )
+    {
+        if( &it->second->board == board )
+        {
+            it->second->lostEvents();
+            it = m_watches.erase( it );
+        }
+        else ++it;
+    }
+}
+
+void PCB_DRC_JOB_MANAGER::InputEventsLost( const BOARD* board )
+{
+    for( auto& [id, watch] : m_watches )
+        if( &watch->board == board ) watch->lostEvents();
+}
+
+void PCB_DRC_JOB_MANAGER::fileEvent( wxFileSystemWatcherEvent& event )
+{
+    const int change = event.GetChangeType();
+    bool lost = ( change & ( wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR ) ) != 0;
+#if defined( wxHAS_INOTIFY ) || defined( wxHAVE_FSEVENTS_FILE_NOTIFICATIONS )
+    lost |= ( change & wxFSW_EVENT_UNMOUNT ) != 0;
+#endif
+    const wxString path = event.GetPath().GetFullPath().empty() ? wxString()
+                                                                : NormalizedPath( event.GetPath() );
+    const wxString renamed = event.GetNewPath().GetFullPath().empty() ? wxString()
+                                                                     : NormalizedPath( event.GetNewPath() );
+    if( !lost && ( change & ( wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE | wxFSW_EVENT_RENAME
+                              | wxFSW_EVENT_MODIFY | wxFSW_EVENT_ATTRIB ) ) )
+    {
+        for( auto& [id, watch] : m_watches ) watch->fileChanged( path, renamed );
+    }
+    // The kernel drops the subscription of a watched directory that is removed or
+    // renamed, and nothing would report later changes below it.
+    lost |= ( change & ( wxFSW_EVENT_DELETE | wxFSW_EVENT_RENAME ) ) && m_files
+            && m_files->paths.contains( path );
+    if( lost )
+    {
+        // Nothing proves that no change was missed: every receipt relying on this
+        // queue is stale, and later receipts subscribe again from scratch.
+        for( auto& [id, watch] : m_watches )
+            if( !watch->subscriptions.empty() ) watch->lostEvents();
+        if( m_files ) m_files->retire();
+    }
+}
+
+void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
+        const SCHEMATIC_OBSERVER& schematic, const LIBRARY_OBSERVER& libraries )
+{
+    std::vector<std::shared_ptr<JOB>> receipts;
+    {
+        std::lock_guard lock( m_mutex );
+        for( const auto& [id, job] : m_jobs ) receipts.push_back( job );
+    }
+    for( const auto& job : receipts )
+    {
+        {
+            std::lock_guard lock( job->mutex );
+            if( job->invalidated || job->checkedBoardEpoch != board.m_Uuid.AsStdString() ) continue;
+        }
+        // Activation/settings notification is a recovery checkpoint, including
+        // changes made in another editor of this process. Never revive receipts
+        // already invalidated by a change or an overflow.
+        state( job, board, epoch, schematic, libraries );
+    }
+}
+
+void PCB_DRC_JOB_MANAGER::retireWatches()
+{
+    // Called only outside native callbacks: a stale receipt can never revive, so
+    // its board listener and file subscriptions have no further purpose.
+    for( auto it = m_watches.begin(); it != m_watches.end(); )
+    {
+        auto receipt = it->second->job.lock();
+        bool retired = !receipt;
+        if( receipt )
+        {
+            std::lock_guard lock( receipt->mutex );
+            retired = receipt->invalidated
+                      || ( receipt->workerFinished && receipt->status != PDRCJS_COMPLETED );
+        }
+        if( retired ) it = m_watches.erase( it );
+        else ++it;
+    }
+    if( m_files && m_files->retired ) m_files->reset();
+}
+
+std::unique_ptr<PCB_DRC_JOB_MANAGER::INPUT_WATCHER> PCB_DRC_JOB_MANAGER::watchInputs(
+        BOARD& board, const PCB_DRC_CAPTURE_CONTEXT& context )
+{
+    // Only a native event owner installs listeners and detaches before replacing
+    // its board. Headless contexts retain the full read-time observation path.
+    if( !m_eventsEnabled ) return nullptr;
+
+    // Subscribe before capture: a change after this point is either part of the
+    // capture or reaches this receipt as a notification.
+    auto watch = std::make_unique<INPUT_WATCHER>( *this, board );
+    if( !m_resolveLibraries || !wxEventLoopBase::GetActive() ) return watch;
+    if( !m_files ) m_files = std::make_unique<FILE_EVENTS>( *this );
+    // After a lost queue every older subscribed receipt is stale; their later
+    // releases carry the old generation and cannot touch new subscriptions.
+    if( m_files->retired ) m_files->reset();
+    watch->generation = m_files->generation;
+    // Resolve the current adapter on the owner thread. Project/library reload may
+    // replace it while the board and its receipts stay alive.
+    watch->libraryContent = [resolver = m_resolveLibraries, &board]( const std::set<wxString>& libraries )
+    {
+        auto* adapter = resolver( board );
+        if( !adapter ) throw std::runtime_error( "Native footprint library owner is unavailable" );
+        auto current = DRC_LIBRARY_INPUTS::Capture( board, *adapter, nullptr, &libraries );
+        if( !current ) throw std::runtime_error( "Native library observation was cancelled" );
+        return current->LibraryFingerprints();
+    };
+    try
+    {
+        auto& adapter = context.libraries;
+        // Only inputs a new check would read from disk: custom rules, footprint
+        // library tables and the libraries of placed footprints. The drawing sheet
+        // file is watched because it is the declared source of the in-memory sheet.
+        // Project settings are compared in memory on every read; KiCad rewrites the
+        // project file on ordinary saves without changing them.
+        bool covered = watch->addFile( board.GetDesignRulesPath(), "project_inputs_changed" );
+        if( auto* project = board.GetProject() )
+        {
+            const auto& drawing = project->GetProjectFile().m_BoardDrawingSheetFile;
+            if( !drawing.empty() )
+            {
+                FILENAME_RESOLVER resolver;
+                resolver.SetProject( project );
+                resolver.SetProgramBase( PgmOrNull() );
+                const wxString path = resolver.ResolvePath( drawing, project->GetProjectPath(),
+                                                            { board.GetEmbeddedFiles() } );
+                covered &= !path.empty() && watch->addFile( path, "auxiliary_inputs_changed" );
+            }
+        }
+        // A project-only owner need not have a global table. The adapter's
+        // GlobalTable() asserts that it exists; use the native optional lookup.
+        if( auto table = adapter.Manager().Table( adapter.Type(), LIBRARY_TABLE_SCOPE::GLOBAL ) )
+            covered &= watch->addFile( ( *table )->Path(), "library_inputs_changed" );
+        if( auto table = adapter.ProjectTable() )
+            covered &= watch->addFile( ( *table )->Path(), "library_inputs_changed" );
+        std::map<wxString, std::set<wxString>> libraries;
+        for( const auto* footprint : board.Footprints() )
+        {
+            const wxString nickname = footprint->GetFPID().GetLibNickname();
+            if( nickname.empty() ) continue;
+            // A nickname without a row is covered by the library table watches.
+            if( auto row = adapter.GetRow( nickname ) )
+                libraries[LIBRARY_MANAGER::GetFullURI( *row, true )].insert( nickname );
+        }
+        for( const auto& [uri, nicknames] : libraries )
+            covered &= watch->addLibrary( uri, nicknames );
+        watch->covered = covered;
+    }
+    catch( const std::exception& ) { watch->covered = false; }
+    return watch;
+}
+
 PCB_DRC_JOB_MANAGER::PCB_DRC_JOB_MANAGER( AUXILIARY_OBSERVER aObserveAuxiliary ) :
         m_observeAuxiliary( std::move( aObserveAuxiliary ) )
 {}
 
 PCB_DRC_JOB_MANAGER::~PCB_DRC_JOB_MANAGER()
 {
+    // Subscriptions go first: none of them may outlive the native watcher, and no
+    // native callback may reach a receipt while its worker is being joined.
+    m_watches.clear();
+    m_files.reset();
     std::vector<std::shared_ptr<JOB>> jobs;
     {
         std::lock_guard lock( m_mutex );
@@ -144,10 +649,16 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     if( !aJob ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aJob->processEpoch != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
+    bool observeInputs;
+    {
+        std::lock_guard lock( aJob->mutex );
+        observeInputs = !aJob->invalidated && ( aJob->status == PDRCJS_QUEUED
+                || aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_COMPLETED );
+    }
     // Immutable source identity is fixed before worker launch. Do not hold the
     // receipt mutex while dispatching a UI-thread observation of another document.
     bool schematicChanged = false;
-    if( aJob->testFootprints )
+    if( observeInputs && aJob->testFootprints )
     {
         if( !aObserveSchematic ) schematicChanged = true;
         else
@@ -161,9 +672,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
             catch( const std::exception& ) { schematicChanged = true; }
         }
     }
-    const bool projectChanged = !aJob->projectBaseline.Unchanged( aBoard );
-    bool auxiliaryChanged = true;
-    if( m_observeAuxiliary )
+    // wx notifications can still be queued when an IPC read arrives. Registration
+    // is not a completeness barrier: retain the full content fallback for every
+    // live receipt, without pumping unrelated native events or entering the UI.
+    const bool projectChanged = observeInputs && !aJob->projectBaseline.Unchanged( aBoard );
+    bool auxiliaryChanged = observeInputs;
+    if( observeInputs && m_observeAuxiliary )
     {
         try
         {
@@ -173,7 +687,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         catch( const std::exception& ) { }
     }
     bool librariesChanged = false;
-    if( aJob->hasLibraryDependencies )
+    if( observeInputs && aJob->hasLibraryDependencies )
     {
         if( !aObserveLibraries ) librariesChanged = true;
         else
@@ -195,7 +709,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     }
     const bool liveChanged = aBoard.m_Uuid.AsStdString() != aJob->checkedBoardEpoch
                              || aBoard.GetTimeStamp() != aJob->checkedSequence;
-    if( ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
+    if( !aJob->invalidated && ( aJob->status == PDRCJS_RUNNING || aJob->status == PDRCJS_QUEUED
           || aJob->status == PDRCJS_COMPLETED )
         && ( liveChanged || schematicChanged || projectChanged || librariesChanged || auxiliaryChanged ) )
     {
@@ -323,10 +837,15 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         }
     }
 
+    retireWatches();
+    std::unique_ptr<INPUT_WATCHER> watch;
     std::unique_ptr<PCB_DRC_RUN_INPUTS> inputs;
     std::vector<KIID> candidateItemIds;
     try
     {
+        // Subscribe before capture so no change falls between the snapshot and
+        // its first notification.
+        watch = watchInputs( aBoard, aCaptureContext );
         inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
         if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
         if( aRequest.candidate_items_size() > 0 )
@@ -358,6 +877,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->testFootprints = aRequest.test_footprints();
     job->projectBaseline = inputs->ProjectBaseline();
     job->libraryFingerprint = inputs->LibraryFingerprint();
+    job->libraryFingerprints = inputs->LibraryFingerprints();
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
     job->candidateDryRun = !candidateItemIds.empty();
@@ -369,6 +889,13 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                                    aCaptureContext.schematic->warnings().end() );
     }
     job->reporter = std::make_unique<JOB_PROGRESS>();
+    if( watch )
+    {
+        watch->job = job;
+        if( !watch->covered )
+            job->inputWarnings.emplace_back( "Some native input notifications are unavailable; status reads recheck content" );
+        m_watches.emplace( job->id, std::move( watch ) );
+    }
     {
         std::lock_guard lock( m_mutex );
         m_jobs.emplace( job->id, job );
@@ -477,6 +1004,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     {
         std::lock_guard lock( m_mutex );
         m_jobs.erase( job->id );
+        m_watches.erase( job->id );
         return tl::unexpected( std::string( "Could not launch native DRC worker: " ) + error.what() );
     }
     return state( job, aBoard, aProcessEpoch, capturedState, observeLibraries );
@@ -486,6 +1014,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
         const ReadPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
         const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries )
 {
+    retireWatches();
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aRequest.process_epoch() != aProcessEpoch )
@@ -498,6 +1027,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(
         const CancelPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
         const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries )
 {
+    retireWatches();
     auto job = find( aRequest.job_id() );
     if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aRequest.process_epoch() != aProcessEpoch )

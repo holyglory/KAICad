@@ -18,30 +18,48 @@ const DRC_LIBRARY_INPUTS::ENTRY* DRC_LIBRARY_INPUTS::Find( const LIB_ID& aId ) c
     return found == m_entries.end() ? nullptr : &found->second;
 }
 
+namespace
+{
+std::string EntryRecord( const LIB_ID& aId, const DRC_LIBRARY_INPUTS::ENTRY& aEntry )
+{
+    std::string definition;
+    if( aEntry.footprint )
+    {
+        PCB_IO_KICAD_SEXPR writer( CTL_FOR_LIBRARY );
+        STRING_FORMATTER output;
+        writer.SetOutputFormatter( &output );
+        writer.Format( aEntry.footprint.get() );
+        definition = output.GetString();
+    }
+    // JSON provides unambiguous boundaries even for arbitrary library names,
+    // source URIs and definition strings.
+    return nlohmann::json( { std::string( aId.Format().c_str() ), static_cast<int>( aEntry.status ),
+                             aEntry.uri.utf8_string(), definition } ).dump();
+}
+}
+
 std::string DRC_LIBRARY_INPUTS::ContentFingerprint() const
 {
     NATIVE_STATE_DIGEST digest;
+    // Map traversal fixes entry order.
     for( const auto& [id, entry] : m_entries )
-    {
-        std::string definition;
-        if( entry.footprint )
-        {
-            PCB_IO_KICAD_SEXPR writer( CTL_FOR_LIBRARY );
-            STRING_FORMATTER output;
-            writer.SetOutputFormatter( &output );
-            writer.Format( entry.footprint.get() );
-            definition = output.GetString();
-        }
-        // JSON provides unambiguous boundaries even for arbitrary library names,
-        // source URIs and definition strings. Map traversal fixes entry order.
-        digest.Append( nlohmann::json( { std::string( id.Format().c_str() ),
-                static_cast<int>( entry.status ), entry.uri.utf8_string(), definition } ).dump() );
-    }
+        digest.Append( EntryRecord( id, entry ) );
     return digest.Hex();
 }
 
+std::map<wxString, std::string> DRC_LIBRARY_INPUTS::LibraryFingerprints() const
+{
+    std::map<wxString, NATIVE_STATE_DIGEST> digests;
+    for( const auto& [id, entry] : m_entries )
+        digests[wxString( id.GetLibNickname() )].Append( EntryRecord( id, entry ) );
+    std::map<wxString, std::string> result;
+    for( auto& [nickname, digest] : digests ) result.emplace( nickname, digest.Hex() );
+    return result;
+}
+
 std::shared_ptr<const DRC_LIBRARY_INPUTS> DRC_LIBRARY_INPUTS::Capture(
-        const BOARD& aBoard, FOOTPRINT_LIBRARY_ADAPTER& aAdapter, PROGRESS_REPORTER* aReporter )
+        const BOARD& aBoard, FOOTPRINT_LIBRARY_ADAPTER& aAdapter, PROGRESS_REPORTER* aReporter,
+        const std::set<wxString>* aLibraries )
 {
     auto result = std::make_shared<DRC_LIBRARY_INPUTS>();
     std::set<wxString> refreshed;
@@ -50,6 +68,7 @@ std::shared_ptr<const DRC_LIBRARY_INPUTS> DRC_LIBRARY_INPUTS::Capture(
         if( aReporter && aReporter->IsCancelled() ) return nullptr;
         const LIB_ID& id = footprint->GetFPID();
         if( id.GetLibNickname().empty() || result->m_entries.contains( id ) ) continue;
+        if( aLibraries && !aLibraries->contains( wxString( id.GetLibNickname() ) ) ) continue;
         ENTRY entry;
         auto row = aAdapter.GetRow( id.GetLibNickname() );
         if( row )

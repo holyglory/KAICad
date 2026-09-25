@@ -7,6 +7,7 @@
 #include <google/protobuf/repeated_field.h>
 #include <kiid.h>
 #include <json_common.h>
+#include <map>
 #include <memory>
 #include <string>
 #include <tl/expected.hpp>
@@ -84,6 +85,8 @@ public:
     const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
     const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
     std::string LibraryFingerprint() const;
+    // The captured content digest of each footprint library the board uses.
+    std::map<wxString, std::string> LibraryFingerprints() const;
     bool HasLibraryDependencies() const;
 
     // Add explicitly net-bound Track/Arc/Via candidates only to this detached

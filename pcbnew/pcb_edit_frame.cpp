@@ -531,6 +531,14 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_apiHandler = std::make_unique<API_HANDLER_PCB>( this );
     Pgm().GetApiServer().RegisterHandler( m_apiHandler.get() );
+    // Activation is a DRC recovery checkpoint: changes made in another editor of
+    // this process are observed before an agent reads an older check.
+    Bind( wxEVT_ACTIVATE, [this]( wxActivateEvent& event )
+    {
+        if( event.GetActive() && !m_isClosing && m_apiHandler )
+            m_apiHandler->ObserveNativeDrcInputs();
+        event.Skip();
+    } );
 
     if( Kiface().IsSingle() )
     {
@@ -764,6 +772,10 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+    // DRC receipts must not keep listening to the board this frame is about to free.
+    if( m_apiHandler )
+        m_apiHandler->DetachDrcBoard( GetBoard() );
+
     // Failed opens use Destroy(), bypassing doCloseWindow(). Never leave the
     // process-wide dispatcher pointing at handlers owned by this dead frame.
     if( auto* server = Pgm().ApiServerOrNull() )
@@ -854,6 +866,10 @@ void PCB_EDIT_FRAME::detachTextVarTracker()
 
 void PCB_EDIT_FRAME::SetBoard( BOARD* aBoard, bool aBuildConnectivity, PROGRESS_REPORTER* aReporter )
 {
+    // PCB_BASE_FRAME::SetBoard() deletes m_pcb; its DRC receipts become stale first.
+    if( m_apiHandler && m_pcb != aBoard )
+        m_apiHandler->DetachDrcBoard( m_pcb );
+
     // PCB_BASE_FRAME::SetBoard() deletes m_pcb; detach tracker consumers first.
     if( m_pcb )
     {
@@ -2265,6 +2281,11 @@ void PCB_EDIT_FRAME::SetLastPath( LAST_PATH_TYPE aType, const wxString& aLastPat
 void PCB_EDIT_FRAME::OnModify()
 {
     PCB_BASE_FRAME::OnModify();
+    // This boundary is shared by manual edits, settings changes and undo/redo.
+    // Do not wait for another IPC request to cancel obsolete native work.
+    if( m_apiHandler )
+        m_apiHandler->DrcBoardChanged( GetBoard() );
+
     Kiway().LocalHistory().NoteFileChange( GetBoard()->GetFileName() );
     m_ZoneFillsDirty = true;
 
@@ -2658,6 +2679,8 @@ void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
         RefreshProjectNetColors();
     }
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
+    if( m_apiHandler )
+        m_apiHandler->ObserveNativeDrcInputs();
     m_appearancePanel->CommonSettingsChanged( aFlags );
 
     PrepareLayerIndicator();

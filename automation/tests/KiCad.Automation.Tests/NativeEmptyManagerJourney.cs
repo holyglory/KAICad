@@ -88,6 +88,8 @@ public sealed partial class NativeSessionTests
             // The update manager provides none of the document callbacks, so its handshake lists none
             // of those requests and it does not dispatch them at all.
             string[] managerRequests = managerSession.HandledRequests.ToArray();
+            CollectionAssert.DoesNotContain(managerSession.Capabilities.ToArray(), SchematicConnectedAddition.NativeCapability,
+                "The empty update manager serves no schematic, so it does not advertise connection realization (CN-1 §8.3).");
             CollectionAssert.Contains(managerRequests, KiCad.Automation.Protocol.GetAutomationSession.Descriptor.FullName,
                 "This build's handshake lists the requests it handles.");
             foreach (string type in new[] { Kiapi.Common.Commands.OpenDocument.Descriptor.FullName,

@@ -71,9 +71,14 @@ Compared with sequence 22 it adds, as preliminary features:
   MCP server without contacting KiCad.
 - **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
   `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
+- **XML connections become labelled wires.** When saved XML adds connections, apply
+  draws a short wire and a net label from each new pin, with hierarchical labels and
+  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
+  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
+  started for a project advertises `schematic.connection-realization.v1`; the empty update
+  manager does not. Wires routed between pins are not built yet.
 
-Groundwork for turning XML connections into wires is included but switched off: KiCad
-does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
+Known limitations: the
 diagram editor's dark-theme selection and other design-QA polish are still being fixed,
 Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
 from the project manager is not built yet.
@@ -957,6 +962,8 @@ rejected: inspect and reconcile their exact receipts before replacing the saved
 revision needed for retry. This operation only refreshes the recovery observation;
 it does not write the design XML or edit KiCad. Incomplete native tracking remains
 explicit and is not authorization for synchronized mutation.
+When the record keeps pin connections, the refresh captures them too, so a refreshed
+record can be planned and applied again.
 
 The internal `DesignRecoveryFileObserver` subscribes to an explicit design file
 before its initial read. Each notification captures the current saved bytes into
@@ -1089,6 +1096,41 @@ legacy-only, foreign-circuit or future-revision history cannot authorize a candi
 The public read-only `kicad_design_sync_plan` and internal executor use the same
 history-aware preparation. Instruction-only edits can merge; competing circuit
 and layout changes still pause synchronization.
+
+The plan also says when apply will draw in KiCad rather than publish a prepared XML.
+When the saved XML only adds connections (between pins already drawn, or to parts it
+also adds) and leaves every existing part, symbol, sheet, binding and connection
+unchanged, and the handshake recorded at attach advertises
+`schematic.connection-realization.v1`, a plan that can be prepared returns
+`connectionRealizationRequired: true`, `candidateDesignXml: null` and a
+`connectionIntent` summary: each net with its scope and global name, each sheet's
+labelled island, the sheet ports, how many native pin groups KiCad must confirm and
+the symbols apply creates. Every other plan, including one that cannot be prepared,
+returns `connectionRealizationRequired: false` and `connectionIntent: null`.
+
+`nativeRebuildRequired` and `rebuildSheetInstances` report the two cases where apply
+creates native sheets from XML:
+
+- **New sheets.** When the saved XML adds empty sheets below sheets KiCad shows, apply
+  creates the sheet symbols and their files. Parts go in a later XML revision, once
+  their sheets exist.
+- **Lost schematic files.** If a project's `.kicad_sch` files are deleted, open the
+  project so KiCad creates a new empty root, reattach the recovery record with
+  `kicad_design_recovery_reattach`, then plan and apply as usual. Apply rebuilds every
+  sheet, symbol, pin, label, sheet pin, library cache entry, page and title block from
+  the XML last synchronized with KiCad, with the original identities, and the saved
+  files match the originals byte for byte. The new root first takes back the old
+  root's identity; undo returns to the empty root. The rebuild keeps the existing
+  `.kicad_pro` and never rewrites it.
+
+The rebuild refuses, before KiCad is touched: XML edited after the files were lost
+(`rebuild_requires_settled_xml`); net chains, and sheet files shared by several sheets,
+which it cannot rebuild yet (`rebuild_state_unrepresented`); a kept project file whose
+settings differ from the XML's (`rebuild_project_settings_changed`); and any planned
+change other than the root identity, page, title block, root page and embedded files
+(`rebuild_operation_unsupported`). The snapshot's list of state it does not hold no
+longer names the library cache, which it now holds exactly; recovery records captured
+by earlier previews report a changed snapshot on their first capture after upgrading.
 Linux native run `t20260916T032035Z-c12d41` verifies real keyboard undo/redo of
 unit and component deletions in two editors, including history older than the
 latest receipt, exact restored identities, preserved newer instructions, actual

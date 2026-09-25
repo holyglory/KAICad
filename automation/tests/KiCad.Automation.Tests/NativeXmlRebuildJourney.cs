@@ -216,7 +216,7 @@ public sealed partial class NativeSessionTests
             new SchematicItemOperation { TargetDocument = document.Clone(), SetTitleBlock = emptyRoot.Metadata.TitleBlock?.Clone() ?? new TitleBlockInfo() },
             Identity(originalRootScreen)));
         refusals.Add(await RefusedIdentity(empty, "canonical", Identity(originalRootScreen.ToUpperInvariant())));
-        refusals.Add(await RefusedIdentity(empty, "", Identity(originalRootScreen),
+        refusals.Add(await RefusedIdentity(empty, "Atomic operation 1 rejected", Identity(originalRootScreen),
             new SchematicItemOperation { TargetDocument = document.Clone(), Update = Any.Pack(probeLabel) }));
 
         var reattach = await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,

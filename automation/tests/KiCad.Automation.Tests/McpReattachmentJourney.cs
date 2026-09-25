@@ -370,6 +370,16 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
             preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray(), because);
         Assert.AreEqual(expected.NativeConnectivityValidationRequired, preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), because);
+        // CN-1 §9.5: a realization plan says so and summarizes the connections apply will draw; any other plan carries no intent.
+        Assert.AreEqual(expected.NativeConnectionRealizationRequired, preview.GetProperty("connectionRealizationRequired").GetBoolean(), because);
+        var intent = preview.GetProperty("connectionIntent");
+        if (expected.Connections is not { } connections) { Assert.AreEqual(JsonValueKind.Null, intent.ValueKind, because); return; }
+        Assert.AreEqual(connections.Screens.Sum(s => s.Islands.Count), intent.GetProperty("screens").EnumerateArray()
+            .Sum(s => s.GetProperty("islands").GetArrayLength()), because);
+        CollectionAssert.AreEqual(connections.Screens.SelectMany(s => s.Islands).Select(i => i.LabelText).ToArray(), intent.GetProperty("screens")
+            .EnumerateArray().SelectMany(s => s.GetProperty("islands").EnumerateArray()).Select(i => i.GetProperty("labelText").GetString()).ToArray(), because);
+        Assert.AreEqual(connections.Nets.Count, intent.GetProperty("nets").GetArrayLength(), because);
+        Assert.AreEqual(connections.ExpectedGroups.Count, intent.GetProperty("expectedGroupCount").GetInt32(), because);
     }
 
     // Two probes on the declared project root whose single pins are drawn and not connected to anything.

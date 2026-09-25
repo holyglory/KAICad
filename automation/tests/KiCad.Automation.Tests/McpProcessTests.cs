@@ -970,9 +970,9 @@ public sealed class McpProcessTests
     // classifies a saved connection-only revision with the handshake this server recorded when it attached the
     // instance and never contacts KiCad for it; with no attached instance it is today's plan; reattaching refreshes
     // the record. The automatic worker and apply take their own live handshakes and classify the same revision the
-    // same way. No KiCad build advertises schematic.connection-realization.v1 yet (CN-1 §8.3), so a scripted editor
-    // on the real NNG transport stands in for one; NativeSessionTests (VerifyRecordedHandshakePlanning) proves the
-    // unadvertised case against a real KiCad. With the capability the planner plans the connection's realization
+    // same way. A scripted editor on the real NNG transport stands in for KiCad so both handshakes, with and without
+    // schematic.connection-realization.v1, can be driven here; NativeSessionTests (VerifyRecordedHandshakePlanning) proves
+    // the advertised case against a real KiCad started for a project, which advertises it (CN-1 §8.3). With the capability the planner plans the connection's realization
     // (CN-1 §4.3), and the scripted editor refuses the realization's measurement, so the worker and apply must both
     // stop with that measurement's code (CN-1 §13) after sending the editor the same requests.
     [TestMethod]

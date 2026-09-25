@@ -42,17 +42,27 @@ struct PCB_DRC_COPPER_PREPARATION
     std::vector<KIID> regenerated;
 };
 
+// The live project inputs a project baseline is compared with: the project and
+// board settings, and the content of the board's custom rules file as it is now.
+struct PCB_DRC_PROJECT_OBSERVATION
+{
+    nlohmann::json settings;
+    wxString rulesPath;
+    FILE_CONTENT_BASELINE rules; // Read only when the board has a rules path.
+};
+
 // Lightweight, immutable receipt data; never borrows the live project or the
 // worker's private board. This covers project/settings/rules, not every input.
 class PCB_DRC_PROJECT_BASELINE
 {
 public:
     bool Unchanged( const BOARD& aBoard ) const;
-    // The live project settings Unchanged() compares, observed once so that one
-    // checkpoint can compare many baselines of the same board. Throws when the
+    // Observes the live project inputs once, reading the rules file once, so that
+    // one checkpoint can compare many baselines of the same board. Throws when the
     // settings cannot be represented; that is never evidence of freshness.
-    static nlohmann::json ObserveSettings( const BOARD& aBoard );
-    bool Unchanged( const BOARD& aBoard, const nlohmann::json& aObservedSettings ) const;
+    static PCB_DRC_PROJECT_OBSERVATION Observe( const BOARD& aBoard );
+    // Compares with an observation without reading anything again.
+    bool Unchanged( const PCB_DRC_PROJECT_OBSERVATION& aObserved ) const;
 
 private:
     friend class PCB_DRC_RUN_INPUTS;

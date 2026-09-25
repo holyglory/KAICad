@@ -76,10 +76,26 @@ struct DRC_CAPTURE_FIXTURE
     static int NativeWatches( const PCB_DRC_JOB_MANAGER& jobs ) { return jobs.nativeWatches(); }
     static void Detach( PCB_DRC_JOB_MANAGER& jobs, BOARD& board ) { jobs.DetachBoard( &board ); }
     static size_t WatchCount( const PCB_DRC_JOB_MANAGER& jobs ) { return jobs.m_watches.size(); }
+    // A recovery checkpoint of the editor owner: window activation, or with
+    // settingsChanged a settings notification (PCB_EDIT_FRAME::CommonSettingsChanged).
     static void Observe( PCB_DRC_JOB_MANAGER& jobs, BOARD& board, const std::string& epoch,
                          const PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER& observer = {},
-                         const PCB_DRC_JOB_MANAGER::SCHEMATIC_OBSERVER& schematic = {} )
-    { jobs.ObserveInputs( board, epoch, schematic, observer ); }
+                         const PCB_DRC_JOB_MANAGER::SCHEMATIC_OBSERVER& schematic = {},
+                         bool settingsChanged = false )
+    { jobs.ObserveInputs( board, epoch, schematic, observer, settingsChanged ); }
+    // Why a notification or checkpoint made the receipt stale, without observing
+    // anything; empty while it is live.
+    static std::string Invalidation( const PCB_DRC_JOB_MANAGER& jobs, const PcbDrcJobState& state )
+    { return jobs.invalidation( state.job_id() ); }
+    // Counts the observations of the live project settings and custom rules file.
+    static void CountProjectObservations( PCB_DRC_JOB_MANAGER& jobs, int& count )
+    {
+        jobs.m_observeProject = [&count]( const BOARD& board )
+        {
+            ++count;
+            return PCB_DRC_PROJECT_BASELINE::Observe( board );
+        };
+    }
     static void AddTracks( BOARD& board, int count )
     {
         for( int i = 0; i < count; ++i )
@@ -343,7 +359,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     placed->SetParent( &board ); board.Add( placed );
     auto* otherPlaced = static_cast<FOOTPRINT*>( otherPart.Clone() );
     otherPlaced->SetParent( &board ); board.Add( otherPlaced );
-    int libraryReads = 0, auxiliaryReads = 0;
+    int libraryReads = 0, auxiliaryReads = 0, projectObservations = 0;
     PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER observer = [&]( BOARD& source )
             -> tl::expected<std::string, std::string>
     {
@@ -357,6 +373,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
         return PCB_DRC_AUXILIARY_BASELINE::Capture( context ).Fingerprint();
     } );
     EnableEvents( jobs );
+    CountProjectObservations( jobs, projectObservations );
     const auto epoch = KIID().AsStdString();
     auto request = Request( board, epoch );
     auto start = jobs.Start( request, board, epoch, context );
@@ -461,8 +478,9 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     Observe( jobs, board, epoch, observer );
     BOOST_CHECK( jobs.Read( Query( *fresh ), board, epoch, {}, observer )->status() == PDRCJS_STALE );
 
-    // A recovery checkpoint (window activation) observes each live input once for
-    // every receipt, and rereads no library whose native notifications cover it.
+    // A window-activation checkpoint observes each live input once for every
+    // receipt, and rereads no library whose native notifications cover it while its
+    // library configuration is unchanged.
     auto covered = jobs.Start( Request( board, epoch ), board, epoch, context );
     BOOST_REQUIRE( covered );
     BOOST_CHECK_EQUAL( covered->input_warnings_size(), 0 );
@@ -472,21 +490,36 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     BOOST_CHECK_EQUAL( alsoCovered->input_warnings_size(), 0 );
     BOOST_REQUIRE( Wait( jobs, board, *alsoCovered, observer ).status() == PDRCJS_COMPLETED );
     BOOST_CHECK_EQUAL( WatchCount( jobs ), 2 );
-    libraryReads = 0; auxiliaryReads = 0; libraryResolutions = 0;
+    libraryReads = 0; auxiliaryReads = 0; libraryResolutions = 0; projectObservations = 0;
     Observe( jobs, board, epoch, observer );
     BOOST_CHECK_EQUAL( libraryReads, 0 );
-    BOOST_CHECK_EQUAL( libraryResolutions, 0 );
+    // One owner lookup serves the library configuration comparison of both receipts.
+    // It loads no footprint: a checkpoint reads library content only through the
+    // observer, which libraryReads counts.
+    BOOST_CHECK_EQUAL( libraryResolutions, 1 );
     BOOST_CHECK_EQUAL( auxiliaryReads, 1 );
+    BOOST_CHECK_EQUAL( projectObservations, 1 );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *covered ), "" );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *alsoCovered ), "" );
     // Reads still compare every live input before exposing results (n456d6b796cd7a9a3).
-    libraryReads = 0;
+    libraryReads = 0; projectObservations = 0;
     BOOST_CHECK( jobs.Read( Query( *covered ), board, epoch, {}, observer )->status() == PDRCJS_COMPLETED );
     BOOST_CHECK( jobs.Read( Query( *alsoCovered ), board, epoch, {}, observer )->status() == PDRCJS_COMPLETED );
     BOOST_CHECK_EQUAL( libraryReads, 2 );
+    BOOST_CHECK_EQUAL( projectObservations, 2 );
+
+    // A changed library file whose notification has not run yet: window activation
+    // leaves both receipts to that notification instead of rereading the library.
+    original.SetLibDescription( "changed for both receipts" );
+    io.FootprintSave( uri, &original );
+    libraryReads = 0;
+    Observe( jobs, board, epoch, observer );
+    BOOST_CHECK_EQUAL( libraryReads, 0 );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *covered ), "" );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *alsoCovered ), "" );
 
     // One notification of a changed library rereads that library once, not once per
     // receipt, and makes both receipts stale before any read.
-    original.SetLibDescription( "changed for both receipts" );
-    io.FootprintSave( uri, &original );
     wxFileSystemWatcherEvent modified( wxFSW_EVENT_MODIFY, wxFileName( wxString::FromUTF8( ( libPath / "Part.kicad_mod" ).string() ) ),
                                        wxFileName( wxString::FromUTF8( ( libPath / "Part.kicad_mod" ).string() ) ) );
     libraryResolutions = 0; auxiliaryReads = 0;
@@ -504,6 +537,63 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     original.SetLibDescription( "" );
     io.FootprintSave( uri, &original );
     DispatchFiles( loop );
+
+    // A settings notification (Configure Paths, preferences) may have changed library
+    // configuration in memory, so it compares library content for every receipt,
+    // once, whatever their rows look like.
+    auto settingsFirst = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( settingsFirst );
+    BOOST_REQUIRE( Wait( jobs, board, *settingsFirst, observer ).status() == PDRCJS_COMPLETED );
+    auto settingsSecond = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( settingsSecond );
+    BOOST_REQUIRE( Wait( jobs, board, *settingsSecond, observer ).status() == PDRCJS_COMPLETED );
+    libraryReads = 0; libraryResolutions = 0;
+    Observe( jobs, board, epoch, observer, {}, true );
+    BOOST_CHECK_EQUAL( libraryReads, 1 );
+    BOOST_CHECK_EQUAL( libraryResolutions, 0 );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *settingsFirst ), "" ); // Same content: still current.
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *settingsSecond ), "" );
+    original.SetLibDescription( "changed before a settings checkpoint" );
+    io.FootprintSave( uri, &original ); // Its notification has not run yet.
+    libraryReads = 0;
+    Observe( jobs, board, epoch, observer, {}, true );
+    BOOST_CHECK_EQUAL( libraryReads, 1 );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *settingsFirst ), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *settingsSecond ), "library_inputs_changed" );
+    original.SetLibDescription( "" );
+    io.FootprintSave( uri, &original );
+    DispatchFiles( loop );
+
+    // Library configuration changed in memory produces no file notification: a row
+    // disabled, or pointed at another folder as a changed path variable does. Window
+    // activation compares each covered receipt's library rows without loading a
+    // footprint, finds the change, and then compares the library content once.
+    auto eventRow = adapter.GetRow( "EventLibrary" );
+    BOOST_REQUIRE( eventRow );
+    const std::vector<std::pair<std::function<void()>, std::function<void()>>> rowChanges = {
+        { [&] { ( *eventRow )->SetDisabled( true ); }, [&] { ( *eventRow )->SetDisabled( false ); } },
+        { [&] { ( *eventRow )->SetURI( otherUri ); }, [&] { ( *eventRow )->SetURI( uri ); } } };
+    for( const auto& [change, undo] : rowChanges )
+    {
+        auto receipt = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE( receipt );
+        BOOST_CHECK_EQUAL( receipt->input_warnings_size(), 0 );
+        BOOST_REQUIRE( Wait( jobs, board, *receipt, observer ).status() == PDRCJS_COMPLETED );
+        change();
+        libraryReads = 0; libraryResolutions = 0;
+        Observe( jobs, board, epoch, observer );
+        BOOST_CHECK_EQUAL( libraryResolutions, 1 );
+        BOOST_CHECK_EQUAL( libraryReads, 1 );
+        BOOST_CHECK_EQUAL( Invalidation( jobs, *receipt ), "library_inputs_changed" );
+        auxiliaryReads = 0;
+        auto rowStale = jobs.Read( Query( *receipt ), board, epoch, {}, observer );
+        BOOST_REQUIRE( rowStale );
+        BOOST_CHECK( rowStale->status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( rowStale->error_code(), "library_inputs_changed" );
+        BOOST_CHECK_EQUAL( rowStale->findings_size(), 0 );
+        BOOST_CHECK_EQUAL( auxiliaryReads, 0 ); // The checkpoint, not this read, made it stale.
+        undo();
+    }
 
     // Receipts without native notifications (a headless owner) are rechecked from
     // content at a checkpoint, still with one library read for all of them.
@@ -742,6 +832,43 @@ BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent
     auto replay = jobs.ReadOperation( request, board, epoch );
     BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
     BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
+
+    // A checkpoint observes the project settings and reads the rules file once for
+    // every receipt of the board; each read observes them for its own receipt.
+    { std::ofstream file( rulesPath ); file << original; }
+    DispatchFiles( loop );
+    auto one = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( one );
+    BOOST_REQUIRE( Wait( jobs, board, *one ).status() == PDRCJS_COMPLETED );
+    auto two = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE( two );
+    BOOST_REQUIRE( Wait( jobs, board, *two ).status() == PDRCJS_COMPLETED );
+    int projectObservations = 0;
+    CountProjectObservations( jobs, projectObservations );
+    Observe( jobs, board, epoch );
+    BOOST_CHECK_EQUAL( projectObservations, 1 );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *one ), "" );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *two ), "" );
+    projectObservations = 0;
+    BOOST_CHECK( jobs.Read( Query( *one ), board, epoch )->status() == PDRCJS_COMPLETED );
+    BOOST_CHECK( jobs.Read( Query( *two ), board, epoch )->status() == PDRCJS_COMPLETED );
+    BOOST_CHECK_EQUAL( projectObservations, 2 );
+    { std::ofstream file( rulesPath ); file << changed; } // Its notification has not run yet.
+    projectObservations = 0;
+    Observe( jobs, board, epoch );
+    BOOST_CHECK_EQUAL( projectObservations, 1 ); // One rules file read made both stale.
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *one ), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( Invalidation( jobs, *two ), "project_inputs_changed" );
+    projectObservations = 0;
+    for( const auto& receipt : { *one, *two } )
+    {
+        auto checkpointStale = jobs.Read( Query( receipt ), board, epoch );
+        BOOST_REQUIRE( checkpointStale );
+        BOOST_CHECK( checkpointStale->status() == PDRCJS_STALE );
+        BOOST_CHECK_EQUAL( checkpointStale->error_code(), "project_inputs_changed" );
+        BOOST_CHECK_EQUAL( checkpointStale->findings_size(), 0 );
+    }
+    BOOST_CHECK_EQUAL( projectObservations, 0 ); // A stale receipt is never observed again.
 }
 
 BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument )

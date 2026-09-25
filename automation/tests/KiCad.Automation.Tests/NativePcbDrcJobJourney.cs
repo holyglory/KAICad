@@ -17,46 +17,9 @@ public sealed partial class NativeSessionTests
         // input capture is still open (p23deb822a36256a6). An ordinary job must run on
         // its detached snapshot, leave the live board untouched and never claim a
         // complete snapshot or fresh results.
-        async Task<(StartPcbDrcJob Request, PcbDrcJobState State)> Run(DocumentLifecycleState at)
-        {
-            var request = new StartPcbDrcJob
-            {
-                Document = board, ProcessEpoch = client.Epoch,
-                ExpectedRevision = at.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D")
-            };
-            var started = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, token);
-            Assert.AreEqual(board, started.Document);
-            Assert.AreEqual(request.OperationId, started.OperationId);
-            Assert.AreEqual(client.Epoch, started.ProcessEpoch);
-            Assert.AreEqual(at.Revision, started.CheckedRevision);
-            Assert.IsTrue(Guid.TryParseExact(started.JobId, "D", out _));
-            Assert.IsFalse(started.CandidateDryRun);
-            Assert.IsEmpty(started.CandidateItemIds);
-            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
-            wait.CancelAfter(TimeSpan.FromMinutes(2));
-            int delay = 25;
-            var state = started;
-            while (!state.WorkerFinished)
-            {
-                await Task.Delay(delay, wait.Token);
-                delay = Math.Min(delay * 2, 500);
-                state = await Read(started, wait.Token);
-                Assert.AreEqual(started.JobId, state.JobId);
-            }
-            return (request, state);
-        }
-        Task<PcbDrcJobState> Read(PcbDrcJobState job, CancellationToken cancellation) =>
-            client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(new()
-                { Document = board, JobId = job.JobId, ProcessEpoch = client.Epoch }, cancellation);
-        static void AssertStale(PcbDrcJobState job, string code, string because)
-        {
-            Assert.AreEqual(PcbDrcJobStatus.PdrcjsStale, job.Status, because + " " + job.ErrorCode + ": " + job.ErrorMessage);
-            Assert.AreEqual(code, job.ErrorCode, because);
-            Assert.IsEmpty(job.Findings, because + " A stale check must not expose its old findings.");
-            Assert.IsTrue(job.WorkerFinished, because);
-            Assert.IsFalse(job.ResultsFresh, because);
-            Assert.IsFalse(job.SnapshotComplete, because);
-        }
+        Task<(StartPcbDrcJob Request, PcbDrcJobState State)> Run(DocumentLifecycleState at) => RunPcbDrcJob(client, board, at, token);
+        Task<PcbDrcJobState> Read(PcbDrcJobState job, CancellationToken cancellation) => ReadPcbDrcJobState(client, board, job, cancellation);
+        static void AssertStale(PcbDrcJobState job, string code, string because) => AssertPcbDrcJobStale(job, code, because);
         Task Evidence(string name, PcbDrcJobState state) => File.WriteAllTextAsync(
             Path.Combine(evidence, name), SchematicJson.Formatter.Format(state), token);
 
@@ -184,5 +147,154 @@ public sealed partial class NativeSessionTests
             "A new check of the reloaded board must report the findings of the saved board.");
         Assert.IsFalse(third.SnapshotComplete);
         Assert.IsFalse(third.ResultsFresh);
+    }
+
+    // Window activation is the PCB editor's checkpoint for changes that reach it without any notification. Here the
+    // board's custom rules file is a link to a file in another folder: KiCad watches the folder of the link, so it hears
+    // nothing when the linked file changes, and the check says so in its input warnings. Only activating the PCB editor
+    // (the person switches back to it) can then make the check stale before an agent reads it again.
+    private static async Task VerifyPcbDrcJobActivation(NativeClient client, DocumentSpecifier board, int processId,
+        string display, string evidence, CancellationToken token)
+    {
+        const string uncovered = "Some native input notifications are unavailable; status reads recheck content";
+        const string original = "(version 1)\n(rule \"fixture_linked\" (constraint clearance (min 0.3mm)))\n";
+        const string changed = "(version 1)\n(rule \"fixture_linked\" (constraint clearance (min 0.4mm)))\n";
+        var schematic = (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(
+            new() { Type = DocumentType.DoctypeSchematic }, token)).Documents.Single();
+        string rules = Path.Combine(board.Project.Path, Path.ChangeExtension(board.BoardFilename, ".kicad_dru"));
+        Task Evidence(string name, PcbDrcJobState state) => File.WriteAllTextAsync(
+            Path.Combine(evidence, name), SchematicJson.Formatter.Format(state), token);
+        // KiCad handles notifications, activation and API requests on its UI thread. The pause only gives a busy UI thread
+        // its turn; the assertions after it prove the result.
+        async Task Settle()
+        {
+            await ObserveLifecycleState(client, board, token);
+            await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+            await ObserveLifecycleState(client, board, token);
+        }
+        // The schematic editor's canvas holds the keyboard focus exactly while its window is the active one.
+        async Task SchematicFocus(bool focused, string because)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(8));
+            int delay = 25;
+            try
+            {
+                while (true)
+                {
+                    try
+                    {
+                        var observation = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(
+                            new() { Document = schematic }, limit.Token);
+                        if (observation.Preview.Viewport.CanvasHasKeyboardFocus == focused) return;
+                    }
+                    catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                    await Task.Delay(delay, limit.Token);
+                    delay = Math.Min(delay * 2, 200);
+                }
+            }
+            catch (OperationCanceledException) when (limit.IsCancellationRequested && !token.IsCancellationRequested)
+            {
+                await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + "-drc-job-activation-focus.png"), token);
+                throw new AssertFailedException(because);
+            }
+        }
+
+        byte[]? saved = File.Exists(rules) ? await File.ReadAllBytesAsync(rules, token) : null;
+        string outside = Directory.CreateTempSubdirectory("kicad-drc-activation-").FullName;
+        string target = Path.Combine(outside, "linked.kicad_dru");
+        bool linked = false;
+        try
+        {
+            if (saved is not null) File.Delete(rules);
+            await File.WriteAllTextAsync(target, original, token);
+            File.CreateSymbolicLink(rules, target);
+            linked = true;
+            await Settle(); // The link's own creation notification runs before the checks start.
+
+            // Without an activation, a change that reached no notification and was put back before the read is not
+            // seen: the check's inputs are again exactly what it checked.
+            var (_, control) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+            await Evidence("pcb-drc-job-activation-control.json", control);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, control.Status, control.ErrorCode + ": " + control.ErrorMessage);
+            CollectionAssert.Contains(control.InputWarnings.ToArray(), uncovered,
+                "A check whose rules file is a link must say that notifications do not cover all of its inputs.");
+            await File.WriteAllTextAsync(target, changed, token);
+            await Settle();
+            await File.WriteAllTextAsync(target, original, token);
+            var unobserved = await ReadPcbDrcJobState(client, board, control, token);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, unobserved.Status,
+                "Nothing but a read observed the linked rules, and they were put back first. " + unobserved.ErrorCode + ": " + unobserved.ErrorMessage);
+            Assert.AreEqual(control.Findings.Count, unobserved.Findings.Count);
+
+            // The same change, now with the PCB editor activated while the linked rules are changed: the person moves
+            // to the schematic editor and back.
+            var (_, check) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, check.Status, check.ErrorCode + ": " + check.ErrorMessage);
+            CollectionAssert.Contains(check.InputWarnings.ToArray(), uncovered);
+            await File.WriteAllTextAsync(target, changed, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", controlKey: false); // The schematic canvas background.
+            await SchematicFocus(true, "The schematic editor did not become the active window.");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor", false, false);
+            await SchematicFocus(false, "The PCB editor did not become the active window again.");
+            await Settle();
+            await File.WriteAllTextAsync(target, original, token);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + "-drc-job-activation.png"), token);
+            var activated = await ReadPcbDrcJobState(client, board, check, token);
+            await Evidence("pcb-drc-job-activation-stale.json", activated);
+            AssertPcbDrcJobStale(activated, "project_inputs_changed",
+                "Activating the PCB editor after its linked rules changed must make the check stale before any read, and putting the rules back must not revive it.");
+        }
+        finally
+        {
+            if (linked) File.Delete(rules); // Only the link this step created.
+            if (saved is not null) await File.WriteAllBytesAsync(rules, saved, CancellationToken.None);
+            Directory.Delete(outside, true);
+        }
+    }
+
+    // Starts an ordinary PCB DRC job at the given revision and reads it until its worker finished.
+    private static async Task<(StartPcbDrcJob Request, PcbDrcJobState State)> RunPcbDrcJob(NativeClient client,
+        DocumentSpecifier board, DocumentLifecycleState at, CancellationToken token)
+    {
+        var request = new StartPcbDrcJob
+        {
+            Document = board, ProcessEpoch = client.Epoch,
+            ExpectedRevision = at.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D")
+        };
+        var started = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, token);
+        Assert.AreEqual(board, started.Document);
+        Assert.AreEqual(request.OperationId, started.OperationId);
+        Assert.AreEqual(client.Epoch, started.ProcessEpoch);
+        Assert.AreEqual(at.Revision, started.CheckedRevision);
+        Assert.IsTrue(Guid.TryParseExact(started.JobId, "D", out _));
+        Assert.IsFalse(started.CandidateDryRun);
+        Assert.IsEmpty(started.CandidateItemIds);
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
+        wait.CancelAfter(TimeSpan.FromMinutes(2));
+        int delay = 25;
+        var state = started;
+        while (!state.WorkerFinished)
+        {
+            await Task.Delay(delay, wait.Token);
+            delay = Math.Min(delay * 2, 500);
+            state = await ReadPcbDrcJobState(client, board, started, wait.Token);
+            Assert.AreEqual(started.JobId, state.JobId);
+        }
+        return (request, state);
+    }
+
+    private static Task<PcbDrcJobState> ReadPcbDrcJobState(NativeClient client, DocumentSpecifier board, PcbDrcJobState job,
+        CancellationToken token) => client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(new()
+            { Document = board, JobId = job.JobId, ProcessEpoch = client.Epoch }, token);
+
+    private static void AssertPcbDrcJobStale(PcbDrcJobState job, string code, string because)
+    {
+        Assert.AreEqual(PcbDrcJobStatus.PdrcjsStale, job.Status, because + " " + job.ErrorCode + ": " + job.ErrorMessage);
+        Assert.AreEqual(code, job.ErrorCode, because);
+        Assert.IsEmpty(job.Findings, because + " A stale check must not expose its old findings.");
+        Assert.IsTrue(job.WorkerFinished, because);
+        Assert.IsFalse(job.ResultsFresh, because);
+        Assert.IsFalse(job.SnapshotComplete, because);
     }
 }

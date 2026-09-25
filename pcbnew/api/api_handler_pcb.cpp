@@ -496,12 +496,13 @@ tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOA
     return captured->ContentFingerprint();
 }
 
-void API_HANDLER_PCB::ObserveNativeDrcInputs()
+void API_HANDLER_PCB::ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged )
 {
     if( !board() || !Pgm().ApiServerOrNull() ) return;
     m_drcJobs.ObserveInputs( *board(), Pgm().GetApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
-            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); },
+            aLibraryConfigurationMayHaveChanged );
 }
 
 tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcAuxiliary( BOARD& source )

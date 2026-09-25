@@ -48,8 +48,12 @@ public:
     // its UI thread. A handler without a frame never subscribes to board events.
     void DetachDrcBoard( const BOARD* aBoard ) { m_drcJobs.DetachBoard( aBoard ); }
     void DrcBoardChanged( const BOARD* aBoard ) { m_drcJobs.BoardChanged( aBoard ); }
-    // Recovery checkpoint after activation or a settings notification.
-    void ObserveNativeDrcInputs();
+    // Recovery checkpoint after activation or a settings notification. A settings
+    // notification passes true: it may have changed library configuration in memory
+    // (path variables, library rows) without a file notification, so library content
+    // is compared for every check. Activation passes false and compares each check's
+    // library configuration first (PCB_DRC_JOB_MANAGER::ObserveInputs).
+    void ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged );
 
 private:
     typedef std::map<std::string, PROPERTY_BASE*> PROTO_PROPERTY_MAP;

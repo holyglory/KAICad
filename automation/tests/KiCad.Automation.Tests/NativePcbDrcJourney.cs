@@ -182,5 +182,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(0, cleared["board"]!["design_settings"]!["drc_exclusions"]!.AsArray().Count);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
         Assert.IsTrue((await Read()).Findings.All(finding => !finding.Excluded));
+        // A detached DRC job's window-activation checkpoint needs this step's rendered editor windows.
+        await VerifyPcbDrcJobActivation(client, board, processId, display, evidence, token);
     }
 }

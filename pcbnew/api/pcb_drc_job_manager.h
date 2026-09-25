@@ -17,6 +17,7 @@ class FOOTPRINT_LIBRARY_ADAPTER;
 class wxFileSystemWatcherEvent;
 class wxString;
 struct PCB_DRC_CAPTURE_CONTEXT;
+struct PCB_DRC_PROJECT_OBSERVATION;
 
 /**
  * Owns DRC jobs for one native process/document owner. Jobs run against a
@@ -79,15 +80,28 @@ public:
     void DetachBoard( const BOARD* aBoard );
     // A native committed change, undo/redo or settings edit reached the owner.
     void BoardChanged( const BOARD* aBoard );
-    // A recovery checkpoint (activation or settings notification): observe every
-    // live receipt of this board again. Already stale receipts never revive. Each
-    // live input is observed at most once per checkpoint, whatever the number of
-    // receipts, and the libraries of receipts whose file notifications cover them
-    // are not reread at all: their changes arrive as notifications, and every read
-    // still compares them before exposing results.
+    /*
+     * A recovery checkpoint: observe every live receipt of this board again.
+     * Already stale receipts never revive. The parity schematic, the drawing sheet
+     * and router settings, the project settings with the custom rules file, and the
+     * library content are each observed at most once per checkpoint, whatever the
+     * number of receipts.
+     *
+     * Library content changes on disk reach receipts whose native file
+     * notifications cover their libraries as notifications. Library configuration
+     * changes in memory do not: path variables (Configure Paths), or a library row
+     * disabled, repointed, reloaded or given another type or options. A settings
+     * notification passes aLibraryConfigurationMayHaveChanged and compares library
+     * content for every receipt. Window activation passes false: a covered receipt
+     * then skips the library content only while each of its libraries still has
+     * the row, resolved URI, type, options, disabled flag and loaded state recorded
+     * when it started, compared without loading any footprint. Every read still
+     * compares all inputs before exposing results (n456d6b796cd7a9a3).
+     */
     void ObserveInputs( BOARD& aBoard, const std::string& aProcessEpoch,
                         const SCHEMATIC_OBSERVER& aObserveSchematic,
-                        const LIBRARY_OBSERVER& aObserveLibraries );
+                        const LIBRARY_OBSERVER& aObserveLibraries,
+                        bool aLibraryConfigurationMayHaveChanged );
 
 private:
     friend struct DRC_CAPTURE_FIXTURE;
@@ -107,6 +121,9 @@ private:
     // receipts sharing one directory subscription, and its native watched paths.
     int fileSubscribers( const wxString& aDirectory ) const;
     int nativeWatches() const;
+    // Lifecycle fixture introspection without an observation: the stale reason of a
+    // receipt a notification or checkpoint invalidated, or empty while it is live.
+    std::string invalidation( const std::string& aJobId ) const;
     std::shared_ptr<JOB> find( const std::string& aJobId ) const;
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
             const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
@@ -118,6 +135,9 @@ private:
 
     mutable std::mutex m_mutex;
     const AUXILIARY_OBSERVER m_observeAuxiliary;
+    // Observes the live project inputs (PCB_DRC_PROJECT_BASELINE::Observe); the
+    // lifecycle fixture counts observations through it.
+    std::function<PCB_DRC_PROJECT_OBSERVATION( const BOARD& )> m_observeProject;
     std::map<std::string, std::shared_ptr<JOB>> m_jobs;
     // Owner-thread native subscriptions. Workers never see these objects.
     LIBRARY_RESOLVER m_resolveLibraries;

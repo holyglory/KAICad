@@ -74,16 +74,20 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
 }
 }
 
-nlohmann::json PCB_DRC_PROJECT_BASELINE::ObserveSettings( const BOARD& aBoard )
+PCB_DRC_PROJECT_OBSERVATION PCB_DRC_PROJECT_BASELINE::Observe( const BOARD& aBoard )
 {
-    return ProjectInputs( aBoard );
+    PCB_DRC_PROJECT_OBSERVATION result;
+    result.settings = ProjectInputs( aBoard );
+    result.rulesPath = aBoard.GetDesignRulesPath();
+    if( !result.rulesPath.empty() ) result.rules = FILE_CONTENT_BASELINE::Read( result.rulesPath );
+    return result;
 }
 
 bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
 {
     try
     {
-        return Unchanged( aBoard, ProjectInputs( aBoard ) );
+        return Unchanged( Observe( aBoard ) );
     }
     catch( const std::exception& )
     {
@@ -92,14 +96,20 @@ bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
     }
 }
 
-bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard, const nlohmann::json& aObservedSettings ) const
+bool PCB_DRC_PROJECT_BASELINE::Unchanged( const PCB_DRC_PROJECT_OBSERVATION& aObserved ) const
 {
     try
     {
-        const wxString rulesPath = aBoard.GetDesignRulesPath();
-        const bool rulesUnchanged = m_rules.Path().empty() ? rulesPath.empty()
-                : m_rules.Check( rulesPath ) == FILE_BASELINE_CHECK::UNCHANGED;
-        return rulesUnchanged && m_settings == aObservedSettings;
+        // The same comparison as FILE_CONTENT_BASELINE::Check, against the rules file
+        // content the observation already read: an unreadable file, another path or
+        // other bytes are never unchanged.
+        const FILE_CONTENT_BASELINE& now = aObserved.rules;
+        const bool rulesUnchanged = m_rules.Path().empty() ? aObserved.rulesPath.empty()
+                : m_rules.Known() && now.Known()
+                  && FILE_CONTENT_BASELINE::SamePath( m_rules.Path(), aObserved.rulesPath )
+                  && now.Exists() == m_rules.Exists() && now.Bytes() == m_rules.Bytes()
+                  && now.Sha256() == m_rules.Sha256();
+        return rulesUnchanged && m_settings == aObserved.settings;
     }
     catch( const std::exception& )
     {

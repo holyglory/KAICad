@@ -136,8 +136,9 @@ struct PCB_DRC_JOB_MANAGER::LIVE_INPUTS
     LIBRARY_OBSERVER libraries;
     AUXILIARY_OBSERVER auxiliary;
     std::function<bool( const PCB_DRC_PROJECT_BASELINE& )> projectUnchanged;
-    // The receipt's native file notifications cover every library input, so this
-    // observation need not reread them. Reads never set it (n456d6b796cd7a9a3).
+    // The receipt's native file notifications cover every library file and its
+    // library configuration is unchanged, so this window-activation checkpoint need
+    // not reread library content. Reads never set it (n456d6b796cd7a9a3).
     bool librariesNotified = false;
 };
 
@@ -177,6 +178,19 @@ std::string ChangeMessage( const std::string& aCode )
 
 const char* const LOST_EVENTS_MESSAGE =
         "Native input notifications were lost; start a new job from a fresh capture";
+
+// The configuration of one footprint library that KiCad can change in memory
+// without any file notification: whether the nickname has a row, the row's URI with
+// path variables resolved, its type, options and disabled flag, and whether the
+// library is loaded. Reading it loads no footprint.
+std::string LibraryConfiguration( FOOTPRINT_LIBRARY_ADAPTER& aAdapter, const wxString& aNickname )
+{
+    auto row = aAdapter.GetRow( aNickname );
+    if( !row ) return nlohmann::json::array().dump();
+    return nlohmann::json( { LIBRARY_MANAGER::GetFullURI( *row, true ).utf8_string(),
+                             ( *row )->Type().utf8_string(), ( *row )->Options().utf8_string(),
+                             ( *row )->Disabled(), aAdapter.IsLibraryLoaded( aNickname ) } ).dump();
+}
 }
 
 // One native file subscription for every receipt of this owner. A single kernel
@@ -292,6 +306,8 @@ struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
     uint64_t generation = 0;
     LIBRARY_CONTENT libraryContent;
     bool covered = false;
+    // LibraryConfiguration() of every library nickname the board used at capture.
+    std::map<wxString, std::string> libraryConfiguration;
 
     INPUT_WATCHER( PCB_DRC_JOB_MANAGER& aOwner, BOARD& aBoard ) : owner( aOwner ), board( aBoard )
     {
@@ -548,7 +564,8 @@ void PCB_DRC_JOB_MANAGER::fileEvent( wxFileSystemWatcherEvent& event )
 }
 
 void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
-        const SCHEMATIC_OBSERVER& schematic, const LIBRARY_OBSERVER& libraries )
+        const SCHEMATIC_OBSERVER& schematic, const LIBRARY_OBSERVER& libraries,
+        bool libraryConfigurationMayHaveChanged )
 {
     std::vector<std::shared_ptr<JOB>> receipts;
     {
@@ -560,7 +577,7 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
     using TEXT = tl::expected<std::string, std::string>;
     std::optional<TEXT> auxiliary, catalogue;
     bool projectObserved = false;
-    std::optional<nlohmann::json> project; // Empty after a failed observation.
+    std::optional<PCB_DRC_PROJECT_OBSERVATION> project; // Empty after a failed observation.
     std::vector<std::pair<DocumentSpecifier, tl::expected<DocumentLifecycleState, std::string>>> schematics;
     LIVE_INPUTS shared;
     if( schematic )
@@ -606,10 +623,37 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
         if( !projectObserved )
         {
             projectObserved = true;
-            try { project.emplace( PCB_DRC_PROJECT_BASELINE::ObserveSettings( board ) ); }
+            try { project.emplace( m_observeProject( board ) ); }
             catch( const std::exception& ) { }
         }
-        return project.has_value() && baseline.Unchanged( board, *project );
+        return project.has_value() && baseline.Unchanged( *project );
+    };
+    // The current configuration of each library, read at most once per checkpoint
+    // from the owner's current adapter. An unavailable owner matches nothing.
+    bool adapterResolved = false;
+    FOOTPRINT_LIBRARY_ADAPTER* adapter = nullptr;
+    std::map<wxString, std::optional<std::string>> configurations;
+    auto configurationUnchanged = [&]( const INPUT_WATCHER& watch )
+    {
+        for( const auto& [nickname, recorded] : watch.libraryConfiguration )
+        {
+            auto found = configurations.find( nickname );
+            if( found == configurations.end() )
+            {
+                if( !adapterResolved )
+                {
+                    adapterResolved = true;
+                    try { adapter = m_resolveLibraries ? m_resolveLibraries( board ) : nullptr; }
+                    catch( const std::exception& ) { adapter = nullptr; }
+                }
+                std::optional<std::string> current;
+                try { if( adapter ) current = LibraryConfiguration( *adapter, nickname ); }
+                catch( const std::exception& ) { }
+                found = configurations.emplace( nickname, std::move( current ) ).first;
+            }
+            if( !found->second || *found->second != recorded ) return false;
+        }
+        return true;
     };
     for( const auto& job : receipts )
     {
@@ -618,10 +662,14 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
             if( job->invalidated || job->checkedBoardEpoch != board.m_Uuid.AsStdString() ) continue;
         }
         // Library files of a covered receipt are watched by the current native
-        // subscription, so their changes arrive as notifications.
+        // subscription, so their content changes arrive as notifications. Library
+        // configuration changes arrive as none: a settings notification compares the
+        // library content, and activation does when a library's configuration changed.
         const auto watch = m_watches.find( job->id );
-        shared.librariesNotified = watch != m_watches.end() && watch->second->covered && m_files
-                                   && !m_files->retired && watch->second->generation == m_files->generation;
+        shared.librariesNotified = !libraryConfigurationMayHaveChanged && watch != m_watches.end()
+                                   && watch->second->covered && m_files && !m_files->retired
+                                   && watch->second->generation == m_files->generation
+                                   && configurationUnchanged( *watch->second );
         // Activation/settings notification is a recovery checkpoint, including
         // changes made in another editor of this process. Never revive receipts
         // already invalidated by a change or an overflow.
@@ -639,6 +687,14 @@ int PCB_DRC_JOB_MANAGER::fileSubscribers( const wxString& aDirectory ) const
 int PCB_DRC_JOB_MANAGER::nativeWatches() const
 {
     return m_files && m_files->native ? m_files->native->GetWatchedPathsCount() : 0;
+}
+
+std::string PCB_DRC_JOB_MANAGER::invalidation( const std::string& aJobId ) const
+{
+    const auto job = find( aJobId );
+    if( !job ) return "unknown job";
+    std::lock_guard lock( job->mutex );
+    return job->invalidated ? job->errorCode : std::string();
 }
 
 void PCB_DRC_JOB_MANAGER::retireWatches()
@@ -720,6 +776,10 @@ std::unique_ptr<PCB_DRC_JOB_MANAGER::INPUT_WATCHER> PCB_DRC_JOB_MANAGER::watchIn
         {
             const wxString nickname = footprint->GetFPID().GetLibNickname();
             if( nickname.empty() ) continue;
+            // In-memory configuration changes produce no notification; window
+            // activation compares this record instead (ObserveInputs).
+            if( !watch->libraryConfiguration.contains( nickname ) )
+                watch->libraryConfiguration.emplace( nickname, LibraryConfiguration( adapter, nickname ) );
             // A nickname without a row is covered by the library table watches.
             if( auto row = adapter.GetRow( nickname ) )
                 libraries[LIBRARY_MANAGER::GetFullURI( *row, true )].insert( nickname );
@@ -733,7 +793,8 @@ std::unique_ptr<PCB_DRC_JOB_MANAGER::INPUT_WATCHER> PCB_DRC_JOB_MANAGER::watchIn
 }
 
 PCB_DRC_JOB_MANAGER::PCB_DRC_JOB_MANAGER( AUXILIARY_OBSERVER aObserveAuxiliary ) :
-        m_observeAuxiliary( std::move( aObserveAuxiliary ) )
+        m_observeAuxiliary( std::move( aObserveAuxiliary ) ),
+        m_observeProject( &PCB_DRC_PROJECT_BASELINE::Observe )
 {}
 
 PCB_DRC_JOB_MANAGER::~PCB_DRC_JOB_MANAGER()
@@ -769,8 +830,11 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     inputs.schematic = aObserveSchematic;
     inputs.libraries = aObserveLibraries;
     inputs.auxiliary = m_observeAuxiliary;
-    inputs.projectUnchanged = [&aBoard]( const PCB_DRC_PROJECT_BASELINE& baseline )
-    { return baseline.Unchanged( aBoard ); };
+    inputs.projectUnchanged = [this, &aBoard]( const PCB_DRC_PROJECT_BASELINE& baseline )
+    {
+        try { return baseline.Unchanged( m_observeProject( aBoard ) ); }
+        catch( const std::exception& ) { return false; } // Never evidence of freshness.
+    };
     return state( aJob, aBoard, aProcessEpoch, inputs );
 }
 

@@ -13,7 +13,13 @@ public sealed partial class NativeSessionTests
     {
         string directory = Directory.CreateDirectory(Path.Combine(temporary, "interrupted-start")).FullName;
         string project = Path.Combine(directory, "recover.kicad_pro");
-        await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}", token);
+        // The project declares its root sheet, which holds two unconnected probes for the recorded-handshake
+        // planning step at the end. KiCad reads the declaration once, when it loads the project at startup.
+        string rootId = Guid.NewGuid().ToString("D");
+        await File.WriteAllTextAsync(project, $$$"""
+            {"meta":{"version":3},"schematic":{"top_level_sheets":[{"uuid":"{{{rootId}}}","name":"recover","filename":"recover.kicad_sch"}]}}
+            """, token);
+        await File.WriteAllTextAsync(Path.ChangeExtension(project, ".kicad_sch"), UnconnectedProbePair(rootId, "recover"), token);
         string state = Path.Combine(directory, "registry");
         var barrier = new StartupHandshakeBarrier();
         var registry = new InstanceRegistry(barrier, state, start =>
@@ -70,7 +76,8 @@ public sealed partial class NativeSessionTests
             string[] features = NativeFeatureContracts.Verify(session);
             // A manager with no editor open lists exactly what it dispatches in handled_requests: its
             // own requests and the automation controllers, but no schematic editor request until an
-            // editor opens.
+            // editor opens. It opens and closes documents but has no close-all, so that request is
+            // neither dispatched nor listed.
             string[] managerOnly = await NativeCapabilityProbe.VerifyHandshakeAsync(recovered.Client(attached.InstanceId),
                 Path.Combine(evidence, "startup-recovery.capabilities.json"), token);
             foreach (string type in new[] { GetAutomationSession.Descriptor.FullName, GetVersion.Descriptor.FullName,
@@ -78,6 +85,8 @@ public sealed partial class NativeSessionTests
                          CheckedSchematicBatch.Descriptor.FullName })
                 CollectionAssert.Contains(managerOnly, type);
             CollectionAssert.DoesNotContain(managerOnly, ReadSchematicScreenData.Descriptor.FullName);
+            CollectionAssert.DoesNotContain(managerOnly, CloseAllDocuments.Descriptor.FullName,
+                "The desktop manager has no close-all callback, so it must not dispatch or list CloseAllDocuments.");
             // The clean-close journey proves that opening and closing editors leaves them unchanged.
             CollectionAssert.AreEqual(features, (await recovered.Client(attached.InstanceId).HandshakeAsync(token)).Capabilities.ToArray(),
                 "A repeated handshake of the same manager must name the same feature contracts.");
@@ -86,6 +95,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(0, third.List().Count);
             Assert.AreEqual(attached.InstanceId, (await third.SavedSessionsAsync(token)).Single().InstanceId);
             Assert.AreEqual(attached.Epoch, (await third.ReattachAsync(attached.InstanceId, token)).Epoch);
+            await VerifyRecordedHandshakePlanning(recovered.Client(attached.InstanceId), state,
+                Path.ChangeExtension(project, ".kicad_sch"), evidence, token);
         }
         finally
         {

@@ -40,7 +40,10 @@ public:
      * it does not.  KiCad decides this when it opens the project (the project file was read-only
      * then, or KiCad could not take the project lock), so the reason says what to change and that
      * the project must then be reopened.  For the lock it looks at the lock file as it is now: it
-     * names the holder when another program holds it, and says so when nothing does.
+     * names the holder when another program holds it, the lock file when it is read-only, the
+     * other user when the record names one, and says so when nothing holds it.  While KiCad keeps
+     * its own lock object for the project, which may hold the lock file itself, it never calls
+     * the holder another program and names the recorded owner instead.
      */
     static wxString ReadOnlyProjectReason( const PROJECT& aProject );
 

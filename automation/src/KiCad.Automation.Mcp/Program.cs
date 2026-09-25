@@ -69,6 +69,10 @@ builder.Services.AddSingleton<FileIntakeRegistry>();
 builder.Services.AddSingleton<NativeIntakeRegistry>();
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), stateDirectory));
+// The synchronization preview classifies with the handshake each instance gave when it was
+// attached, without contacting KiCad (decision n39ac0ccc5c9270f2).
+builder.Services.AddSingleton<IAttachedHandshakes>(provider =>
+    new AttachedHandshakes(provider.GetRequiredService<InstanceRegistry>().AttachedHandshake));
 builder.Services.AddMcpServer(options =>
 {
     options.ServerInstructions = "Operate only explicitly identified KiCad instances. Listed registrations are not proof a process is still live: inspect before use. Do not edit native design files behind a live editor. Mutations require explicit targets and the documented revision/retry identities. After a lost mutation reply, inspect its receipt or retry identical arguments with the same operation ID. Do not infer routing, complete revision tracking or XML reconstruction support from a successful connection.";

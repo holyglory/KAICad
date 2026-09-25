@@ -264,11 +264,10 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
     }
 
     // A project whose lock KiCad could not take when it opened it stays read-only until it is
-    // reopened (SETTINGS_MANAGER::LoadProject, KICAD_MANAGER_FRAME::ProjectChanged). That happens
-    // when another program holds the lock, but also when the lock file could not be created or
-    // written, or records another user. Look at the lock as it is now, so the reason names what
-    // still stands in the way instead of guessing at what did then.
-    const LOCKFILE* lock = aProject.GetProjectLock();
+    // reopened (SETTINGS_MANAGER::LoadProject, KICAD_MANAGER_FRAME::ProjectChanged). Look at the
+    // lock as it is now, so the reason names what still stands in the way; nothing here guesses at
+    // what happened when the project was opened.
+    LOCKFILE* lock = aProject.GetProjectLock();
 
     if( !lock || !lock->Valid() )
     {
@@ -276,14 +275,19 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
         LOCKFILE       current = LOCKFILE::Inspect( path );
         const wxString user = current.GetUsername();
         const wxString host = current.GetHostname();
+        const bool     exists = wxFileName::FileExists( lockPath );
+        const wxString owner = user.empty() && host.empty()
+                                       ? wxString( wxS( "its lock file does not say who" ) )
+                                       : wxString::Format( wxS( "its lock file names user '%s' on computer '%s'" ),
+                                                           user, host );
 
-        if( !current.Valid() )
+        // Inspect() reports the lock as held while any open lock file holds it. KiCad itself keeps
+        // the lock it could not validate (KICAD_MANAGER_FRAME::ProjectChanged), and for another
+        // user's record that object holds the lock file's system lock (FILE_LOCK::Acquire succeeds,
+        // LOCKFILE refuses the record), so only without such an object does "held" mean that
+        // another program holds it.
+        if( !lock && !current.Valid() )
         {
-            const wxString owner = user.empty() && host.empty()
-                                           ? wxString( wxS( "its lock file does not say who" ) )
-                                           : wxString::Format( wxS( "its lock file names user '%s' on computer '%s'" ),
-                                                               user, host );
-
             return wxString::Format( wxS( "KiCad opened this project read-only because another program holds its "
                                           "project lock '%s' (%s); close the project there, then reopen it in "
                                           "KiCad" ),
@@ -291,7 +295,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
         }
 
         // KiCad takes a lock by opening its file for writing (FILE_LOCK::Acquire).
-        if( wxFileName::FileExists( lockPath ) && !wxFileName::IsFileWritable( lockPath ) )
+        if( exists && !wxFileName::IsFileWritable( lockPath ) )
             return wxString::Format( wxS( "KiCad opened this project read-only because it cannot write its project "
                                           "lock file '%s' (the file is read-only), so it could not take the lock; "
                                           "make the lock file writable or delete it, then reopen the project in "
@@ -300,7 +304,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
 
         // An abandoned lock is taken over only when it is this user's own on this computer: another
         // user's may still be in use on another computer that shares the folder.
-        if( !current.IsLockedByMe() )
+        if( exists && !current.IsLockedByMe() )
             return wxString::Format( wxS( "KiCad opened this project read-only because its project lock '%s' belongs "
                                           "to user '%s' on computer '%s', and KiCad never takes over another user's "
                                           "lock because that user may have the project open on another computer; "
@@ -308,9 +312,18 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( const PROJECT& aP
                                           "project open, then reopen it in KiCad" ),
                                      lockPath, user, host );
 
-        return wxString::Format( wxS( "KiCad could not take the project lock '%s' when it opened the project (for "
-                                      "example because the lock file could not be created), so it opened the project "
-                                      "read-only; nothing holds the lock now, so reopen the project in KiCad" ),
+        // KiCad's own lock object could not take a lock that names this user on this computer (or
+        // nobody). Whether another KiCad holds it cannot be told from here, since KiCad's object
+        // may hold it itself, so the reason names only the record and what to do.
+        if( lock && exists )
+            return wxString::Format( wxS( "KiCad could not take the project lock '%s' when it opened the project, so "
+                                          "it opened the project read-only (%s); close the project in any other "
+                                          "KiCad that has it open, then reopen it in KiCad" ),
+                                     lockPath, owner );
+
+        return wxString::Format( wxS( "KiCad could not take the project lock '%s' when it opened the project, so it "
+                                      "opened the project read-only; nothing holds the lock now, so reopen the "
+                                      "project in KiCad" ),
                                  lockPath );
     }
 
@@ -608,7 +621,8 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                         ? "Fix what stops KiCad writing the named files (for example make the file or folder "
                           "writable or free disk space), then " + again
                 : !refused.empty()
-                        ? "Resolve what KiCad refused; making files writable does not help. Then " + again
+                        ? "Resolve what KiCad refused, as named above; making the document's files writable does "
+                          "not help. Then " + again
                 : !failed.empty() || !unconfirmed.empty()
                         ? "KiCad found nothing that blocks the named files now, so the cause may have passed (for "
                           "example a full disk or an unavailable network drive): check the disk, then " + again

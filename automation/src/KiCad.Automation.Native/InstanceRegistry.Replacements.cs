@@ -68,7 +68,7 @@ public sealed partial class InstanceRegistry
                 if (connections.TryGetValue(current.InstanceId, out var held)
                     && !SameIdentity(held.Record, previous) && !SameIdentity(held.Record, current))
                     throw new AutomationException("instance_changed", "The attached registration contradicts the replacement receipt.");
-                connections[current.InstanceId] = new(current, client);
+                connections[current.InstanceId] = new(current, client, session.Clone());
                 return new(current, true);
             }
             if (!SameIdentity(current, previous) || (connections.TryGetValue(previous.InstanceId, out var attached)
@@ -91,7 +91,7 @@ public sealed partial class InstanceRegistry
                 }
                 finally { if (File.Exists(pending)) File.Delete(pending); }
             }
-            var connection = new Connection(intent.Replacement, client);
+            var connection = new Connection(intent.Replacement, client, session.Clone());
             beforePublish?.Invoke();
             await WriteRecordAsync(intent.Replacement, token);
             connections[previous.InstanceId] = connection;

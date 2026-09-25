@@ -133,6 +133,42 @@ public sealed class McpProcessTests
             StringAssert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_apply_checked_batch").GetProperty("description").GetString(),
                 "\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\"", "The tool shows an agent how to write a typed object.");
+            // The checked view takes the rendered sheet and the checked state together for an explicit schematic root and a
+            // displayed sheet of that same schematic. An unreadable or non-root document, a view of another schematic, or an
+            // instance this server never attached is refused before KiCad is asked. The capture itself, and the observe-then-
+            // apply loop it serves, need a real editor: NativeSessionTests.AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits.
+            CollectionAssert.Contains(names, "kicad_schematic_checked_view");
+            string viewRoot = Guid.NewGuid().ToString("D");
+            string ViewDocument(params string[] path)
+            {
+                var sheetPath = new Kiapi.Common.Types.SheetPath();
+                sheetPath.Path.Add(path.Select(id => new Kiapi.Common.Types.KIID { Value = id }));
+                return SchematicJson.Formatter.Format(new Kiapi.Common.Types.DocumentSpecifier
+                {
+                    Type = (Kiapi.Common.Types.DocumentType)1, SheetPath = sheetPath,
+                    Project = new Kiapi.Common.Types.ProjectSpecifier { Name = "fixture", Path = state }
+                });
+            }
+            foreach (var (requestId, documentJson, viewDocumentJson, code) in new (int, string, string?, string)[]
+            {
+                (9094, "{\"type\":", null, "invalid_checked_document"),
+                (9095, ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), null, "invalid_checked_document"),
+                (9096, ViewDocument(viewRoot), ViewDocument(Guid.NewGuid().ToString("D")), "invalid_checked_document"),
+                (9097, ViewDocument(viewRoot), ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), "unknown_instance"),
+                (9098, ViewDocument(viewRoot), null, "unknown_instance")
+            })
+            {
+                string instanceId = Guid.NewGuid().ToString("D");
+                object arguments = viewDocumentJson is null ? new { instanceId, documentJson } : new { instanceId, documentJson, viewDocumentJson };
+                var refused = (await Request(requestId, "tools/call", new { name = "kicad_schematic_checked_view", arguments })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual(code, refused.GetProperty("structuredContent").GetProperty("code").GetString(), refused.GetRawText());
+                Assert.IsFalse(refused.GetProperty("content").EnumerateArray().Any(block => block.GetProperty("type").GetString() == "image"),
+                    "A refused view carries no image.");
+            }
+            Assert.IsTrue(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_checked_view").GetProperty("annotations")
+                .GetProperty("readOnlyHint").GetBoolean(), "Taking a view never edits the design.");
             CollectionAssert.Contains(names, "kicad_document_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_state");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");

@@ -1,5 +1,6 @@
 /* Checked lifecycle dispatch and process-owned retry receipts. GPL-3.0-or-later. */
 #include <api/document_lifecycle_controller.h>
+#include <api/common/commands/capability_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <wx/filename.h>
@@ -146,6 +147,78 @@ bool FileCoverage( const DocumentLifecycleState& aState )
     }
     return paths.empty();
 }
+
+// The rendered sheet an agent looks at and the checked state its next batch must name, taken at
+// one native checkpoint.  API dispatch runs synchronously on KiCad's GUI thread, so no editor
+// event (a keystroke, a pointer edit, an undo) runs between the three reads below; the closing
+// state read still refuses the pair if anything the state covers changed while rendering.
+API_RESULT ReadCheckedView( ApiRequest& aEnvelope, const std::string& aProcessEpoch,
+                            const DOCUMENT_LIFECYCLE_CONTROLLER::DISPATCH& aDispatch )
+{
+    ReadCheckedSchematicView request;
+    if( !aEnvelope.message().UnpackTo( &request ) || request.process_epoch() != aProcessEpoch
+            || !Uuid( aProcessEpoch ) || request.document().type() != kiapi::common::types::DOCTYPE_SCHEMATIC
+            || request.document().sheet_path().path_size() != 1
+            || !Uuid( request.document().sheet_path().path( 0 ).value() )
+            || request.view().type() != kiapi::common::types::DOCTYPE_SCHEMATIC
+            || request.view().sheet_path().path_size() < 1
+            || request.view().sheet_path().path( 0 ).value() != request.document().sheet_path().path( 0 ).value()
+            || !MessageDifferencer::Equals( request.view().project(), request.document().project() ) )
+        return Error( "A checked view requires the exact schematic root, a sheet of that schematic to view "
+                      "and the process epoch" );
+    auto call = [&]( const google::protobuf::Message& aMessage )
+    {
+        ApiRequest query;
+        query.mutable_header()->CopyFrom( aEnvelope.header() );
+        query.mutable_message()->PackFrom( aMessage );
+        return aDispatch( query );
+    };
+    CheckedSchematicView result;
+
+    ReadCheckedSchematicState checkedQuery;
+    checkedQuery.mutable_document()->CopyFrom( request.document() );
+    checkedQuery.set_process_epoch( aProcessEpoch );
+    // A busy editor, a pending transaction or a change during the combined read is refused with
+    // its own status, which the caller sees unchanged.
+    API_RESULT checked = call( checkedQuery );
+    if( !checked ) return checked;
+    if( checked->status().status() != ApiStatusCode::AS_OK || !checked->message().UnpackTo( result.mutable_checked() ) )
+        return Error( "The checked schematic state could not be read for the view" );
+
+    CaptureSchematicObservation viewQuery;
+    viewQuery.mutable_document()->CopyFrom( request.view() );
+    // The schema the checked electrical state uses, so both describe the same object fields.
+    viewQuery.set_schema_version( 9 );
+    API_RESULT view = call( viewQuery );
+    if( !view ) return view;
+    if( view->status().status() != ApiStatusCode::AS_OK || !view->message().UnpackTo( result.mutable_view() ) )
+        return Error( "The displayed sheet could not be captured for the view" );
+
+    ReadDocumentLifecycleState afterQuery;
+    afterQuery.mutable_document()->CopyFrom( request.document() );
+    API_RESULT after = call( afterQuery );
+    if( !after ) return after;
+    DocumentLifecycleState afterState;
+    if( after->status().status() != ApiStatusCode::AS_OK || !after->message().UnpackTo( &afterState ) )
+        return Error( "The schematic state could not be read again after rendering the view" );
+
+    const auto& revision = result.checked().state().revision();
+    if( !MessageDifferencer::Equals( afterState, result.checked().state() )
+            || !MessageDifferencer::Equals( result.view().preview().revision(), revision )
+            || !MessageDifferencer::Equals( result.view().snapshot().revision(), revision )
+            || !MessageDifferencer::Equals( result.view().preview().document(), request.view() )
+            || !MessageDifferencer::Equals( result.view().snapshot().data().metadata().document(), request.view() ) )
+    {
+        ApiResponseStatus changed;
+        changed.set_status( ApiStatusCode::AS_NOT_READY );
+        changed.set_error_message( "The schematic changed while its view was captured; observe again" );
+        return tl::unexpected( changed );
+    }
+    ApiResponse response;
+    response.mutable_status()->set_status( ApiStatusCode::AS_OK );
+    response.mutable_message()->PackFrom( result );
+    return response;
+}
 }
 
 const std::vector<std::string>& DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes()
@@ -155,7 +228,8 @@ const std::vector<std::string>& DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes()
         std::vector<std::string> names = {
             std::string( kiapi::automation::v1::CheckedSaveDocument::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::CheckedCloseDocument::descriptor()->full_name() ),
-            std::string( kiapi::automation::v1::ReadLifecycleOperation::descriptor()->full_name() )
+            std::string( kiapi::automation::v1::ReadLifecycleOperation::descriptor()->full_name() ),
+            std::string( kiapi::automation::v1::ReadCheckedSchematicView::descriptor()->full_name() )
         };
         std::sort( names.begin(), names.end() );
         return names;
@@ -359,6 +433,8 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         const std::string& aProcessEpoch, const DISPATCH& aDispatch )
 {
     using namespace kiapi::automation::v1;
+    if( aEnvelope.message().Is<ReadCheckedSchematicView>() )
+        return ReadCheckedView( aEnvelope, aProcessEpoch, aDispatch );
     if( aEnvelope.message().Is<ReadLifecycleOperation>() )
     {
         ReadLifecycleOperation query;

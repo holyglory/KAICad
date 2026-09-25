@@ -1,4 +1,29 @@
-/* KiCad native capability commands, owned by Phase 2 lane 2D. GPL-3.0-or-later. */
+/* KiCad native capability and observation commands, owned by Phase 2 lane 2D. GPL-3.0-or-later. */
 syntax = "proto3";
 package kiapi.automation.v1;
 option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/types/base_types.proto";
+import "common/commands/automation_commands.proto";
+
+// What an agent needs before it edits a live schematic: the rendered sheet it looks at and the
+// exact state a CheckedSchematicBatch must name, taken together at one native checkpoint.  KiCad
+// captures the whole-schematic checked state (ReadCheckedSchematicState), renders the displayed
+// sheet (CaptureSchematicObservation) and reads the document state again, all in this one request
+// on its own thread, so no editor event runs between them.  A state that differs afterwards
+// refuses the request (AS_NOT_READY) instead of pairing an image with another revision.
+message ReadCheckedSchematicView {
+  // The explicit schematic root, as for ReadCheckedSchematicState.
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  // The sheet instance the editor displays: the root itself or a sheet below it, in the same
+  // project.  A sheet the editor does not display is refused.
+  kiapi.common.types.DocumentSpecifier view = 3;
+}
+
+message CheckedSchematicView {
+  // checked.state is the expected_state of a batch planned from this view.
+  CheckedSchematicState checked = 1;
+  // The displayed sheet's image and objects; its snapshot and preview carry checked.state's revision.
+  SchematicObservation view = 2;
+}

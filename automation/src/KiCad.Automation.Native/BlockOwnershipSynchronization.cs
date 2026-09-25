@@ -31,11 +31,13 @@ public sealed record BlockOwnershipResult(BlockOwnershipPlan Plan, string BlockG
 
 /// <summary>Native edits reach the owning block by exact identity (ledger p74ee7c1da24272d9). A component the design
 /// holds and no block of the selected root owns (for example one placed in KiCad and adopted by synchronization) is
-/// bound to the block of the sheet it sits on: the deepest block of the selected hierarchy that owns every other component
-/// on that sheet (the owners of the components drawn on it or instantiated on it, and their common ancestor). No name,
-/// reference or position is used. A sheet with no owned component, or a component two blocks claim, is a resolution
-/// request. Bindings are written as new block revisions through the block graph's own draft API, which updates the
-/// selected root snapshot and keeps every earlier revision; an unchanged plan writes nothing.</summary>
+/// bound to the block of the sheet it sits on. Sheets are not blocks (psu-cpu-fixture-and-ownership.md §0 rule 3), so a
+/// sheet names a block only when one block owns every other component that sits on it or draws a unit there. No name,
+/// reference or position is used, and nothing is inferred from the block hierarchy: a sheet with no owned component, a
+/// sheet whose components several blocks own (the request offers every block from the selected root down to each of
+/// them) and a component two blocks claim are resolution requests the person answers. Bindings are written as new block
+/// revisions through the block graph's own draft API, which updates the selected root snapshot and keeps every earlier
+/// revision; an unchanged plan writes nothing.</summary>
 public static class BlockOwnershipSynchronization
 {
     public const string ResolutionRequired = "block_owner_resolution_required";
@@ -74,35 +76,36 @@ public static class BlockOwnershipSynchronization
             requests.Add(new(OwnerAmbiguous, component, components[component].Reference, components[component].SheetInstanceId,
                 [.. blocks.Order()], "Several blocks of the selected design own this component; keep it in exactly one."));
 
-        IReadOnlyList<Guid> Chain(Guid block)
+        var order = closure.Select((s, i) => (s.BlockId, i)).GroupBy(p => p.BlockId).ToDictionary(g => g.Key, g => g.First().i);
+        IEnumerable<Guid> Chain(Guid block)
         {
-            var chain = new List<Guid>();
-            for (Guid? current = block; current is { } id; current = parents[id]) chain.Add(id);
-            chain.Reverse();
-            return chain;
+            for (Guid? current = block; current is { } id; current = parents[id]) yield return id;
         }
         foreach (var component in circuit.Components.Where(c => !owners.ContainsKey(c.Id)).OrderBy(c => c.Id))
         {
             token.ThrowIfCancellationRequested();
             Guid sheet = component.SheetInstanceId;
-            var owning = circuit.Components.Where(c => c.Id != component.Id && owners.TryGetValue(c.Id, out var list) && list.Count == 1
+            // Every other component that sits on this sheet or draws a unit there, and the blocks that own it.
+            var owning = circuit.Components.Where(c => c.Id != component.Id && owners.ContainsKey(c.Id)
                     && (c.SheetInstanceId == sheet || circuit.Symbols.Any(s => s.ComponentId == c.Id && s.EffectiveSheetInstanceId(c) == sheet)))
-                .Select(c => owners[c.Id][0]).Distinct().ToArray();
+                .SelectMany(c => owners[c.Id]).Distinct().ToArray();
             if (owning.Length == 0)
             {
                 requests.Add(new(OwnerUnresolved, component.Id, component.Reference, sheet, [],
                     "No block owns a component on this sheet, so the sheet names no block; bind the component to the block that owns it."));
                 continue;
             }
-            // The deepest common ancestor of the owners of everything else on this sheet.
-            var chains = owning.Select(Chain).ToArray();
-            int depth = 0;
-            while (chains.All(c => c.Count > depth && c[depth] == chains[0][depth])) depth++;
-            Guid owner = chains[0][depth - 1];
-            assignments.Add(new(component.Id, component.Reference, sheet, owner, names[owner],
-                owning.Length == 1 && owning[0] == owner
-                    ? "Every other component on its sheet belongs to this block."
-                    : "This block contains the blocks that own every other component on its sheet."));
+            if (owning.Length == 1)
+            {
+                assignments.Add(new(component.Id, component.Reference, sheet, owning[0], names[owning[0]],
+                    "Every other component on its sheet belongs to this block."));
+                continue;
+            }
+            // Several blocks own what this sheet shows, so the sheet names no single block. Offer every block from the
+            // selected root down to each of them; the person decides.
+            requests.Add(new(OwnerUnresolved, component.Id, component.Reference, sheet,
+                [.. owning.SelectMany(Chain).Distinct().OrderBy(b => order[b])],
+                "Several blocks own the components on this sheet, so the sheet names no single block; bind the component to the block that owns it."));
         }
         var detached = owners.Keys.Where(id => !components.ContainsKey(id)).Order().ToArray();
         return new(graph.DocumentId, graph.SelectedRoot, designId, circuit.Id, assignments, requests, detached);

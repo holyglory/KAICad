@@ -87,6 +87,9 @@ public static class SchematicRebuild
     private static SchematicRebuildClassification NotApplicable => new(SchematicRebuildKind.NotApplicable, []);
     private static SchematicRebuildClassification Rejected(string code, string message) => new(SchematicRebuildKind.Rejected, [], code, message);
 
+    /// <summary>An XML revision removes a unit of a component it keeps, yet leaves pins only that unit draws in their nets.</summary>
+    public const string UnitPinsConnected = "xml_removal_unit_pins_connected";
+
     /// <summary>Decide whether a saved XML revision needs native sheets generated or
     /// rebuilt. Pure: reads no files or editor. A shape neither rule admits keeps the general path
     /// and its error codes; a rebuild or generation the saved state cannot support is refused here
@@ -536,11 +539,13 @@ public static class SchematicRebuild
     // ---- XML removal of components and units -------------------------------------------
 
     // A saved XML revision that only removes symbol occurrences (units) and whole components, with their native bindings,
-    // their pins in nets and definitions or parts nothing else uses, while KiCad still shows the design last synchronized.
-    // Each removed occurrence's native symbol is removed from KiCad. The XML keeps whatever instructions its author kept,
-    // including ones retained as detached references to the removed components. Any other XML shape keeps the general
-    // path and its codes; a removal while KiCad also changed keeps both versions and is refused
-    // (ownership_change_with_xml_edits), because applying either would discard the other.
+    // their pins in nets (a removed component's pins, and the pins only a removed unit draws) and definitions or parts
+    // nothing else uses, while KiCad still shows the design last synchronized. Each removed occurrence's native symbol is
+    // removed from KiCad. The XML keeps whatever instructions its author kept, including ones retained as detached
+    // references to the removed components. Any other XML shape keeps the general path and its codes. Two removals are
+    // refused before KiCad changes: one that keeps a removed unit's pins in their nets (xml_removal_unit_pins_connected),
+    // and one made while KiCad also changed, which keeps both versions (ownership_change_with_xml_edits), because applying
+    // either would discard the other.
     private static SchematicRebuildClassification ClassifyXmlRemoval(DesignRecoveryState state, SchematicDesign desired, CancellationToken token)
     {
         var baseline = state.Baseline;
@@ -574,17 +579,36 @@ public static class SchematicRebuild
             if (sheet.Components.Where(c => !next.Components.Contains(c)).Any(d => after.Components.Any(c => c.DefinitionId == d.Id)))
                 return NotApplicable;
         }
-        // Nets lose exactly the removed components' pins; a net left without pins may go too.
+        // A component that keeps other units no longer draws the pins only its removed units carry (a unit-0 pin is common
+        // to every unit, so it stays while any unit is drawn).
+        var definitionParts = before.Sheets.SelectMany(d => d.Components).ToDictionary(d => d.Id, d => d.PartId);
+        var unitPins = new HashSet<PinEndpoint>();
+        foreach (var component in after.Components.Where(c => removed.Any(s => s.ComponentId == c.Id)))
+        {
+            var drawn = before.Symbols.Where(s => s.ComponentId == component.Id).Select(s => s.Unit).ToHashSet();
+            var kept = after.Symbols.Where(s => s.ComponentId == component.Id).Select(s => s.Unit).ToHashSet();
+            static bool Carried(IEnumerable<PartPin> pins, HashSet<int> units) => pins.Any(p => p.Unit == 0 ? units.Count != 0 : units.Contains(p.Unit));
+            foreach (var pins in beforeParts[definitionParts[component.DefinitionId]].Pins.GroupBy(p => p.Number, StringComparer.Ordinal))
+                if (Carried(pins, drawn) && !Carried(pins, kept)) unitPins.Add(new(component.Id, pins.Key));
+        }
+        // Nets lose exactly the pins of the removed components and units; a net left without pins may go too. XML that keeps
+        // a removed unit's pin in a net describes a connection nothing draws, and is refused below once the rest of the
+        // revision is a removal.
         var afterNets = after.Nets.ToDictionary(n => n.Id);
+        bool unitPinsKept = false;
         foreach (var net in before.Nets)
         {
-            var remaining = net.Pins.Where(p => !retired.Contains(p.ComponentId)).ToArray();
+            var remaining = net.Pins.Where(p => !retired.Contains(p.ComponentId) && !unitPins.Contains(p)).ToArray();
             if (!afterNets.TryGetValue(net.Id, out var next))
             {
                 if (remaining.Length != 0 || net.Pins.Count == 0) return NotApplicable;
                 continue;
             }
-            if (next.Name != net.Name || !next.Pins.ToHashSet().SetEquals(remaining) || next.Pins.Count != remaining.Length) return NotApplicable;
+            var pins = next.Pins.ToHashSet();
+            if (next.Name != net.Name || pins.Count != next.Pins.Count || !pins.IsSupersetOf(remaining)
+                || !pins.IsSubsetOf(net.Pins.Where(p => !retired.Contains(p.ComponentId))))
+                return NotApplicable;
+            unitPinsKept |= pins.Count != remaining.Length;
         }
         if (after.Nets.Any(n => !before.Nets.Any(b => b.Id == n.Id))) return NotApplicable;
         // The XML removes the occurrences' native bindings with them and keeps every other binding exactly.
@@ -600,6 +624,10 @@ public static class SchematicRebuild
             NativeId: baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == s.Id).NativeObjectId)).ToArray();
         // The XML's native snapshot is the last synchronized one, with or without the removed symbols.
         if (!SameDrawing(Without(desired.Schematic, natives), Without(baseline.Schematic, natives), token)) return NotApplicable;
+        if (unitPinsKept)
+            return Rejected(UnitPinsConnected,
+                "The XML removes a unit but keeps pins only that unit draws in their nets. Remove those pins from their nets too, "
+                + "or keep the unit; nothing was sent to KiCad.");
         if (!NativeUnchanged(state, token))
             return Rejected("ownership_change_with_xml_edits",
                 "The XML removes components or units while KiCad changed since the last synchronization. Both versions are kept: "

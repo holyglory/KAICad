@@ -490,12 +490,23 @@ public sealed class SchematicRebuildTests
     // ownership journey (NativeSymbolSheetOwnershipJourney, check ownership-sync) drives through KiCad: which XML shapes are
     // removals, the exact native removals they plan, and the guards that keep other shapes on the general path or keep both
     // versions. Extending an existing test was not possible: no test covered XML-side removal before this item.
+    // The XML an author writes to remove these occurrences: whole components go with their definitions and net pins, and a
+    // component that keeps other units loses from its nets the pins only the removed units draw.
     internal static SchematicDesign WithoutOccurrences(SchematicDesign design, params Guid[] occurrences)
     {
         var circuit = design.Engineering.Circuit;
         var retired = circuit.Components.Where(c => circuit.Symbols.Where(s => s.ComponentId == c.Id).All(s => occurrences.Contains(s.Id)))
             .Select(c => c.Id).ToHashSet();
         var definitions = circuit.Components.Where(c => retired.Contains(c.Id)).Select(c => c.DefinitionId).ToHashSet();
+        var parts = circuit.Sheets.SelectMany(s => s.Components).ToDictionary(d => d.Id, d => circuit.Parts.Single(p => p.Id == d.PartId));
+        var unitPins = new HashSet<PinEndpoint>();
+        foreach (var component in circuit.Components.Where(c => !retired.Contains(c.Id)))
+        {
+            var kept = circuit.Symbols.Where(s => s.ComponentId == component.Id && !occurrences.Contains(s.Id)).Select(s => s.Unit).ToHashSet();
+            if (kept.Count == circuit.Symbols.Count(s => s.ComponentId == component.Id)) continue;
+            foreach (var pins in parts[component.DefinitionId].Pins.GroupBy(p => p.Number, StringComparer.Ordinal))
+                if (!pins.Any(p => p.Unit == 0 || kept.Contains(p.Unit))) unitPins.Add(new(component.Id, pins.Key));
+        }
         return design with
         {
             Engineering = design.Engineering with { Circuit = circuit with
@@ -503,7 +514,7 @@ public sealed class SchematicRebuildTests
                 Symbols = [.. circuit.Symbols.Where(s => !occurrences.Contains(s.Id))],
                 Components = [.. circuit.Components.Where(c => !retired.Contains(c.Id))],
                 Sheets = [.. circuit.Sheets.Select(s => s with { Components = [.. s.Components.Where(c => !definitions.Contains(c.Id))] })],
-                Nets = [.. circuit.Nets.Select(n => n with { Pins = [.. n.Pins.Where(p => !retired.Contains(p.ComponentId))] })]
+                Nets = [.. circuit.Nets.Select(n => n with { Pins = [.. n.Pins.Where(p => !retired.Contains(p.ComponentId) && !unitPins.Contains(p))] })]
             } },
             SymbolBindings = [.. design.SymbolBindings.Where(b => !occurrences.Contains(b.SymbolOccurrenceId))]
         };

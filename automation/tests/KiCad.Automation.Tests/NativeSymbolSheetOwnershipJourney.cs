@@ -16,21 +16,22 @@ public sealed partial class NativeSessionTests
     // layout, plan and apply tools of the production MCP server over STDIO. Then, as a person works in KiCad and in the XML:
     //  The XML also declares a second part, R_sense, drawn with the same library resistor as the fixture's R.
     //  1. The automatic worker starts with the fixture's block graph. Every component is owned, so nothing is written.
-    //  2. A connector placed on the PSU sheet in KiCad becomes an XML component whose identities derive from the circuit, the
+    //  2. Connectors placed in KiCad on three sheets become XML components whose identities derive from the circuit, the
     //     sheet path and the symbol's own UUID, of the fixture's connector part (the only part drawn or declared with that
-    //     library symbol and exactly its pins), and the PSU block owns it (its sheet holds J1 and the parts of PSU's
-    //     children), as a new PSU revision in a new root snapshot.
-    //  3. An instruction the XML adds to it is kept as a detached instruction when undo in KiCad removes the connector, and is
-    //     attached again when redo restores it with the same identities; its block binding stays throughout.
-    //  4. A connector placed on the root sheet is adopted, but no block owns anything there: the worker pauses with the
-    //     request, the person binds it to System with kicad_diagram_components_set and resumes.
-    //  5. A resistor placed in KiCad could be the fixture's R or R_sense: the worker pauses with the resolution request and
+    //     library symbol and exactly its pins). Sheets are not blocks, so a sheet names a block only when one block owns
+    //     everything else it shows: J4 on CPU_POWER (only the processor's power unit) is bound to Processor by the worker, as
+    //     a new Processor revision in a new root snapshot. J2 on the PSU sheet (parts of PSU and its four children) and J3 on
+    //     the root sheet (no owned part) pause the worker with requests; the person binds them to PSU and System with
+    //     kicad_diagram_components_set and resumes.
+    //  3. An instruction the XML adds to J4 is kept as a detached instruction when undo in KiCad removes it, and is attached
+    //     again when redo restores it with the same identities; its Processor binding stays throughout.
+    //  4. A resistor placed in KiCad could be the fixture's R or R_sense: the worker pauses with the resolution request and
     //     publishes nothing. The person stops the worker and undoes the placement.
-    //  6. With the worker stopped, the XML removes the processor's power unit and the memory; the public plan previews
+    //  5. With the worker stopped, the XML removes the processor's power unit and the memory; the public plan previews
     //     exactly their two symbol removals, and apply removes them in KiCad. Their bindings stay as detached.
-    //  7. Simultaneous conflicting edits: the new connector deleted in KiCad while the XML removes U3. The worker pauses and
-    //     keeps both versions; after undo in KiCad and resume, the XML removal is applied.
-    //  8. Every repeat is a no-op: plan, apply and block ownership change nothing.
+    //  6. Simultaneous conflicting edits of one component: U3 moved in KiCad while the XML removes U3. The worker pauses and
+    //     keeps both versions; after undo in KiCad and resume, the XML removal is applied and U3's binding stays detached.
+    //  7. Every repeat is a no-op: plan, apply and block ownership change nothing.
     private static async Task VerifyPsuCpuOwnershipSync(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -108,110 +109,133 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(0, ownedAtStart.GetProperty("resolutionRequests").GetArrayLength());
         Step("worker watching");
 
-        // ---- 2. A resistor placed in KiCad on the PSU sheet ---------------------------------------------------------
+        // ---- 2. Connectors placed in KiCad on three sheets -----------------------------------------------------------
+        // J2 on the PSU sheet, J3 on the root sheet and J4 on CPU_POWER, one native commit each, while the worker watches.
         var psu = Sheet(PsuCpuIds.Id(0x05, 2));
-        var j1 = NativeOf(store.Read()!.State.Baseline, (await Capture()).Electrical.Hierarchy.Data, PsuCpuIds.Id(0x09, 1));
-        var r1 = NativeOf(store.Read()!.State.Baseline, (await Capture()).Electrical.Hierarchy.Data, PsuCpuIds.Id(0x09, 3));
+        var rootSheet = Sheet(PsuCpuIds.Id(0x05, 1));
+        var cpuPower = Sheet(PsuCpuIds.Id(0x05, 4));
+        var shownAtStart = (await Capture()).Electrical.Hierarchy.Data;
+        var j1 = NativeOf(store.Read()!.State.Baseline, shownAtStart, PsuCpuIds.Id(0x09, 1));
+        var r1 = NativeOf(store.Read()!.State.Baseline, shownAtStart, PsuCpuIds.Id(0x09, 3));
         var free = usable["PSU"];
+        var power = usable["CPU_POWER"];
         static long Grid(long nm) => (nm + 1_270_000 - 1) / 1_270_000 * 1_270_000;
-        var r2 = Place(j1, "J2", psu, Grid(free.LeftNm + 25_400_000), Grid(free.BottomNm + 20_320_000));
-        await NativeBatch("Place a test connector in KiCad", psu, new SchematicItemOperation { Create = Any.Pack(r2) });
-        Guid r2Native = Guid.Parse(r2.Id.Value);
-        var psuPath = store.Read()!.State.Baseline.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, 2)).NativePath;
-        Guid r2Component = SchematicNativeAdditionProjection.AdoptedIdentity("component", circuitId, psuPath, r2Native);
-        Guid r2Occurrence = SchematicNativeAdditionProjection.AdoptedIdentity("occurrence", circuitId, psuPath, r2Native);
-        await Worker("native addition", s => Phase(s) == "Watching" && Settled(d => d.Engineering.Circuit.Components.Any(c => c.Id == r2Component)));
+        var j2 = Place(j1, "J2", psu, Grid(free.LeftNm + 25_400_000), Grid(free.BottomNm + 20_320_000));
+        var j3 = Place(j1, "J3", rootSheet, 25_400_000, 152_400_000);
+        var j4 = Place(j1, "J4", cpuPower, Grid(power.LeftNm + 25_400_000), Grid(power.BottomNm + 20_320_000));
+        IReadOnlyList<Guid> NativePathOf(Guid sheet) => store.Read()!.State.Baseline.SheetBindings.Single(b => b.SheetInstanceId == sheet).NativePath;
+        Guid Adopted(string kind, Guid sheet, SchematicSymbolInstance symbol) =>
+            SchematicNativeAdditionProjection.AdoptedIdentity(kind, circuitId, NativePathOf(sheet), Guid.Parse(symbol.Id.Value));
+        Guid j2Component = Adopted("component", PsuCpuIds.Id(0x05, 2), j2), j2Occurrence = Adopted("occurrence", PsuCpuIds.Id(0x05, 2), j2);
+        Guid j3Component = Adopted("component", PsuCpuIds.Id(0x05, 1), j3);
+        Guid j4Component = Adopted("component", PsuCpuIds.Id(0x05, 4), j4), j4Occurrence = Adopted("occurrence", PsuCpuIds.Id(0x05, 4), j4);
+        Guid j2Native = Guid.Parse(j2.Id.Value), j4Native = Guid.Parse(j4.Id.Value);
+        await NativeBatch("Place a test connector on the PSU sheet", psu, new SchematicItemOperation { Create = Any.Pack(j2) });
+        await NativeBatch("Place a connector on the root sheet", rootSheet, new SchematicItemOperation { Create = Any.Pack(j3) });
+        await NativeBatch("Place a connector beside the processor's power unit", cpuPower, new SchematicItemOperation { Create = Any.Pack(j4) });
+
+        // The worker adopts them and binds what exact identities decide. J4: everything else CPU_POWER shows is the processor's
+        // power unit, so it belongs to Processor. J2: the PSU sheet shows parts of PSU and of its four children, and J3: the
+        // root sheet shows no owned part; for those the worker pauses and the person binds them (J2 to PSU, J3 to System). The
+        // worker may see the three placements in one or more rounds; every round's requests are answered the same way.
+        var chosen = new Dictionary<Guid, int> { [j2Component] = 2, [j3Component] = 1 };
+        var offered = new Dictionary<Guid, Guid[]> { [j2Component] = [Block(1), Block(2), Block(4), Block(5), Block(6), Block(7)], [j3Component] = [] };
+        var answered = new List<Guid>();
+        bool AllAdopted(SchematicDesign d) => new[] { j2Component, j3Component, j4Component }.All(id => d.Engineering.Circuit.Components.Any(c => c.Id == id));
+        ulong answeredAt = 0; int round = 0;
+        while (true)
+        {
+            var settled = await Worker("native additions", s => (Phase(s) == "Watching" && Settled(AllAdopted))
+                || (Phase(s) == "Paused" && Code(s) == BlockOwnershipSynchronization.ResolutionRequired && s.GetProperty("sequence").GetUInt64() > answeredAt));
+            if (Phase(settled) == "Watching") break;
+            Assert.IsLessThanOrEqualTo(3, ++round, "Three placements need at most three rounds.");
+            var requests = (await BlockPlan("block-plan-additions-" + round)).GetProperty("resolutionRequests").EnumerateArray().ToArray();
+            Assert.AreNotEqual(0, requests.Length, "The worker paused for owners, so the plan names them.");
+            foreach (var request in requests)
+            {
+                Guid component = request.GetProperty("componentId").GetGuid();
+                Assert.IsTrue(chosen.ContainsKey(component), $"Only J2 and J3 need the person; {component} was never meant to be asked about.");
+                Assert.AreEqual(BlockOwnershipSynchronization.OwnerUnresolved, request.GetProperty("code").GetString());
+                CollectionAssert.AreEqual(offered[component], request.GetProperty("candidateBlockIds").EnumerateArray().Select(e => e.GetGuid()).ToArray(),
+                    "The request offers every block from the root down to each owner of the sheet's other parts, and nothing on the root sheet.");
+                await BindTo(component, Block(chosen[component]), "owner-choice-" + round + "-" + (component == j2Component ? "psu" : "root"));
+                answered.Add(component);
+            }
+            answeredAt = sequence;
+            RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_resume", new { instanceId, sessionId, expectedSequence = sequence }));
+        }
+        CollectionAssert.AreEquivalent(new[] { j2Component, j3Component }, answered, "The person answered J2 and J3, once each.");
+        var owners = await BlockPlan("block-plan-additions-owned");
+        Assert.AreEqual(0, owners.GetProperty("assignments").GetArrayLength());
+        Assert.AreEqual(0, owners.GetProperty("resolutionRequests").GetArrayLength());
+
         var adopted = await Published();
-        var r2Instance = adopted.Engineering.Circuit.Components.Single(c => c.Id == r2Component);
-        Assert.AreEqual("J2", r2Instance.Reference);
-        Assert.AreEqual(PsuCpuIds.Id(0x05, 2), r2Instance.SheetInstanceId, "It sits on the PSU sheet instance KiCad shows it on.");
-        Assert.AreEqual(PsuCpuIds.Id(0x03, 1), adopted.Engineering.Circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == r2Instance.DefinitionId).PartId,
-            "Its part is the fixture's connector: the same library symbol with exactly the same pins.");
-        Assert.AreEqual(SchematicDesignBindings.PathKey(psuPath), SchematicDesignBindings.PathKey(adopted.SheetBindings.Single(b => b.SheetInstanceId == r2Instance.SheetInstanceId).NativePath));
-        Assert.AreEqual(r2Native, adopted.SymbolBindings.Single(b => b.SymbolOccurrenceId == r2Occurrence).NativeObjectId);
+        var j2Instance = adopted.Engineering.Circuit.Components.Single(c => c.Id == j2Component);
+        Assert.AreEqual("J2", j2Instance.Reference);
+        Assert.AreEqual(PsuCpuIds.Id(0x05, 2), j2Instance.SheetInstanceId, "It sits on the PSU sheet instance KiCad shows it on.");
+        Assert.AreEqual(PsuCpuIds.Id(0x05, 4), adopted.Engineering.Circuit.Components.Single(c => c.Id == j4Component).SheetInstanceId);
+        foreach (var component in new[] { j2Component, j3Component, j4Component })
+            Assert.AreEqual(PsuCpuIds.Id(0x03, 1), adopted.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
+                .Single(d => d.Id == adopted.Engineering.Circuit.Components.Single(c => c.Id == component).DefinitionId).PartId,
+                "Its part is the fixture's connector: the same library symbol with exactly the same pins.");
+        Assert.AreEqual(SchematicDesignBindings.PathKey(NativePathOf(PsuCpuIds.Id(0x05, 2))),
+            SchematicDesignBindings.PathKey(adopted.SheetBindings.Single(b => b.SheetInstanceId == j2Instance.SheetInstanceId).NativePath));
+        Assert.AreEqual(j2Native, adopted.SymbolBindings.Single(b => b.SymbolOccurrenceId == j2Occurrence).NativeObjectId);
+        Assert.AreEqual(j4Native, adopted.SymbolBindings.Single(b => b.SymbolOccurrenceId == j4Occurrence).NativeObjectId);
         var placed = (await Capture()).Electrical.Hierarchy.Data;
-        Assert.IsTrue(SchematicOrientation.Equivalent(SchematicModelProjection.Placement(NativeOf(adopted, placed, r2Occurrence)),
-            adopted.Engineering.Circuit.Symbols.Single(s => s.Id == r2Occurrence).Placement!));
-        Assert.IsFalse(adopted.Engineering.Circuit.Nets.Any(n => n.Pins.Any(p => p.ComponentId == r2Component)), "Its unconnected pins make no net.");
+        Assert.IsTrue(SchematicOrientation.Equivalent(SchematicModelProjection.Placement(NativeOf(adopted, placed, j2Occurrence)),
+            adopted.Engineering.Circuit.Symbols.Single(s => s.Id == j2Occurrence).Placement!));
+        Assert.IsFalse(adopted.Engineering.Circuit.Nets.Any(n => n.Pins.Any(p => p.ComponentId == j2Component || p.ComponentId == j4Component)),
+            "Their unconnected pins make no net.");
         var afterAddition = await Blocks();
-        var psuSelection = afterAddition.Walk(afterAddition.SelectedRoot).Single(s => s.BlockId == Block(2));
-        CollectionAssert.Contains(afterAddition.Inspect(psuSelection).EffectiveComponentBindings.Targets.ToArray(),
-            new ComponentRealization(designId, circuitId, r2Component), "The PSU block owns the connector placed on its sheet.");
+        RecursiveBlockRevision Owner(Guid component) => afterAddition.Walk(afterAddition.SelectedRoot).Select(afterAddition.Inspect)
+            .Single(r => r.EffectiveComponentBindings.Targets.Contains(new ComponentRealization(designId, circuitId, component)));
+        Assert.AreEqual(Block(8), Owner(j4Component).Selection.BlockId, "Processor owns the connector placed beside its power unit.");
+        Assert.AreEqual(RequirementRevisionActor.Editor, Owner(j4Component).Origin.ActorKind, "The worker bound it, as an edit made in KiCad.");
+        Assert.AreEqual(Block(2), Owner(j2Component).Selection.BlockId, "PSU owns J2, as the person chose.");
+        Assert.AreEqual(Block(1), Owner(j3Component).Selection.BlockId, "System owns J3, as the person chose.");
         var initialGraph = PsuCpuFixture.Graph();
-        Assert.AreNotEqual(initialGraph.SelectedRoot, afterAddition.SelectedRoot, "A new root snapshot selects the new PSU revision.");
-        Assert.AreEqual(initialGraph.Walk(initialGraph.SelectedRoot).Single(s => s.BlockId == Block(2)).RevisionId,
-            afterAddition.Inspect(psuSelection).ParentRevisionId, "The new PSU revision follows the one the fixture selected.");
-        foreach (int unchanged in new[] { 3, 4, 5, 6, 7, 8, 9 })
+        Assert.AreNotEqual(initialGraph.SelectedRoot, afterAddition.SelectedRoot, "A new root snapshot selects the new revisions.");
+        Assert.AreEqual(initialGraph.Walk(initialGraph.SelectedRoot).Single(s => s.BlockId == Block(8)).RevisionId,
+            afterAddition.Revisions.Single(r => r.Selection.BlockId == Block(8) && r.EffectiveComponentBindings.Targets.Any(t => t.ComponentId == j4Component)).ParentRevisionId,
+            "The new Processor revision follows the one the fixture selected.");
+        foreach (int unchanged in new[] { 4, 5, 6, 7, 9 })
             Assert.AreEqual(initialGraph.Walk(initialGraph.SelectedRoot).Single(s => s.BlockId == Block(unchanged)),
                 afterAddition.Walk(afterAddition.SelectedRoot).Single(s => s.BlockId == Block(unchanged)), "Other blocks keep their revisions.");
-        Assert.AreEqual(1, afterAddition.Revisions.Count(r => r.Selection.BlockId == Block(2) && r.EffectiveComponentBindings.Targets.Any(t => t.ComponentId == r2Component)));
-        await NoOpPlan("addition-repeat-plan");
         string blocksAfterAddition = await BlocksSha();
         Assert.IsFalse((await BlockApply("addition-block-repeat")).GetProperty("blockGraphWritten").GetBoolean(), "Repeating block ownership writes nothing.");
         Assert.AreEqual(blocksAfterAddition, await BlocksSha());
-        Step("native addition owned by PSU", new { component = r2Component, occurrence = r2Occurrence, native = r2Native });
+        Step("native additions owned", new { j2 = j2Component, j3 = j3Component, j4 = j4Component, rounds = round });
 
-        // ---- 3. An instruction on it survives undo and redo in KiCad -------------------------------------------------
-        var statement = new EngineeringStatement(Guid.NewGuid(), r2Component, EngineeringStatementRole.Intent, GuidanceStrength.Requirement,
-            "Keep this test connector at the board edge.", null, [], []);
+        // ---- 3. An instruction on J4 survives undo and redo in KiCad --------------------------------------------------
+        var statement = new EngineeringStatement(Guid.NewGuid(), j4Component, EngineeringStatementRole.Intent, GuidanceStrength.Requirement,
+            "Keep this connector beside the processor's power pins.", null, [], []);
         var current = store.Read()!.State.Baseline;
         await SaveXml(current with { Engineering = current.Engineering with { Structure = current.Engineering.Structure with
             { Statements = [.. current.Engineering.Structure.Statements, statement] } } });
         await Worker("instruction", s => Phase(s) == "Watching" && Settled(d => d.Engineering.Structure.Statements.Any(x => x.Id == statement.Id)));
         await FocusedSchematicShortcut(client, document, processId, display, "z", token);
-        await Worker("native undo", s => Phase(s) == "Watching" && Settled(d => !d.Engineering.Circuit.Components.Any(c => c.Id == r2Component)));
+        await Worker("native undo", s => Phase(s) == "Watching" && Settled(d => !d.Engineering.Circuit.Components.Any(c => c.Id == j4Component)));
         var undone = await Published();
+        Assert.IsTrue(undone.Engineering.Circuit.Components.Any(c => c.Id == j2Component), "Undo takes back only the last placement.");
         Assert.AreEqual(statement, undone.Engineering.Structure.Statements.Single(s => s.Id == statement.Id), "The instruction is kept.");
         Assert.IsTrue(undone.Engineering.Structure.UnresolvedComponentReferences!.Any(r => r.OwnerId == statement.Id
-            && r.Slot == ComponentReferenceSlot.StatementTarget && r.FormerTarget.ComponentId == r2Component), "It is kept detached from the removed connector.");
+            && r.Slot == ComponentReferenceSlot.StatementTarget && r.FormerTarget.ComponentId == j4Component), "It is kept detached from the removed connector.");
         var detached = await BlockPlan("block-plan-undone");
-        CollectionAssert.Contains(detached.GetProperty("detachedComponents").EnumerateArray().Select(e => e.GetGuid()).ToArray(), r2Component,
-            "The PSU binding stays, detached, while the connector is gone.");
+        CollectionAssert.Contains(detached.GetProperty("detachedComponents").EnumerateArray().Select(e => e.GetGuid()).ToArray(), j4Component,
+            "The Processor binding stays, detached, while the connector is gone.");
         Assert.AreEqual(blocksAfterAddition, await BlocksSha(), "Undo writes no block revision.");
         await FocusedSchematicShortcut(client, document, processId, display, "y", token);
-        await Worker("native redo", s => Phase(s) == "Watching" && Settled(d => d.Engineering.Circuit.Components.Any(c => c.Id == r2Component)));
+        await Worker("native redo", s => Phase(s) == "Watching" && Settled(d => d.Engineering.Circuit.Components.Any(c => c.Id == j4Component)));
         var redone = await Published();
-        Assert.AreEqual(r2Native, redone.SymbolBindings.Single(b => b.SymbolOccurrenceId == r2Occurrence).NativeObjectId, "Redo restores the same identities.");
+        Assert.AreEqual(j4Native, redone.SymbolBindings.Single(b => b.SymbolOccurrenceId == j4Occurrence).NativeObjectId, "Redo restores the same identities.");
         Assert.IsFalse(redone.Engineering.HasUnresolvedComponentReferences, "The instruction is attached again.");
-        Assert.AreEqual(r2Component, redone.Engineering.Structure.Statements.Single(s => s.Id == statement.Id).TargetId);
+        Assert.AreEqual(j4Component, redone.Engineering.Structure.Statements.Single(s => s.Id == statement.Id).TargetId);
         Assert.AreEqual(0, (await BlockPlan("block-plan-redone")).GetProperty("detachedComponents").GetArrayLength());
         Assert.AreEqual(blocksAfterAddition, await BlocksSha(), "Redo writes no block revision either.");
         Step("undo and redo in KiCad");
 
-        // ---- 4. A connector on the root sheet: no block owns anything there ------------------------------------------
-        var rootSheet = Sheet(PsuCpuIds.Id(0x05, 1));
-        var r3 = Place(j1, "J3", rootSheet, 25_400_000, 152_400_000);
-        await NativeBatch("Place a connector on the root sheet", rootSheet, new SchematicItemOperation { Create = Any.Pack(r3) });
-        Guid r3Component = SchematicNativeAdditionProjection.AdoptedIdentity("component", circuitId,
-            store.Read()!.State.Baseline.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, 1)).NativePath, Guid.Parse(r3.Id.Value));
-        var paused = await Worker("root addition", s => Phase(s) == "Paused" && Code(s) == BlockOwnershipSynchronization.ResolutionRequired);
-        Assert.IsTrue(store.Read()!.State.Baseline.Engineering.Circuit.Components.Any(c => c.Id == r3Component), "The design adopted it first.");
-        var request = (await BlockPlan("block-plan-root")).GetProperty("resolutionRequests").EnumerateArray().Single();
-        Assert.AreEqual(BlockOwnershipSynchronization.OwnerUnresolved, request.GetProperty("code").GetString());
-        Assert.AreEqual(r3Component, request.GetProperty("componentId").GetGuid());
-        Assert.AreEqual(blocksAfterAddition, await BlocksSha(), "An undecidable owner is never guessed.");
-        var graph = await Blocks();
-        var system = graph.Inspect(graph.SelectedRoot);
-        var session = await client.HandshakeAsync(token);
-        var bound = await host.Tool("kicad_diagram_components_set", new
-        {
-            instanceId, expectedInstanceEpoch = session.Epoch, repositoryRoot = context.ProjectDirectory, sourcePath = blocksPath,
-            documentId = documentId.ToString("D"), expectedSourceToken = await BlocksSha(),
-            expectedRoot = JsonSerializer.SerializeToElement(graph.SelectedRoot, web),
-            blockPath = JsonSerializer.SerializeToElement(new[] { graph.SelectedRoot }, web),
-            bindings = JsonSerializer.SerializeToElement(new BlockComponentBindings([.. system.EffectiveComponentBindings.Targets,
-                new ComponentRealization(designId, circuitId, r3Component)]), web),
-            operationId = Guid.NewGuid(), actor = "PSU/CPU ownership journey"
-        });
-        await File.WriteAllTextAsync(Evidence("root-owner-choice.json"), bound.GetRawText(), token);
-        RequireToolSuccess(bound);
-        RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_resume", new { instanceId, sessionId, expectedSequence = sequence }));
-        await Worker("root owner chosen", s => Phase(s) == "Watching");
-        Assert.AreEqual(0, (await BlockPlan("block-plan-root-chosen")).GetProperty("resolutionRequests").GetArrayLength());
-        string blocksAfterChoice = await BlocksSha();
-        Step("root owner chosen by the person", new { component = r3Component, pause = Code(paused) });
-
-        // ---- 5. An undecidable part: two parts drawn or declared with the same library resistor -----------------------
+        // ---- 4. An undecidable part: two parts drawn or declared with the same library resistor -----------------------
         var r5 = Place(r1, "R2", psu, Grid(free.LeftNm + 127_000_000), Grid(free.BottomNm + 20_320_000));
         byte[] beforeAmbiguous = await File.ReadAllBytesAsync(path, token);
         await NativeBatch("Place a resistor in KiCad", psu, new SchematicItemOperation { Create = Any.Pack(r5) });
@@ -237,7 +261,7 @@ public sealed partial class NativeSessionTests
         await NoOpPlan("undecided-undone-plan");
         Step("undecidable part paused", new { code = Code(ambiguous), candidates = new[] { fixtureR.Id, sense.Id } });
 
-        // ---- 6. The XML removes a unit and a component; the public plan and apply remove them in KiCad ----------------
+        // ---- 5. The XML removes a unit and a component; the public plan and apply remove them in KiCad ----------------
         current = store.Read()!.State.Baseline;
         Guid unitFour = PsuCpuIds.Id(0x09, 10), memory = PsuCpuIds.Id(0x09, 11);
         var removedNative = new[] { unitFour, memory }.Select(o => current.SymbolBindings.Single(b => b.SymbolOccurrenceId == o).NativeObjectId.ToString("D")).ToArray();
@@ -256,8 +280,9 @@ public sealed partial class NativeSessionTests
         var shown = removed.Electrical.Hierarchy.Data.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
             .Select(i => i.Unpack<SchematicSymbolInstance>().Id.Value).ToHashSet(StringComparer.Ordinal);
         Assert.IsFalse(removedNative.Any(shown.Contains), "KiCad no longer draws the removed unit and component.");
-        Assert.IsFalse(removed.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == sheetPaths["CPU_POWER"]).Items
-            .Any(i => i.Is(SchematicSymbolInstance.Descriptor)), "CPU_POWER is empty.");
+        CollectionAssert.AreEqual(new[] { j4.Id.Value }, removed.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == sheetPaths["CPU_POWER"]).Items
+            .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>().Id.Value).ToArray(),
+            "CPU_POWER shows only the connector placed beside the removed unit.");
         Assert.IsTrue(store.Read()!.State.Baseline.Engineering.Circuit.Components.Any(c => c.Id == PsuCpuIds.Id(0x07, 7)), "U5 keeps its other units.");
         var afterRemoval = await BlockPlan("block-plan-removed");
         CollectionAssert.AreEqual(new[] { PsuCpuIds.Id(0x07, 8) },
@@ -268,12 +293,23 @@ public sealed partial class NativeSessionTests
         await ApplyUnchanged("removal-repeat");
         Step("XML removal applied in KiCad", new { removedNative });
 
-        // ---- 7. Simultaneous conflicting edits keep both versions and pause -------------------------------------------
-        // The person deletes the new connector in KiCad (J1 keeps its library symbol cached) while the XML removes U3.
-        var deletedR2 = NativeOf(store.Read()!.State.Baseline, removed.Electrical.Hierarchy.Data, r2Occurrence);
-        await NativeBatch("Delete the new connector in KiCad", psu, new SchematicItemOperation { Remove = new() { Value = deletedR2.Id.Value } });
+        // ---- 6. Simultaneous conflicting edits of one component keep both versions and pause -------------------------
+        // The person moves U3 (the PSU's LTC2959) in KiCad while the XML removes U3. Applying the removal would discard the
+        // move, and publishing the move would bring U3 back into the XML, so the worker keeps both versions and pauses.
         current = store.Read()!.State.Baseline;
         Guid u3 = PsuCpuIds.Id(0x09, 5);
+        Guid u3Component = current.Engineering.Circuit.Symbols.Single(s => s.Id == u3).ComponentId;
+        Assert.AreEqual(PsuCpuIds.Id(0x05, 2), current.Engineering.Circuit.Components.Single(c => c.Id == u3Component).SheetInstanceId, "U3 sits on the PSU sheet.");
+        string u3Native = current.SymbolBindings.Single(b => b.SymbolOccurrenceId == u3).NativeObjectId.ToString("D");
+        var shownBeforeConflict = (await Capture()).Electrical.Hierarchy.Data;
+        var movedU3 = NativeOf(current, shownBeforeConflict, u3);
+        Assert.AreEqual(u3Native, movedU3.Id.Value);
+        const long nudge = 1_270_000;
+        movedU3.Position.XNm += nudge;
+        foreach (var field in new[] { movedU3.ReferenceField, movedU3.ValueField, movedU3.FootprintField, movedU3.DatasheetField,
+                     movedU3.DescriptionField }.Concat(movedU3.UserFields))
+            if (field?.Text?.Position is { } fieldPosition) fieldPosition.XNm += nudge;
+        await NativeBatch("Move U3 one grid step in KiCad", psu, new SchematicItemOperation { Update = Any.Pack(movedU3) });
         var withoutU3 = SchematicRebuildTests.WithoutOccurrences(current, u3);
         byte[] xmlVersion = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(withoutU3, []));
         await File.WriteAllBytesAsync(path, xmlVersion, token);
@@ -284,23 +320,27 @@ public sealed partial class NativeSessionTests
         sequence = restarted.GetProperty("structuredContent").GetProperty("status").GetProperty("sequence").GetUInt64();
         var conflict = await Worker("simultaneous edits", s => Phase(s) == "Paused" && Code(s) == "ownership_change_with_xml_edits");
         CollectionAssert.AreEqual(xmlVersion, await File.ReadAllBytesAsync(path, token), "The XML version is kept.");
-        var nativeVersion = await Capture();
-        var nativeIds = nativeVersion.Electrical.Hierarchy.Data.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
-            .Select(i => i.Unpack<SchematicSymbolInstance>().Id.Value).ToHashSet(StringComparer.Ordinal);
-        Assert.IsFalse(nativeIds.Contains(deletedR2.Id.Value), "KiCad's version is kept: the connector stays deleted.");
-        Assert.IsTrue(nativeIds.Contains(current.SymbolBindings.Single(b => b.SymbolOccurrenceId == u3).NativeObjectId.ToString("D")), "U3 stays in KiCad.");
+        static IReadOnlyDictionary<string, SchematicSymbolInstance> NativeSymbols(CheckedSchematicState state) => state.Electrical.Hierarchy.Data.Instances
+            .SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .ToDictionary(x => x.Id.Value, StringComparer.Ordinal);
+        var nativeVersion = NativeSymbols(await Capture());
+        Assert.AreEqual(movedU3.Position, nativeVersion[u3Native].Position, "KiCad's version is kept: U3 stays where the person moved it.");
+        Assert.IsTrue(store.Read()!.State.Baseline.Engineering.Circuit.Symbols.Any(x => x.Id == u3), "Nothing was published: the design still holds U3.");
         Assert.IsFalse(store.Read()!.State.HasPendingWork);
         await FocusedSchematicShortcut(client, document, processId, display, "z", token);
         RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_resume", new { instanceId, sessionId, expectedSequence = sequence }));
         await Worker("conflict resolved in KiCad", s => Phase(s) == "Watching" && Settled(d => !d.Engineering.Circuit.Symbols.Any(x => x.Id == u3)));
-        var resolved = await Capture();
-        var resolvedIds = resolved.Electrical.Hierarchy.Data.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
-            .Select(i => i.Unpack<SchematicSymbolInstance>().Id.Value).ToHashSet(StringComparer.Ordinal);
-        Assert.IsTrue(resolvedIds.Contains(deletedR2.Id.Value), "Undo brought the connector back.");
-        Assert.IsFalse(resolvedIds.Contains(current.SymbolBindings.Single(b => b.SymbolOccurrenceId == u3).NativeObjectId.ToString("D")), "The XML removal of U3 reached KiCad.");
-        Step("conflict kept both versions", new { code = Code(conflict) });
+        var resolved = NativeSymbols(await Capture());
+        Assert.IsFalse(resolved.ContainsKey(u3Native), "After the move is undone, the XML removal of U3 reached KiCad.");
+        Assert.IsTrue(resolved.ContainsKey(j2Native.ToString("D")) && resolved.ContainsKey(j4Native.ToString("D")), "Every other symbol stays.");
+        var resolvedDesign = await Published();
+        Assert.IsFalse(resolvedDesign.Engineering.Circuit.Components.Any(c => c.Id == u3Component), "The XML version won once KiCad's edit was undone.");
+        CollectionAssert.AreEquivalent(new[] { PsuCpuIds.Id(0x07, 8), u3Component },
+            (await BlockPlan("block-plan-conflict-resolved")).GetProperty("detachedComponents").EnumerateArray().Select(e => e.GetGuid()).ToArray(),
+            "The Memory and U3 bindings stay, detached.");
+        Step("conflict kept both versions", new { code = Code(conflict), sameComponent = u3Component });
 
-        // ---- 8. Every repeat is a no-op --------------------------------------------------------------------------------
+        // ---- 7. Every repeat is a no-op --------------------------------------------------------------------------------
         RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId }));
         RequireToolSuccess(await host.Tool("kicad_design_recovery_refresh", Recovery()));
         await NoOpPlan("final-plan");
@@ -318,14 +358,37 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
         {
             instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, seed = context.Seed.ToString(), realStdioProductionServer = true, steps, statuses,
-            nativeAddition = new { component = r2Component, occurrence = r2Occurrence, native = r2Native, part = PsuCpuIds.Id(0x03, 1), owner = "PSU", newRootSnapshot = true },
+            additions = new
+            {
+                cpuPower = new { component = j4Component, occurrence = j4Occurrence, native = j4Native, part = PsuCpuIds.Id(0x03, 1), owner = "Processor",
+                    boundBy = "automatic worker", newRootSnapshot = true },
+                psu = new { component = j2Component, pausedWith = BlockOwnershipSynchronization.ResolutionRequired,
+                    candidates = offered[j2Component], chosenBlock = "PSU" },
+                root = new { component = j3Component, pausedWith = BlockOwnershipSynchronization.ResolutionRequired, candidates = offered[j3Component],
+                    chosenBlock = "System" },
+                rounds = round
+            },
             undoRedo = new { instructionDetachedOnUndo = true, instructionAttachedOnRedo = true, sameIdentitiesAfterRedo = true, blockBindingKept = true },
-            rootOwner = new { component = r3Component, pausedWith = BlockOwnershipSynchronization.ResolutionRequired, chosenBlock = "System" },
             undecidablePart = new { pausedWith = SchematicNativeAdditionProjection.ResolutionRequired, candidates = new[] { fixtureR.Id, sense.Id }, published = false },
             xmlRemoval = new { removedNative, previewExact = true, appliedInKiCad = true, bindingDetached = true },
-            conflict = new { pausedWith = "ownership_change_with_xml_edits", xmlVersionKept = true, kicadVersionKept = true, resolvedAfterUndo = true },
+            conflict = new { pausedWith = "ownership_change_with_xml_edits", component = u3Component, kicadEdit = "moved one grid step",
+                xmlEdit = "removed", xmlVersionKept = true, kicadVersionKept = true, resolvedAfterUndo = true },
             repeatsNoOp = true, crossPlatformReady = false,
-            remaining = "Sheets inserted, removed or moved in KiCad or XML; applying a chosen part for an undecidable new symbol; part and pin rebinding of an existing component."
+            remaining = new[]
+            {
+                "Sheets inserted, removed or moved to another parent in KiCad or in the XML are not yet reflected on the other side (sheet_ownership_changed).",
+                "A part chosen for an undecidable new symbol (part_ambiguous) cannot be applied yet.",
+                "Answers to unit-owner and unit-grouping requests for new units of multi-unit parts cannot be applied yet.",
+                "Part and pin rebinding of an existing component has no explicit resolution request yet.",
+                "A symbol placed on a sheet shown several times is refused (native_addition_repeated_sheet_unsupported).",
+                "A KiCad undo that restores symbols in the same change as new placements is refused (native_restoration_with_additions).",
+                "A symbol placed before the first synchronization is refused (missing_native_ownership_history) until the planning seam plans a never-synchronized design with empty history; a design synchronized without content-verified retained XML stays refused (unverified_native_ownership_history).",
+                "Independent edits of different components made in KiCad and the XML at once are refused like conflicting ones (ownership_change_with_xml_edits) rather than merged; this journey exercises only the conflicting pair.",
+                "Two designs sharing one block graph cannot both run block-keeping workers (automatic_sync_ownership_conflict).",
+                "A block graph edited outside the worker is not re-settled until the design or KiCad changes.",
+                "XML removal of a connected unit is proven offline only; this journey removes units on the Components stage, which has no nets.",
+                "Symbols are placed through the native item-batch commit, not through KiCad's Add Symbol or Duplicate tools (unannotated references such as J? are not exercised)."
+            }
         }), token);
 
         string Phase(JsonElement status) => status.GetProperty("phase").GetString()!;
@@ -441,6 +504,34 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Evidence(name + ".json"), RetainedToolEvidence(applied), token);
             RequireToolSuccess(applied);
             return applied.GetProperty("structuredContent").Clone();
+        }
+
+        // The person binds a component to the block they choose, through the per-level editor's public tool.
+        async Task BindTo(Guid component, Guid block, string name)
+        {
+            var graph = await Blocks();
+            var blockPath = new List<BlockSelection>();
+            bool Visit(BlockSelection selection)
+            {
+                blockPath.Add(selection);
+                if (selection.BlockId == block || graph.Inspect(selection).Children.Any(Visit)) return true;
+                blockPath.RemoveAt(blockPath.Count - 1);
+                return false;
+            }
+            Assert.IsTrue(Visit(graph.SelectedRoot), "The chosen block is in the selected design.");
+            var session = await client.HandshakeAsync(token);
+            var bound = await host.Tool("kicad_diagram_components_set", new
+            {
+                instanceId, expectedInstanceEpoch = session.Epoch, repositoryRoot = context.ProjectDirectory, sourcePath = blocksPath,
+                documentId = documentId.ToString("D"), expectedSourceToken = await BlocksSha(),
+                expectedRoot = JsonSerializer.SerializeToElement(graph.SelectedRoot, web),
+                blockPath = JsonSerializer.SerializeToElement(blockPath, web),
+                bindings = JsonSerializer.SerializeToElement(new BlockComponentBindings([.. graph.Inspect(blockPath[^1]).EffectiveComponentBindings.Targets,
+                    new ComponentRealization(designId, circuitId, component)]), web),
+                operationId = Guid.NewGuid(), actor = "PSU/CPU ownership journey"
+            });
+            await File.WriteAllTextAsync(Evidence(name + ".json"), bound.GetRawText(), token);
+            RequireToolSuccess(bound);
         }
 
         IReadOnlyList<SchematicItemOperation> Operations(JsonElement plan) => [.. plan.GetProperty("nativeOperationsJson").EnumerateArray()

@@ -116,6 +116,8 @@ public sealed class NativeFieldHistoryTests
             StringAssert.EndsWith(compactHeading, "v2 · Fixture user — Selected text");
             Assert.AreNotEqual($"{initialName} · v2 · Fixture user — Selected text", compactHeading, "The compact heading shortens the implementation's name.");
             Assert.AreEqual($"Use {initialName} · v2 text in draft", result.GetProperty("restore_label").GetString());
+            // An "&" in an implementation's name shows on the Use button as written, not as a keyboard mnemonic.
+            Assert.AreEqual("Use C&K approach · v2 text in draft", result.GetProperty("ampersand_restore_label").GetString());
             foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png", "04-conflict-unresolved.png", "05-conflict-resolved.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, "A rendered capture is required: " + capture);
             byte[] currentCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "01-current.png"));

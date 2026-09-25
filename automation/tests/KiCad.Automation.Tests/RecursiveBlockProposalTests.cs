@@ -38,8 +38,6 @@ public sealed class RecursiveBlockProposalTests
         return (graph, proposal, f.Blocks["CPU"]);
     }
 
-    /// <summary>A whole-block proposal that rewrites the target's three fields. With <paramref name="refine"/>, it also
-    /// refines that existing connection of the target's level (a new implementation of it with rewritten fields).</summary>
     /// <summary>A test-only proposal for the input's target: two new blocks joined by a new signal group and, when
     /// <paramref name="refine"/> names one of the target's connections, a refinement of it that rewrites its three fields. When
     /// <paramref name="refineMember"/> names one of that connection's direct members, the proposal refines the member too: it
@@ -163,11 +161,6 @@ public sealed class RecursiveBlockProposalTests
         Assert.AreEqual(changed.Requirements(changed.SelectedRoot).Requirements, chosen.Requirements(chosen.SelectedRoot).Requirements);
     }
 
-    // Isolated rules of the stale-proposal comparison (ledger pa48933d0fe0a5c2f). The native journey compares a root proposal with the
-    // saved design through the production MCP server, and a chosen supply proposal before and after an edit, but its fixture changes no
-    // nested level on both sides, no member of a refined connection, chooses no proposal made from a chosen one, has no proposal below a
-    // direct child of the root (so no outdated path through a containing block) and never takes the target out of the design; those
-    // cases are only reachable here.
     /// <summary>Which code a comparison that cannot be made reports beside a publication or refusal (review of pa48, finding 3).
     /// The journey proves the realistic case over MCP: an outdated request that no longer prepares reports invalid_block_proposal.
     /// A published proposal was validated when it was saved, so no real request makes comparing it fail without a code; that
@@ -192,6 +185,11 @@ public sealed class RecursiveBlockProposalTests
         Assert.IsNotNull(comparison); Assert.IsNull(cause, "A comparison that can be made reports no cause.");
     }
 
+    // Isolated rules of the stale-proposal comparison (ledger pa48933d0fe0a5c2f). The native journey compares a root proposal with the
+    // saved design through the production MCP server, and a chosen supply proposal before and after an edit; that supply proposal also
+    // refines a member of the refined Supply connection. But its fixture changes no nested level on both sides, changes no member of a
+    // refined connection on today's side, chooses no proposal made from a chosen one, has no proposal below a direct child of the root
+    // (so no outdated path through a containing block) and never takes the target out of the design; those cases are only reachable here.
     [TestMethod]
     public void StaleProposalComparisonNamesEachChangedElementOnEachSide()
     {

@@ -307,7 +307,8 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
         m_selectedHeading->SetLabelText( wxString::Format( _( "%s · %s — Selected text" ), entry.revisionLabel, entry.actor ) );
         m_selectedHeading->SetToolTip( m_selectedHeading->GetLabelText() );
         m_selectedText->ChangeValue( entry.text );
-        m_restore->SetLabel( wxString::Format( _( "Use %s text in draft" ), entry.revisionLabel ) );
+        // Escaped like the heading: an "&" in an implementation's name is shown, not taken as a keyboard mnemonic.
+        m_restore->SetLabel( wxControl::EscapeMnemonics( wxString::Format( _( "Use %s text in draft" ), entry.revisionLabel ) ) );
         m_source->Show( m_openSource && !entry.sourceDescription.IsEmpty() );
         m_source->SetToolTip( entry.sourceDescription );
     }

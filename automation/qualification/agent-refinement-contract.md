@@ -185,15 +185,20 @@ The connection's new revision takes the call's `operationId` as its identity, an
 identity the save creates (the groups containing it, the level and each level above it, new
 members) is derived from it. An agent whose call was cut off reads the connection: a revision
 with the operation's identity means the operation landed. Repeating a landed operation never
-saves a second copy: on the file it produced it finds nothing to change and writes nothing. The native editor
+saves a second copy, and on the file it produced it writes nothing: a repeated
+`kicad_diagram_connection_endpoint_set` finds its end already as asked and reports `changed=false`;
+a repeated `kicad_diagram_connection_members_refine` that declares new members is refused with
+`identity_reused`, because those members now exist (one that declares none finds nothing to change).
+The native editor
 shows the result after it reloads: bound or unresolved ends with what they say in the connection's
 Endpoints row, refined members in its Signals row. Native schematic and PCB files are not touched.
 
 Evidence: `RecursiveEditorFileCommandTests.AgentConnectionEditsBindEndsThroughTheLevelsAndRefineMembersInOneGuardedSave`
 (helper process, PSU/CPU fixture), the connection-details and PSU/CPU canvas steps of
 `NativeRecursiveEditorJourney` (production MCP server, rendered editor; the unbind's revision is its
-operation's identity and repeating it writes nothing; the grouped Supply revision before the PSU
-proposal likewise) and
+operation's identity and repeating it reports `changed=false` and writes nothing; the grouped Supply
+revision before the PSU proposal is its operation's identity too, and repeating that grouping is refused
+with `identity_reused` and writes nothing) and
 `RecursiveBlockLocalDiagramTests.AgentConnectionEditsNameExactlyOneCurrentTarget` (the refusal
 matrix of the isolated rules).
 

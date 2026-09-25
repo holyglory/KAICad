@@ -314,7 +314,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );
         selectedHeading = control<wxStaticText>( dialog, "DiagramFieldHistorySelectedHeading" )->GetLabelText().utf8_string();
-        restoreLabel = restore->GetLabel().utf8_string();
+        restoreLabel = restore->GetLabelText().utf8_string();
         BOOST_CHECK_EQUAL( saved->GetValue(), text( page.saved_text() ) );
         BOOST_CHECK( !dialog->RestoreRevision().has_value() );
         capture( dialog, evidence, "02-earlier-text.png" );
@@ -378,13 +378,25 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         click( control<wxButton>( other, "DiagramFieldHistoryClose" ) );
     } ), wxID_CANCEL );
     other->Destroy(); wxTheApp->ProcessPendingEvents();
+
+    // An "&" in the name of the implementation a row was saved in is shown as written on the Use button, as in the heading,
+    // not taken as a keyboard mnemonic (a manufacturer-style name such as "C&K").
+    DIAGRAM_FIELD_HISTORY_ENTRY named = rows[1];
+    named.implementation = wxS( "C&K approach" );
+    named.revisionLabel = wxString::Format( "C&K approach · v%u", page.entries( 1 ).context_version() );
+    auto* ampersand = new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "Routing requirements", "PSU",
+            wxString::Format( "v%u", page.context_version() ), text( page.saved_text() ), { named } );
+    std::string ampersandLabel = control<wxButton>( ampersand, "DiagramFieldHistoryRestore" )->GetLabelText().utf8_string();
+    BOOST_CHECK_EQUAL( ampersandLabel, wxString::Format( "Use C&K approach · v%u text in draft", page.entries( 1 ).context_version() ).utf8_string() );
+    ampersand->Destroy(); wxTheApp->ProcessPendingEvents();
     std::ofstream receipt( evidence / "interaction.json" );
     receipt << nlohmann::json( { { "document_id", page.document_id() }, { "owner_id", page.owner_id() },
         { "context_revision_id", page.context_revision_id() }, { "restore_requirement_revision_id", restored },
         { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
         { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits },
         { "compact_author_visible", compactAuthorShown }, { "compact_heading", compactHeading },
-        { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel } } ).dump( 2 );
+        { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel },
+        { "ampersand_restore_label", ampersandLabel } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
 }
 

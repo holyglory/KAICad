@@ -671,7 +671,7 @@ public sealed partial class NativeSessionTests
             // A dense level stays responsive (review of design QA P2-5): another agent draws twelve blocks with eight ports each and
             // fifty connections between them on the System level. The editor lays a level's connection paths out once for each
             // change of its geometry and reuses that layout for every repaint and every state read; a drag of one block lays the
-            // level out once for each position the block reaches (GTK may merge the fixture's eight pointer motions into fewer
+            // level out at most once for each position the block reaches (GTK may merge the fixture's eight pointer motions into fewer
             // positions, which the editor reports as drag_positions), and no single layout takes a second even in this
             // unoptimized build.
             var denseBase = RecursiveBlockGraphXml.Read(savedXml);
@@ -1887,7 +1887,7 @@ public sealed partial class NativeSessionTests
             Guid convertedRails = Guid.NewGuid(), vout = Guid.NewGuid(), rtn = Guid.NewGuid(), groupOperation = Guid.NewGuid();
             var datasheet = new SourceReference("regulator-datasheet", "rev-c", 7, "Table 3", "TPS62A0-Q1");
             var memberEnums = new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
-            var grouped = await client.CallToolAsync("kicad_diagram_connection_members_refine", new Dictionary<string, object?>(arguments)
+            var groupCall = new Dictionary<string, object?>(arguments)
             {
                 ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = await FileToken(source, token), ["expectedRoot"] = groupBase.SelectedRoot,
                 ["blockPath"] = new[] { groupBase.SelectedRoot, groupPsu }, ["connectionPath"] = new[] { groupSupply }, ["memberIds"] = new[] { convertedRails },
@@ -1898,7 +1898,8 @@ public sealed partial class NativeSessionTests
                     new ConnectionMemberDefinition(vout, "VOUT", []), new ConnectionMemberDefinition(rtn, "RTN", [])
                 }, memberEnums),
                 ["operationId"] = groupOperation, ["actor"] = "Supply agent", ["sources"] = new[] { datasheet }
-            }, cancellationToken: token);
+            };
+            var grouped = await client.CallToolAsync("kicad_diagram_connection_members_refine", groupCall, cancellationToken: token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-supply-members-grouped.json"), JsonSerializer.Serialize(grouped), token);
             Assert.IsFalse(grouped.IsError == true, JsonSerializer.Serialize(grouped));
             Assert.IsTrue(JsonSerializer.SerializeToElement(grouped).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
@@ -1908,6 +1909,20 @@ public sealed partial class NativeSessionTests
             // The connection edit's new revision is the operation's identity, so an agent whose call was cut off can see it landed.
             Assert.AreEqual(groupOperation, groupedSupply.RevisionId, "The grouped Supply revision is the operation's identity.");
             CollectionAssert.AreEqual(new[] { convertedRails }, groupedGraph.Connections(groupPsu.BlockId).Inspect(groupedSupply).Members.Select(m => m.ConnectionId).ToArray());
+            // Repeating the landed grouping on the file it produced (its token and paths) cannot save it twice: the new members it
+            // declares now exist, so it is refused as identity_reused and writes nothing. (A repeated end binding instead finds
+            // nothing to change; the connection-details journey proves that.)
+            var groupedData = JsonSerializer.SerializeToElement(grouped).GetProperty("structuredContent");
+            string groupedXml = await File.ReadAllTextAsync(source, token);
+            var regrouped = await client.CallToolAsync("kicad_diagram_connection_members_refine", new Dictionary<string, object?>(groupCall)
+            {
+                ["expectedSourceToken"] = groupedData.GetProperty("sourceToken").GetString(), ["expectedRoot"] = groupedData.GetProperty("selectedRoot"),
+                ["blockPath"] = groupedData.GetProperty("blockPath"), ["connectionPath"] = groupedData.GetProperty("connectionPath")
+            }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-supply-members-regrouped.json"), JsonSerializer.Serialize(regrouped), token);
+            Assert.IsTrue(regrouped.IsError == true, "Repeating the landed grouping is refused: " + JsonSerializer.Serialize(regrouped));
+            Assert.AreEqual("identity_reused", JsonSerializer.SerializeToElement(regrouped).GetProperty("structuredContent").GetProperty("code").GetString());
+            Assert.AreEqual(groupedXml, await File.ReadAllTextAsync(source, token), "The refused repeat writes nothing.");
             nativeSavedComponents = groupedGraph;
             var beforePhysical = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
             Assert.IsFalse(beforePhysical.IsError == true);

@@ -445,7 +445,9 @@ public sealed class SchematicInitialLayoutPlannerTests
     }
 
     // #PWR01 (global GND) is in GND; the XML adds TP1 and #PWR02, both coordinate-free, to GND. TP9 is the test-point template.
-    private static (Bench Bench, DesignRecoveryState Saved, Guid Tp1, Guid Pwr2) Power()
+    // An optional item is drawn on the root sheet at <paramref name="obstacle"/> (measured by <paramref name="geometry"/>).
+    private static (Bench Bench, DesignRecoveryState Saved, Guid Tp1, Guid Pwr2) Power(SchematicConnectionRealizerTests.Rect? obstacle = null,
+        SchematicConnectionRealizerTests.Geometry? geometry = null)
     {
         var bench = new Bench();
         Guid gnd = bench.Part("GND", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "GND", 1, ElectricalPinType.EptPowerInput, false));
@@ -454,6 +456,14 @@ public sealed class SchematicInitialLayoutPlannerTests
         bench.Component(tp, "TP9");
         var ground = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr1, "1")]);
         var state = SchematicConnectionRealizerTests.WithFormatting(bench.State([ground]));
+        if (obstacle is { } rect)
+        {
+            var id = Guid.NewGuid();
+            state = SchematicConnectionRealizerTests.Edited(state, data => SchematicConnectionRealizerTests.Root(data).Items.Add(
+                Google.Protobuf.WellKnownTypes.Any.Pack(new SchematicText { Id = new() { Value = id.ToString("D") }, Locked = LockedState.LsUnlocked,
+                    Text = new() { Text_ = "keep out", Position = new() { XNm = rect.L, YNm = rect.T }, Attributes = new() { Multiline = true } } })));
+            (geometry ?? throw new ArgumentNullException(nameof(geometry))).Sized[id] = rect;
+        }
         var (design, tp1) = bench.Create(state.Baseline, tp, "TP1", BenchSheet.Root);
         (design, var pwr2) = bench.Create(design, gnd, "#PWR02", BenchSheet.Root, value: "GND");
         design = WithNets(Unplaced(Unplaced(design, tp1), pwr2), ground with { Pins = [.. ground.Pins, new(tp1, "1"), new(pwr2, "1")] });
@@ -505,6 +515,110 @@ public sealed class SchematicInitialLayoutPlannerTests
         Assert.AreEqual(new SymbolPlacement(137.3m, 100m, 180, false, false, false), besidePlacement);
         var besideRealization = await SchematicConnectionRealizerTests.Scene.Of(null, pinnedPartner, _ => beside.DesiredDesign!).Realize();
         Assert.IsTrue(besideRealization.Outcomes.Single().AttachedCarrier, "The stub attaches to the power symbol seated beside the placed TP1.");
+    }
+
+    // Decision n2ad655250c5716f5 rule 3 (review finding 1 of the placement re-review): a seat beside an explicitly placed new symbol
+    // joins that symbol's reserved room, and the layout checks that room as one rectangle, like every explicitly placed symbol. With
+    // #PWR02 measured 12 grids tall when turned half round (TP1 is 4 grids tall), the rectangle around TP1's room and the seat
+    // reaches 4 grids above TP1, where neither TP1's room nor the seat is. An item there, clear of both, used to refuse the whole
+    // layout (pinned_obstacle_overlap on TP1); now only the pairing is dropped as a collision and everything is laid out.
+    [TestMethod]
+    public async Task ASeatThatWouldGrowAnExplicitlyPlacedPartnerOntoAnItemIsDroppedAlone()
+    {
+        SchematicConnectionRealizerTests.Geometry Tall() => new()
+        {
+            Tamper = (request, reply) =>
+            {
+                foreach (var candidate in reply.Candidates)
+                    if (request.Candidates.Single(c => c.Id.Equals(candidate.Id)).Transform?.Orientation is SchematicSymbolOrientation.Sso180)
+                    {
+                        candidate.Bounds.Position.YNm = candidate.Anchor.YNm - 6 * ConnectionGrid;
+                        candidate.Bounds.Size.YNm = 12 * ConnectionGrid;
+                    }
+                return reply;
+            }
+        };
+        var placedTp1 = new SymbolPlacement(150, 100, 0, false, false, false);
+        async Task<(SchematicInitialLayoutResult Result, Guid Tp1, Guid Pwr2)> Propose(SchematicConnectionRealizerTests.Rect item)
+        {
+            var geometry = Tall();
+            var (bench, saved, tp1, pwr2) = Power(item, geometry);
+            var wanted = DesignRecoveryStore.ReadDesired(saved);
+            var pinned = saved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(wanted with { Engineering = wanted.Engineering with
+                { Circuit = wanted.Engineering.Circuit with { Symbols = [.. wanted.Engineering.Circuit.Symbols
+                    .Select(s => s.ComponentId == tp1 ? s with { Placement = placedTp1 } : s)] } } }, saved.KnowledgeLibraries)) };
+            return (await ProposeConnected(pinned, Root(bench), geometry), tp1, pwr2);
+        }
+        // TP1's body spans x 144.92..155.08 mm and y 97.46..102.54 mm; its stub and label room lies left of x 146.2 mm. The seat
+        // spans x 132.22..142.38 mm and, measured tall, y 92.38..107.62 mm, so the grown room reaches up to y 92.38 mm right across TP1.
+        // Guard: the item 3.4 mm above that, outside the grown room by more than the 1.27 mm layout clearance, leaves the seat attached.
+        var (clear, _, _) = await Propose(new(149_000_000, 88_000_000, 152_000_000, 89_000_000));
+        Assert.IsTrue(clear.CanPropose, string.Join("; ", clear.Layout.Issues.Select(i => i.Code)));
+        var seated = clear.PowerAttachments.Single();
+        Assert.IsTrue(seated.Attached, seated.DroppedReason);
+        Assert.AreEqual(new PresentationPoint(150_000_000 - 10 * ConnectionGrid, 100_000_000), seated.Anchor);
+        // Must-catch: the item inside the grown room, 3.46 mm above TP1's body and 6.6 mm right of the seat, clear of both.
+        var (blocked, tp1, pwr2) = await Propose(new(149_000_000, 93_000_000, 152_000_000, 94_000_000));
+        Assert.IsTrue(blocked.CanPropose, "Only the pairing is dropped, never the layout: " + string.Join("; ", blocked.Layout.Issues.Select(i => i.Code)));
+        var dropped = blocked.PowerAttachments.Single();
+        Assert.IsFalse(dropped.Attached);
+        Assert.AreEqual("collision", dropped.DroppedReason);
+        Assert.AreEqual(new PresentationPoint(150_000_000 - 10 * ConnectionGrid, 100_000_000), dropped.Anchor, "The refused seat is reported.");
+        Assert.AreEqual(placedTp1, blocked.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == tp1).Placement,
+            "TP1 keeps its explicit position.");
+        Assert.AreEqual(0, blocked.DesiredDesign.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr2).Placement!.RotationDegrees,
+            "The dropped power symbol is laid out freely, unturned.");
+        Assert.HasCount(2, blocked.Layout.Placements!);
+    }
+
+    // Decision n2ad655250c5716f5 rule 3 (review finding 3 of the placement re-review): TP1 with #PWR02 on the root sheet and TP2 with
+    // #PWR03 on the child sheet, all coordinate-free and joining GND. The root's usable region has room for TP1 (17.78 mm wide with
+    // its stub and label) but not for TP1 with #PWR02 seated on it (22.86 mm); the child sheet has room for everything.
+    [TestMethod]
+    public async Task AFailedFirstLayoutDropsSeatsOnlyOnTheSheetsThatFoundNoRoom()
+    {
+        var bench = new Bench();
+        Guid gnd = bench.Part("GND", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "GND", 1, ElectricalPinType.EptPowerInput, false));
+        Guid tp = bench.Part("TP", Passive("1"));
+        Guid pwr1 = bench.Component(gnd, "#PWR01", value: "GND");
+        bench.Component(tp, "TP9");
+        var ground = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr1, "1")]);
+        var state = SchematicConnectionRealizerTests.WithFormatting(bench.State([ground]));
+        var (design, tp1) = bench.Create(state.Baseline, tp, "TP1", BenchSheet.Root);
+        (design, var pwr2) = bench.Create(design, gnd, "#PWR02", BenchSheet.Root, value: "GND");
+        (design, var tp2) = bench.Create(design, tp, "TP2", BenchSheet.Child);
+        (design, var pwr3) = bench.Create(design, gnd, "#PWR03", BenchSheet.Child, value: "GND");
+        design = WithNets(Unplaced(Unplaced(Unplaced(Unplaced(design, tp1), pwr2), tp2), pwr3),
+            ground with { Pins = [.. ground.Pins, new(tp1, "1"), new(pwr2, "1"), new(tp2, "1"), new(pwr3, "1")] });
+        var (saved, _) = Revise(state, _ => design);
+        Guid root = bench.ScreenId(BenchSheet.Root), child = bench.ScreenId(BenchSheet.Child);
+        SchematicLayoutRegion[] Regions(PresentationBounds rootRegion) =>
+            [new(root, rootRegion, []), new(child, new(0, 0, 297_000_000, 210_000_000), [])];
+
+        // Guard: with room on both sheets, both power symbols are seated.
+        var roomy = await ProposeConnected(saved, Regions(new(0, 0, 297_000_000, 210_000_000)), new());
+        Assert.IsTrue(roomy.CanPropose, string.Join("; ", roomy.Layout.Issues.Select(i => i.Code)));
+        Assert.IsTrue(roomy.PowerAttachments.All(a => a.Attached), string.Join(",", roomy.PowerAttachments.Select(a => a.DroppedReason)));
+
+        // Must-catch: the crowded root sheet fails the first layout. Only its seat is dropped (page_overflow); the child sheet, which
+        // was laid out, keeps its seat attached, exactly where the roomy layout seated it.
+        var crowded = await ProposeConnected(saved, Regions(new(100_000_000, 100_000_000, 121_000_000, 112_000_000)), new());
+        Assert.IsTrue(crowded.CanPropose, string.Join("; ", crowded.Layout.Issues.Select(i => i.Code)));
+        Assert.HasCount(2, crowded.PowerAttachments);
+        var onRoot = crowded.PowerAttachments.Single(a => a.ScreenId == root);
+        Assert.AreEqual(pwr2, onRoot.CarrierComponentId);
+        Assert.IsFalse(onRoot.Attached); Assert.AreEqual("page_overflow", onRoot.DroppedReason);
+        var onChild = crowded.PowerAttachments.Single(a => a.ScreenId == child);
+        Assert.AreEqual(pwr3, onChild.CarrierComponentId);
+        Assert.AreEqual(new PinEndpoint(tp2, "1"), onChild.Partner);
+        Assert.IsTrue(onChild.Attached, "The child sheet found room, so its seat stays: " + onChild.DroppedReason);
+        var roomyChild = roomy.PowerAttachments.Single(a => a.ScreenId == child);
+        Assert.AreEqual(roomyChild.Anchor, onChild.Anchor, "The child sheet is laid out exactly as with room everywhere.");
+        Assert.AreEqual(roomyChild.RotationDegrees, onChild.RotationDegrees);
+        var childPlacements = crowded.Layout.Placements!.Where(p => p.SheetId == child).Select(p => (p.BodyId, p.Anchor)).ToArray();
+        CollectionAssert.AreEqual(roomy.Layout.Placements!.Where(p => p.SheetId == child).Select(p => (p.BodyId, p.Anchor)).ToArray(), childPlacements);
+        Assert.AreEqual(180, crowded.DesiredDesign!.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr3).Placement!.RotationDegrees);
+        Assert.AreEqual(0, crowded.DesiredDesign.Engineering.Circuit.Symbols.Single(s => s.ComponentId == pwr2).Placement!.RotationDegrees);
     }
 
     [TestMethod]

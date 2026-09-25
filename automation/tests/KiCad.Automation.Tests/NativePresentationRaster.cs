@@ -29,7 +29,58 @@ internal static class NativePresentationRaster
         if (Math.Abs(viewport.PixelXDyNm) > 1e-6 || Math.Abs(viewport.PixelYDxNm) > 1e-6
             || viewport.PixelXDxNm <= 0 || viewport.PixelYDyNm <= 0)
             throw new InvalidDataException("An axis-aligned offscreen view is required to map pixels to the sheet.");
-        var raster = Decode(png);
+        var ink = Ink(Decode(png));
+        long X(int pixel) => (long)Math.Round(viewport.OriginXNm + pixel * viewport.PixelXDxNm);
+        long Y(int pixel) => (long)Math.Round(viewport.OriginYNm + pixel * viewport.PixelYDyNm);
+        return (new PresentationBounds(X(ink.Left), Y(ink.Top), X(ink.Right + 1), Y(ink.Bottom + 1)),
+            Math.Max(viewport.PixelXDxNm, viewport.PixelYDyNm));
+    }
+
+    /// <summary>How well two paintings of one text at one scale agree in shape, as the smaller of the shares of each painting's
+    /// ink pixels that lie within one pixel of the other's ink (1 when every ink pixel of each has one of the other beside it),
+    /// with both paintings aligned on their ink boxes. Turned compares <paramref name="turned"/> with <paramref name="upright"/>
+    /// turned half round; Unturned compares it with <paramref name="upright"/> as it is. Text painted upside down agrees with
+    /// its upright painting turned half round, and much less with it unturned unless the text reads the same both ways, although
+    /// both fill a box of the same size. Where each painting lies does not matter: KiCad turns a field about its anchor, which
+    /// is not the middle of its text unless the text is centred.</summary>
+    internal static (double Turned, double Unturned) HalfTurnAgreement(byte[] upright, byte[] turned)
+    {
+        var a = Ink(Decode(upright));
+        var b = Ink(Decode(turned));
+        // Ink pixels relative to the top-left corner of their ink box.
+        HashSet<(int X, int Y)> Points(InkMask ink, bool halfTurn)
+        {
+            var points = new HashSet<(int X, int Y)>();
+            for (int y = ink.Top; y <= ink.Bottom; ++y)
+            for (int x = ink.Left; x <= ink.Right; ++x)
+                if (ink.Mask[y * ink.Width + x])
+                    points.Add(halfTurn ? (ink.Right - x, ink.Bottom - y) : (x - ink.Left, y - ink.Top));
+            return points;
+        }
+        static double Share(HashSet<(int X, int Y)> from, HashSet<(int X, int Y)> to)
+        {
+            if (from.Count == 0) return 0;
+            int near = 0;
+            foreach (var (x, y) in from)
+            {
+                bool found = false;
+                for (int dy = -1; dy <= 1 && !found; ++dy)
+                for (int dx = -1; dx <= 1 && !found; ++dx)
+                    found = to.Contains((x + dx, y + dy));
+                if (found) ++near;
+            }
+            return (double)near / from.Count;
+        }
+        static double Agreement(HashSet<(int X, int Y)> first, HashSet<(int X, int Y)> second) => Math.Min(Share(first, second), Share(second, first));
+        var other = Points(b, halfTurn: false);
+        return (Agreement(Points(a, halfTurn: true), other), Agreement(Points(a, halfTurn: false), other));
+    }
+
+    // The ink pixels of a painting and their box, found as InkBounds describes; ink reaching the image edge is refused.
+    private sealed record InkMask(int Width, int Height, bool[] Mask, int Left, int Top, int Right, int Bottom);
+
+    private static InkMask Ink(Raster raster)
+    {
         var border = new Dictionary<(byte, byte, byte), int>();
         void Sample(int x, int y) => border[raster.At(x, y)] = border.GetValueOrDefault(raster.At(x, y)) + 1;
         for (int x = 0; x < raster.Width; ++x) { Sample(x, 0); Sample(x, raster.Height - 1); }
@@ -42,19 +93,18 @@ internal static class NativePresentationRaster
         for (int x = 0; x < raster.Width; ++x)
             strongest = Math.Max(strongest, Difference(raster.At(x, y)));
         if (strongest < 64) throw new InvalidDataException("The offscreen view contains no painted ink.");
+        var mask = new bool[raster.Width * raster.Height];
         int left = int.MaxValue, top = int.MaxValue, right = -1, bottom = -1;
         for (int y = 0; y < raster.Height; ++y)
         for (int x = 0; x < raster.Width; ++x)
         {
             if (2 * Difference(raster.At(x, y)) < strongest) continue;
+            mask[y * raster.Width + x] = true;
             left = Math.Min(left, x); right = Math.Max(right, x); top = Math.Min(top, y); bottom = Math.Max(bottom, y);
         }
         if (left == 0 || top == 0 || right == raster.Width - 1 || bottom == raster.Height - 1)
             throw new InvalidDataException("Ink reaches the edge of the offscreen view; the region does not contain the whole text.");
-        long X(int pixel) => (long)Math.Round(viewport.OriginXNm + pixel * viewport.PixelXDxNm);
-        long Y(int pixel) => (long)Math.Round(viewport.OriginYNm + pixel * viewport.PixelYDyNm);
-        return (new PresentationBounds(X(left), Y(top), X(right + 1), Y(bottom + 1)),
-            Math.Max(viewport.PixelXDxNm, viewport.PixelYDyNm));
+        return new(raster.Width, raster.Height, mask, left, top, right, bottom);
     }
 
     internal static Raster Decode(byte[] png)

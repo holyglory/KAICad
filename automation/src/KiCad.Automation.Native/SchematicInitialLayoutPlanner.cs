@@ -214,8 +214,10 @@ public static class SchematicInitialLayoutPlanner
             limits.UnionWith(connection.Limitations);
         }
         var layout = InitialSchematicLayout.Propose(pages, bodies, policy, token);
-        // A new symbol that has no room together with the power symbols seated on it takes them without their seats (§10).
-        if (!layout.CanPropose && connection is not null && connection.DropSeatsOnFreeSymbols(bodies))
+        // A new symbol that has no room together with the power symbols seated on it takes them without their seats (§10), on
+        // the sheets that found no room only; every other sheet keeps its seats.
+        if (!layout.CanPropose && connection is not null
+            && connection.DropSeatsOnFreeSymbols(bodies, layout.Issues.Select(i => i.SheetId).ToHashSet()))
             layout = InitialSchematicLayout.Propose(pages, bodies, policy, token);
         var preferredAnchors = connection?.PreferredAnchors(bodies) ?? [];
         if (!layout.CanPropose) return new(null, null, layout, null, limits.Order(StringComparer.Ordinal).ToArray(), preferredAnchors, []);
@@ -605,7 +607,9 @@ public static class SchematicInitialLayoutPlanner
         // shortest stub. The seat is claimed before any free symbol is placed: beside an existing symbol it becomes an
         // obstacle, and beside a new symbol, explicitly placed or free, it joins that symbol's reserved bounds and moves with
         // it, so the free layout keeps every other symbol clear of it. A seat outside the usable page or one that collides is
-        // dropped, and the power symbol is then laid out freely like any other new symbol.
+        // dropped, and the power symbol is then laid out freely like any other new symbol. Beside an explicitly placed symbol the
+        // seat also collides when the symbol's room grown by the seat would meet something the room alone does not
+        // (GrownRoomCollides); only that pairing is dropped, never the layout.
         private void Seat(ScreenWork screen, InitialLayoutSheet page)
         {
             if (screen.Carriers.Count == 0) return;
@@ -652,7 +656,8 @@ public static class SchematicInitialLayoutPlanner
                 var bounds = Translate(probe.Bounds, Plus(origin, offset));
                 Guid frame = free ? partner.SymbolId : Guid.Empty;
                 string? refusal = !free && !available.Contains(bounds) ? "page_overflow"
-                    : Collides(screen, page, partner, host, origin, frame, bounds, claimed) ? "collision" : null;
+                    : Collides(screen, page, partner, host, origin, frame, bounds, claimed) ? "collision"
+                    : host is { FixedAnchor: { } fixedAt } && GrownRoomCollides(screen, page, host, fixedAt, bounds) ? "collision" : null;
                 seats.Add(Decision(rotation, offset, probe.Bounds, refusal));
                 if (refusal is not null) continue;
                 claimed.Add((frame, bounds));
@@ -666,18 +671,20 @@ public static class SchematicInitialLayoutPlanner
             }
         }
 
-        /// <summary>After a layout that found no room: drop every seat on a free new symbol as <c>page_overflow</c>, give that symbol
-        /// back its own reserved bounds and return its power symbols to the free layout. Seats beside existing and explicitly placed
-        /// symbols were checked against the page before the layout and stay. Returns whether anything changed.</summary>
-        public bool DropSeatsOnFreeSymbols(List<InitialLayoutBody> bodies)
+        /// <summary>After a layout that found no room: on each sheet named in <paramref name="failed"/> only, drop every seat on a
+        /// free new symbol as <c>page_overflow</c>, give that symbol back its own reserved bounds and return its power symbols to the
+        /// free layout (decision n2ad655250c5716f5 rule 3). Seats on sheets that were laid out stay, and so do seats beside existing
+        /// and explicitly placed symbols, which were checked before the layout like the symbols they sit beside. Returns whether
+        /// anything changed.</summary>
+        public bool DropSeatsOnFreeSymbols(List<InitialLayoutBody> bodies, IReadOnlySet<Guid> failed)
         {
             bool changed = false;
             for (int i = 0; i < seats.Count; i++)
             {
                 var seat = seats[i];
                 var screen = work[seat.ScreenId];
-                if (seat.DroppedReason is not null || !screen.Unseated.TryGetValue(seat.Partner.SymbolId, out var unseated)
-                    || unseated.FixedAnchor is not null)
+                if (seat.DroppedReason is not null || !failed.Contains(seat.ScreenId)
+                    || !screen.Unseated.TryGetValue(seat.Partner.SymbolId, out var unseated) || unseated.FixedAnchor is not null)
                     continue;
                 seats[i] = seat with { DroppedReason = "page_overflow" };
                 screen.Seated.Remove(seat.Carrier);
@@ -706,6 +713,27 @@ public static class SchematicInitialLayoutPlanner
                 if (obstacle.Id != partner.SymbolId && !partnerPins.Contains(obstacle.Id) && Near(bounds, obstacle.Bounds, gap)) return true;
             return screen.Bodies.Values.Any(b => b.FixedAnchor is { } fixedAt && b.Id != partner.SymbolId
                 && Near(bounds, Translate(b.OccupiedRelativeBounds, fixedAt), gap));
+        }
+
+        // A seat beside an explicitly placed new symbol joins that symbol's reserved room, which the layout checks as one rectangle
+        // like every explicitly placed symbol: inside the usable page and clear, by the layout clearance, of every item, every
+        // keep-out (claimed seats beside existing symbols among them) and every other explicitly placed symbol's room. That
+        // rectangle can reach where neither the room nor the seat does (above or below the symbol when the power symbol is taller
+        // than it), so it is checked here, before the layout, and a seat that would make it collide is dropped as a collision
+        // rather than refusing the whole layout (decision n2ad655250c5716f5 rule 3). Only what the grown room reaches beyond the
+        // room the symbol already has counts; anything that room already meets is a problem of the explicit position itself,
+        // which the layout reports as before. The page is a rectangle, so a room and a seat that each fit it grow into a room
+        // that fits it too: the seat's own page check covers the page.
+        private bool GrownRoomCollides(ScreenWork screen, InitialLayoutSheet page, InitialLayoutBody host, PresentationPoint fixedAt,
+            PresentationBounds seat)
+        {
+            long gap = layoutPolicy.ClearanceNm;
+            var room = Translate(host.OccupiedRelativeBounds, fixedAt);
+            var grown = Union([room, seat]);
+            var others = page.Obstacles.Concat(screen.KeepOuts).Select(o => o.Bounds)
+                .Concat(screen.Bodies.Values.Where(b => b.FixedAnchor is not null && b.Id != host.Id)
+                    .Select(b => Translate(b.OccupiedRelativeBounds, b.FixedAnchor!.Value)));
+            return others.Any(other => Near(grown, other, gap) && !Near(room, other, gap));
         }
 
         /// <summary>Put each seated power symbol where its seat ended up and report every pairing (§10 powerAttachments): a

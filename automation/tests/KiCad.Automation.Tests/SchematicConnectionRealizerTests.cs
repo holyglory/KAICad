@@ -751,10 +751,10 @@ public sealed class SchematicConnectionRealizerTests
     }
 
     [TestMethod]
-    public async Task ALibraryCacheIsReplacedOnlyToAddDefinitionsOnASheetReceivingANewSymbol()
+    public async Task ALibraryCacheChangesOnlyByTheDefinitionsOfSymbolsCreatedOnItsSheet()
     {
-        // The batch check (I6): a sheet's library cache may change only on a sheet that receives a new symbol, and only by
-        // adding definitions. Every definition KiCad already holds there must stay exactly as it is.
+        // The batch check (I6): a sheet's library cache may change only on a sheet that receives a new symbol, and only by the
+        // definitions of the symbols created on that sheet. Every definition KiCad already holds there must stay exactly as it is.
         static SchematicCachedSymbol Entry(SchematicHierarchyData data, string reference)
         {
             var symbol = data.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
@@ -1397,12 +1397,13 @@ public sealed class SchematicConnectionRealizerTests
     /// <summary>A realization recording: the planned revision's circuit (its nets listed again for reading) and exact
     /// desired-file digest, the checkpoint, every measurement request with the editor's reply in order, and the operations
     /// and generated items the realizer produced from them. The recovery record the revision was planned from is kept once
-    /// beside it, under the name <paramref name="recovery"/> that the recording carries. A refused realization has no
-    /// operations or generated items and carries the <paramref name="refusal"/> instead; it is evidence, never loaded as a
-    /// replay fixture (those are named *.measurement.json).</summary>
+    /// beside it, under the name <paramref name="recovery"/> that the recording carries. A realization that failed has no
+    /// operations or generated items and carries its <paramref name="failure"/> instead: the refusal's code and message for
+    /// a refusal (an <see cref="AutomationException"/>), else the failure's type and message with no code. It is evidence,
+    /// never loaded as a replay fixture (those are named *.measurement.json).</summary>
     internal static string FormatRecording(string scenario, DesignRecoveryState revision, CheckedSchematicState checkpoint,
         IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> measurements, SchematicConnectionRealization? realization,
-        string recovery = "editor.recovery.json", AutomationException? refusal = null)
+        string recovery = "editor.recovery.json", Exception? failure = null)
     {
         static System.Text.Json.Nodes.JsonNode Proto(IMessage message) => System.Text.Json.Nodes.JsonNode.Parse(SchematicJson.Formatter.Format(message))!;
         var desired = DesignRecoveryStore.ReadDesired(revision);
@@ -1435,7 +1436,10 @@ public sealed class SchematicConnectionRealizerTests
             {
                 ["part"] = p.PartId.ToString("D"), ["library"] = Proto(p.LibraryId), ["symbol"] = Proto(p.Symbol), ["bodyStyle"] = p.BodyStyle
             })]);
-        if (refusal is not null) root["refusal"] = new System.Text.Json.Nodes.JsonObject { ["code"] = refusal.Code, ["message"] = refusal.Message };
+        if (failure is AutomationException refusal)
+            root["refusal"] = new System.Text.Json.Nodes.JsonObject { ["code"] = refusal.Code, ["message"] = refusal.Message };
+        else if (failure is not null)
+            root["failure"] = new System.Text.Json.Nodes.JsonObject { ["type"] = failure.GetType().FullName, ["message"] = failure.Message };
         return root.ToJsonString();
     }
 
@@ -1572,6 +1576,16 @@ public sealed class SchematicConnectionRealizerTests
             Assert.IsGreaterThan(0, answered.Count, recording.Scenario + ": the refusal came after measuring.");
             Assert.IsTrue(System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(SchematicJson.Formatter.Format(answered[^1].Reply)),
                 kept["measurements"]!.AsArray()[^1]!["response"]), recording.Scenario + ": the last answer kept is the editor's last answer.");
+            // A realization that fails without a refusal (here a measurement the editor stopped answering) is kept the same way,
+            // with the failure's type and message and no error code, since only a refusal has one.
+            var stopped = new InvalidOperationException("The editor stopped answering placement measurements.");
+            var failed = System.Text.Json.Nodes.JsonNode.Parse(FormatRecording(recording.Scenario, everywhere.State, everywhere.Checkpoint, answered, null,
+                recording.Scenario + ".recovery.json", stopped))!;
+            Assert.IsNull(failed["refusal"], recording.Scenario);
+            Assert.AreEqual(typeof(InvalidOperationException).FullName, failed["failure"]!["type"]!.GetValue<string>(), recording.Scenario);
+            Assert.AreEqual(stopped.Message, failed["failure"]!["message"]!.GetValue<string>(), recording.Scenario);
+            Assert.HasCount(answered.Count, failed["measurements"]!.AsArray(), recording.Scenario);
+            Assert.IsNull(kept["failure"], recording.Scenario + ": a refusal is recorded as a refusal.");
             // Must-catch for the likely cause of the refusal in governed run t20260924T114705Z-b90471, whose own recording was
             // not kept (the journey wrote it only after a successful realization; it now keeps a failed one too): a new probe
             // copied from a symbol whose reference field the journey's manual field check had dragged 60.96 mm aside and

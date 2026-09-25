@@ -32,6 +32,11 @@ public sealed partial class NativeSessionTests
         tiny.Text.Attributes.Size = new Vector2 { XNm = 200000, YNm = 200000 };
         tiny.Text.Position.XNm = -10000000;
         var hidden = originalSymbol.Clone(); hidden.ReferenceField.Visible = false;
+        // The default mode applies the reading-direction rule of the hierarchy check too: the probe (drawn unrotated) with its
+        // value turned half round paints it upside down.
+        Assert.IsTrue(hidden.Transform is null || hidden.Transform.Orientation is SchematicSymbolOrientation.SsoUnknown or SchematicSymbolOrientation.Sso0,
+            "The fixture probe is drawn unrotated: " + hidden.Transform);
+        hidden.ValueField.Text.Attributes.Angle = new() { ValueDegrees = 180 };
         var batch = new ApplySchematicItemBatch { Document = document, Description = "Presentation must-catch fixture" };
         batch.Operations.Add(new SchematicItemOperation { Update = Any.Pack(tiny) });
         batch.Operations.Add(new SchematicItemOperation { Update = Any.Pack(hidden) });
@@ -43,6 +48,10 @@ public sealed partial class NativeSessionTests
         // repair ownership remains the exact symbol UUID + canonical field name.
         var brokenReference = broken.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Reference");
         Assert.IsTrue(broken.Report.Findings.Any(f => f.Rule == "designator_not_visible" && f.ObjectIds.Contains(brokenReference.ObjectId)));
+        var brokenValue = broken.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Value");
+        var upsideDown = broken.Report.Findings.Single(f => f.Rule == "text_orientation" && f.ObjectIds.Contains(brokenValue.ObjectId));
+        Assert.AreEqual(180m, upsideDown.Measured); Assert.AreEqual(90m, upsideDown.Limit); Assert.AreEqual(PresentationUnits.Degrees, upsideDown.Unit);
+        Assert.AreEqual(policy, broken.Report.Policy, "The report states the policy it applied.");
         var image = await client.InvokeAsync<CaptureSchematicPreview, SchematicPreview>(new() { Document = document }, token);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-presentation-defects.png"), image.Png.ToByteArray(), token);
         batch.Operations.Clear();
@@ -53,6 +62,36 @@ public sealed partial class NativeSessionTests
         var restoredReference = restored.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Reference");
         Assert.IsFalse(restored.Report.Findings.Any(f => f.ObjectIds.Contains(textGuid) && f.Rule is "text_size" or "page_overflow"));
         Assert.IsFalse(restored.Report.Findings.Any(f => f.Rule == "designator_not_visible" && f.ObjectIds.Contains(restoredReference.ObjectId)));
+        var restoredValue = restored.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Value");
+        Assert.IsFalse(restored.Report.Findings.Any(f => f.Rule == "text_orientation" && f.ObjectIds.Contains(restoredValue.ObjectId)));
+
+        // Guard (presentation re-review finding 1): the same probe made a power symbol, its reference hidden as KiCad hides power
+        // references, reports nothing about that reference in the default mode either, although the ordinary probe with the same
+        // hidden reference was reported above. KiCad itself says the reference need not show.
+        var powered = originalSymbol.Clone();
+        powered.Definition.Type = SchematicSymbolType.SstGlobalPower;
+        powered.ReferenceField.Visible = false;
+        batch.Operations.Clear(); batch.Operations.Add(new SchematicItemOperation { Update = Any.Pack(powered) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+        var powerCheck = await NativePresentationChecks.CheckAsync(client, document, policy, token);
+        var powerReference = powerCheck.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Reference");
+        Assert.IsFalse(powerCheck.Report.Findings.Any(f => f.Rule.StartsWith("designator_", StringComparison.Ordinal) && f.ObjectIds.Contains(powerReference.ObjectId)),
+            "A power symbol's hidden reference is not a finding: " + string.Join("; ", powerCheck.Report.Findings
+                .Where(f => f.ObjectIds.Contains(powerReference.ObjectId)).Select(f => f.Rule + " " + f.Message)));
+        var checkedAt = powerCheck.Report.Revision;
+        var powerFacts = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+        {
+            Document = document.Clone(), IncludePresentation = true,
+            ExpectedRevision = new KiCad.Automation.Protocol.DocumentRevision { Epoch = checkedAt.Epoch, Sequence = checkedAt.Sequence }
+        }, token);
+        var powerReferenceFact = powerFacts.Presentation.Objects.Single(o => o.Id.Value == powerReference.ObjectId.ToString("D"));
+        Assert.IsFalse(powerReferenceFact.Visible);
+        Assert.IsFalse(powerReferenceFact.DesignatorRequired, "KiCad does not require a power symbol's reference to show.");
+        batch.Operations.Clear(); batch.Operations.Add(new SchematicItemOperation { Update = Any.Pack(originalSymbol) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+        var unpowered = await NativePresentationChecks.CheckAsync(client, document, policy, token);
+        Assert.IsFalse(unpowered.Report.Findings.Any(f => f.Rule.StartsWith("designator_", StringComparison.Ordinal)
+            && f.ObjectIds.Contains(unpowered.RepairTargets.Single(t => t.OwnerId == symbolGuid && t.FieldName == "Reference").ObjectId)));
         var pending = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = header }, token);
         Assert.AreEqual(7, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
             NativePresentationChecks.CheckAsync(client, document, policy, token))).Status);
@@ -411,6 +450,9 @@ public sealed partial class NativeSessionTests
         var absent = second.Clone(); absent.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
         Assert.AreEqual("presentation_sheet_not_loaded", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
             NativePresentationChecks.CheckHierarchyAsync(client, absent, policy, token))).Code);
+        // A stale revision is refused as stale first, even when it names a sheet instance KiCad does not hold now.
+        Assert.AreEqual("presentation_revision_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            NativePresentationChecks.CheckHierarchyAsync(client, absent, policy, token, before.Revision))).Code);
 
         batch.Operations.Clear();
         batch.Operations.Add(new SchematicItemOperation { Remove = symbol.Id.Clone() });

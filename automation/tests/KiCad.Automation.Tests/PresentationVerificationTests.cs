@@ -272,6 +272,18 @@ public sealed class PresentationVerificationTests
         var strict = Single(clean.All, "label_overlap", Policy with { OverlapToleranceMm = 0 });
         Assert.AreEqual(0.2m, strict.Measured); Assert.AreEqual(0m, strict.Limit);
 
+        // Every report states the policy it applied, so one without findings still says which tolerance let objects touch.
+        Assert.AreEqual(Policy, quiet.Policy);
+        Assert.AreEqual(0.634m, VerifyLayout(clean.All, Policy with { OverlapToleranceMm = 0.634m }).Policy!.OverlapToleranceMm);
+        // A tolerance of half the 1.27 mm grid or more would let real overlaps pass (a caller could switch the rules off with
+        // 1000 mm), and a negative one means nothing: both are refused, as they are before KiCad is asked (NativePresentationChecks).
+        foreach (decimal invalid in new[] { PresentationPolicy.OverlapToleranceLimitMm, 1000m, -0.1m })
+        {
+            var refused = Assert.ThrowsExactly<AutomationException>(() => VerifyLayout(clean.All, Policy with { OverlapToleranceMm = invalid }));
+            Assert.AreEqual("invalid_presentation", refused.Code);
+            Assert.ThrowsExactly<AutomationException>(() => PresentationVerifier.RequireValid(Policy with { OverlapToleranceMm = invalid }));
+        }
+
         // Hidden or empty field text paints nothing, and boxes that only touch share no area.
         foreach (var quietField in new[] { clean.U1Reference with { FullBounds = Box(41, 12, 45, 14), Visible = false },
             clean.U1Reference with { FullBounds = Box(41, 12, 45, 14), Text = "" } })

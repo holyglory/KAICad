@@ -34,11 +34,14 @@ public sealed record PresentationSnapshot(Guid DocumentId, DocumentRevision Revi
     IReadOnlyList<PresentationSheet> Sheets);
 // Font limits are caller-selected presentation policy, not an electrical standard. Overlap tolerance
 // absorbs the pen-width inflation of native bounding boxes where objects are meant to touch (a label
-// or power symbol on a pin end); it stays below half the 1.27 mm schematic grid.
+// or power symbol on a pin end); it must stay below half the 1.27 mm schematic grid, so an overlap of
+// half a grid step or more is always reported.
 public sealed record PresentationPolicy(decimal MinimumTextHeightMm, decimal MaximumTextHeightMm,
     int MaximumCrossingsPerSignal = 2, decimal OverlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm)
 {
     public const decimal DefaultOverlapToleranceMm = 0.5m;
+    // Half the 1.27 mm schematic grid; the tolerance must be less than this.
+    public const decimal OverlapToleranceLimitMm = 0.635m;
     // Text reads left to right (0) up to bottom to top (90); beyond that it reads upside down or top to bottom.
     public const decimal MaximumReadingAngleDegrees = 90m;
 }
@@ -63,8 +66,11 @@ public static class PresentationUnits
 }
 // Every sheet instance the report covers, so a missing sheet is visible rather than silently clean.
 public sealed record PresentationSheetCoverage(string SheetPath, string? SheetName, int Objects, int Wires);
+// Policy is the policy the report was measured against, so a report without findings still says which text
+// limits, crossing limit and overlap tolerance it applied.
 public sealed record PresentationReport(Guid DocumentId, DocumentRevision Revision, bool CoverageComplete,
-    IReadOnlyList<PresentationFinding> Findings, IReadOnlyList<PresentationSheetCoverage>? Sheets = null)
+    IReadOnlyList<PresentationFinding> Findings, IReadOnlyList<PresentationSheetCoverage>? Sheets = null,
+    PresentationPolicy? Policy = null)
 {
     public bool Clear => CoverageComplete && Findings.Count == 0;
 }
@@ -73,12 +79,26 @@ public sealed record PresentationReport(Guid DocumentId, DocumentRevision Revisi
 /// not manufacture bounds from screenshots or claim the native extractor exists.</summary>
 public static class PresentationVerifier
 {
+    /// <summary>Refuse a policy that cannot be applied: text limits must be positive and ordered, the crossing limit
+    /// nonnegative, and the overlap tolerance at least 0 and below <see cref="PresentationPolicy.OverlapToleranceLimitMm"/>
+    /// (half the schematic grid), so no tolerance can switch the overlap rules off.</summary>
+    public static void RequireValid(PresentationPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (policy.MinimumTextHeightMm <= 0 || policy.MaximumTextHeightMm < policy.MinimumTextHeightMm)
+            throw Invalid("Invalid presentation policy: the minimum text height must be positive and not above the maximum.");
+        if (policy.MaximumCrossingsPerSignal < 0)
+            throw Invalid("Invalid presentation policy: the crossing limit must not be negative.");
+        if (policy.OverlapToleranceMm < 0 || policy.OverlapToleranceMm >= PresentationPolicy.OverlapToleranceLimitMm)
+            throw Invalid($"Invalid presentation policy: the overlap tolerance must be at least 0 mm and below "
+                + $"{PresentationPolicy.OverlapToleranceLimitMm} mm (half the 1.27 mm schematic grid), not {policy.OverlapToleranceMm} mm.");
+    }
+
     public static PresentationReport Verify(PresentationSnapshot snapshot, PresentationPolicy policy)
     {
         if (snapshot.DocumentId == Guid.Empty || string.IsNullOrWhiteSpace(snapshot.Revision.Epoch))
             throw Invalid("An identified document revision is required.");
-        if (policy.MinimumTextHeightMm <= 0 || policy.MaximumTextHeightMm < policy.MinimumTextHeightMm
-            || policy.MaximumCrossingsPerSignal < 0 || policy.OverlapToleranceMm < 0) throw Invalid("Invalid presentation policy.");
+        RequireValid(policy);
         var findings = new List<PresentationFinding>();
         var coverage = new List<PresentationSheetCoverage>();
         if (!snapshot.CoverageComplete)
@@ -272,7 +292,7 @@ public static class PresentationVerifier
         }
         if (snapshot.Sheets.Count == 0) throw Invalid("At least one sheet is required.");
         return new(snapshot.DocumentId, snapshot.Revision,
-            snapshot.CoverageComplete && findings.All(f => f.Severity != PresentationSeverity.Unavailable), findings, coverage);
+            snapshot.CoverageComplete && findings.All(f => f.Severity != PresentationSeverity.Unavailable), findings, coverage, policy);
     }
 
     // How far the inner box reaches beyond the outer one, in nanometres (0 when it fits).

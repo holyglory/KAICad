@@ -723,7 +723,8 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEquivalent(sheetNames.Keys.ToArray(), sheetPaths.Keys.ToArray());
         string[] allSheets = [.. sheetNames.Keys];
 
-        Task<JsonElement> Call(DocumentSpecifier start, KiCad.Automation.Protocol.DocumentRevision? expectedRevision, bool subsheets = true)
+        Task<JsonElement> Call(DocumentSpecifier start, KiCad.Automation.Protocol.DocumentRevision? expectedRevision, bool subsheets = true,
+            decimal? overlapToleranceMm = null)
         {
             var arguments = new Dictionary<string, object?>
             {
@@ -731,6 +732,7 @@ public sealed partial class NativeSessionTests
                 ["minimumTextHeightMm"] = 1m, ["maximumTextHeightMm"] = 3m, ["includeSubsheets"] = subsheets
             };
             if (expectedRevision is not null) arguments["expectedRevisionJson"] = JsonFormatter.Default.Format(expectedRevision);
+            if (overlapToleranceMm is not null) arguments["overlapToleranceMm"] = overlapToleranceMm;
             return host.Tool("kicad_schematic_check_presentation", arguments);
         }
 
@@ -759,6 +761,12 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(sequence, report.GetProperty("revision").GetProperty("sequence").GetUInt64(), name);
             Assert.IsFalse(report.GetProperty("clear").GetBoolean(), name + ": partial coverage is never a verification pass.");
             Assert.IsTrue(check.GetProperty("limitations").GetArrayLength() > 0, name);
+            // The report states the policy it applied, so a report without findings still says which tolerance let objects touch.
+            var applied = report.GetProperty("policy");
+            Assert.AreEqual(1m, applied.GetProperty("minimumTextHeightMm").GetDecimal(), name);
+            Assert.AreEqual(3m, applied.GetProperty("maximumTextHeightMm").GetDecimal(), name);
+            Assert.AreEqual(2, applied.GetProperty("maximumCrossingsPerSignal").GetInt32(), name);
+            Assert.AreEqual(PresentationPolicy.DefaultOverlapToleranceMm, applied.GetProperty("overlapToleranceMm").GetDecimal(), name);
             var findings = report.GetProperty("findings");
             Assert.AreEqual(1, findings.EnumerateArray().Count(f => f.GetProperty("rule").GetString() == "coverage_incomplete"
                 && f.GetProperty("sheetPath").GetString() == ""), name);
@@ -776,10 +784,10 @@ public sealed partial class NativeSessionTests
         }
         // A refused check changes nothing and names why.
         async Task<string> Refused(string name, DocumentSpecifier start, KiCad.Automation.Protocol.DocumentRevision? expectedRevision,
-            bool subsheets = true)
+            bool subsheets = true, decimal? overlapToleranceMm = null)
         {
             var state = await State();
-            var result = await Call(start, expectedRevision, subsheets);
+            var result = await Call(start, expectedRevision, subsheets, overlapToleranceMm);
             await File.WriteAllTextAsync(evidence("presentation-" + name + ".json"), result.GetRawText(), token);
             Assert.IsTrue(result.TryGetProperty("isError", out var error) && error.GetBoolean(), name + ": " + result.GetRawText());
             Assert.AreEqual(state, await State(), name + ": a refused check changes nothing.");
@@ -986,12 +994,57 @@ public sealed partial class NativeSessionTests
             YNm = u1Pin.Position.YNm + (u1Pin.Position.YNm - facing.Pin.Position.YNm) };
         Guid powerId = Guid.Parse(facing.Symbol.Id.Value);
         var power = PowerProbe(powerId, facing.Symbol.Transform.Orientation, powerAt);
-        // The value sits on the middle of the body, where the library draws the resistor's own value: KiCad turns it to
-        // read left to right on the rotated symbol, and a field on its own body is an intentional pattern.
-        power.ValueField.Text.Position = powerAt.Clone();
+        // The value sits where a power symbol draws it: beyond its body, on the side away from its pin (presentation re-review
+        // finding 2). A placed symbol's field positions are given unturned, relative to the symbol's position, and KiCad turns
+        // them with the symbol's transform. So the value goes on the pin's axis opposite the pin, 6.35 mm from the symbol's
+        // position: 3.81 mm past the far end of the resistor body (which reaches 2.54 mm from it), clear of the body however
+        // wide KiCad paints "+3V3". KiCad turns it with the symbol and then to read left to right. The value does not touch its
+        // own body, so no owner exemption keeps it quiet, and it must report nothing.
+        var probePin = power.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.Unpack<SchematicPin>()).Single();
+        const long PowerValueFromCentreNm = 6_350_000;
+        bool vertical = Math.Abs(probePin.Position.YNm) >= Math.Abs(probePin.Position.XNm);
+        Assert.AreNotEqual(0L, vertical ? probePin.Position.YNm : probePin.Position.XNm, "The probe's pin lies off its centre, on one side.");
+        power.ValueField.Text.Position = new Vector2
+        {
+            XNm = powerAt.XNm - (vertical ? 0 : Math.Sign(probePin.Position.XNm) * PowerValueFromCentreNm),
+            YNm = powerAt.YNm - (vertical ? Math.Sign(probePin.Position.YNm) * PowerValueFromCentreNm : 0)
+        };
         var onBodyBox = Box(probed.ItemCandidates.Single(c => c.Id.Value == onBodyId.ToString("D")).Bounds);
         Assert.IsTrue(body2.Contains(onBodyBox) && Depth(body2, onBodyBox) > Tolerance / 1_000_000m,
             $"The seeded label must lie on U2's body ({body2}), not beside it: {onBodyBox}.");
+
+        // Before the defects, KiCad paints U1's value alone as the layout left it, reading left to right, in a region 1.27 mm wider
+        // than its measured glyphs at 20 pixels per millimetre; it is painted the same way again once it is upside down.
+        const long PixelNm = 50_000, Margin = 1_270_000;
+        static int LayerOf(SchematicViewSet rendered, string name) => rendered.AvailableLayers.Single(l => l.Name == name).Id;
+        static Box2 GlyphRegion(PresentationBounds glyphs) => new()
+        {
+            Position = new() { XNm = glyphs.LeftNm - Margin, YNm = glyphs.TopNm - Margin },
+            Size = new() { XNm = glyphs.RightNm - glyphs.LeftNm + 2 * Margin, YNm = glyphs.BottomNm - glyphs.TopNm + 2 * Margin }
+        };
+        static SchematicRenderView GlyphView(string key, Box2 region, int layer)
+        {
+            var view = new SchematicRenderView { Key = key, Region = region.Clone(),
+                WidthPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.XNm / (double)PixelNm), 64, 2048),
+                HeightPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.YNm / (double)PixelNm), 64, 2048) };
+            view.NativeLayers.Add(layer);
+            return view;
+        }
+        async Task<SchematicPreview> PaintAlone(string name, Box2 region, int layer)
+        {
+            var request = new RenderSchematicViews { Document = psu.Clone() };
+            request.Views.Add(GlyphView(name, region, layer));
+            var preview = (await client.InvokeAsync<RenderSchematicViews, SchematicViewSet>(request, token)).Views.Single().Preview;
+            Assert.IsTrue(preview.Png.Length > 0, name);
+            await File.WriteAllBytesAsync(evidence("presentation-glyphs-" + name + ".png"), preview.Png.ToByteArray(), token);
+            return preview;
+        }
+        var cleanPage = await RenderPsu("presentation-clean");
+        var uprightValue = measured.Presentation.Objects.Single(o => o.PresentationRole == "field" && o.OwnerId?.Value == u1.ToString("D")
+            && o.FieldName == "Value");
+        Assert.IsTrue(uprightValue.Visible && uprightValue.GlyphBounds is not null, "U1's value is painted before the defects.");
+        Assert.AreEqual(0d, uprightValue.ReadingAngleDegrees, 1e-9, "U1's value reads left to right before the defects.");
+        var uprightPainting = await PaintAlone("u1-value-upright", GlyphRegion(Box(uprightValue.GlyphBounds)), LayerOf(cleanPage, "values"));
 
         var seed = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Presentation must-catch fixture on the PSU sheet" };
         void Update(Google.Protobuf.IMessage item) => seed.Operations.Add(new SchematicItemOperation { TargetDocument = psu.Clone(), Update = Any.Pack(item) });
@@ -1022,14 +1075,17 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(powerReference.Visible);
         Assert.IsFalse(powerReference.DesignatorRequired, "KiCad does not require a power symbol's reference to show.");
         Assert.IsTrue(FieldFact(r1, "Reference").DesignatorRequired);
+        // The power symbol's value lies beside its body, not on it: no owner exemption is what keeps it quiet.
+        var powerValueGlyphs = Glyphs(powerId, "Value");
+        Assert.IsNull(Shared(powerValueGlyphs, Body(defects, powerId)),
+            $"The power symbol's value {powerValueGlyphs} lies clear of its own body {Body(defects, powerId)}.");
         CollectionAssert.AreEqual(new[] { body2, body3, moved4, moved1 }, new[] { u2, u3, u4, j1 }.Select(id => Body(defects, id)).ToArray(),
             "KiCad measures the untouched and moved bodies exactly where they were put.");
 
         // KiCad's own pixels confirm the measured field glyphs: each field is painted alone (only its own native layer) in a
         // region 1.27 mm wider than its measured glyphs at 20 pixels per millimetre, and the painted ink must lie within two
         // pixels of the measured glyph box on every side.
-        const long PixelNm = 50_000, Margin = 1_270_000;
-        int Layer(string name) => page.AvailableLayers.Single(l => l.Name == name).Id;
+        int Layer(string name) => LayerOf(page, name);
         var probes = new (string Name, Guid Owner, string Field, string Layer, double Reading)[]
         {
             ("u1-value-upside-down", u1, "Value", "values", 180),
@@ -1047,14 +1103,7 @@ public sealed partial class NativeSessionTests
                 var fact = FieldFact(p.Owner, p.Field);
                 Assert.IsTrue(fact.Visible && fact.GlyphBounds is not null, p.Name + " is painted.");
                 Assert.AreEqual(p.Reading, fact.ReadingAngleDegrees, 1e-9, p.Name + " is painted at the expected reading direction.");
-                var glyphs = Box(fact.GlyphBounds);
-                var region = new Box2 { Position = new() { XNm = glyphs.LeftNm - Margin, YNm = glyphs.TopNm - Margin },
-                    Size = new() { XNm = glyphs.RightNm - glyphs.LeftNm + 2 * Margin, YNm = glyphs.BottomNm - glyphs.TopNm + 2 * Margin } };
-                var view = new SchematicRenderView { Key = p.Name, Region = region,
-                    WidthPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.XNm / (double)PixelNm), 64, 2048),
-                    HeightPixels = (uint)Math.Clamp(Math.Ceiling(region.Size.YNm / (double)PixelNm), 64, 2048) };
-                view.NativeLayers.Add(Layer(p.Layer));
-                request.Views.Add(view);
+                request.Views.Add(GlyphView(p.Name, GlyphRegion(Box(fact.GlyphBounds)), Layer(p.Layer)));
             }
             var rendered = await client.InvokeAsync<RenderSchematicViews, SchematicViewSet>(request, token);
             foreach (var p in batch)
@@ -1070,6 +1119,19 @@ public sealed partial class NativeSessionTests
                     + $"{glyphs}; the left, top, right and bottom edges differ by {string.Join(", ", edges)} nm, more than two pixels ({2 * pixel} nm).");
             }
         }
+        // A box cannot tell text read left to right from the same text turned half round: both fill a box of the same size.
+        // KiCad's pixels can (presentation re-review finding 5). U1's value painted upside down must have the shape of its upright
+        // painting from before the defects turned half round, and clearly not its shape unturned. KiCad turns the value about its
+        // anchor, so each painting covers its own measured glyphs; the shapes are compared on their ink boxes. This holds the
+        // check's reading direction (SCH_FIELD::GetDrawRotation) to what the painter actually draws (sch_painter.cpp).
+        var upsideDownPainting = await PaintAlone("u1-value-upside-down-reading", GlyphRegion(Glyphs(u1, "Value")), Layer("values"));
+        Assert.AreEqual(uprightPainting.Viewport.PixelXDxNm, upsideDownPainting.Viewport.PixelXDxNm, 1e-9, "Both paintings have one scale.");
+        Assert.AreEqual(uprightPainting.Viewport.PixelYDyNm, upsideDownPainting.Viewport.PixelYDyNm, 1e-9, "Both paintings have one scale.");
+        var (turned, unturned) = NativePresentationRaster.HalfTurnAgreement(uprightPainting.Png.ToByteArray(), upsideDownPainting.Png.ToByteArray());
+        pixels.Add(new { probe = "u1-value-reading-direction", text = FieldFact(u1, "Value").Text, turnedAgreement = turned, unturnedAgreement = unturned });
+        Assert.IsTrue(turned >= 0.9, $"U1's value painted upside down must match the upright painting turned half round: agreement {turned:0.000}.");
+        Assert.IsTrue(unturned <= 0.75 && turned - unturned >= 0.2,
+            $"U1's value painted upside down must differ from the upright painting as it is: agreement {unturned:0.000} unturned, {turned:0.000} turned.");
         await File.WriteAllTextAsync(evidence("presentation-glyph-pixels.json"), JsonSerializer.Serialize(pixels), token);
 
         // The report names exactly the seeded defects on the PSU sheet, with measured values derived here from KiCad's own
@@ -1081,6 +1143,8 @@ public sealed partial class NativeSessionTests
                 + Describe(On(broken.Findings, sheetPaths[sheet])));
         var onPsu = On(broken.Findings, psuPath).ToArray();
         Guid Target(Guid owner, string name) => Field(broken.Targets, psuPath, owner, name);
+        Assert.IsFalse(onPsu.Any(f => Ids(f).Contains(powerId) || Ids(f).Contains(Target(powerId, "Value"))),
+            "The power symbol and its value beside it report nothing: " + Describe(onPsu.Where(f => Ids(f).Contains(powerId) || Ids(f).Contains(Target(powerId, "Value")))));
         var pageBox = Box(defects.Presentation.PageBounds);
         var wires = created.Select(c => Guid.Parse(c.Wire.Id.Value)).ToArray();
         var expectedPsu = new (string Rule, Guid[] Ids, decimal Measured, decimal Limit, string Unit)[]
@@ -1130,6 +1194,12 @@ public sealed partial class NativeSessionTests
         var unloaded = psu.Clone(); unloaded.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
         string unloadedCode = await Refused("unloaded-sheet", unloaded, null);
         Assert.AreEqual("presentation_sheet_not_loaded", unloadedCode);
+        // A stale revision is refused as stale first, even when it names a sheet instance KiCad does not hold now.
+        Assert.AreEqual("presentation_revision_changed", await Refused("stale-revision-unloaded-sheet", unloaded, clean.State.State.Revision));
+        // An overlap tolerance that would switch the overlap rules off (half the 1.27 mm grid or more) is refused in both modes.
+        Assert.AreEqual("invalid_presentation", await Refused("tolerance-too-loose", root, null, overlapToleranceMm: 1000m));
+        Assert.AreEqual("invalid_presentation", await Refused("tolerance-too-loose-displayed", root, null, subsheets: false,
+            overlapToleranceMm: PresentationPolicy.OverlapToleranceLimitMm));
 
         // KiCad's own Undo shortcut removes the whole defect batch from the PSU sheet while the root stays displayed, and
         // every sheet instance reports nothing again.
@@ -1236,7 +1306,9 @@ public sealed partial class NativeSessionTests
         var aware = await ProposedRooms(proposal.DesiredDesign!);
         var awareIssues = aware.Sheets.SelectMany(s => ConnectedPlacementIssues(s, aware.Expectation)).ToArray();
         Assert.IsEmpty(awareIssues, "Connection-aware Complete layout: " + string.Join("; ", awareIssues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
-        RequireEveryStubRoomMeasured(aware.Sheets, aware.Plan.Connections!, "Connection-aware Complete layout");
+        // Every one of the fixture's 41 connected pins, on PSU, CPU and CPU_POWER alike, has its stub room measured.
+        RequireStubRooms(aware.Sheets, aware.Plan.Candidate!, aware.Plan.Connections!, [.. complete.SelectMany(n => n.Pins)], null, 41,
+            "Connection-aware Complete layout");
 
         // Must-catch: the ordinary layout of the same symbols (their connections left out) keeps no such room.
         var ordinary = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(current.State, PsuCpuLayoutPolicy, regions, Instructions, live, token);
@@ -1444,7 +1516,19 @@ public sealed partial class NativeSessionTests
         }
         var r3 = sheets.Single(s => s.Key == "PSU").Bodies.ContainsKey(bodies[added["R3"].Occurrence]);
         Assert.IsTrue(r3, "R3 is measured on PSU.");
-        RequireEveryStubRoomMeasured(sheets, intent, "Connected addition");
+        // The fixture's Complete-net pins on PSU and CPU and the six pull-up pins: 45 rooms. The fixture's other two connected pins
+        // are the processor's unit-4 power pins on CPU_POWER, which the addition does not lay out.
+        var pullUpPins = new[] { "R2", "R3", "R4" }.SelectMany(r => new[] { "1", "2" }.Select(n => new PinEndpoint(added[r].Component, n))).ToArray();
+        PinEndpoint[] connectedPins = [.. PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets.SelectMany(n => n.Pins), .. pullUpPins];
+        var addedSheets = new HashSet<string>(StringComparer.Ordinal) { sheetPaths["PSU"], sheetPaths["CPU"] };
+        RequireStubRooms(sheets, candidate, intent, connectedPins, addedSheets, 45, "Connected addition");
+        var elsewhere = SchematicConnectionIntentBuilderTests.Keys(candidate, [.. connectedPins.Select(p => (p.ComponentId, p.Pin))])
+            .Where(k => !addedSheets.Contains(k.SheetPathKey)).ToArray();
+        Assert.HasCount(2, elsewhere, "Connected addition: two connected fixture pins lie outside PSU and CPU.");
+        Assert.IsTrue(elsewhere.All(k => k.SheetPathKey == sheetPaths["CPU_POWER"]), "Connected addition: both are on CPU_POWER.");
+        var roomed = sheets.SelectMany(s => s.Rooms).Select(r => r.Pin).ToHashSet();
+        foreach (var (reference, number) in new[] { ("R2", "1"), ("R2", "2"), ("R3", "1"), ("R3", "2"), ("R4", "1"), ("R4", "2") })
+            Assert.IsTrue(roomed.Contains(PinId((reference, number))), "Connected addition: pull-up pin " + reference + "." + number + " has its stub room measured.");
         var issues = sheets.SelectMany(s => ConnectedPlacementIssues(s, expectation)).ToArray();
         Assert.IsEmpty(issues, string.Join("; ", issues.Select(i => i.Code + " " + string.Join(",", i.Symbols))));
 
@@ -1593,16 +1677,28 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    // Every pin that needs a stub on the measured sheets has exactly one measured room, and no other pin has one.
-    private static void RequireEveryStubRoomMeasured(IReadOnlyList<ConnectedSheetGeometry> sheets, SchematicConnectionIntent intent, string context)
+    /// <summary>The measured stub rooms against a list built without the connection intent (placement re-review finding 2): the
+    /// placed pins of exactly <paramref name="pins"/> (the fixture's Complete nets, plus the pull-ups' pins in the addition), found
+    /// in the planned design by component and pin number, on <paramref name="onlySheets"/> when given. There must be exactly
+    /// <paramref name="count"/> of them; every sheet holding one must have been measured; each must have exactly one measured
+    /// room and no other pin a room. The connection intent must then agree: the pins it gives a stub on the measured sheets are
+    /// exactly these.</summary>
+    private static void RequireStubRooms(IReadOnlyList<ConnectedSheetGeometry> sheets, SchematicDesign candidate, SchematicConnectionIntent intent,
+        IReadOnlyCollection<PinEndpoint> pins, IReadOnlySet<string>? onlySheets, int count, string context)
     {
-        var paths = sheets.Select(s => s.PathKey).ToHashSet(StringComparer.Ordinal);
-        var expected = intent.Screens.SelectMany(s => s.Islands).Where(i => paths.Contains(i.SheetPathKey))
-            .SelectMany(i => i.Members.Where(m => m.RequiresStub).Select(m => (Sheet: i.SheetPathKey, Pin: m.Pin.PlacedPinId))).ToArray();
+        var all = SchematicConnectionIntentBuilderTests.Keys(candidate, [.. pins.Select(p => (p.ComponentId, p.Pin))]);
+        var expected = all.Where(k => onlySheets is null || onlySheets.Contains(k.SheetPathKey)).Select(k => (Sheet: k.SheetPathKey, Pin: k.PlacedPinId)).ToArray();
+        Assert.HasCount(count, expected, context + ": the fixture pins that need a connection on the checked sheets.");
+        Assert.HasCount(count, expected.Distinct().ToArray(), context + ": each fixture pin is one placed pin.");
+        var measuredSheets = sheets.Select(s => s.PathKey).ToHashSet(StringComparer.Ordinal);
+        foreach (var sheet in expected.Select(e => e.Sheet).Distinct(StringComparer.Ordinal))
+            Assert.IsTrue(measuredSheets.Contains(sheet), context + ": sheet " + sheet + ", which holds pins that need a connection, was measured.");
         var measured = sheets.SelectMany(s => s.Rooms.Select(r => (Sheet: s.PathKey, r.Pin))).ToArray();
-        Assert.IsNotEmpty(expected, context + ": some pin needs a stub.");
-        Assert.AreEqual(expected.Length, measured.Length, context + ": one measured room per pin that needs a stub.");
-        CollectionAssert.AreEquivalent(expected, measured, context + ": the measured rooms belong to exactly the pins that need a stub.");
+        Assert.HasCount(count, measured, context + ": one measured room per pin that needs a connection.");
+        CollectionAssert.AreEquivalent(expected, measured, context + ": the measured rooms belong to exactly the fixture pins that need a connection.");
+        var stubbed = intent.Screens.SelectMany(s => s.Islands).Where(i => measuredSheets.Contains(i.SheetPathKey))
+            .SelectMany(i => i.Members.Where(m => m.RequiresStub).Select(m => (Sheet: i.SheetPathKey, Pin: m.Pin.PlacedPinId))).ToArray();
+        CollectionAssert.AreEquivalent(expected, stubbed, context + ": the connection intent gives exactly these pins a stub.");
     }
 
     internal sealed record ConnectedPlacementIssue(string Code, IReadOnlyList<Guid> Symbols);
@@ -2939,20 +3035,22 @@ public sealed partial class NativeSessionTests
             string kept = Path.Combine(evidence, instanceId + "-realization-" + record);
             SchematicConnectionRealization realization;
             try { realization = await SchematicConnectionRealizer.RealizeAsync(plan.Connections!, plan.Candidate!, checkpoint, Live, policy, token); }
-            catch (AutomationException error)
+            catch (Exception error) when (error is not OperationCanceledException)
             {
-                // A refused realization keeps what the editor answered beside the saved record, so it can be replayed. If
-                // keeping that evidence fails as well, both failures are reported and the refusal is never hidden.
+                // A realization that fails in any way (a refusal, a failed measurement or connection, or any other error) keeps
+                // what the editor answered beside the saved record, so it can be replayed; only a refusal carries an error code.
+                // If keeping that evidence fails as well, both failures are reported and the original failure is never hidden.
+                string outcome = error is AutomationException ? ".refused.json" : ".failed.json";
                 try
                 {
                     await Keep();
-                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-realization-" + name + ".refused.json"),
+                    await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-realization-" + name + outcome),
                         SchematicConnectionRealizerTests.FormatRecording(name, revision, checkpoint, recorded, null, record, error), CancellationToken.None);
                 }
                 catch (Exception keeping)
                 {
-                    throw new AggregateException("Realizing " + name + " was refused (" + error.Code + ": " + error.Message
-                        + "), and keeping its evidence failed as well.", error, keeping);
+                    throw new AggregateException("Realizing " + name + " failed (" + (error is AutomationException refusal ? refusal.Code + ": " : "")
+                        + error.Message + "), and keeping its evidence failed as well.", error, keeping);
                 }
                 throw;
             }

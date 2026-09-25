@@ -355,16 +355,20 @@ internal static class SchematicNativeCreationProjection
         return result;
     }
 
-    /// <summary>A created symbol's fields sit where its library definition puts them, as KiCad places them when it resets a
-    /// placed symbol's fields from its library (<c>SCH_SYMBOL::UpdateFields</c>): at the symbol's position plus the library
-    /// field's position, with the library field's text angle and justification. They never follow the fields of the placed
-    /// symbol that is copied: which placed symbol that is depends on generated identities, and a person may have dragged its
-    /// fields anywhere. A copy would take such a field with it, and KiCad, which measures a symbol as one rectangle around
-    /// its visible fields, could then find no room at the new symbol's pins for their connections (the likely cause of the
-    /// refusal in governed run t20260924T114705Z-b90471, whose recording was not kept). Visibility and text style stay as the
-    /// copied symbol shows them. A field the definition does not define keeps its place relative to the copied symbol (moved
-    /// by <paramref name="dx"/>, <paramref name="dy"/>), as KiCad's own reset keeps it. A declared part's symbol is already
-    /// made from its definition's fields, so this changes nothing there.</summary>
+    /// <summary>A created symbol's fields are laid out as its library definition lays them out, exactly as KiCad does when it
+    /// places a symbol from its library or resets a placed symbol's fields from it (<c>SCH_SYMBOL::UpdateFields</c> with style
+    /// update, which calls <c>SCH_FIELD::ImportValues</c> and <c>SetPrivate</c>): each field the definition defines sits at the
+    /// symbol's position plus the library field's position and takes every text attribute of the library field (angle,
+    /// justification, size, stroke width, font, bold, italic, colour, mirroring, line spacing and multi-line mode), its
+    /// visibility, whether its name is shown, whether it may be placed automatically, and whether it is private. Only the text
+    /// stays the component's own. Nothing follows the placed symbol that is copied: which placed symbol that is depends on
+    /// generated identities, and a person may have dragged its fields anywhere, hidden or shown them, or resized them. A copy
+    /// would take such a field with it, so the new symbol's visible text and the one rectangle KiCad measures around its
+    /// visible fields would depend on that choice, and there could be no room at its pins for their connections (the likely
+    /// cause of the refusal in governed run t20260924T114705Z-b90471, whose recording was not kept). A field the definition
+    /// does not define keeps its place and style relative to the copied symbol (moved by <paramref name="dx"/>,
+    /// <paramref name="dy"/>), as KiCad's own reset keeps it. A declared part's symbol is already made from its definition's
+    /// fields, so this changes nothing there.</summary>
     private static void PlaceFields(SchematicSymbolInstance symbol, long dx, long dy)
     {
         var definition = symbol.Definition;
@@ -383,13 +387,11 @@ internal static class SchematicNativeCreationProjection
             if (source?.Text?.Position is { } local)
             {
                 placed.Text.Position = new() { XNm = symbol.Position.XNm + local.XNm, YNm = symbol.Position.YNm + local.YNm };
-                if (source.Text.Attributes is { } from)
-                {
-                    var attributes = placed.Text.Attributes ??= new();
-                    attributes.Angle = from.Angle?.Clone();
-                    attributes.HorizontalAlignment = from.HorizontalAlignment;
-                    attributes.VerticalAlignment = from.VerticalAlignment;
-                }
+                if (source.Text.Attributes is { } attributes) placed.Text.Attributes = attributes.Clone();
+                placed.Visible = source.Visible;
+                placed.ShowName = source.ShowName;
+                placed.AllowAutoPlace = source.AllowAutoPlace;
+                placed.IsPrivate = source.IsPrivate;
                 fromLibrary = true;
             }
             else { position.XNm += dx; position.YNm += dy; }

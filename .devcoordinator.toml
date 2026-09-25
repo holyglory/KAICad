@@ -69,7 +69,7 @@ tier="development"
 requires=["contracts","native-protocol"]
 after=["native-ui"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
 
 [test.part-symbol-contracts]
@@ -1453,31 +1453,58 @@ requires=["native-runtime"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuSeed", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/native-seed-tests"]
 retained_artifacts=[{ name = "psu-cpu-seed-tests", path = "automation/artifacts/psu-cpu-fixture/native-seed-tests", max_bytes = 16777216 }, { name = "psu-cpu-seed-evidence", path = "automation/artifacts/native-psu-cpu-seed/native-session-current", max_bytes = 67108864 }]
 
-# Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
-# that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
-# sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means
-# only that the symbol writer changed (for example a schematic file-format bump): the lanes are
-# not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
-# as psu-cpu-fixture-writer-drift-evidence.
-# PSU/CPU lossless rebuild from XML (lane 2C, ledger p168f8654d86c5a1a) and
-# ownership synchronization (p74ee7c1da24272d9).
+# PSU/CPU lossless rebuild from XML (lane 2C, ledger p168f8654d86c5a1a). The ownership
+# synchronization check (p74ee7c1da24272d9) joins this graph with its journey; until then the
+# journey is Inconclusive and a check for it would only report a skipped test as passed.
 [[test.psu-cpu-fixture.check]]
 name="xml-rebuild"
 tier="development"
 requires=["native-runtime"]
 after=["native-seed"]
 timeout_seconds=1200
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlRebuild", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-rebuild-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlRebuild", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-rebuild-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-xml-rebuild-tests", path = "automation/artifacts/native-xml-rebuild-tests", max_bytes = 16777216 }, { name = "native-xml-rebuild-evidence", path = "automation/artifacts/native-xml-rebuild/native-session-current", max_bytes = 67108864 }]
 
-[[test.psu-cpu-fixture.check]]
-name="ownership-sync"
+# Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
+# that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
+# sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means
+# only that the symbol writer changed (for example a schematic file-format bump): the lanes are
+# not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
+# as psu-cpu-fixture-writer-drift-evidence.
+
+# PSU/CPU native crash journey (lane 2D, ledger pcb5513dd69eda714): a KiCad dying
+# mid-session keeps the XML, recovery record and instance registry truthful.
+# Inconclusive counts as failed (fixture contract section 1.9).
+[test.native-crash]
+timeout_seconds=3600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-crash.check]]
+name="managed-build"
 tier="development"
-requires=["native-runtime"]
-after=["xml-rebuild"]
-timeout_seconds=1200
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeOwnershipSync", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-ownership-sync-tests"]
-retained_artifacts=[{ name = "native-ownership-sync-tests", path = "automation/artifacts/native-ownership-sync-tests", max_bytes = 16777216 }, { name = "native-ownership-sync-evidence", path = "automation/artifacts/native-ownership-sync/native-session-current", max_bytes = 67108864 }]
+role="preflight"
+invalidates=["native-build", "native-crash"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-crash.check]]
+name="native-configure"
+tier="development"
+role="preflight"
+invalidates=["native-build", "native-crash"]
+command=["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-crash.check]]
+name="native-build"
+tier="development"
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-crash.check]]
+name="native-crash"
+tier="development"
+requires=["native-build"]
+timeout_seconds=900
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }, { name = "native-crash-release-evidence", path = "automation/artifacts/native-crash-release/native-session-current", max_bytes = 67108864 }]
 
 [test.psu-cpu-fixture-writer-drift]
 timeout_seconds=3600
@@ -3045,8 +3072,19 @@ name="psu-cpu-rendered"
 tier="development"
 requires=["native-build"]
 after=["rendered"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-psu-cpu-creation-tests", path = "automation/artifacts/native-psu-cpu-creation-tests", max_bytes = 16777216 }, { name = "native-psu-cpu-creation-evidence", path = "automation/artifacts/native-psu-cpu-creation/native-session-current", max_bytes = 67108864 }]
+
+# PSU/CPU connected realization (CN-1 milestone 1 end to end): the fixture's
+# Complete-stage nets drawn as labelled stubs in one checked native commit.
+[[test.native-xml-component-creation.check]]
+name="psu-cpu-connected"
+tier="development"
+requires=["native-build"]
+after=["psu-cpu-rendered"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-connected-realization-tests", path = "automation/artifacts/native-connected-realization-tests", max_bytes = 16777216 }, { name = "native-connected-realization-evidence", path = "automation/artifacts/native-connected-realization/native-session-current", max_bytes = 67108864 }]
 
 [test.native-transform-sync]
 timeout_seconds=3600
@@ -3259,7 +3297,7 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "native-offscreen-move-tests", path = "automation/artifacts/native-offscreen-move-tests", max_bytes = 16777216 }, { name = "native-offscreen-move-evidence", path = "automation/artifacts/native-offscreen-move/native-session-current", max_bytes = 33554432 }]
 
 # Composed Linux acceptance for frozen candidates only: every native schematic,
-# diagram, simulation and PCB-item journey, one after another, reusing each
+# diagram, simulation, PCB-item, crash and PSU/CPU fixture journey, one after another, reusing each
 # focused graph's exact journey command and evidence retention.
 [test.native-acceptance]
 timeout_seconds=14400
@@ -3269,14 +3307,14 @@ env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 name="restore"
 tier="development"
 role="preflight"
-invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history"]
+invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas"]
 command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
 
 [[test.native-acceptance.check]]
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history"]
+invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
 [[test.native-acceptance.check]]
@@ -3407,6 +3445,51 @@ requires=["native-build"]
 after=["journey-native-offscreen-move"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{ name = "dialog-tests", path = "automation/artifacts/field-history-dialog-tests", max_bytes = 16777216 }, { name = "light", path = "automation/artifacts/native-field-history/light/native-session-current", max_bytes = 16777216 }, { name = "dark", path = "automation/artifacts/native-field-history/dark/native-session-current", max_bytes = 16777216 }, { name = "editor-light", path = "automation/artifacts/native-recursive-editor/light/native-session-current", max_bytes = 67108864 }, { name = "editor-dark", path = "automation/artifacts/native-recursive-editor/dark/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-psu-cpu-creation"
+tier="development"
+requires=["native-build"]
+after=["journey-diagram-requirement-history"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-psu-cpu-creation-tests", path = "automation/artifacts/native-psu-cpu-creation-tests", max_bytes = 16777216 }, { name = "native-psu-cpu-creation-evidence", path = "automation/artifacts/native-psu-cpu-creation/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-psu-cpu-connected"
+tier="development"
+requires=["native-build"]
+after=["journey-psu-cpu-creation"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-connected-realization-tests", path = "automation/artifacts/native-connected-realization-tests", max_bytes = 16777216 }, { name = "native-connected-realization-evidence", path = "automation/artifacts/native-connected-realization/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-psu-cpu-rebuild"
+tier="development"
+requires=["native-build"]
+after=["journey-psu-cpu-connected"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlRebuild", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-rebuild-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-xml-rebuild-tests", path = "automation/artifacts/native-xml-rebuild-tests", max_bytes = 16777216 }, { name = "native-xml-rebuild-evidence", path = "automation/artifacts/native-xml-rebuild/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-native-crash"
+tier="development"
+requires=["native-build"]
+after=["journey-psu-cpu-rebuild"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }, { name = "native-crash-release-evidence", path = "automation/artifacts/native-crash-release/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-diagram-canvas"
+tier="development"
+requires=["native-build"]
+after=["journey-native-crash"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeDiagramCanvas", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-diagram-canvas-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-diagram-canvas-tests", path = "automation/artifacts/native-diagram-canvas-tests", max_bytes = 16777216 }, { name = "canvas-light", path = "automation/artifacts/native-diagram-canvas/light/native-session-current", max_bytes = 67108864 }, { name = "canvas-dark", path = "automation/artifacts/native-diagram-canvas/dark/native-session-current", max_bytes = 67108864 }]
 
 # Current Linux publication and latest Mac/Windows public verification recipes
 # (unified from the former delivery control point codex/xml-net-settings).

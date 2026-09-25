@@ -12,11 +12,13 @@ using LockedState = Kiapi.Common.Types.LockedState;
 namespace KiCad.Automation.Tests;
 
 // CN-1 classification, preparation guards and connection intent (cn1-wiring-intent.md §4.1, §4.4 and §5).
-// These are unit tests of isolated pure logic: no editor can exercise an admitted connected addition until
-// native advertises schematic.connection-realization.v1, which it does not yet, and nothing can apply the
-// realizer's wires before lane 2C's native assertion exists. The rendered NativeXmlComponentCreation journey checks
-// the same gate, builds intents from real handshakes and captured states and realizes them against the editor's own
-// measurements without applying them; the existing plan tests here pin the unchanged general-path results.
+// These are unit tests of isolated pure logic. The admitted path is proven end to end on a real editor, which advertises
+// schematic.connection-realization.v1 for a project: the psu-cpu-connected journey plans and applies the PSU/CPU fixture's
+// Complete stage through the production MCP server, and McpReattachmentJourney realizes a revision through the automatic
+// worker and apply. What stays here needs states a live editor cannot be steered into, or handshakes it does not send:
+// every classification refusal and guard, sessions without the capability, and variants of the frozen fixtures that no
+// journey stage produces (hidden power pins on another net, stacked pins split across nets, crossings already wired); the
+// existing plan tests here pin the unchanged general-path results.
 public sealed partial class SchematicSynchronizationPlanTests
 {
     [TestMethod]
@@ -328,6 +330,24 @@ public sealed partial class SchematicSynchronizationPlanTests
             Assert.AreEqual(code, refused.ErrorCode, problem + ": " + refused.ErrorMessage);
             Assert.IsNull(refused.Candidate, problem); Assert.IsEmpty(refused.NativeOperations, problem);
         }
+        // A saved sheet holding a symbol whose library definition KiCad cannot resolve (captured, as KiCad captures it,
+        // with no definition of its own) cannot be matched with the design, so the refusal names that symbol and what to
+        // restore. The live creation journey proves the same on a real editor; this pins the wording's precision: a
+        // baseline that disagrees for any other reason keeps the general reason and names no symbol.
+        var (unresolved, unresolvedDesired) = WithUnresolvedSymbol(saved, desired, "X9");
+        var named = PrepareConnected(unresolved, unresolvedDesired, admitted);
+        Assert.AreEqual(SchematicConnectionErrors.UnalignedElectricalBaseline, named.ErrorCode, named.ErrorMessage);
+        Assert.AreEqual("The saved baseline must agree with its native pin partition. KiCad cannot resolve the library definition of symbol "
+            + "X9 ('Unavailable:Unresolved'), so its pins cannot be matched with the design and no XML connection can be added. Restore the "
+            + "missing library, or rescue or replace that symbol in the schematic editor, then save the XML again.", named.ErrorMessage);
+        Assert.IsNull(named.Candidate); Assert.IsNull(named.Connections);
+        // The whole planner reaches the same refusal from the saved XML, which carries such a symbol unchanged.
+        var unresolvedSaved = unresolved with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(unresolvedDesired, unresolved.KnowledgeLibraries)) };
+        var planned = SchematicSynchronizationPlanner.Plan(unresolvedSaved, ConnectedSession(unresolvedSaved.InstanceId, realization: true));
+        Assert.AreEqual(SchematicConnectionErrors.UnalignedElectricalBaseline, planned.ErrorCode, planned.ErrorMessage);
+        Assert.AreEqual(named.ErrorMessage, planned.ErrorMessage);
+        var general = PrepareConnected(saved with { BaselineElectrical = foreign }, desired, admitted);
+        Assert.AreEqual("The saved baseline must agree with its native pin partition.", general.ErrorMessage, "No unresolved symbol is named.");
 
         // Hierarchy merge refusals pass through with the merge's own result, as PrepareCreation reports them
         // (§4.4 step 1): competing XML and native edits of one sheet are a conflict, and an invalid XML
@@ -998,6 +1018,35 @@ public sealed partial class SchematicSynchronizationPlanTests
         var design = WithCircuit(state.Baseline, edit);
         var saved = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, state.KnowledgeLibraries)) };
         return (saved, DesignRecoveryStore.ReadDesired(saved));
+    }
+
+    // The saved record and the desired design with one more symbol on the root sheet whose library definition KiCad cannot
+    // resolve: captured, as KiCad captures such a symbol, with its library identity and fields but no definition of its
+    // own (no unit and no pins), on the saved, observed and desired sheets and in both electrical checkpoints. The design
+    // does not own it.
+    private static (DesignRecoveryState State, SchematicDesign Desired) WithUnresolvedSymbol(DesignRecoveryState state, SchematicDesign desired,
+        string reference)
+    {
+        var library = new Kiapi.Common.Types.LibraryIdentifier { LibraryNickname = "Unavailable", EntryName = "Unresolved" };
+        void Add(SchematicHierarchyData data)
+        {
+            var root = data.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+            root.Items.Add(Any.Pack(new SchematicSymbolInstance
+            {
+                Id = new() { Value = "7e57f1c5-0000-4000-8000-00000000c0de" }, Path = root.Metadata.Document.SheetPath.Clone(),
+                Position = new() { XNm = 266_700_000, YNm = 25_400_000 }, LibraryId = library.Clone(), Definition = new() { Id = library.Clone() },
+                Unit = new() { Unit = 1 }, SeparatePinIdentities = true,
+                ReferenceField = new() { Name = "Reference", Text = new() { Text_ = reference, Attributes = new() { Multiline = true } } },
+                ValueField = new() { Name = "Value", Text = new() { Text_ = "Unresolved", Attributes = new() { Multiline = true } } }
+            }));
+        }
+        var baseline = state.Baseline.Schematic.Clone(); Add(baseline);
+        var observed = state.Observed.Clone(); Add(observed);
+        var baselineElectrical = state.BaselineElectrical!.Clone(); Add(baselineElectrical.Hierarchy.Data);
+        var observedElectrical = state.ObservedElectrical!.Clone(); Add(observedElectrical.Hierarchy.Data);
+        var wanted = desired.Schematic.Clone(); Add(wanted);
+        return (state with { Baseline = state.Baseline with { Schematic = baseline }, Observed = observed,
+            BaselineElectrical = baselineElectrical, ObservedElectrical = observedElectrical }, desired with { Schematic = wanted });
     }
 
     private static SchematicDesign WithCircuit(SchematicDesign design, Func<Circuit, Circuit> edit) =>

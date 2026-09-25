@@ -58,6 +58,100 @@ public sealed class SchematicNativeCreationProjectionTests
         CollectionAssert.AreEqual(first.Operations.ToArray(), second.Operations.ToArray());
     }
 
+    // Must-catch for the likely cause of the refusal in governed run t20260924T114705Z-b90471 (its recording was not kept): a
+    // new probe copying a placed probe whose reference field the journey's manual field check had dragged 60.96 mm aside and
+    // 121.666 mm in front of its pin (as it left one in governed run t20260924T154856Z-66ef97) would carry that field, and its
+    // own measured bounds would cover all the room for its connection. Which placed symbol creation copies depends on
+    // generated identities, so the live journey cannot pick it; here two editors hold the same part with the same library
+    // definition, but every placed symbol's fields dragged, turned, hidden or shown, resized and restyled differently. Both
+    // must create the identical symbol, with each field the library defines laid out exactly as the library lays it out
+    // (position, every text attribute, visibility, name display, auto-placement and privacy, as KiCad places a symbol from
+    // its library), and a field only the placed symbols have kept beside the symbol.
+    [TestMethod]
+    public void CreatedSymbolsTakeTheirFieldPlacesFromTheLibraryNotFromTheSymbolTheyCopy()
+    {
+        const long Mm = 1_000_000;
+        var (baseline, library) = Fixture();
+        var wanted = AddComponent(baseline);
+        static SchematicField Field(string name, string text, long x, long y, int degrees, HorizontalAlignment alignment, bool visible = true,
+            long size = 1_270_000, bool bold = false, bool italic = false, bool showName = false, bool autoplace = true) => new()
+        {
+            Name = name, Visible = visible, ShowName = showName, AllowAutoPlace = autoplace,
+            Text = new() { Text_ = text, Position = new() { XNm = x, YNm = y }, Attributes = new() { Multiline = true, Angle = new() { ValueDegrees = degrees },
+                HorizontalAlignment = alignment, VerticalAlignment = VerticalAlignment.VaCenter, Size = new() { XNm = size, YNm = size },
+                Bold = bold, Italic = italic } }
+        };
+        // The library definition every placed symbol of the part carries: its own fields, symbol-local, each styled its own way.
+        var libraryReference = Field("Reference", "U", 0, -3 * Mm, 0, HorizontalAlignment.HaCenter);
+        var libraryValue = Field("Value", "Probe", 0, -5 * Mm, 0, HorizontalAlignment.HaCenter, size: 1_524_000, bold: true, autoplace: false);
+        // Private in the library, and public on every placed copy, so that the created field's privacy tells them apart.
+        var libraryPart = Field("MPN", "P-1", 5 * Mm, 0, 0, HorizontalAlignment.HaLeft, visible: false, size: 1_000_000, italic: true, showName: true);
+        libraryPart.IsPrivate = true;
+        SchematicDesign Dragged(long aside, long ahead, int degrees, bool shown, long size)
+        {
+            var design = baseline with { Schematic = baseline.Schematic.Clone() };
+            foreach (var screen in design.Schematic.Instances)
+            for (int i = 0; i < screen.Items.Count; i++)
+            {
+                if (!screen.Items[i].Is(SchematicSymbolInstance.Descriptor)) continue;
+                var symbol = screen.Items[i].Unpack<SchematicSymbolInstance>();
+                symbol.Definition.ReferenceField = libraryReference.Clone();
+                symbol.Definition.ValueField = libraryValue.Clone();
+                symbol.Definition.Items.Add(new SchematicSymbolChild { Item = Any.Pack(libraryPart) });
+                // Where a person dragged and turned this editor's fields, how they hid, showed, resized and restyled them, and a
+                // field only the placed symbols have.
+                long x = symbol.Position.XNm, y = symbol.Position.YNm;
+                symbol.ReferenceField = Field("Reference", symbol.ReferenceField.Text.Text_, x + aside, y + ahead, degrees, HorizontalAlignment.HaLeft,
+                    visible: shown, size: size, italic: shown, showName: shown, autoplace: !shown);
+                symbol.ValueField = Field("Value", symbol.ValueField.Text.Text_, x - aside, y + ahead, degrees, HorizontalAlignment.HaRight,
+                    visible: !shown, size: size, bold: !shown, autoplace: shown);
+                symbol.UserFields.Add(Field("MPN", "P-1", x + aside, y - ahead, degrees, HorizontalAlignment.HaRight, visible: shown, size: size,
+                    showName: !shown));
+                symbol.UserFields.Add(Field("Note", "placed only", x + 7 * Mm, y + 7 * Mm, 0, HorizontalAlignment.HaLeft));
+                symbol.FieldsAutoplaced = true;
+                screen.Items[i] = Any.Pack(symbol);
+            }
+            return design;
+        }
+        SchematicSymbolInstance[] Created(SchematicDesign design)
+        {
+            var result = SchematicNativeCreationProjection.Project(design, wanted, [library]);
+            var ids = result.CreatedOccurrences.Select(o => result.Candidate.SymbolBindings.Single(b => b.SymbolOccurrenceId == o).NativeObjectId.ToString("D")).ToHashSet();
+            return [.. result.Candidate.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Select(i => i.Unpack<SchematicSymbolInstance>()).Where(s => ids.Contains(s.Id.Value)).OrderBy(s => s.Id.Value, StringComparer.Ordinal)
+                .ThenBy(s => string.Join('/', s.Path.Path.Select(p => p.Value)), StringComparer.Ordinal)];
+        }
+        var near = Created(Dragged(60_960_000, 121_666_000, 90, shown: false, size: 2_540_000));
+        var far = Created(Dragged(-20 * Mm, 40 * Mm, 270, shown: true, size: 800_000));
+        Assert.IsNotEmpty(near);
+        CollectionAssert.AreEqual(near, far,
+            "The new symbol does not depend on where the copied symbol's fields were dragged or how they were shown, sized or styled.");
+        foreach (var symbol in near)
+        {
+            long x = symbol.Position.XNm, y = symbol.Position.YNm;
+            Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x, YNm = y - 3 * Mm }, symbol.ReferenceField.Text.Position, "The reference sits where the library puts it.");
+            Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x, YNm = y - 5 * Mm }, symbol.ValueField.Text.Position, "The value sits where the library puts it.");
+            var mpn = symbol.UserFields.Single(f => f.Name == "MPN");
+            Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x + 5 * Mm, YNm = y }, mpn.Text.Position, "A user field the library defines sits where the library puts it.");
+            Assert.IsTrue(mpn.IsPrivate, "The field is private as the library field is, though every placed copy of it is public.");
+            foreach (var (field, source) in new[] { (symbol.ReferenceField, libraryReference), (symbol.ValueField, libraryValue), (mpn, libraryPart) })
+            {
+                Assert.AreEqual(source.Text.Attributes, field.Text.Attributes, field.Name + " takes every text attribute of the library field.");
+                Assert.AreEqual(source.Visible, field.Visible, field.Name + " is shown or hidden as the library field is.");
+                Assert.AreEqual(source.ShowName, field.ShowName, field.Name + " shows its name as the library field does.");
+                Assert.AreEqual(source.AllowAutoPlace, field.AllowAutoPlace, field.Name + " may be placed automatically as the library field may.");
+                Assert.AreEqual(source.IsPrivate, field.IsPrivate, field.Name + " is private as the library field is.");
+            }
+            Assert.AreNotEqual("U", symbol.ReferenceField.Text.Text_, "The text is the component's own, not the library's.");
+            Assert.AreNotEqual("Probe", symbol.ValueField.Text.Text_, "The value is the component's own, not the library's.");
+            var note = symbol.UserFields.Single(f => f.Name == "Note");
+            Assert.AreEqual(new Kiapi.Common.Types.Vector2 { XNm = x + 7 * Mm, YNm = y + 7 * Mm }, note.Text.Position,
+                "A field the library does not define keeps its place beside the symbol.");
+            Assert.IsTrue(note.Visible); Assert.AreEqual(1_270_000, note.Text.Attributes.Size.XNm, "and keeps its own style.");
+            Assert.IsFalse(symbol.FieldsAutoplaced, "Nothing arranged the fields automatically.");
+        }
+    }
+
     [TestMethod]
     public void ConnectedOrCoordinateFreeCreationIsRejectedWithoutAPartialCandidate()
     {

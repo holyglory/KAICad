@@ -423,6 +423,11 @@ message AutomationSession {
   // feature contracts. A peer that answers this handshake always dispatches GetAutomationSession,
   // so an empty list means a peer built before this field, whose request coverage is unknown.
   repeated string handled_requests = 401;
+  // The operating-system process ID of this KiCad process, 0 when unknown. An automation client
+  // uses it only to observe whether this same process is still running, together with the start
+  // time the operating system reports for it, so a KiCad that ended can be reported as ended; it
+  // never signals or stops KiCad through it.
+  uint32 process_id = 402;
   // -- end lane 2D --
 }
 
@@ -558,6 +563,10 @@ message MeasureSchematicPlacement {
   repeated google.protobuf.Any item_candidates = 5;
   // 6: reserved for explicit variant selection (p20323), declared at a later seam freeze.
   // -- lane 2A (100-199) --
+  // Also return the presentation facts of this sheet instance (presentation), measured on
+  // private copies at this instance: its own references, units and field text, painted glyph
+  // extents and native net identities. Servers that predate this field refuse the request.
+  bool include_presentation = 100;
   // -- end lane 2A --
 }
 
@@ -579,6 +588,10 @@ message SchematicPlacementGeometry {
   repeated SchematicPlacementBounds item_candidates = 9;
   // 10: held for the CN-1 milestone 2 measurement extension, declared at a later seam freeze.
   // -- lane 2A (100-199) --
+  // Present only when include_presentation was requested; document and revision equal this
+  // response's. Unlike ReadSchematicPresentationFacts it measures any loaded sheet instance, not
+  // only the displayed one, and fills every lane 2A presentation field.
+  SchematicPresentationFacts presentation = 100;
   // -- end lane 2A --
 }
 
@@ -660,6 +673,9 @@ message SchematicPresentationFacts {
   repeated SchematicPresentationWire wires = 7;
   repeated kiapi.common.types.Vector2 junctions = 8;
   // -- lane 2A (100-199) --
+  // Human-readable sheet-instance path (for example "/CPU/CPU_POWER/") and page number.
+  string sheet_name = 100;
+  string page_number = 101;
   // -- end lane 2A --
 }
 
@@ -689,6 +705,20 @@ message SchematicPresentationObject {
   // font metrics, transformed to sheet coordinates; not a clipping rectangle.
   kiapi.common.types.Box2 text_bounds = 9;
   // -- lane 2A (100-199) --
+  // Extent of the glyphs the schematic painter draws for this text: its draw position,
+  // justification, rotation, effective stroke width, font and metrics, from the exact native
+  // glyph geometry. Absent for objects without painted glyphs.
+  kiapi.common.types.Box2 glyph_bounds = 100;
+  // Painted reading direction in degrees counter-clockwise, in [0, 360): 0 reads left to right,
+  // 90 bottom to top, 180 upside down, 270 top to bottom. Absent for objects without text.
+  optional double reading_angle_degrees = 101;
+  // The reference designator of a symbol that must show one: every symbol except power and
+  // virtual ('#') symbols, whose references KiCad hides by design.
+  bool designator_required = 102;
+  // What the object is on its sheet, deciding which overlap rules apply: "symbol" (body and
+  // pins), "sheet" (sheet symbol body), "label" (label body), "field", "sheet_pin", "text" or
+  // "other". Empty from peers that predate it.
+  string presentation_role = 103;
   // -- end lane 2A --
 }
 

@@ -3820,8 +3820,30 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(at.Controls.Any(c => (c.Name.StartsWith("RecursiveDirection", StringComparison.Ordinal) || c.Name.StartsWith("RecursiveDomain", StringComparison.Ordinal)
                 || c.Name.StartsWith("RecursiveType", StringComparison.Ordinal)) && c.Shown), step + ": no choice is offered up front.");
         }
+        // A signal drawn in this draft is removed by the editor itself, as the inverse of its addition (contract rbg-v2 erratum
+        // "connection signals in the level draft", section 4.7): the level draft is exactly what it was without that signal, no
+        // removal effect is reported, the status line names no removal (a saved signal's cascade says "Removed …"), and nothing
+        // is written.
+        async Task DrawnRemoval(P.RecursiveDiagramEditorState at, P.LevelDraftData expected, string file, string step)
+        {
+            Assert.AreEqual(expected, at.LevelDraft, step + ": the level draft is exactly what it was without the drawn signal.");
+            Assert.IsEmpty(at.LastEffects, step + ": removing a drawn signal reports no removal effect.");
+            Assert.AreEqual(at.Dirty ? "Unsaved changes" : "", at.StatusText, step + ": the status line names no removal.");
+            Assert.AreEqual("", at.ErrorMessage, step + ": no error.");
+            Assert.AreEqual(file, await File.ReadAllTextAsync(created.Path, token), step + ": nothing is written.");
+        }
+        // The draft without one drawn signal: its own new connection and the member line its addition gave a saved connection's draft.
+        static P.LevelDraftData Without(P.LevelDraftData draft, string signal)
+        {
+            var expected = draft.Clone();
+            expected.NewConnections.Remove(expected.NewConnections.Single(c => c.Selection.ConnectionId == signal));
+            foreach (var link in expected.ConnectionDrafts)
+                foreach (var member in link.Members.Where(m => m.ConnectionId == signal).ToArray()) link.Members.Remove(member);
+            return expected;
+        }
 
         var start = await Open("start");
+        string startXml = await File.ReadAllTextAsync(created.Path, token);
         var level = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
         var top = level.Inspect(level.SelectedRoot);
         string root = level.SelectedRoot.BlockId.ToString("D");
@@ -3891,6 +3913,21 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(new[] { "VIN", "RTN" }, drawnForSupply.Select(c => c.Name).ToArray());
         CollectionAssert.AreEqual(drawnForSupply.Select(c => c.Selection.ConnectionId).ToArray(), newSignals.ConnectionDraft.Members.Select(m => m.ConnectionId).ToArray());
         Assert.AreEqual(psuName + " \u2192 " + boundary.Name, Find(newSignals, "RecursiveDirectionFromFirst").Label, "A direction would read from the block to the port.");
+        // A third signal drawn for the new connection and removed again with its own remove button leaves the draft exactly as it
+        // was before Enter added it; Undo brings it back exactly, and Redo removes it again.
+        Type("AUX"); Key("Return");
+        var withAux = await Wait("new-signal-aux", s => Signals(s).SequenceEqual(["VIN", "RTN", "AUX"]));
+        Assert.AreEqual(supply, withAux.LevelDraft.NewConnections.Single(c => c.Name == "AUX").MemberOf, "AUX is drawn for Supply input.");
+        await Press("RecursiveSignalRemove2");
+        await DrawnRemoval(await Wait("new-signal-aux-removed", s => Signals(s).SequenceEqual(["VIN", "RTN"])), newSignals.LevelDraft, startXml,
+            "new-signal-aux-removed");
+        await Press("RecursiveSignalEntry");
+        Key("z", control: true);
+        var auxBack = await Wait("new-signal-aux-undone", s => Signals(s).SequenceEqual(["VIN", "RTN", "AUX"]));
+        Assert.AreEqual(withAux.LevelDraft, auxBack.LevelDraft, "Undo restores the drawn signal exactly.");
+        Key("y", control: true);
+        await DrawnRemoval(await Wait("new-signal-aux-redone", s => Signals(s).SequenceEqual(["VIN", "RTN"])), newSignals.LevelDraft, startXml,
+            "new-signal-aux-redone");
         // With exactly two single signals the connection may be a differential pair; a pair keeps its two signals, so their remove
         // buttons, the Signals row's remove button and the entry are unavailable until another type is chosen.
         await AddDetail("Home", "Down", "Down");
@@ -3970,7 +4007,7 @@ public sealed partial class NativeSessionTests
         // + Add detail > Signals: each typed name and Enter adds one signal; a repeated name is refused with a notice; Escape clears
         // the entry; a signal's own remove button takes only that signal away, and Undo brings it back.
         await AddDetail("Home");
-        await Wait("signals-row", s => Details(s).SequenceEqual(["signals", "direction"]) && s.FocusedControl == "RecursiveSignalEntry");
+        var signalsRow = await Wait("signals-row", s => Details(s).SequenceEqual(["signals", "direction"]) && s.FocusedControl == "RecursiveSignalEntry");
         Type("VBUS"); Key("Return");
         await Wait("signal-vbus", s => Signals(s).SequenceEqual(["VBUS"]) && Find(s, "RecursiveSignalEntry").Label == "");
         Type("GND"); Key("Return");
@@ -3984,8 +4021,19 @@ public sealed partial class NativeSessionTests
         Key("Escape");
         await Wait("signal-entry-cleared", s => s.ConnectionNotice == "" && Find(s, "RecursiveSignalEntry").Label == "" && s.FocusedControl == "RecursiveSignalEntry");
         await Press("RecursiveSignalRemove0");
-        await Wait("signal-removed", s => Signals(s).SequenceEqual(["GND"]));
-        Key("z", control: true); await Wait("signal-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]));
+        var vbusGone = await Wait("signal-removed", s => Signals(s).SequenceEqual(["GND"]));
+        await DrawnRemoval(vbusGone, Without(twoSignals.LevelDraft, drawnSignals[0].Selection.ConnectionId), startXml, "signal-removed");
+        Key("z", control: true);
+        var restored = await Wait("signal-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]));
+        Assert.AreEqual(twoSignals.LevelDraft, restored.LevelDraft, "Undo restores the drawn signal exactly.");
+        // The Signals row's remove button, while every signal was drawn in this draft, is their removal too: the draft is again
+        // exactly what it was before + Add detail > Signals, and Undo brings both back.
+        await Press("RecursiveDetailRemoveSignals");
+        await DrawnRemoval(await Wait("drawn-signals-removed", s => Signals(s).Length == 0 && Details(s).SequenceEqual(["direction"])),
+            signalsRow.LevelDraft, startXml, "drawn-signals-removed");
+        Key("z", control: true);
+        var bothBack = await Wait("drawn-signals-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && Details(s).SequenceEqual(["signals", "direction"]));
+        Assert.AreEqual(twoSignals.LevelDraft, bothBack.LevelDraft, "Undo brings both drawn signals back exactly.");
         await Capture("signals");
 
         // + Add detail > Type: a connection with signals cannot be a single signal; with exactly two signals it may be a pair.
@@ -4051,8 +4099,18 @@ public sealed partial class NativeSessionTests
         await Press("RecursiveDirectionFromFirst");
         await Wait("direction-changed", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
         Key("d", alt: true);
-        await Wait("declined", s => !s.Dirty && s.ConnectionDraft?.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
+        var declined = await Wait("declined", s => !s.Dirty && s.ConnectionDraft?.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+        // On a clean draft, a signal drawn for the saved Power and removed again leaves nothing to save. The only trace is Power's
+        // connection draft, which the addition opened and which is again exactly the saved Power.
+        await Press("RecursiveSignalEntry"); Type("VREF"); Key("Return");
+        await Wait("clean-signal-added", s => Signals(s).SequenceEqual(["VBUS", "GND", "VREF"]) && s.Dirty);
+        await Press("RecursiveSignalRemove2");
+        var vrefGone = await Wait("clean-signal-removed", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && !s.Dirty);
+        var cleanAgain = declined.LevelDraft.Clone(); cleanAgain.ConnectionDrafts.Add(declined.ConnectionDraft);
+        await DrawnRemoval(vrefGone, cleanAgain, savedXml, "clean-signal-removed");
+        Assert.AreEqual(declined.ConnectionDraft, vrefGone.ConnectionDraft, "Power's draft is again its saved revision.");
+        Assert.IsFalse(Find(vrefGone, "RecursiveSave").Enabled, "Save is unavailable: nothing is left to save.");
         // A saved signal leaves through the companion's removal cascade and the status bar names it; Undo restores it.
         await Press("RecursiveSignalRemove0");
         var vbusRemoved = await Wait("saved-signal-removed", s => Signals(s).SequenceEqual(["GND"]) && s.Dirty);

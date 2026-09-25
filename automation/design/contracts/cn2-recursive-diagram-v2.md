@@ -970,19 +970,72 @@ item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`). The earlier sections sta
 
 Owner decision `ne0261047035e58c6` (`kicad-cn2-connection-signals-in-draft-20260924`): an abstract connection grows during
 development into a concrete bus with named signals (for example I2C gaining SDA and SCL), added in the connection panel with
-"+ Add detail" (owner decisions `nf53af9d74841b7d3` and `n98a3f3c41084f0ed`). The frozen text of §4.6 L3 and L4, §4.7 and
-§9.1 kept a connection's members unchanged in a level draft, which would make that impossible. The erratum is accepted
-(integration grant for lane 2B's design-QA batch). The earlier sections stay as history; this erratum overrides them.
+"+ Add detail" (owner decisions `nf53af9d74841b7d3` and `n98a3f3c41084f0ed`). The frozen text of §4.6 L3 and L4, §4.7, §4.8
+and §9.1 kept a connection's members unchanged in a level draft, which would make that impossible. The erratum is accepted
+(integration grant for lane 2B). The earlier sections stay as history; this erratum overrides them.
 
-- **§4.6 L3 (connection drafts).** A connection draft's `Members` are the saved members it keeps, in saved order, followed
-  by exactly the signals drawn for it in this draft, in the order they were added. Anything else fails with
-  `connection_member_edit_requires_member_path`, and a saved member's own content is still edited only through its member
-  path. Dropping a saved member from a connection draft is allowed, but the save is refused while a note or a realization
-  still points at it (the graph's annotation and realization checks).
-- **§4.6 L4 (new occurrences).** A drawn signal names its root connection with `member_of` and is never a root itself. A
-  drawn root's members are its signals, in declaration order.
-- **§4.6 step 2 (new children).** A new caption-only block stores no local diagram until it has ports or content; the
-  sentence "`Diagram = new(Interfaces, [], [])`" applies only once the new block has ports or content.
-- **§4.7 (removals).** A signal drawn in the same draft is removed natively, as the inverse of its addition, with no
-  effects. Removing a saved signal goes through the ordinary removal preparation (`RFA_PREPARE_LEVEL_EDIT`).
-- **§9.1 (rebase).** A rebase that meets drawn signals refuses with a connection conflict instead of dropping them.
+Terms: a signal is a member of one of the level's root connections. A drawn signal was added in the current level draft; a
+saved signal is stored in the file.
+
+- **§4.6 `NewConnectionOccurrence`** gains `Guid? MemberOf = null` (proto `NewConnectionData.member_of = 200`, lane 2B band).
+  An occurrence with `MemberOf` is a drawn signal. `MemberOf` names one of the level's root connections: one drawn in the same
+  draft (an occurrence without `MemberOf`), or a saved root that the same draft edits through a connection draft. A drawn
+  signal is never itself one of the level's connections. Anything else, a signal of a signal included, fails with
+  `invalid_level_draft`.
+- **§4.6 L3 (connection drafts).** Instead of "`Members` must equal the baseline": a connection draft's `Members` are the saved
+  members it keeps, in their saved order, followed by exactly the signals drawn for it in this draft, in the order the draft
+  lists them among its new connections (the order they were added). Anything else fails with
+  `connection_member_edit_requires_member_path`: saved members out of their saved order, a member listed twice, a drawn
+  signal before or between the kept members, a drawn signal left out, or a member that is neither (a saved or drawn signal
+  of another connection). A saved member's own content is still edited only through its member path.
+- **§4.6 L3, dropping a saved member directly.** A connection draft may leave out saved members it no longer keeps. The graph's
+  own checks then refuse the save while anything still points at a dropped member or at one of its own members: a note that
+  targets it without an unresolved reason fails with `invalid_recursive_block_graph`, and a realization of one of the level's
+  boundary interfaces that still names it as a `LocalConnection` target fails with `invalid_interface_realization`. Nothing
+  is written. Once those notes are unresolved (or removed) and those targets removed, the same drop saves, and the dropped
+  signal's saved revisions stay in the history. The editor never drops a saved member this way; it removes saved signals with
+  `RemoveConnectionMembers` (§4.7 below), whose cascade does exactly that.
+- **§4.6 L4 and step 4 (new occurrences).** A drawn signal's selection appears in none of the scope's roots (instead of
+  exactly once). Step 4 gives a drawn root the `Members` of the signals drawn for it, in the order the draft lists them, and
+  a drawn signal no members. A drawn root of kind Signal that has drawn signals fails with
+  `invalid_diagram_connection_archive` (the archive's rule that a single signal has no members).
+- **§4.6 step 2 (new children).** A new block drawn without ports is created with no local diagram. `Diagram = new(Interfaces,
+  [], [])` applies only to a new block drawn with ports. A block without a local diagram keeps none until it has ports or
+  content: step 3 stores none for a child draft without ports, and step 5 stores none for a level that still has no ports,
+  connections, notes, layout or realizations.
+- **§4.7 (removals).**
+  - `LevelEditCommandKind` gains `RemoveConnectionMembers` (C# value 199, proto `LECK_REMOVE_CONNECTION_MEMBERS = 200`,
+    keeping the §2.5 rule C# = proto − 1). `LevelEditCommand` gains `MemberIds` (proto `LevelEditCommandData.member_ids =
+    200`) under the §2.5 record rules: no default in the primary constructor, the six-value constructor kept, and an omitted
+    list reads as empty.
+  - **RemoveConnectionMembers(C, M).** `ConnectionId` C is one of the level's root connections and `MemberIds` M a non-empty
+    list of distinct signals C has in the draft: the saved members its connection draft keeps (its saved members when it has
+    no connection draft) and the signals drawn for it. `BlockId` and `InterfaceId` are absent and `DetachConnections` is false.
+    Anything else fails with `level_edit_target_missing`. `MemberIds` on any other kind of removal fails with
+    `invalid_level_draft`.
+  - Each signal in M gives one `ConnectionRemoved` effect with its name. A drawn signal leaves the draft's new connections. A
+    saved signal leaves C's member list (C gets a connection draft if it had none). Steps 3 to 5 then apply to every removed
+    signal and to a saved signal's own members: notes on them become unresolved (`AnnotationUnresolved`), realization targets
+    on them are removed (`RealizationTargetRemoved`, and `RealizationStateChanged` when a record's state changes), and their
+    routes are removed (`PresentationEntryRemoved`). C itself, its other signals and its other details stay.
+  - **Removing a root.** RemoveConnection(C), and a removal that takes C with it (RemoveChild, or RemoveInterface with
+    `DetachConnections`), also removes the signals drawn for C. Which roots a removed block or interface touches, and what
+    steps 3 to 5 cover, both read one list: C, the saved signals its draft keeps with their own members, and the signals
+    drawn for it. A saved signal the draft already dropped is not part of C. "Members are removed through their member path"
+    now applies only to a signal's own members.
+  - **In the editor.** Instead of "Removals always go through `RFA_PREPARE_LEVEL_EDIT`": when every signal removed at once was
+    drawn in the same draft, the editor removes them itself, as the inverse of their addition. Each leaves the draft's new
+    connections and the member list its addition extended, the previous draft goes onto undo, no effect is reported and
+    nothing is sent to the helper. When any of them is saved, the whole removal goes through `RFA_PREPARE_LEVEL_EDIT` with
+    `RemoveConnectionMembers`, and the editor shows its effects. The editor removes no signal of a differential pair; its type
+    changes first.
+- **§4.8 (rebase).** Drawn signals follow their root. A drawn root keeps them, as every new connection is kept. A saved root's
+  connection draft carries the signals drawn for it, so its member list is a change of that draft: when the other side also
+  changed or removed that root, the rebase reports `LCK_CONNECTION` for it and returns no candidate, so nothing drawn is
+  dropped. Otherwise the candidate keeps the connection draft with its members and every drawn signal.
+- **§9.1 (native editor).** A signal is added in the level draft from the connection's Signals row: a drawn signal of kind
+  Signal whose `MemberOf` is the selected connection. Its ends are the blocks and ports the connection's ends are drawn on,
+  without any pin, selector, candidates or intent stated for the connection's ends. A saved connection's draft appends it
+  to its `Members`. Removing a connection's Endpoints row returns its ends, and those of the signals drawn for it in the
+  draft, to the blocks and ports they are drawn on; a saved signal's own ends change only through its member path.
+  Signals are removed as in §4.7. A separate connection draft remains only for edits of a signal's own content.

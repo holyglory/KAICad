@@ -477,8 +477,20 @@ public sealed class McpProcessTests
                 Assert.AreEqual(moved.NativeRevision, continued.State.NativeRevision);
                 Assert.AreEqual("released_operation_not_open", Assert.ThrowsExactly<AutomationException>(() =>
                     store.ContinueReleasedOperation(Session(continued.State), continued.RevisionToken, receipt)).Code, "An operation is continued once.");
-                Assert.AreNotEqual(continued.RevisionToken, store.Save(Session(continued.State), continued.RevisionToken).RevisionToken,
-                    "Once continued, the record can be attached like any other.");
+                var reattached = store.Save(Session(continued.State), continued.RevisionToken);
+                Assert.AreNotEqual(continued.RevisionToken, reattached.RevisionToken, "Once continued, the record can be attached like any other.");
+                // A refusal once the operation is released keeps the release and says so: the error reply names the receipt and
+                // the record's current revision token, and whether this call released the operation.
+                var superseded = await Release(4096, reattached.RevisionToken, heldOperation, "resume");
+                Assert.IsTrue(superseded.GetProperty("isError").GetBoolean(), superseded.GetRawText());
+                Assert.AreEqual("released_operation_superseded", Code(superseded), superseded.GetRawText());
+                var refusal = superseded.GetProperty("structuredContent");
+                Assert.IsFalse(refusal.GetProperty("releasedNow").GetBoolean(), refusal.GetRawText());
+                Assert.AreEqual(heldEpoch, refusal.GetProperty("releasedEpoch").GetString());
+                Assert.AreEqual(view.GetProperty("receiptPath").GetString(), refusal.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, refusal.GetProperty("recoveryRevisionToken").GetString());
+                StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), "stays released (receipt " + view.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, store.Read()!.RevisionToken, "A refused continuation changes nothing.");
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
             }
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");

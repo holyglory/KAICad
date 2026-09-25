@@ -123,9 +123,17 @@ public sealed class SchematicNativeCreationProjectionTests
         }
         var near = Created(Dragged(60_960_000, 121_666_000, 90, shown: false, size: 2_540_000));
         var far = Created(Dragged(-20 * Mm, 40 * Mm, 270, shown: true, size: 800_000));
+        // The two refusals governed full acceptance recorded on sources without this rule (runs t20260925T024611Z-78215b and
+        // t20260925T090725Z-c388f6, "no free room for a connection stub" at the new probe's pin). The manual field check drags
+        // one placed probe's reference to the sheet point (81.28 mm, 141.986 mm), and in both runs that probe had the lowest
+        // generated occurrence identity of its part, so creation copied it: TP801 at (20.32 mm, 20.32 mm), its reference
+        // 60.96 mm aside and 121.666 mm ahead (the drag above), and TP899 at (200.66 mm, 130.81 mm), its reference 119.38 mm
+        // to the other side and 11.176 mm ahead (the drag here).
+        var refusedInAcceptance = Created(Dragged(-119_380_000, 11_176_000, 0, shown: true, size: 1_270_000));
         Assert.IsNotEmpty(near);
         CollectionAssert.AreEqual(near, far,
             "The new symbol does not depend on where the copied symbol's fields were dragged or how they were shown, sized or styled.");
+        CollectionAssert.AreEqual(near, refusedInAcceptance, "A copy of the probe dragged as in run t20260925T090725Z-c388f6 is the same new symbol.");
         foreach (var symbol in near)
         {
             long x = symbol.Position.XNm, y = symbol.Position.YNm;

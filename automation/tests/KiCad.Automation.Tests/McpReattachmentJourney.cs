@@ -155,8 +155,8 @@ public sealed partial class NativeSessionTests
         string instanceId = live.InstanceId;
         NativeFeatureContracts.Verify(live);
         Assert.IsTrue(live.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
-            "This KiCad serves every CN-1 §8.3 piece, so it must advertise " + SchematicConnectedAddition.NativeCapability + ": "
-            + string.Join(",", live.Capabilities));
+            "This KiCad serves every CN-1 §8.3 piece, so it must advertise " + SchematicConnectedAddition.NativeCapability
+            + " (ledger task p186c0db05be2a146): " + string.Join(",", live.Capabilities));
         byte[] savedSheet = await File.ReadAllBytesAsync(schematic, token);
         Task<CheckedSchematicState> Capture() => Ready(() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
             new() { Document = root.Clone(), ProcessEpoch = client.Epoch }, token));
@@ -236,6 +236,7 @@ public sealed partial class NativeSessionTests
             RequireToolSuccess(await mcp.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId }));
             workerCode = status.GetProperty("errorCode").GetString();
             Assert.AreEqual("Watching", status.GetProperty("phase").GetString(), "The worker must realize the revision: " + status.GetRawText());
+            Assert.IsNull(workerCode, status.GetRawText());
             Assert.AreNotEqual(JsonValueKind.Null, status.GetProperty("operationId").ValueKind, status.GetRawText());
             worker = await Drawn("worker", automatic, initial, status.GetProperty("operationId").GetGuid());
 

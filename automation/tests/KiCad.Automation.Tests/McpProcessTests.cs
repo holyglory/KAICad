@@ -1001,12 +1001,31 @@ public sealed class McpProcessTests
         Assert.IsTrue(preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), preview.GetRawText());
         Assert.AreEqual(JsonValueKind.Object, intent.ValueKind, preview.GetRawText());
         string json = intent.GetRawText();
+        // The published summary shape: exactly these property names on every object, so a renamed or dropped field
+        // changes the public JSON only together with this contract.
+        void Shape(JsonElement shown, params string[] names) =>
+            CollectionAssert.AreEquivalent(names, shown.EnumerateObject().Select(p => p.Name).ToArray(), "Summary fields: " + shown.GetRawText());
+        Shape(intent, "version", "circuitId", "nativeRevision", "desiredSha256", "nets", "screens", "ports", "expectedGroupCount",
+            "expectedPinCount", "createdSymbolIds");
+        Shape(intent.GetProperty("nativeRevision"), "epoch", "sequence");
         Assert.AreEqual(planned.Version, intent.GetProperty("version").GetInt32(), json);
         Assert.AreEqual(planned.CircuitId, intent.GetProperty("circuitId").GetGuid(), json);
         Assert.AreEqual(planned.DesiredSha256, intent.GetProperty("desiredSha256").GetString(), json);
         Assert.AreEqual(planned.NativeRevision.Epoch, intent.GetProperty("nativeRevision").GetProperty("epoch").GetString(), json);
         Assert.AreEqual(planned.NativeRevision.Sequence, intent.GetProperty("nativeRevision").GetProperty("sequence").GetUInt64(), json);
         static (Guid, string?) Pin(JsonElement pin) => (pin.GetProperty("componentId").GetGuid(), pin.GetProperty("pin").GetString());
+        // CN-1 §5.9 publishes these scope and role names; renaming an enum member must not silently rename them.
+        static string ScopeName(ConnectionScope scope) => scope switch
+        {
+            ConnectionScope.Local => "Local", ConnectionScope.Global => "Global",
+            _ => throw new AssertFailedException("CN-1 §5.9 names no connection scope " + (int)scope + ".")
+        };
+        static string RoleName(ConnectionMemberRole role) => role switch
+        {
+            ConnectionMemberRole.Signal => "Signal", ConnectionMemberRole.PowerCarrier => "PowerCarrier",
+            ConnectionMemberRole.ImplicitPower => "ImplicitPower",
+            _ => throw new AssertFailedException("CN-1 §5.9 names no member role " + (int)role + ".")
+        };
 
         // Every connected net with its scope and global name, and the pins it gains.
         var nets = intent.GetProperty("nets").EnumerateArray().ToArray();
@@ -1014,9 +1033,11 @@ public sealed class McpProcessTests
         Assert.HasCount(planned.Nets.Count, nets, json);
         foreach (var (net, shown) in planned.Nets.Zip(nets))
         {
+            Shape(shown, "netId", "name", "scope", "globalName", "addedPins");
+            foreach (var pin in shown.GetProperty("addedPins").EnumerateArray()) Shape(pin, "componentId", "pin");
             Assert.AreEqual(net.NetId, shown.GetProperty("netId").GetGuid(), json);
             Assert.AreEqual(net.Name, shown.GetProperty("name").GetString(), json);
-            Assert.AreEqual(net.Scope.ToString(), shown.GetProperty("scope").GetString(), json);
+            Assert.AreEqual(ScopeName(net.Scope), shown.GetProperty("scope").GetString(), json);
             Assert.AreEqual(net.GlobalName, shown.GetProperty("globalName").GetString(), json);
             CollectionAssert.AreEqual(net.AddedPins.Select(p => ((Guid, string?))(p.ComponentId, p.Pin)).ToArray(),
                 shown.GetProperty("addedPins").EnumerateArray().Select(Pin).ToArray(), json);
@@ -1027,6 +1048,7 @@ public sealed class McpProcessTests
         Assert.HasCount(planned.Screens.Count, screens, json);
         foreach (var (screen, shownScreen) in planned.Screens.Zip(screens))
         {
+            Shape(shownScreen, "screenId", "instancePaths", "islands");
             Assert.AreEqual(screen.ScreenId, shownScreen.GetProperty("screenId").GetGuid(), json);
             CollectionAssert.AreEqual(screen.InstancePathKeys.ToArray(),
                 shownScreen.GetProperty("instancePaths").EnumerateArray().Select(p => p.GetString()).ToArray(), json);
@@ -1034,9 +1056,11 @@ public sealed class McpProcessTests
             Assert.HasCount(screen.Islands.Count, islands, json);
             foreach (var (island, shown) in screen.Islands.Zip(islands))
             {
+                Shape(shown, "netId", "sheetPath", "scope", "labelText", "members", "anchorHasMatchingDriver", "joinRequired",
+                    "joinCandidates", "uplinkSheetSymbolId", "childSheetSymbolIds");
                 Assert.AreEqual(island.NetId, shown.GetProperty("netId").GetGuid(), json);
                 Assert.AreEqual(island.SheetPathKey, shown.GetProperty("sheetPath").GetString(), json);
-                Assert.AreEqual(island.Scope.ToString(), shown.GetProperty("scope").GetString(), json);
+                Assert.AreEqual(ScopeName(island.Scope), shown.GetProperty("scope").GetString(), json);
                 Assert.AreEqual(island.LabelText, shown.GetProperty("labelText").GetString(), json);
                 Assert.AreEqual(island.JoinRequired, shown.GetProperty("joinRequired").GetBoolean(), json);
                 Assert.AreEqual(island.AnchorHasMatchingDriver, shown.GetProperty("anchorHasMatchingDriver").GetBoolean(), json);
@@ -1049,11 +1073,13 @@ public sealed class McpProcessTests
                 Assert.HasCount(island.Members.Count, members, json);
                 foreach (var (member, shownMember) in island.Members.Zip(members))
                 {
+                    Shape(shownMember, "componentId", "pin", "placedPinId", "symbolId", "createdSymbol", "role", "alreadyConnected",
+                        "requiresStub", "powerName");
                     Assert.AreEqual(((Guid, string?))(member.Pin.Endpoint.ComponentId, member.Pin.Endpoint.Pin), Pin(shownMember), json);
                     Assert.AreEqual(member.Pin.PlacedPinId, shownMember.GetProperty("placedPinId").GetGuid(), json);
                     Assert.AreEqual(member.Pin.SymbolId, shownMember.GetProperty("symbolId").GetGuid(), json);
                     Assert.AreEqual(member.Pin.CreatedSymbol, shownMember.GetProperty("createdSymbol").GetBoolean(), json);
-                    Assert.AreEqual(member.Role.ToString(), shownMember.GetProperty("role").GetString(), json);
+                    Assert.AreEqual(RoleName(member.Role), shownMember.GetProperty("role").GetString(), json);
                     Assert.AreEqual(member.AlreadyConnected, shownMember.GetProperty("alreadyConnected").GetBoolean(), json);
                     Assert.AreEqual(member.RequiresStub, shownMember.GetProperty("requiresStub").GetBoolean(), json);
                     Assert.AreEqual(member.PowerName, shownMember.GetProperty("powerName").GetString(), json);
@@ -1066,6 +1092,7 @@ public sealed class McpProcessTests
         Assert.HasCount(planned.Ports.Count, ports, json);
         foreach (var (port, shown) in planned.Ports.Zip(ports))
         {
+            Shape(shown, "netId", "childPath", "parentPath", "sheetSymbolId", "portText", "sheetPinExists", "uplinkLabelExists");
             Assert.AreEqual(port.NetId, shown.GetProperty("netId").GetGuid(), json);
             Assert.AreEqual(port.ChildPathKey, shown.GetProperty("childPath").GetString(), json);
             Assert.AreEqual(port.ParentPathKey, shown.GetProperty("parentPath").GetString(), json);

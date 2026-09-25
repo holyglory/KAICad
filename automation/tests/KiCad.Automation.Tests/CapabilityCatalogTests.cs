@@ -754,8 +754,8 @@ internal static class CapabilityCatalogAssertions
 /// <list type="bullet">
 /// <item>A direct citation: an expression body (=>) that is exactly
 /// RunNativeSessions(NativeJourney.X[, further arguments that are each a single identifier or
-/// keyword, such as a parameter name, true or null, or a single string or character literal with no
-/// interpolation holes]), optionally awaited, runs journey X. Any other body that names
+/// keyword, such as a parameter name, true or null, or a single string or character literal on one
+/// line with no interpolation holes]), optionally awaited, runs journey X. Any other body that names
 /// RunNativeSessions, including a block body making the same call, is read as a helper chain, which
 /// rejects it. A switch expression is read as dispatch only over a parameter that always holds the
 /// journey being run: a NativeJourney parameter, taken by value, of the member that contains the
@@ -770,10 +770,11 @@ internal static class CapabilityCatalogAssertions
 /// unconditional assignment statement of that block whose arms name journeys, except a discard arm
 /// (_) that throws for any other journey. Every journey may reach: a stub named anywhere in the
 /// fixture's source files except in its declaration and as the call a switch expression arm makes
-/// (NativeJourney.X => Stub(...) or _ => Stub(...), without a when clause), such as a stub named in
-/// an if/else dispatch, a switch statement, a direct call or a delegate; a stub that a switch over
-/// any other value leads to; and a call from any fixture member into another test class that may
-/// reach a stub.</item>
+/// when the arm has no when clause and its pattern is _ or one or more NativeJourney values joined
+/// by the keyword or (NativeJourney.X => Stub(...), NativeJourney.X or NativeJourney.Y => Stub(...),
+/// _ => Stub(...)), such as a stub named in an if/else dispatch, a switch statement, an arm with a
+/// when clause, a direct call or a delegate; a stub that a switch over any other value leads to; and
+/// a call from any fixture member into another test class that may reach a stub.</item>
 /// <item>A helper-chain citation: any other test is followed through every NativeSessionTests member
 /// it names without a qualifier, to any depth. It is rejected when a reachable member, including the
 /// cited test itself, is or names a stub, names NativeJourney or RunNativeSessions, makes an
@@ -805,8 +806,9 @@ internal static class CapabilityCatalogAssertions
 /// base.Member(...), NativeSessionTests.Member(...), other.Member(...),
 /// new NativeSessionTests().Member(...) or field.Member(...). The member is not followed, so a stub
 /// it reaches further on is missed; a reached member that names a stub itself, in any form, is still
-/// rejected. A direct citation is not affected, because any mention of a stub outside its
-/// declaration and the call a switch arm makes rejects every direct citation.</item>
+/// rejected. A direct citation is not affected, because any mention of a stub other than its
+/// declaration and the call made by a switch expression arm without a when clause, as described
+/// above, rejects every direct citation.</item>
 /// <item>In either citation form, calls through any instance or field of another test class
 /// (var helper = new Helper(); then helper.Pending(), or field.Pending()), and extension-method
 /// calls. Only the new Helper() that creates such an instance is followed, as described above,
@@ -814,10 +816,15 @@ internal static class CapabilityCatalogAssertions
 /// <item>Calls into another test class written other than Class.Member(...) or new Class(...) with a
 /// simple class name: with a namespace or enclosing class (Ns.Helper.Pending(),
 /// Outer.Helper.Pending(), global::Ns.Helper.Pending()), with generic arguments on the class
-/// (Helper&lt;T&gt;.Pending(), new Helper&lt;T&gt;()), or with target-typed new(). Property
-/// reads and method groups of another test class (Helper.Value, Run(Helper.Pending)) are not
-/// followed either, nor members that another test class inherits from its base class, nor calls
-/// into records and structs.</item>
+/// (Helper&lt;T&gt;.Pending(), new Helper&lt;T&gt;()), with target-typed new(), or as an object
+/// initializer with no parentheses (new Helper { ... }). Members that another test class inherits
+/// from its base class are not followed either, nor calls into records and structs.</item>
+/// <item>Property and field reads and method groups of another test class, including a delegate
+/// passed on or invoked through Invoke or ?.Invoke (Helper.Value, Run(Helper.Callback),
+/// Helper.Callback.Invoke(), Helper.Callback?.Invoke(), Run(Helper.Pending)): none is followed. Only
+/// a direct call of a delegate field or property, Helper.Callback(...), is followed, and then only to
+/// that member's own declaration, initializer included; a value assigned to it elsewhere is not
+/// followed from that call.</item>
 /// <item>Inside another test class, its own members named through this (this.Member(...)), and calls
 /// back into NativeSessionTests (NativeSessionTests.Member(...)): neither is followed.</item>
 /// <item>A variable that a lambda or local function redeclares under the journey parameter's name in

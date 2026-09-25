@@ -37,20 +37,22 @@ public enum KiCadVerificationLevel
 /// except a catch filter that only lets such a result through. A cited stub is rejected.</item>
 /// <item>A direct citation, whose expression body (=>) is exactly
 /// RunNativeSessions(NativeJourney.X[, further arguments that are each a single identifier or
-/// keyword, such as a parameter name, true or null, or a single string or character literal with no
-/// interpolation holes]), optionally awaited. Any other body that names RunNativeSessions, such as
-/// a block body making the same call, is read as a helper chain, which rejects it. A direct
-/// citation is rejected when a switch expression over the running journey sends X to a stub or has
-/// a default arm leading to a stub that X may reach. A switch is read as dispatch only over a
-/// parameter that always holds the journey being run, passed on unchanged from RunNativeSessions. A
-/// default arm is limited only by earlier switches over that same parameter, each a whole
-/// assignment statement of the member's own block whose arms name journeys, except a discard arm
-/// (_) that throws for any other journey, and only when the default arm's switch also runs directly
-/// in that block, not inside a lambda, local function or nested block. Every direct citation is
-/// rejected when a stub is named anywhere in the fixture other than in its declaration and as the
-/// call a switch arm makes (NativeJourney.X => Stub(...) or _ => Stub(...)), when a switch over any
-/// other value leads to a stub, or when any fixture member makes a call into another test class
-/// that may reach a stub.</item>
+/// keyword, such as a parameter name, true or null, or a single string or character literal on one
+/// line with no interpolation holes]), optionally awaited. Any other body that names
+/// RunNativeSessions, such as a block body making the same call, is read as a helper chain, which
+/// rejects it. A direct citation is rejected when a switch expression over the running journey
+/// sends X to a stub or has a default arm leading to a stub that X may reach. A switch is read as
+/// dispatch only over a parameter that always holds the journey being run, passed on unchanged from
+/// RunNativeSessions. A default arm is limited only by earlier switches over that same parameter,
+/// each a whole assignment statement of the member's own block whose arms name journeys, except a
+/// discard arm (_) that throws for any other journey, and only when the default arm's switch also
+/// runs directly in that block, not inside a lambda, local function or nested block. Every direct
+/// citation is rejected when a stub is named anywhere in the fixture other than in its declaration
+/// and as the call a switch expression arm makes when the arm has no when clause and its pattern is
+/// _ or one or more NativeJourney values joined by the keyword or (NativeJourney.X => Stub(...),
+/// NativeJourney.X or NativeJourney.Y => Stub(...), _ => Stub(...)), when a switch over any other
+/// value leads to a stub, or when any fixture member makes a call into another test class that may
+/// reach a stub.</item>
 /// <item>A helper-chain citation (any other cited method), followed through every
 /// NativeSessionTests member it names without a qualifier, to any depth. It is rejected when a
 /// reached member, including the cited test itself, is or names a stub, names NativeJourney or
@@ -84,9 +86,14 @@ public enum KiCadVerificationLevel
 /// Only the new Class(...) that creates such an instance is followed, as above, never the later
 /// call.</item>
 /// <item>Calls into another test class written with a namespace, an enclosing class or generic
-/// arguments on the class, or with target-typed new(); property reads and method groups of another
-/// test class; members another test class inherits from its base class; and calls into records and
-/// structs.</item>
+/// arguments on the class, with target-typed new(), or as an object initializer with no
+/// parentheses (new Helper { ... }); members another test class inherits from its base class; and
+/// calls into records and structs.</item>
+/// <item>Property and field reads and method groups of another test class, including a delegate
+/// passed on or invoked through Invoke or ?.Invoke (Helper.Value, Helper.Callback.Invoke(),
+/// Run(Helper.Callback), Run(Helper.Pending)). Only a direct call of a delegate field or property,
+/// Helper.Callback(...), is followed, and then only to that member's own declaration, initializer
+/// included.</item>
 /// <item>Inside another test class, its own members named through this (this.Member(...)), and
 /// calls back into NativeSessionTests.</item>
 /// <item>A variable that a lambda or local function redeclares under the journey parameter's name

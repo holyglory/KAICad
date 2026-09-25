@@ -261,6 +261,28 @@ std::unique_ptr<COMMIT> API_HANDLER_SCH::createCommit()
 }
 
 
+std::optional<std::string> API_HANDLER_SCH::ScreenIdentityRefusal( SCHEMATIC& aSchematic, const SCH_SHEET_PATH& aTarget )
+{
+    SCH_SHEET*  sheet = aTarget.Last();
+    SCH_SCREEN* screen = aTarget.LastScreen();
+    if( !sheet || !screen || aSchematic.GetTopLevelSheets().size() != 1
+            || aSchematic.GetTopLevelSheet( 0 ) != sheet )
+        return std::string( "Only the root sheet of a single-root schematic can adopt a screen identity" );
+    const wxFileName file( aSchematic.Project().AbsolutePath( screen->GetFileName() ) );
+    if( screen->GetFileFormatVersionAtLoad() > 0 || screen->FileExists()
+            || ( !screen->GetFileName().IsEmpty() && file.FileExists() ) )
+        return std::string( "Only a root that was never loaded from or saved to a file can adopt a screen identity" );
+    if( !screen->Items().empty() || !screen->GetLibSymbols().empty() )
+        return std::string( "Only an empty root can adopt a screen identity" );
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        if( path.LastScreen() != screen )
+            return std::string( "Only a schematic with nothing but its root can adopt a screen identity" );
+    }
+    return std::nullopt;
+}
+
+
 SCHEMATIC* API_HANDLER_SCH::schematic() const
 {
     wxCHECK( m_context, nullptr );
@@ -1014,7 +1036,33 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             header.mutable_document()->CopyFrom( document );
             result.add_operation_targets()->CopyFrom( document );
 
-            if( operation.has_set_symbol_locks() )
+            if( operation.has_rebuild_screen_identity() )
+            {
+                // Rebuilding deleted native files from saved XML: a root KiCad created for the project
+                // adopts the identity its saved root file had.  Refuse anything else, before any edit.
+                auto known = operation;
+                known.DiscardUnknownFields();
+                const std::string& requested = operation.rebuild_screen_identity().value();
+                const KIID id( requested );
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                        || requested.empty() || id == niluuid || id.AsStdString() != requested )
+                    return reject( prefix + "A screen identity requires one canonical nonzero UUID" );
+                if( index != 1 )
+                    return reject( prefix + "A screen identity must be the first operation of its batch" );
+                if( operationId.empty() || !aCtx.Request.has_expected_revision() )
+                    return reject( prefix + "A screen identity requires revision and retry identity" );
+                if( auto refusal = ScreenIdentityRefusal( *schematic(), *targetSheet ) )
+                    return reject( prefix + *refusal );
+                if( !m_frame )
+                    return reject( prefix + "A screen identity requires an editor context" );
+                SCH_SCREEN* screen = targetSheet->LastScreen();
+                if( screen->GetUuid() != id )
+                {
+                    nativeCommit->SetScreenIdentity( screen, id );
+                    result.set_screen_identity_changed( true );
+                }
+            }
+            else if( operation.has_set_symbol_locks() )
             {
                 const auto& locks = operation.set_symbol_locks();
                 auto known = operation;
@@ -2022,6 +2070,9 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
         result.set_state_sha256( state.DocumentSha256() );
+        // What a save keeps: publication accepts a save that only rewrote the project-file
+        // entries saving derives from the schematic (a stale sheet list) by this digest.
+        result.set_save_stable_state_sha256( state.SaveStableSha256() );
         if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
                 || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
         {
@@ -2488,8 +2539,15 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
     drawing->set_label_size_ratio( ratios[3] );
     drawing->set_overbar_height_ratio( ratios[4] );
 
-    for( const char* missing : { "complete_project_settings", "shared_screen_root_ownership",
-                                "library_cache", "net_chains" } )
+    // State this snapshot does not hold completely enough to rebuild the saved files from it.
+    // The project file keeps settings the typed fields above do not cover.  The library cache is
+    // cached_symbols, every definition exactly (an unsupported one fails the read), so it is not
+    // named.  Shared-screen root ownership and net chains are named on every snapshot, whatever
+    // the schematic holds: the list is a property of the snapshot, not of the design, so a batch
+    // that adds or removes a repeated sheet or a net chain never changes it.  Whether a given
+    // schematic has any of them is read from its hierarchy and net chains themselves (a rebuild
+    // from saved XML does exactly that).
+    for( const char* missing : { "complete_project_settings", "shared_screen_root_ownership", "net_chains" } )
         metadata->add_unrepresented_state( missing );
 
     const auto& journal = schematic()->ChangeJournal();
@@ -4118,6 +4176,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     sheet->GetScreen()->SetFileName( requested.GetFullPath() );
                     if( sheetProto.has_child_screen_id() )
                         sheet->GetScreen()->SetUuid( KIID( sheetProto.child_screen_id().value() ) );
+                    // The new file's known absence is its baseline, as for a root KiCad creates, so the
+                    // first save may write it and a file appearing there meanwhile is never overwritten.
+                    const FILE_CONTENT_BASELINE absent = FILE_CONTENT_BASELINE::Read( requested.GetFullPath() );
+                    if( absent.Known() && !absent.Exists() )
+                        sheet->GetScreen()->SetFileBaseline( absent );
                 }
                 if( sheetProto.has_child_screen_id()
                         && sheet->GetScreen()->GetUuid().AsStdString() != sheetProto.child_screen_id().value() )

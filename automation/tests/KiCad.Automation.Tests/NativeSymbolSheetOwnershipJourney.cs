@@ -17,6 +17,112 @@ public sealed partial class NativeSessionTests
         string display, string evidence, string instanceId, CancellationToken token)
         => throw new AssertInconclusiveException("Phase 2 lane 2C has not delivered this journey");
 
+    // Ledger pc97a1139c2e34c36. KiCad writes the project file's sheet list only when it saves, so a sheet renamed since the
+    // last save leaves that list stale in the editor, as every sheet of a project whose file KiCad has not written yet does.
+    // The apply's own save then rewrites the list: KiCad saves exactly the planned design, yet its full state digest differs
+    // from the one recorded before the save. The apply must still publish, leave no pending work and replay exactly. The test
+    // host pauses right after KiCad confirms the save, so the check reads the recorded pre-save state and KiCad's state after
+    // saving, which proves publication accepted the save by the save-stable digest, then lets the same apply finish.
+    private static async Task VerifyRenamedSheetPublishesThroughItsSave(NativeClient client, DocumentSpecifier root,
+        DocumentSpecifier sheet, string projectDirectory, DesignRecoveryStore store, string designPath, string evidence,
+        string instanceId, CancellationToken token)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token); limit.CancelAfter(TimeSpan.FromSeconds(120));
+        string projectFile = Path.Combine(projectDirectory, "fixture.kicad_pro");
+        string sheetId = sheet.SheetPath.Path[^1].Value;
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+            { Document = root.Clone(), ProcessEpoch = client.Epoch }, limit.Token);
+        // The names the saved project file lists for this sheet: [uuid, name] pairs under "sheets".
+        async Task<string[]> SavedNames()
+        {
+            using var project = JsonDocument.Parse(await File.ReadAllBytesAsync(projectFile, limit.Token));
+            return project.RootElement.TryGetProperty("sheets", out var sheets) ? [.. sheets.EnumerateArray()
+                .Where(e => e.GetArrayLength() == 2 && e[0].GetString() == sheetId).Select(e => e[1].GetString()!)] : [];
+        }
+        static bool IsDigest(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
+
+        var before = await Capture();
+        Assert.IsFalse(before.State.NativeContentDirty, "The rename starts from a saved project.");
+        var symbol = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(root)).Items
+            .Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>()).Single(s => s.Id.Value == sheetId);
+        string oldName = symbol.NameField.Text.Text_, newName = oldName + " renamed";
+        CollectionAssert.AreEqual(new[] { oldName }, await SavedNames(), "The saved sheet list names the sheet as KiCad last saved it.");
+        var renamed = symbol.Clone(); renamed.NameField.Text.Text_ = newName;
+        var rename = new ApplySchematicItemBatch { Document = root.Clone(), Description = "Rename a sheet" };
+        rename.Operations.Add(new SchematicItemOperation { Update = Any.Pack(renamed) });
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(rename, limit.Token);
+        Assert.IsTrue((await Capture()).State.NativeContentDirty, "The rename is unsaved work in the editor.");
+        CollectionAssert.AreEqual(new[] { oldName }, await SavedNames(), "Renaming alone does not write the project file.");
+        var saved = await DesignRecoveryInspector.RefreshAsync(store, client, store.Read()!.RevisionToken, limit.Token, includeElectrical: true);
+        byte[] previousXml = await File.ReadAllBytesAsync(designPath, limit.Token);
+
+        Guid operationId = Guid.NewGuid();
+        var args = new { instanceId, recoveryPath = store.StatePath, designPath, expectedRevisionToken = saved.RevisionToken,
+            operationId = operationId.ToString("D") };
+        string name = instanceId + "-renamed-sheet";
+        string marker = Path.Combine(evidence, name + "-saved.json"), release = Path.Combine(evidence, name + "-release");
+        var start = SyncHarnessProcessTests.StartInfo("native-save", marker);
+        start.Environment["KICAD_SYNC_HARNESS_PAUSE_RELEASE"] = release;
+        await using var host = await StdioMcpFixture.StartAsync(start, Path.Combine(evidence, name + "-host"),
+            Path.Combine(evidence, name + "-host.log"), limit.Token);
+        RequireToolSuccess(await host.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        Task markerReady = SyncHarnessProcessTests.WaitForMarkerAsync(marker, limit.Token);
+        Task<JsonElement> call = host.Tool("kicad_design_sync_apply", args);
+        DocumentLifecycleState expected, afterSave;
+        try
+        {
+            if (await Task.WhenAny(markerReady, call) == call)
+            { RequireToolSuccess(await call); Assert.Fail("The apply finished without saving through KiCad."); }
+            await markerReady;
+            expected = store.Read()!.State.PendingNativeSave?.ExpectedState
+                ?? throw new AssertFailedException("The apply records the state it asks KiCad to save.");
+            afterSave = (await Capture()).State;
+            Assert.IsFalse(afterSave.NativeContentDirty, "KiCad saved the rename.");
+            Assert.IsTrue(afterSave.ProjectSettingsIncluded);
+            CollectionAssert.AreEqual(new[] { newName }, await SavedNames(), "KiCad's save rewrote the stale sheet list.");
+            Assert.AreNotEqual(expected.StateSha256, afterSave.StateSha256,
+                "Rewriting the sheet list changes the full state digest, so this save is accepted only by the save-stable digest.");
+            Assert.IsTrue(IsDigest(expected.SaveStableStateSha256), "KiCad reports the save-stable digest before saving.");
+            Assert.AreEqual(expected.SaveStableStateSha256, afterSave.SaveStableStateSha256,
+                "Apart from the entries a save derives from the schematic, KiCad saved exactly the recorded state.");
+            await File.WriteAllBytesAsync(release, [], limit.Token);
+        }
+        catch
+        {
+            await host.TerminateAsync();
+            try { await call; } catch (Exception) { }
+            throw;
+        }
+        var applied = await call; RequireToolSuccess(applied);
+        var data = applied.GetProperty("structuredContent");
+        Assert.IsTrue(data.GetProperty("synchronizationCommitted").GetBoolean(), data.GetRawText());
+        Assert.IsTrue(data.GetProperty("nativeFilesSaved").GetBoolean(), data.GetRawText());
+        Assert.IsFalse(data.GetProperty("nativeMutationCommitted").GetBoolean(), "The rename was KiCad's; the apply sends no edit.");
+        Assert.IsFalse(data.GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(JsonValueKind.String, data.GetProperty("previousXmlPath").ValueKind, "The candidate replaced the XML: it was published.");
+        var completed = store.Read()!;
+        Assert.IsFalse(completed.State.HasPendingWork, "Publication leaves no pending work.");
+        Assert.AreEqual(operationId, completed.State.LastSynchronization!.OperationId);
+        CollectionAssert.AreEqual(previousXml, await RetainedXmlHistory.ReadVerifiedAsync(completed.State.LastSynchronization!, limit.Token));
+        var final = await Capture();
+        Assert.AreEqual(afterSave, final.State, "Publishing the XML leaves KiCad's saved state untouched.");
+        var published = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, limit.Token), []);
+        Assert.AreEqual(newName, published.Schematic.Instances.Single(s => s.Metadata.Document.Equals(root)).Items
+            .Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>()).Single(s => s.Id.Value == sheetId).NameField.Text.Text_);
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(final.Electrical.Hierarchy.Data, published.Schematic, limit.Token));
+        var replay = await host.Tool("kicad_design_sync_apply", args); RequireToolSuccess(replay);
+        Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(final, await Capture(), "The exact replay changes nothing.");
+        await File.WriteAllTextAsync(Path.Combine(evidence, name + ".json"), JsonSerializer.Serialize(new
+        {
+            instanceId, sheet = sheetId, oldName, newName, operationId,
+            recordedBeforeSave = new { expected.StateSha256, expected.SaveStableStateSha256 },
+            afterSave = new { afterSave.StateSha256, afterSave.SaveStableStateSha256 },
+            projectSheetListRewritten = true, fullDigestChanged = true, saveStableDigestKept = true,
+            published = true, pendingWork = false, exactReplay = true
+        }), token);
+    }
+
     private static async Task VerifyNativeSymbolSheetOwnership(NativeClient client, DocumentSpecifier root,
         HierarchyFixture hierarchy, string evidence, string instanceId, int processId, string display, CancellationToken token)
     {
@@ -248,6 +354,7 @@ public sealed partial class NativeSessionTests
         foreach (var instruction in removalInstructions)
             Assert.AreEqual(withNotes.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text,
                 redo.Engineering.Structure.Statements.Single(s => s.Id == instruction.Id).Text);
+        await VerifyRenamedSheetPublishesThroughItsSave(client, root, second, hierarchy.Directory, store, designPath, evidence, instanceId, token);
         // The separate service-restart fixture uses the standard title-block
         // command, whose existing contract requires the displayed sheet. The
         // offscreen-view preservation assertions above have already completed.

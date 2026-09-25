@@ -1453,6 +1453,18 @@ requires=["native-runtime"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuSeed", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/psu-cpu-fixture/native-seed-tests"]
 retained_artifacts=[{ name = "psu-cpu-seed-tests", path = "automation/artifacts/psu-cpu-fixture/native-seed-tests", max_bytes = 16777216 }, { name = "psu-cpu-seed-evidence", path = "automation/artifacts/native-psu-cpu-seed/native-session-current", max_bytes = 67108864 }]
 
+# PSU/CPU lossless rebuild from XML (lane 2C, ledger p168f8654d86c5a1a). The ownership
+# synchronization check (p74ee7c1da24272d9) joins this graph with its journey; until then the
+# journey is Inconclusive and a check for it would only report a skipped test as passed.
+[[test.psu-cpu-fixture.check]]
+name="xml-rebuild"
+tier="development"
+requires=["native-runtime"]
+after=["native-seed"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlRebuild", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-rebuild-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-xml-rebuild-tests", path = "automation/artifacts/native-xml-rebuild-tests", max_bytes = 16777216 }, { name = "native-xml-rebuild-evidence", path = "automation/artifacts/native-xml-rebuild/native-session-current", max_bytes = 67108864 }]
+
 # Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
 # that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
 # sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means
@@ -3036,7 +3048,7 @@ tier="development"
 requires=["native-build"]
 after=["psu-cpu-rendered"]
 timeout_seconds=1200
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-connected-realization-tests", path = "automation/artifacts/native-connected-realization-tests", max_bytes = 16777216 }, { name = "native-connected-realization-evidence", path = "automation/artifacts/native-connected-realization/native-session-current", max_bytes = 67108864 }]
 
 [test.native-transform-sync]

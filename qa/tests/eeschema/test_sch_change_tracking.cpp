@@ -56,11 +56,16 @@
 #include <vector>
 
 #if defined( EESCHEMA )
+#include <api/api_handler_sch.h>
 #include <api/api_sch_state_groups.h>
+#include <api/checked_schematic_controller.h>
+#include <api/sch_api_save.h>
+#include <google/protobuf/util/message_differencer.h>
 #include <bus_alias.h>
 #include <connection_graph.h>
 #include <embedded_files.h>
 #include <lib_symbol.h>
+#include <nlohmann/json.hpp>
 #include <project.h>
 #include <project/project_file.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
@@ -2437,15 +2442,17 @@ inline std::vector<UNPROVEN> unprovenRoutes()
 
 /// A routed owner whose change and whose cancel and no-op precision the rendered journey
 /// proves: among the statements the journey method always runs, an awaited OneChange(...) call
-/// asserts exactly one revision with this journal description, and an awaited Unchanged(...)
-/// call asserts each cancel or no-op step left the revision, saved state, modified flag and
-/// journal alone.
+/// asserts exactly one revision with this journal description, an awaited Unchanged(...) call
+/// asserts each cancel or no-op step left the revision, saved state, modified flag and journal
+/// alone, and an awaited Undone(...) call asserts each undo step was exactly one undo revision
+/// (its caller then requires the state that undo restores).
 struct PROOF
 {
     std::string              file;          ///< The owner's source.
     std::string              function;      ///< The owner; it must still route its change.
     std::string              description;   ///< The revision's exact journal description.
     std::vector<std::string> unchanged;     ///< The exact cancel and no-op step names.
+    std::vector<std::string> undone = {};   ///< The exact undo step names (awaited Undone(...)).
 };
 
 
@@ -2475,13 +2482,15 @@ inline std::vector<PROOF> journeyProofs()
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
           { "Closing unchanged Annotate Schematic" } },
         // Annotate itself.  Repairing one duplicated identity with nothing else to annotate is one
-        // revision, both when every symbol is staged and pushed and when nothing is staged (the
-        // dialog records it; nothing is left to undo), and so is handing out a designator again
-        // with every staged symbol unchanged (the kept reference inventory differs).  Annotating
-        // an annotated schematic is no revision and leaves nothing to undo.
+        // revision, both when every symbol is staged and pushed (the undo that follows is one
+        // revision) and when nothing is staged (the dialog records it; the undo that follows undoes
+        // the fence edit below it), and so is handing out a designator again with every staged
+        // symbol unchanged (the kept reference inventory differs).  Annotating an annotated
+        // schematic is no revision and leaves no undo entry (the undo undoes the fence edit).
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "Annotate",
-          { "Annotating an annotated schematic", "Undoing after annotating an annotated schematic",
-            "Undoing an identity repair that staged nothing" } },
+          { "Annotating an annotated schematic" },
+          { "Undoing an identity repair that staged every symbol", "Undoing after annotating an annotated schematic",
+            "Undoing after an identity repair that staged nothing" } },
     };
 }
 
@@ -2499,6 +2508,11 @@ inline std::map<std::string, std::vector<std::string>> journeyStepAssertions()
         { "OneChange",
           { "Assert.IsFalse(journal.ResetRequired)", "Assert.HasCount(1,journal.Changes",
             "Assert.AreEqual(kind,change.Kind)", "Assert.AreEqual(description,change.Description)" } },
+        // An undo step must see the undo happen: a lost key or an undo with nothing to undo records
+        // no revision, so the step fails instead of passing unseen.
+        { "Undone",
+          { "awaitAdvanced(after,", "Assert.IsFalse(journal.ResetRequired)", "Assert.HasCount(1,journal.Changes",
+            "Assert.AreEqual(SchematicChange.Types.Kind.Undo,journal.Changes.Single().Kind" } },
     };
 }
 
@@ -2512,6 +2526,7 @@ struct JOURNEY_STEPS
 {
     std::set<std::string>    changes;
     std::set<std::string>    unchanged;
+    std::set<std::string>    undone;
     std::set<std::string>    conditional;
     std::vector<std::string> failures;
 };
@@ -2549,7 +2564,8 @@ inline JOURNEY_STEPS journeySteps( const std::string& aSource, const std::string
     }
 
     for( const auto& [helper, found] : { std::make_pair( std::string( "OneChange" ), &steps.changes ),
-                                         std::make_pair( std::string( "Unchanged" ), &steps.unchanged ) } )
+                                         std::make_pair( std::string( "Unchanged" ), &steps.unchanged ),
+                                         std::make_pair( std::string( "Undone" ), &steps.undone ) } )
     {
         for( const AWAITED_CALL& call : awaitedLiteralCalls( aSource, blanked.code, helper, 1, begin, end ) )
         {
@@ -3634,6 +3650,14 @@ BOOST_AUTO_TEST_CASE( EveryProvenOwnerKeepsItsRenderedSteps )
                                          + " has no unconditional awaited Unchanged(..., \"" + step + "\") step"
                                          + where( step ) + "." );
         }
+
+        for( const std::string& step : proof.undone )
+        {
+            BOOST_CHECK_MESSAGE( steps.undone.count( step ),
+                                 proof.function + " is no longer proven: " + JOURNEY_METHOD
+                                         + " has no unconditional awaited Undone(..., \"" + step + "\", ...) step"
+                                         + where( step ) + "." );
+        }
     }
 
     // Recall and precision of the journey scan: steps named in comments, strings, raw strings
@@ -3660,7 +3684,19 @@ private static async Task VerifyDirectOwnerTracking(NativeClient client)
         // Assert.AreEqual(description, change.Description);
         return change;
     }
+    async Task<DocumentLifecycleState> Undone(DocumentLifecycleState after, string step, string slug)
+    {
+        var undone = await Advanced(after, slug);
+        var journal = await Changes(after);
+        Assert.IsFalse(journal.ResetRequired);
+        Assert.HasCount(1, journal.Changes, $"{step} must be exactly one revision.");
+        Assert.AreEqual(SchematicChange.Types.Kind.Undo, journal.Changes.Single().Kind);
+        return undone;
+    }
     // await OneChange(clean, "Commented", SchematicChange.Types.Kind.Commit);
+    // await Undone(clean, "Commented undo", "slug");
+    var undone = await Undone(clean, "Real undo", "real-undo");
+    if (clean.NativeContentDirty) await Undone(clean, "Undo inside a branch", "branch-undo");
     var text = "await OneChange(clean, "Quoted", kind)";
     var raw = """
         await Unchanged(clean, "Raw");
@@ -3692,11 +3728,13 @@ private static async Task Elsewhere() { await OneChange(clean, "Elsewhere", kind
     const JOURNEY_STEPS probed = journeySteps( probe, JOURNEY_METHOD );
 
     BOOST_CHECK( ( probed.changes == std::set<std::string>{ "Real change", "Assigned change" } ) );
+    BOOST_CHECK( ( probed.undone == std::set<std::string>{ "Real undo" } ) );
     BOOST_CHECK( ( probed.unchanged
                    == std::set<std::string>{ "Real cancel", "Inside a try", "Inside a using",
                                              "After a local function's return" } ) );
     BOOST_CHECK( ( probed.conditional
-                   == std::set<std::string>{ "Inside a branch", "Braceless branch", "Braceless else", "Inside a loop",
+                   == std::set<std::string>{ "Undo inside a branch", "Inside a branch", "Braceless branch",
+                                             "Braceless else", "Inside a loop",
                                              "Swallowed", "Inside a local function", "Inside a lambda",
                                              "Inside a conditional expression", "After an early return",
                                              "Also after an early return" } ) );
@@ -3932,6 +3970,98 @@ BOOST_FIXTURE_TEST_CASE( RecordsOnlyRealEditsOfTheSameDocument, TRACKED_SCHEMATI
     }
 
     BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+}
+
+
+/// A project KiCad has not saved yet, its sheet files and project file written by a harness or
+/// another program: the project file has none of the entries a save writes from the schematic
+/// itself.  KiCad's first save writes them (the sheet list, the top-level sheet list, the root
+/// sheet's revision kept for IPC-2581 and the project file name), which changes the saved state
+/// digest but must leave the save-stable digest alone, so publication can recognize that save as
+/// the planned one (ReadDocumentLifecycleState.save_stable_state_sha256).  Any other change moves
+/// the save-stable digest.
+BOOST_AUTO_TEST_CASE( FirstSaveOfAnUnsavedProjectKeepsTheSaveStableState )
+{
+    const fs::path source( KI_TEST::GetEeschemaTestDataDir() );
+    const fs::path copy = fs::temp_directory_path() / ( "kicad-save-stable-" + KIID().AsStdString() );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ copy };
+    fs::create_directories( copy );
+
+    for( const char* name : { "issue13212.kicad_sch", "issue13212_subsheet_1.kicad_sch",
+                              "issue13212_subsheet_2.kicad_sch" } )
+    {
+        fs::copy_file( source / name, copy / name );
+    }
+
+    {
+        // Written the way the native journeys' harness writes it: the settings format and nothing a
+        // save derives.
+        std::ofstream project( copy / "issue13212.kicad_pro" );
+        project << R"({ "meta": { "version": 3 } })";
+    }
+
+    SETTINGS_MANAGER           settings;
+    std::unique_ptr<SCHEMATIC> schematic;
+    KI_TEST::LoadSchematic( settings,
+                            fs::relative( copy / "issue13212", KI_TEST::GetEeschemaTestDataDir() ).generic_string(),
+                            schematic );
+    BOOST_REQUIRE( schematic );
+    schematic->RefreshHierarchy();
+    PROJECT& project = schematic->Project();
+    BOOST_REQUIRE( project.GetProjectFile().GetSheets().empty() );
+
+    size_t sheets = 0;
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy() )
+    {
+        if( !path.Last()->IsVirtualRootSheet() )
+            ++sheets;
+    }
+
+    BOOST_REQUIRE_GT( sheets, 1u );
+
+    const SCH_STATE_GROUPS before = SCH_STATE_GROUPS::Capture( *schematic );
+    BOOST_REQUIRE_EQUAL( before.SaveStableSha256().size(), 64u );
+    BOOST_CHECK_NE( before.SaveStableSha256(), before.DocumentSha256() );
+
+    // The save's own project-file writing.  UpdateProjectFile sets the entries it derives from the
+    // schematic and then asks the program's settings manager to write the file; this test's project
+    // belongs to its own settings manager, which then writes it exactly as that save does.
+    SCH_API_SAVE::UpdateProjectFile( *schematic, project );
+    BOOST_REQUIRE( settings.SaveProject( project.GetProjectFullName(), &project ) );
+    BOOST_CHECK_EQUAL( project.GetProjectFile().GetSheets().size(), sheets );
+
+    std::ifstream written( copy / "issue13212.kicad_pro" );
+    const nlohmann::json file = nlohmann::json::parse( written );
+    BOOST_REQUIRE( file.contains( "sheets" ) );
+    BOOST_CHECK_EQUAL( file.at( "sheets" ).size(), sheets );
+    BOOST_CHECK_EQUAL( file.at( "meta" ).at( "filename" ).get<std::string>(), "issue13212.kicad_pro" );
+
+    // Recall of the scenario: the save changed the project settings and nothing else, and the
+    // save-stable digest recognizes exactly that change.
+    const SCH_STATE_GROUPS saved = SCH_STATE_GROUPS::Capture( *schematic );
+    BOOST_CHECK_NE( before.DocumentSha256(), saved.DocumentSha256() );
+    BOOST_CHECK( before.ChangedGroups( saved ) == std::vector<std::string>{ "project-settings" } );
+    BOOST_CHECK_EQUAL( before.SaveStableSha256(), saved.SaveStableSha256() );
+
+    // A second save writes the same entries again: nothing changes.
+    SCH_API_SAVE::UpdateProjectFile( *schematic, project );
+    BOOST_REQUIRE( settings.SaveProject( project.GetProjectFullName(), &project ) );
+    BOOST_CHECK_EQUAL( SCH_STATE_GROUPS::Capture( *schematic ).DocumentSha256(), saved.DocumentSha256() );
+
+    // Precision: a project setting the save does not derive moves the save-stable digest, and
+    // putting it back restores it.
+    project.GetTextVars()[wxS( "SAVE_STABLE_PROBE" )] = wxS( "changed" );
+    BOOST_CHECK_NE( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+    project.GetTextVars().erase( wxS( "SAVE_STABLE_PROBE" ) );
+    BOOST_CHECK_EQUAL( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+
+    // So does any edit of a sheet.
+    schematic->RootScreen()->Append( new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "save-stable probe" ) ) );
+    BOOST_CHECK_NE( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+
+    // A capture without the project settings has no save-stable digest.
+    BOOST_CHECK( SCH_STATE_GROUPS::CaptureScreens( *schematic, { schematic->RootScreen() } ).SaveStableSha256().empty() );
 }
 
 
@@ -4571,6 +4701,274 @@ BOOST_FIXTURE_TEST_CASE( ApiGlobalLabelsKeepTheirReferenceFieldThroughSetup, TRA
     doc.RecomputeIntersheetRefs();
     BOOST_CHECK( !reorderedRefs->IsVisible() );
     BOOST_CHECK( customFields( *reordered ) == custom );
+}
+
+
+/**
+ * Rebuilding deleted schematic files from saved XML (lane 2C, rebuild_screen_identity): only the root KiCad
+ * creates for a project whose schematic files are gone may adopt the identity its saved root file had.  Each
+ * refusal is checked on its own, with every other condition met, against the precision case it must not catch.
+ * The ordering rules of the operation (first in its batch, canonical UUID, retry identity) and the rollback of a
+ * rejected batch need a live editor; the PSU/CPU rebuild journey (NativeXmlRebuildJourney) proves those.
+ */
+BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_SCHEMATIC )
+{
+    auto refusal = []( SCHEMATIC& aSchematic, std::optional<SCH_SHEET_PATH> aPath = std::nullopt )
+    {
+        return API_HANDLER_SCH::ScreenIdentityRefusal( aSchematic, aPath ? *aPath : aSchematic.Hierarchy().at( 0 ) );
+    };
+    SCHEMATIC&  doc = *schematic;
+    SCH_SCREEN* screen = doc.RootScreen();
+    BOOST_REQUIRE( doc.Hierarchy().at( 0 ).LastScreen() == screen );
+
+    // Precision: a new root, never loaded or saved, with nothing on it and no file at its path.
+    const fs::path file = fs::temp_directory_path() / ( "rebuilt-root-" + KIID().AsStdString() + ".kicad_sch" );
+    screen->SetFileName( wxString::FromUTF8( file.string() ) );
+    BOOST_CHECK_MESSAGE( !refusal( doc ), refusal( doc ).value_or( "" ) );
+
+    // A root KiCad loaded from its file.
+    screen->SetFileFormatVersionAtLoad( 20250318 );
+    BOOST_CHECK( refusal( doc ) );
+    screen->SetFileFormatVersionAtLoad( 0 );
+
+    // A root KiCad knows it saved.
+    screen->SetFileExists( true );
+    BOOST_CHECK( refusal( doc ) );
+    screen->SetFileExists( false );
+
+    // A file at the root's path that KiCad never read: it is kept, never replaced by a rebuild.
+    {
+        std::ofstream( file ) << "(kicad_sch)";
+    }
+    BOOST_CHECK( refusal( doc ) );
+    fs::remove( file );
+    BOOST_CHECK( !refusal( doc ) );
+
+    // A root holding an object.
+    auto* note = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "note" ) );
+    screen->Append( note );
+    BOOST_CHECK( refusal( doc ) );
+    screen->Remove( note );
+    delete note;
+    BOOST_CHECK( !refusal( doc ) );
+
+    // A child sheet cannot adopt the root's identity, and a root showing one holds its sheet symbol.
+    {
+        TRACKED_SCHEMATIC nested;
+        addChildSheet( *nested.schematic, wxS( "child.kicad_sch" ) );
+        BOOST_REQUIRE_EQUAL( nested.schematic->Hierarchy().size(), 2u );
+        BOOST_CHECK( refusal( *nested.schematic ) );
+        BOOST_CHECK( refusal( *nested.schematic, nested.schematic->Hierarchy().at( 1 ) ) );
+    }
+
+    // A root holding a library cache but no object.
+    {
+        TRACKED_SCHEMATIC cached;
+        cached.schematic->RootScreen()->AddLibSymbol( new LIB_SYMBOL( wxS( "R" ) ) );
+        BOOST_CHECK( refusal( *cached.schematic ) );
+    }
+
+    // A schematic with a second top-level sheet: neither root is the project's only root.
+    {
+        TRACKED_SCHEMATIC twoRoots;
+        SCHEMATIC& multi = *twoRoots.schematic;
+        const SCH_SHEET_PATH first = multi.Hierarchy().at( 0 );
+        BOOST_CHECK( !refusal( multi, first ) );
+        auto* second = new SCH_SHEET( &multi );
+        second->SetScreen( new SCH_SCREEN( &multi ) );
+        second->GetScreen()->SetFileName( wxS( "second.kicad_sch" ) );
+        multi.AddTopLevelSheet( second );
+        BOOST_REQUIRE_EQUAL( multi.GetTopLevelSheets().size(), 2u );
+        BOOST_CHECK( refusal( multi, first ) );
+        SCH_SHEET_PATH secondPath;
+        secondPath.push_back( second );
+        BOOST_CHECK( refusal( multi, secondPath ) );
+    }
+}
+
+
+namespace
+{
+using namespace kiapi::automation::v1;
+
+/// The checked batch controller over a scripted native peer, for its root-identity rule: a checked batch keeps the
+/// document's native identity (its root screen's), except that a rebuild's first operation may give it exactly the
+/// identity that operation requests, when the native result says it changed it.
+struct IDENTITY_CONTROLLER
+{
+    CHECKED_SCHEMATIC_CONTROLLER controller;
+    DocumentLifecycleState       state;
+    std::string                  process = KIID().AsStdString();
+    std::string                  identityAfter;     ///< Native identity after the batch; empty keeps it.
+    bool                         claimChanged = false;
+    bool                         reject = false;
+    unsigned                     mutations = 0;
+
+    IDENTITY_CONTROLLER()
+    {
+        auto* document = state.mutable_document();
+        document->set_type( kiapi::common::types::DOCTYPE_SCHEMATIC );
+        document->mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+        document->mutable_project()->set_name( "rebuilt" );
+        document->mutable_project()->set_path( fs::temp_directory_path().string() );
+        state.set_process_epoch( process );
+        state.set_native_identity( KIID().AsStdString() );
+        state.mutable_revision()->set_epoch( KIID().AsStdString() );
+        state.mutable_revision()->set_sequence( 2 );
+        state.set_scope( DLS_SCHEMATIC_HIERARCHY );
+        state.set_project_settings_included( true );
+        state.set_state_sha256( std::string( 64, 'a' ) );
+        state.set_native_content_dirty( true );
+        for( const char* name : { "rebuilt.kicad_sch", "rebuilt.kicad_pro" } )
+        {
+            const std::string path = ( fs::temp_directory_path() / name ).string();
+            state.add_native_files( path );
+            auto* baseline = state.add_file_baselines();
+            baseline->set_path( path );
+            baseline->set_baseline_path( path );
+            baseline->set_baseline_known( true );
+            baseline->set_current_known( true );
+            baseline->set_baseline_exists( false );
+            baseline->set_current_exists( false );
+            baseline->set_status( NFBS_UNCHANGED );
+        }
+    }
+
+    CheckedSchematicBatch Request( const std::vector<SchematicItemOperation>& aOperations )
+    {
+        CheckedSchematicBatch request;
+        request.mutable_expected_state()->CopyFrom( state );
+        auto* batch = request.mutable_batch();
+        batch->mutable_document()->CopyFrom( state.document() );
+        batch->set_operation_id( KIID().AsStdString() );
+        batch->set_document_epoch( state.revision().epoch() );
+        batch->mutable_expected_revision()->CopyFrom( state.revision() );
+        for( const SchematicItemOperation& operation : aOperations )
+            batch->add_operations()->CopyFrom( operation );
+        return request;
+    }
+
+    API_RESULT Dispatch( ApiRequest& aRequest )
+    {
+        ApiResponse response;
+        response.mutable_status()->set_status( ApiStatusCode::AS_OK );
+        if( aRequest.message().Is<ReadDocumentLifecycleState>() )
+        {
+            response.mutable_message()->PackFrom( state );
+            return response;
+        }
+        if( !aRequest.message().Is<ApplySchematicItemBatch>() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Unexpected request" );
+            return tl::unexpected( error );
+        }
+        ++mutations;
+        if( reject )
+        {
+            // KiCad rolled the batch back, the identity included: nothing changed.
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Atomic operation 1 rejected: scripted failure" );
+            return tl::unexpected( error );
+        }
+        state.mutable_revision()->set_sequence( state.revision().sequence() + 1 );
+        state.set_state_sha256( std::string( 64, 'd' ) );
+        if( !identityAfter.empty() )
+            state.set_native_identity( identityAfter );
+        SchematicItemBatchResult result;
+        result.mutable_revision()->CopyFrom( state.revision() );
+        result.set_screen_identity_changed( claimChanged );
+        response.mutable_message()->PackFrom( result );
+        return response;
+    }
+
+    CheckedSchematicBatchReceipt Apply( const CheckedSchematicBatch& aRequest )
+    {
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( aRequest );
+        auto response = controller.Handle( envelope, process, [this]( ApiRequest& aValue ) { return Dispatch( aValue ); } );
+        BOOST_REQUIRE( response );
+        CheckedSchematicBatchReceipt receipt;
+        BOOST_REQUIRE( response->message().UnpackTo( &receipt ) );
+        return receipt;
+    }
+};
+
+
+SchematicItemOperation adoptIdentity( const std::string& aIdentity )
+{
+    SchematicItemOperation operation;
+    operation.mutable_rebuild_screen_identity()->set_value( aIdentity );
+    return operation;
+}
+
+
+SchematicItemOperation titleEdit()
+{
+    SchematicItemOperation operation;
+    operation.mutable_set_title_block()->set_title( "Rebuilt" );
+    return operation;
+}
+} // namespace
+
+
+BOOST_AUTO_TEST_CASE( CheckedBatchesKeepTheRootIdentityUnlessARebuildAdoptsIt )
+{
+    const std::string saved = KIID().AsStdString();
+
+    // The rebuild's first operation adopts the saved identity, and KiCad reports exactly that change.
+    {
+        IDENTITY_CONTROLLER f;
+        f.identityAfter = saved;
+        f.claimChanged = true;
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( saved ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_COMPLETED );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), saved );
+        BOOST_CHECK( receipt.result().screen_identity_changed() );
+    }
+
+    // Must-catch: an identity other than the requested one, a change KiCad does not report, a change without an
+    // identity operation, and a change requested anywhere but first are never accepted as committed.
+    struct CASE { const char* what; std::vector<SchematicItemOperation> operations; std::string after; bool claimed; };
+    const std::string other = KIID().AsStdString();
+    for( const CASE& c : std::vector<CASE>{
+                 { "another identity", { adoptIdentity( saved ) }, other, true },
+                 { "unreported change", { adoptIdentity( saved ) }, saved, false },
+                 { "no identity operation", { titleEdit() }, other, true },
+                 { "identity not first", { titleEdit(), adoptIdentity( saved ) }, saved, true } } )
+    {
+        IDENTITY_CONTROLLER f;
+        f.identityAfter = c.after;
+        f.claimChanged = c.claimed;
+        const auto receipt = f.Apply( f.Request( c.operations ) );
+        BOOST_CHECK_MESSAGE( receipt.status() == CSBS_INDETERMINATE, c.what );
+        BOOST_CHECK_MESSAGE( receipt.error_code() == "post_state_mismatch", c.what << ": " << receipt.error_code() );
+    }
+
+    // Precision: an identity operation KiCad found already satisfied keeps the identity, and the batch commits.
+    {
+        IDENTITY_CONTROLLER f;
+        const std::string current = f.state.native_identity();
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( current ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_COMPLETED );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), current );
+        BOOST_CHECK( !receipt.result().screen_identity_changed() );
+    }
+
+    // A batch KiCad rejects after the identity operation leaves the identity it had: a clean rejection, no result.
+    {
+        IDENTITY_CONTROLLER f;
+        f.reject = true;
+        const std::string before = f.state.native_identity();
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( saved ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_REJECTED );
+        BOOST_CHECK_EQUAL( receipt.error_code(), "native_batch_rejected" );
+        BOOST_CHECK( !receipt.has_result() );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), before );
+        BOOST_CHECK_EQUAL( f.mutations, 1u );
+    }
 }
 
 

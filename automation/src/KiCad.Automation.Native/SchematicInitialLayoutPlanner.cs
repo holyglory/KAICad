@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
@@ -11,19 +13,43 @@ namespace KiCad.Automation.Native;
 public sealed record SchematicLayoutRegion(Guid ScreenId, PresentationBounds UsableBounds,
     IReadOnlyList<InitialLayoutObstacle> Reservations);
 
+/// <summary>Where a new symbol that connects to already placed pins was aimed (cn1-wiring-intent.md §10):
+/// the grid point that puts the mean of its connected pins on the mean of the partner pins it connects to
+/// on the same sheet. <paramref name="PartnerPins"/> are those partners' placed pin identities.</summary>
+public sealed record InitialLayoutPreferredAnchor(Guid BodyId, Guid ScreenId, IReadOnlyList<Guid> SymbolOccurrences,
+    PresentationPoint Anchor, IReadOnlyList<Guid> PartnerPins);
+
+/// <summary>A new power symbol paired with the pin it will sit on (cn1-wiring-intent.md §10): turned by
+/// <paramref name="RotationDegrees"/> so that its pin faces the partner pin, and placed so that its pin lands
+/// on the end of that pin's connection stub. The seat is claimed before any free symbol is placed. When
+/// <paramref name="Attached"/> is false the pairing was dropped for <paramref name="DroppedReason"/>
+/// (<c>collision</c>, <c>page_overflow</c> or <c>no_matching_rotation</c>), <paramref name="Anchor"/> is the
+/// refused seat (none without a matching rotation), the symbol is laid out freely and its partner pin is
+/// not offered to another power symbol.</summary>
+public sealed record InitialLayoutPowerAttachment(Guid CarrierBodyId, Guid ScreenId, IReadOnlyList<Guid> CarrierOccurrences,
+    Guid CarrierComponentId, PinEndpoint Partner, Guid PartnerSymbolId, Guid PartnerPlacedPinId, int RotationDegrees,
+    PresentationPoint? Anchor, bool Attached, string? DroppedReason);
+
 public sealed record SchematicInitialLayoutResult(SchematicDesign? DesiredDesign, string? DesiredXml,
-    InitialLayoutCandidate Layout, LayoutRefinement? Refinement, IReadOnlyList<string> Limitations)
+    InitialLayoutCandidate Layout, LayoutRefinement? Refinement, IReadOnlyList<string> Limitations,
+    IReadOnlyList<InitialLayoutPreferredAnchor> PreferredAnchors, IReadOnlyList<InitialLayoutPowerAttachment> PowerAttachments)
 {
     public bool CanPropose => DesiredDesign is not null && Layout.CanPropose;
     public bool RequiresNativeConnectivityValidation => true;
     public bool RequiresVisualReview => true;
 }
 
-/// <summary>Read-only preparation for known-part, unconnected additions. Uses
-/// detached native measurements, never dummy symbol sizes or native insertion.
-/// A result is a proposed XML edit, not an accepted layout or a sync commit.</summary>
+/// <summary>Read-only preparation for known-part additions. Uses detached native measurements,
+/// never dummy symbol sizes or native insertion. A result is a proposed XML edit, not an accepted
+/// layout or a sync commit. Unconnected additions are placed exactly as before. Additions that come
+/// with XML connections (cn1-wiring-intent.md §10) are admitted only for an editor that reports it can
+/// draw and verify them; their symbols go near the pins they connect to, keep room for every
+/// connection stub and label they and their partners will receive, and new power symbols sit on
+/// the end of their partner's stub.</summary>
 public static class SchematicInitialLayoutPlanner
 {
+    private const string UnsupportedMessage = "Initial placement supports component additions without rewiring or changes to existing owners and parts.";
+
     public static async Task<SchematicInitialLayoutResult> ProposeAsync(NativeClient client,
         DesignRecoveryState state, InitialLayoutPolicy policy, IReadOnlyList<SchematicLayoutRegion> regions,
         string userInstructions, CancellationToken token = default)
@@ -33,19 +59,37 @@ public static class SchematicInitialLayoutPlanner
         if (session.InstanceId != state.InstanceId.ToString("D"))
             throw Error("layout_instance_mismatch", "Measure only the native instance recorded by this design.");
         return await ProposeMeasuredAsync(state, policy, regions, userInstructions,
-            (request, cancellation) => client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation), token);
+            (request, cancellation) => client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation),
+            session, token);
     }
 
+    internal static Task<SchematicInitialLayoutResult> ProposeMeasuredAsync(DesignRecoveryState state,
+        InitialLayoutPolicy policy, IReadOnlyList<SchematicLayoutRegion> regions, string userInstructions,
+        Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> measure,
+        CancellationToken token = default) => ProposeMeasuredAsync(state, policy, regions, userInstructions, measure, null, token);
+
+    /// <param name="session">The handshake of the recorded instance. Only a session that advertises
+    /// <see cref="SchematicConnectedAddition.NativeCapability"/> admits additions with connections.</param>
     internal static async Task<SchematicInitialLayoutResult> ProposeMeasuredAsync(DesignRecoveryState state,
         InitialLayoutPolicy policy, IReadOnlyList<SchematicLayoutRegion> regions, string userInstructions,
         Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> measure,
-        CancellationToken token = default)
+        AutomationSession? session, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
         _ = SchematicElectricalCheckpoints.Require(state);
         var desired = DesignRecoveryStore.ReadDesired(state);
+        // §10 admission: a plain supported addition, or a connected addition the classification admits.
+        bool connected = false;
         if (!SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering))
-            throw Error("unsupported_layout_creation", "Initial placement requires component additions without rewiring or changes to existing owners and parts.");
+        {
+            var shape = SchematicConnectedAddition.Classify(state, desired, session, token);
+            // The refusal keeps the classification's own reason, such as a pin the XML disconnects.
+            if (shape.Kind != SchematicConnectedAdditionKind.Admitted)
+                throw Error("unsupported_layout_creation", !SchematicConnectedAddition.Advertises(session, state.InstanceId)
+                    ? UnsupportedMessage + " Additions that also connect pins need an editor that reports it can draw and verify XML connections; this one does not."
+                    : shape.ErrorMessage is { } reason ? UnsupportedMessage + " " + reason : UnsupportedMessage);
+            connected = true;
+        }
         var oldIds = state.Baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
         var added = desired.Engineering.Circuit.Symbols.Where(s => !oldIds.Contains(s.Id)).ToArray();
         if (!added.Any(s => s.Placement is null))
@@ -56,7 +100,7 @@ public static class SchematicInitialLayoutPlanner
         // the synchronization plan's code for this record instead of computing any identity.
         if (SchematicNativeCreationProjection.OmittedOccurrences(desired.Engineering.Circuit, added).Count != 0)
         {
-            var refused = SchematicSynchronizationPlanner.Plan(state, token);
+            var refused = SchematicSynchronizationPlanner.Plan(state, session, token);
             throw Error(refused.ErrorCode ?? "unsupported_layout_creation",
                 refused.ErrorMessage ?? "Initial placement requires component additions without changes to existing owners and parts.");
         }
@@ -82,13 +126,19 @@ public static class SchematicInitialLayoutPlanner
         // Reuse synchronization's exact checkpoint, binding, hierarchy and
         // electrical guards before asking the editor to measure anything.
         var plan = SchematicSynchronizationPlanner.Plan(state with
-        { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(seeded, state.KnowledgeLibraries)) }, token);
+        { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(seeded, state.KnowledgeLibraries)) }, session, token);
         if (!plan.CanPrepare)
             throw Error(plan.ErrorCode ?? "invalid_layout_baseline", plan.ErrorMessage ?? "Resolve the current synchronization conflict first.");
+        // The seeded plan supplies the connection intent (§10); an unconnected addition has none.
+        if (connected != plan.Connections is not null)
+            throw Error("unsupported_layout_creation", UnsupportedMessage);
         var prepared = plan.Candidate!;
         var bindings = prepared.SymbolBindings.Where(b => seed.ContainsKey(b.SymbolOccurrenceId)).ToDictionary(b => b.SymbolOccurrenceId);
         var newNative = bindings.Values.Select(b => b.NativeObjectId).ToHashSet();
         var byScreen = new Dictionary<Guid, List<SchematicPlacementGeometry>>();
+        var byPath = new Dictionary<string, List<SchematicPlacementGeometry>>(StringComparer.Ordinal);
+        var prototypesByPath = new Dictionary<string, SchematicSymbolInstance[]>(StringComparer.Ordinal);
+        var obstaclesByPath = new Dictionary<string, HashSet<Guid>>(StringComparer.Ordinal);
         var limits = new HashSet<string>(StringComparer.Ordinal);
         foreach (var screen in prepared.Schematic.Instances.OrderBy(s => Path(s.Metadata.Document), StringComparer.Ordinal))
         {
@@ -96,8 +146,11 @@ public static class SchematicInitialLayoutPlanner
                 .Select(i => i.Unpack<SchematicSymbolInstance>()).Where(s => newNative.Contains(Id(s.Id)))
                 .OrderBy(s => s.Id.Value, StringComparer.Ordinal).ToArray();
             if (prototypes.Length == 0) continue;
-            var expectedObstacles = SchematicItemDelta.Index(sheets[Path(screen.Metadata.Document)].Items)
+            string path = Path(screen.Metadata.Document);
+            var expectedObstacles = SchematicItemDelta.Index(sheets[path].Items)
                 .Where(pair => pair.Value is not Group).Select(pair => pair.Key).ToHashSet();
+            prototypesByPath.Add(path, prototypes);
+            obstaclesByPath.Add(path, expectedObstacles);
             SchematicPlacementGeometry? first = null;
             foreach (var chunk in prototypes.Chunk(256))
             {
@@ -114,6 +167,8 @@ public static class SchematicInitialLayoutPlanner
                 Guid physical = Id(measured.ScreenId);
                 if (!byScreen.TryGetValue(physical, out var observations)) byScreen.Add(physical, observations = []);
                 observations.Add(measured.Clone());
+                if (!byPath.TryGetValue(path, out var pathObservations)) byPath.Add(path, pathObservations = []);
+                pathObservations.Add(measured.Clone());
                 limits.UnionWith(measured.Limitations);
             }
         }
@@ -151,21 +206,39 @@ public static class SchematicInitialLayoutPlanner
                     blockIds.Length == 1 ? blockIds[0] : null));
             }
         }
+        ConnectedLayout? connection = null;
+        if (plan.Connections is { } intent)
+        {
+            connection = new ConnectedLayout(intent, state, policy, byPath, prototypesByPath, obstaclesByPath, added, measure, token);
+            await connection.PrepareAsync(pages, bodies);
+            limits.UnionWith(connection.Limitations);
+        }
         var layout = InitialSchematicLayout.Propose(pages, bodies, policy, token);
-        if (!layout.CanPropose) return new(null, null, layout, null, limits.Order(StringComparer.Ordinal).ToArray());
+        // A new symbol that has no room together with the power symbols seated on it takes them without their seats (§10), on
+        // the sheets that found no room only; every other sheet keeps its seats.
+        if (!layout.CanPropose && connection is not null
+            && connection.DropSeatsOnFreeSymbols(bodies, layout.Issues.Select(i => i.SheetId).ToHashSet()))
+            layout = InitialSchematicLayout.Propose(pages, bodies, policy, token);
+        var preferredAnchors = connection?.PreferredAnchors(bodies) ?? [];
+        if (!layout.CanPropose) return new(null, null, layout, null, limits.Order(StringComparer.Ordinal).ToArray(), preferredAnchors, []);
+        var rotations = new Dictionary<Guid, int>();
+        IReadOnlyList<InitialLayoutPowerAttachment> attachments = [];
+        if (connection is not null)
+            (layout, attachments) = connection.PlaceSeatedPowerSymbols(layout, rotations);
         var placements = layout.Placements!.SelectMany(p => p.SymbolOccurrences.Select(id => (Id: id,
             Placement: seed[id] with { XMillimeters = Coordinates.NanometersToMillimeters(p.Anchor.XNm),
-                YMillimeters = Coordinates.NanometersToMillimeters(p.Anchor.YNm) }))).ToDictionary(p => p.Id, p => p.Placement);
+                YMillimeters = Coordinates.NanometersToMillimeters(p.Anchor.YNm),
+                RotationDegrees = rotations.TryGetValue(p.BodyId, out int rotation) ? rotation : seed[id].RotationDegrees }))).ToDictionary(p => p.Id, p => p.Placement);
         var circuit = desired.Engineering.Circuit with { Symbols = desired.Engineering.Circuit.Symbols
             .Select(s => placements.TryGetValue(s.Id, out var p) ? s with { Placement = p } : s).ToArray() };
         var result = desired with { Engineering = desired.Engineering with { Circuit = circuit } };
         // Leave existing native bindings unchanged in the desired XML. The
         // ordinary synchronizer owns creation and publication of new bindings.
-        _ = SchematicNativeCreationProjection.Project(state.Baseline, result, state.KnowledgeLibraries, token);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, result, state.KnowledgeLibraries, token, allowConnected: connected);
         string xml = SchematicDesignXml.Write(result, state.KnowledgeLibraries);
         var refinement = LayoutRefinement.ForAddedSymbols(state.Baseline.Engineering.Circuit, circuit, state.NativeRevision, userInstructions);
         token.ThrowIfCancellationRequested();
-        return new(result, xml, layout, refinement, limits.Order(StringComparer.Ordinal).ToArray());
+        return new(result, xml, layout, refinement, limits.Order(StringComparer.Ordinal).ToArray(), preferredAnchors, attachments);
     }
 
     private static void ValidateMeasurement(MeasureSchematicPlacement request, SchematicPlacementGeometry measured,
@@ -178,7 +251,8 @@ public static class SchematicInitialLayoutPlanner
         if (measured.Obstacles.Select(o => Id(o.Id)).Distinct().Count() != measured.Obstacles.Count
             || !expectedObstacles.SetEquals(measured.Obstacles.Select(o => Id(o.Id)))
             || measured.Candidates.Select(c => Id(c.Id)).Distinct().Count() != measured.Candidates.Count
-            || !request.Candidates.Select(c => Id(c.Id)).ToHashSet().SetEquals(measured.Candidates.Select(c => Id(c.Id))))
+            || !request.Candidates.Select(c => Id(c.Id)).ToHashSet().SetEquals(measured.Candidates.Select(c => Id(c.Id)))
+            || measured.ItemCandidates.Count != request.ItemCandidates.Count)
             throw Error("incomplete_layout_measurement", "Native geometry must include every exact requested candidate and existing obstacle once.");
         foreach (var obstacle in measured.Obstacles) _ = Bounds(obstacle.Bounds);
         foreach (var candidate in measured.Candidates)
@@ -186,6 +260,18 @@ public static class SchematicInitialLayoutPlanner
             if (!Equals(candidate.Anchor, request.Candidates.Single(c => c.Id.Equals(candidate.Id)).Position))
                 throw Error("invalid_layout_anchor", "The measured candidate anchor differs from its requested placement.");
             _ = Bounds(candidate.Bounds);
+        }
+        // Label prototypes answer in request order, at their requested position, without pins.
+        for (int i = 0; i < request.ItemCandidates.Count; i++)
+        {
+            var (id, item) = SchematicItemDelta.Index([request.ItemCandidates[i]]).Single();
+            var position = item.Descriptor.FindFieldByName("position")?.Accessor.GetValue(item) as Vector2;
+            var reply = measured.ItemCandidates[i];
+            if (Id(reply.Id) != id || reply.SymbolPins is not null)
+                throw Error("incomplete_layout_measurement", "Native label measurements must answer each requested label prototype once, in order.");
+            if (!Equals(reply.Anchor, position))
+                throw Error("invalid_layout_anchor", "The measured label anchor differs from its requested position.");
+            _ = Bounds(reply.Bounds);
         }
     }
 
@@ -216,4 +302,562 @@ public static class SchematicInitialLayoutPlanner
     }
     private static string Path(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(id => id.Value));
     private static AutomationException Error(string code, string message) => new(code, message);
+
+    /// <summary>The connection-aware part of a proposal (cn1-wiring-intent.md §10), built from the seeded plan's
+    /// connection intent and the editor's own measurements at the recorded revision. It aims each new symbol at
+    /// the pins it connects to, reserves room for every stub and label that realization will draw beside new and
+    /// existing pins, and claims the seat of each new power symbol on the end of its partner pin's stub before the
+    /// free layout runs.</summary>
+    private sealed class ConnectedLayout(SchematicConnectionIntent intent, DesignRecoveryState state,
+        InitialLayoutPolicy layoutPolicy, Dictionary<string, List<SchematicPlacementGeometry>> byPath,
+        Dictionary<string, SchematicSymbolInstance[]> prototypesByPath, Dictionary<string, HashSet<Guid>> obstaclesByPath,
+        SymbolOccurrence[] added,
+        Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> measure, CancellationToken token)
+    {
+        private static readonly int[] Rotations = [0, 90, 180, 270];
+        private readonly SortedSet<string> limitations = new(StringComparer.Ordinal);
+        private readonly Dictionary<Guid, ScreenWork> work = [];
+        private readonly List<SeatWork> seats = [];
+        private SchematicConnectionPolicy policy = null!;
+
+        public IReadOnlyCollection<string> Limitations => limitations;
+
+        /// <summary>Measure what connected placement needs and fold it into <paramref name="pages"/> and
+        /// <paramref name="bodies"/>: preferred anchors, reserved bounds, keep-out areas and the claimed seats of new
+        /// power symbols, which leave the free layout.</summary>
+        public async Task PrepareAsync(List<InitialLayoutSheet> pages, List<InitialLayoutBody> bodies)
+        {
+            // Stub lengths and label sizes come from the project's own connection grid and text size (§6.1).
+            policy = SchematicConnectionPolicy.FromSnapshot(state.Observed);
+            var screenIds = pages.Select(p => p.Id).ToHashSet();
+            foreach (var record in intent.Screens.Where(s => screenIds.Contains(s.ScreenId)).OrderBy(s => s.ScreenId))
+            {
+                token.ThrowIfCancellationRequested();
+                var screen = new ScreenWork(record, bodies.Where(b => b.SheetId == record.ScreenId).ToDictionary(b => b.Id));
+                foreach (var path in record.InstancePathKeys)
+                    if (!byPath.TryGetValue(path, out var observed) || !prototypesByPath.ContainsKey(path))
+                        throw Error("incomplete_layout_measurement", "Every instance of a sheet that receives new connected symbols must be measured.");
+                    else screen.Views.Add(new View(path, observed));
+                foreach (var view in screen.Views)
+                    if (view.Measurements.Any(m => !m.PinGeometryAvailable))
+                        throw Error("incomplete_layout_measurement", "This KiCad does not report exact pin geometry, which placing connected symbols needs.");
+                work.Add(record.ScreenId, screen);
+                Collect(screen);
+                await MeasureAsync(screen);
+                Reserve(screen);
+                Seat(screen, pages.Single(p => p.Id == record.ScreenId));
+            }
+            for (int i = 0; i < pages.Count; i++)
+                if (work.TryGetValue(pages[i].Id, out var screen) && screen.KeepOuts.Count != 0)
+                    pages[i] = pages[i] with { Obstacles = [.. pages[i].Obstacles, .. screen.KeepOuts] };
+            for (int i = bodies.Count - 1; i >= 0; i--)
+            {
+                if (!work.TryGetValue(bodies[i].SheetId, out var screen)) continue;
+                // A seated power symbol already has its place; the free layout only keeps clear of it.
+                if (screen.Seated.Contains(bodies[i].Id)) bodies.RemoveAt(i);
+                else if (screen.Bodies.TryGetValue(bodies[i].Id, out var updated)) bodies[i] = updated;
+            }
+        }
+
+        public IReadOnlyList<InitialLayoutPreferredAnchor> PreferredAnchors(IReadOnlyList<InitialLayoutBody> bodies) =>
+        [
+            .. bodies.Where(b => b.PreferredAnchor is not null).OrderBy(b => b.SheetId).ThenBy(b => b.Id).Select(b =>
+                new InitialLayoutPreferredAnchor(b.Id, b.SheetId, b.SymbolOccurrences.Order().ToArray(), b.PreferredAnchor!.Value,
+                    work[b.SheetId].Partners.TryGetValue(b.Id, out var partners) ? partners.Order().ToArray() : []))
+        ];
+
+        // ---- which pins matter, and where they are ----
+
+        private void Collect(ScreenWork screen)
+        {
+            var representative = screen.Views[0];
+            foreach (var island in screen.Record.Islands.OrderBy(i => i.NetId).ThenBy(i => i.SheetPathKey, StringComparer.Ordinal))
+            {
+                if (island.SheetPathKey != representative.Path)
+                    throw Error("inconsistent_layout_measurement", "A connection island is not on its sheet's representative instance.");
+                var kinds = Kinds(island);
+                // Partners: drawn pins of symbols whose position is already known. Hidden power pins join by name only.
+                var partners = island.Members.Where(m => m.Role != ConnectionMemberRole.ImplicitPower && !IsFree(screen, m.Pin.SymbolId))
+                    .Select(m => (m.Pin, At: Absolute(screen, m.Pin))).ToArray();
+                foreach (var member in island.Members.Where(m => m.Role != ConnectionMemberRole.ImplicitPower && IsFree(screen, m.Pin.SymbolId)))
+                {
+                    if (partners.Length == 0) continue;
+                    var own = Offset(screen, member.Pin);
+                    if (!screen.Aims.TryGetValue(member.Pin.SymbolId, out var aim)) screen.Aims.Add(member.Pin.SymbolId, aim = new());
+                    aim.Own.Add(own);
+                    aim.Partners.AddRange(partners.Select(p => p.At));
+                    aim.PartnerPins.UnionWith(partners.Select(p => p.Pin.PlacedPinId));
+                }
+                foreach (var member in island.Members.Where(m => m.RequiresStub))
+                    screen.Stubs.Add(Stub(screen, member.Pin, kinds, island.LabelText));
+                // Realization names an unlabelled existing connection at its first join candidate that has room.
+                if (island.JoinRequired && island.JoinCandidates.Count != 0)
+                    screen.Stubs.Add(Stub(screen, island.JoinCandidates[0], kinds, island.LabelText));
+                foreach (var sheetId in island.ChildSheetSymbolIds.Order())
+                    screen.Strips.Add(new(sheetId, representative.ObstacleBounds(sheetId), kinds, island.LabelText));
+                // New coordinate-free single-pin global power symbols that have a same-net stub pin to sit on.
+                if (island.Members.Any(m => m.RequiresStub))
+                    foreach (var member in island.Members.Where(m => m.Role == ConnectionMemberRole.PowerCarrier && IsFree(screen, m.Pin.SymbolId)))
+                        if (SinglePinGlobalCarrier(representative, member.Pin.SymbolId))
+                            screen.Carriers.TryAdd(member.Pin.SymbolId, (island, member));
+            }
+        }
+
+        private StubWork Stub(ScreenWork screen, ConnectionPlacedPin pin, IReadOnlyList<ConnectionLabelKind> kinds, string text)
+        {
+            var anchor = screen.Views[0].Pin(pin);
+            var outward = SchematicConnectionGeometry.Outward(anchor);
+            foreach (var view in screen.Views.Skip(1))
+            {
+                var other = view.Pin(pin);
+                if (other.BodyDirectionX != anchor.BodyDirectionX || other.BodyDirectionY != anchor.BodyDirectionY)
+                    throw Error("inconsistent_layout_measurement", "A connected pin faces different ways on instances of one repeated sheet.");
+            }
+            return new(pin, IsFree(screen, pin.SymbolId), new(anchor.Position.XNm, anchor.Position.YNm), outward, kinds, text);
+        }
+
+        private bool IsFree(ScreenWork screen, Guid symbol) => screen.Bodies.TryGetValue(symbol, out var body) && body.FixedAnchor is null;
+
+        // The absolute position of a pin whose symbol is existing or explicitly placed, identical on every instance.
+        private PresentationPoint Absolute(ScreenWork screen, ConnectionPlacedPin pin)
+        {
+            var at = screen.Views[0].Pin(pin).Position;
+            if (screen.Views.Skip(1).Any(v => !Equals(v.Pin(pin).Position, at)))
+                throw Error("inconsistent_layout_measurement", "A connected pin is drawn at different positions on instances of one repeated sheet.");
+            return new(at.XNm, at.YNm);
+        }
+
+        // A free new symbol's pin relative to its measured anchor, identical on every instance.
+        private PresentationPoint Offset(ScreenWork screen, ConnectionPlacedPin pin)
+        {
+            PresentationPoint? first = null;
+            foreach (var view in screen.Views)
+            {
+                var at = view.Pin(pin).Position; var anchor = view.CandidateAnchor(pin.SymbolId);
+                var offset = new PresentationPoint(at.XNm - anchor.XNm, at.YNm - anchor.YNm);
+                if (first is not null && first != offset)
+                    throw Error("inconsistent_layout_measurement", "A new symbol's pins are measured differently on instances of one repeated sheet.");
+                first = offset;
+            }
+            return first!.Value;
+        }
+
+        private bool SinglePinGlobalCarrier(View view, Guid symbol)
+        {
+            var prototype = prototypesByPath[view.Path].Single(s => Id(s.Id) == symbol);
+            return prototype.Definition?.Type == SchematicSymbolType.SstGlobalPower
+                && SchematicPlacedPins.Active(prototype, prototype.Unit?.Unit ?? 1).Count() == 1;
+        }
+
+        private static IReadOnlyList<ConnectionLabelKind> Kinds(ConnectionIsland island) => island.Scope == ConnectionScope.Global
+            ? [ConnectionLabelKind.Global]
+            : island.UplinkSheetSymbolId is null ? [ConnectionLabelKind.Local] : [ConnectionLabelKind.Local, ConnectionLabelKind.Hierarchical];
+
+        // ---- round 2: label prototypes and rotated power-symbol probes ----
+
+        private async Task MeasureAsync(ScreenWork screen)
+        {
+            long first = SchematicConnectionPolicy.StubMultiples[0] * policy.GridNm;
+            var positions = new Dictionary<Combo, PresentationPoint>();
+            foreach (var stub in screen.Stubs)
+                foreach (var kind in stub.Kinds)
+                    positions.TryAdd(new(kind, stub.Text, SchematicConnectionGeometry.Spin(stub.Outward)), Step(stub.At, stub.Outward, first));
+            foreach (var strip in screen.Strips)
+                foreach (var (outward, x) in new[] { ((-1, 0), strip.Sheet.LeftNm), ((1, 0), strip.Sheet.RightNm) })
+                    foreach (var kind in strip.Kinds)
+                        positions.TryAdd(new(kind, strip.Text, SchematicConnectionGeometry.Spin(outward)),
+                            Step(new(x, strip.Sheet.TopNm + policy.SheetPinPitchNm), outward, first));
+            var labels = positions.Keys.OrderBy(c => c.Kind).ThenBy(c => c.Text, StringComparer.Ordinal).ThenBy(c => c.Spin).ToArray();
+            var ids = labels.ToDictionary(c => c, c => SchematicConnectionIdentity.Probe(intent.NativeRevision, screen.Record.ScreenId,
+                SchematicConnectionRealizer.Descriptor(c.Kind), c.Text, c.Spin, c.Shape));
+            var probes = new List<(Guid Carrier, int Rotation, Guid Probe)>();
+            foreach (var carrier in screen.Carriers.Keys.Order())
+                foreach (int rotation in Rotations)
+                    probes.Add((carrier, rotation, SchematicConnectionIdentity.Probe(intent.NativeRevision, screen.Record.ScreenId,
+                        SchematicSymbolInstance.Descriptor, "", SchematicLabelSpinStyle.SlssUnknown, SchematicLabelShape.SlshUnknown, carrier, rotation)));
+            if (labels.Length == 0 && probes.Count == 0) return;
+            var items = labels.Select(c => (Label: (Combo?)c, Probe: ((Guid Carrier, int Rotation, Guid Probe)?)null))
+                .Concat(probes.Select(p => (Label: (Combo?)null, Probe: ((Guid Carrier, int Rotation, Guid Probe)?)p))).ToArray();
+            foreach (var view in screen.Views)
+            {
+                var prototypes = prototypesByPath[view.Path].ToDictionary(s => Id(s.Id));
+                foreach (var chunk in items.Chunk(SchematicConnectionRealizer.MaxMeasuredCandidates))
+                {
+                    token.ThrowIfCancellationRequested();
+                    // Round 1 already proved this document is exactly the requested instance path.
+                    var request = new MeasureSchematicPlacement { Document = view.Measurements[0].Document.Clone(),
+                        ExpectedRevision = new() { Epoch = state.NativeRevision.Epoch, Sequence = state.NativeRevision.Sequence } };
+                    foreach (var (label, probe) in chunk)
+                        if (label is { } combo)
+                            request.ItemCandidates.Add(Any.Pack(SchematicConnectionRealizer.LabelPayload(combo.Kind, ids[combo],
+                                new() { XNm = positions[combo].XNm, YNm = positions[combo].YNm }, combo.Text, combo.Spin, policy)));
+                        else if (probe is { } p)
+                        {
+                            var symbol = prototypes[p.Carrier].Clone();
+                            symbol.Id = new() { Value = p.Probe.ToString("D") };
+                            symbol.Transform = new() { Orientation = (SchematicSymbolOrientation)(p.Rotation / 90 + 1), MirrorX = false, MirrorY = false };
+                            request.Candidates.Add(symbol);
+                        }
+                    var measured = await measure(request, token);
+                    ValidateMeasurement(request, measured, screen.Record.ScreenId, obstaclesByPath[view.Path]);
+                    limitations.UnionWith(measured.Limitations);
+                    int index = 0;
+                    foreach (var (label, probe) in chunk)
+                    {
+                        if (label is not { } combo) continue;
+                        var reply = measured.ItemCandidates[index++];
+                        var envelope = Relative(Bounds(reply.Bounds), reply.Anchor);
+                        screen.Envelopes[combo] = screen.Envelopes.TryGetValue(combo, out var prior) ? Union([prior, envelope]) : envelope;
+                    }
+                    foreach (var (_, probe) in chunk)
+                    {
+                        if (probe is not { } p) continue;
+                        var reply = measured.Candidates.Single(c => Id(c.Id) == p.Probe);
+                        var pins = reply.SymbolPins;
+                        if (pins is null || !pins.Complete || pins.Pins.Count != 1)
+                            throw Error("incomplete_layout_measurement", "KiCad does not report the single pin of new power symbol "
+                                + p.Carrier.ToString("D") + " when it is turned, so it cannot be seated on its partner pin.");
+                        var bounds = Relative(Bounds(reply.Bounds), reply.Anchor);
+                        var pin = pins.Pins[0];
+                        var geometry = new ProbeGeometry(bounds, new(pin.Position.XNm - reply.Anchor.XNm, pin.Position.YNm - reply.Anchor.YNm),
+                            (pin.BodyDirectionX, pin.BodyDirectionY));
+                        var key = (p.Carrier, p.Rotation);
+                        if (screen.Probes.TryGetValue(key, out var earlier))
+                        {
+                            if (earlier.Pin != geometry.Pin || earlier.BodyDirection != geometry.BodyDirection)
+                                throw Error("inconsistent_layout_measurement", "A turned power symbol is measured differently on instances of one repeated sheet.");
+                            geometry = geometry with { Bounds = Union([earlier.Bounds, geometry.Bounds]) };
+                        }
+                        screen.Probes[key] = geometry;
+                    }
+                }
+            }
+        }
+
+        // ---- reservations, keep-outs and preferred anchors ----
+
+        private void Reserve(ScreenWork screen)
+        {
+            long length = SchematicConnectionPolicy.StubMultiples[0] * policy.GridNm;
+            var zones = new Dictionary<Guid, List<PresentationBounds>>();
+            foreach (var stub in screen.Stubs)
+            {
+                var end = Step(stub.At, stub.Outward, length);
+                var spin = SchematicConnectionGeometry.Spin(stub.Outward);
+                // The stub and the clearance realization keeps around its end, and every label that may end it.
+                var zone = Union([Inflate(Span(stub.At, end), policy.ClearanceNm), Inflate(Span(end, end), policy.ClearanceNm),
+                    .. stub.Kinds.Select(kind => Translate(screen.Envelopes[new(kind, stub.Text, spin)], end))]);
+                screen.Zones[stub.Pin.PlacedPinId] = zone;
+                if (screen.Bodies.TryGetValue(stub.Pin.SymbolId, out var body))
+                {
+                    // A new symbol reserves the zone relative to its anchor: measured at its seed, or its explicit position.
+                    var anchor = stub.Free ? screen.Views[0].CandidateAnchor(stub.Pin.SymbolId) : ToVector(body.FixedAnchor!.Value);
+                    if (!zones.TryGetValue(body.Id, out var list)) zones.Add(body.Id, list = []);
+                    list.Add(Relative(zone, anchor));
+                }
+                else if (screen.KeepOuts.All(k => k.Id != stub.Pin.PlacedPinId))
+                    screen.KeepOuts.Add(new(stub.Pin.PlacedPinId, zone));
+            }
+            foreach (var strip in screen.Strips)
+            {
+                foreach (var (outward, side) in new[] { ((-1, 0), "left"), ((1, 0), "right") })
+                {
+                    var spin = SchematicConnectionGeometry.Spin(outward);
+                    long depth = strip.Kinds.Max(kind => outward.Item1 < 0 ? -screen.Envelopes[new(kind, strip.Text, spin)].LeftNm
+                        : screen.Envelopes[new(kind, strip.Text, spin)].RightNm);
+                    long reach = checked(length + Math.Max(0, depth) + policy.ClearanceNm);
+                    var band = outward.Item1 < 0
+                        ? new PresentationBounds(checked(strip.Sheet.LeftNm - reach), strip.Sheet.TopNm, strip.Sheet.LeftNm, strip.Sheet.BottomNm)
+                        : new PresentationBounds(strip.Sheet.RightNm, strip.Sheet.TopNm, checked(strip.Sheet.RightNm + reach), strip.Sheet.BottomNm);
+                    var id = KeepOutId(screen.Record.ScreenId, strip.SheetId, side);
+                    int existing = screen.KeepOuts.FindIndex(k => k.Id == id);
+                    if (existing < 0) screen.KeepOuts.Add(new(id, band));
+                    else screen.KeepOuts[existing] = new(id, Union([screen.KeepOuts[existing].Bounds, band]));
+                }
+            }
+            foreach (var (id, body) in screen.Bodies.ToArray())
+            {
+                PresentationPoint? preferred = null;
+                if (body.FixedAnchor is null && screen.Aims.TryGetValue(id, out var aim) && aim.Partners.Count != 0)
+                {
+                    // §10: snap to grid (mean partner anchor − mean own member-pin offset).
+                    decimal x = aim.Partners.Average(p => (decimal)p.XNm) - aim.Own.Average(p => (decimal)p.XNm);
+                    decimal y = aim.Partners.Average(p => (decimal)p.YNm) - aim.Own.Average(p => (decimal)p.YNm);
+                    preferred = new(Snap(x), Snap(y));
+                    screen.Partners[id] = aim.PartnerPins;
+                }
+                var reserved = zones.TryGetValue(id, out var list) ? Union([body.RelativeBounds, .. list]) : null;
+                if (preferred is not null || reserved is not null)
+                    screen.Bodies[id] = body with { PreferredAnchor = preferred, ReservedRelativeBounds = reserved };
+            }
+        }
+
+        private long Snap(decimal value)
+        {
+            long grid = layoutPolicy.GridNm;
+            try { return checked((long)(decimal.Round(value / grid, MidpointRounding.AwayFromZero) * grid)); }
+            catch (OverflowException) { throw Error("invalid_layout_geometry", "A preferred position exceeds the supported coordinate range."); }
+        }
+
+        // ---- power symbols seated on their partner pin's stub (§10 power attachment), claimed before the free layout ----
+
+        // Each new single-pin global power symbol, in component order, is paired with the first same-net stub pin, in
+        // (component, pin, placed pin) order, that no earlier power symbol was paired with; a dropped pairing keeps its pin.
+        // It is turned by the smallest rotation that makes its pin face that pin, and its pin goes on the end of the pin's
+        // shortest stub. The seat is claimed before any free symbol is placed: beside an existing symbol it becomes an
+        // obstacle, and beside a new symbol, explicitly placed or free, it joins that symbol's reserved bounds and moves with
+        // it, so the free layout keeps every other symbol clear of it. A seat outside the usable page or one that collides is
+        // dropped, and the power symbol is then laid out freely like any other new symbol. Beside an explicitly placed symbol the
+        // seat also collides when the symbol's room grown by the seat would meet something the room alone does not
+        // (GrownRoomCollides); only that pairing is dropped, never the layout.
+        private void Seat(ScreenWork screen, InitialLayoutSheet page)
+        {
+            if (screen.Carriers.Count == 0) return;
+            long length = SchematicConnectionPolicy.StubMultiples[0] * policy.GridNm;
+            var available = new PresentationBounds(checked(page.AvailableBounds.LeftNm + layoutPolicy.PageInsetNm),
+                checked(page.AvailableBounds.TopNm + layoutPolicy.PageInsetNm), checked(page.AvailableBounds.RightNm - layoutPolicy.PageInsetNm),
+                checked(page.AvailableBounds.BottomNm - layoutPolicy.PageInsetNm));
+            var components = added.ToDictionary(s => s.Id, s => s.ComponentId);
+            var paired = new HashSet<Guid>();
+            // Claimed seats in the frame they are known in: the sheet (Guid.Empty), or a free partner's measured anchor.
+            var claimed = new List<(Guid Frame, PresentationBounds Bounds)>();
+            var carriers = screen.Carriers.Select(c => (Body: c.Key, c.Value.Island,
+                    Component: screen.Bodies[c.Key].SymbolOccurrences.Select(o => components[o]).Min()))
+                .OrderBy(c => c.Component).ThenBy(c => c.Body).ToArray();
+            foreach (var carrier in carriers)
+            {
+                token.ThrowIfCancellationRequested();
+                var member = carrier.Island.Members
+                    .Where(m => m.RequiresStub && m.Role == ConnectionMemberRole.Signal && !paired.Contains(m.Pin.PlacedPinId))
+                    .OrderBy(m => m.Pin.Endpoint.ComponentId).ThenBy(m => m.Pin.Endpoint.Pin, StringComparer.Ordinal).ThenBy(m => m.Pin.PlacedPinId)
+                    .FirstOrDefault();
+                if (member is null) continue;
+                var partner = member.Pin;
+                paired.Add(partner.PlacedPinId);
+                bool existing = !screen.Bodies.TryGetValue(partner.SymbolId, out var host);
+                var occurrences = screen.Bodies[carrier.Body].SymbolOccurrences.Order().ToArray();
+                SeatWork Decision(int rotation, PresentationPoint? offset, PresentationBounds? probeBounds, string? reason) =>
+                    new(carrier.Body, screen.Record.ScreenId, occurrences, carrier.Component, partner, existing, rotation, offset, probeBounds, reason);
+                // The smallest turn whose pin points from the stub end back along the stub into the power symbol.
+                var outward = SchematicConnectionGeometry.Outward(screen.Views[0].Pin(partner));
+                int? turn = Rotations.Cast<int?>().FirstOrDefault(r => screen.Probes[(carrier.Body, r!.Value)].BodyDirection == outward);
+                if (turn is not { } rotation)
+                {
+                    seats.Add(Decision(0, null, null, "no_matching_rotation"));
+                    continue;
+                }
+                var probe = screen.Probes[(carrier.Body, rotation)];
+                bool free = host is { FixedAnchor: null };
+                // The frame the partner was measured in: the sheet for an existing symbol, else the new symbol's measured anchor.
+                var origin = existing ? new PresentationPoint(0, 0) : Anchor(screen, partner.SymbolId);
+                var at = free ? Plus(origin, Offset(screen, partner)) : Absolute(screen, partner);
+                var end = Step(at, outward, length);
+                var offset = new PresentationPoint(checked(end.XNm - probe.Pin.XNm - origin.XNm), checked(end.YNm - probe.Pin.YNm - origin.YNm));
+                var bounds = Translate(probe.Bounds, Plus(origin, offset));
+                Guid frame = free ? partner.SymbolId : Guid.Empty;
+                string? refusal = !free && !available.Contains(bounds) ? "page_overflow"
+                    : Collides(screen, page, partner, host, origin, frame, bounds, claimed) ? "collision"
+                    : host is { FixedAnchor: { } fixedAt } && GrownRoomCollides(screen, page, host, fixedAt, bounds) ? "collision" : null;
+                seats.Add(Decision(rotation, offset, probe.Bounds, refusal));
+                if (refusal is not null) continue;
+                claimed.Add((frame, bounds));
+                screen.Seated.Add(carrier.Body);
+                if (host is null) screen.KeepOuts.Add(new(carrier.Body, bounds));
+                else
+                {
+                    screen.Unseated.TryAdd(partner.SymbolId, host);
+                    screen.Bodies[partner.SymbolId] = host with { ReservedRelativeBounds = Union([host.OccupiedRelativeBounds, Translate(probe.Bounds, offset)]) };
+                }
+            }
+        }
+
+        /// <summary>After a layout that found no room: on each sheet named in <paramref name="failed"/> only, drop every seat on a
+        /// free new symbol as <c>page_overflow</c>, give that symbol back its own reserved bounds and return its power symbols to the
+        /// free layout (decision n2ad655250c5716f5 rule 3). Seats on sheets that were laid out stay, and so do seats beside existing
+        /// and explicitly placed symbols, which were checked before the layout like the symbols they sit beside. Returns whether
+        /// anything changed.</summary>
+        public bool DropSeatsOnFreeSymbols(List<InitialLayoutBody> bodies, IReadOnlySet<Guid> failed)
+        {
+            bool changed = false;
+            for (int i = 0; i < seats.Count; i++)
+            {
+                var seat = seats[i];
+                var screen = work[seat.ScreenId];
+                if (seat.DroppedReason is not null || !failed.Contains(seat.ScreenId)
+                    || !screen.Unseated.TryGetValue(seat.Partner.SymbolId, out var unseated) || unseated.FixedAnchor is not null)
+                    continue;
+                seats[i] = seat with { DroppedReason = "page_overflow" };
+                screen.Seated.Remove(seat.Carrier);
+                bodies.Add(screen.Bodies[seat.Carrier]);
+                int partner = bodies.FindIndex(b => b.SheetId == seat.ScreenId && b.Id == seat.Partner.SymbolId);
+                bodies[partner] = screen.Bodies[seat.Partner.SymbolId] = unseated;
+                changed = true;
+            }
+            return changed;
+        }
+
+        // A seat may touch the symbol it attaches to, but not overlap it or the stubs and labels of that symbol's other pins,
+        // and it takes the place of the label its partner pin would otherwise receive. It keeps the layout clearance from every
+        // other seat claimed in its frame and, beside an existing or explicitly placed symbol, from every item, keep-out and
+        // explicitly placed symbol on the sheet. Free symbols are placed afterwards and keep clear of it.
+        private bool Collides(ScreenWork screen, InitialLayoutSheet page, ConnectionPlacedPin partner, InitialLayoutBody? host,
+            PresentationPoint origin, Guid frame, PresentationBounds bounds, List<(Guid Frame, PresentationBounds Bounds)> claimed)
+        {
+            long gap = layoutPolicy.ClearanceNm;
+            var partnerPins = screen.Stubs.Where(s => s.Pin.SymbolId == partner.SymbolId).Select(s => s.Pin.PlacedPinId).ToHashSet();
+            var body = host is null ? page.Obstacles.First(o => o.Id == partner.SymbolId).Bounds : Translate(host.RelativeBounds, origin);
+            if (Overlaps(bounds, body) || partnerPins.Any(p => p != partner.PlacedPinId && Overlaps(bounds, screen.Zones[p]))) return true;
+            if (claimed.Any(c => c.Frame == frame && Near(bounds, c.Bounds, gap))) return true;
+            if (frame != Guid.Empty) return false;
+            foreach (var obstacle in page.Obstacles.Concat(screen.KeepOuts))
+                if (obstacle.Id != partner.SymbolId && !partnerPins.Contains(obstacle.Id) && Near(bounds, obstacle.Bounds, gap)) return true;
+            return screen.Bodies.Values.Any(b => b.FixedAnchor is { } fixedAt && b.Id != partner.SymbolId
+                && Near(bounds, Translate(b.OccupiedRelativeBounds, fixedAt), gap));
+        }
+
+        // A seat beside an explicitly placed new symbol joins that symbol's reserved room, which the layout checks as one rectangle
+        // like every explicitly placed symbol: inside the usable page and clear, by the layout clearance, of every item, every
+        // keep-out (claimed seats beside existing symbols among them) and every other explicitly placed symbol's room. That
+        // rectangle can reach where neither the room nor the seat does (above or below the symbol when the power symbol is taller
+        // than it), so it is checked here, before the layout, and a seat that would make it collide is dropped as a collision
+        // rather than refusing the whole layout (decision n2ad655250c5716f5 rule 3). Only what the grown room reaches beyond the
+        // room the symbol already has counts; anything that room already meets is a problem of the explicit position itself,
+        // which the layout reports as before. The page is a rectangle, so a room and a seat that each fit it grow into a room
+        // that fits it too: the seat's own page check covers the page.
+        private bool GrownRoomCollides(ScreenWork screen, InitialLayoutSheet page, InitialLayoutBody host, PresentationPoint fixedAt,
+            PresentationBounds seat)
+        {
+            long gap = layoutPolicy.ClearanceNm;
+            var room = Translate(host.OccupiedRelativeBounds, fixedAt);
+            var grown = Union([room, seat]);
+            var others = page.Obstacles.Concat(screen.KeepOuts).Select(o => o.Bounds)
+                .Concat(screen.Bodies.Values.Where(b => b.FixedAnchor is not null && b.Id != host.Id)
+                    .Select(b => Translate(b.OccupiedRelativeBounds, b.FixedAnchor!.Value)));
+            return others.Any(other => Near(grown, other, gap) && !Near(room, other, gap));
+        }
+
+        /// <summary>Put each seated power symbol where its seat ended up and report every pairing (§10 powerAttachments): a
+        /// seat beside an existing symbol stays where it was claimed, and one beside a new symbol moves with that symbol.</summary>
+        public (InitialLayoutCandidate Layout, IReadOnlyList<InitialLayoutPowerAttachment> Attachments) PlaceSeatedPowerSymbols(
+            InitialLayoutCandidate layout, Dictionary<Guid, int> rotations)
+        {
+            if (seats.Count == 0) return (layout, []);
+            var placements = layout.Placements!.ToList();
+            var anchors = placements.ToDictionary(p => (p.SheetId, p.BodyId), p => p.Anchor);
+            var attachments = new List<InitialLayoutPowerAttachment>();
+            foreach (var seat in seats)
+            {
+                PresentationPoint? anchor = seat.Offset is not { } offset ? null
+                    : seat.ExistingPartner ? offset : Plus(anchors[(seat.ScreenId, seat.Partner.SymbolId)], offset);
+                bool attached = seat.DroppedReason is null;
+                attachments.Add(new(seat.Carrier, seat.ScreenId, seat.Occurrences, seat.Component, seat.Partner.Endpoint, seat.Partner.SymbolId,
+                    seat.Partner.PlacedPinId, seat.Rotation, anchor, attached, seat.DroppedReason));
+                if (!attached) continue;
+                placements.Add(new(seat.Carrier, seat.ScreenId, seat.Occurrences, anchor!.Value, Translate(seat.ProbeBounds!, anchor.Value), false));
+                rotations[seat.Carrier] = seat.Rotation;
+            }
+            return (layout with { Placements = placements.OrderBy(p => p.SheetId).ThenBy(p => p.BodyId).ToArray() }, attachments);
+        }
+
+        // The position a new body's zones were computed at: its seed measurement, or its explicit position.
+        private PresentationPoint Anchor(ScreenWork screen, Guid body)
+        {
+            if (screen.Bodies[body].FixedAnchor is { } fixedAnchor) return fixedAnchor;
+            var seed = screen.Views[0].CandidateAnchor(body);
+            return new(seed.XNm, seed.YNm);
+        }
+
+        private static Guid KeepOutId(Guid screen, Guid sheet, string side)
+        {
+            byte[] b = SHA256.HashData(Encoding.UTF8.GetBytes("kicad-initial-layout-keep-out-v1\n" + screen.ToString("D") + "\n"
+                + sheet.ToString("D") + "\n" + side));
+            b[6] = (byte)((b[6] & 0x0F) | 0x80); b[8] = (byte)((b[8] & 0x3F) | 0x80);
+            return new Guid(b.AsSpan(0, 16), bigEndian: true);
+        }
+
+        private static PresentationPoint Step(PresentationPoint at, (int Dx, int Dy) outward, long length) =>
+            new(checked(at.XNm + outward.Dx * length), checked(at.YNm + outward.Dy * length));
+        private static PresentationBounds Span(PresentationPoint a, PresentationPoint b) =>
+            new(Math.Min(a.XNm, b.XNm), Math.Min(a.YNm, b.YNm), Math.Max(a.XNm, b.XNm), Math.Max(a.YNm, b.YNm));
+        private static PresentationBounds Inflate(PresentationBounds b, long by) =>
+            new(checked(b.LeftNm - by), checked(b.TopNm - by), checked(b.RightNm + by), checked(b.BottomNm + by));
+        private static PresentationBounds Translate(PresentationBounds b, PresentationPoint p) =>
+            new(checked(b.LeftNm + p.XNm), checked(b.TopNm + p.YNm), checked(b.RightNm + p.XNm), checked(b.BottomNm + p.YNm));
+        private static PresentationPoint Plus(PresentationPoint a, PresentationPoint b) => new(checked(a.XNm + b.XNm), checked(a.YNm + b.YNm));
+        private static Vector2 ToVector(PresentationPoint p) => new() { XNm = p.XNm, YNm = p.YNm };
+        private static bool Overlaps(PresentationBounds a, PresentationBounds b) =>
+            a.LeftNm < b.RightNm && b.LeftNm < a.RightNm && a.TopNm < b.BottomNm && b.TopNm < a.BottomNm;
+        private static bool Near(PresentationBounds a, PresentationBounds b, long gap) =>
+            (decimal)a.LeftNm - gap < b.RightNm && (decimal)a.RightNm + gap > b.LeftNm
+            && (decimal)a.TopNm - gap < b.BottomNm && (decimal)a.BottomNm + gap > b.TopNm;
+
+        private sealed record Combo(ConnectionLabelKind Kind, string Text, SchematicLabelSpinStyle Spin)
+        {
+            public SchematicLabelShape Shape => Kind == ConnectionLabelKind.Local ? SchematicLabelShape.SlshUnknown : SchematicLabelShape.SlshPassive;
+        }
+
+        private sealed record StubWork(ConnectionPlacedPin Pin, bool Free, PresentationPoint At, (int Dx, int Dy) Outward,
+            IReadOnlyList<ConnectionLabelKind> Kinds, string Text);
+
+        private sealed record StripWork(Guid SheetId, PresentationBounds Sheet, IReadOnlyList<ConnectionLabelKind> Kinds, string Text);
+
+        private sealed record ProbeGeometry(PresentationBounds Bounds, PresentationPoint Pin, (int X, int Y) BodyDirection);
+
+        /// <summary>One power-symbol pairing as decided before the free layout. <paramref name="Offset"/> is the seat's anchor
+        /// on the sheet beside an existing partner, or relative to a new partner's anchor; it is null without a matching
+        /// rotation. <paramref name="ProbeBounds"/> are the turned power symbol's bounds relative to its anchor.</summary>
+        private sealed record SeatWork(Guid Carrier, Guid ScreenId, IReadOnlyList<Guid> Occurrences, Guid Component, ConnectionPlacedPin Partner,
+            bool ExistingPartner, int Rotation, PresentationPoint? Offset, PresentationBounds? ProbeBounds, string? DroppedReason);
+
+        private sealed class Aim
+        {
+            public List<PresentationPoint> Own { get; } = [];
+            public List<PresentationPoint> Partners { get; } = [];
+            public HashSet<Guid> PartnerPins { get; } = [];
+        }
+
+        private sealed class View(string path, List<SchematicPlacementGeometry> measurements)
+        {
+            public string Path { get; } = path;
+            public List<SchematicPlacementGeometry> Measurements { get; } = measurements;
+
+            public SchematicPinAnchor Pin(ConnectionPlacedPin pin)
+            {
+                var symbol = Measurements.SelectMany(m => m.Candidates.Concat(m.Obstacles)).FirstOrDefault(s => s.Id?.Value == pin.SymbolId.ToString("D"))
+                    ?? throw Error("incomplete_layout_measurement", "KiCad did not measure the symbol of connected pin "
+                        + pin.Endpoint.Pin + " on sheet " + Path + ".");
+                if (symbol.SymbolPins is not { Complete: true } pins)
+                    throw Error("incomplete_layout_measurement", "KiCad cannot report exact pin positions for the symbol of connected pin "
+                        + pin.Endpoint.Pin + " on sheet " + Path + ", so its connections cannot be placed.");
+                return pins.Pins.FirstOrDefault(p => p.Id?.Value == pin.PlacedPinId.ToString("D"))
+                    ?? throw Error("incomplete_layout_measurement", "KiCad does not report connected pin " + pin.Endpoint.Pin + " on sheet " + Path + ".");
+            }
+
+            public Vector2 CandidateAnchor(Guid symbol) =>
+                Measurements.SelectMany(m => m.Candidates).First(c => c.Id.Value == symbol.ToString("D")).Anchor;
+
+            public PresentationBounds ObstacleBounds(Guid item) =>
+                Bounds(Measurements.SelectMany(m => m.Obstacles).FirstOrDefault(o => o.Id.Value == item.ToString("D"))?.Bounds
+                    ?? throw Error("incomplete_layout_measurement", "KiCad did not measure sheet symbol " + item.ToString("D") + " on sheet " + Path + "."));
+        }
+
+        private sealed class ScreenWork(ConnectionScreen record, Dictionary<Guid, InitialLayoutBody> bodies)
+        {
+            public ConnectionScreen Record { get; } = record;
+            public Dictionary<Guid, InitialLayoutBody> Bodies { get; } = bodies;
+            public List<View> Views { get; } = [];
+            public Dictionary<Guid, Aim> Aims { get; } = [];
+            public Dictionary<Guid, HashSet<Guid>> Partners { get; } = [];
+            public List<StubWork> Stubs { get; } = [];
+            public List<StripWork> Strips { get; } = [];
+            public Dictionary<Guid, (ConnectionIsland Island, ConnectionMember Member)> Carriers { get; } = [];
+            public Dictionary<Combo, PresentationBounds> Envelopes { get; } = [];
+            public Dictionary<(Guid Carrier, int Rotation), ProbeGeometry> Probes { get; } = [];
+            public Dictionary<Guid, PresentationBounds> Zones { get; } = [];
+            public List<InitialLayoutObstacle> KeepOuts { get; } = [];
+            public HashSet<Guid> Seated { get; } = [];
+            // New symbols as they were before a power symbol was seated on them.
+            public Dictionary<Guid, InitialLayoutBody> Unseated { get; } = [];
+        }
+    }
 }

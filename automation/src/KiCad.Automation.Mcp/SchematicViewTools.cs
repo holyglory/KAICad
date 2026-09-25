@@ -65,7 +65,7 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_design_propose_initial_layout", ReadOnly = true),
-     Description("Propose positions for coordinate-free additions of known, unconnected parts in an explicitly attached schematic. Requires the absolute recovery path and exact recovery token, nanometre grid/clearance/inset, and one usable-page region with title-block/artwork reservations per affected physical screen UUID. Uses revision-bound native body/visible-field measurements, combines repeated sheet envelopes and preserves existing or explicitly positioned symbols. Returns desired XML plus scoped visual-refinement context; no-space returns issues without a partial candidate. Does not write XML/recovery, edit KiCad, generate wiring or certify readability. Review and publish the proposed XML through normal revision-safe synchronization, then verify native connectivity and rendered presentation.")]
+     Description("Propose positions for coordinate-free additions of known parts in an explicitly attached schematic. Requires the absolute recovery path and exact recovery token, nanometre grid/clearance/inset, and one usable-page region with title-block/artwork reservations per affected physical screen UUID. Uses revision-bound native body/visible-field measurements, combines repeated sheet envelopes and preserves existing or explicitly positioned symbols. Additions whose XML also connects their pins are accepted only when the attached editor reports it can draw and verify XML connections: each new symbol then goes to the free place nearest the already placed pins it connects to (preferredAnchors), keeps room for the connection stubs and labels its pins and theirs will receive, and a new single-pin global power symbol is turned and seated on the end of its partner pin's stub when that spot is free (powerAttachments). Returns desired XML plus scoped visual-refinement context; no-space returns issues without a partial candidate. Does not write XML/recovery, edit KiCad, generate wiring or certify readability. Review and publish the proposed XML through normal revision-safe synchronization, then verify native connectivity and rendered presentation.")]
     public Task<CallToolResult> ProposeInitialLayout(string instanceId, string recoveryPath,
         string expectedRevisionToken, long gridNm, long clearanceNm, long pageInsetNm,
         SchematicLayoutRegion[] regions, string userInstructions, CancellationToken cancellationToken) => Execute(async () =>
@@ -87,6 +87,7 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = saved.RevisionToken,
             nativeRevision = saved.State.NativeRevision, canPropose = proposal.CanPropose, desiredXml = proposal.DesiredXml,
             layout = proposal.Layout, refinement = proposal.Refinement, limitations = proposal.Limitations,
+            preferredAnchors = proposal.PreferredAnchors, powerAttachments = proposal.PowerAttachments,
             requiresVisualReview = true, requiresNativeConnectivityValidation = true,
             nativeDocumentEdited = false, designFileWritten = false, recoveryWritten = false });
         return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
@@ -259,14 +260,23 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_check_presentation", ReadOnly = true),
-     Description("Check current-sheet native geometry for page overflow, image bounds, font-size policy, reference visibility and more than two unrelated signal crossings. Supply explicit minimum/maximum text height in millimetres. Returns object-linked findings and repair targets. Partial coverage: full glyph clipping/occlusion, independent sheet contexts and complete revision tracking remain unfinished; missing wire bindings are reported. Never interpret this partial report as a complete verification pass.")]
+     Description("Find presentation problems an AI or person must repair: page overflow, cropped images, text outside the font-size policy, text painted upside down or top to bottom, hidden, empty or unannotated reference designators, overlapping symbol bodies, labels and field text, and signals crossing unrelated wiring more than twice. Supply explicit minimum/maximum text height in millimetres. By default checks the sheet KiCad displays (documentJson must name it). With includeSubsheets=true, checks the sheet instance documentJson names and every loaded sheet instance below it (the whole hierarchy from the root sheet, or one branch from a child sheet), without changing the design or the displayed sheet. Both modes apply the same rules: each sheet instance is measured by KiCad at its own instance with its own references and painted field glyphs; power and '#' symbols need no visible reference; overlapToleranceMm (default 0.5, at least 0 and below 0.635, half the 1.27 mm grid) is the overlap depth allowed where objects are meant to touch, such as a label on a pin end. The report states the policy it applied (text limits, crossing limit and overlap tolerance); an invalid policy is refused with invalid_presentation before KiCad is asked anything. Optional expectedRevisionJson ({\"epoch\",\"sequence\"}) is the document revision the caller observed: the check is refused with presentation_revision_changed when KiCad holds another revision (this refusal comes first, even for a sheet instance deleted since), as it is when the design changes during the check; a sheet instance KiCad has not loaded is refused with presentation_sheet_not_loaded. Every finding names its sheet path and sheet name, the document revision, the affected object IDs, the measured value, the threshold and their unit (mm, degrees or count; an unreadable reference is measured as 0 visible designators against 1 required), except the notices that a measurement is unavailable; repair targets name each field by its owner, field name and sheet path. Coverage stays partial: text crossed by wires, pin names, graphics or the drawing-sheet frame and title block, and complete revision tracking, are not measured, so never read a report without findings as a complete verification pass.")]
     public Task<CallToolResult> CheckPresentation(string instanceId, string documentJson,
-        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken) =>
+        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken,
+        bool includeSubsheets = false, decimal overlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm,
+        string? expectedRevisionJson = null) =>
         Execute(async () =>
         {
-            var check = await NativePresentationChecks.CheckAsync(registry.Client(instanceId), ParseDocument(documentJson),
-                new(minimumTextHeightMm, maximumTextHeightMm), cancellationToken);
-            var result = JsonSerializer.SerializeToElement(new { instanceId, check },
+            var policy = new PresentationPolicy(minimumTextHeightMm, maximumTextHeightMm,
+                OverlapToleranceMm: overlapToleranceMm);
+            var client = registry.Client(instanceId);
+            var document = ParseDocument(documentJson);
+            var expected = string.IsNullOrWhiteSpace(expectedRevisionJson) ? null
+                : SchematicJson.Parser.Parse<Protocol.DocumentRevision>(expectedRevisionJson);
+            var check = includeSubsheets
+                ? await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, cancellationToken, expected)
+                : await NativePresentationChecks.CheckAsync(client, document, policy, cancellationToken, expected);
+            var result = JsonSerializer.SerializeToElement(new { instanceId, includeSubsheets, check },
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     Converters = { new JsonStringEnumConverter() } });
             return new CallToolResult

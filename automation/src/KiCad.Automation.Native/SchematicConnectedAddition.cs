@@ -399,11 +399,12 @@ public static class SchematicConnectedAdditionPlanner
                     "XML connections cannot overwrite concurrent native hierarchy or layout edits.");
             var before = SchematicElectricalComparison.Compare(state.Baseline, checkpoints.Baseline, state.KnowledgeLibraries, token);
             if (!before.PinBindingsComplete || !before.ConnectivityEquivalent)
-                return Failure(SchematicConnectionErrors.UnalignedElectricalBaseline, "The saved baseline must agree with its native pin partition.");
+                return Failure(SchematicConnectionErrors.UnalignedElectricalBaseline,
+                    Unmatchable("The saved baseline must agree with its native pin partition.", before, checkpoints.Baseline));
             var observed = SchematicElectricalComparison.Compare(state.Baseline, checkpoints.Observed, state.KnowledgeLibraries, token);
             if (!observed.PinBindingsComplete || !observed.ConnectivityEquivalent)
                 return Failure(SchematicConnectionErrors.CreationRequiresStableConnectivity,
-                    "Reconcile current native connectivity before adding XML connections.");
+                    Unmatchable("Reconcile current native connectivity before adding XML connections.", observed, checkpoints.Observed));
 
             // Step 2: the pre-realization candidate. Created symbols keep their exact creation identities.
             var candidate = shape.AddedComponentIds.Count != 0
@@ -433,5 +434,30 @@ public static class SchematicConnectedAdditionPlanner
 
         SchematicSynchronizationPlan Failure(string code, string message, IReadOnlyList<SchematicBindingIssue>? issues = null) =>
             new(null, null, [], hierarchy, null, null, issues ?? [], [], null, gaps.Distinct().ToArray(), true, code, message);
+    }
+
+    // KiCad captures a symbol whose library definition it cannot resolve without any definition of its own (no unit and
+    // no pins), so the design can neither own that symbol nor match its pins. When the comparison fails on such a symbol
+    // (it is not owned, or its owned pins are missing), the refusal names it and says what to restore; a failure on
+    // anything else keeps its general reason.
+    private static string Unmatchable(string reason, SchematicElectricalComparisonResult comparison, SchematicElectricalState native)
+    {
+        var failing = comparison.Issues.Select(i => i.NativeId).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var named = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var screen in native.Hierarchy.Data.Instances)
+        foreach (var packed in screen.Items.Where(i => i.Is(Kiapi.Schematic.Types.SchematicSymbolInstance.Descriptor)))
+        {
+            var symbol = packed.Unpack<Kiapi.Schematic.Types.SchematicSymbolInstance>();
+            if (symbol.Definition is { UnitCount: > 0 } || symbol.Id is null || !failing.Contains(symbol.Id.Value)) continue;
+            var library = symbol.LibraryId ?? symbol.Definition?.Id;
+            string name = library is null ? "" : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
+            string reference = symbol.ReferenceField?.Text?.Text_ is { Length: > 0 } text ? text : symbol.Id.Value;
+            named.Add(reference + (name.Length == 0 ? "" : " ('" + name + "')"));
+        }
+        if (named.Count == 0) return reason;
+        return reason + " KiCad cannot resolve the library definition of symbol" + (named.Count == 1 ? " " : "s ") + string.Join(", ", named)
+            + ", so " + (named.Count == 1 ? "its" : "their") + " pins cannot be matched with the design and no XML connection can be added. "
+            + "Restore the missing library, or rescue or replace " + (named.Count == 1 ? "that symbol" : "those symbols")
+            + " in the schematic editor, then save the XML again.";
     }
 }

@@ -94,6 +94,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<KnowledgeTools>()
     .WithTools<PlacementTools>()
     .WithTools<RecoveryTools>()
+    .WithTools<ExitedOperationTools>()
     .WithTools<FileIntakeTools>()
     .WithTools<NativeIntakeTools>()
     .WithTools<AutomaticDesignTools>()

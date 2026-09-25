@@ -71,9 +71,14 @@ Compared with sequence 22 it adds, as preliminary features:
   MCP server without contacting KiCad.
 - **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
   `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
+- **XML connections become labelled wires.** When saved XML adds connections, apply
+  draws a short wire and a net label from each new pin, with hierarchical labels and
+  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
+  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
+  started for a project advertises `schematic.connection-realization.v1`; the empty update
+  manager does not. Wires routed between pins are not built yet.
 
-Groundwork for turning XML connections into wires is included but switched off: KiCad
-does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
+Known limitations: the
 diagram editor's dark-theme selection and other design-QA polish are still being fixed,
 Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
 from the project manager is not built yet.
@@ -742,8 +747,15 @@ proposes field positions for exact symbol fields (addressed by symbol or slot an
 expected name and revision) while preserving content, visibility, locks and repeated
 geometry; review and apply it through the same synchronization workflow. Neither
 tool creates unknown parts, generates wiring, infers drawing-sheet reservations or
-performs AI reasoning inside the service; general occlusion and hierarchy-wide
-presentation checks remain open.
+performs AI reasoning inside the service; general occlusion remains open.
+`kicad_schematic_check_presentation` checks the displayed sheet by default, or with
+`includeSubsheets=true` the sheet instance `documentJson` names and every loaded sheet
+instance below it, each measured by KiCad at its own instance without changing the
+design or the displayed sheet. Both modes apply the same rules, refuse a stale
+`expectedRevisionJson` first as `presentation_revision_changed`, and report the policy
+they applied. Coverage is partial: text crossed by wires, pin names, graphics or the
+drawing-sheet frame and title block is not measured yet, so a report without findings
+is not a complete verification pass.
 
 For an explicitly attached instance and initialized recovery record, use
 `kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,
@@ -760,6 +772,28 @@ expectedDocumentEpoch)`. This records a fresh observation without editing KiCad,
 writing XML or advancing the synchronized baseline. Pending old-session actions
 must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
 then start automatic synchronization with the returned recovery token.
+
+When KiCad ends while a synchronization is applying or saving its edit, the record
+keeps that operation and it is never replayed on another KiCad process. Start KiCad
+again for the project (`kicad_instance_start`, which continues the instance ID), stop
+any paused automatic session, and call `kicad_design_recovery_release_exited` with the
+operation ID and `resume` or `roll-back`. The operation is released only when the
+server proves that exactly the KiCad process holding it has ended: its own observer
+saw it end, or a saved registration from the same machine, boot and process ID
+namespace shows it gone; a registration written on another computer never counts. The
+release keeps a receipt of the whole operation beside the record and checks every
+sheet the new KiCad loaded: each must be the last synchronized version or exactly the
+operation's result, so a user edit is never taken for it (`released_operation_diverged`
+otherwise). `resume` applies only the part the new KiCad does not hold yet and publishes
+the operation's XML; `roll-back` removes the partial result and publishes the last
+synchronized design, keeping the replaced XML as the previous version. Either completes
+through `kicad_design_sync_apply` with the returned `continuationOperationId` and
+`requestedRecoveryRevisionToken`, or through automatic synchronization. Until then the
+record cannot be attached to another KiCad session (`kicad_design_recovery_reattach`
+returns `released_operation_requires_continuation`). If the XML was already being
+published when KiCad ended, `resume` refuses (`released_publication_started`), and if the
+restarted KiCad holds other edits neither continuation can proceed yet. The PSU/CPU
+`native-crash` graph proves both continuations on killed KiCad processes.
 
 Run `devcoordinator2 test start . --test native-xml-component-creation --tier
 development --client codex` for the two-editor Linux journey. It checks XML-driven
@@ -957,6 +991,8 @@ rejected: inspect and reconcile their exact receipts before replacing the saved
 revision needed for retry. This operation only refreshes the recovery observation;
 it does not write the design XML or edit KiCad. Incomplete native tracking remains
 explicit and is not authorization for synchronized mutation.
+When the record keeps pin connections, the refresh captures them too, so a refreshed
+record can be planned and applied again.
 
 The internal `DesignRecoveryFileObserver` subscribes to an explicit design file
 before its initial read. Each notification captures the current saved bytes into
@@ -1089,6 +1125,41 @@ legacy-only, foreign-circuit or future-revision history cannot authorize a candi
 The public read-only `kicad_design_sync_plan` and internal executor use the same
 history-aware preparation. Instruction-only edits can merge; competing circuit
 and layout changes still pause synchronization.
+
+The plan also says when apply will draw in KiCad rather than publish a prepared XML.
+When the saved XML only adds connections (between pins already drawn, or to parts it
+also adds) and leaves every existing part, symbol, sheet, binding and connection
+unchanged, and the handshake recorded at attach advertises
+`schematic.connection-realization.v1`, a plan that can be prepared returns
+`connectionRealizationRequired: true`, `candidateDesignXml: null` and a
+`connectionIntent` summary: each net with its scope and global name, each sheet's
+labelled island, the sheet ports, how many native pin groups KiCad must confirm and
+the symbols apply creates. Every other plan, including one that cannot be prepared,
+returns `connectionRealizationRequired: false` and `connectionIntent: null`.
+
+`nativeRebuildRequired` and `rebuildSheetInstances` report the two cases where apply
+creates native sheets from XML:
+
+- **New sheets.** When the saved XML adds empty sheets below sheets KiCad shows, apply
+  creates the sheet symbols and their files. Parts go in a later XML revision, once
+  their sheets exist.
+- **Lost schematic files.** If a project's `.kicad_sch` files are deleted, open the
+  project so KiCad creates a new empty root, reattach the recovery record with
+  `kicad_design_recovery_reattach`, then plan and apply as usual. Apply rebuilds every
+  sheet, symbol, pin, label, sheet pin, library cache entry, page and title block from
+  the XML last synchronized with KiCad, with the original identities, and the saved
+  files match the originals byte for byte. The new root first takes back the old
+  root's identity; undo returns to the empty root. The rebuild keeps the existing
+  `.kicad_pro` and never rewrites it.
+
+The rebuild refuses, before KiCad is touched: XML edited after the files were lost
+(`rebuild_requires_settled_xml`); net chains, and sheet files shared by several sheets,
+which it cannot rebuild yet (`rebuild_state_unrepresented`); a kept project file whose
+settings differ from the XML's (`rebuild_project_settings_changed`); and any planned
+change other than the root identity, page, title block, root page and embedded files
+(`rebuild_operation_unsupported`). The snapshot's list of state it does not hold no
+longer names the library cache, which it now holds exactly; recovery records captured
+by earlier previews report a changed snapshot on their first capture after upgrading.
 Linux native run `t20260916T032035Z-c12d41` verifies real keyboard undo/redo of
 unit and component deletions in two editors, including history older than the
 latest receipt, exact restored identities, preserved newer instructions, actual
@@ -1274,7 +1345,7 @@ unfinished work that no registered tool provides.
 A Linux native check has opened schematic windows in two isolated
 instances and captured their actual software-rendered canvases as PNGs. This
 preview is exposed through a preliminary MCP tool with viewport metadata and an
-explicitly incomplete revision-tracking flag. Current-sheet presentation checks,
+explicitly incomplete revision-tracking flag. Presentation checks of the displayed sheet or a whole loaded hierarchy,
 sheet activation and operation-receipt inspection are also exposed. Independent
 region/layer images of any explicitly targeted loaded sheet are available through
 the separate render tool below. PCB/3D views and complete synchronized

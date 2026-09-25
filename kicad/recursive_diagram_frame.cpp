@@ -6,6 +6,7 @@
 #include <api/api_server.h>
 #include <bitmaps.h>
 #include <pgm_base.h>
+#include <kiplatform/ui.h>
 #include <kiid.h>
 #include <google/protobuf/util/json_util.h>
 #include <algorithm>
@@ -101,19 +102,21 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_toolbar->AddTool( wxID_REDO, _( "Redo" ), KiBitmap( BITMAPS::redo ) ); m_toolbar->AddSeparator();
     m_toolbar->AddTool( FIT, _( "Fit" ), KiBitmap( BITMAPS::zoom_fit_in_page ) );
     m_toolbar->AddTool( NOTE, _( "Note" ), KiBitmap( BITMAPS::add_textbox ) ); m_toolbar->AddSeparator();
-    // Round A1 option 1: the drawing tools follow the approved commands as one compact strip. They
-    // are the same tool buttons as the canvas-edge palette, so both show the one active tool.
-    auto strip = [&]( TOOL tool, const wxString& label, BITMAPS bitmap, const char* name )
+    // Round A1 option 1: the drawing tools follow the approved commands as one compact strip. They are the same tool
+    // buttons and glyphs as the canvas-edge palette, at the toolbar's icon size and label baseline, so both show the one
+    // active tool the same clear way (design QA P2-1, P2-2 and P2-3).
+    auto strip = [&]( TOOL tool, const wxString& label, R::GLYPH glyph, const char* name, const wxString& tip )
     {
-        auto* button = R::ToolButton( m_toolbar, label, bitmap, name, true );
+        auto* button = new R::TOOL_BUTTON( m_toolbar, label, glyph, R::TOOL_STYLE::STRIP, name, tip );
         button->Bind( wxEVT_TOGGLEBUTTON, [this, tool]( wxCommandEvent& ) { setTool( tool ); m_canvas->SetFocus(); } );
-        m_toolbar->AddControl( button ); m_strip.emplace_back( tool, static_cast<wxToggleButton*>( button ) );
+        m_toolbar->AddControl( button ); m_strip.emplace_back( tool, button );
     };
-    strip( TOOL::SELECT, _( "Select" ), BITMAPS::cursor, "RecursiveToolSelect" );
-    strip( TOOL::ADD_BLOCK, _( "Add block" ), BITMAPS::add_rectangle, "RecursiveToolAddBlock" );
-    strip( TOOL::CONNECT, _( "Connect" ), BITMAPS::add_line, "RecursiveToolConnect" );
-    strip( TOOL::ADD_PORT, _( "Place port" ), BITMAPS::add_hierar_pin, "RecursiveToolPlacePort" );
-    m_stripDelete = static_cast<wxButton*>( R::ToolButton( m_toolbar, _( "Delete" ), BITMAPS::trash, "RecursiveToolDelete", false ) );
+    strip( TOOL::SELECT, _( "Select" ), R::GLYPH::SELECT, "RecursiveToolSelect", _( "Select and move items (Esc)" ) );
+    strip( TOOL::ADD_BLOCK, _( "Add block" ), R::GLYPH::ADD_BLOCK, "RecursiveToolAddBlock", _( "Add a block where you click (B)" ) );
+    strip( TOOL::CONNECT, _( "Connect" ), R::GLYPH::CONNECT, "RecursiveToolConnect", _( "Connect two blocks or ports (C)" ) );
+    strip( TOOL::ADD_PORT, _( "Place port" ), R::GLYPH::PORT, "RecursiveToolPlacePort", _( "Place a port on a block edge or the level boundary (P)" ) );
+    m_stripDelete = new R::TOOL_ACTION( m_toolbar, _( "Delete" ), R::GLYPH::REMOVE, R::TOOL_STYLE::STRIP, "RecursiveToolDelete",
+                                        _( "Delete the selection (Delete)" ) );
     m_stripDelete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeSelection(); } );
     m_toolbar->AddControl( m_stripDelete );
     m_toolbar->Realize();
@@ -139,6 +142,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     paletteActions.undo = [this] { undo( false ); };
     m_palette = new R::TOOL_PALETTE( m_canvas, std::move( paletteActions ) );
     m_caption = new wxTextCtrl( m_canvas, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
+    // The caption field's focus ring is drawn by the canvas in its accent (design QA P1-1); moving the field redraws it.
+    m_caption->Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { m_rendered = false; m_canvas->Refresh(); event.Skip(); } );
     m_caption->SetName( "DiagramCaptionEditor" ); m_caption->Hide();
     m_caption->Bind( wxEVT_TEXT_ENTER, [this]( wxCommandEvent& ) { finishCaption( true ); } );
     // Moving focus away keeps a typed caption and cancels a blank one, so focus is never pulled back.
@@ -165,9 +170,11 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_facetRows[facet] = new R::FACET_ROW( scroll, facet, [this]( int chosen ) { openFacet( chosen, true ); } );
         fields->Add( m_facetRows[facet], 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
     }
+    // A clear gap after the facet table, the gap used between the other sections (design QA P2-12).
+    m_facetGap = fields->AddSpacer( FromDIP( 12 ) );
     m_facetDetail = new wxBoxSizer( wxVERTICAL );
-    m_facetBack = new wxButton( scroll, wxID_ANY, wxS( "↑ " ) + _( "Back to facet overview" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-    m_facetBack->SetName( "RecursiveFacetBack" );
+    // Back and Clear facet are actions, so they look like the canvas's Review facets link (design QA P2-10).
+    m_facetBack = new R::LINK_BUTTON( scroll, wxS( "↑ " ) + _( "Back to facet overview" ), "RecursiveFacetBack" );
     m_facetBack->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { closeFacet( true ); } );
     m_facetDetail->Add( m_facetBack, 0, wxTOP | wxBOTTOM, FromDIP( 6 ) );
     m_facetTitle = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetTitle->SetFont( GetFont().Bold() );
@@ -178,36 +185,42 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         auto* item = new wxStaticText( scroll, wxID_ANY, text );
         m_facetDetail->Add( item, 0, wxTOP, FromDIP( 6 ) ); return item;
     };
-    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first).
+    // A row wraps only when even its short labels do not fit (fitFacetLabels collapses the strength labels first, and
+    // gives both rows the width they wrap within before the inspector is laid out, so what follows a wrapped row moves
+    // down with it).
     auto choices = [&]( std::array<wxRadioButton*, 3>& buttons, const std::array<wxString, 3>& labels, const char* name,
                         const std::array<const char*, 3>& names )
     {
-        auto* row = new wxWrapSizer( wxHORIZONTAL );
+        auto* row = new R::CHOICE_FLOW( FromDIP( FACET_CHOICE_GAP ) );
         for( int i = 0; i < 3; ++i )
         {
             buttons[i] = new wxRadioButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, i == 0 ? wxRB_GROUP : 0 );
             buttons[i]->SetName( wxString( name ) + names[i] ); buttons[i]->SetToolTip( labels[i] );
             row->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
-            if( i < 2 ) row->AddSpacer( FromDIP( FACET_CHOICE_GAP ) );
         }
         m_facetDetail->Add( row, 0, wxEXPAND );
+        return row;
     };
     label( _( "State" ) );
-    choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState", { "Chosen", "Candidate", "Unknown" } );
+    m_facetStateRow = choices( m_facetStates, { _( "Chosen" ), _( "Candidate" ), _( "Unknown" ) }, "RecursiveFacetState",
+                               { "Chosen", "Candidate", "Unknown" } );
     m_facetValueLabel = label( _( "Value" ) );
     m_facetValue = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
     m_facetValue->SetName( "RecursiveFacetValue" ); m_facetDetail->Add( m_facetValue, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     m_facetCandidates = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    R::PadTextBox( m_facetCandidates, FromDIP( 8 ), FromDIP( 6 ) );
     m_facetCandidates->SetName( "RecursiveFacetCandidates" ); m_facetCandidates->SetHint( _( "One per line" ) );
     m_facetDetail->Add( m_facetCandidates, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     m_facetReason = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 200, 62 ) ), wxTE_MULTILINE );
+    R::PadTextBox( m_facetReason, FromDIP( 8 ), FromDIP( 6 ) );
     m_facetReason->SetName( "RecursiveFacetReason" ); m_facetDetail->Add( m_facetReason, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     label( _( "Strength" ) );
-    choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength", { "Information", "Preference", "Requirement" } );
+    m_facetStrengthRow = choices( m_facetStrengths, strengthLabels( false ), "RecursiveFacetStrength",
+                                  { "Information", "Preference", "Requirement" } );
     m_facetNotice = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_facetNotice->SetName( "RecursiveFacetNotice" );
     m_facetDetail->Add( m_facetNotice, 0, wxEXPAND | wxTOP, FromDIP( 6 ) );
-    m_facetClear = new wxButton( scroll, wxID_ANY, _( "Clear facet" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-    m_facetClear->SetName( "RecursiveFacetClear" ); m_facetDetail->Add( m_facetClear, 0, wxTOP, FromDIP( 6 ) );
+    m_facetClear = new R::LINK_BUTTON( scroll, _( "Clear facet" ), "RecursiveFacetClear" );
+    m_facetDetail->Add( m_facetClear, 0, wxTOP, FromDIP( 6 ) );
     m_facetClear->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { clearFacet(); } );
     for( auto* button : m_facetStates ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetStateChanged(); } );
     for( auto* button : m_facetStrengths ) button->Bind( wxEVT_RADIOBUTTON, [this]( wxCommandEvent& ) { if( !m_updating ) facetEdited(); } );
@@ -319,13 +332,17 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         // Each requirement appears only once it has text or the user adds it (owner decision n98a3f3c41084f0ed).
         auto* row = new wxBoxSizer( wxVERTICAL );
         auto* title = new wxBoxSizer( wxHORIZONTAL );
-        title->Add( new wxStaticText( scroll, wxID_ANY, FIELD_LABELS[i] ), 1, wxALIGN_CENTER_VERTICAL );
+        // One bold heading style for the inspector's sections (design QA P3 19).
+        auto* fieldLabel = new wxStaticText( scroll, wxID_ANY, FIELD_LABELS[i] ); fieldLabel->SetFont( GetFont().Bold() );
+        title->Add( fieldLabel, 1, wxALIGN_CENTER_VERTICAL );
         m_history[i] = new wxButton( scroll, wxID_ANY, _( "History" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
         m_history[i]->SetName( wxString::Format( "RecursiveFieldHistory%d", i ) );
         title->Add( m_history[i], 0 ); row->Add( title, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
         m_fields[i] = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
                 FromDIP( wxSize( 320, 90 ) ), wxTE_MULTILINE );
         m_fields[i]->SetName( wxString::Format( "RecursiveRequirements%d", i ) );
+        // Text sits inside the box, not against its border (design QA P2-9).
+        R::PadTextBox( m_fields[i], FromDIP( 8 ), FromDIP( 6 ) );
         row->Add( m_fields[i], 0, wxEXPAND | wxALL, FromDIP( 12 ) );
         fields->Add( row, 0, wxEXPAND ); m_fieldHeadings[i] = row;
         m_fields[i]->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) edit(); } );
@@ -336,7 +353,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_addRequirement->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { chooseRequirement(); } );
     fields->Add( m_addRequirement, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     auto* commentsHeading = new wxBoxSizer( wxHORIZONTAL );
-    commentsHeading->Add( new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ), 1, wxALIGN_CENTER_VERTICAL );
+    auto* commentsLabel = new wxStaticText( scroll, wxID_ANY, _( "Comments" ) ); commentsLabel->SetFont( GetFont().Bold() );
+    commentsHeading->Add( commentsLabel, 1, wxALIGN_CENTER_VERTICAL );
     m_commentChoice = new wxChoice( scroll, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 190, -1 ) ) );
     m_commentChoice->SetName( "RecursiveCommentSelection" ); commentsHeading->Add( m_commentChoice, 0 );
     fields->Add( commentsHeading, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP( 12 ) );
@@ -344,7 +362,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_commentTargetStatus->SetName( "RecursiveCommentTargetStatus" );
     fields->Add( m_commentTargetStatus, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 12 ) );
     m_comments = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 320, 110 ) ), wxTE_MULTILINE );
-    m_comments->SetName( "RecursiveComments" ); fields->Add( m_comments, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
+    m_comments->SetName( "RecursiveComments" ); R::PadTextBox( m_comments, FromDIP( 8 ), FromDIP( 6 ) );
+    fields->Add( m_comments, 0, wxEXPAND | wxALL, FromDIP( 12 ) );
     m_comments->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) editComment(); } );
     m_commentChoice->Bind( wxEVT_CHOICE, [this]( wxCommandEvent& )
     {
@@ -353,6 +372,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         { m_commentId = m_commentIds[chosen]; m_newComment = m_commentId.empty(); fillComments(); m_comments->SetFocus(); }
     } );
     scroll->SetSizer( fields ); properties->Add( scroll, 1, wxEXPAND ); inspector->SetSizer( properties );
+    // A scroll bar that stays visible while the inspector holds more than it shows (design QA P2-13: GTK's overlay scroll bar
+    // is hidden until the pointer moves over it, so a cut-off box gave no sign that the inspector scrolls).
+    KIPLATFORM::UI::SetOverlayScrolling( scroll, false );
     // A wider or narrower inspector (the splitter, or its scroll bar showing) restores or collapses the strength labels.
     scroll->Bind( wxEVT_SIZE, [this]( wxSizeEvent& event )
     {
@@ -371,10 +393,14 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         { m_diagramHistoryPanel->SetBusy( true ); execute( m_failedHistoryRequest ); } };
     m_diagramHistoryPanel = new PANEL_DIAGRAM_HISTORY( m_inspectorBook, std::move( historyActions ) );
     m_inspectorBook->AddPage( m_diagramHistoryPanel, _( "History" ) ); side->Add( m_inspectorBook, 1, wxEXPAND );
-    auto* actions = new wxBoxSizer( wxHORIZONTAL ); actions->AddStretchSpacer();
+    // Decline and Save share the inspector's width; Save is the primary action (design QA P2-8, styled by enableSave).
+    auto* actions = new wxBoxSizer( wxHORIZONTAL );
     m_decline = new wxButton( inspectorRoot, wxID_ANY, _( "&Decline" ) ); m_decline->SetName( "RecursiveDecline" );
     m_save = new wxButton( inspectorRoot, wxID_SAVE, _( "Save" ) ); m_save->SetName( "RecursiveSave" );
-    actions->Add( m_decline, 0, wxRIGHT, FromDIP( 12 ) ); actions->Add( m_save, 0 );
+    // One minimum size for both, so the sizer gives them equal halves whatever their labels.
+    m_decline->SetMinSize( FromDIP( wxSize( 60, 36 ) ) ); m_save->SetMinSize( FromDIP( wxSize( 60, 36 ) ) );
+    // The 12 DIP gap is split between them: a sizer counts an item's border as part of its share.
+    actions->Add( m_decline, 1, wxRIGHT, FromDIP( 6 ) ); actions->Add( m_save, 1, wxLEFT, FromDIP( 6 ) );
     side->Add( actions, 0, wxEXPAND | wxALL, FromDIP( 12 ) ); inspectorRoot->SetSizer( side );
     splitter->SplitVertically( diagram, inspectorRoot, FromDIP( 1100 ) );
     auto* frameSizer = new wxBoxSizer( wxVERTICAL ); frameSizer->Add( splitter, 1, wxEXPAND ); SetSizer( frameSizer ); CreateStatusBar();
@@ -388,6 +414,12 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         m_canvas->Refresh(); event.Skip();
     } );
     m_canvas->Bind( wxEVT_LEFT_DOWN, &RECURSIVE_DIAGRAM_FRAME::click, this );
+    m_canvas->Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& event )
+    {
+        m_pointerInside = false;
+        if( m_tool == TOOL::CONNECT ) { m_rendered = false; m_canvas->Refresh(); }
+        event.Skip();
+    } );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::motion, this );
     // The release point ends a drag, even when the pointer's last motion before it arrived late or was merged away.
@@ -1124,7 +1156,7 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_addSeparator->Show( m_ready && ( detailsLeft || anyDetail ) );
     m_openDiagram->Enable( available && child && !isNew );
     bool writable = m_document.source_writable() || !m_ready;
-    m_save->Enable( available && m_dirty && writable ); m_decline->Enable( available && m_dirty );
+    enableSave( available && m_dirty && writable, available && m_dirty );
     m_toolbar->EnableTool( BACK, available && !m_back.empty() ); m_toolbar->EnableTool( UP, available && m_path.size() > 1 );
     m_toolbar->EnableTool( wxID_UNDO, available && !m_undo.empty() );
     m_toolbar->EnableTool( wxID_REDO, available && !m_redo.empty() );
@@ -1139,11 +1171,28 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
+void RECURSIVE_DIAGRAM_FRAME::enableSave( bool save, bool decline )
+{
+    // Save is the primary action while it is available: an accent fill with a label at 4.5:1 or more; unavailable, it keeps
+    // the theme's own disabled look (design QA P2-8).
+    m_decline->Enable( decline );
+    const int style = save ? 1 : 0;
+    if( m_save->IsEnabled() == save && m_saveStyle == style ) return;
+    m_save->Enable( save ); m_saveStyle = style;
+    if( save )
+    {
+        R::ACCENT_FILL fill = R::AccentFill( wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), m_save->GetParent()->GetBackgroundColour() );
+        m_save->SetBackgroundColour( fill.fill ); m_save->SetForegroundColour( fill.text );
+    }
+    else { m_save->SetBackgroundColour( wxNullColour ); m_save->SetForegroundColour( wxNullColour ); }
+    m_save->Refresh();
+}
 void RECURSIVE_DIAGRAM_FRAME::showStatus()
 {
     // One status line for every path that changes the draft, so typing never hides why Save is unavailable.
     wxString status = !m_error.empty() ? Text( m_error ) : m_process ? _( "Working…" )
         : !m_notice.empty() ? Text( m_notice )
+        : m_captionKind ? _( "Type a name and press Enter, or press Escape to cancel." )
         : m_tool == TOOL::CONNECT && m_connectFrom ? _( "Click a port to finish connection" )
         : m_tool == TOOL::CONNECT ? _( "Click a block or port to start a connection." )
         : m_tool == TOOL::ADD_BLOCK ? _( "Click the diagram where the new block goes." )
@@ -1648,7 +1697,7 @@ void RECURSIVE_DIAGRAM_FRAME::captionEdited()
     else if( auto* draft = editConnection( true ) ) draft->set_name( caption );
     m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
     // Like requirement text, the field is not refilled while typing; the canvas shows the new caption.
-    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    enableSave( m_dirty && m_document.source_writable(), m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
     showStatus();
@@ -1898,6 +1947,11 @@ void RECURSIVE_DIAGRAM_FRAME::fillFacets( bool available )
     m_facetHeading->Show( any );
     bool open = m_facet >= 0;
     m_facetDetail->ShowItems( open );
+    m_facetGap->Show( any && !open );
+    // "Back to facet overview" only once there is an overview to go back to (design QA P3 21); Escape always returns.
+    m_facetBack->Show( open && any );
+    // While a facet's detail is open, Comments is three lines high so more of the detail fits (design QA P2-13).
+    m_comments->SetMinSize( wxSize( -1, FromDIP( open ? 72 : 110 ) ) );
     if( open )
     {
         if( !m_facetTouched ) fillFacetForm();
@@ -1990,13 +2044,18 @@ bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
         wxRadioButton* button = m_facetStrengths[i]; button->InvalidateBestSize();
         needed += button->GetBestSize().x - button->GetTextExtent( button->GetLabel() ).x + button->GetTextExtent( full[i] ).x;
     }
-    bool collapse = needed > available, changed = false;
+    // A few pixels to spare, so the full labels show only where they fit with room left over.
+    bool collapse = needed + FromDIP( 4 ) > available, changed = false;
     for( int i = 0; i < 3; ++i )
     {
         const wxString& label = collapse ? brief[i] : full[i];
         if( m_facetStrengths[i]->GetLabel() == label ) continue;
         m_facetStrengths[i]->SetLabel( label ); m_facetStrengths[i]->InvalidateBestSize(); changed = true;
     }
+    // Both rows wrap within the width the inspector gives them. Set before the inspector is laid out, it makes each row
+    // as tall as the lines it places, so the controls below a row that wraps move down and none lies over a choice.
+    changed |= m_facetStateRow->SetWrapWidth( available );
+    changed |= m_facetStrengthRow->SetWrapWidth( available );
     return changed;
 }
 void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()
@@ -2052,7 +2111,7 @@ void RECURSIVE_DIAGRAM_FRAME::facetEdited()
     m_facetHeading->Show( any ); m_facetClear->Show( true );
     m_updating = wasUpdating;
     m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
-    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    enableSave( m_dirty && m_document.source_writable(), m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
     showStatus();
@@ -2087,8 +2146,8 @@ wxFont RECURSIVE_DIAGRAM_FRAME::chipFont() const
 }
 wxColour RECURSIVE_DIAGRAM_FRAME::linkColour() const
 {
-    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
-    return accent.ChangeLightness( window.Red() + window.Green() + window.Blue() < 384 ? 170 : 62 );
+    // The canvas's Review facets link and the inspector's links share one colour (design QA P2-10).
+    return R::LINK_BUTTON::LinkColour( wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ) );
 }
 std::vector<std::pair<std::string, R::BLOCK_CHIPS>> RECURSIVE_DIAGRAM_FRAME::drawnChips() const
 {
@@ -2128,7 +2187,7 @@ void RECURSIVE_DIAGRAM_FRAME::edit()
     if( before.SerializeAsString() == m_level.SerializeAsString() ) return;
     m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges(); ++m_viewRevision;
     // Do not refill text controls while typing: it would move the caret.
-    m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    enableSave( m_dirty && m_document.source_writable(), m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     m_palette->SetState( m_tool, drawingAvailable(), canDelete(), true );
     showStatus();
@@ -2188,7 +2247,7 @@ void RECURSIVE_DIAGRAM_FRAME::editComment()
         selectedNote->set_text( value ); EditorOrigin( selectedNote->mutable_origin(), "Edit diagram comment" );
     }
     m_undo.push_back( std::move( before ) ); m_redo.clear(); m_dirty = hasChanges();
-    ++m_viewRevision; m_save->Enable( m_dirty && m_document.source_writable() ); m_decline->Enable( m_dirty );
+    ++m_viewRevision; enableSave( m_dirty && m_document.source_writable(), m_dirty );
     m_toolbar->EnableTool( wxID_UNDO, true ); m_toolbar->EnableTool( wxID_REDO, false );
     fillComments(); m_inspectorScroll->Layout(); m_inspectorScroll->FitInside(); showStatus();
     m_rendered = false; m_canvas->Refresh();
@@ -2607,7 +2666,8 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             out->set_name( name ); out->set_x( origin.x + rect.x ); out->set_y( origin.y + rect.y );
             out->set_width( rect.width ); out->set_height( rect.height ); out->set_shown( visible.Contains( rect ) ); out->set_enabled( enabled );
         };
-        for( const auto& [block, chips] : drawnChips() )
+        const auto drawnChipsCache = drawnChips();
+        for( const auto& [block, chips] : drawnChipsCache )
         {
             auto* row = result.add_block_chips(); row->set_block_id( block ); row->set_hidden_chips( chips.hidden );
             for( const auto& chip : chips.chips )
@@ -2666,6 +2726,39 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 box.Deflate( 8 );
                 for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y ) ) row->add_lines( R::Utf8( line ) );
             }
+            // Design QA fixes, as drawn: every port's square and the Connect tool's highlight (P2-6), every connection caption
+            // (P2-7), every block's caption and version line (P2-7) and the selected block's handles (P1-1).
+            auto target = connectTarget( drawn );
+            for( const auto& port : portMarks( drawn ) )
+            {
+                auto* row = result.add_port_marks(); place( row, "DiagramPortMark", port.rect, false );
+                row->set_label( R::Utf8( port.name ) );
+                row->set_active( target && target->port && target->owner == port.owner && target->id == port.id );
+            }
+            if( target ) { place( result.mutable_connect_target(), "DiagramConnectTarget", target->rect, false ); result.mutable_connect_target()->set_label( R::Utf8( target->name ) ); }
+            for( const auto& caption : connectionCaptions( drawn, m_canvas->GetClientSize() ) )
+            {
+                auto* row = result.add_connection_captions(); place( row, "DiagramConnectionCaption", caption.rect, false );
+                row->set_shown( caption.shown && visible.Contains( caption.rect ) ); row->set_label( R::Utf8( caption.text ) );
+            }
+            wxFont captionFont = GetFont().Bold().Larger();
+            for( const auto& node : drawn.Nodes() )
+            {
+                wxRect box = toScreen( drawn.Rect( node.id ) ), inner = wxRect( box ).Deflate( 8 );
+                auto* row = result.add_block_texts(); row->set_block_id( node.id ); place( row->mutable_block(), "DiagramBlock", box, false );
+                R::CAPTION caption = R::BlockCaption( dc, node, inner, captionFont );
+                if( !caption.rect.IsEmpty() )
+                { place( row->mutable_caption(), "DiagramBlockCaption", caption.rect, false ); row->mutable_caption()->set_label( R::Utf8( caption.text ) ); }
+                dc.SetFont( GetFont() );
+                bool chips = std::any_of( drawnChipsCache.begin(), drawnChipsCache.end(), [&]( const auto& entry ) { return entry.first == node.id; } );
+                if( !chips && !node.isNew )
+                {
+                    wxString version = wxString::Format( "v%d", node.version );
+                    if( wxRect line = R::VersionRect( dc, version, inner, caption.rect ); !line.IsEmpty() )
+                    { place( row->mutable_version_line(), "DiagramBlockVersion", line, false ); row->mutable_version_line()->set_label( R::Utf8( version ) ); }
+                }
+            }
+            for( const auto& handle : selectionHandles( drawn ) ) place( result.add_selection_handles(), "DiagramSelectionHandle", handle, false );
         }
     }
     result.set_canvas_presses( m_canvasPresses );
@@ -2705,11 +2798,19 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.
     wxPoint window = GetScreenPosition();
-    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label )
+    auto control = [&]( const std::string& name, const wxRect& rect, bool shown, bool enabled, bool active, const wxString& label,
+                        wxWindow* item = nullptr )
     {
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
         row->set_label( Utf8( label ) );
+        // What assistive technology reads from a button, a one-click choice or a facet row, from the toolkit itself.
+        if( item && ( dynamic_cast<wxAnyButton*>( item ) || dynamic_cast<wxRadioButton*>( item ) || dynamic_cast<R::FACET_ROW*>( item ) ) )
+            if( auto accessible = R::AccessibleOf( item ) )
+            {
+                auto* out = row->mutable_accessible();
+                out->set_role( accessible->role ); out->set_name( accessible->name ); out->set_checked( accessible->checked );
+            }
     };
     std::vector<wxWindow*> windows{ m_caption, m_addRequirement, m_addDetail, m_save, m_decline, m_openDiagram, m_owner, m_canvas, m_stripDelete,
                                     m_endpoints, m_comments, m_inspectorScroll, m_connectionCaption, m_signalEntry, m_savedVersion };
@@ -2729,13 +2830,14 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         if( item->GetName().empty() || item->GetName() == "staticLine" ) continue;
         auto* toggle = dynamic_cast<wxToggleButton*>( item );
         auto* radio = dynamic_cast<wxRadioButton*>( item );
-        bool labelled = radio || dynamic_cast<wxAnyButton*>( item ) || item == m_owner || dynamic_cast<wxStaticText*>( item );
+        bool labelled = radio || dynamic_cast<wxAnyButton*>( item ) || dynamic_cast<R::FACET_ROW*>( item ) || item == m_owner
+                        || dynamic_cast<wxStaticText*>( item );
         // The connection's caption field and new-signal entry report the text they show (Round A3).
         auto* text = dynamic_cast<wxStaticText*>( item );
         wxString label = item == m_connectionCaption ? m_connectionCaption->GetValue() : item == m_signalEntry ? m_signalEntry->GetValue()
                        : text ? text->GetLabelText() : labelled ? item->GetLabel() : wxString();
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
-                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label );
+                 ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label, item );
     }
     // The splitter's sash between the canvas and the inspector, which widens or narrows the inspector.
     if( m_splitter->IsSplit() )

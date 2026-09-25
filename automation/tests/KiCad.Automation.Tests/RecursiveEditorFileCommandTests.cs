@@ -1309,6 +1309,37 @@ public sealed class RecursiveEditorFileCommandTests
             Assert.AreEqual((DiagramDomain.Power, DiagramConnectionDirection.FromFirst), (links.Inspect(powerSaved).Domain, links.Inspect(powerSaved).Direction));
             Assert.IsTrue(links.Inspect(powerLink).Members.IsEmpty, "The earlier Power revision keeps its history unchanged.");
 
+            // L3 on a connection that already has saved signals (contract erratum, owner decision ne0261047035e58c6): I2C's draft lists
+            // the saved signals it keeps (SDA, SCL) in their saved order, then exactly the signals drawn for I2C in this draft. Every
+            // other member list is refused with connection_member_edit_requires_member_path and nothing is written.
+            var alert = Signal("ALERT", i2c.ConnectionId, ends);
+            var vbus = Signal("VBUS", powerLink.ConnectionId, links.Inspect(powerSaved).Endpoints);
+            var i2cHead = i2cSaved.Selection;
+            RecursiveLevelDraft EditI2c(ImmutableArray<ConnectionSelection> members, params NewConnectionOccurrence[] drawnHere) =>
+                stored.StartLevelDraft(stored.SelectedRoot) with
+                {
+                    ConnectionDrafts = [links.StartDraft(i2cHead) with { Members = members }], NewConnections = [.. drawnHere]
+                };
+            var memberRefusals = new (string Name, RecursiveLevelDraft Draft)[]
+            {
+                ("the saved signals out of their saved order", EditI2c([scl.Selection, sda.Selection])),
+                ("a kept saved signal listed twice", EditI2c([sda.Selection, sda.Selection, scl.Selection])),
+                ("a drawn signal before the kept ones", EditI2c([alert.Selection, sda.Selection, scl.Selection], alert)),
+                ("a drawn signal between the kept ones", EditI2c([sda.Selection, alert.Selection, scl.Selection], alert)),
+                ("a saved signal of another connection", EditI2c([sda.Selection, gnd.Selection])),
+                ("a signal drawn for another connection", EditI2c([sda.Selection, scl.Selection, vbus.Selection], vbus) with
+                {
+                    ConnectionDrafts = [links.StartDraft(i2cHead) with { Members = [sda.Selection, scl.Selection, vbus.Selection] },
+                        links.StartDraft(powerSaved) with { Members = [gnd.Selection, vbus.Selection] }]
+                }),
+            };
+            foreach (var (name, draft) in memberRefusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual("connection_member_edit_requires_member_path", refused.ErrorCode, name);
+            }
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "A refused member list writes nothing.");
+
             // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
             var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",
                 new(DiagramAnnotationTargetKind.Connection, gnd.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
@@ -1394,7 +1425,134 @@ public sealed class RecursiveEditorFileCommandTests
                     connection: i2c.ConnectionId, members: members));
                 Assert.IsFalse(refused.Success, code); Assert.AreEqual(code, refused.ErrorCode);
             }
+            // A removal of signals names only the connection and its signals: naming a block or a port, or asking to detach, fails closed.
+            foreach (var (name, request) in new (string Name, P.RecursiveFileRequest Request)[]
+            {
+                ("with a block", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, block: psu.BlockId, connection: i2c.ConnectionId, members: [sda.Selection.ConnectionId])),
+                ("with a port", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, boundary: f.Ports["PSU/Power"], members: [sda.Selection.ConnectionId])),
+                ("detaching", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, detach: true, members: [sda.Selection.ConnectionId])),
+            })
+            {
+                var refused = await Invoke(request);
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual("level_edit_target_missing", refused.ErrorCode, name);
+            }
             Assert.AreEqual(await File.ReadAllTextAsync(path), RecursiveBlockGraphXml.Write(removedGraph));
+
+            // A saved signal may also leave a connection draft directly (erratum L3), but the graph's own checks refuse the save while
+            // anything still points at it. I2C gains INT, the level gains an IRQ port that INT realizes, and a note is left on INT.
+            var interrupt = Signal("INT", i2c.ConnectionId, ends); var irq = Guid.NewGuid();
+            var onInterrupt = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Open drain; pulled up on the CPU side.",
+                new(DiagramAnnotationTargetKind.Connection, interrupt.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+            ConnectionSelection Root(RecursiveBlockGraph on, Guid id) => on.Inspect(on.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == id);
+            var withInterrupt = removedGraph.StartLevelDraft(removedGraph.SelectedRoot); var here = withInterrupt.Scope.LocalDiagram;
+            withInterrupt = withInterrupt with
+            {
+                Scope = withInterrupt.Scope with { Diagram = here with
+                {
+                    Interfaces = here.Interfaces.Add(new(irq, "IRQ", "Test-only interrupt output.")), Annotations = here.Notes.Add(onInterrupt),
+                    InterfaceRealizations = here.Realizations.Add(new(irq, DiagramRealizationState.Resolved,
+                        [InterfaceRealizationTarget.LocalConnection(interrupt.Selection.ConnectionId)], null, []))
+                } },
+                ConnectionDrafts = [removedGraph.Connections(system.BlockId).StartDraft(Root(removedGraph, i2c.ConnectionId)) with
+                    { Members = [sda.Selection, interrupt.Selection] }],
+                NewConnections = [interrupt]
+            };
+            var interruptSaved = await Invoke(SaveLevelRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], withInterrupt));
+            Assert.IsTrue(interruptSaved.Success, interruptSaved.ErrorMessage);
+            string interruptXml = await File.ReadAllTextAsync(path); var interruptGraph = RecursiveBlockGraphXml.Read(interruptXml);
+            var interruptLinks = interruptGraph.Connections(system.BlockId);
+            CollectionAssert.AreEqual(new[] { "SDA", "INT" }, interruptLinks.Inspect(Root(interruptGraph, i2c.ConnectionId)).Members
+                .Select(m => interruptLinks.Inspect(m).Name).ToArray(), "I2C keeps SDA and adds the signal drawn for it.");
+            // The same direct drop of INT, with the note still resolved or the IRQ realization still naming INT, and with neither.
+            RecursiveLevelDraft DropInterrupt(bool noteOnInterrupt, bool realizedByInterrupt)
+            {
+                var drop = interruptGraph.StartLevelDraft(interruptGraph.SelectedRoot); var local = drop.Scope.LocalDiagram;
+                return drop with
+                {
+                    Scope = drop.Scope with { Diagram = local with
+                    {
+                        Annotations = [.. local.Notes.Select(n => n.Id != onInterrupt.Id || noteOnInterrupt ? n
+                            : n with { Target = n.Target with { UnresolvedReason = "Target removed from this diagram level." } })],
+                        InterfaceRealizations = [.. local.Realizations.Select(r => r.InterfaceId != irq || realizedByInterrupt ? r
+                            : r with { State = DiagramRealizationState.Unknown, Targets = [], UnresolvedReason = "Realizing element was removed." })]
+                    } },
+                    ConnectionDrafts = [interruptLinks.StartDraft(Root(interruptGraph, i2c.ConnectionId)) with { Members = [sda.Selection] }]
+                };
+            }
+            foreach (var (name, draft, code) in new (string Name, RecursiveLevelDraft Draft, string Code)[]
+            {
+                ("a resolved note still targets INT", DropInterrupt(noteOnInterrupt: true, realizedByInterrupt: false), "invalid_recursive_block_graph"),
+                ("the IRQ realization still targets INT", DropInterrupt(noteOnInterrupt: false, realizedByInterrupt: true), "invalid_interface_realization"),
+            })
+            {
+                var refused = await Invoke(SaveLevelRequest(read, interruptSaved.SourceToken, interruptGraph.SelectedRoot, [interruptGraph.SelectedRoot], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(interruptXml, await File.ReadAllTextAsync(path), "A refused drop writes nothing.");
+            var directDrop = await Invoke(SaveLevelRequest(read, interruptSaved.SourceToken, interruptGraph.SelectedRoot, [interruptGraph.SelectedRoot],
+                DropInterrupt(noteOnInterrupt: false, realizedByInterrupt: false)));
+            Assert.IsTrue(directDrop.Success, directDrop.ErrorMessage);
+            var dropGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var dropLinks = dropGraph.Connections(system.BlockId);
+            var dropTop = dropGraph.Inspect(dropGraph.SelectedRoot);
+            CollectionAssert.AreEqual(new[] { sda.Selection }, dropLinks.Inspect(Root(dropGraph, i2c.ConnectionId)).Members.ToArray(), "INT left I2C.");
+            Assert.AreEqual("INT", dropLinks.Inspect(interrupt.Selection).Name, "INT's saved revision stays in history.");
+            Assert.IsNotNull(dropTop.LocalDiagram.Notes.Single(n => n.Id == onInterrupt.Id).Target.UnresolvedReason, "The note is kept, unresolved.");
+            Assert.AreEqual(DiagramRealizationState.Unknown, dropTop.LocalDiagram.Realizations.Single(r => r.InterfaceId == irq).State);
+
+            // A rebase carries drawn signals with their root (erratum, section 4.8): a drawn root keeps its signals, and a saved root's
+            // connection draft carries the signals drawn for it. Another writer's change elsewhere composes with them; a change to that
+            // same saved root is a connection conflict with no candidate, so nothing drawn is dropped.
+            async Task<string> Rename(RecursiveBlockGraph on, string at, Guid connection, string name)
+            {
+                var other = on.StartLevelDraft(on.SelectedRoot);
+                other = other with { ConnectionDrafts = [on.Connections(system.BlockId).StartDraft(Root(on, connection)) with { Name = name }] };
+                var written = await Invoke(SaveLevelRequest(read, at, on.SelectedRoot, [on.SelectedRoot], other));
+                Assert.IsTrue(written.Success, written.ErrorMessage);
+                return written.SourceToken;
+            }
+            var wake = Signal("WAKE", i2c.ConnectionId, ends); var reset = Fresh(); var nrst = Signal("nRST", reset.ConnectionId, ends);
+            var mine = dropGraph.StartLevelDraft(dropGraph.SelectedRoot);
+            mine = mine with
+            {
+                Scope = mine.Scope with { Diagram = mine.Scope.LocalDiagram with { Connections = mine.Scope.LocalDiagram.Connections.Add(reset) } },
+                ConnectionDrafts = [dropLinks.StartDraft(Root(dropGraph, i2c.ConnectionId)) with { Members = [sda.Selection, wake.Selection] }],
+                NewConnections = [wake, new(reset, Guid.NewGuid(), "Initial", "Reset", DiagramConnectionKind.SignalGroup, DiagramDomain.Control,
+                    DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null), nrst]
+            };
+            var telemetry = f.Links["System/Telemetry"].ConnectionId;
+            await Rename(dropGraph, directDrop.SourceToken, telemetry, "Telemetry bus");
+            var carried = await Invoke(RebaseLevelRequest(read, "", mine));
+            Assert.IsTrue(carried.Success, carried.ErrorMessage); Assert.IsEmpty(carried.LevelMerge.Conflicts);
+            var candidate = RecursiveBlockCodec.Decode(carried.LevelMerge.Candidate, graph.DocumentId);
+            CollectionAssert.AreEqual(new[] { "WAKE", "Reset", "nRST" }, candidate.NewConnections.Select(c => c.Name).ToArray(),
+                "The drawn signals and the drawn root are kept.");
+            CollectionAssert.AreEqual(new[] { sda.Selection, wake.Selection }, candidate.ConnectionDrafts.Single().Members.ToArray(),
+                "I2C's draft still lists WAKE after the saved SDA.");
+            var carriedSaved = await Invoke(SaveLevelRequest(read, carried.SourceToken, candidate.Scope.Baseline, [candidate.Scope.Baseline], candidate));
+            Assert.IsTrue(carriedSaved.Success, carriedSaved.ErrorMessage);
+            var signalGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var signalLinks = signalGraph.Connections(system.BlockId);
+            Assert.AreEqual("Telemetry bus", signalLinks.Inspect(Root(signalGraph, telemetry)).Name, "The other writer's change is kept.");
+            CollectionAssert.AreEqual(new[] { "SDA", "WAKE" }, signalLinks.Inspect(Root(signalGraph, i2c.ConnectionId)).Members
+                .Select(m => signalLinks.Inspect(m).Name).ToArray());
+            CollectionAssert.AreEqual(new[] { "nRST" }, signalLinks.Inspect(Root(signalGraph, reset.ConnectionId)).Members
+                .Select(m => signalLinks.Inspect(m).Name).ToArray());
+            var sleep = Signal("SLEEP", i2c.ConnectionId, ends);
+            var mineAgain = signalGraph.StartLevelDraft(signalGraph.SelectedRoot);
+            mineAgain = mineAgain with
+            {
+                ConnectionDrafts = [signalLinks.StartDraft(Root(signalGraph, i2c.ConnectionId)) with { Members = [sda.Selection, wake.Selection, sleep.Selection] }],
+                NewConnections = [sleep]
+            };
+            await Rename(signalGraph, carriedSaved.SourceToken, i2c.ConnectionId, "I2C bus");
+            string renamedXml = await File.ReadAllTextAsync(path);
+            var clash = await Invoke(RebaseLevelRequest(read, "", mineAgain));
+            Assert.IsTrue(clash.Success, clash.ErrorMessage); Assert.IsNull(clash.LevelMerge.Candidate, "No candidate drops SLEEP.");
+            var connectionConflict = clash.LevelMerge.Conflicts.Single();
+            Assert.AreEqual((P.LevelConflictKind.LckConnection, i2c.ConnectionId.ToString("D")), (connectionConflict.Kind, connectionConflict.ObjectId));
+            Assert.AreEqual(renamedXml, await File.ReadAllTextAsync(path), "A rebase never writes.");
         }
         finally { Directory.Delete(root, true); }
     }

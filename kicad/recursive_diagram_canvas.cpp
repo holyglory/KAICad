@@ -8,21 +8,246 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
-#include <wx/button.h>
 #include <wx/control.h>
 #include <wx/dc.h>
 #include <wx/dcbuffer.h>
 #include <wx/dcclient.h>
+#include <wx/dcgraph.h>
+#include <wx/image.h>
+#include <wx/graphics.h>
 #include <wx/menu.h>
 #include <wx/textctrl.h>
 #include <wx/sizer.h>
 #include <wx/settings.h>
-#include <wx/statline.h>
 #include <wx/tglbtn.h>
+#include <memory>
+#include <set>
+#include <tuple>
+#if defined( __WXGTK__ )
+#include <dlfcn.h>
+#endif
 
 namespace RECURSIVE_DIAGRAM
 {
 std::string FreshId() { return Utf8( KIID().AsString() ); }
+
+namespace
+{
+double channel( unsigned char value )
+{
+    double v = value / 255.0;
+    return v <= 0.03928 ? v / 12.92 : std::pow( ( v + 0.055 ) / 1.055, 2.4 );
+}
+double luminance( const wxColour& colour )
+{
+    return 0.2126 * channel( colour.Red() ) + 0.7152 * channel( colour.Green() ) + 0.0722 * channel( colour.Blue() );
+}
+struct HSL { double h = 0, s = 0, l = 0; };
+HSL toHsl( const wxColour& colour )
+{
+    double r = colour.Red() / 255.0, g = colour.Green() / 255.0, b = colour.Blue() / 255.0;
+    double high = std::max( { r, g, b } ), low = std::min( { r, g, b } );
+    HSL result; result.l = ( high + low ) / 2;
+    if( high == low ) return result;
+    double d = high - low;
+    result.s = result.l > 0.5 ? d / ( 2 - high - low ) : d / ( high + low );
+    if( high == r ) result.h = ( g - b ) / d + ( g < b ? 6 : 0 );
+    else if( high == g ) result.h = ( b - r ) / d + 2;
+    else result.h = ( r - g ) / d + 4;
+    result.h /= 6;
+    return result;
+}
+wxColour fromHsl( const HSL& hsl )
+{
+    auto hue = []( double p, double q, double t )
+    {
+        if( t < 0 ) t += 1;
+        if( t > 1 ) t -= 1;
+        if( t < 1.0 / 6 ) return p + ( q - p ) * 6 * t;
+        if( t < 0.5 ) return q;
+        if( t < 2.0 / 3 ) return p + ( q - p ) * ( 2.0 / 3 - t ) * 6;
+        return p;
+    };
+    double l = std::clamp( hsl.l, 0.0, 1.0 ), r = l, g = l, b = l;
+    if( hsl.s > 0 )
+    {
+        double q = l < 0.5 ? l * ( 1 + hsl.s ) : l + hsl.s - l * hsl.s, p = 2 * l - q;
+        r = hue( p, q, hsl.h + 1.0 / 3 ); g = hue( p, q, hsl.h ); b = hue( p, q, hsl.h - 1.0 / 3 );
+    }
+    auto byte = []( double v ) { return static_cast<unsigned char>( std::lround( std::clamp( v, 0.0, 1.0 ) * 255 ) ); };
+    return wxColour( byte( r ), byte( g ), byte( b ) );
+}
+wxColour mix( const wxColour& a, const wxColour& b, double weightOfA )
+{
+    auto one = [&]( unsigned char x, unsigned char y ) { return static_cast<unsigned char>( std::lround( x * weightOfA + y * ( 1 - weightOfA ) ) ); };
+    return wxColour( one( a.Red(), b.Red() ), one( a.Green(), b.Green() ), one( a.Blue(), b.Blue() ) );
+}
+}
+
+double Contrast( const wxColour& a, const wxColour& b )
+{
+    double x = luminance( a ), y = luminance( b );
+    return ( std::max( x, y ) + 0.05 ) / ( std::min( x, y ) + 0.05 );
+}
+
+bool IsDark( const wxColour& surface ) { return surface.Red() + surface.Green() + surface.Blue() < 384; }
+
+wxColour Readable( const wxColour& colour, std::initializer_list<wxColour> against, double minimum )
+{
+    auto worst = [&]( const wxColour& candidate )
+    {
+        double result = 21;
+        for( const wxColour& surface : against ) result = std::min( result, Contrast( candidate, surface ) );
+        return result;
+    };
+    if( worst( colour ) >= minimum ) return colour;
+    HSL hsl = toHsl( colour );
+    wxColour best = colour; double bestContrast = worst( colour );
+    for( int step = 1; step <= 100; ++step )
+        for( int sign : { 1, -1 } )
+        {
+            HSL moved = hsl; moved.l += sign * step * 0.01;
+            if( moved.l < 0 || moved.l > 1 ) continue;
+            wxColour candidate = fromHsl( moved ); double reached = worst( candidate );
+            if( reached >= minimum ) return candidate;
+            if( reached > bestContrast ) { best = candidate; bestContrast = reached; }
+        }
+    return best;
+}
+
+ACCENT_FILL AccentFill( const wxColour& accent, const wxColour& surface )
+{
+    const wxColour white( 255, 255, 255 ), ink( 26, 26, 26 );
+    HSL base = toHsl( accent );
+    std::optional<ACCENT_FILL> inked;
+    for( int step = 0; step <= 100; ++step )
+        for( int sign : { 1, -1 } )
+        {
+            if( step == 0 && sign < 0 ) continue;
+            HSL moved = base; moved.l += sign * step * 0.01;
+            if( moved.l < 0.1 || moved.l > 0.9 ) continue;
+            wxColour fill = fromHsl( moved );
+            // 3:1 with a little to spare, so the rendered fill never lands just under it.
+            if( Contrast( fill, surface ) < 3.2 ) continue;
+            if( Contrast( white, fill ) >= 4.5 ) return { fill, white };
+            if( !inked && Contrast( ink, fill ) >= 4.5 ) inked = ACCENT_FILL{ fill, ink };
+        }
+    if( inked ) return *inked;
+    return { accent, Contrast( white, accent ) >= Contrast( ink, accent ) ? white : ink };
+}
+
+CANVAS_COLOURS CanvasColours()
+{
+    CANVAS_COLOURS colours;
+    colours.background = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    colours.foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+    colours.muted = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    colours.dark = IsDark( colours.background );
+    // The theme's selection colour, lightened on a dark canvas until selected items stand out from it (design QA P1-1:
+    // the dark theme's own blue reached only 1.8:1 there, less than an unselected wire).
+    colours.accent = Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), { colours.background }, colours.dark ? 4.5 : 3.0 );
+    // The selected block's fill is a tint of the accent over the canvas, light enough that the accent outline and handles
+    // stay 3:1 or more from it.
+    double weight = 0.25;
+    colours.selectedFill = mix( colours.accent, colours.background, weight );
+    while( weight > 0.05 && Contrast( colours.accent, colours.selectedFill ) < 3.2 )
+    { weight -= 0.01; colours.selectedFill = mix( colours.accent, colours.background, weight ); }
+    colours.blockFill = colours.background.ChangeLightness( colours.dark ? 120 : 97 );
+    // White handles with an accent outline, as the sketch; on a dark canvas the handles take the canvas's foreground.
+    colours.handleFill = colours.dark ? colours.foreground : colours.background;
+    return colours;
+}
+
+void PadTextBox( wxTextCtrl* control, int horizontal, int vertical )
+{
+    if( !control->IsMultiLine() ) { control->SetMargins( horizontal, vertical ); return; }
+#if defined( __WXGTK__ )
+    // wxGTK 3.2 applies SetMargins to single-line entries only. A multi-line entry is a GtkTextView inside the GtkScrolledWindow
+    // that GetHandle() returns; its margins are set through the GTK the toolkit already runs on, looked up at run time so no
+    // GTK header is needed here. A missing function leaves the text where GTK puts it.
+    using CHILD = void* ( * )( void* );
+    using MARGIN = void ( * )( void*, int );
+    static const auto child = reinterpret_cast<CHILD>( dlsym( RTLD_DEFAULT, "gtk_bin_get_child" ) );
+    static const auto left = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_left_margin" ) );
+    static const auto right = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_right_margin" ) );
+    static const auto top = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_top_margin" ) );
+    static const auto bottom = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_bottom_margin" ) );
+    void* view = child && control->GetHandle() ? child( control->GetHandle() ) : nullptr;
+    if( !view ) return;
+    if( left ) left( view, horizontal );
+    if( right ) right( view, horizontal );
+    if( top ) top( view, vertical );
+    if( bottom ) bottom( view, vertical );
+#else
+    control->SetMargins( horizontal, vertical );
+#endif
+}
+
+void DrawGlyph( wxDC& dc, GLYPH glyph, const wxRect& box, const wxColour& colour )
+{
+    // A 24-unit design grid scaled to the box; strokes are about 1.75 units wide with round ends. A graphics DC (a platform
+    // button the editor paints, see PaintNatively) lends its own context; any other DC gets one of its own.
+    std::unique_ptr<wxGraphicsContext> owned;
+    wxGraphicsContext* gc = nullptr;
+    if( auto* graphics = dynamic_cast<wxGCDC*>( &dc ) ) gc = graphics->GetGraphicsContext();
+    else { owned.reset( wxGraphicsContext::CreateFromUnknownDC( dc ) ); gc = owned.get(); }
+    if( !gc ) return;
+    // The DC's own pen and brush are applied again after the glyph, so the DC draws on as before.
+    struct RESTORE
+    {
+        wxDC& dc;
+        ~RESTORE() { dc.SetPen( dc.GetPen() ); dc.SetBrush( dc.GetBrush() ); }
+    } restore{ dc };
+    gc->SetAntialiasMode( wxANTIALIAS_DEFAULT );
+    const double s = std::min( box.width, box.height ) / 24.0;
+    const double ox = box.x + ( box.width - 24 * s ) / 2, oy = box.y + ( box.height - 24 * s ) / 2;
+    auto X = [&]( double x ) { return ox + x * s; };
+    auto Y = [&]( double y ) { return oy + y * s; };
+    gc->SetPen( gc->CreatePen( wxGraphicsPenInfo( colour ).Width( std::max( 1.5, 1.75 * s ) ).Cap( wxCAP_ROUND ).Join( wxJOIN_ROUND ) ) );
+    gc->SetBrush( *wxTRANSPARENT_BRUSH );
+    wxGraphicsPath path = gc->CreatePath();
+    switch( glyph )
+    {
+    case GLYPH::SELECT:
+    {
+        const double points[][2] = { { 6, 3 }, { 6, 19 }, { 10, 15.2 }, { 13, 21.5 }, { 15.6, 20.3 }, { 12.6, 14 }, { 18, 14 } };
+        path.MoveToPoint( X( points[0][0] ), Y( points[0][1] ) );
+        for( size_t i = 1; i < std::size( points ); ++i ) path.AddLineToPoint( X( points[i][0] ), Y( points[i][1] ) );
+        path.CloseSubpath();
+        gc->SetBrush( gc->CreateBrush( wxBrush( colour ) ) );
+        gc->DrawPath( path );
+        return;
+    }
+    case GLYPH::ADD_BLOCK:
+        path.AddRoundedRectangle( X( 3.5 ), Y( 6 ), 17 * s, 12 * s, 1.5 * s );
+        break;
+    case GLYPH::CONNECT:
+        path.MoveToPoint( X( 6.8 ), Y( 17.2 ) ); path.AddLineToPoint( X( 17.2 ), Y( 6.8 ) );
+        path.AddCircle( X( 5 ), Y( 19 ), 2.5 * s ); path.AddCircle( X( 19 ), Y( 5 ), 2.5 * s );
+        break;
+    case GLYPH::PORT:
+        // A hollow square with a short lead, like a port on the canvas.
+        path.AddRectangle( X( 10 ), Y( 7.5 ), 9 * s, 9 * s );
+        path.MoveToPoint( X( 3 ), Y( 12 ) ); path.AddLineToPoint( X( 10 ), Y( 12 ) );
+        break;
+    case GLYPH::REMOVE:
+        path.MoveToPoint( X( 4 ), Y( 6.5 ) ); path.AddLineToPoint( X( 20 ), Y( 6.5 ) );
+        path.MoveToPoint( X( 9.5 ), Y( 6.5 ) ); path.AddLineToPoint( X( 9.5 ), Y( 3.8 ) );
+        path.AddLineToPoint( X( 14.5 ), Y( 3.8 ) ); path.AddLineToPoint( X( 14.5 ), Y( 6.5 ) );
+        path.MoveToPoint( X( 6.5 ), Y( 6.5 ) ); path.AddLineToPoint( X( 7.6 ), Y( 20.5 ) );
+        path.AddLineToPoint( X( 16.4 ), Y( 20.5 ) ); path.AddLineToPoint( X( 17.5 ), Y( 6.5 ) );
+        path.MoveToPoint( X( 10.3 ), Y( 10 ) ); path.AddLineToPoint( X( 10.3 ), Y( 17 ) );
+        path.MoveToPoint( X( 13.7 ), Y( 10 ) ); path.AddLineToPoint( X( 13.7 ), Y( 17 ) );
+        break;
+    case GLYPH::UNDO:
+        path.MoveToPoint( X( 9 ), Y( 5 ) ); path.AddLineToPoint( X( 5 ), Y( 9 ) ); path.AddLineToPoint( X( 9 ), Y( 13 ) );
+        path.MoveToPoint( X( 5 ), Y( 9 ) ); path.AddLineToPoint( X( 14 ), Y( 9 ) );
+        path.AddArc( X( 14 ), Y( 14 ), 5 * s, -M_PI / 2, M_PI / 2, true );
+        path.AddLineToPoint( X( 8 ), Y( 19 ) );
+        break;
+    }
+    gc->StrokePath( path );
+}
 
 void EditorOrigin( D::DiagramRevisionOriginData* origin, const std::string& summary )
 {
@@ -181,6 +406,8 @@ LEVEL_LAYOUT::LEVEL_LAYOUT( std::string scope, std::vector<BOUNDARY> scopeInterf
                     && route.endpoint_index() < static_cast<unsigned>( link.endpoints.size() ) )
                 { m_routes.push_back( route ); ++active; break; }
     m_dormant = entries > active ? entries - active : 0;
+    placeBlockEnds();
+    placePaths();
 }
 
 const NODE* LEVEL_LAYOUT::Node( const std::string& id ) const
@@ -228,8 +455,327 @@ POINT LEVEL_LAYOUT::Anchor( const D::DiagramEndpointBindingData& endpoint, int64
         for( int64_t k = 0; k < count; ++k ) if( node->interfaces[k].id == endpoint.interface_id() ) index = k;
     if( endpoint.has_interface_id() && index < count )
         if( const PORT* port = Port( node->id, endpoint.interface_id() ); port && port->placed ) return port->anchor;
-    // Rule F2: the edge facing the peer, at the legacy offset.
-    return { rect.x + rect.w / 2 < peerX ? rect.Right() : rect.x, rect.y + ( index + 1 ) * rect.h / std::max<int64_t>( 2, count + 1 ) };
+    int64_t x = rect.x + rect.w / 2 < peerX ? rect.Right() : rect.x;
+    // Rule F2: a port on the edge facing the peer, at the legacy offset.
+    if( index < count ) return { x, rect.y + ( index + 1 ) * rect.h / std::max<int64_t>( 2, count + 1 ) };
+    // An end on the block itself that is not part of a connection yet (the Connect preview): the middle of that edge.
+    return { x, rect.y + rect.h / 2 };
+}
+bool LEVEL_LAYOUT::isBlockEnd( const D::DiagramEndpointBindingData& endpoint ) const
+{
+    if( endpoint.block_id() == m_scope ) return false;
+    const NODE* node = Node( endpoint.block_id() );
+    if( !node ) return false;
+    if( !endpoint.has_interface_id() ) return true;
+    return std::none_of( node->interfaces.begin(), node->interfaces.end(), [&]( const BOUNDARY& port ) { return port.id == endpoint.interface_id(); } );
+}
+D::DiagramPortSide LEVEL_LAYOUT::facing( const D::DiagramEndpointBindingData& endpoint, const D::DiagramEndpointBindingData& peer ) const
+{
+    RECT rect = Rect( endpoint.block_id() );
+    return rect.x + rect.w / 2 < centreX( peer ) ? D::DPS_RIGHT : D::DPS_LEFT;
+}
+int64_t LEVEL_LAYOUT::referenceY( const D::DiagramEndpointBindingData& endpoint ) const
+{
+    if( endpoint.block_id() == m_scope ) return Anchor( endpoint, 0 ).y;
+    if( !isBlockEnd( endpoint ) ) if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ) ) return port->anchor.y;
+    RECT rect = Rect( endpoint.block_id() );
+    return rect.y + rect.h / 2;
+}
+void LEVEL_LAYOUT::placeBlockEnds()
+{
+    // Rule F2 for an end on a block itself (design QA P2-5; the legacy k = n put every such end on the block's bottom corner
+    // once it had a port, and gave all of them one shared point). The ends on one edge of one block get their own points: with
+    // p ports on that edge (the block's placed ports on it and all of its unplaced ports) and m such ends, the edge is divided
+    // into p + m + 1 equal steps rounded to the unit; each port, in order of its offset, takes the step point nearest to it
+    // (the lower on a tie), and the ends take the m points left, in order of their peers' heights and then level order. An
+    // end shared by several legs of one connection is one end. A single end on a block without ports stays at the middle.
+    struct ATTACH { std::string link; int endpoint = 0; int side = 0; int64_t peerY = 0; size_t order = 0; };
+    std::map<std::pair<std::string, int>, std::vector<ATTACH>> edges;
+    std::set<std::tuple<std::string, int, int>> seen;
+    size_t order = 0;
+    for( const auto& link : m_links )
+        for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
+            for( auto [end, peer] : { std::pair<int, int>{ 0, leg }, std::pair<int, int>{ leg, 0 } } )
+            {
+                const auto& endpoint = link.endpoints[end];
+                if( !isBlockEnd( endpoint ) ) continue;
+                int side = static_cast<int>( facing( endpoint, link.endpoints[peer] ) );
+                if( !seen.insert( { link.id, end, side } ).second ) continue;
+                edges[{ endpoint.block_id(), side }].push_back( { link.id, end, side, referenceY( link.endpoints[peer] ), order++ } );
+            }
+    for( auto& [edge, ends] : edges )
+    {
+        RECT rect = Rect( edge.first );
+        std::vector<int64_t> occupied;
+        for( const auto& port : m_ports )
+            if( !port.boundary && port.blockId == edge.first && ( !port.placed || static_cast<int>( port.side ) == edge.second ) )
+                occupied.push_back( port.offset );
+        std::sort( occupied.begin(), occupied.end() );
+        const int64_t count = static_cast<int64_t>( occupied.size() + ends.size() ), steps = count + 1;
+        std::vector<int64_t> points;
+        for( int64_t j = 1; j <= count; ++j ) points.push_back( ( rect.h * j / steps + QUANTUM / 2 ) / QUANTUM * QUANTUM );
+        for( int64_t offset : occupied )
+        {
+            size_t nearest = 0;
+            for( size_t k = 1; k < points.size(); ++k ) if( std::llabs( points[k] - offset ) < std::llabs( points[nearest] - offset ) ) nearest = k;
+            if( !points.empty() ) points.erase( points.begin() + static_cast<std::ptrdiff_t>( nearest ) );
+        }
+        std::stable_sort( ends.begin(), ends.end(), []( const ATTACH& a, const ATTACH& b )
+                          { return a.peerY != b.peerY ? a.peerY < b.peerY : a.order < b.order; } );
+        for( size_t k = 0; k < ends.size() && k < points.size(); ++k )
+            m_blockEnds[{ ends[k].link, ends[k].endpoint, ends[k].side }] = { edge.second == D::DPS_RIGHT ? rect.Right() : rect.x, rect.y + points[k] };
+    }
+}
+POINT LEVEL_LAYOUT::EndAnchor( const LINK& link, int endpoint, int leg ) const
+{
+    const auto& end = link.endpoints[endpoint];
+    const auto& peer = link.endpoints[endpoint == 0 ? leg : 0];
+    if( isBlockEnd( end ) )
+        if( auto found = m_blockEnds.find( { link.id, endpoint, static_cast<int>( facing( end, peer ) ) } ); found != m_blockEnds.end() )
+            return found->second;
+    return Anchor( end, centreX( peer ) );
+}
+int LEVEL_LAYOUT::normal( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
+{
+    // Which way a path leaves an end (rule F4c): +1 to the right, -1 to the left, 0 for an end on a top or bottom side. A
+    // child block's end points out of the block; a boundary port points into the level.
+    auto side = []( D::DiagramPortSide portSide, bool boundary ) -> int
+    {
+        if( portSide == D::DPS_LEFT ) return boundary ? 1 : -1;
+        if( portSide == D::DPS_RIGHT ) return boundary ? -1 : 1;
+        return 0;
+    };
+    if( endpoint.block_id() == m_scope )
+    {
+        if( endpoint.has_interface_id() )
+            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return side( port->side, true );
+        return 1;
+    }
+    if( endpoint.has_interface_id() )
+        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return side( port->side, false );
+    return at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1;
+}
+std::string LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
+{
+    return endpoint.block_id() != m_scope && Node( endpoint.block_id() ) ? endpoint.block_id() : std::string();
+}
+void LEVEL_LAYOUT::placePaths()
+{
+    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
+    // (two waypoints on one vertical line) runs level from each of its ends to its channel, so a route stored against ends
+    // that have since moved never draws a slanted leg (F4b). A computed leg is the three-segment path from, (x, from.y),
+    // (x, to.y), to, whose channel x is chosen so that the leg leaves each block along its edge before turning (F4c) and
+    // keeps apart from the other legs (F4a):
+    //  - An end on a block's left or right edge, or on a boundary port, needs the channel at least 20 units out along its
+    //    edge. The preferred channel is the middle between the ends moved into those limits; the candidates are it and every
+    //    channel 10k units from it inside the limits (up to 200 units past the ends on an open side). When the limits of the
+    //    two ends cannot both hold, the preferred channel is the middle and the candidates stay 10 units inside the ends.
+    //  - A candidate scores, in this order: the runs beside another leg (its vertical leg within 10 units of another vertical
+    //    leg over heights they share or meet at; its horizontal leg on the height of another leg's horizontal segment that
+    //    overlaps it or ends within 10 units of it, unless that other leg starts or ends at the same point), the blocks its
+    //    segments come within 10 units of (a segment leaving an end does not count that end's own block), the other legs it
+    //    crosses, and its distance from the preferred channel; then the lower channel.
+    //  - Stored routes are laid out first, then the computed legs in level order, each taking its best candidate against the
+    //    legs laid out before it. Then, up to four times over, each computed leg still running beside another is laid out
+    //    again together with each computed leg it runs beside, over every pair of their candidates, against all the other
+    //    legs; a pair is taken when its summed score is lower than the pair's current one (the first such lowest pair, in
+    //    candidate order).
+    const int64_t apart = 10 * QUANTUM, stub = 20 * QUANTUM, reach = 200 * QUANTUM;
+    struct PATH { std::vector<POINT> points; };
+    struct LEG
+    {
+        std::pair<std::string, int> key;
+        POINT from, to;
+        std::string fromBlock, toBlock;
+        int64_t preferred = 0;
+        std::vector<int64_t> candidates;
+    };
+    struct SCORE
+    {
+        int64_t conflicts = 0, contacts = 0, crossings = 0, distance = 0;
+        SCORE operator+( const SCORE& other ) const
+        {
+            return { conflicts + other.conflicts, contacts + other.contacts, crossings + other.crossings, distance + other.distance };
+        }
+        bool operator<( const SCORE& other ) const
+        {
+            return std::tie( conflicts, contacts, crossings, distance ) < std::tie( other.conflicts, other.contacts, other.crossings, other.distance );
+        }
+    };
+    std::vector<PATH> stored;
+    std::vector<LEG> legs;
+    for( const auto& link : m_links )
+        for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
+        {
+            const POINT from = EndAnchor( link, 0, leg ), to = EndAnchor( link, leg, leg );
+            const D::DiagramConnectionRouteData* route = nullptr;
+            for( const auto& row : m_routes )
+                if( row.connection_id() == link.id && row.endpoint_index() == static_cast<unsigned>( leg ) ) { route = &row; break; }
+            if( route )
+            {
+                std::vector<POINT> waypoints;
+                for( const auto& waypoint : route->waypoints() )
+                { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) waypoints.push_back( point ); }
+                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x ) { waypoints[0].y = from.y; waypoints[1].y = to.y; }
+                std::vector<POINT> points{ from };
+                points.insert( points.end(), waypoints.begin(), waypoints.end() );
+                points.push_back( to );
+                m_paths[{ link.id, leg }] = points; stored.push_back( { std::move( points ) } );
+                continue;
+            }
+            LEG item{ { link.id, leg }, from, to, ownBlock( link.endpoints[0] ), ownBlock( link.endpoints[leg] ), 0, {} };
+            std::optional<int64_t> low, high;
+            for( const auto& [endpoint, at] : { std::pair{ &link.endpoints[0], from }, std::pair{ &link.endpoints[leg], to } } )
+            {
+                int direction = normal( *endpoint, at );
+                if( direction > 0 ) low = low ? std::max( *low, at.x + stub ) : at.x + stub;
+                else if( direction < 0 ) high = high ? std::min( *high, at.x - stub ) : at.x - stub;
+            }
+            int64_t left, right, preferred = ( from.x + to.x ) / 2;
+            if( !low || !high || *low <= *high )
+            {
+                if( low ) preferred = std::max( preferred, *low );
+                if( high ) preferred = std::min( preferred, *high );
+                left = low ? *low : std::min( from.x, to.x ) - reach;
+                right = high ? *high : std::max( from.x, to.x ) + reach;
+            }
+            else
+            {
+                left = std::min( from.x, to.x ) + apart; right = std::max( from.x, to.x ) - apart;
+            }
+            item.preferred = preferred; item.candidates = { preferred };
+            if( from.y != to.y )
+                for( int64_t k = 1; preferred - k * apart >= left || preferred + k * apart <= right; ++k )
+                    for( int64_t x : { preferred - k * apart, preferred + k * apart } )
+                        if( x >= left && x <= right ) item.candidates.push_back( x );
+            legs.push_back( std::move( item ) );
+        }
+    auto pathOf = []( const LEG& leg, int64_t x ) { return PATH{ { leg.from, { x, leg.from.y }, { x, leg.to.y }, leg.to } }; };
+    auto crosses = []( const POINT& a, const POINT& b, const POINT& c, const POINT& d )
+    {
+        auto one = []( const POINT& h1, const POINT& h2, const POINT& v1, const POINT& v2 )
+        {
+            return h1.y == h2.y && v1.x == v2.x && v1.x > std::min( h1.x, h2.x ) && v1.x < std::max( h1.x, h2.x )
+                   && h1.y > std::min( v1.y, v2.y ) && h1.y < std::max( v1.y, v2.y );
+        };
+        return one( a, b, c, d ) || one( c, d, a, b );
+    };
+    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
+    // How leg aLeg on channel aX runs beside and crosses one other drawn leg.
+    auto against = [&]( const LEG& leg, int64_t x, const PATH& other ) -> SCORE
+    {
+        SCORE score;
+        const PATH mine = pathOf( leg, x );
+        const int64_t top = std::min( leg.from.y, leg.to.y ), bottom = std::max( leg.from.y, leg.to.y );
+        const auto& points = other.points;
+        const POINT &otherFrom = points.front(), &otherTo = points.back();
+        for( size_t i = 1; i < points.size(); ++i )
+        {
+            const POINT &a = points[i - 1], &b = points[i];
+            if( same( a, b ) ) continue;
+            if( a.x == b.x && top != bottom )
+            {
+                if( std::llabs( a.x - x ) < apart && std::min( std::max( a.y, b.y ), bottom ) >= std::max( std::min( a.y, b.y ), top ) ) ++score.conflicts;
+            }
+            else if( a.y == b.y )
+            {
+                for( const auto& [y, x1, x2, anchor] : { std::tuple{ leg.from.y, std::min( leg.from.x, x ), std::max( leg.from.x, x ), leg.from },
+                                                         std::tuple{ leg.to.y, std::min( leg.to.x, x ), std::max( leg.to.x, x ), leg.to } } )
+                {
+                    if( x1 == x2 || a.y != y || same( anchor, otherFrom ) || same( anchor, otherTo ) ) continue;
+                    if( std::max( std::min( a.x, b.x ), x1 ) - std::min( std::max( a.x, b.x ), x2 ) < apart ) ++score.conflicts;
+                }
+            }
+            for( size_t j = 1; j < mine.points.size(); ++j ) if( crosses( mine.points[j - 1], mine.points[j], a, b ) ) ++score.crossings;
+        }
+        return score;
+    };
+    // Its own part of the score: the blocks it comes near and its distance from the preferred channel.
+    auto alone = [&]( const LEG& leg, int64_t x ) -> SCORE
+    {
+        SCORE score;
+        const PATH mine = pathOf( leg, x );
+        for( size_t j = 1; j < mine.points.size(); ++j )
+        {
+            const POINT &a = mine.points[j - 1], &b = mine.points[j];
+            if( same( a, b ) ) continue;
+            for( size_t n = 0; n < m_nodes.size(); ++n )
+            {
+                if( ( j == 1 && m_nodes[n].id == leg.fromBlock ) || ( j == 3 && m_nodes[n].id == leg.toBlock ) ) continue;
+                const RECT& r = m_rects[n];
+                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
+                    && std::min( a.y, b.y ) < r.Bottom() + apart )
+                    ++score.contacts;
+            }
+        }
+        score.distance = std::llabs( x - leg.preferred );
+        return score;
+    };
+    auto cost = [&]( const LEG& leg, int64_t x, const std::vector<const PATH*>& others )
+    {
+        SCORE score = alone( leg, x );
+        for( const PATH* other : others ) score = score + against( leg, x, *other );
+        return score;
+    };
+    std::vector<int64_t> chosen( legs.size() );
+    std::vector<PATH> placed;
+    auto others = [&]( size_t skipA, size_t skipB )
+    {
+        std::vector<const PATH*> result;
+        for( const auto& path : stored ) result.push_back( &path );
+        for( size_t i = 0; i < placed.size(); ++i ) if( i != skipA && i != skipB ) result.push_back( &placed[i] );
+        return result;
+    };
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        auto before = others( SIZE_MAX, SIZE_MAX );
+        std::optional<SCORE> best; int64_t bestX = legs[i].preferred;
+        for( int64_t x : legs[i].candidates )
+        {
+            SCORE score = cost( legs[i], x, before );
+            if( !best || score < *best || ( !( *best < score ) && x < bestX ) ) { best = score; bestX = x; }
+        }
+        chosen[i] = bestX; placed.push_back( pathOf( legs[i], bestX ) );
+    }
+    for( int round = 0; round < 4; ++round )
+    {
+        bool improved = false;
+        for( size_t a = 0; a < legs.size(); ++a )
+        {
+            if( cost( legs[a], chosen[a], others( a, SIZE_MAX ) ).conflicts == 0 ) continue;
+            for( size_t b = 0; b < legs.size(); ++b )
+            {
+                // Only a leg this one runs beside is laid out again with it.
+                if( b == a || ( against( legs[a], chosen[a], placed[b] ).conflicts == 0 && against( legs[b], chosen[b], placed[a] ).conflicts == 0 ) )
+                    continue;
+                const auto rest = others( a, b );
+                std::vector<SCORE> baseA, baseB;
+                for( int64_t x : legs[a].candidates ) baseA.push_back( cost( legs[a], x, rest ) );
+                for( int64_t x : legs[b].candidates ) baseB.push_back( cost( legs[b], x, rest ) );
+                auto total = [&]( size_t i, size_t j )
+                {
+                    int64_t xa = legs[a].candidates[i], xb = legs[b].candidates[j];
+                    return baseA[i] + against( legs[a], xa, pathOf( legs[b], xb ) ) + baseB[j] + against( legs[b], xb, pathOf( legs[a], xa ) );
+                };
+                const SCORE current = cost( legs[a], chosen[a], rest ) + against( legs[a], chosen[a], placed[b] )
+                                      + cost( legs[b], chosen[b], rest ) + against( legs[b], chosen[b], placed[a] );
+                std::optional<std::tuple<SCORE, size_t, size_t>> found;
+                for( size_t i = 0; i < legs[a].candidates.size(); ++i )
+                    for( size_t j = 0; j < legs[b].candidates.size(); ++j )
+                    {
+                        SCORE score = total( i, j );
+                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
+                    }
+                if( !found ) continue;
+                chosen[a] = legs[a].candidates[std::get<1>( *found )]; chosen[b] = legs[b].candidates[std::get<2>( *found )];
+                placed[a] = pathOf( legs[a], chosen[a] ); placed[b] = pathOf( legs[b], chosen[b] );
+                improved = true;
+                if( std::get<0>( *found ).conflicts == 0 ) break;
+            }
+        }
+        if( !improved ) break;
+    }
+    for( size_t i = 0; i < legs.size(); ++i ) m_paths[legs[i].key] = placed[i].points;
 }
 bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
 {
@@ -249,18 +795,9 @@ std::optional<POINT> LEVEL_LAYOUT::RouteLabel( const std::string& id, int endpoi
 std::vector<POINT> LEVEL_LAYOUT::Route( const LINK& link, int index ) const
 {
     if( index < 1 || index >= static_cast<int>( link.endpoints.size() ) ) return {};
-    const auto& first = link.endpoints[0]; const auto& second = link.endpoints[index];
-    POINT from = Anchor( first, centreX( second ) ), to = Anchor( second, centreX( first ) );
-    for( const auto& route : m_routes )
-        if( route.connection_id() == link.id && route.endpoint_index() == static_cast<unsigned>( index ) )
-        {
-            std::vector<POINT> points{ from };
-            for( const auto& waypoint : route.waypoints() )
-            { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) points.push_back( point ); }
-            points.push_back( to );
-            return points;
-        }
-    // Rule F4: the legacy three-segment path.
+    if( auto found = m_paths.find( { link.id, index } ); found != m_paths.end() ) return found->second;
+    // A connection that is not on this level: the legacy three-segment path between its anchors.
+    POINT from = EndAnchor( link, 0, index ), to = EndAnchor( link, index, index );
     int64_t middle = ( from.x + to.x ) / 2;
     return { from, { middle, from.y }, { middle, to.y }, to };
 }
@@ -452,11 +989,31 @@ void DrawChoiceMark( wxDC& dc, const wxRect& box, D::DefinitionChoiceStateData s
     }
 }
 
+CAPTION BlockCaption( wxDC& dc, const NODE& node, const wxRect& inner, const wxFont& captionFont )
+{
+    // Design QA P2-7: text keeps its size while a zoomed-out block shrinks, so the caption moves up (a third of the way down a
+    // small block, 24 pixels down a full one), is shortened with "…" to the block's width, and is drawn whole or not at all.
+    dc.SetFont( captionFont );
+    CAPTION caption;
+    const int height = dc.GetCharHeight(), left = inner.x + 10, width = inner.GetRight() - 4 - left + 1;
+    const int top = inner.y + std::clamp( inner.height / 3 - height / 2, 0, 24 );
+    if( width < dc.GetTextExtent( wxS( "W…" ) ).x || top + height > inner.GetBottom() + 1 ) return caption;
+    caption.text = wxControl::Ellipsize( Text( node.name ), dc, wxELLIPSIZE_END, width );
+    caption.rect = wxRect( wxPoint( left, top ), wxSize( dc.GetTextExtent( caption.text ).x, height ) );
+    return caption;
+}
+
 wxRect CaptionRect( wxDC& dc, const NODE& node, const wxRect& inner, const wxFont& captionFont )
 {
-    dc.SetFont( captionFont );
-    wxSize extent = dc.GetTextExtent( Text( node.name ) );
-    return wxRect( wxPoint( inner.x + 10, inner.y + 24 ), extent ).Intersect( inner );
+    return BlockCaption( dc, node, inner, captionFont ).rect;
+}
+
+wxRect VersionRect( wxDC& dc, const wxString& text, const wxRect& inner, const wxRect& caption )
+{
+    if( caption.IsEmpty() ) return wxRect();
+    // 34 pixels below the caption's top, as a full block has always drawn it (58 pixels down its content area).
+    wxRect line( wxPoint( inner.x + 10, caption.y + 34 ), dc.GetTextExtent( text ) );
+    return inner.Contains( line ) ? line : wxRect();
 }
 
 std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height )
@@ -490,13 +1047,14 @@ std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int 
 
 wxRect PortNameRect( wxDC& dc, const wxString& name, D::DiagramPortSide side, const wxPoint& at )
 {
+    // Clear of the port's 12-pixel square (design QA P2-6) by 4 pixels.
     wxSize extent = dc.GetTextExtent( name );
     switch( side )
     {
-    case D::DPS_RIGHT: return wxRect( wxPoint( at.x - extent.x - 8, at.y - extent.y / 2 ), extent );
-    case D::DPS_TOP: return wxRect( wxPoint( at.x - extent.x / 2, at.y + 6 ), extent );
-    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x - extent.x / 2, at.y - extent.y - 6 ), extent );
-    default: return wxRect( wxPoint( at.x + 8, at.y - extent.y / 2 ), extent );
+    case D::DPS_RIGHT: return wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y / 2 ), extent );
+    case D::DPS_TOP: return wxRect( wxPoint( at.x - extent.x / 2, at.y + 10 ), extent );
+    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x - extent.x / 2, at.y - extent.y - 10 ), extent );
+    default: return wxRect( wxPoint( at.x + 10, at.y - extent.y / 2 ), extent );
     }
 }
 
@@ -516,8 +1074,10 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
     if( !result.shown ) return result;
     dc.SetFont( small );
     // Below the caption: one chip per row, and the Review facets link at the bottom of the block.
-    // aBox is the block's content area: the caption sits at its top (24 to about 46 pixels down).
-    const int height = dc.GetCharHeight() + 6, gap = 3, left = box.x + 10, width = box.width - 20, top = box.y + 50;
+    // aBox is the block's content area: the caption sits at its top (24 to about 46 pixels down a full block, higher in a
+    // small one), and the chips follow 26 pixels below its top.
+    const int height = dc.GetCharHeight() + 6, gap = 3, left = box.x + 10, width = box.width - 20;
+    const int top = caption.IsEmpty() ? box.y + 50 : caption.y + 26;
     const int mark = height - 9, textLeft = 6 + mark + 6;
     // The part of a row from aFrom to aTo that is clear of the port names drawn inside the block edge: a name in the
     // right half of the block ends the row before it, one in the left half starts the row after it.
@@ -582,15 +1142,23 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
         else if( rows > 0 && static_cast<size_t>( rows ) > result.chips.size() && moreWidth <= rowWidth( result.chips.size() ) )
             result.more = wxRect( rowSpan( result.chips.size() ).first, rowTop( result.chips.size() ), moreWidth, height );
     }
-    if( result.chips.empty() && !result.more && !chosen.empty() )
+    if( result.chips.empty() && !result.more && !chosen.empty() && !caption.IsEmpty() )
     {
-        // Too small for a chip: the choices' state marks follow the caption where they fit.
-        const int size = std::max( 6, std::min( 12, mark ) ), step = size + 3;
-        auto [from, to] = span( box.y + 29, size, std::max( captionRight + 6, left ), box.GetRight() );
+        // Too small for a chip: the choices' state marks follow the caption, level with it, where they fit. They keep 6 pixels
+        // from the block's edge handles and from the port names inside the block (design QA P2-7).
+        const int size = std::max( 6, std::min( 12, mark ) ), step = size + 3, clear = 6;
+        const int y = caption.y + ( caption.height - size ) / 2;
+        int from = std::max( captionRight + 6, left ), to = box.GetRight() - 2;
+        for( const auto& name : portNames )
+            if( name.y < y + size + clear && name.GetBottom() + clear >= y )
+            {
+                if( name.x + name.width / 2 >= box.x + box.width / 2 ) to = std::min( to, name.x - clear );
+                else from = std::max( from, name.GetRight() + 1 + clear );
+            }
         int x = to - static_cast<int>( chosen.size() ) * step;
-        if( x >= from && box.y + 29 + size <= box.GetBottom() )
+        if( x >= from && y >= box.y && y + size <= box.GetBottom() )
             for( size_t i = 0; i < chosen.size(); ++i )
-                result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, box.y + 29, size, size ) } );
+                result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, y, size, size ) } );
     }
     return result;
 }
@@ -656,6 +1224,9 @@ void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open 
     if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
     m_value = value; m_state = choice.state(); m_isOpen = open;
     SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
+    // The editor draws the row itself, so it tells assistive technology what the row is: a button named by its facet and
+    // value, which opens the facet's detail.
+    SetAccessibleRole( this, "button", GetLabel() );
     Refresh();
 }
 
@@ -679,18 +1250,27 @@ void FACET_ROW::paint()
     dc.SetPen( wxPen( background.ChangeLightness( dark ? 135 : 85 ), 1 ) );
     dc.DrawLine( area.x, area.GetBottom(), area.GetRight() + 1, area.GetBottom() );
     dc.SetFont( GetFont() );
-    // The label column fits the longest facet name, so every row's value starts at the same place.
+    // The label column fits the longest facet name, so every row's value starts at the same place. Facet names use the
+    // normal text colour, so a row never looks disabled (design QA P3 17).
     int text = ( area.height - dc.GetCharHeight() ) / 2, labelWidth = FromDIP( 90 );
     for( int facet = 0; facet < FACETS; ++facet ) labelWidth = std::max( labelWidth, dc.GetTextExtent( FacetLabel( facet ) ).x + FromDIP( 20 ) );
-    dc.SetTextForeground( m_isOpen ? foreground : muted.ChangeLightness( dark ? 130 : 70 ) );
+    dc.SetTextForeground( foreground );
     dc.DrawText( wxControl::Ellipsize( FacetLabel( m_facet ), dc, wxELLIPSIZE_END, labelWidth - FromDIP( 12 ) ), FromDIP( 6 ), text );
     int mark = std::min( FromDIP( 14 ), area.height - FromDIP( 10 ) );
     DrawChoiceMark( dc, wxRect( labelWidth, ( area.height - mark ) / 2, mark, mark ), m_state, dark );
-    wxString chevron = wxS( "›" ); int chevronWidth = dc.GetTextExtent( chevron ).x;
-    int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 14 );
+    // A text-size chevron at 3:1 or better on the row and on the open row's fill shows that the row opens its facet
+    // (design QA P2-11).
+    const int chevronWidth = FromDIP( 6 ), chevronHeight = FromDIP( 11 );
+    int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 18 );
     dc.SetTextForeground( foreground );
     dc.DrawText( wxControl::Ellipsize( m_value, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
-    dc.SetTextForeground( muted ); dc.DrawText( chevron, area.width - chevronWidth - FromDIP( 8 ), text );
+    wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hover = background.ChangeLightness( dark ? 115 : 95 );
+    wxColour chevron = Readable( muted, { background, open, hover }, 3.5 );
+    {
+        const int right = area.width - FromDIP( 9 ), middle = area.height / 2;
+        const wxPoint points[] = { { right - chevronWidth, middle - chevronHeight / 2 }, { right, middle }, { right - chevronWidth, middle + chevronHeight / 2 } };
+        dc.SetPen( wxPen( chevron, FromDIP( 2 ) ) ); dc.DrawLines( 3, points );
+    }
     if( HasFocus() )
     {
         dc.SetPen( wxPen( accent, 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
@@ -710,50 +1290,406 @@ const char* ToolName( TOOL tool )
     }
 }
 
-wxAnyButton* ToolButton( wxWindow* parent, const wxString& label, BITMAPS bitmap, const char* name, bool toggle )
+namespace
 {
-    wxAnyButton* button = toggle ? static_cast<wxAnyButton*>( new wxToggleButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ) )
-                                 : static_cast<wxAnyButton*>( new wxButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ) );
-    button->SetBitmap( KiBitmapBundle( bitmap ) ); button->SetBitmapPosition( wxTOP ); button->SetName( name ); button->SetToolTip( label );
-    button->SetMinSize( parent->FromDIP( wxSize( 86, 50 ) ) );
-    return button;
+/// The glyph size of every drawing tool, and the gap to its label (the toolbar's own tools leave 4 pixels).
+constexpr int GLYPH_DIP = 24;
+int glyphGap( TOOL_STYLE style ) { return style == TOOL_STYLE::STRIP ? 4 : 3; }
+
+#if defined( __WXGTK__ )
+/// A GTK, GLib or ATK function of the toolkit this build already runs on, looked up at run time so no GTK header is needed.
+template <typename FUNCTION>
+FUNCTION toolkit( const char* aName )
+{
+    return reinterpret_cast<FUNCTION>( dlsym( RTLD_DEFAULT, aName ) );
+}
+constexpr unsigned GTK_STATE_ACTIVE = 1u << 0, GTK_STATE_PRELIGHT = 1u << 1;
+void* accessibleOf( wxWindow* window )
+{
+    static const auto get = toolkit<void* ( * )( void* )>( "gtk_widget_get_accessible" );
+    return get && window && window->GetHandle() ? get( window->GetHandle() ) : nullptr;
+}
+int drawButton( void* widget, void* cairo, void* painter )
+{
+    // GTK's own drawing of the button is replaced by the editor's: returning true ends the draw signal before GTK paints
+    // the theme's frame and label.
+    static const auto flagsOf = toolkit<unsigned ( * )( void* )>( "gtk_widget_get_state_flags" );
+    static const auto scaleOf = toolkit<int ( * )( void* )>( "gtk_widget_get_scale_factor" );
+    wxGraphicsRenderer* renderer = wxGraphicsRenderer::GetCairoRenderer();
+    wxGraphicsContext* context = renderer ? renderer->CreateContextFromNativeContext( cairo ) : nullptr;
+    if( !context ) return 0;
+    // As the toolkit's own paint DC does, one-pixel lines fall on whole pixels (at the display's own scale).
+    context->EnableOffset( !scaleOf || scaleOf( widget ) <= 1 );
+    unsigned flags = flagsOf ? flagsOf( widget ) : 0;
+    wxGCDC dc( context );
+    static_cast<BUTTON_PAINTER*>( painter )->PaintButton( dc, ( flags & GTK_STATE_PRELIGHT ) != 0, ( flags & GTK_STATE_ACTIVE ) != 0 );
+    return 1;
+}
+void redrawButton( void* widget, unsigned, void* )
+{
+    static const auto queue = toolkit<void ( * )( void* )>( "gtk_widget_queue_draw" );
+    if( queue ) queue( widget );
+}
+#endif
+}
+
+void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter )
+{
+#if defined( __WXGTK__ )
+    using CONNECT = unsigned long ( * )( void*, const char*, void*, void*, void*, int );
+    static const auto connect = toolkit<CONNECT>( "g_signal_connect_data" );
+    static const auto focusOnClick = toolkit<void ( * )( void*, int )>( "gtk_widget_set_focus_on_click" );
+    static const auto provider = toolkit<void* ( * )()>( "gtk_css_provider_new" );
+    static const auto load = toolkit<int ( * )( void*, const char*, long, void** )>( "gtk_css_provider_load_from_data" );
+    static const auto styleOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_style_context" );
+    static const auto addProvider = toolkit<void ( * )( void*, void*, unsigned )>( "gtk_style_context_add_provider" );
+    static const auto unref = toolkit<void ( * )( void* )>( "g_object_unref" );
+    void* widget = aButton->GetHandle();
+    if( !widget || !connect ) return;
+    connect( widget, "draw", reinterpret_cast<void*>( &drawButton ), aPainter, nullptr, 0 );
+    connect( widget, "state-flags-changed", reinterpret_cast<void*>( &redrawButton ), nullptr, nullptr, 0 );
+    // Like the toolbar's own tools, a press leaves the keyboard focus where it was (the canvas); Tab still reaches the button.
+    if( focusOnClick ) focusOnClick( widget, 0 );
+    // Without the theme's button padding, border and minimum size, the button is exactly the size the editor draws.
+    if( provider && load && styleOf && addProvider && unref )
+        if( void* css = provider() )
+        {
+            static const char RESET[] = "* { padding: 0; margin: 0; border-width: 0; min-width: 0; min-height: 0; box-shadow: none; }";
+            if( load( css, RESET, -1, nullptr ) ) addProvider( styleOf( widget ), css, 800 );
+            unref( css );
+        }
+#else
+    wxUnusedVar( aButton ); wxUnusedVar( aPainter );
+#endif
+}
+
+void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName )
+{
+#if defined( __WXGTK__ )
+    static const auto roleFor = toolkit<int ( * )( const char* )>( "atk_role_for_name" );
+    static const auto setRole = toolkit<void ( * )( void*, int )>( "atk_object_set_role" );
+    static const auto setName = toolkit<void ( * )( void*, const char* )>( "atk_object_set_name" );
+    void* accessible = accessibleOf( aWindow );
+    if( !accessible ) return;
+    if( aRole && roleFor && setRole )
+    {
+        // ATK 2.36 renamed "push button" to "button"; an older ATK knows only the old name.
+        int role = roleFor( aRole );
+        if( role == 0 && std::string( aRole ) == "button" ) role = roleFor( "push button" );
+        if( role != 0 ) setRole( accessible, role );
+    }
+    if( !aName.empty() && setName ) setName( accessible, aName.utf8_str() );
+#else
+    wxUnusedVar( aWindow ); wxUnusedVar( aRole ); wxUnusedVar( aName );
+#endif
+}
+
+std::optional<ACCESSIBLE> AccessibleOf( wxWindow* aWindow )
+{
+#if defined( __WXGTK__ )
+    static const auto getRole = toolkit<int ( * )( void* )>( "atk_object_get_role" );
+    static const auto roleName = toolkit<const char* ( * )( int )>( "atk_role_get_name" );
+    static const auto getName = toolkit<const char* ( * )( void* )>( "atk_object_get_name" );
+    static const auto states = toolkit<void* ( * )( void* )>( "atk_object_ref_state_set" );
+    static const auto stateFor = toolkit<int ( * )( const char* )>( "atk_state_type_for_name" );
+    static const auto contains = toolkit<int ( * )( void*, int )>( "atk_state_set_contains_state" );
+    static const auto unref = toolkit<void ( * )( void* )>( "g_object_unref" );
+    void* accessible = accessibleOf( aWindow );
+    if( !accessible || !getRole || !roleName || !getName ) return std::nullopt;
+    ACCESSIBLE result;
+    if( const char* role = roleName( getRole( accessible ) ) ) result.role = role;
+    if( const char* name = getName( accessible ) ) result.name = name;
+    if( states && stateFor && contains && unref )
+        if( void* set = states( accessible ) )
+        {
+            result.checked = contains( set, stateFor( "checked" ) ) != 0;
+            unref( set );
+        }
+    return result;
+#else
+    wxUnusedVar( aWindow );
+    return std::nullopt;
+#endif
+}
+
+wxSize TOOL_FACE::BestSize( const wxWindow* aWindow ) const
+{
+    const wxSize text = aWindow->GetTextExtent( label );
+    const int glyphSize = aWindow->FromDIP( GLYPH_DIP ), padding = aWindow->FromDIP( style == TOOL_STYLE::STRIP ? 5 : 6 );
+    return wxSize( std::max( glyphSize, text.x ) + 2 * aWindow->FromDIP( 8 ), glyphSize + aWindow->FromDIP( glyphGap( style ) ) + text.y + 2 * padding );
+}
+
+wxRect TOOL_FACE::GlyphRect( const wxWindow* aWindow ) const
+{
+    // The glyph and label are centred as one block, as the toolbar centres its own tools, so the strip's labels share their
+    // baseline (design QA P2-2).
+    const wxSize area = aWindow->GetClientSize(), text = aWindow->GetTextExtent( label );
+    const int glyphSize = aWindow->FromDIP( GLYPH_DIP ), top = ( area.y - ( glyphSize + aWindow->FromDIP( glyphGap( style ) ) + text.y ) ) / 2;
+    return wxRect( ( area.x - glyphSize ) / 2, top, glyphSize, glyphSize );
+}
+
+wxRect TOOL_FACE::LabelRect( const wxWindow* aWindow ) const
+{
+    const wxSize area = aWindow->GetClientSize(), text = aWindow->GetTextExtent( label );
+    const wxRect box = GlyphRect( aWindow );
+    return wxRect( ( area.x - text.x ) / 2, box.GetBottom() + 1 + aWindow->FromDIP( glyphGap( style ) ), text.x, text.y );
+}
+
+void TOOL_FACE::Paint( wxDC& dc, const wxWindow* aWindow, bool aActive, bool aHover, bool aDown ) const
+{
+    const wxRect area( aWindow->GetClientSize() );
+    const bool palette = style == TOOL_STYLE::PALETTE, enabled = aWindow->IsEnabled();
+    const wxColour surface = palette ? TOOL_PALETTE::Surface() : wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE );
+    const bool dark = IsDark( surface );
+    const wxColour highlight = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    wxColour content = enabled ? Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ), { surface }, 4.5 )
+                               : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    // The palette cell paints the palette's one surface; the strip keeps the toolbar's own background.
+    if( palette ) { dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( surface ) ); dc.DrawRectangle( area ); }
+    const wxRect tile = wxRect( area ).Deflate( aWindow->FromDIP( palette ? 2 : 1 ) );
+    const int radius = aWindow->FromDIP( palette ? 6 : 4 );
+    if( enabled && aActive )
+    {
+        // The active tool (design QA P2-1): a solid accent cell with a white or dark label in the palette (sketch 2); a pale
+        // accent tile with an accent border, glyph and label in the strip (sketch 1). Each reaches 3:1 for the tile and 4.5:1
+        // for its label.
+        if( palette )
+        {
+            ACCENT_FILL fill = AccentFill( highlight, surface );
+            dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( fill.fill ) ); dc.DrawRoundedRectangle( tile, radius );
+            content = fill.text;
+        }
+        else
+        {
+            wxColour pale = mix( highlight, surface, dark ? 0.30 : 0.14 );
+            dc.SetPen( wxPen( Readable( highlight, { surface, pale }, 3.0 ), aWindow->FromDIP( 1 ) ) ); dc.SetBrush( wxBrush( pale ) );
+            dc.DrawRoundedRectangle( tile, radius );
+            content = Readable( highlight, { pale }, 4.5 );
+        }
+    }
+    else if( enabled && ( aDown || aHover ) )
+    {
+        dc.SetPen( *wxTRANSPARENT_PEN );
+        dc.SetBrush( wxBrush( surface.ChangeLightness( dark ? ( aDown ? 140 : 122 ) : ( aDown ? 86 : 93 ) ) ) );
+        dc.DrawRoundedRectangle( tile, radius );
+    }
+    DrawGlyph( dc, glyph, GlyphRect( aWindow ), content );
+    dc.SetFont( aWindow->GetFont() ); dc.SetTextForeground( content ); dc.DrawText( label, LabelRect( aWindow ).GetTopLeft() );
+    if( aWindow->HasFocus() )
+    {
+        dc.SetPen( wxPen( Readable( highlight, { surface }, 3.0 ), 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.DrawRoundedRectangle( wxRect( tile ).Deflate( aWindow->FromDIP( 2 ) ), radius );
+    }
+}
+
+namespace
+{
+/// The palette's cells are icon-first: a 9-point label under the 24 DIP glyph (design QA P2-2).
+void smallLabel( wxWindow* window, TOOL_STYLE style )
+{
+    if( style != TOOL_STYLE::PALETTE ) return;
+    wxFont small = window->GetFont(); small.SetPointSize( std::min( 9, small.GetPointSize() ) ); window->SetFont( small );
+}
+#if !defined( __WXGTK__ )
+/// Where the editor cannot paint a platform button itself, the button shows the tool's glyph above its label.
+wxBitmap glyphBitmap( wxWindow* window, GLYPH glyph )
+{
+    const int size = window->FromDIP( GLYPH_DIP );
+    wxImage image( size, size );
+    image.InitAlpha();
+    std::fill( image.GetAlpha(), image.GetAlpha() + size * size, static_cast<unsigned char>( 0 ) );
+    {
+        wxGCDC dc( wxGraphicsContext::Create( image ) );
+        DrawGlyph( dc, glyph, wxRect( 0, 0, size, size ), wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ) );
+    }
+    return wxBitmap( image );
+}
+#endif
+}
+
+TOOL_BUTTON::TOOL_BUTTON( wxWindow* parent, const wxString& label, GLYPH glyph, TOOL_STYLE style, const char* name, const wxString& toolTip ) :
+        wxToggleButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE, wxDefaultValidator, name ),
+        m_face{ label, glyph, style }
+{
+    // The platform's own toggle button, so assistive technology reads its role, its label as its name and whether it is
+    // pressed; on GTK the editor paints it (design QA P2-1 to P2-3).
+    SetToolTip( toolTip ); smallLabel( this, style );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#else
+    SetBitmap( glyphBitmap( this, glyph ) ); SetBitmapPosition( wxTOP );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void TOOL_BUTTON::PaintButton( wxDC& aDC, bool aHover, bool aDown ) { m_face.Paint( aDC, this, GetValue(), aHover, aDown ); }
+
+wxSize TOOL_BUTTON::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return m_face.BestSize( this );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
+}
+
+TOOL_ACTION::TOOL_ACTION( wxWindow* parent, const wxString& label, GLYPH glyph, TOOL_STYLE style, const char* name, const wxString& toolTip ) :
+        wxButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE, wxDefaultValidator, name ),
+        m_face{ label, glyph, style }
+{
+    SetToolTip( toolTip ); smallLabel( this, style );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#else
+    SetBitmap( glyphBitmap( this, glyph ) ); SetBitmapPosition( wxTOP );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void TOOL_ACTION::PaintButton( wxDC& aDC, bool aHover, bool aDown ) { m_face.Paint( aDC, this, false, aHover, aDown ); }
+
+wxSize TOOL_ACTION::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return m_face.BestSize( this );
+#else
+    return wxButton::DoGetBestSize();
+#endif
+}
+
+LINK_BUTTON::LINK_BUTTON( wxWindow* parent, const wxString& label, const char* name ) :
+        wxButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxBU_EXACTFIT, wxDefaultValidator, name )
+{
+    // A platform button that assistive technology announces as a link, with its label as its name (design QA P2-10).
+    SetCursor( wxCursor( wxCURSOR_HAND ) );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetAccessibleRole( this, "link", wxEmptyString );
+    SetInitialSize( DoGetBestSize() );
+}
+
+wxColour LINK_BUTTON::LinkColour( const wxColour& surface )
+{
+    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    return Readable( accent.ChangeLightness( IsDark( surface ) ? 170 : 62 ), { surface }, 4.5 );
+}
+
+wxSize LINK_BUTTON::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return GetTextExtent( GetLabel() ) + wxSize( 2 * FromDIP( 3 ), 2 * FromDIP( 3 ) );
+#else
+    return wxButton::DoGetBestSize();
+#endif
+}
+
+void LINK_BUTTON::SetLabel( const wxString& label )
+{
+    wxButton::SetLabel( label ); InvalidateBestSize(); SetInitialSize( DoGetBestSize() ); Refresh();
+}
+
+void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
+{
+    const wxColour background = GetParent()->GetBackgroundColour();
+    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( GetClientSize() ) );
+    wxFont font = GetFont(); font.SetUnderlined( true ); dc.SetFont( font );
+    wxColour colour = IsEnabled() ? LinkColour( background ) : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    if( IsEnabled() && aHover ) colour = Readable( colour, { background }, 7.0 );
+    dc.SetTextForeground( colour ); dc.DrawText( GetLabel(), FromDIP( 3 ), FromDIP( 3 ) );
+    if( HasFocus() )
+    {
+        dc.SetPen( wxPen( colour, 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.DrawRectangle( wxRect( GetClientSize() ) );
+    }
+}
+
+bool CHOICE_FLOW::SetWrapWidth( int width )
+{
+    width = std::max( 0, width );
+    if( width == m_width ) return false;
+    m_width = width; return true;
+}
+
+std::vector<std::pair<wxSizerItem*, wxRect>> CHOICE_FLOW::arrange( wxSize& extent )
+{
+    // The same arrangement serves the minimum size and the placement, so the row always takes the lines it counted.
+    std::vector<std::pair<wxSizerItem*, wxRect>> placed;
+    int x = 0, y = 0, line = 0; extent = wxSize( 0, 0 );
+    for( wxSizerItemList::compatibility_iterator node = m_children.GetFirst(); node; node = node->GetNext() )
+    {
+        wxSizerItem* item = node->GetData();
+        if( !item->IsShown() ) continue;
+        wxSize size = item->CalcMin();
+        if( x > 0 && m_width > 0 && x + m_gap + size.x > m_width ) { y += line; x = 0; line = 0; }
+        if( x > 0 ) x += m_gap;
+        placed.emplace_back( item, wxRect( wxPoint( x, y ), size ) );
+        x += size.x; line = std::max( line, size.y ); extent.x = std::max( extent.x, x );
+    }
+    extent.y = y + line;
+    return placed;
+}
+
+wxSize CHOICE_FLOW::CalcMin()
+{
+    wxSize extent; arrange( extent ); return extent;
+}
+
+void CHOICE_FLOW::RepositionChildren( const wxSize& )
+{
+    wxSize extent;
+    for( const auto& [item, rect] : arrange( extent ) ) item->SetDimension( m_position + rect.GetPosition(), rect.GetSize() );
+}
+
+wxColour TOOL_PALETTE::Surface()
+{
+    wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    return window.ChangeLightness( IsDark( window ) ? 125 : 96 );
 }
 
 TOOL_PALETTE::TOOL_PALETTE( wxWindow* parent, ACTIONS actions ) :
         wxPanel( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxTAB_TRAVERSAL ), m_actions( std::move( actions ) )
 {
-    SetName( "DiagramToolPalette" );
-    wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
-    bool dark = window.Red() + window.Green() + window.Blue() < 384;
-    SetBackgroundColour( window.ChangeLightness( dark ? 125 : 96 ) );
-    // A quiet rounded outline, like the sketch's floating palette, rather than a black frame.
-    wxColour outline = window.ChangeLightness( dark ? 175 : 78 );
-    Bind( wxEVT_PAINT, [this, outline]( wxPaintEvent& )
-          {
-              wxPaintDC dc( this ); dc.SetPen( wxPen( outline, 1 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
-              dc.DrawRoundedRectangle( GetClientRect(), FromDIP( 4 ) );
-          } );
+    SetName( "DiagramToolPalette" ); SetBackgroundStyle( wxBG_STYLE_PAINT );
+    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
     auto* column = new wxBoxSizer( wxVERTICAL );
-    auto addTool = [&]( TOOL tool, const wxString& label, BITMAPS bitmap, const char* name )
+    auto add = [&]( wxWindow* item ) { column->Add( item, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 6 ) ); };
+    auto tool = [&]( TOOL which, const wxString& label, GLYPH glyph, const char* name, const wxString& tip )
     {
-        auto* button = static_cast<wxToggleButton*>( ToolButton( this, label, bitmap, name, true ) );
-        button->Bind( wxEVT_TOGGLEBUTTON, [this, tool]( wxCommandEvent& ) { if( m_actions.choose ) m_actions.choose( tool ); } );
-        column->Add( button, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 4 ) );
-        m_tools.emplace_back( tool, button );
+        auto* item = new TOOL_BUTTON( this, label, glyph, TOOL_STYLE::PALETTE, name, tip );
+        item->Bind( wxEVT_TOGGLEBUTTON, [this, which]( wxCommandEvent& ) { if( m_actions.choose ) m_actions.choose( which ); } );
+        add( item ); m_tools.emplace_back( which, item );
     };
-    addTool( TOOL::SELECT, _( "Select" ), BITMAPS::cursor, "DiagramPaletteSelect" );
-    addTool( TOOL::ADD_BLOCK, _( "Add block" ), BITMAPS::add_rectangle, "DiagramPaletteAddBlock" );
-    addTool( TOOL::CONNECT, _( "Connect" ), BITMAPS::add_line, "DiagramPaletteConnect" );
-    addTool( TOOL::ADD_PORT, _( "Place port" ), BITMAPS::add_hierar_pin, "DiagramPalettePlacePort" );
-    m_delete = static_cast<wxButton*>( ToolButton( this, _( "Delete" ), BITMAPS::trash, "DiagramPaletteDelete", false ) );
+    tool( TOOL::SELECT, _( "Select" ), GLYPH::SELECT, "DiagramPaletteSelect", _( "Select and move items (Esc)" ) );
+    tool( TOOL::ADD_BLOCK, _( "Add block" ), GLYPH::ADD_BLOCK, "DiagramPaletteAddBlock", _( "Add a block where you click (B)" ) );
+    tool( TOOL::CONNECT, _( "Connect" ), GLYPH::CONNECT, "DiagramPaletteConnect", _( "Connect two blocks or ports (C)" ) );
+    tool( TOOL::ADD_PORT, _( "Place port" ), GLYPH::PORT, "DiagramPalettePlacePort", _( "Place a port on a block edge or the level boundary (P)" ) );
+    m_delete = new TOOL_ACTION( this, _( "Delete" ), GLYPH::REMOVE, TOOL_STYLE::PALETTE, "DiagramPaletteDelete", _( "Delete the selection (Delete)" ) );
     m_delete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { if( m_actions.remove ) m_actions.remove(); } );
-    column->Add( m_delete, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP( 4 ) );
-    auto* line = new wxStaticLine( this ); line->SetName( "staticLine" );
-    column->Add( line, 0, wxEXPAND | wxALL, FromDIP( 6 ) );
-    m_undo = static_cast<wxButton*>( ToolButton( this, _( "Undo" ), BITMAPS::undo, "DiagramPaletteUndo", false ) );
+    add( m_delete );
+    // Room for the one divider before Undo, drawn by paint().
+    column->AddSpacer( FromDIP( 7 ) );
+    m_undo = new TOOL_ACTION( this, _( "Undo" ), GLYPH::UNDO, TOOL_STYLE::PALETTE, "DiagramPaletteUndo", _( "Undo (Ctrl+Z)" ) );
     m_undo->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { if( m_actions.undo ) m_actions.undo(); } );
-    column->Add( m_undo, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 4 ) );
+    add( m_undo );
+    column->AddSpacer( FromDIP( 6 ) );
     SetSizerAndFit( column );
+}
+
+void TOOL_PALETTE::paint()
+{
+    // One card: the canvas shows around its rounded corners, one surface, a quiet outline and one divider before Undo
+    // (design QA P2-4 and P3 11).
+    wxAutoBufferedPaintDC dc( this );
+    const wxColour window = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    const bool dark = IsDark( window );
+    const wxRect area( GetClientSize() );
+    dc.SetBackground( wxBrush( window ) ); dc.Clear();
+    dc.SetPen( wxPen( window.ChangeLightness( dark ? 175 : 78 ), 1 ) ); dc.SetBrush( wxBrush( Surface() ) );
+    dc.DrawRoundedRectangle( area, FromDIP( 8 ) );
+    const int y = ( m_delete->GetRect().GetBottom() + m_undo->GetRect().y ) / 2;
+    dc.SetPen( wxPen( window.ChangeLightness( dark ? 160 : 82 ), 1 ) );
+    dc.DrawLine( FromDIP( 12 ), y, area.width - FromDIP( 12 ), y );
 }
 
 void TOOL_PALETTE::SetState( TOOL active, bool enabled, bool canDelete, bool canUndo )
@@ -806,71 +1742,8 @@ void encodePoint( const R::POINT& point, D::DiagramAnnotationPointData* out )
 {
     out->set_x( R::FormatUnits( point.x ) ); out->set_y( R::FormatUnits( point.y ) );
 }
-/// How far two drawn paths run along each other: the summed length of their collinear horizontal and
-/// vertical segments. Crossing at a point or meeting at a shared end point does not count.
-int64_t sharedLength( const std::vector<R::POINT>& path, const std::vector<std::vector<R::POINT>>& others )
-{
-    int64_t total = 0;
-    for( size_t i = 1; i < path.size(); ++i )
-        for( const auto& other : others )
-            for( size_t j = 1; j < other.size(); ++j )
-            {
-                const R::POINT &a = path[i - 1], &b = path[i], &c = other[j - 1], &d = other[j];
-                if( a.y == b.y && c.y == d.y && a.y == c.y )
-                    total += std::max<int64_t>( 0, std::min( std::max( a.x, b.x ), std::max( c.x, d.x ) ) - std::max( std::min( a.x, b.x ), std::min( c.x, d.x ) ) );
-                else if( a.x == b.x && c.x == d.x && a.x == c.x )
-                    total += std::max<int64_t>( 0, std::min( std::max( a.y, b.y ), std::max( c.y, d.y ) ) - std::max( std::min( a.y, b.y ), std::min( c.y, d.y ) ) );
-            }
-    return total;
-}
-/// Where a connection's caption goes: centred above the middle of its longest horizontal leg, or beside the
-/// middle of its longest vertical leg, so each caption sits on its own connection.
-wxPoint captionPosition( const std::vector<wxPoint>& points, const wxSize& extent )
-{
-    size_t longest = 1; int length = -1;
-    for( size_t i = 1; i < points.size(); ++i )
-    {
-        int here = std::abs( points[i].x - points[i - 1].x ) + std::abs( points[i].y - points[i - 1].y );
-        if( here > length ) { length = here; longest = i; }
-    }
-    const wxPoint &a = points[longest - 1], &b = points[longest];
-    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
-    if( std::abs( b.y - a.y ) > std::abs( b.x - a.x ) ) return { middle.x + 6, middle.y - extent.y / 2 };
-    return { middle.x - extent.x / 2, middle.y - extent.y - 4 };
-}
 }
 
-void RECURSIVE_DIAGRAM_FRAME::routeNewConnection( const std::string& id )
-{
-    // Rule F4 draws a new connection's computed path. Where that path would run along a connection already on
-    // the level (two connections ending on the same block edge share an anchor, rule F2), the editor stores a
-    // route whose middle leg moves to a free channel between the ends, so each connection stays visible and
-    // selectable on its own. Storing a route is a layout edit (rule F1a).
-    auto drawn = layout( current(), true );
-    const R::LINK* link = drawn.Link( id );
-    if( !link || link->endpoints.size() != 2 || drawn.HasRoute( id, 1 ) ) return;
-    auto computed = drawn.Route( *link, 1 );
-    if( computed.size() != 4 ) return;
-    std::vector<std::vector<R::POINT>> others;
-    for( const auto& other : drawn.Links() ) if( other.id != id )
-        for( int i = 1; i < static_cast<int>( other.endpoints.size() ); ++i ) others.push_back( drawn.Route( other, i ) );
-    const R::POINT from = computed.front(), to = computed.back();
-    const int64_t middle = ( from.x + to.x ) / 2, margin = 10 * Q;
-    const int64_t low = std::min( from.x, to.x ) + margin, high = std::max( from.x, to.x ) - margin;
-    int64_t best = sharedLength( computed, others ), channel = middle;
-    for( int step = 1; step <= 6 && best > 0; ++step )
-        for( int sign : { 1, -1 } )
-        {
-            int64_t x = middle + sign * step * 30 * Q;
-            if( x < low || x > high ) continue;
-            int64_t shared = sharedLength( { from, { x, from.y }, { x, to.y }, to }, others );
-            if( shared < best ) { best = shared; channel = x; }
-        }
-    if( channel == middle ) return;
-    materialize();
-    auto* row = presentation()->add_routes(); row->set_connection_id( id ); row->set_endpoint_index( 1 );
-    encodePoint( { channel, from.y }, row->add_waypoints() ); encodePoint( { channel, to.y }, row->add_waypoints() );
-}
 void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
 {
     // A channel route (two unlocked waypoints on one vertical line) always runs level from each end to its channel:
@@ -1089,13 +1962,14 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
 wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
 {
     wxSize extent = dc.GetTextExtent( Text( port.name ) );
-    if( !port.placed ) return wxRect( wxPoint( at.x + 12, at.y - 24 ), extent );
+    // Clear of the port's 12-pixel square (design QA P2-6).
+    if( !port.placed ) return wxRect( wxPoint( at.x + 12, at.y - 26 ), extent );
     switch( port.side )
     {
-    case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 8, at.y - extent.y - 4 ), extent );
-    case D::DPS_TOP: return wxRect( wxPoint( at.x + 8, at.y - extent.y - 6 ), extent );
-    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x + 8, at.y + 6 ), extent );
-    default: return wxRect( wxPoint( at.x - extent.x - 8, at.y - extent.y - 4 ), extent );
+    case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 10, at.y - extent.y - 6 ), extent );
+    case D::DPS_TOP: return wxRect( wxPoint( at.x + 10, at.y - extent.y - 8 ), extent );
+    case D::DPS_BOTTOM: return wxRect( wxPoint( at.x + 10, at.y + 8 ), extent );
+    default: return wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent );
     }
 }
 }
@@ -1121,7 +1995,8 @@ std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL
 
 const R::PORT* RECURSIVE_DIAGRAM_FRAME::portAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
 {
-    int reach = FromDIP( 7 );
+    // A port is hit within 9 DIP of its point at every zoom, a target of at least 16 pixels (design QA P2-6).
+    int reach = FromDIP( 9 );
     for( const auto& port : drawnPorts( drawn, [this]( const R::POINT& p ) { return toScreen( p ); } ) )
         if( std::abs( port.at.x - point.x ) <= reach && std::abs( port.at.y - point.y ) <= reach ) return drawn.Port( port.owner, port.id );
     return nullptr;
@@ -1193,12 +2068,168 @@ int RECURSIVE_DIAGRAM_FRAME::handleAt( const wxPoint& point ) const
 {
     if( !drawingAvailable() || m_tool != TOOL::SELECT || !m_connectionId.empty() || !m_portId.empty()
         || m_selected.empty() || m_selected == m_level.scope().baseline().block_id() ) return -1;
-    wxRect box = toScreen( layout( current(), true ).Rect( m_selected ) );
-    wxPoint handles[] = { box.GetTopLeft(), { box.x + box.width / 2, box.y }, box.GetTopRight(), { box.GetRight(), box.y + box.height / 2 },
-                          box.GetBottomRight(), { box.x + box.width / 2, box.GetBottom() }, box.GetBottomLeft(), { box.x, box.y + box.height / 2 } };
-    int reach = FromDIP( 6 );
-    for( int i = 0; i < 8; ++i ) if( std::abs( handles[i].x - point.x ) <= reach && std::abs( handles[i].y - point.y ) <= reach ) return i;
+    auto handles = selectionHandles( layout( current(), true ) );
+    for( int i = 0; i < static_cast<int>( handles.size() ); ++i ) if( wxRect( handles[i] ).Inflate( FromDIP( 2 ) ).Contains( point ) ) return i;
     return -1;
+}
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::selectionHandles( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // Eight 9 DIP handles on the selected block's corners and edge middles (the order handleAt and the resize use).
+    if( !drawingAvailable() || m_tool != TOOL::SELECT || !m_connectionId.empty() || !m_portId.empty()
+        || m_selected.empty() || m_selected == m_level.scope().baseline().block_id() || !drawn.Node( m_selected ) ) return {};
+    wxRect box = toScreen( drawn.Rect( m_selected ) );
+    wxPoint points[] = { box.GetTopLeft(), { box.x + box.width / 2, box.y }, box.GetTopRight(), { box.GetRight(), box.y + box.height / 2 },
+                         box.GetBottomRight(), { box.x + box.width / 2, box.GetBottom() }, box.GetBottomLeft(), { box.x, box.y + box.height / 2 } };
+    const int half = FromDIP( 4 );
+    std::vector<wxRect> result;
+    for( const auto& point : points ) result.emplace_back( point.x - half, point.y - half, 2 * half + 1, 2 * half + 1 );
+    return result;
+}
+std::vector<RECURSIVE_DIAGRAM_FRAME::PORT_MARK> RECURSIVE_DIAGRAM_FRAME::portMarks( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<PORT_MARK> result;
+    for( const auto& port : drawnPorts( drawn, [this]( const R::POINT& p ) { return toScreen( p ); } ) )
+        result.push_back( { port.owner, port.id, Text( port.name ), portMark( port.at ) } );
+    return result;
+}
+wxRect RECURSIVE_DIAGRAM_FRAME::portMark( const wxPoint& at ) const
+{
+    const int half = FromDIP( 6 );
+    return wxRect( at.x - half, at.y - half, 2 * half, 2 * half );
+}
+std::optional<RECURSIVE_DIAGRAM_FRAME::TARGET> RECURSIVE_DIAGRAM_FRAME::connectTarget( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // Design QA P2-6 and P3 4: while Connect is active, the port under the pointer gets a ring (the sketch's snap circle) and a
+    // block under it an outline, when a connection can start or finish there (never on the end it started from).
+    if( m_tool != TOOL::CONNECT || !drawingAvailable() || m_captionKind || m_connectTo || !m_pointerInside ) return std::nullopt;
+    if( !wxRect( wxPoint( 0, 0 ), m_canvas->GetClientSize() ).Contains( m_pointer ) ) return std::nullopt;
+    const int reach = FromDIP( 9 );
+    std::optional<DRAWN_PORT> nearest; int best = INT_MAX;
+    for( const auto& port : drawnPorts( drawn, [this]( const R::POINT& p ) { return toScreen( p ); } ) )
+    {
+        int distance = std::max( std::abs( port.at.x - m_pointer.x ), std::abs( port.at.y - m_pointer.y ) );
+        if( distance <= reach && distance < best ) { best = distance; nearest = port; }
+    }
+    if( nearest )
+    {
+        if( m_connectFrom && m_connectFrom->block_id() == nearest->owner && m_connectFrom->interface_id() == nearest->id ) return std::nullopt;
+        const int radius = FromDIP( 11 );
+        return TARGET{ wxRect( nearest->at.x - radius, nearest->at.y - radius, 2 * radius + 1, 2 * radius + 1 ), Text( nearest->name ), true,
+                       nearest->owner, nearest->id };
+    }
+    std::string block = blockAt( drawn, m_pointer );
+    if( block.empty() || ( m_connectFrom && m_connectFrom->block_id() == block && !m_connectFrom->has_interface_id() ) ) return std::nullopt;
+    const R::NODE* node = drawn.Node( block );
+    return TARGET{ toScreen( drawn.Rect( block ) ).Inflate( FromDIP( 4 ) ), node ? Text( node->name ) : wxString(), false, block, {} };
+}
+std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::connectionCaptions( const R::LEVEL_LAYOUT& drawn, const wxSize& area ) const
+{
+    // Design QA P2-7: text keeps its size while the drawing zooms out, so each caption looks for a clear place beside its own
+    // connection: above and below the middle of each horizontal leg, right and left of the middle of each vertical leg,
+    // longest leg first (a stored route's caption position comes first), and then the same places moved along each leg
+    // (the fix the design QA gives: "move labels along their segment when they would collide"). Clear means inside the canvas and apart from every
+    // block by the handle size plus 4 pixels (so a resize handle never covers a caption), from every port and its name, from
+    // every wire and from the captions already placed. A caption with no clear place is left out; the inspector names it.
+    std::vector<CAPTION_PLACE> result;
+    if( !m_ready || !current() ) return result;
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const wxRect canvas( wxPoint( 0, 0 ), area );
+    std::vector<wxRect> obstacles;
+    const int clearance = FromDIP( 8 );
+    for( const auto& node : drawn.Nodes() ) obstacles.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( clearance ) );
+    auto screen = [this]( const R::POINT& p ) { return toScreen( p ); };
+    for( const auto& port : drawnPorts( drawn, screen ) ) obstacles.push_back( portMark( port.at ).Inflate( FromDIP( 2 ) ) );
+    for( const auto& [name, rect] : boundaryNames( drawn ) ) obstacles.push_back( wxRect( rect ).Inflate( FromDIP( 2 ) ) );
+    const auto& notes = visibleNotes();
+    for( int i = 0; i < notes.size(); ++i )
+        if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
+    std::vector<std::pair<wxPoint, wxPoint>> wires;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            auto route = drawn.Route( link, i );
+            for( size_t j = 1; j < route.size(); ++j ) wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
+        }
+    auto touchesWire = [&]( const wxRect& rect )
+    {
+        wxRect zone = wxRect( rect ).Inflate( FromDIP( 2 ) );
+        for( const auto& [a, b] : wires )
+        {
+            wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+            if( segment.Intersects( zone ) ) return true;
+        }
+        return false;
+    };
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            // A boundary already names its interface. Avoid duplicating the title on it.
+            if( link.endpoints[0].block_id() == drawn.ScopeId() || link.endpoints[i].block_id() == drawn.ScopeId() ) continue;
+            auto route = drawn.Route( link, i );
+            if( route.size() < 2 ) continue;
+            std::vector<wxPoint> points; for( const auto& point : route ) points.push_back( toScreen( point ) );
+            std::vector<size_t> legs;
+            for( size_t j = 1; j < points.size(); ++j ) if( points[j] != points[j - 1] ) legs.push_back( j );
+            auto length = [&]( size_t j ) { return std::abs( points[j].x - points[j - 1].x ) + std::abs( points[j].y - points[j - 1].y ); };
+            std::stable_sort( legs.begin(), legs.end(), [&]( size_t a, size_t b ) { return length( a ) > length( b ); } );
+            // The places for a text of aExtent: a stored route's caption position first, then the middle of every leg, then,
+            // when none is clear, places moved along the legs in 6-pixel steps, the nearest to a middle first.
+            auto places = [&]( const wxSize& extent )
+            {
+                std::vector<wxRect> candidates;
+                if( auto label = drawn.RouteLabel( link.id, i ) ) candidates.emplace_back( toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 ), extent );
+                // Beside the point `shift` pixels from the middle of leg j, while that point is still on the leg.
+                auto beside = [&]( size_t j, int shift )
+                {
+                    const wxPoint &a = points[j - 1], &b = points[j];
+                    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
+                    if( a.y == b.y )
+                    {
+                        int x = middle.x + shift;
+                        if( x < std::min( a.x, b.x ) || x > std::max( a.x, b.x ) ) return;
+                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y - extent.y - FromDIP( 4 ) ), extent );
+                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y + FromDIP( 4 ) ), extent );
+                    }
+                    else if( a.x == b.x )
+                    {
+                        int y = middle.y + shift;
+                        if( y < std::min( a.y, b.y ) || y > std::max( a.y, b.y ) ) return;
+                        candidates.emplace_back( wxPoint( a.x + FromDIP( 6 ), y - extent.y / 2 ), extent );
+                        candidates.emplace_back( wxPoint( a.x - FromDIP( 6 ) - extent.x, y - extent.y / 2 ), extent );
+                    }
+                };
+                int longest = 0;
+                for( size_t j : legs ) { beside( j, 0 ); longest = std::max( longest, length( j ) ); }
+                const int step = FromDIP( 6 );
+                for( int shift = step; shift <= longest / 2; shift += step )
+                    for( size_t j : legs ) { beside( j, shift ); beside( j, -shift ); }
+                return candidates;
+            };
+            auto clear = [&]( const wxRect& candidate )
+            {
+                return canvas.Contains( candidate ) && !touchesWire( candidate )
+                       && std::none_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& other ) { return other.Intersects( candidate ); } );
+            };
+            // The whole caption where it has a clear place. Otherwise the longest shortening of it, ending in "…" and keeping at
+            // least four characters, that has one, as a block caption is shortened to its block's width; only a caption that
+            // has no clear place even so is left out (the inspector names it).
+            wxString full = Text( link.name );
+            CAPTION_PLACE place{ link.id, full, wxRect(), false };
+            for( size_t keep = full.length(); !place.shown && ( keep == full.length() || keep >= 4 ); --keep )
+            {
+                wxString text = keep == full.length() ? full : wxString( full.Left( keep ) ).Trim() + wxS( "…" );
+                if( keep < full.length() && text.length() >= full.length() ) continue;
+                auto candidates = places( dc.GetTextExtent( text ) );
+                if( keep == full.length() && !candidates.empty() ) place.rect = candidates.front();
+                for( const auto& candidate : candidates )
+                    if( clear( candidate ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
+                if( keep == 0 ) break;
+            }
+            if( legs.empty() && !place.shown ) continue;
+            if( place.shown ) obstacles.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
+            result.push_back( std::move( place ) );
+        }
+    return result;
 }
 
 int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
@@ -1217,10 +2248,10 @@ RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R:
         wxSize extent = dc.GetTextExtent( Text( port.name ) );
         switch( port.side )
         {
-        case D::DPS_RIGHT: room.right = std::max( room.right, extent.x + 12 ); break;
-        case D::DPS_TOP: room.top = std::max( room.top, extent.y + 10 ); break;
-        case D::DPS_BOTTOM: room.bottom = std::max( room.bottom, extent.y + 10 ); break;
-        default: room.left = std::max( room.left, extent.x + 12 ); break;
+        case D::DPS_RIGHT: room.right = std::max( room.right, extent.x + 14 ); break;
+        case D::DPS_TOP: room.top = std::max( room.top, extent.y + 12 ); break;
+        case D::DPS_BOTTOM: room.bottom = std::max( room.bottom, extent.y + 12 ); break;
+        default: room.left = std::max( room.left, extent.x + 14 ); break;
         }
     }
     return room;
@@ -1296,6 +2327,9 @@ void RECURSIVE_DIAGRAM_FRAME::removeSelection( bool detach )
 void RECURSIVE_DIAGRAM_FRAME::beginCaption( int kind, const wxRect& box, const wxString& value )
 {
     m_captionKind = kind;
+    // What to type, in the field itself where the platform shows a hint in a focused field (GTK 3 shows it only in an unfocused
+    // one, and this field always has the focus; there the status bar says what to type and how to finish, design QA P3 2).
+    m_caption->SetHint( kind == 1 ? _( "Block name" ) : kind == 2 ? _( "Connection caption" ) : kind == 3 ? _( "Port name" ) : wxString() );
     int height = m_caption->GetBestSize().y;
     m_caption->SetSize( box.x, box.y, std::max( FromDIP( 140 ), box.width ), height );
     m_caption->ChangeValue( value ); m_caption->Show(); m_caption->Raise(); m_caption->SetFocus(); m_caption->SelectAll();
@@ -1347,6 +2381,9 @@ void RECURSIVE_DIAGRAM_FRAME::commitNewConnection( const std::string& caption )
 {
     if( !m_connectFrom || !m_connectTo ) return;
     pushUndo();
+    // A new end on a block takes its own point on the block's edge, which moves the other ends there (rule F2); stored channel
+    // routes follow their ends. Computed paths keep apart by themselves (F4a), so no route is stored for the new connection.
+    auto before = layout( current(), true );
     auto* link = m_level.add_new_connections();
     link->mutable_selection()->set_connection_id( FreshId() ); link->mutable_selection()->set_state_id( FreshId() );
     link->mutable_selection()->set_revision_id( FreshId() ); link->set_requirement_revision_id( FreshId() );
@@ -1354,7 +2391,7 @@ void RECURSIVE_DIAGRAM_FRAME::commitNewConnection( const std::string& caption )
     *link->add_endpoints() = *m_connectFrom; *link->add_endpoints() = *m_connectTo;
     *m_level.mutable_scope()->mutable_local_diagram()->add_connections() = link->selection();
     std::string id = link->selection().connection_id();
-    routeNewConnection( id );
+    followRoutes( before );
     m_selected = m_level.scope().baseline().block_id(); m_connectionId = id;
     m_portOwner.clear(); m_portId.clear(); m_commentId.clear(); m_lastEffects.Clear();
     m_tool = TOOL::SELECT; m_canvas->SetCursor( wxCursor( wxCURSOR_ARROW ) ); changed();
@@ -1407,22 +2444,19 @@ void RECURSIVE_DIAGRAM_FRAME::renameNew( const std::string& caption )
 
 void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
 {
-    wxColour background = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
-    wxColour foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
-    wxColour muted = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
-    wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    // Design QA P1-1: one accent for everything selected or in progress, readable in both themes (3:1 or more against the
+    // canvas and against the selected block's fill), and handles that stand out from both.
+    const R::CANVAS_COLOURS colours = R::CanvasColours();
+    const wxColour &background = colours.background, &foreground = colours.foreground, &muted = colours.muted, &accent = colours.accent;
     dc.SetBackground( wxBrush( background ) ); dc.Clear(); dc.SetTextForeground( foreground );
     auto* scope = current(); if( !m_ready || !scope ) { dc.DrawText( m_error.empty() ? _( "Loading diagram…" ) : Text( m_error ), 24, 24 ); return; }
-    bool dark = background.Red() + background.Green() + background.Blue() < 384;
+    const bool dark = colours.dark;
     auto drawn = layout( scope, !m_historyPreview );
     auto screen = [this]( const R::POINT& point ) { return toScreen( point ); };
     if( auto frame = drawn.Frame() )
     {
         dc.SetPen( wxPen( muted, 1, wxPENSTYLE_SHORT_DASH ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawRectangle( toScreen( *frame ) );
     }
-    // Connection captions are drawn after the blocks and their resize handles, so a handle never covers one.
-    std::vector<std::pair<wxString, wxPoint>> captions;
-    const wxFont captionFont = dc.GetFont();
     for( const auto& link : drawn.Links() )
     {
         bool highlighted = link.id == m_connectionId;
@@ -1434,18 +2468,10 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             auto route = drawn.Route( link, i );
             std::vector<wxPoint> points; for( const auto& point : route ) points.push_back( toScreen( point ) );
             for( size_t segment = 1; segment < points.size(); ++segment ) dc.DrawLine( points[segment - 1], points[segment] );
-            // A boundary already names its interface. Avoid duplicating the title on it.
-            if( points.size() >= 2 && link.endpoints[0].block_id() != drawn.ScopeId() && link.endpoints[i].block_id() != drawn.ScopeId() )
-            {
-                wxString caption = Text( link.name ); wxSize extent = dc.GetTextExtent( caption );
-                wxPoint at = captionPosition( points, extent );
-                if( auto label = drawn.RouteLabel( link.id, i ) ) at = toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 );
-                captions.emplace_back( caption, at );
-            }
         }
     }
     // A connection's direction detail shows as arrowheads into the ends it points to (Round A3). The selected
-    // connection's arrowheads are drawn last, so an end two connections share shows the selected one.
+    // connection's arrowheads are drawn last.
     auto arrows = drawnArrows();
     std::stable_partition( arrows.begin(), arrows.end(), [this]( const ARROW& arrow ) { return arrow.connection != m_connectionId; } );
     for( const auto& arrow : arrows )
@@ -1459,44 +2485,59 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
                              wxPoint( static_cast<int>( std::lround( arrow.from.x + dy * half ) ), static_cast<int>( std::lround( arrow.from.y - dx * half ) ) ) };
         dc.SetPen( wxPen( colour, 1 ) ); dc.SetBrush( wxBrush( colour ) ); dc.DrawPolygon( 3, points );
     }
+    const auto handles = selectionHandles( drawn );
     for( const auto& node : drawn.Nodes() )
     {
         wxRect box = toScreen( drawn.Rect( node.id ) ); bool selected = node.id == m_selected && m_connectionId.empty();
         dc.SetPen( wxPen( selected ? accent : muted, selected ? 2 : 1 ) );
-        dc.SetBrush( wxBrush( selected ? accent.ChangeLightness( dark ? 60 : 175 ) : background.ChangeLightness( dark ? 120 : 97 ) ) ); dc.DrawRectangle( box );
-        // The block's content sits inside an 8-pixel margin; the outline and its handles stay on the block's edges.
+        dc.SetBrush( wxBrush( selected ? colours.selectedFill : colours.blockFill ) ); dc.DrawRectangle( box );
+        // The block's content sits inside an 8-pixel margin; the outline and its handles stay on the block's edges. Text is
+        // drawn whole or not at all (design QA P2-7).
         wxRect inner = wxRect( box ).Deflate( 8 );
         dc.SetClippingRegion( inner );
         auto names = portNames( dc, drawn, node.id );
-        wxRect caption = R::CaptionRect( dc, node, inner, GetFont().Bold().Larger() );
-        dc.DrawText( Text( node.name ), inner.x + 10, inner.y + 24 ); dc.SetFont( GetFont() );
+        R::CAPTION caption = R::BlockCaption( dc, node, inner, GetFont().Bold().Larger() );
+        if( !caption.rect.IsEmpty() ) dc.DrawText( caption.text, caption.rect.GetTopLeft() );
+        dc.SetFont( GetFont() );
         // A block shows a chip for each chosen or candidate component choice once it has any (Round A4, owner
         // decision n0b2a908b00e78823); until then it is only its caption (owner decision n98a3f3c41084f0ed).
-        auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption, names );
+        auto chips = R::LayoutChips( dc, node, inner, chipFont(), caption.rect, names );
         // While the whole-diagram history is open (browsing or previewing a past revision) the canvas takes no
         // presses: the blocks keep their chips, but a Review facets link would do nothing there.
         if( !facetLinkOffered() ) chips.link.reset();
+        dc.SetFont( GetFont() );
         if( chips.shown ) R::DrawChips( dc, chips, chipFont(), dark, foreground, linkColour() );
-        else if( !node.isNew ) dc.DrawText( wxString::Format( "v%d", node.version ), inner.x + 10, inner.y + 58 );
+        else if( !node.isNew )
+        {
+            wxString version = wxString::Format( "v%d", node.version );
+            if( wxRect line = R::VersionRect( dc, version, inner, caption.rect ); !line.IsEmpty() ) dc.DrawText( version, line.GetTopLeft() );
+        }
         dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
         dc.DestroyClippingRegion();
-        if( selected && drawingAvailable() && m_tool == TOOL::SELECT && m_portId.empty() )
+        if( selected && !handles.empty() )
         {
-            dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( background ) );
-            wxPoint handles[] = { box.GetTopLeft(), { box.x + box.width / 2, box.y }, box.GetTopRight(), { box.GetRight(), box.y + box.height / 2 },
-                                  box.GetBottomRight(), { box.x + box.width / 2, box.GetBottom() }, box.GetBottomLeft(), { box.x, box.y + box.height / 2 } };
-            for( const auto& handle : handles ) dc.DrawRectangle( handle.x - 3, handle.y - 3, 7, 7 );
+            dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( colours.handleFill ) );
+            for( const auto& handle : handles ) dc.DrawRectangle( handle );
         }
     }
-    dc.SetFont( captionFont ); dc.SetTextForeground( foreground );
-    for( const auto& [caption, at] : captions ) dc.DrawText( caption, at );
-    dc.SetFont( GetFont() );
+    // Connection captions are drawn after the blocks and their resize handles, each in a clear place beside its connection
+    // on a knocked-out background (design QA P2-7).
+    dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
+    for( const auto& place : connectionCaptions( drawn, dc.GetSize() ) )
+    {
+        if( !place.shown ) continue;
+        dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( place.rect ).Inflate( 1 ) );
+        dc.DrawText( place.text, place.rect.GetTopLeft() );
+    }
+    std::optional<TARGET> target = connectTarget( drawn );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
+        // Ports are 12 DIP squares at every zoom (design QA P2-6).
         bool selected = port.owner == m_portOwner && port.id == m_portId;
-        dc.SetPen( wxPen( selected ? accent : foreground, selected ? 2 : 1 ) );
-        dc.SetBrush( selected ? wxBrush( accent.ChangeLightness( dark ? 70 : 160 ) ) : wxBrush( background ) );
-        dc.DrawRectangle( port.at.x - 4, port.at.y - 4, 8, 8 );
+        bool aimed = target && target->port && target->owner == port.owner && target->id == port.id;
+        dc.SetPen( wxPen( selected || aimed ? accent : foreground, selected || aimed ? 2 : 1 ) );
+        dc.SetBrush( selected || aimed ? wxBrush( colours.selectedFill ) : wxBrush( background ) );
+        dc.DrawRectangle( portMark( port.at ) );
         if( port.boundary )
         {
             // A port on the level frame names itself outside the frame, beside its side.
@@ -1542,22 +2583,45 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     if( m_captionKind == 1 )
     {
         // The block being added, at the point the user chose, while its caption is typed.
-        dc.SetPen( wxPen( accent, 1, wxPENSTYLE_SHORT_DASH ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
         dc.DrawRectangle( toScreen( R::RECT{ snap( m_pendingPoint.x - 120 * Q ), snap( m_pendingPoint.y - 70 * Q ), 240 * Q, 140 * Q } ) );
     }
-    if( m_tool == TOOL::CONNECT && m_connectFrom && !m_historyPreview )
+    if( m_captionKind && m_caption->IsShown() )
     {
-        // The connection in progress and the hint shared by the toolbar strip and the palette.
-        wxPoint from = toScreen( drawn.Anchor( *m_connectFrom, toDiagram( m_pointer ).x ) );
-        wxPoint to = m_connectTo ? toScreen( drawn.Anchor( *m_connectTo, drawn.Anchor( *m_connectFrom, 0 ).x ) ) : m_pointer;
-        dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLine( from, to );
-        dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( to, 5 );
-        if( !m_captionKind )
+        // The in-place caption field's focus ring in the accent, which the theme's own focus border does not reach in the
+        // dark theme (design QA P1-1).
+        dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+        dc.DrawRectangle( m_caption->GetRect().Inflate( FromDIP( 3 ) ) );
+    }
+    if( m_tool == TOOL::CONNECT && !m_historyPreview )
+    {
+        // The port or block under the pointer where the connection can start or finish (design QA P2-6).
+        if( target )
         {
-            wxString hint = _( "Click a port to finish connection" ); wxSize extent = dc.GetTextExtent( hint );
-            wxRect callout( to.x + 14, to.y + 10, extent.x + 16, extent.y + 10 );
-            dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( accent.ChangeLightness( dark ? 50 : 185 ) ) );
-            dc.DrawRoundedRectangle( callout, 4 ); dc.DrawText( hint, callout.x + 8, callout.y + 5 );
+            dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
+            if( target->port ) dc.DrawCircle( target->rect.x + target->rect.width / 2, target->rect.y + target->rect.height / 2, target->rect.width / 2 );
+            else dc.DrawRectangle( target->rect );
+        }
+        if( m_connectFrom )
+        {
+            // The connection in progress, at right angles like a drawn connection, ending in a circle at the pointer (design QA
+            // P1-1 and P3 4), and the hint shared by the toolbar strip and the palette.
+            wxPoint from = toScreen( drawn.Anchor( *m_connectFrom, toDiagram( m_pointer ).x ) );
+            wxPoint to = m_connectTo ? toScreen( drawn.Anchor( *m_connectTo, drawn.Anchor( *m_connectFrom, 0 ).x ) ) : m_pointer;
+            int middle = ( from.x + to.x ) / 2;
+            wxPoint path[] = { from, { middle, from.y }, { middle, to.y }, to };
+            dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLines( 4, path );
+            dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( to, FromDIP( 5 ) );
+            if( !m_captionKind )
+            {
+                wxString hint = _( "Click a port to finish connection" ); wxSize extent = dc.GetTextExtent( hint );
+                wxRect callout( to.x + 14, to.y + 10, extent.x + 16, extent.y + 10 );
+                wxColour fill = accent.ChangeLightness( dark ? 45 : 185 );
+                dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( fill ) );
+                dc.SetTextForeground( R::Readable( foreground, { fill }, 4.5 ) );
+                dc.DrawRoundedRectangle( callout, 4 ); dc.DrawText( hint, callout.x + 8, callout.y + 5 );
+                dc.SetTextForeground( foreground );
+            }
         }
     }
     m_rendered = true;
@@ -1567,7 +2631,7 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 {
     ++m_canvasPresses;
     if( !m_ready || m_process || !current() || m_diagramHistoryOpen ) return;
-    wxPoint point = event.GetPosition(); m_pointer = point;
+    wxPoint point = event.GetPosition(); m_pointer = point; m_pointerInside = true;
     // A new press ends any drag whose release was not delivered; a press the canvas receives only through
     // its mouse capture, outside its own area, belongs to another control and changes nothing here.
     if( m_drag != DRAG::NONE ) release();
@@ -1674,8 +2738,9 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 
 void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
-    m_pointer = event.GetPosition();
-    if( m_tool == TOOL::CONNECT && m_connectFrom && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
+    m_pointer = event.GetPosition(); m_pointerInside = true;
+    // The Connect tool follows the pointer: its preview, and the port or block it would start or finish on.
+    if( m_tool == TOOL::CONNECT && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
     if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && facetLinkOffered() )
     {
         bool link = false;

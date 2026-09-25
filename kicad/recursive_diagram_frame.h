@@ -30,6 +30,7 @@ class wxChoice;
 class wxRadioButton;
 class wxSplitterWindow;
 class wxSizer;
+class wxSizerItem;
 class wxStaticLine;
 class DIALOG_DIAGRAM_FIELD_HISTORY;
 class PANEL_DIAGRAM_HISTORY;
@@ -105,8 +106,6 @@ private:
     void materialize();
     void materializeFrame();
     void encloseInFrame( const RECURSIVE_DIAGRAM::RECT& aRect );
-    /// Stores a route for a new connection whose computed path would run along another one (rule F4).
-    void routeNewConnection( const std::string& aConnectionId );
     /// Keeps each unlocked channel route level with its ends' current heights, and its offset from the middle
     /// when its ends moved since aBefore.
     void followRoutes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore );
@@ -179,8 +178,8 @@ private:
     void setFacetState( int aState );
     void setFacetStrength( int aStrength );
     /// Shows the strength choices' full labels when they fit the inspector's width in one row, and their short
-    /// labels otherwise, so the row collapses its labels before it wraps.
-    /// Returns whether a label changed, so the caller lays out the inspector again.
+    /// labels otherwise, so the row collapses its labels before it wraps; and gives the state and strength rows the
+    /// width they wrap within. Returns whether a label or that width changed, so the caller lays out the inspector again.
     bool fitFacetLabels();
     wxFont chipFont() const;
     wxColour linkColour() const;
@@ -263,6 +262,24 @@ private:
     std::vector<wxRect> portNames( wxDC& aDC, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::string& aBlock ) const;
     /// Each boundary port's name and where it is drawn beside the level frame, in canvas pixels.
     std::vector<std::pair<std::string, wxRect>> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// A port's square as drawn at aAt: 12 DIP at every zoom (design QA P2-6).
+    wxRect portMark( const wxPoint& aAt ) const;
+    /// Every port square as drawn on the canvas (an unplaced child port once per place a connection attaches to it).
+    struct PORT_MARK { std::string owner, id; wxString name; wxRect rect; };
+    std::vector<PORT_MARK> portMarks( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Each connection caption and where it is drawn, in canvas pixels; shown is false for one left out because no place
+    /// beside its connection is clear of blocks, handles, ports, wires and other captions (design QA P2-7).
+    struct CAPTION_PLACE { std::string connection; wxString text; wxRect rect; bool shown = false; };
+    std::vector<CAPTION_PLACE> connectionCaptions( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxSize& aArea ) const;
+    /// The selected block's eight resize handles as drawn, in canvas pixels; empty when none are drawn.
+    std::vector<wxRect> selectionHandles( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// What the Connect tool highlights under the pointer as a valid place to start or finish (design QA P2-6): a port's
+    /// ring or a block's outline, in canvas pixels, with its name.
+    struct TARGET { wxRect rect; wxString name; bool port = false; std::string owner, id; };
+    std::optional<TARGET> connectTarget( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Keeps Save styled as the primary action while it is available, with Decline beside it as the secondary one
+    /// (design QA P2-8).
+    void enableSave( bool aSave, bool aDecline );
     wxPoint toScreen( const RECURSIVE_DIAGRAM::POINT& aPoint ) const;
     wxRect toScreen( const RECURSIVE_DIAGRAM::RECT& aRect ) const;
     RECURSIVE_DIAGRAM::POINT toDiagram( const wxPoint& aPoint ) const;
@@ -303,8 +320,8 @@ private:
     /// A plain window, not a panel: a panel would pass keyboard focus on to the palette it contains.
     wxWindow* m_canvas;
     RECURSIVE_DIAGRAM::TOOL_PALETTE* m_palette;
-    std::vector<std::pair<TOOL, wxToggleButton*>> m_strip;
-    wxButton* m_stripDelete;
+    std::vector<std::pair<TOOL, RECURSIVE_DIAGRAM::TOOL_BUTTON*>> m_strip;
+    RECURSIVE_DIAGRAM::TOOL_ACTION* m_stripDelete;
     bool m_paletteShown = true;
     wxTextCtrl* m_caption;
     int m_captionKind = 0;
@@ -312,6 +329,8 @@ private:
     std::string m_pendingOwner;
     std::optional<kiapi::automation::diagrams::v1::DiagramEndpointBindingData> m_connectFrom, m_connectTo;
     wxPoint m_pointer;
+    /// Whether the pointer is over the canvas (the Connect tool highlights what is under it only then).
+    bool m_pointerInside = false;
     wxStaticText* m_breadcrumb;
     wxButton* m_implementation;
     wxButton* m_diagramHistory;
@@ -352,16 +371,21 @@ private:
     wxStaticText* m_facetHeading;
     std::array<RECURSIVE_DIAGRAM::FACET_ROW*, RECURSIVE_DIAGRAM::FACETS> m_facetRows;
     wxSizer* m_facetDetail;
-    wxButton* m_facetBack;
+    /// The gap between the facet overview and the section after it (design QA P2-12).
+    wxSizerItem* m_facetGap;
+    RECURSIVE_DIAGRAM::LINK_BUTTON* m_facetBack;
     wxStaticText* m_facetTitle;
     /// One-click choices (Chosen, Candidate, Unknown) and (Information, Preference, Requirement).
     std::array<wxRadioButton*, 3> m_facetStates;
+    /// The rows holding the state and strength choices; they wrap within the width fitFacetLabels gives them.
+    RECURSIVE_DIAGRAM::CHOICE_FLOW* m_facetStateRow;
+    RECURSIVE_DIAGRAM::CHOICE_FLOW* m_facetStrengthRow;
     wxStaticText* m_facetValueLabel;
     wxTextCtrl* m_facetValue;
     wxTextCtrl* m_facetCandidates;
     wxTextCtrl* m_facetReason;
     std::array<wxRadioButton*, 3> m_facetStrengths;
-    wxButton* m_facetClear;
+    RECURSIVE_DIAGRAM::LINK_BUTTON* m_facetClear;
     wxStaticText* m_facetNotice;
     /// The facet whose detail is open (-1 for none) and the block it belongs to.
     int m_facet = -1;
@@ -385,6 +409,8 @@ private:
     std::map<std::string, std::array<bool, 3>> m_revealed;
     wxButton* m_openDiagram;
     wxButton* m_save;
+    /// How Save is styled: 1 as the primary action, 0 unavailable, -1 not yet styled.
+    int m_saveStyle = -1;
     wxButton* m_decline;
     std::array<wxTextCtrl*, 3> m_fields;
     std::array<wxButton*, 3> m_history;

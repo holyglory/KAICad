@@ -27,7 +27,7 @@ internal static class DesignPublicationCommitter
             || after.ProcessEpoch != confirmedSave.ProcessEpoch || after.NativeIdentity != request.ExpectedState.NativeIdentity
             || after.Revision?.Epoch != request.ExpectedState.Revision.Epoch
             || after.Revision.Sequence < request.ExpectedState.Revision.Sequence || after.NativeContentDirty
-            || !after.ProjectSettingsIncluded || after.StateSha256 != request.ExpectedState.StateSha256
+            || !after.ProjectSettingsIncluded || !SavedAsPlanned(after, request.ExpectedState)
             || !CheckedSchematicContract.FileCoverage(after))
             throw Error("native_save_not_confirmed", "An exact successful native-save result is required before publishing XML.");
         if (intent.PreviousPath != PreservingFileReplacement.PreviousPath(intent.StagedPath))
@@ -130,6 +130,19 @@ internal static class DesignPublicationCommitter
                 intent.Phase == DesignPublicationPhase.Published ? intent.PreviousPath : null);
         }
     }
+
+    /// <summary>Whether the saved state is the state observed before the save. KiCad's save also writes the project-file
+    /// entries it derives from the schematic itself (the sheet list, the top-level sheet list, the root sheet's revision
+    /// kept for IPC-2581 and the project file name). A project whose file KiCad has not written yet, or whose sheets were
+    /// added or renamed since its last save, therefore changes <c>state_sha256</c> on its next save although KiCad saved
+    /// exactly the planned design. That change, and no other, is recognized: the native save-stable digest, which leaves
+    /// out exactly those entries, must be present before the save and unchanged by it. Without it (an editor that does
+    /// not report it) the full digest must be unchanged.</summary>
+    internal static bool SavedAsPlanned(DocumentLifecycleState after, DocumentLifecycleState expected) =>
+        after.StateSha256 == expected.StateSha256
+        || (IsDigest(expected.SaveStableStateSha256) && after.SaveStableStateSha256 == expected.SaveStableStateSha256);
+
+    private static bool IsDigest(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
 
     private static StoredDesignRecovery RequireRecord(DesignRecoveryStore store, string token)
     {

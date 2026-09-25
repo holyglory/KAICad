@@ -25,8 +25,7 @@ public sealed record SchematicSynchronizationPlan(SchematicDesign? Candidate, st
     // the executor builds the batch around them (CN-1 §9.1).
     // Candidate is the pre-realization design.
     public bool NativeConnectionRealizationRequired => Connections is not null;
-    // The Rebuild parameter is provisional until lane 2C confirms; changes go
-    // through a seam request.
+    // Rebuild: apply creates sheets the XML adds or rebuilds lost schematic files (SchematicRebuild).
     public bool NativeRebuildRequired => Rebuild is not null;
 }
 
@@ -109,8 +108,7 @@ public static class SchematicSynchronizationPlanner
                 return Failure(connected.ErrorCode ?? SchematicConnectionErrors.XmlDisconnectionUnsupported, connected.ErrorMessage);
             if (connected.Kind == SchematicConnectedAdditionKind.Admitted)
                 return SchematicConnectedAdditionPlanner.Prepare(state, desired, hierarchy, connected, gaps, token);
-            // The rebuild dispatch and its design_sync_conflict fallback are provisional
-            // until lane 2C confirms; changes go through a seam request.
+            // A sheet generation or lost-files rebuild; an unexplained refusal is design_sync_conflict.
             var rebuild = SchematicRebuild.Classify(state, desired, token);
             if (rebuild.Kind == SchematicRebuildKind.Rejected)
                 return Failure(rebuild.ErrorCode ?? "design_sync_conflict", rebuild.ErrorMessage);

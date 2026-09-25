@@ -390,6 +390,8 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
             session.set_instance_id( m_automationInstanceId );
             session.set_project_path( m_automationProjectPath );
             session.set_epoch( m_token );
+            // Lets a client that attached to this process tell later whether it is still running.
+            session.set_process_id( static_cast<uint32_t>( ::wxGetProcessId() ) );
 
             // Named feature contracts, each listed only when the whole feature works in this build.
             session.add_capabilities( "session.info" );

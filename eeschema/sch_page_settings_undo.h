@@ -107,8 +107,11 @@ public:
         {
             SCH_SCREEN* screen = path.LastScreen();
             if( screen )
+            {
                 m_screens.emplace( screen->GetUuid(), STATE{ screen->GetPageSettings(), screen->GetTitleBlock(),
                                                            screen->IsContentModified() } );
+                m_screenIdentities.emplace( screen, screen->GetUuid() );
+            }
             SCH_SHEET* sheet = path.Last();
             if( sheet )
                 m_roots.emplace( sheet->m_Uuid, sheet->HasRootInstance()
@@ -186,6 +189,21 @@ public:
         }
         if( m_restoreErcPolicy || m_restoreErcMarkers )
             RestoreErc( aFrame, aOpposite );
+        // A rebuild gave a new root screen the identity its saved file had (IncludeScreenIdentities).
+        // Put each screen's identity back first: the page states below are keyed by it.
+        if( m_restoreScreenIdentities )
+        {
+            for( const SCH_SHEET_PATH& path : aFrame->Schematic().Hierarchy() )
+            {
+                SCH_SCREEN* screen = path.LastScreen();
+                auto        saved = screen ? m_screenIdentities.find( screen ) : m_screenIdentities.end();
+                if( saved != m_screenIdentities.end() && screen->GetUuid() != saved->second )
+                {
+                    screen->SetUuid( saved->second );
+                    screen->SetContentModified();
+                }
+            }
+        }
         for( const SCH_SHEET_PATH& path : aFrame->Schematic().Hierarchy() )
         {
             SCH_SCREEN* screen = path.LastScreen();
@@ -246,6 +264,9 @@ public:
     /// The screens' page, title and root-page states are always restored; this records that
     /// the entry is more than an ERC edit.
     void IncludePages() { m_restorePages = true; }
+    /// A screen's identity was changed by this entry (a rebuilt root adopting its saved identity).
+    /// Restoring puts every screen captured here back to the identity it had then.
+    void IncludeScreenIdentities() { m_restorePages = true; m_restoreScreenIdentities = true; }
     bool IncludesErcMarkers() const { return m_restoreErcMarkers; }
     SCH_ERC_HISTORY::STATE& ErcMarkers() { return m_ercMarkers; }
 
@@ -428,6 +449,7 @@ public:
         m_restoreErcPolicy = aOther.m_restoreErcPolicy;
         m_restoreErcMarkers = aOther.m_restoreErcMarkers;
         m_restorePages = aOther.m_restorePages;
+        m_restoreScreenIdentities = aOther.m_restoreScreenIdentities;
         m_restoreSetup = aOther.m_restoreSetup;
         if( m_restoreSetup )
         {
@@ -470,6 +492,8 @@ public:
 private:
     struct STATE { PAGE_INFO page; TITLE_BLOCK title; bool modified; };
     std::map<KIID, STATE> m_screens;
+    std::map<const SCH_SCREEN*, KIID> m_screenIdentities;   ///< Each screen's identity when captured.
+    bool m_restoreScreenIdentities = false;
     std::vector<std::shared_ptr<BUS_ALIAS>> m_busAliases;
     std::map<wxString, wxString> m_textVariables;
     std::map<wxString, wxString> m_variantDescriptions;

@@ -23,7 +23,8 @@ public sealed class CapabilityCatalogTests
 
     // Lane 2D tool types: each of their tools declares its capability and its verification.
     private static readonly System.Type[] DeclaredToolTypes =
-        [typeof(InstanceTools), typeof(InstanceUpdateTools), typeof(DocumentLifecycleTools), typeof(DocumentStateTools), typeof(CheckedSchematicTools)];
+        [typeof(InstanceTools), typeof(InstanceUpdateTools), typeof(DocumentLifecycleTools), typeof(DocumentStateTools), typeof(CheckedSchematicTools),
+         typeof(ExitedOperationTools)];
 
     [TestMethod]
     public async Task CompiledServerAdvertisesExactlyItsRegisteredTools()
@@ -730,39 +731,118 @@ internal static class CapabilityCatalogAssertions
 /// helper's tool parameter (string toolName = "name"). A listed, asserted or assigned name is not a
 /// call, and comments are removed before matching. The call check is per class, not per method.
 /// <para>
+/// The check guards against honest mistakes, such as citing a journey that still ends Inconclusive;
+/// it does not guard against deliberate evasion. It reads source text with regular expressions, not
+/// compiled code, and rejects a cited NativeSessionTests method only for what it finds in the forms
+/// described here. The known forms it does not read are listed at the end.
+/// </para>
+/// <para>
 /// NativeSessionTests is the Linux native session fixture: its partial sources are the journeys that
-/// drive a real KiCad. Its members, and those of every other class in the test sources, are read with
-/// their braces, strings and comments, so every member is found, with or without an access modifier.
-/// An Inconclusive lane stub is any member that names AssertInconclusiveException or
-/// Assert.Inconclusive, whether it raises, catches or tests for it, except in the one catch filter
-/// that lets such a result through: catch (T e) when (e is not AssertInconclusiveException), alone or
-/// followed by &amp;&amp; with no top-level | or ?. A cited NativeSessionTests method counts only when this
-/// check can read that it cannot reach a stub, and what it cannot read is rejected, never accepted:
+/// drive a real KiCad. The check reads every class of the test sources whose declaration line begins
+/// with the class keyword, after only public, internal, private, protected, static, sealed,
+/// abstract, partial or file; records, structs and interfaces are not read. Comments are removed,
+/// and each class is split into members with its brackets and strings taken into account, so each
+/// member is found with or without an access modifier.
+/// An Inconclusive lane stub is recognised by its body: any member whose own text names
+/// AssertInconclusiveException or Assert.Inconclusive, whether it raises, catches or tests for it,
+/// except in the one catch filter that lets such a result through: catch (T e) when (e is not
+/// AssertInconclusiveException), alone or followed by &amp;&amp; with no top-level | or ?. A cited
+/// stub is rejected. Any other cited NativeSessionTests method counts when the check finds no path
+/// to a stub in the two forms below. Within those forms, a construct the check recognises but cannot
+/// follow is rejected rather than accepted:
 /// </para>
 /// <list type="bullet">
-/// <item>An expression body that is exactly RunNativeSessions(NativeJourney.X[, parameters]) runs
-/// journey X. A switch is read as dispatch only over a parameter that always holds the journey being
-/// run: the NativeJourney parameter of RunNativeSessions when every call passes it a named journey
-/// from a test that nothing else names, or the NativeJourney parameter of a member named only in
-/// calls that each pass it such a parameter of the caller, unchanged. Neither may be reassigned or
-/// redeclared, and an overloaded member is not read. X is rejected when a dispatch arm sends it to a
+/// <item>A direct citation: an expression body (=>) that is exactly
+/// RunNativeSessions(NativeJourney.X[, further arguments that are each a single identifier or
+/// keyword, such as a parameter name, true or null, or a single string or character literal on one
+/// line with no interpolation holes]), optionally awaited, runs journey X. Any other body that names
+/// RunNativeSessions, including a block body making the same call, is read as a helper chain, which
+/// rejects it. A switch expression is read as dispatch only over a parameter that always holds the
+/// journey being run: a NativeJourney parameter, taken by value, of the member that contains the
+/// switch, where that member is named in the fixture only in calls and each call passes it either
+/// the caller's own such parameter, unchanged, or, when the member is RunNativeSessions, a named
+/// journey (NativeJourney.Y) from a member that nothing else names, normally a test. The parameter
+/// may not be reassigned, or redeclared in a form this check recognises, its member may not use
+/// goto, and an overloaded member is not read. X is rejected when a dispatch arm sends it to a
 /// stub, or when a default arm leading to a stub may be reached by X. A default arm is limited only
-/// when its switch runs directly in the member's block, outside any lambda, local function or nested
-/// block, and then only by earlier switches over the same parameter, each a whole unconditional
-/// assignment statement of that block whose arms name journeys and throw for any other. Every journey
-/// may reach a stub that is named anywhere except its declaration and switch arms (an if/else
-/// dispatch, a direct call, a delegate), a stub that a switch over any other value leads to, and a
-/// call into another test class that can end Inconclusive.</item>
-/// <item>Any other test is followed through every NativeSessionTests member it names, to any depth.
-/// It is rejected when a reachable member is or names a stub, names NativeJourney or
-/// RunNativeSessions, makes an unqualified call that is neither a NativeSessionTests member nor a
-/// local function, delegate or parameter declared where it is called, or calls into another test
-/// class a member that can end Inconclusive.</item>
+/// when its switch runs directly in the member's block, outside any lambda, local function or
+/// nested block, and then only by earlier switches over the same parameter, each a whole
+/// unconditional assignment statement of that block whose arms name journeys, except a discard arm
+/// (_) that throws for any other journey. Every journey may reach: a stub named anywhere in the
+/// fixture's source files except in its declaration and as the call a switch expression arm makes
+/// when the arm has no when clause and its pattern is _ or one or more NativeJourney values joined
+/// by the keyword or (NativeJourney.X => Stub(...), NativeJourney.X or NativeJourney.Y => Stub(...),
+/// _ => Stub(...)), such as a stub named in an if/else dispatch, a switch statement, an arm with a
+/// when clause, a direct call or a delegate; a stub that a switch over any other value leads to; and
+/// a call from any fixture member into another test class that may reach a stub.</item>
+/// <item>A helper-chain citation: any other test is followed through every NativeSessionTests member
+/// it names without a qualifier, to any depth. It is rejected when a reachable member, including the
+/// cited test itself, is or names a stub, names NativeJourney or RunNativeSessions, makes an
+/// unqualified call whose name is not a NativeSessionTests member, a local function, variable or
+/// parameter declared anywhere in that member, or a member every object has (ToString, Equals and
+/// the like), or makes a call into another test class that may reach a stub.</item>
 /// </list>
-/// A call into another test class (Class.Member(...) or new Class(...)) is followed member by member
-/// through that class and the test classes it calls the same way; a name this check cannot find there
-/// stands for every member of its class. Members reached through an instance, and code outside the
-/// test sources, are not examined.
+/// Another test class is any class other than NativeSessionTests that the check reads. A call into
+/// one is followed only when written Class.Member(...), with Class a simple class name and the
+/// member optionally generic, or new Class(...). It is followed member by member: from each member
+/// reached there, the check follows the members of its own class named without a qualifier and the
+/// calls made in the same two forms into test classes, but never a call back into
+/// NativeSessionTests. A name this check cannot find in the called class stands for every member of
+/// that class. So new Class(...) follows only the constructor when the class declares one, and every
+/// member of the class when it does not.
+/// <para>
+/// Known forms this check does not read, so a claim that depends on them is not checked:
+/// </para>
+/// <list type="bullet">
+/// <item>Code the test framework runs without the test naming it: [TestInitialize], [TestCleanup],
+/// [ClassInitialize], [AssemblyInitialize] and the like in any class, the NativeSessionTests
+/// constructor, Dispose and DisposeAsync, and field and property initializers. The check does not
+/// treat this code as part of the tests it runs around, and a helper chain reaches it only when a
+/// member the chain follows names it. For a direct citation, such code inside NativeSessionTests is
+/// read like any fixture member, so a stub it names or a call it makes into another test class that
+/// may reach a stub is caught. Such code that is itself a stub is caught only by chance, for example
+/// when its name appears elsewhere in the fixture.</item>
+/// <item>In a helper chain, a NativeSessionTests member named with a qualifier: this.Member(...),
+/// base.Member(...), NativeSessionTests.Member(...), other.Member(...),
+/// new NativeSessionTests().Member(...) or field.Member(...). The member is not followed, so a stub
+/// it reaches further on is missed; a reached member that names a stub itself, in any form, is still
+/// rejected. A direct citation is not affected, because any mention of a stub other than its
+/// declaration and the call made by a switch expression arm without a when clause, as described
+/// above, rejects every direct citation.</item>
+/// <item>In either citation form, calls through any instance or field of another test class
+/// (var helper = new Helper(); then helper.Pending(), or field.Pending()), and extension-method
+/// calls. Only the new Helper() that creates such an instance is followed, as described above,
+/// where the check reads it; the later call is not.</item>
+/// <item>Calls into another test class written other than Class.Member(...) or new Class(...) with a
+/// simple class name: with a namespace or enclosing class (Ns.Helper.Pending(),
+/// Outer.Helper.Pending(), global::Ns.Helper.Pending()), with generic arguments on the class
+/// (Helper&lt;T&gt;.Pending(), new Helper&lt;T&gt;()), with target-typed new(), or as an object
+/// initializer with no parentheses (new Helper { ... }). Members that another test class inherits
+/// from its base class are not followed either, nor calls into records and structs.</item>
+/// <item>Property and field reads and method groups of another test class, including a delegate
+/// passed on or invoked through Invoke or ?.Invoke (Helper.Value, Run(Helper.Callback),
+/// Helper.Callback.Invoke(), Helper.Callback?.Invoke(), Run(Helper.Pending)): none is followed. Only
+/// a direct call of a delegate field or property, Helper.Callback(...), is followed, and then only to
+/// that member's own declaration, initializer included; a value assigned to it elsewhere is not
+/// followed from that call.</item>
+/// <item>Inside another test class, its own members named through this (this.Member(...)), and calls
+/// back into NativeSessionTests (NativeSessionTests.Member(...)): neither is followed.</item>
+/// <item>A variable that a lambda or local function redeclares under the journey parameter's name in
+/// a form this check does not recognise as a declaration, such as a pattern variable followed by
+/// &amp;&amp;. The parameter is then still read as holding the running journey, and a switch over the
+/// redeclared variable is read as dispatch.</item>
+/// <item>An exception class declared outside NativeSessionTests that derives from
+/// AssertInconclusiveException and is raised under its own name. Only members that name
+/// AssertInconclusiveException or Assert.Inconclusive themselves are stubs.</item>
+/// <item>An unqualified call made available by using static, such as a bare Inconclusive(...) or a
+/// helper of another test class. A bare Inconclusive(...) is never recognised as a stub, and such a
+/// call is never followed into the class it comes from. A helper chain rejects it, as an unqualified
+/// call it cannot find, only in a NativeSessionTests member the chain reaches, including the cited
+/// test's own body. It is missed in any other test class, whichever way the test is cited, and in
+/// fixture code that a direct citation runs, for example through a dispatch arm, so such a journey
+/// still counts.</item>
+/// <item>Code outside the test sources.</item>
+/// </list>
 /// </summary>
 internal static class VerificationEvidenceRules
 {

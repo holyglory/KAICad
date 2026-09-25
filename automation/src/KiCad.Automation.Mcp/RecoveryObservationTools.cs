@@ -32,7 +32,7 @@ public sealed class RecoveryObservationTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_design_recovery_refresh"),
-     Description("Capture and persist the current native hierarchy into an existing recovery record for an explicitly attached instance. Requires the absolute recovery path and exact expected recovery revision token. Preserves baseline, desired XML bytes and libraries. Rejects unconfirmed pending mutations; use recovery observation and reconciliation first. Changed native data/revision invalidates saved hierarchy choices. A concurrent recovery write rejects the refresh. Does not modify KiCad, write design XML, advance the baseline, or imply complete tracking or automatic synchronization.")]
+     Description("Capture and persist the current native hierarchy into an existing recovery record for an explicitly attached instance; a record that keeps electrical checkpoints also gets the current pin connectivity, so it can be planned again. Requires the absolute recovery path and exact expected recovery revision token. Preserves baseline, desired XML bytes and libraries. Rejects unconfirmed pending mutations; use recovery observation and reconciliation first. Changed native data/revision invalidates saved hierarchy choices. A concurrent recovery write rejects the refresh. Does not modify KiCad, write design XML, advance the baseline, or imply complete tracking or automatic synchronization.")]
     public Task<CallToolResult> RefreshRecovery(string instanceId, string recoveryPath,
         string expectedRevisionToken, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -45,7 +45,11 @@ public sealed class RecoveryObservationTools(InstanceRegistry registry)
             throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
         if (saved.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery state changed; reload it before refresh.");
-        var refreshed = await DesignRecoveryInspector.RefreshAsync(store, registry.Client(instanceId), expectedRevisionToken, cancellationToken);
+        // A record that keeps electrical checkpoints is planned against current pin connectivity, so capture it with the
+        // hierarchy; a hierarchy-only refresh would leave that record unplannable (missing_electrical_observation).
+        bool electrical = saved.State.BaselineElectrical is not null || saved.State.ObservedElectrical is not null;
+        var refreshed = await DesignRecoveryInspector.RefreshAsync(store, registry.Client(instanceId), expectedRevisionToken, cancellationToken,
+            includeElectrical: electrical);
         var structured = JsonSerializer.SerializeToElement(new
         {
             instanceId, recoveryRevisionToken = refreshed.RevisionToken,

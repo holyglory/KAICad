@@ -900,6 +900,22 @@ bool SCH_COMMIT::SetNetChainClasses( const std::set<wxString>& aDefinitions,
     return true;
 }
 
+void SCH_COMMIT::SetScreenIdentity( SCH_SCREEN* aScreen, const KIID& aId )
+{
+    auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
+    wxCHECK_RET( frame && aScreen && !m_isLibEditor, "Screen identity changes require a schematic editor" );
+    // Captured before the change, so the entry records the identity to restore.
+    if( !m_pageSettingsUndo )
+    {
+        m_pageSettingsUndo = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( frame );
+        m_pageSettingsUndo->SetFlags( UR_TRANSIENT );
+    }
+    m_pageSettingsUndo->IncludeScreenIdentities();
+    aScreen->SetUuid( aId );
+    aScreen->SetContentModified();
+}
+
+
 void SCH_COMMIT::SetRootInstance( SCH_SHEET* aSheet, const std::optional<wxString>& aPageNumber )
 {
     auto* frame = dynamic_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );

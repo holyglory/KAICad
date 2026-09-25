@@ -965,3 +965,91 @@ item `flat-proto-cleanup`, ledger `pecd3343bbab4075c`). The earlier sections sta
   `NativeStructuralEditorJourney.cs`, `NativeStructuralPropertyJourney.cs`, `StructuralEditorFileTests.cs` and
   `NativeStructuralMigrationJourney.cs`. Never created: `StructuralMigration.cs`, `StructuralMigrationTests.cs` and the
   `kicad_diagram_migrate` tool.
+
+## Erratum 2026-09-24: connection signals in the level draft
+
+Owner decision `ne0261047035e58c6` (`kicad-cn2-connection-signals-in-draft-20260924`): an abstract connection grows during
+development into a concrete bus with named signals (for example I2C gaining SDA and SCL), added in the connection panel with
+"+ Add detail" (owner decisions `nf53af9d74841b7d3` and `n98a3f3c41084f0ed`). The frozen text of §4.6 L3 and L4, §4.7, §4.8
+and §9.1 kept a connection's members unchanged in a level draft, which would make that impossible. The erratum is accepted
+(integration grant for lane 2B). The earlier sections stay as history; this erratum overrides them.
+
+Terms: a signal is a member of one of the level's root connections. A drawn signal was added in the current level draft; a
+saved signal is stored in the file.
+
+- **§4.6 `NewConnectionOccurrence`** gains `Guid? MemberOf = null` (proto `NewConnectionData.member_of = 200`, lane 2B band).
+  An occurrence with `MemberOf` is a drawn signal. `MemberOf` names one of the level's root connections: one drawn in the same
+  draft (an occurrence without `MemberOf`), or a saved root that the same draft edits through a connection draft. A drawn
+  signal is never itself one of the level's connections. Anything else, a signal of a signal included, fails with
+  `invalid_level_draft`.
+- **§4.6 L3 (connection drafts).** Instead of "`Members` must equal the baseline": a connection draft's `Members` are the saved
+  members it keeps, in their saved order, followed by exactly the signals drawn for it in this draft, in the order the draft
+  lists them among its new connections (the order they were added). Anything else fails with
+  `connection_member_edit_requires_member_path`: saved members out of their saved order, a member listed twice, a drawn
+  signal before or between the kept members, a drawn signal left out, or a member that is neither (a saved or drawn signal
+  of another connection). A saved member's own content is still edited only through its member path.
+- **§4.6 L3, dropping a saved member directly.** A connection draft may leave out saved members it no longer keeps. The graph's
+  own checks then refuse the save while anything still points at a dropped member or at one of its own members: a note that
+  targets it without an unresolved reason fails with `invalid_recursive_block_graph`, and a realization of one of the level's
+  boundary interfaces that still names it as a `LocalConnection` target fails with `invalid_interface_realization`. Nothing
+  is written. Once those notes are unresolved (or removed) and those targets removed, the same drop saves, and the dropped
+  signal's saved revisions stay in the history. The editor never drops a saved member this way; it removes saved signals with
+  `RemoveConnectionMembers` (§4.7 below), whose cascade does exactly that.
+- **§4.6 L4 and step 4 (new occurrences).** A drawn signal's selection appears in none of the scope's roots (instead of
+  exactly once). Step 4 gives a drawn root the `Members` of the signals drawn for it, in the order the draft lists them, and
+  a drawn signal no members. A drawn root of kind Signal that has drawn signals fails with
+  `invalid_diagram_connection_archive` (the archive's rule that a single signal has no members).
+- **§4.6 step 2 (new children).** A new block drawn without ports is created with no local diagram. `Diagram = new(Interfaces,
+  [], [])` applies only to a new block drawn with ports. A block without a local diagram keeps none until it has ports or
+  content: step 3 stores none for a child draft without ports, and step 5 stores none for a level that still has no ports,
+  connections, notes, layout or realizations.
+- **§4.7 (removals).**
+  - `LevelEditCommandKind` gains `RemoveConnectionMembers` (C# value 199, proto `LECK_REMOVE_CONNECTION_MEMBERS = 200`,
+    keeping the §2.5 rule C# = proto − 1). `LevelEditCommand` gains `MemberIds` (proto `LevelEditCommandData.member_ids =
+    200`) under the §2.5 record rules: no default in the primary constructor, the six-value constructor kept, and an omitted
+    list reads as empty.
+  - **RemoveConnectionMembers(C, M).** `ConnectionId` C is one of the level's root connections and `MemberIds` M a non-empty
+    list of distinct signals C has in the draft: the saved members its connection draft keeps (its saved members when it has
+    no connection draft) and the signals drawn for it. `BlockId` and `InterfaceId` are absent and `DetachConnections` is false.
+    Anything else fails with `level_edit_target_missing`. `MemberIds` on any other kind of removal fails with
+    `invalid_level_draft`.
+  - Each signal in M gives one `ConnectionRemoved` effect with its name. A drawn signal leaves the draft's new connections. A
+    saved signal leaves C's member list (C gets a connection draft if it had none). Steps 3 to 5 then apply to every removed
+    signal and to a saved signal's own members: notes on them become unresolved (`AnnotationUnresolved`), realization targets
+    on them are removed (`RealizationTargetRemoved`, and `RealizationStateChanged` when a record's state changes), and their
+    routes are removed (`PresentationEntryRemoved`). C itself, its other signals and its other details stay.
+  - **Removing a root.** RemoveConnection(C), and a removal that takes C with it (RemoveChild, or RemoveInterface with
+    `DetachConnections`), also removes the signals drawn for C. Which roots a removed block or interface touches, and what
+    steps 3 to 5 cover, both read one list: C, the saved signals its draft keeps with their own members, and the signals
+    drawn for it. A saved signal the draft already dropped is not part of C. "Members are removed through their member path"
+    now applies only to a signal's own members.
+  - **In the editor.** Instead of "Removals always go through `RFA_PREPARE_LEVEL_EDIT`": when every signal removed at once was
+    drawn in the same draft, the editor removes them itself, as the inverse of their addition. Each leaves the draft's new
+    connections and the member list its addition extended, the previous draft goes onto undo, no effect is reported and
+    nothing is sent to the helper. When any of them is saved, the whole removal goes through `RFA_PREPARE_LEVEL_EDIT` with
+    `RemoveConnectionMembers`, and the editor shows its effects. The editor removes no signal of a differential pair; its type
+    changes first.
+- **§4.8 (rebase).** Drawn signals follow their root. A drawn root keeps them, as every new connection is kept. A saved root's
+  connection draft carries the signals drawn for it, so its member list is a change of that draft: when the other side also
+  changed or removed that root, the rebase reports `LCK_CONNECTION` for it and returns no candidate, so nothing drawn is
+  dropped. Otherwise the candidate keeps the connection draft with its members and every drawn signal.
+- **§9.1 (native editor).** A signal is added in the level draft from the connection's Signals row: a drawn signal of kind
+  Signal whose `MemberOf` is the selected connection. Its ends are the blocks and ports the connection's ends are drawn on,
+  without any pin, selector, candidates or intent stated for the connection's ends. A saved connection's draft appends it
+  to its `Members`. Removing a connection's Endpoints row returns its ends, and those of the signals drawn for it in the
+  draft, to the blocks and ports they are drawn on; a saved signal's own ends change only through its member path.
+  Signals are removed as in §4.7. A separate connection draft remains only for edits of a signal's own content.
+
+## Erratum 2026-09-24: connection layout (design QA P2-5)
+
+Integration-owner decision `n03892aa8cecf933f` (2026-09-25): every connection is drawn on its own path. An end on a block never sits on the block's corner or on another connection's point, and each computed path leaves its blocks along their edges before it turns and keeps apart from the other paths wherever three-segment paths allow it; connections of one port share only the run at that port (formal design QA of the per-level editor, finding P2-5). The earlier text of section 9.2 stays as history; this erratum overrides its F2 for ends on a block itself and its F4.
+
+- **F2, ends on a block itself.** Ports keep the legacy rule. Take one edge of one block, with p ports on it (its ports placed on that side and all of its unplaced ports) and m ends on the block itself that face that way (F2's facing rule). The edge is divided into p + m + 1 equal steps, rounded to the unit. Each port, in order of its offset, takes the step point nearest to it (the lower one on a tie). The ends take the m points left, in order of their peers' reference heights and then level order; the reference height is the peer port's anchor, or the middle of the peer block. An end shared by several legs of one connection is one end. A single end on a block without ports stays at the middle of the edge. `resolved_layout` reports each leg's first and last point at these ends.
+- **F4, legs with a stored route.** A leg runs anchor(E[0]), its waypoints, anchor(E[i]). An unlocked route with exactly two waypoints on one vertical line (a channel route) is drawn with the two waypoints' heights replaced by the heights of its two ends' anchors, so it always runs level from each end to its channel (F4b). A locked route, and any other stored route, is drawn exactly as stored. Drawing never writes: the channel route's stored heights follow its ends with the next layout edit of the level (a move, resize, port edit, removal or rebase), which also keeps the channel's offset from the middle between the ends while the route is the one the draft drew.
+- **F4, computed legs.** A leg without a stored route runs from, (x, from.y), (x, to.y), to. Its channel x is chosen so:
+  1. **Leaving along the edge (F4c).** An end on a child block's left edge needs x ≤ its x − 20, on a right edge x ≥ its x + 20. An unplaced boundary port, and one placed on the frame's left side, needs x ≥ its x + 20; one placed on the frame's right side x ≤ its x − 20. An end on a top or bottom side sets no limit. When both ends' limits can hold together, the preferred channel is the middle (from.x + to.x) / 2 moved into them, and the candidates are the preferred channel and every channel a multiple of 10 units from it within the limits (up to 200 units beyond the ends on a side without a limit). Otherwise the preferred channel is the middle, and the candidates stay 10 units inside the ends. A leg whose ends are level has only the preferred channel.
+  2. **Score (F4a).** A candidate is scored, compared in this order: (a) its runs beside other legs: another leg's upright segment within 10 units of its upright segment over heights they share or meet at, and another leg's level segment on the height of one of its level segments that overlaps it or ends less than 10 units from it, unless that other leg starts or ends where this level segment starts (two connections of one port); (b) its contacts: each of its segments that comes within 10 units of a child block, not counting a block for the segment leaving that block's end; (c) the other legs' segments it crosses; (d) its distance from the preferred channel. On an equal score the lower channel is taken.
+  3. **Order.** Legs with a stored route are laid out first, then the computed legs in level order (connections in the level's order, each connection's legs in endpoint order), each taking its best candidate against the legs laid out before it. Then, up to four times over the computed legs in level order, a leg whose score still counts a run beside another leg is laid out again together with each computed leg it runs beside, over every pair of their candidates and scored against all the other legs; the first pair, in candidate order, whose summed score is the lowest and lower than their current summed score is taken.
+- **Routes the editor stores.** The editor stores no route for a connection it draws (Round A1 stored one, as a native presentation edit of section 4.6, when a computed path ran along another). A stored route, from an agent or an earlier save, follows its ends when they move (unlocked) or stays exactly as stored (locked), as before.
+- **Files written before this erratum.** Opening a file writes nothing and changes no draft. Ends on a block itself and computed paths are resolved by these rules, so `resolved_layout` reports the new points. An unlocked channel route stored against an end's old height (for example Rail feed's (500, 230)–(500, 275) when its end on the CPU moves from 275 to 283) is drawn level at once (F4b) and stored so with the next layout edit. A locked route, or a stored route of another shape, whose end moved is drawn as stored, with a slanted last leg, as a locked route already is when its ends move.
+- **Superseded text.** In section 9.2, F2's "or n when the id is absent" for an end on a block itself, and F4 as a whole.

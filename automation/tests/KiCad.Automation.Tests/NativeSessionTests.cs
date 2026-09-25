@@ -91,8 +91,13 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCrash")]
     public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
 
+    // The same crash fixture: the synchronizations the mid-apply kills left pending are released, then resumed or rolled
+    // back on the KiCad started again (decision nd2e75380e7f8aa7f).
+    [TestMethod, TestCategory("NativeCrash")]
+    public Task NativeCrashReleasesTheExitedOperation() => RunNativeSessions(NativeJourney.NativeCrashRelease);
+
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
-        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash }
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash, NativeCrashRelease }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -122,6 +127,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.XmlRebuild => "native-xml-rebuild",
                 NativeJourney.OwnershipSync => "native-ownership-sync",
                 NativeJourney.NativeCrash => "native-crash",
+                NativeJourney.NativeCrashRelease => "native-crash-release",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -271,7 +277,7 @@ public sealed partial class NativeSessionTests
                     evidence, target.Id, target.RootId, deadline.Token);
                 if (journey is NativeJourney.PsuCpuSeed or NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
                     or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync
-                    or NativeJourney.NativeCrash)
+                    or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease)
                 {
                     // PSU/CPU journeys seed the shared frozen fixture on this native-created
                     // root instead of the probe fixture. An Inconclusive lane stub ends the
@@ -881,7 +887,7 @@ public sealed partial class NativeSessionTests
         var seed = journey switch
         {
             NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync
-                or NativeJourney.NativeCrash => PsuCpuSeed.Sheets,
+                or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease => PsuCpuSeed.Sheets,
             NativeJourney.XmlRebuild => PsuCpuSeed.RootOnly,
             NativeJourney.DiagramCanvas => PsuCpuSeed.None,
             _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
@@ -894,6 +900,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.NativeCrashRelease => VerifyPsuCpuExitedOperationRelease(client, context, native, native.Id, display, evidence, instanceId, token),
             _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
         });
     }

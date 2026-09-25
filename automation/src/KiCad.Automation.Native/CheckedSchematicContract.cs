@@ -62,7 +62,7 @@ public static class CheckedSchematicContract
                 || result.Result.Revision.Epoch != request.Batch.DocumentEpoch
                 || result.Result.Revision.Sequence < request.Batch.ExpectedRevision.Sequence
                 || result.ObservedAfter.ProcessEpoch != request.ExpectedState.ProcessEpoch
-                || result.ObservedAfter.NativeIdentity != request.ExpectedState.NativeIdentity
+                || result.ObservedAfter.NativeIdentity != IdentityAfter(request, result.Result)
                 || !Equals(result.ObservedAfter.Document, request.Batch.Document)
                 || result.ObservedAfter.StateSha256.Length != 64
                 || !result.ObservedAfter.StateSha256.All(char.IsAsciiHexDigitLower)
@@ -94,6 +94,12 @@ public static class CheckedSchematicContract
     /// <summary>Whether <paramref name="batch"/> carries a CN-1 pin-partition assertion.</summary>
     public static bool Asserts(ApplySchematicItemBatch? batch) =>
         batch?.Operations.Any(operation => operation.OperationCase == SchematicItemOperation.OperationOneofCase.AssertConnectivity) == true;
+
+    // The native identity is the root screen's. Only a rebuild's first operation changes it, to exactly the identity
+    // the rebuilt root's saved file had (SchematicRebuild); every other batch keeps it.
+    internal static string IdentityAfter(CheckedSchematicBatch request, SchematicItemBatchResult result) =>
+        request.Batch.Operations.Count != 0 && request.Batch.Operations[0].RebuildScreenIdentity is { } identity && result.ScreenIdentityChanged
+            ? identity.Value : request.ExpectedState.NativeIdentity;
 
     internal static bool FileCoverage(DocumentLifecycleState state)
     {

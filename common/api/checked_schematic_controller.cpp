@@ -448,7 +448,13 @@ API_RESULT CHECKED_SCHEMATIC_CONTROLLER::Handle( ApiRequest& envelope,
         auto after = observe();
         if( !after ) return fail( CSBS_INDETERMINATE, "post_observation_failed", after.error().error_message() );
         result.mutable_observed_after()->CopyFrom( *after );
-        if( after->native_identity() != before->native_identity() || after->process_epoch() != processEpoch
+        // The native identity is the root screen's.  Only a rebuild's first operation changes it: a
+        // root KiCad created anew adopts the identity its saved file had, exactly as requested.
+        const auto& first = batch.operations( 0 );
+        const std::string& identity = first.has_rebuild_screen_identity() && nativeResult.screen_identity_changed()
+                                              ? first.rebuild_screen_identity().value()
+                                              : before->native_identity();
+        if( after->native_identity() != identity || after->process_epoch() != processEpoch
                 || !MessageDifferencer::Equals( after->document(), before->document() )
                 || !MessageDifferencer::Equals( after->revision(), nativeResult.revision() )
                 || after->scope() != before->scope() || !Digest( after->state_sha256() )

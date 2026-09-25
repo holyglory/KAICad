@@ -266,13 +266,16 @@ public sealed class NativeClientTests
         // Feature contracts of the handshake. Like a KiCad built before handled_requests, the
         // fixture never lists the requests it handles.
         public string[] Features { get; set; } = [];
+        // The process ID the handshake reports; 0, like a KiCad built before the field, means unknown.
+        public uint ProcessId { get; set; }
         public ApiRequest? LastRequest { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             LastRequest = ApiRequest.Parser.ParseFrom(request);
             IMessage payload = LastRequest.Message.Is(GetAutomationSession.Descriptor) && !WrongType
-                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch, Capabilities = { Features } }
+                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch, Capabilities = { Features },
+                    ProcessId = ProcessId }
                 : new GetVersionResponse { Version = new Kiapi.Common.Types.KiCadVersion { FullVersion = "isolated-protocol-fixture" } };
             return Task.FromResult(new ApiResponse
             {

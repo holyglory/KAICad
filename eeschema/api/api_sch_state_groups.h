@@ -55,6 +55,16 @@ public:
     /// The whole-document digest ("kicad-native-state-v1") over every captured group.
     std::string DocumentSha256() const { return m_document.Hex(); }
 
+    /**
+     * The whole-document digest with the project settings taken without the entries every
+     * save writes from the schematic itself: the sheet list, the top-level sheet list, the
+     * root sheet's revision kept for IPC-2581 and the project file name.  Saving writes
+     * nothing else into the project settings, so a save leaves this digest unchanged even
+     * when it rewrites a stale sheet list (ReadDocumentLifecycleState.save_stable_state_sha256).
+     * Empty when the project settings were not captured.
+     */
+    std::string SaveStableSha256() const { return m_projectSettings ? m_saveStable.Hex() : std::string(); }
+
     /// The sheet each captured screen was written through, ordered by screen identity.
     const std::vector<SCH_SHEET*>& WrittenSheets() const { return m_sheets; }
 
@@ -72,9 +82,13 @@ public:
 
 private:
     void add( const std::string& aName, const NATIVE_STATE_DIGEST& aState );
+    void add( const std::string& aName, const NATIVE_STATE_DIGEST& aState,
+              const NATIVE_STATE_DIGEST& aSaveStable );
 
     std::map<std::string, std::string> m_groups;     ///< Group name to byte count and digest.
     NATIVE_DOCUMENT_DIGEST             m_document;
+    NATIVE_DOCUMENT_DIGEST             m_saveStable; ///< The same groups, save-derived entries left out.
+    bool                               m_projectSettings = false;
     std::vector<SCH_SHEET*>            m_sheets;
     uint64_t                           m_bytes = 0;
 };

@@ -45,6 +45,8 @@ using google::protobuf::Empty;
 class SCH_EDIT_FRAME;
 class SCH_ITEM;
 class SCH_SHEET;
+class SCH_SHEET_PATH;
+class SCHEMATIC;
 
 
 class API_HANDLER_SCH : public API_HANDLER_EDITOR
@@ -52,6 +54,15 @@ class API_HANDLER_SCH : public API_HANDLER_EDITOR
 public:
     API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame );
     API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext, SCH_EDIT_FRAME* aFrame = nullptr );
+
+    /**
+     * Why the sheet instance @a aTarget of @a aSchematic cannot adopt a saved screen identity
+     * (rebuild_screen_identity), or nothing when it can: it must be the only top-level sheet of a
+     * schematic that shows nothing else, and its screen must be empty (no items, no library cache)
+     * and never loaded from or saved to a file, with no file at its path on disk.  That is the
+     * root KiCad creates for a project whose schematic files are gone.
+     */
+    static std::optional<std::string> ScreenIdentityRefusal( SCHEMATIC& aSchematic, const SCH_SHEET_PATH& aTarget );
 
 protected:
     std::optional<ApiResponseStatus> checkForHeadless( const std::string& aCommandName ) const;

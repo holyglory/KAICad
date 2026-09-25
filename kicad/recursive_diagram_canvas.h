@@ -3,19 +3,24 @@
 #define KICAD_RECURSIVE_DIAGRAM_CANVAS_H
 
 #include <api/common/commands/recursive_diagram_commands.pb.h>
-#include <bitmaps/bitmaps_list.h>
+#include <wx/button.h>
+#include <wx/colour.h>
+#include <wx/control.h>
 #include <wx/panel.h>
+#include <wx/sizer.h>
 #include <wx/string.h>
+#include <wx/tglbtn.h>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
+#include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
-class wxAnyButton;
-class wxButton;
 class wxDC;
-class wxToggleButton;
+class wxTextCtrl;
 
 /** Drawing surface pieces of one per-level diagram: exact presentation decimals, the resolved
  * layout of a level (contract rbg-v2 section 9.2) and the canvas-edge drawing palette
@@ -36,6 +41,40 @@ inline std::string Utf8( const wxString& aValue ) { return aValue.ToStdString( w
 std::string FreshId();
 /// A native-editor change origin recorded now, at the protocol's 100 ns precision.
 void EditorOrigin( D::DiagramRevisionOriginData* aOrigin, const std::string& aSummary );
+
+// ---- Colours that stay readable in both themes (design QA P1-1, P2-1, P2-8, P2-11) -----------------
+
+/// The WCAG 2 contrast ratio of two colours, from 1 to 21.
+double Contrast( const wxColour& aA, const wxColour& aB );
+/// Whether a surface is dark (the dark theme).
+bool IsDark( const wxColour& aSurface );
+/// aColour with its HSL lightness moved, in steps of 1 %, away from the surfaces until it reaches aMinimum contrast
+/// against every one of them (or as far as lightness allows). A colour that already reaches it is returned unchanged.
+wxColour Readable( const wxColour& aColour, std::initializer_list<wxColour> aAgainst, double aMinimum );
+/// A filled accent control on aSurface: a fill with its hue that stands 3:1 or more from the surface, and a label
+/// colour (white where the fill allows it, otherwise near-black) with 4.5:1 or more on the fill.
+struct ACCENT_FILL { wxColour fill, text; };
+ACCENT_FILL AccentFill( const wxColour& aAccent, const wxColour& aSurface );
+
+/// The canvas colours of the current theme. The accent (selection, connection preview, new-block outline, caption focus
+/// ring, Connect highlight) reaches 3:1 or more against both the canvas and the selected block's fill.
+struct CANVAS_COLOURS
+{
+    wxColour background, foreground, muted, accent, selectedFill, blockFill, handleFill;
+    bool dark = false;
+};
+CANVAS_COLOURS CanvasColours();
+
+// ---- Tool glyphs (design QA P2-2, P2-3; owner default n46bd6c44b42d5a61: a hollow square port) --------------
+
+/// Keeps a text entry's text 8 DIP (aHorizontal) and 6 DIP (aVertical) inside its box (design QA P2-9). wxGTK does not set
+/// margins on a multi-line entry, so on GTK they are set on its text view directly.
+void PadTextBox( wxTextCtrl* aControl, int aHorizontal, int aVertical );
+
+/// The drawing tools' monochrome glyphs, drawn at any size in any colour, so both entry points show one icon family
+/// in both themes (a port is a hollow square with a short lead, like the ports on the canvas).
+enum class GLYPH { SELECT, ADD_BLOCK, CONNECT, PORT, REMOVE, UNDO };
+void DrawGlyph( wxDC& aDC, GLYPH aGlyph, const wxRect& aBox, const wxColour& aColour );
 
 struct POINT { int64_t x = 0, y = 0; };
 struct RECT
@@ -115,9 +154,16 @@ struct BLOCK_CHIPS
     std::vector<wxRect> portNames;
 };
 
-/// The block caption's text rectangle inside aInner, the block's content area in canvas pixels, drawn with
-/// aCaptionFont and clipped to aInner. The canvas draws the caption there and the chips are laid out below it.
+/// The block caption as drawn inside aInner, the block's content area in canvas pixels, with aCaptionFont: the
+/// caption shortened with "…" to the content width, a third of the way down a small block and 24 pixels down a full
+/// one. The text is drawn whole or not at all: an empty rectangle means the block is too small for it.
+struct CAPTION { wxString text; wxRect rect; };
+CAPTION BlockCaption( wxDC& aDC, const NODE& aNode, const wxRect& aInner, const wxFont& aCaptionFont );
+/// The caption's text rectangle (see BlockCaption). The chips are laid out below it.
 wxRect CaptionRect( wxDC& aDC, const NODE& aNode, const wxRect& aInner, const wxFont& aCaptionFont );
+/// Where a saved caption-only block draws its "vN" line below aCaption with aDC's font, or an empty rectangle when the
+/// whole line does not fit aInner.
+wxRect VersionRect( wxDC& aDC, const wxString& aText, const wxRect& aInner, const wxRect& aCaption );
 /// Lays out a block's chips inside aBox, the block's content area in canvas pixels, with aSmall, the chip font.
 /// aCaption is the caption as CaptionRect placed it. aPortNames are the names of the block's ports drawn inside its
 /// edge (see PortNameRect); a row that shares their height stops short of them.
@@ -198,9 +244,13 @@ public:
     /// Every child port and boundary port as drawn.
     const std::vector<PORT>& Ports() const { return m_ports; }
     const PORT* Port( const std::string& aBlockId, const std::string& aInterfaceId ) const;
-    /// Where a connection endpoint attaches, looking toward a peer at aPeerX (rules F2, F2a and F3).
+    /// Where an endpoint that is not yet part of a connection would attach, looking toward a peer at aPeerX (rules F2,
+    /// F2a and F3): a port at its anchor, a block at the middle of its edge facing the peer (the Connect preview).
     POINT Anchor( const D::DiagramEndpointBindingData& aEndpoint, int64_t aPeerX ) const;
-    /// The drawn path from endpoint 0 to endpoint aEndpoint (rule F4).
+    /// Where endpoint aEndpoint of aLink attaches on the leg to endpoint aLeg (aLeg is the other end of that leg). An end on
+    /// a block itself (no interface) gets its own point on the block's edge facing its peer (rule F2, design QA P2-5).
+    POINT EndAnchor( const LINK& aLink, int aEndpoint, int aLeg ) const;
+    /// The drawn path from endpoint 0 to endpoint aEndpoint (rule F4; computed paths keep their vertical legs apart, F4a).
     std::vector<POINT> Route( const LINK& aLink, int aEndpoint ) const;
     bool HasRoute( const std::string& aConnectionId, int aEndpoint ) const;
     /// The caption position a stored route names, if it names one.
@@ -216,6 +266,16 @@ public:
 
 private:
     int64_t centreX( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    /// The height the ends facing aEndpoint's peer are sorted by: the peer port's anchor, or the peer block's centre.
+    int64_t referenceY( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    bool isBlockEnd( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    D::DiagramPortSide facing( const D::DiagramEndpointBindingData& aEndpoint, const D::DiagramEndpointBindingData& aPeer ) const;
+    /// Which way a path leaves aEndpoint attached at aAt (rule F4c): +1 right, -1 left, 0 for a top or bottom side.
+    int normal( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
+    /// The child block aEndpoint is on, or an empty id for a boundary end.
+    std::string ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    void placeBlockEnds();
+    void placePaths();
 
     std::string m_scope;
     std::vector<BOUNDARY> m_scopeInterfaces;
@@ -228,18 +288,128 @@ private:
     std::vector<D::DiagramConnectionRouteData> m_routes;
     std::optional<RECT> m_frame;
     unsigned m_dormant = 0;
+    /// Where each end on a block itself attaches: (connection, endpoint index, side) to its point (rule F2).
+    std::map<std::tuple<std::string, int, int>, POINT> m_blockEnds;
+    /// Each leg's drawn path: (connection, endpoint index) to its points (rules F4 and F4a).
+    std::map<std::pair<std::string, int>, std::vector<POINT>> m_paths;
 };
 
 enum class TOOL { SELECT, ADD_BLOCK, CONNECT, ADD_PORT, NOTE };
 
-/// One drawing tool button with its icon above its label: a toggle for a tool, a plain button for
-/// an action. The toolbar strip and the canvas-edge palette use the same buttons (Round A1).
-wxAnyButton* ToolButton( wxWindow* aParent, const wxString& aLabel, BITMAPS aBitmap, const char* aName, bool aToggle );
 /// The observation name of a tool: "select", "add-block", "connect", "add-port" or "note".
 const char* ToolName( TOOL aTool );
 
+enum class TOOL_STYLE { STRIP, PALETTE };
+
+/// How a drawing tool looks: its glyph above its label, in the toolbar strip (sketch 1) or in a palette cell (sketch 2).
+/// The strip and the palette share it, so both entry points show one icon family and the active tool the same clear way
+/// (design QA P2-1 to P2-3): in the strip a pale accent tile with an accent border, glyph and label, in the palette a
+/// solid accent cell.
+struct TOOL_FACE
+{
+    wxString label;
+    GLYPH glyph;
+    TOOL_STYLE style;
+    wxSize BestSize( const wxWindow* aWindow ) const;
+    /// The glyph's box and the label's text box as drawn in aWindow, in client pixels.
+    wxRect GlyphRect( const wxWindow* aWindow ) const;
+    wxRect LabelRect( const wxWindow* aWindow ) const;
+    void Paint( wxDC& aDC, const wxWindow* aWindow, bool aActive, bool aHover, bool aDown ) const;
+};
+
+/// A platform button the editor paints itself.
+class BUTTON_PAINTER
+{
+public:
+    virtual ~BUTTON_PAINTER() = default;
+    /// Paints the whole button in client pixels; aHover and aDown are the pointer's state over it.
+    virtual void PaintButton( wxDC& aDC, bool aHover, bool aDown ) = 0;
+};
+
+/// On GTK, hands the drawing of aButton, a platform button, to aPainter. The button stays the platform's own, so it keeps
+/// its role, its label as its name, its pressed state, its focus and its keys for assistive technology (wxGTK has no
+/// wxAccessible). A press leaves the keyboard focus where it was. Elsewhere the platform draws the button.
+void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter );
+/// Gives aWindow the accessible role aRole (an ATK role name such as "link" or "push button") and, when not empty, the
+/// accessible name aName (GTK; elsewhere nothing changes).
+void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName );
+/// What assistive technology reads from a control: its role, its name and whether it is checked (pressed).
+struct ACCESSIBLE { std::string role, name; bool checked = false; };
+/// The accessible role, name and checked state of aWindow as the toolkit exposes them (GTK's ATK object); none elsewhere.
+std::optional<ACCESSIBLE> AccessibleOf( wxWindow* aWindow );
+
+/** One drawing tool (one of which is active) in the toolbar strip or the canvas-edge palette (Round A1). It is the
+ * platform's own toggle button, pressed with the pointer, or Space or Enter when focused, and on GTK the editor paints
+ * it as TOOL_FACE describes. */
+class TOOL_BUTTON : public wxToggleButton, public BUTTON_PAINTER
+{
+public:
+    TOOL_BUTTON( wxWindow* aParent, const wxString& aLabel, GLYPH aGlyph, TOOL_STYLE aStyle, const char* aName, const wxString& aToolTip );
+    const TOOL_FACE& Face() const { return m_face; }
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    TOOL_FACE m_face;
+};
+
+/// An action beside the tools (Delete, and Undo in the palette): the platform's own push button, painted as the tools are.
+class TOOL_ACTION : public wxButton, public BUTTON_PAINTER
+{
+public:
+    TOOL_ACTION( wxWindow* aParent, const wxString& aLabel, GLYPH aGlyph, TOOL_STYLE aStyle, const char* aName, const wxString& aToolTip );
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    TOOL_FACE m_face;
+};
+
+/** A quiet action drawn as an underlined link in the link colour (design QA P2-10: "Back to facet overview" and "Clear
+ * facet"). It is the platform's own push button, announced as a link, pressed with the pointer, or Space or Enter when
+ * focused. */
+class LINK_BUTTON : public wxButton, public BUTTON_PAINTER
+{
+public:
+    LINK_BUTTON( wxWindow* aParent, const wxString& aLabel, const char* aName );
+    void SetLabel( const wxString& aLabel ) override;
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+    /// The link colour of the current theme (#20518D on a light surface, #B8CBE1 on a dark one, or the theme's own).
+    static wxColour LinkColour( const wxColour& aSurface );
+
+protected:
+    wxSize DoGetBestSize() const override;
+};
+
+/** A row of one-click choices, left to right, that continues on a new line only when the next choice does not fit the
+ * width it is given. The editor gives it that width before it lays the inspector out, and the lines it places are the
+ * lines its minimum height counts, so whatever follows the row moves down when the row wraps and never lies over a
+ * choice. (wxWrapSizer learns its width only during a layout and counts its lines for the next one, so for one layout
+ * a wrapped line can lie over what follows it.) */
+class CHOICE_FLOW : public wxSizer
+{
+public:
+    explicit CHOICE_FLOW( int aGap ) : m_gap( aGap ) {}
+    /// The width the choices wrap within, in pixels; 0 keeps them in one line. Returns whether it changed.
+    bool SetWrapWidth( int aWidth );
+    wxSize CalcMin() override;
+    void RepositionChildren( const wxSize& aMinSize ) override;
+
+private:
+    /// Where each shown choice goes, relative to the row's origin, and the extent they take together.
+    std::vector<std::pair<wxSizerItem*, wxRect>> arrange( wxSize& aExtent );
+
+    int m_gap;
+    int m_width = 0;
+};
+
 /** The canvas-edge palette (Round A1 option 2): the same drawing tools as the toolbar strip plus
- * Undo. Both entry points drive one active tool, highlighted in both. */
+ * Undo, on one card with one surface and one button style, and a single divider before Undo (design QA P2-4).
+ * Both entry points drive one active tool, highlighted in both. */
 class TOOL_PALETTE : public wxPanel
 {
 public:
@@ -252,12 +422,16 @@ public:
 
     TOOL_PALETTE( wxWindow* aParent, ACTIONS aActions );
     void SetState( TOOL aActive, bool aEnabled, bool aCanDelete, bool aCanUndo );
+    /// The palette card's surface colour.
+    static wxColour Surface();
 
 private:
+    void paint();
+
     ACTIONS m_actions;
-    std::vector<std::pair<TOOL, wxToggleButton*>> m_tools;
-    wxButton* m_delete;
-    wxButton* m_undo;
+    std::vector<std::pair<TOOL, TOOL_BUTTON*>> m_tools;
+    TOOL_ACTION* m_delete;
+    TOOL_ACTION* m_undo;
 };
 }
 

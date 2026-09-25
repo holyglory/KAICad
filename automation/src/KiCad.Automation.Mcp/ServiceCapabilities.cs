@@ -1,13 +1,13 @@
 namespace KiCad.Automation.Mcp;
 
-// Service rows advertised by kicad_instance_capabilities, in their published
-// order. New tools also carry [KiCadCapability]; this list stays hand-kept
-// until the catalogue is derived from those attributes.
+// Transitional rows for registered tools that do not carry [KiCadCapability]
+// yet. The capability catalogue is derived from the server's registered tools:
+// a tool's attribute wins where both exist, CapabilityCatalogTests requires the
+// two to agree, and a row is deleted once its tool carries the attribute.
 public static class ServiceCapabilities
 {
-    // Keep this list intentionally limited to operations with real handlers
-    // and focused evidence. Planned PCB routing, simulation, OCR and external
-    // agent-client features are not represented as working capabilities.
+    // Only tools that are really registered may appear here; unfinished work is
+    // described by CapabilityCatalog limitations, never by a row.
     public static IReadOnlyList<InstanceCapability> Registered { get; } =
     [
         new InstanceCapability("kicad_design_sync_plan", "schematic-design", "compiled-mcp", "registered", "recovery revision token", false),

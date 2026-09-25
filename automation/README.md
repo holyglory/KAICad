@@ -1251,8 +1251,27 @@ schematic writer cannot save that representation. This preserves the existing
 native format instead of allowing an edit that later blocks saving.
 
 The native extension adds explicit automation startup and session discovery.
-Its capability response currently advertises only `session.info` and
-`version.read`. A Linux native check has opened schematic windows in two isolated
+Its handshake reports two lists. `capabilities` names feature contracts, each
+listed only when the whole feature works in that build; this build names
+`session.info` and `version.read`. `handled_requests` names every request type
+the process dispatches to a registered handler at that moment, once each in
+ordinal order: the handshake itself, the checked document save and close
+requests and the request that reads their outcome, the checked schematic
+requests, and the requests of each editor that is open.
+Opening or closing an editor changes the list, and a listed request can still be
+refused for its target, its arguments or the editor's state.
+`kicad_instance_capabilities` publishes these as `nativeFeatures` and
+`nativeRequests`, and `kicad_instance_inspect` as `nativeCapabilities` and
+`nativeRequests`; both set `nativeRequestCoverage` to `handled-requests`. A
+KiCad built before `handled_requests` existed sends no list: both tools then
+report `nativeRequestCoverage` `unknown` and `nativeRequests` null, which means
+its request support is not known, not that it handles nothing, and they never
+present a request type as a feature. `kicad_service_capabilities` returns this
+MCP server's own catalogue without contacting KiCad: every registered tool with
+its scope, target, revision contract and verification evidence, and the
+unfinished work that no registered tool provides.
+
+A Linux native check has opened schematic windows in two isolated
 instances and captured their actual software-rendered canvases as PNGs. This
 preview is exposed through a preliminary MCP tool with viewport metadata and an
 explicitly incomplete revision-tracking flag. Current-sheet presentation checks,

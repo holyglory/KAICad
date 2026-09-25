@@ -19,16 +19,17 @@ public sealed partial class NativeSessionTests
     // the production server over STDIO, with nothing lost. From the S2 seed (a root sheet only):
     //  1. The fixture's four sheets are generated from XML that adds them (sheet generation), the CPU sheet's paper is
     //     set to A3 in the XML, and the fixture's eight components are created on their sheets from XML with a proposed
-    //     layout. This is the original project, saved by KiCad.
+    //     layout. Two of the fixture's nets are then drawn in KiCad with labels and published to the XML. This is the
+    //     original project, saved by KiCad.
     //  2. Every schematic file is deleted, KiCad creates a new empty root for the project, the recovery record adopts it,
     //     and apply rebuilds the schematic from the XML last synchronized with KiCad.
     //  3. The rebuilt schematic is the original on every captured state group: the whole-document state digest (every
     //     screen as KiCad saves it plus the project settings) and each saved file byte for byte, with the same identities
     //     (screens, sheets, symbols, pins), sheets, library caches, pin partition and settings. A second apply is a
     //     no-op, and one native undo returns to the empty root while redo restores the rebuild.
-    // The fixture's Complete stage adds nets; KiCad can draw XML nets only through lane 2A's connection realization, so
-    // this journey's original stops at the Components stage whether or not an editor advertises it. The rebuild itself
-    // recreates whatever objects the XML holds, wires and labels included.
+    // The fixture's Complete stage adds all eleven nets in XML; KiCad can draw XML nets only through lane 2A's connection
+    // realization, so this journey's original holds the Components stage plus two nets drawn in KiCad, whether or not an
+    // editor advertises it. The rebuild itself recreates whatever objects the XML holds, wires and labels included.
     private static async Task VerifyPsuCpuXmlRebuild(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -125,12 +126,31 @@ public sealed partial class NativeSessionTests
         var creationPlan = await Plan(saved, "creation-plan");
         Assert.IsFalse(creationPlan.GetProperty("nativeRebuildRequired").GetBoolean(), "Component creation is lane 2A's creation path.");
         steps.Add(new { step = "components", afterCreation = await Apply(saved, "creation") });
+        var placed = await Capture();
+        PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, placed.Electrical, Stage);
+
+        // 1d. Connections drawn in KiCad, as a person would: a local label on each pin of the fixture's VIN net (J1.1 and
+        // U1.2 on PSU) and MEM_SCL net (U5.161 and U6.6 on CPU), at the pin's connection point and facing away from it.
+        // The next synchronization publishes them to the XML as nets, so the rebuild must restore labels and connections.
+        var wired = new List<(string Net, string[] Pins)> { ("VIN", ["J1.1", "U1.2"]), ("MEM_SCL", ["U5.161", "U6.6"]) };
+        var labelled = await DrawLabels(placed, [(2, "VIN", ["J1.1", "U1.2"]), (3, "MEM_SCL", ["U5.161", "U6.6"])]);
+        var refresh = await host.Tool("kicad_design_recovery_refresh", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken });
+        RequireToolSuccess(refresh);
+        saved = store.Read()!;
+        var wiringPlan = await Plan(saved, "wiring-plan");
+        Assert.IsFalse(wiringPlan.GetProperty("nativeRebuildRequired").GetBoolean(), "Publishing KiCad's own edits is an ordinary synchronization.");
+        Assert.AreEqual(0, wiringPlan.GetProperty("nativeOperationsJson").GetArrayLength(), "KiCad already shows the connections.");
+        steps.Add(new { step = "wiring", labels = labelled, afterWiring = await Apply(saved, "wiring", nativeEdit: false) });
 
         // The original: saved by KiCad, clean, and the XML settled on it.
         var original = await Capture();
         Assert.IsFalse(original.State.NativeContentDirty, "Apply saved the original.");
         var originalDesign = store.Read()!.State.Baseline;
-        PsuCpuFixture.AssertNative(originalDesign, original.Electrical, Stage);
+        var originalReferences = originalDesign.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
+        CollectionAssert.AreEquivalent(wired.Select(w => string.Join(",", w.Pins.Order(StringComparer.Ordinal))).ToArray(),
+            originalDesign.Engineering.Circuit.Nets.Select(n => string.Join(",", n.Pins.Select(p => originalReferences[p.ComponentId] + "." + p.Pin)
+                .Order(StringComparer.Ordinal))).ToArray(), "The XML holds exactly the two connections drawn in KiCad.");
         foreach (var screen in original.Electrical.Hierarchy.Data.Instances)
             CollectionAssert.AreEqual(new[] { SchematicRebuild.RetainedProjectSettings }, screen.Metadata.UnrepresentedState.ToArray(),
                 "The snapshot holds every part of this schematic except the untyped project settings (no net chains, no shared screens).");
@@ -191,6 +211,7 @@ public sealed partial class NativeSessionTests
             "The rebuild first gives the new root the identity its file had.");
         Assert.AreEqual(expected.Symbols.Count, rebuildOperations.Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true));
         Assert.AreEqual(3, rebuildOperations.Count(o => o.Create?.Is(SheetSymbol.Descriptor) == true));
+        Assert.AreEqual(labelled, rebuildOperations.Count(o => o.Create?.Is(LocalLabel.Descriptor) == true), "Every drawn label is rebuilt.");
         Assert.AreEqual(empty, await Capture(), "Planning must not change KiCad.");
         var rebuild = await Apply(saved, "rebuild");
 
@@ -220,7 +241,12 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(original.Electrical.Nets.Count, rebuilt.Electrical.Nets.Count);
         CollectionAssert.AreEqual(RebuildPartition(original.Electrical), RebuildPartition(rebuilt.Electrical), "The pin partition is the original one.");
         var rebuiltDesign = store.Read()!.State.Baseline;
-        PsuCpuFixture.AssertNative(rebuiltDesign, rebuilt.Electrical, Stage);
+        var comparison = SchematicElectricalComparison.Compare(rebuiltDesign, rebuilt.Electrical, []);
+        Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "KiCad's rebuilt connections are exactly the XML nets.");
+        var rebuiltReferences = rebuiltDesign.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
+        foreach (var (net, pins) in wired)
+            Assert.IsTrue(comparison.PinPartitions!.Any(p => p.Pins.Select(x => rebuiltReferences[x.ComponentId] + "." + x.Pin).Order(StringComparer.Ordinal)
+                .SequenceEqual(pins.Order(StringComparer.Ordinal))), net + " is one native net of exactly its two pins after the rebuild.");
         Assert.AreEqual(SchematicDesignXml.Write(originalDesign with { Schematic = rebuiltDesign.Schematic }, []), SchematicDesignXml.Write(rebuiltDesign, []),
             "The published design is the original's engineering, bindings and part symbols.");
 
@@ -259,7 +285,7 @@ public sealed partial class NativeSessionTests
             deleted = schematicFiles.Select(Path.GetFileName), newRootScreen = emptyRoot.Metadata.ScreenId.Value,
             rebuild = new { operations = rebuildOperations.Count, firstOperation = "rebuild_screen_identity", result = rebuild },
             rebuilt = new { rebuilt.State.StateSha256, sameStateDigest = true, filesByteIdentical = originalFiles.Count, sameObjects = true,
-                samePinPartition = true },
+                samePinPartition = true, drawnLabels = labelled, connections = wired.Select(w => new { w.Net, w.Pins }) },
             refused = new { unsettled = unsettled.ErrorCode, netChains = withChains.ErrorCode },
             secondApplyNoOp = true, undoRestoresEmptyRoot = true, redoRestoresRebuild = true, crossPlatformReady = false,
             remaining = "Complete stage (XML nets) needs lane 2A's connection realization; project-file reconstruction from XML; "
@@ -283,7 +309,37 @@ public sealed partial class NativeSessionTests
             return content;
         }
 
-        async Task<object> Apply(StoredDesignRecovery current, string name)
+        // One local label per pin, at its connection point and facing away from the pin body, drawn in one native edit.
+        async Task<int> DrawLabels(CheckedSchematicState state, (int Sheet, string Net, string[] Pins)[] nets)
+        {
+            var design = store.Read()!.State.Baseline;
+            var policy = SchematicConnectionPolicy.FromSnapshot(state.Electrical.Hierarchy.Data);
+            var batch = new ApplySchematicItemBatch { Document = document.Clone(), Description = "Label the VIN and MEM_SCL pins" };
+            foreach (var (sheet, net, pins) in nets)
+            {
+                var nativePath = string.Join('/', design.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, sheet)).NativePath.Select(p => p.ToString("D")));
+                var screen = state.Electrical.Hierarchy.Data.Instances.Single(s => RebuildPathKey(s) == nativePath);
+                var references = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                    .ToDictionary(s => s.Id.Value, s => s.ReferenceField.Text.Text_);
+                var geometry = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                    { Document = screen.Metadata.Document.Clone(), ExpectedRevision = state.State.Revision.Clone() }, token);
+                Assert.IsTrue(geometry.PinGeometryAvailable);
+                foreach (string pin in pins)
+                {
+                    string reference = pin[..pin.IndexOf('.')], number = pin[(pin.IndexOf('.') + 1)..];
+                    var anchor = geometry.Obstacles.Where(o => o.SymbolPins is not null && references.GetValueOrDefault(o.Id.Value) == reference)
+                        .SelectMany(o => o.SymbolPins.Pins).Single(p => p.Number == number);
+                    var spin = anchor.BodyDirectionX > 0 ? SchematicLabelSpinStyle.SlssLeft : anchor.BodyDirectionX < 0 ? SchematicLabelSpinStyle.SlssRight
+                        : anchor.BodyDirectionY > 0 ? SchematicLabelSpinStyle.SlssUp : SchematicLabelSpinStyle.SlssBottom;
+                    var label = SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Local, Guid.NewGuid(), anchor.Position, net, spin, policy);
+                    batch.Operations.Add(new SchematicItemOperation { TargetDocument = screen.Metadata.Document.Clone(), Create = Any.Pack(label) });
+                }
+            }
+            await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+            return batch.Operations.Count;
+        }
+
+        async Task<object> Apply(StoredDesignRecovery current, string name, bool nativeEdit = true)
         {
             var args = new { instanceId, recoveryPath = store.StatePath, designPath = path, expectedRevisionToken = current.RevisionToken,
                 operationId = Guid.NewGuid().ToString("D") };
@@ -293,7 +349,7 @@ public sealed partial class NativeSessionTests
                 await File.WriteAllTextAsync(Evidence(name + "-actual.xml"), SchematicDataXml.Write((await Capture()).Electrical.Hierarchy.Data), token);
             RequireToolSuccess(applied);
             var result = applied.GetProperty("structuredContent");
-            Assert.IsTrue(result.GetProperty("nativeMutationCommitted").GetBoolean(), applied.GetRawText());
+            Assert.AreEqual(nativeEdit, result.GetProperty("nativeMutationCommitted").GetBoolean(), applied.GetRawText());
             Assert.IsTrue(result.GetProperty("nativeFilesSaved").GetBoolean(), applied.GetRawText());
             Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), applied.GetRawText());
             var replay = await host.Tool("kicad_design_sync_apply", args);

@@ -3028,6 +3028,17 @@ after=["rendered"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests"]
 retained_artifacts=[{ name = "native-psu-cpu-creation-tests", path = "automation/artifacts/native-psu-cpu-creation-tests", max_bytes = 16777216 }, { name = "native-psu-cpu-creation-evidence", path = "automation/artifacts/native-psu-cpu-creation/native-session-current", max_bytes = 67108864 }]
 
+# PSU/CPU connected realization (CN-1 milestone 1 end to end): the fixture's
+# Complete-stage nets drawn as labelled stubs in one checked native commit.
+[[test.native-xml-component-creation.check]]
+name="psu-cpu-connected"
+tier="development"
+requires=["native-build"]
+after=["psu-cpu-rendered"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests"]
+retained_artifacts=[{ name = "native-connected-realization-tests", path = "automation/artifacts/native-connected-realization-tests", max_bytes = 16777216 }, { name = "native-connected-realization-evidence", path = "automation/artifacts/native-connected-realization/native-session-current", max_bytes = 67108864 }]
+
 [test.native-transform-sync]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }

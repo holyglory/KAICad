@@ -23,6 +23,9 @@ message FieldHistoryViewState {
   string inspected_revision_id = 7;
   bool loading = 8;
   string error_message = 9;
+  // Lane 2B: every loaded row of the history list, in list order, exactly as the list shows it (the revision label,
+  // with the implementation's name for a row saved in an earlier implementation, the saved marker and the author).
+  repeated string row_labels = 200;
 }
 message DiagramHistoryViewState {
   BlockSelectionData context = 1;

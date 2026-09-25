@@ -73,7 +73,7 @@ public sealed class DiagramFieldHistoryQueryTests
         var alternative = f.Alternatives["Data+"];
         var altHistory = appended.RequirementHistories.Single(h => h.Scope.DesignStateId == alternative.StateId);
         var continuing = new DiagramRequirementHistory(altHistory.Scope, [altHistory.Revisions[0] with { ParentId = changed.Current.Id,
-            Requirements = altHistory.Revisions[0].Requirements with { Schematic = "Label this member clearly." } }]);
+            Requirements = changed.Current.Requirements }]);
         var rewrite = continuing.Commit(continuing.Current.Id, continuing.StartDraft().Edit(DiagramRequirementField.Schematic, "Label the positive leg."),
             Guid.NewGuid(), RecursiveBlockFixture.Origin("Member agent")).History;
         var altRevision = appended.Inspect(alternative);
@@ -90,6 +90,31 @@ public sealed class DiagramFieldHistoryQueryTests
         CollectionAssert.AreEqual(new[] { altNext.Selection.RevisionId, candidate.Selection.RevisionId, selection.RevisionId },
             member.Entries.Select(e => e.ContextRevisionId).ToArray());
         CollectionAssert.AreEqual(new[] { 2, 2, 1 }, member.Entries.Select(e => e.ContextVersion).ToArray());
+        // Using the earlier implementation's text in this member's own draft and saving it is a new revision of this member
+        // implementation that names the revision the text came from. It survives the archive's XML file and the native codec,
+        // and the member's field history then lists it first, followed by everything it continues.
+        var memberDraft = lineage.StartDraft(altNext.Selection);
+        memberDraft = memberDraft with { Requirements = lineage.RequirementHistories.Single(h => h.Scope == rewrite.Scope)
+            .RestoreField(memberDraft.Requirements, changed.Current.Id, DiagramRequirementField.Schematic) };
+        Guid restoredRevision = Guid.NewGuid(), restoredText = Guid.NewGuid();
+        var restoredMember = lineage.SaveDraft(memberDraft, restoredRevision, restoredText, RecursiveBlockFixture.Origin("Fixture user"));
+        Assert.IsTrue(restoredMember.Changed);
+        string archiveXml = DiagramConnectionArchiveXml.Write(restoredMember.Archive);
+        foreach (var reread in new[] { DiagramConnectionArchiveXml.Read(archiveXml),
+            KiCad.Automation.Native.RecursiveBlockCodec.Decode(KiCad.Automation.Native.RecursiveBlockCodec.Encode(restoredMember.Archive)) })
+        {
+            Assert.AreEqual(archiveXml, DiagramConnectionArchiveXml.Write(reread));
+            var restoredHistory = reread.RequirementHistories.Single(h => h.Scope == rewrite.Scope);
+            Assert.AreEqual(restoredText, restoredHistory.Current.Id); Assert.AreEqual(rewrite.Current.Id, restoredHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.Schematic, changed.Current.Id), restoredHistory.Current.Restorations.Single());
+            Assert.AreEqual(changed.Current.Requirements, restoredHistory.Current.Requirements);
+            Assert.AreEqual(changed.Current.Id, restoredHistory.DerivedFrom);
+            var afterRestore = DiagramFieldHistoryQuery.Connection(reread, altNext.Selection with { RevisionId = restoredRevision }, DiagramRequirementField.Schematic);
+            Assert.AreEqual(3, afterRestore.ContextVersion); Assert.AreEqual("Label this member clearly.", afterRestore.SavedText);
+            CollectionAssert.AreEqual(new[] { restoredText, rewrite.Current.Id, changed.Current.Id, history.Current.Id },
+                afterRestore.Entries.Select(e => e.RequirementRevisionId).ToArray());
+            CollectionAssert.AreEqual(new[] { "Fixture user", "Member agent", "Agent client", "Fixture user" }, afterRestore.Entries.Select(e => e.Origin.Actor).ToArray());
+        }
         // Later revisions of the earlier implementation stay out of this one's history.
         var laterSource = changed.Commit(changed.Current.Id, changed.StartDraft().Edit(DiagramRequirementField.Schematic, "A later source text."),
             Guid.NewGuid(), RecursiveBlockFixture.Origin("Agent client")).History;

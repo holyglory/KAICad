@@ -12,6 +12,48 @@
 #include <wx/textctrl.h>
 
 
+std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> DiagramFieldHistoryRows(
+        const kiapi::automation::diagrams::v1::RecursiveBlockGraphData& aGraph,
+        const kiapi::automation::diagrams::v1::FieldHistoryPageData& aPage, bool aConnection )
+{
+    // The name of the implementation a row was saved in, when that is not the implementation whose history is shown.
+    auto earlierImplementation = [&]( const std::string& aContextRevision ) -> wxString
+    {
+        std::string stateId;
+        if( aConnection )
+        {
+            for( const auto& archive : aGraph.connection_archives() )
+                for( const auto& item : archive.revisions() )
+                    if( item.selection().revision_id() == aContextRevision && item.selection().connection_id() == aPage.owner_id() )
+                        stateId = item.selection().state_id();
+            if( stateId.empty() || stateId == aPage.state_id() ) return wxEmptyString;
+            for( const auto& archive : aGraph.connection_archives() )
+                for( const auto& state : archive.states() )
+                    if( state.id() == stateId ) return wxString::FromUTF8( state.name() );
+            return wxEmptyString;
+        }
+        for( const auto& item : aGraph.revisions() )
+            if( item.selection().revision_id() == aContextRevision && item.selection().block_id() == aPage.owner_id() )
+                stateId = item.selection().state_id();
+        if( stateId.empty() || stateId == aPage.state_id() ) return wxEmptyString;
+        for( const auto& state : aGraph.states() )
+            if( state.id() == stateId ) return wxString::FromUTF8( state.name() );
+        return wxEmptyString;
+    };
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
+    for( const auto& entry : aPage.entries() )
+    {
+        // The same "name · version" form the implementation selector uses.
+        wxString label = wxString::Format( "v%u", entry.context_version() );
+        if( wxString name = earlierImplementation( entry.context_revision_id() ); !name.IsEmpty() )
+            label = name + wxS( " · " ) + label;
+        rows.push_back( { entry.requirement_revision_id(), label, wxString::FromUTF8( entry.origin().actor() ),
+                          wxString::FromUTF8( entry.text() ), wxEmptyString, entry.is_saved_text() } );
+    }
+    return rows;
+}
+
+
 DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
         const wxString& aFieldLabel, const wxString& aOwnerPath,
         const wxString& aSavedRevisionLabel, const wxString& aSavedText,
@@ -62,8 +104,13 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     comparison->Add( revisionColumn, 0, wxEXPAND | wxRIGHT, gap );
 
     auto* texts = new wxBoxSizer( wxVERTICAL );
-    m_selectedHeading = new wxStaticText( this, wxID_ANY, wxEmptyString );
+    // The heading also names the selected row's author, which a narrow revision list can cut off.
+    m_selectedHeading = new wxStaticText( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                          wxST_ELLIPSIZE_MIDDLE );
+    m_selectedHeading->SetName( "DiagramFieldHistorySelectedHeading" );
     m_selectedHeading->SetFont( GetFont().Bold() );
+    // Shorten a long heading instead of widening the dialog.
+    m_selectedHeading->SetMinSize( wxSize( FromDIP( 120 ), -1 ) );
     texts->Add( m_selectedHeading, 0, wxEXPAND | wxBOTTOM, gap / 2 );
     m_selectedText = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
             FromDIP( wxSize( 340, 130 ) ), wxTE_MULTILINE | wxTE_READONLY );
@@ -185,6 +232,14 @@ std::string DIALOG_DIAGRAM_FIELD_HISTORY::InspectedRevision() const
 wxString DIALOG_DIAGRAM_FIELD_HISTORY::PageError() const { return m_pageError->GetLabel(); }
 
 
+std::vector<wxString> DIALOG_DIAGRAM_FIELD_HISTORY::RowLabels() const
+{
+    std::vector<wxString> labels;
+    for( unsigned row = 0; row < m_history->GetCount(); ++row ) labels.push_back( m_history->GetString( row ) );
+    return labels;
+}
+
+
 void DIALOG_DIAGRAM_FIELD_HISTORY::ConfigurePaging( size_t total, std::function<void( size_t )> loadOlder )
 {
     m_showPageCount = total > m_entries.size();
@@ -238,7 +293,8 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
     if( available )
     {
         const auto& entry = m_entries[selected];
-        m_selectedHeading->SetLabel( wxString::Format( _( "%s — Selected text" ), entry.revisionLabel ) );
+        m_selectedHeading->SetLabel( wxString::Format( _( "%s · %s — Selected text" ), entry.revisionLabel, entry.actor ) );
+        m_selectedHeading->SetToolTip( m_selectedHeading->GetLabel() );
         m_selectedText->ChangeValue( entry.text );
         m_restore->SetLabel( wxString::Format( _( "Use %s text in draft" ), entry.revisionLabel ) );
         m_source->Show( m_openSource && !entry.sourceDescription.IsEmpty() );
@@ -247,6 +303,7 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
     else
     {
         m_selectedHeading->SetLabel( _( "No field history available" ) );
+        m_selectedHeading->UnsetToolTip();
         m_selectedText->ChangeValue( wxEmptyString );
         m_source->Hide();
     }

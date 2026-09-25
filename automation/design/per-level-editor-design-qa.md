@@ -826,3 +826,20 @@ Lane 2B does not write the ledger or decisions. These are the open outcomes and 
 - [ ] Erratum amendment appended to cn2 (integration owner).
 - [ ] Open outcomes (b), (e), (f), (g), the two Clear facet outcomes and the notes-as-obstacles limit recorded, and the decision superseding `ne0261047035e58c6` (integration owner).
 - [ ] Formal design QA rerun (integration owner).
+
+## Field history across implementations (item p390b-field-lineage, review repairs)
+
+### What a person sees now
+
+- **Rows from an earlier implementation name it.** When the chosen implementation was made from another one (a duplicate, or a chosen proposal that refined the block or connection), its History list continues that implementation's texts. Each of those rows reads "*implementation* · v*N* · *author*", for example "Initial approach · v2 · Fixture user", in the same "name · version" form as the implementation selector; a row of the chosen implementation keeps "v*N*". Before, both read "v2", so two different texts looked like the same version.
+- **The selected row's heading names its author.** The heading above the selected text reads "Initial approach · v2 · Fixture user — Selected text". A long author name is cut off in the 200-pixel list at the dialog's default size, and the approved interaction specification asks for the actor of the selected row to be shown (`history-and-conflicts/interaction-specification.md`, "Select history row"). The mockup's heading shows only the version; this is the only deviation, and a heading too long for its column is shortened in the middle, with the full text as its tooltip.
+- **A connection behaves like a block.** The refined supply connection's History lists the agent's rewrite and then the replaced connection implementation's texts ("Initial interface · v1 · Fixture user"); using one and saving keeps it as a new revision of the chosen connection implementation.
+
+### Evidence
+
+- The editor and the rendered dialog test build rows with the same function (`DiagramFieldHistoryRows` in `kicad/dialogs/dialog_diagram_field_history.cpp`). `NativeFieldHistoryTests` asserts the three rows exactly as the list shows them, the heading and the Use button's label; the editor journey reads the list as rendered (`FieldHistoryViewState.row_labels`) for the chosen supply and its refined supply connection before restoring each.
+- Captures: `…-continued-field-history.png` and `…-continued-connection-field-history.png` (editor journey), `01-current.png` to `03-compact.png` (rendered dialog), light and dark.
+
+### Limits
+
+- **No formal audit.** The formal `product-design:audit` and `design-qa` skills are not available in this session; the heading deviation above is recorded for the integration owner's formal design QA.

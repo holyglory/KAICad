@@ -126,16 +126,27 @@ agent, sources, linked input and proposal identities, and the version it has in 
 history. Choosing the proposal or switching implementations keeps that history, and restoring an earlier text,
 including one written before the switch, saves a new revision that names the revision the text came from. The
 diagram file checks every link: it must name a saved revision of another implementation of the same block or
-connection (for a block, the exact revision the implementation was made from) and cannot be circular. A separate
-requirement-history file cannot hold a continued history and is refused. Implementations saved before this rule
-keep the separate history they were saved with; no earlier link is invented.
+connection (for a block, the exact revision the implementation was made from) and cannot be circular, and the
+continuing implementation's first revision must be an unchanged copy of the text it continues, with no restoration.
+A separate requirement-history file cannot hold a continued history and is refused. Implementations saved before
+this rule keep the separate history they were saved with; no earlier link is invented.
+
+Which implementation an entry came from is always shown. `kicad_diagram_field_history` gives every entry the
+implementation it was saved in (`contextStateId`, `contextImplementation`); its `contextRevisionId` and
+`contextVersion` belong to that implementation. The editor's history list names that implementation for a row saved
+in an earlier one, in the implementation selector's form ("Initial approach · v1 · Fixture user"), and the selected
+row's heading repeats its author, which a narrow list can cut off.
 
 Evidence: `NativeRecursiveEditorJourney` (production MCP server and rendered editor: an unselected root proposal,
-a chosen supply proposal and its refined supply connection, the root after the choice, an agent's duplicate, and
-restoring the pre-proposal text in the editor), `NativeFieldHistoryTests` (the rendered history dialog restores a
-text saved before an implementation switch), and the isolated rules in `RecursiveBlockProposalTests`,
-`RecursiveImplementationTests`, `DiagramFieldHistoryQueryTests`, `DiagramConnectionArchiveTests`,
-`DiagramRequirementHistoryTests` and `DiagramRequirementHistoryFileTests`.
+a chosen supply proposal and its refined supply connection, the root after the choice, an agent's duplicate; then,
+in the rendered editor, the history list as shown and restoring the pre-proposal text of the chosen supply and of
+its refined supply connection, each saved and read back), `NativeFieldHistoryTests` (the rendered history dialog,
+labelled by the editor's own row builder, restores a text saved before an implementation switch), and the isolated
+rules in `RecursiveBlockProposalTests`, `RecursiveImplementationTests`, `DiagramFieldHistoryQueryTests` (a member
+restoring an earlier implementation's text, saved and read back through XML and the codec),
+`DiagramConnectionArchiveTests`, `DiagramRequirementHistoryTests` and `DiagramRequirementHistoryFileTests`. A
+member is refined through the same connection code; no rendered or MCP journey yet refines a member, because no
+journey level has a group whose member a proposal refines.
 
 ## Connection ends and members (ledger pf92d0ecdec8805b4)
 

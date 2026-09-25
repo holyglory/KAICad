@@ -124,6 +124,11 @@ public sealed class DiagramRequirementHistory
             index.Add(revision.Id, revision); parent = revision.Id;
         }
         _index = index.ToImmutable();
+        // A continued history starts with an unchanged copy of the exact text it continues. Otherwise a file could show
+        // a changed or restored text as the first entry of the new implementation, credited to whoever made it.
+        if ((DerivedFrom is not null && !Revisions[0].Restorations.IsEmpty)
+            || (!Lineage.IsEmpty && Revisions[0].Requirements != Lineage[^1].Requirements))
+            throw Invalid("A continued history must start with an unchanged copy of the text it continues.");
     }
 
     /// <summary>Resolves each derived history among one owner container's histories (a graph's block

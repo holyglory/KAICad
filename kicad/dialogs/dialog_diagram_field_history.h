@@ -2,6 +2,7 @@
 #ifndef KICAD_DIALOG_DIAGRAM_FIELD_HISTORY_H
 #define KICAD_DIALOG_DIAGRAM_FIELD_HISTORY_H
 
+#include <api/common/types/diagram_revision_types.pb.h>
 #include <dialog_shim.h>
 #include <functional>
 #include <optional>
@@ -22,6 +23,15 @@ struct DIAGRAM_FIELD_HISTORY_ENTRY
     wxString sourceDescription;
     bool saved = false;
 };
+
+/** The rows of one field-history page, newest first. An implementation made from another one continues that
+ * implementation's field history, and a row's version counts the diagram revisions of the implementation it was saved
+ * in. A row saved in an earlier implementation therefore names that implementation ("Initial approach · v3") so it is
+ * not mistaken for a version of this one; a row of this implementation shows its version alone ("v3").
+ * @param aConnection true for a connection's or member's history, false for a block's. */
+std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> DiagramFieldHistoryRows(
+        const kiapi::automation::diagrams::v1::RecursiveBlockGraphData& aGraph,
+        const kiapi::automation::diagrams::v1::FieldHistoryPageData& aPage, bool aConnection );
 
 /** Read-only history comparison. Accepting returns an exact source revision for
  * the caller's draft; this dialog never writes a file or starts an AI agent. */
@@ -47,6 +57,8 @@ public:
     bool IsLoading() const { return m_loading; }
     std::string InspectedRevision() const;
     wxString PageError() const;
+    /// Every loaded row as the list shows it: its revision label, the saved marker and the author.
+    std::vector<wxString> RowLabels() const;
 
 private:
     void updateSelection();

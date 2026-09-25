@@ -84,9 +84,10 @@ public sealed class RecursiveImplementationTests
         // A new implementation's field history can only continue the exact revision it was made from.
         Guid forkState = Guid.NewGuid();
         var forked = graph.ForkImplementation(source, forkState, Guid.NewGuid(), Guid.NewGuid(), "Lineage check", RecursiveBlockFixture.Origin());
-        RecursiveBlockGraph Continuing(Guid? parentId, IEnumerable<BlockDesignState>? states = null) => new(forked.DocumentId, forked.SelectedRoot,
-            states ?? forked.States, forked.Revisions, forked.RequirementHistories.Select(h => h.Scope.DesignStateId != forkState ? h
-                : new DiagramRequirementHistory(h.Scope, [h.Revisions[0] with { ParentId = parentId }])));
+        RecursiveBlockGraph ContinuingWith(Func<DiagramRequirementRevision, DiagramRequirementRevision> first, IEnumerable<BlockDesignState>? states = null) =>
+            new(forked.DocumentId, forked.SelectedRoot, states ?? forked.States, forked.Revisions, forked.RequirementHistories.Select(h =>
+                h.Scope.DesignStateId != forkState ? h : new DiagramRequirementHistory(h.Scope, [first(h.Revisions[0])])));
+        RecursiveBlockGraph Continuing(Guid? parentId, IEnumerable<BlockDesignState>? states = null) => ContinuingWith(r => r with { ParentId = parentId }, states);
         Assert.AreEqual(graph.Requirements(source).RevisionId, Continuing(graph.Requirements(source).RevisionId)
             .RequirementHistories.Single(h => h.Scope.DesignStateId == forkState).DerivedFrom);
         Assert.ThrowsExactly<AutomationException>(() => Continuing(graph.Requirements(f.Alternatives["CPU"]).RevisionId));
@@ -94,6 +95,13 @@ public sealed class RecursiveImplementationTests
         Assert.ThrowsExactly<AutomationException>(() => Continuing(Guid.NewGuid()));
         Assert.ThrowsExactly<AutomationException>(() => Continuing(graph.Requirements(source).RevisionId,
             forked.States.Select(s => s.Id == forkState ? s with { ForkedFrom = null } : s)));
+        // Its first revision is an unchanged copy of the text it continues: a different text, or a restoration (even of the
+        // same value), would show up as the new implementation's first change, credited to whoever made it.
+        var madeFrom = graph.Requirements(source);
+        Assert.ThrowsExactly<AutomationException>(() => ContinuingWith(r => r with { ParentId = madeFrom.RevisionId,
+            Requirements = r.Requirements with { General = "Not the text it was made from." } }));
+        Assert.ThrowsExactly<AutomationException>(() => ContinuingWith(r => r with { ParentId = madeFrom.RevisionId,
+            Restorations = [new(DiagramRequirementField.General, madeFrom.RevisionId)] }));
         // An implementation saved before field histories were continued keeps the separate history it was saved with.
         Assert.IsNull(Continuing(null).RequirementHistories.Single(h => h.Scope.DesignStateId == forkState).DerivedFrom);
     }

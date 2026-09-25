@@ -1390,7 +1390,7 @@ public sealed partial class NativeSessionTests
             var agentAlternative = new BlockSelection(sourceCpu.BlockId, agentStateId, agentGraph.States.Single(s => s.Id == agentStateId).HeadRevisionId);
             var sourceGeneral = AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(beforeManagementGraph, sourceCpu, DiagramRequirementField.General, offset, limit));
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, agentAlternative, "General", null, token), sourceGeneral,
-                "agent duplicate of the CPU implementation");
+                "agent duplicate of the CPU implementation", Contexts(agentGraph));
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token)).IsError == true);
             var agentState = agentGraph.States.Single(s => s.Id == agentStateId);
             agentArguments["source"] = new { blockId = agentState.BlockId, stateId = agentState.Id, revisionId = agentState.HeadRevisionId };
@@ -1770,7 +1770,7 @@ public sealed partial class NativeSessionTests
                 [ProposedFieldEntry(proposal, DiagramRequirementField.General),
                  .. AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(mappedGraph, originalInput.BlockPath[^1], DiagramRequirementField.General, offset, limit))
                     .Select(e => e with { IsSavedText = false })],
-                "unselected root proposal");
+                "unselected root proposal", Contexts(proposalGraph));
             var proposalReadArguments = new Dictionary<string, object?>(arguments)
             {
                 ["expectedSourceToken"] = proposalData.GetProperty("sourceToken").GetString(), ["proposalId"] = proposal.Id
@@ -1957,13 +1957,13 @@ public sealed partial class NativeSessionTests
             var refinedSupply = psuProposal.Connections.Single(c => c.BasedOn == psuSupply);
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, psuProposal.Candidate, "General", null, token),
                 [ProposedFieldEntry(psuProposal, DiagramRequirementField.General), .. psuGeneral.Select(e => e with { IsSavedText = false })],
-                "chosen supply proposal");
+                "chosen supply proposal", Contexts(applied));
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, psuProposal.Candidate, "General", refinedSupply.Selection, token),
                 [ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedSupply), .. supplyGeneral.Select(e => e with { IsSavedText = false })],
-                "refined supply connection");
+                "refined supply connection", Contexts(applied.Connections(psu.BlockId)));
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, appliedRoot, "General", null, token),
                 AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(beforeChoiceGraph, beforeChoiceGraph.SelectedRoot,
-                    DiagramRequirementField.General, offset, limit)), "root after the choice");
+                    DiagramRequirementField.General, offset, limit)), "root after the choice", Contexts(applied));
             Assert.AreEqual(selectionBase.Requirements(psu).RevisionId, applied.RequirementHistories.Single(h => h.Scope.DesignStateId == psuProposal.Candidate.StateId).DerivedFrom);
             var selectionReceipt = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
                 { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = applyOperation }, cancellationToken: token);
@@ -2008,6 +2008,17 @@ public sealed partial class NativeSessionTests
                 while (!NativeKeyboard.HasWindow(display, processId, "Requirement history")) await Task.Delay(50, modal.Token);
             }
             Key("Down", title: "Requirement history");
+            // The list shows the rewrite as this implementation's saved version and every earlier text with the name of the
+            // implementation it was saved in, in the implementation selector's "name · version" form, and its author.
+            var psuHistoryDialog = await Wait(s => s.FieldHistory is { Loading: false }
+                && s.FieldHistory.InspectedRevisionId == earlierGeneral.RequirementRevisionId.ToString("D"));
+            Assert.AreEqual(psu.BlockId.ToString("D"), psuHistoryDialog.FieldHistory.OwnerId);
+            CollectionAssert.AreEqual(new[] { $"v2 · Saved · {psuProposal.Origin.Actor}" }
+                    .Concat(psuGeneral.Select(e => HistoryRowLabel(Contexts(selectionBase), e, psuProposal.Candidate.StateId))).ToArray(),
+                psuHistoryDialog.FieldHistory.RowLabels.ToArray(), "The chosen supply's General history as the editor lists it.");
+            var earlierPsuImplementation = Contexts(selectionBase)(earlierGeneral.ContextRevisionId);
+            Assert.AreNotEqual(psuProposal.Candidate.StateId, earlierPsuImplementation.State);
+            StringAssert.StartsWith(psuHistoryDialog.FieldHistory.RowLabels[1], earlierPsuImplementation.Name + " · v");
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-field-history.png"), token);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
             await Wait(s => s.Dirty && s.Draft.Fields.General == earlierGeneral.Text
@@ -2024,7 +2035,69 @@ public sealed partial class NativeSessionTests
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, continuedPsu, "General", null, token),
                 [new(continuedHistory.Current.Id, continuedPsu.RevisionId, 3, "PSU", earlierGeneral.Text, continuedHistory.Current.Origin, true),
                  ProposedFieldEntry(psuProposal, DiagramRequirementField.General) with { IsSavedText = false },
-                 .. psuGeneral.Select(e => e with { IsSavedText = false })], "chosen supply after restoring the earlier text");
+                 .. psuGeneral.Select(e => e with { IsSavedText = false })], "chosen supply after restoring the earlier text", Contexts(continuedFile));
+            // The refined supply connection keeps its field history across the switch in the editor too. Selecting it in the
+            // chosen supply's level and opening its General history lists the agent's rewrite and then every text the replaced
+            // connection implementation had, each named after that implementation. Using the earlier text and saving makes a
+            // new revision of the chosen connection implementation that names the revision the text came from.
+            var earlierSupply = supplyGeneral[0];
+            Assert.AreNotEqual(refinedSupply.Requirements.General, earlierSupply.Text);
+            // Escape returns the keyboard to the canvas, where L selects the level's next connection.
+            Key("Escape");
+            await Wait(s => !s.Busy && s.ConnectionDraft is null && s.Draft.Baseline.BlockId == psu.BlockId.ToString("D")
+                && s.FocusedControl == "RecursiveDiagramCanvas");
+            var levelLinks = applied.Inspect(psuProposal.Candidate).LocalDiagram.Connections;
+            Assert.IsTrue(levelLinks.Any(c => c.ConnectionId == psuSupply.ConnectionId));
+            for (string? selectedLink = null; selectedLink != psuSupply.ConnectionId.ToString("D");)
+            {
+                string? previous = selectedLink; Key("l");
+                selectedLink = (await Wait(s => s.ConnectionDraft is not null && s.ConnectionDraft.Baseline.ConnectionId != previous)).ConnectionDraft.Baseline.ConnectionId;
+                Assert.IsTrue(levelLinks.Any(c => c.ConnectionId.ToString("D") == selectedLink), "L selects a connection of the viewed level.");
+            }
+            var supplySelected = await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == psuSupply.ConnectionId.ToString("D"));
+            Assert.AreEqual(refinedSupply.Selection.RevisionId.ToString("D"), supplySelected.ConnectionDraft.Baseline.RevisionId,
+                "The editor shows the chosen connection implementation.");
+            Key("1", control: true); Key("h", alt: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Requirement history")) await Task.Delay(50, modal.Token);
+            }
+            Key("Down", title: "Requirement history");
+            var supplyHistoryDialog = await Wait(s => s.FieldHistory is { Loading: false }
+                && s.FieldHistory.InspectedRevisionId == earlierSupply.RequirementRevisionId.ToString("D"));
+            Assert.AreEqual(psuSupply.ConnectionId.ToString("D"), supplyHistoryDialog.FieldHistory.OwnerId);
+            var replacedSupply = selectionBase.Connections(psu.BlockId);
+            CollectionAssert.AreEqual(new[] { $"v2 · Saved · {psuProposal.Origin.Actor}" }
+                    .Concat(supplyGeneral.Select(e => HistoryRowLabel(Contexts(replacedSupply), e, refinedSupply.Selection.StateId))).ToArray(),
+                supplyHistoryDialog.FieldHistory.RowLabels.ToArray(), "The refined supply connection's General history as the editor lists it.");
+            var earlierSupplyImplementation = Contexts(replacedSupply)(earlierSupply.ContextRevisionId);
+            Assert.AreNotEqual(refinedSupply.Selection.StateId, earlierSupplyImplementation.State);
+            StringAssert.StartsWith(supplyHistoryDialog.FieldHistory.RowLabels[1], earlierSupplyImplementation.Name + " · v");
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
+            await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == earlierSupply.Text
+                && s.ConnectionDraft.RestoredFields.Any(r => r.SourceRevisionId == earlierSupply.RequirementRevisionId.ToString("D")));
+            await Save();
+            var connectionRestoreFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var connectionRestorePsu = connectionRestoreFile.Inspect(connectionRestoreFile.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+            Assert.AreEqual(psuProposal.Candidate.StateId, connectionRestorePsu.StateId);
+            var restoredSupply = connectionRestoreFile.Inspect(connectionRestorePsu).LocalDiagram.Connections.Single(c => c.ConnectionId == psuSupply.ConnectionId);
+            Assert.AreEqual(refinedSupply.Selection.StateId, restoredSupply.StateId, "The restore is saved in the chosen connection implementation.");
+            var supplyArchive = connectionRestoreFile.Connections(psu.BlockId);
+            var restoredSupplyHistory = supplyArchive.RequirementHistories.Single(h => h.Scope.DesignStateId == restoredSupply.StateId);
+            Assert.AreEqual(supplyArchive.Inspect(restoredSupply).RequirementRevisionId, restoredSupplyHistory.Current.Id);
+            Assert.AreEqual(refinedSupply.RequirementRevisionId, restoredSupplyHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, earlierSupply.RequirementRevisionId),
+                restoredSupplyHistory.Current.Restorations.Single());
+            Assert.AreEqual(refinedSupply.Requirements with { General = earlierSupply.Text }, restoredSupplyHistory.Current.Requirements);
+            Assert.AreEqual(replacedSupply.Requirements(psuSupply).RevisionId, restoredSupplyHistory.DerivedFrom,
+                "The chosen connection implementation still continues the exact revision it was refined from.");
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, connectionRestorePsu, "General", restoredSupply, token),
+                [new(restoredSupplyHistory.Current.Id, restoredSupply.RevisionId, 3, refinedSupply.Name, earlierSupply.Text, restoredSupplyHistory.Current.Origin, true),
+                 ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedSupply) with { IsSavedText = false },
+                 .. supplyGeneral.Select(e => e with { IsSavedText = false })], "refined supply connection after restoring the earlier text",
+                Contexts(supplyArchive));
             Key("w", control: true);
             if (createdDiagram is not null)
                 await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
@@ -4703,6 +4776,30 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
     }
 
+    /// <summary>The row the editor's field-history list shows for an entry saved before the viewed implementation's saved
+    /// text (never the saved row): the name of the implementation it was saved in when that is not the viewed one, in the
+    /// implementation selector's "name · version" form, then its author.</summary>
+    private static string HistoryRowLabel(Func<Guid, (Guid State, string Name)> implementationOf, DiagramFieldHistoryEntry entry, Guid viewedState)
+    {
+        var (state, implementation) = implementationOf(entry.ContextRevisionId);
+        return (state == viewedState ? "" : implementation + " · ") + "v" + entry.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " · " + entry.Origin.Actor;
+    }
+
+    /// <summary>The implementation (its identity and name) a block revision was saved in.</summary>
+    private static Func<Guid, (Guid State, string Name)> Contexts(RecursiveBlockGraph graph) => revision =>
+    {
+        Guid state = graph.Revisions.Single(r => r.Selection.RevisionId == revision).Selection.StateId;
+        return (state, graph.States.Single(s => s.Id == state).Name);
+    };
+
+    /// <summary>The implementation (its identity and name) a connection or member revision was saved in.</summary>
+    private static Func<Guid, (Guid State, string Name)> Contexts(DiagramConnectionArchive archive) => revision =>
+    {
+        Guid state = archive.Revisions.Single(r => r.Selection.RevisionId == revision).Selection.StateId;
+        return (state, archive.States.Single(s => s.Id == state).Name);
+    };
+
     /// <summary>A complete field history read through the production MCP server (<c>kicad_diagram_field_history</c>) for an
     /// exact block revision, or for an exact connection or member of its level, page by page (at most 200 entries each)
     /// until every entry is loaded. Every page must name the same saved context and total.</summary>
@@ -4758,8 +4855,10 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Asserts that an MCP field-history page lists exactly the expected entries, newest first: each entry's requirement
-    /// revision, saved context and its version there, text, saved marker, actor, sources and linked inputs.</summary>
-    private static void AssertFieldHistory(IReadOnlyList<JsonElement> rows, IReadOnlyList<DiagramFieldHistoryEntry> expected, string what)
+    /// revision, saved context, the implementation it was saved in and its version there, text, saved marker, author (kind,
+    /// name and time), summary, every source statement and the linked inputs.</summary>
+    private static void AssertFieldHistory(IReadOnlyList<JsonElement> rows, IReadOnlyList<DiagramFieldHistoryEntry> expected, string what,
+        Func<Guid, (Guid State, string Name)> implementationOf)
     {
         Assert.HasCount(expected.Count, rows, what + ": " + string.Join(", ", rows.Take(3).Select(r => r.GetRawText())));
         static string Optional(JsonElement row, string name) => row.TryGetProperty(name, out var value) ? value.ToString() : "";
@@ -4771,14 +4870,24 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(want.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), Optional(row, "contextVersion"), at);
             Assert.AreEqual(want.Text, Optional(row, "text"), at);
             Assert.AreEqual(want.IsSavedText, row.TryGetProperty("isSavedText", out var saved) && saved.GetBoolean(), at);
+            // The implementation the entry was saved in, which for an earlier implementation's entry is not the requested one.
+            var (state, implementation) = implementationOf(want.ContextRevisionId);
+            Assert.AreEqual(state.ToString("D"), row.GetProperty("contextStateId").GetString(), at);
+            Assert.AreEqual(implementation, row.GetProperty("contextImplementation").GetString(), at);
             var origin = row.GetProperty("origin");
+            // The complete author identity: whether a person, an agent, an import or the editor wrote it, who, and when.
+            Assert.AreEqual("DAK_" + want.Origin.ActorKind.ToString().ToUpperInvariant(), Optional(origin, "kind"), at);
             Assert.AreEqual(want.Origin.Actor, origin.GetProperty("actor").GetString(), at);
+            Assert.AreEqual(want.Origin.RecordedAt, Google.Protobuf.JsonParser.Default.Parse<Google.Protobuf.WellKnownTypes.Timestamp>(
+                JsonSerializer.Serialize(origin.GetProperty("recordedAt").GetString())).ToDateTimeOffset(), at);
             Assert.AreEqual(want.Origin.Summary, Optional(origin, "summary"), at);
             CollectionAssert.AreEqual(want.Origin.InputIds.Select(id => id.ToString("D")).ToArray(),
                 origin.TryGetProperty("inputIds", out var inputs) ? inputs.EnumerateArray().Select(x => x.GetString()).ToArray() : Array.Empty<string>(), at);
-            CollectionAssert.AreEqual(want.Origin.Sources.Select(s => s.DocumentId + "@" + s.Revision).ToArray(),
-                origin.TryGetProperty("sources", out var sources) ? sources.EnumerateArray().Select(x => Optional(x, "documentId") + "@" + Optional(x, "revision")).ToArray()
-                    : Array.Empty<string>(), at);
+            // Each source statement exactly: its document, revision, page, table and part variant.
+            CollectionAssert.AreEqual(want.Origin.Sources.Select(s => string.Join("|", s.DocumentId, s.Revision,
+                    s.Page?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "", s.Table ?? "", s.PartVariant ?? "")).ToArray(),
+                origin.TryGetProperty("sources", out var sources) ? sources.EnumerateArray().Select(x => string.Join("|", Optional(x, "documentId"),
+                    Optional(x, "revision"), Optional(x, "page"), Optional(x, "table"), Optional(x, "partVariant"))).ToArray() : Array.Empty<string>(), at);
         }
     }
 

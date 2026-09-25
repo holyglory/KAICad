@@ -681,7 +681,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_field_history", ReadOnly = true),
-     Description("Read a bounded field-history page at an exact saved block revision, optionally for one exact connection/member in that local diagram. Field is General, Schematic or Routing. Returns original text, provenance, revision targets and total count; later unselected candidates do not appear as saved edits. No draft, file or native selection is changed.")]
+     Description("Read a bounded field-history page at an exact saved block revision, optionally for one exact connection/member in that local diagram. Field is General, Schematic or Routing. Returns original text, provenance, revision targets and total count; later unselected candidates do not appear as saved edits. An implementation made from another one (a duplicate, or a proposal that refined the block, connection or member) continues that implementation's history: after its own entries come the earlier implementation's entries, up to the revision it was made from, each with its own author, sources and linked inputs. Every entry names the implementation it was saved in (contextStateId, contextImplementation); its contextRevisionId and contextVersion belong to that implementation, which for such an entry is not the requested one. No draft, file or native selection is changed.")]
     public Task<CallToolResult> FieldHistory(string instanceId, string repositoryRoot, string sourcePath, string documentId,
         string blockId, string stateId, string revisionId, string field, CancellationToken cancellationToken,
         int offset = 0, int limit = 50, string? connectionId = null, string? connectionStateId = null,
@@ -702,8 +702,33 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             request.Connection = new() { ConnectionId = Identity(connectionId).ToString("D"), StateId = Identity(connectionStateId).ToString("D"), RevisionId = Identity(connectionRevisionId).ToString("D") };
         }
         var result = await RecursiveEditorFiles.ExecuteAsync(request, cancellationToken);
+        // Name the implementation each entry was saved in (an implementation made from another one continues its history),
+        // read from the same saved file: the read is bound to the history's source token.
+        var snapshot = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = result.SourceToken }, cancellationToken);
+        var saved = snapshot.Document.Graph;
+        var contexts = new Dictionary<string, (string StateId, string Name)>();
+        if (request.Action == RecursiveFileAction.RfaBlockFieldHistory)
+        {
+            var names = saved.States.ToDictionary(s => s.Id, s => s.Name);
+            foreach (var revision in saved.Revisions.Where(r => r.Selection.BlockId == request.Block.BlockId))
+                contexts[revision.Selection.RevisionId] = (revision.Selection.StateId, names[revision.Selection.StateId]);
+        }
+        else
+        {
+            var archive = saved.ConnectionArchives.Single(a => a.OwnerBlockId == request.Block.BlockId);
+            var names = archive.States.ToDictionary(s => s.Id, s => s.Name);
+            foreach (var revision in archive.Revisions.Where(r => r.Selection.ConnectionId == request.Connection.ConnectionId))
+                contexts[revision.Selection.RevisionId] = (revision.Selection.StateId, names[revision.Selection.StateId]);
+        }
+        var history = JsonNode.Parse(JsonFormatter.Default.Format(result.History))!.AsObject();
+        foreach (var entry in history["entries"]?.AsArray() ?? [])
+        {
+            var (contextState, implementation) = contexts[entry!["contextRevisionId"]!.GetValue<string>()];
+            entry["contextStateId"] = contextState; entry["contextImplementation"] = implementation;
+        }
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
-            sourceToken = result.SourceToken, history = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.History)) });
+            sourceToken = result.SourceToken, history });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 

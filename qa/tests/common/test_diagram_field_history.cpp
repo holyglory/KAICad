@@ -195,19 +195,15 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
     const char* outputPath = std::getenv( "KICAD_FIELD_HISTORY_EVIDENCE" );
     if( !inputPath || !outputPath ) return;
     BOOST_REQUIRE( KI_TEST::CanDoDisplayTests() ); wxInitAllImageHandlers();
-    D::FieldHistoryPageData first, older;
+    D::FieldHistoryPageData first, older; D::RecursiveBlockGraphData longGraph;
     std::ifstream firstInput( std::filesystem::path( inputPath ) / "history-page-0.pb", std::ios::binary );
     std::ifstream olderInput( std::filesystem::path( inputPath ) / "history-page-200.pb", std::ios::binary );
+    std::ifstream graphInput( std::filesystem::path( inputPath ) / "history-graph.pb", std::ios::binary );
     BOOST_REQUIRE( first.ParseFromIstream( &firstInput ) ); BOOST_REQUIRE( older.ParseFromIstream( &olderInput ) );
+    BOOST_REQUIRE( longGraph.ParseFromIstream( &graphInput ) );
     BOOST_REQUIRE_EQUAL( first.entries_size(), 200 ); BOOST_REQUIRE_EQUAL( first.total(), 206 );
-    auto rows = []( const D::FieldHistoryPageData& page )
-    {
-        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> result;
-        for( const auto& entry : page.entries() )
-            result.push_back( { entry.requirement_revision_id(), wxString::Format( "v%u", entry.context_version() ),
-                wxString::FromUTF8( entry.origin().actor() ), wxString::FromUTF8( entry.text() ), wxEmptyString, entry.is_saved_text() } );
-        return result;
-    };
+    // The editor's own row builder: every row of this single implementation's history shows its version alone.
+    auto rows = [&]( const D::FieldHistoryPageData& page ) { return DiagramFieldHistoryRows( longGraph, page, false ); };
     auto makeDialog = [&]()
     {
         return new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "General requirements", "System", "v206",
@@ -289,13 +285,16 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     BOOST_REQUIRE( input.good() ); BOOST_REQUIRE( page.ParseFromIstream( &input ) );
     BOOST_REQUIRE_EQUAL( page.field(), D::RFK_ROUTING );
     BOOST_REQUIRE_GE( page.entries_size(), 2 );
+    // The diagram the page was read from, so the rows are labelled exactly as the editor labels them.
+    const char* graphPath = std::getenv( "KICAD_FIELD_HISTORY_GRAPH" );
+    BOOST_REQUIRE( graphPath );
+    D::RecursiveBlockGraphData graph;
+    std::ifstream graphInput( graphPath, std::ios::binary );
+    BOOST_REQUIRE( graphInput.good() ); BOOST_REQUIRE( graph.ParseFromIstream( &graphInput ) );
     std::filesystem::path evidence( outputPath );
     std::filesystem::create_directories( evidence );
     auto text = []( const std::string& value ) { return wxString::FromUTF8( value ); };
-    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
-    for( const auto& entry : page.entries() )
-        rows.push_back( { entry.requirement_revision_id(), wxString::Format( "v%u", entry.context_version() ),
-                         text( entry.origin().actor() ), text( entry.text() ), wxEmptyString, entry.is_saved_text() } );
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows = DiagramFieldHistoryRows( graph, page, false );
     auto* dialog = new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "Routing requirements", "PSU",
             wxString::Format( "v%u", page.context_version() ), text( page.saved_text() ), rows );
     dialog->Move( wxPoint( 60, 60 ) );
@@ -305,13 +304,17 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
     auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
     dialog->ConfigurePaging( rows.size(), []( size_t ) { BOOST_FAIL( "A complete short history needs no further request." ); } );
+    nlohmann::json renderedRows = nlohmann::json::array(); std::string selectedHeading, restoreLabel;
     int cancelled = show( dialog, [&]
     {
         BOOST_CHECK( !control<wxStaticText>( dialog, "DiagramFieldHistoryPageStatus" )->IsShown() );
         BOOST_CHECK( !control<wxButton>( dialog, "DiagramFieldHistoryOlder" )->IsShown() );
+        for( unsigned row = 0; row < list->GetCount(); ++row ) renderedRows.push_back( list->GetString( row ).utf8_string() );
         capture( dialog, evidence, "01-current.png" );
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );
+        selectedHeading = control<wxStaticText>( dialog, "DiagramFieldHistorySelectedHeading" )->GetLabel().utf8_string();
+        restoreLabel = restore->GetLabel().utf8_string();
         BOOST_CHECK_EQUAL( saved->GetValue(), text( page.saved_text() ) );
         BOOST_CHECK( !dialog->RestoreRevision().has_value() );
         capture( dialog, evidence, "02-earlier-text.png" );
@@ -368,7 +371,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     receipt << nlohmann::json( { { "document_id", page.document_id() }, { "owner_id", page.owner_id() },
         { "context_revision_id", page.context_revision_id() }, { "restore_requirement_revision_id", restored },
         { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
-        { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits } } ).dump( 2 );
+        { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits },
+        { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
 }
 

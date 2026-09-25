@@ -3022,23 +3022,34 @@ public sealed partial class NativeSessionTests
             "RecursiveFacetValue", "RecursiveFacetCandidates", "RecursiveFacetReason", "RecursiveFacetStrengthInformation",
             "RecursiveFacetStrengthPreference", "RecursiveFacetStrengthRequirement", "RecursiveFacetClear"];
         P.DiagramControlRect[] DetailControls(P.RecursiveDiagramEditorState at) => detailNames.Select(n => Find(at, n)).Where(c => c.Shown).ToArray();
-        async Task<P.RecursiveDiagramEditorState> DetailSettled()
+        async Task<P.RecursiveDiagramEditorState> DetailSettled(string step)
         {
             // The inspector lays out again once a label collapses or its scroll bar shows; measure once two readings agree.
             var at = await Read();
             using var settle = CancellationTokenSource.CreateLinkedTokenSource(token); settle.CancelAfter(TimeSpan.FromSeconds(5));
-            while (true)
+            try
             {
-                await Task.Delay(120, settle.Token);
-                var again = await Read();
-                if (DetailControls(again).SequenceEqual(DetailControls(at)) && Find(again, "RecursiveInspector").Equals(Find(at, "RecursiveInspector"))) return again;
-                at = again;
+                while (true)
+                {
+                    await Task.Delay(120, settle.Token);
+                    var again = await Read();
+                    if (DetailControls(again).SequenceEqual(DetailControls(at)) && Find(again, "RecursiveInspector").Equals(Find(at, "RecursiveInspector"))) return again;
+                    at = again;
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-timeout-" + step + ".json"), SchematicJson.Formatter.Format(at), token);
+                await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-timeout-" + step + ".png"), token);
+                throw new AssertFailedException("The facet detail at '" + step + "' was still moving after 5 seconds; its last state and screen are retained.");
             }
         }
-        // Measured in one capture: no two of the detail's controls intersect and none is clipped at the inspector's sides. The
-        // entry lies below the state choices, the strength choices below the entry, and Clear facet below the strength choices,
-        // however those rows wrap or collapse their labels. Clear facet looks like an action (design QA P2-10).
-        void VerifyDetailLayout(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step)
+        // Measured from the rectangles the editor reports: every control of the detail keeps a size, Clear facet is as tall as Back to
+        // facet overview, no two controls intersect, none is clipped at the inspector's sides and every choice lies within the
+        // detail's column. The entry lies below the state choices, the strength choices below the entry, and Clear facet below the
+        // strength choices, however those rows wrap or collapse their labels. Returns the closest two controls' distance and
+        // Clear facet's distance below the lowest strength choice.
+        (int Closest, int ClearBelow) VerifyDetailGeometry(P.RecursiveDiagramEditorState at, string step)
         {
             static string Box(P.DiagramControlRect c) => $"{c.Name} ({c.X}, {c.Y}, {c.Width} x {c.Height})";
             // The distance between two rectangles along the axis that separates them; negative when they intersect.
@@ -3046,6 +3057,14 @@ public sealed partial class NativeSessionTests
                 Math.Max(Math.Max(b.X - (a.X + a.Width), a.X - (b.X + b.Width)), Math.Max(b.Y - (a.Y + a.Height), a.Y - (b.Y + b.Height)));
             var inspector = Find(at, "RecursiveInspector");
             var shown = DetailControls(at);
+            // A control squeezed to nothing cannot be seen or pressed: in the failing capture clear-facet-overlap-11e548 the editor
+            // reported Clear facet 0 pixels high below the wrapped strength row, and the click on its centre met empty space.
+            foreach (var control in shown)
+                Assert.IsTrue(control.Width > 0 && control.Height > 0, $"{step}: {Box(control)} keeps a size.");
+            var back = Find(at, "RecursiveFacetBack"); var clear = Find(at, "RecursiveFacetClear");
+            Assert.IsTrue(back.Shown, step + ": Back to facet overview is shown while the overview lists facets.");
+            Assert.IsTrue(clear.Shown, step + ": Clear facet is shown for a facet with a value.");
+            Assert.AreEqual(back.Height, clear.Height, $"{step}: {Box(clear)} is as tall as {Box(back)}; both are link-look actions.");
             int closest = int.MaxValue;
             for (int i = 0; i < shown.Length; ++i)
                 for (int j = i + 1; j < shown.Length; ++j)
@@ -3053,24 +3072,45 @@ public sealed partial class NativeSessionTests
                     int gap = Gap(shown[i], shown[j]); closest = Math.Min(closest, gap);
                     Assert.IsTrue(gap >= 0, $"{step}: {Box(shown[i])} and {Box(shown[j])} intersect.");
                 }
-            shot.Record("Facet detail: closest two interactive controls (px)", closest);
             foreach (var control in shown)
-                Assert.IsTrue(control.Width > 0 && control.Height > 0 && control.X >= inspector.X && control.X + control.Width <= inspector.X + inspector.Width,
-                    $"{step}: {Box(control)} lies whole across the inspector ({inspector.X} to {inspector.X + inspector.Width}).");
+                Assert.IsTrue(control.X >= inspector.X && control.X + control.Width <= inspector.X + inspector.Width,
+                    $"{step}: {Box(control)} is not clipped at the inspector's sides ({inspector.X} to {inspector.X + inspector.Width}).");
             var states = shown.Where(c => c.Name.StartsWith("RecursiveFacetState", StringComparison.Ordinal)).ToArray();
             var strengths = shown.Where(c => c.Name.StartsWith("RecursiveFacetStrength", StringComparison.Ordinal)).ToArray();
             var entries = shown.Where(c => c.Name is "RecursiveFacetValue" or "RecursiveFacetCandidates" or "RecursiveFacetReason").ToArray();
-            var clear = Find(at, "RecursiveFacetClear");
             Assert.HasCount(3, states, step + ": the three state choices are shown.");
             Assert.HasCount(3, strengths, step + ": the three strength choices are shown.");
             Assert.HasCount(1, entries, step + ": the one entry the state asks for is shown.");
-            Assert.IsTrue(clear.Shown, step + ": Clear facet is shown for a facet with a value.");
+            // The entry fills the detail's column, so the choices wrap within its edges.
             var entry = entries[0];
+            foreach (var choice in states.Concat(strengths))
+                Assert.IsTrue(choice.X >= entry.X && choice.X + choice.Width <= entry.X + entry.Width,
+                    $"{step}: {Box(choice)} lies within the detail's column ({entry.X} to {entry.X + entry.Width}).");
             Assert.IsTrue(entry.Y >= states.Max(c => c.Y + c.Height), $"{step}: {Box(entry)} lies below every state choice.");
             Assert.IsTrue(strengths.Min(c => c.Y) >= entry.Y + entry.Height, $"{step}: the strength choices lie below {Box(entry)}.");
-            int below = shot.Record("Clear facet below the lowest strength choice (px)", clear.Y - strengths.Max(c => c.Y + c.Height));
+            int below = clear.Y - strengths.Max(c => c.Y + c.Height);
             Assert.IsTrue(below >= 4, $"{step}: {Box(clear)} starts {below} pixels below the lowest strength choice, at least 4.");
-            VerifyLink(shot, clear, Find(at, "RecursiveSavedVersion"), step, "Clear facet");
+            return (closest, below);
+        }
+        // The same, measured in one capture as well: each choice shows its label where it is reported, and Clear facet looks like an
+        // action (design QA P2-10).
+        void VerifyDetailLayout(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step)
+        {
+            var (closest, below) = VerifyDetailGeometry(at, step);
+            shot.Record("Facet detail: closest two interactive controls (px)", closest);
+            shot.Record("Clear facet below the lowest strength choice (px)", below);
+            var inspector = Find(at, "RecursiveInspector");
+            // Each choice is drawn where the editor reports it: its label's ink lies in the right two thirds of its rectangle (the
+            // indicator takes the left), measured against the inspector beside it.
+            foreach (var choice in DetailControls(at).Where(c => c.Name.StartsWith("RecursiveFacetState", StringComparison.Ordinal)
+                || c.Name.StartsWith("RecursiveFacetStrength", StringComparison.Ordinal)))
+            {
+                var page = shot.At(inspector.X + 3, choice.Y + choice.Height / 2);
+                int textFrom = choice.X + choice.Width / 3;
+                Assert.IsNotEmpty(shot.InkRuns(textFrom, choice.Y, choice.X + choice.Width - textFrom, choice.Height, page, rows: false, minimum: 2.0),
+                    $"{step}: {choice.Name} ({choice.X}, {choice.Y}, {choice.Width} x {choice.Height}) shows its label where it is reported.");
+            }
+            VerifyLink(shot, Find(at, "RecursiveFacetClear"), Find(at, "RecursiveSavedVersion"), step, "Clear facet");
         }
         async Task<P.RecursiveDiagramEditorState> MoveSash(string step, int toX, Func<P.RecursiveDiagramEditorState, bool> reached)
         {
@@ -3307,17 +3347,27 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(new[] { "Type: linear regulator", "Package: SOT-23-5" }, ChipTexts(chosenAgain, psu));
 
         // Clear facet returns Package to unspecified: its row and chip go. Undo brings it back with its strength. The Package
-        // detail is measured and cleared through the rendered Clear facet at the default width, in the narrowest and a wide
-        // inspector, and in the compact window (below), in each theme's session.
-        async Task<P.RecursiveDiagramEditorState> ClearPackage(string step, bool? brief, string[] facetsLeft,
+        // detail is opened from the facet overview, measured, and cleared through the rendered Clear facet at the default width,
+        // at the inspector's minimum width, at the first width that shows the full strength labels, and in the compact window
+        // (below), in each theme's session.
+        async Task<(P.RecursiveDiagramEditorState Detail, CapturedWindow Shot)> MeasurePackage(string step, bool? brief)
+        {
+            var detail = await DetailSettled(step);
+            var shot = await Shot(step + "-package-detail");
+            VerifyDetailLayout(shot, detail, step);
+            StrengthRow(detail, step, brief);
+            return (detail, shot);
+        }
+        async Task<(P.RecursiveDiagramEditorState Detail, CapturedWindow Shot)> OpenPackage(string step, bool? brief)
+        {
+            await Press("RecursiveFacetRowPackage");
+            await Wait(step + "-package-row", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetStateCandidate");
+            return await MeasurePackage(step, brief);
+        }
+        async Task<P.RecursiveDiagramEditorState> ClearOpenPackage(string step, string[] facetsLeft,
             params (string Facet, P.DefinitionChoiceStateData State)[] choicesLeft)
         {
             bool dirty = (await Read()).Dirty;
-            await Press("RecursiveFacetRowPackage");
-            await Wait(step + "-package-row", s => s.FacetEditor == "package" && s.FocusedControl == "RecursiveFacetStateCandidate");
-            var detail = await DetailSettled();
-            VerifyDetailLayout(await Shot(step + "-package-detail"), detail, step);
-            StrengthRow(detail, step, brief);
             await Press("RecursiveFacetClear");
             var gone = await Wait(step + "-package-cleared", s => s.FacetEditor == "" && Facet(s, d => d.Package) is null);
             CollectionAssert.AreEqual(facetsLeft, gone.ShownFacets.ToArray(), step + ": the Package row leaves the facet overview.");
@@ -3329,17 +3379,64 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(dirty, back.Dirty, step + ": undo returns the draft to what it was before Clear facet.");
             return gone;
         }
-        var cleared = await ClearPackage("default-width", null, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
-        CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
-        // The narrowest inspector collapses the strength labels; a wide one shows them in full, the width at which they once
-        // wrapped under Clear facet.
+        async Task<P.RecursiveDiagramEditorState> ClearPackage(string step, bool? brief, string[] facetsLeft,
+            params (string Facet, P.DefinitionChoiceStateData State)[] choicesLeft)
+        {
+            await OpenPackage(step, brief);
+            return await ClearOpenPackage(step, facetsLeft, choicesLeft);
+        }
+        (string, P.DefinitionChoiceStateData) typeChosen = ("type", P.DefinitionChoiceStateData.DcsdSelected);
+        string[] fullStrengths = ["Information", "Preference", "Requirement"], briefStrengths = ["Info", "Pref.", "Req."];
         var clearSash = Find(await Read(), "RecursiveInspectorSash");
+        var cleared = await ClearPackage("default-width", null, ["type", "manufacturer"], typeChosen);
+        CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
+        // The labels switch at one width, and the integration run clear-facet-overlap-11e548 failed near such a width: the full
+        // labels fitted the facet overview, which has no scroll bar, but not the Package detail once its scroll bar showed, and
+        // Clear facet was squeezed to nothing below the wrapped row. So the inspector is widened from the default width in 3-pixel
+        // steps until the full labels show with the Package detail open. At each width the detail is measured as the sash left it,
+        // and again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        var sweepStart = (await OpenPackage("sweep-00", true)).Detail;
+        P.RecursiveDiagramEditorState lastShort = sweepStart, firstFull;
+        for (int i = 1; ; ++i)
+        {
+            Assert.IsTrue(i <= 20, "The full strength labels show within 60 pixels of the default width.");
+            string step = $"sweep-{i:00}";
+            var sash = Find(await Read(), "RecursiveInspectorSash");
+            await MoveSash(step, sash.X + sash.Width / 2 - 3, s => Find(s, "RecursiveInspectorSash").X < sash.X);
+            var dragged = await DetailSettled(step + "-resized");
+            _ = VerifyDetailGeometry(dragged, step + "-resized"); StrengthRow(dragged, step + "-resized", null);
+            await Press("RecursiveFacetBack");
+            await Wait(step + "-overview", s => s.FacetEditor == "" && s.ShownFacets.Contains("package"));
+            var reopenedDetail = (await OpenPackage(step + "-reopened", null)).Detail;
+            CollectionAssert.AreEqual(StrengthLabels(dragged), StrengthLabels(reopenedDetail),
+                step + ": the strength labels follow the inspector's width, however the detail was reached.");
+            if (StrengthLabels(reopenedDetail).SequenceEqual(fullStrengths)) { firstFull = reopenedDetail; break; }
+            lastShort = reopenedDetail;
+        }
+        // They switch where the rule says: the full labels show once they fit the detail's column with 4 DIP to spare (the fixture
+        // display is at 96 DPI, where the detail's 12 DIP margin is 12 pixels), and one step narrower they did not. The editor
+        // measures a label with wxWidgets and GTK draws it, and each may round a label's width by a pixel, so the rule is held to
+        // within 3 pixels; that the full labels fit their column is asserted exactly in the measurement.
+        var (fullDetail, fullShot) = await MeasurePackage("first-full-width", false);
+        var information = Find(fullDetail, "RecursiveFacetStrengthInformation"); var requirement = Find(fullDetail, "RecursiveFacetStrengthRequirement");
+        Assert.AreEqual(12, Find(fullDetail, "RecursiveFacetCandidates").X - Find(fullDetail, "RecursiveInspector").X, "The detail's margin is 12 pixels.");
+        int fullRow = fullShot.Record("Strength row with the full labels (px)", requirement.X + requirement.Width - information.X);
+        int wideColumn = fullShot.Record("Detail column where the full labels first show (px)", Find(fullDetail, "RecursiveFacetCandidates").Width);
+        int narrowColumn = fullShot.Record("Detail column one step narrower, short labels (px)", Find(lastShort, "RecursiveFacetCandidates").Width);
+        Assert.AreEqual(Find(firstFull, "RecursiveFacetCandidates").Width, wideColumn, "The detail keeps its width while it is measured again.");
+        Assert.IsTrue(fullRow + 4 <= wideColumn + 3 && fullRow + 4 > narrowColumn - 3,
+            $"The full strength labels ({fullRow} pixels) show from a {wideColumn}-pixel column and not from {narrowColumn} pixels, where they need {fullRow + 4}.");
+        // The sweep covered every width where opening the detail switches the labels: where it started, even the facet overview's
+        // column (the inspector's width less its 12 DIP margins, as the overview has no scroll bar) was too narrow for them.
+        int overviewColumn = Find(sweepStart, "RecursiveInspector").Width - 24;
+        fullShot.Record("Facet overview column where the sweep started (px)", overviewColumn);
+        Assert.IsTrue(overviewColumn < fullRow + 4,
+            $"The sweep starts below the widths where opening the detail switches the labels: the overview's {overviewColumn}-pixel column there is under {fullRow + 4} pixels.");
+        await ClearOpenPackage("first-full-width", ["type", "manufacturer"], typeChosen);
+        // The narrowest inspector (its minimum width) collapses the strength labels.
         await MoveSash("clear-inspector-narrowest", clearSash.X + 160, s => Find(s, "RecursiveInspectorSash").X > clearSash.X
-            && StrengthLabels(s)[0] == "Info");
-        await ClearPackage("narrowest-inspector", true, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
-        await MoveSash("clear-inspector-wide", clearSash.X - 160, s => Find(s, "RecursiveInspectorSash").X < clearSash.X - 100
-            && StrengthLabels(s)[0] == "Information");
-        await ClearPackage("wide-inspector", false, ["type", "manufacturer"], ("type", P.DefinitionChoiceStateData.DcsdSelected));
+            && StrengthLabels(s).SequenceEqual(briefStrengths));
+        await ClearPackage("narrowest-inspector", true, ["type", "manufacturer"], typeChosen);
         await MoveSash("clear-inspector-default", clearSash.X + clearSash.Width / 2, s => Math.Abs(Find(s, "RecursiveInspectorSash").X - clearSash.X) <= 2);
 
         // A third choice: Family takes the candidate "TLV755P" (Add detail now reads Purpose, Family, ...). The block has room for
@@ -3484,7 +3581,8 @@ public sealed partial class NativeSessionTests
             ("family", P.DefinitionChoiceStateData.DcsdCandidates));
         // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
         // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
-        ulong beforeBetween = compact.ViewRevision;
+        // Read just before the resize: clearing Package above advanced the view revision, and the wait below must see a new frame.
+        ulong beforeBetween = (await Read()).ViewRevision;
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1300, resizeHeight: 880);
         var between = await Wait("between", s => s.Rendered && s.ViewRevision > beforeBetween && s.CanvasPixelWidth > compact.CanvasPixelWidth);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-between.json"), SchematicJson.Formatter.Format(between), token);

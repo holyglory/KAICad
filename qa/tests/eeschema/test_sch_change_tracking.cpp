@@ -56,8 +56,11 @@
 #include <vector>
 
 #if defined( EESCHEMA )
+#include <api/api_handler_sch.h>
 #include <api/api_sch_state_groups.h>
+#include <api/checked_schematic_controller.h>
 #include <api/sch_api_save.h>
+#include <google/protobuf/util/message_differencer.h>
 #include <bus_alias.h>
 #include <connection_graph.h>
 #include <embedded_files.h>
@@ -4698,6 +4701,274 @@ BOOST_FIXTURE_TEST_CASE( ApiGlobalLabelsKeepTheirReferenceFieldThroughSetup, TRA
     doc.RecomputeIntersheetRefs();
     BOOST_CHECK( !reorderedRefs->IsVisible() );
     BOOST_CHECK( customFields( *reordered ) == custom );
+}
+
+
+/**
+ * Rebuilding deleted schematic files from saved XML (lane 2C, rebuild_screen_identity): only the root KiCad
+ * creates for a project whose schematic files are gone may adopt the identity its saved root file had.  Each
+ * refusal is checked on its own, with every other condition met, against the precision case it must not catch.
+ * The ordering rules of the operation (first in its batch, canonical UUID, retry identity) and the rollback of a
+ * rejected batch need a live editor; the PSU/CPU rebuild journey (NativeXmlRebuildJourney) proves those.
+ */
+BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_SCHEMATIC )
+{
+    auto refusal = []( SCHEMATIC& aSchematic, std::optional<SCH_SHEET_PATH> aPath = std::nullopt )
+    {
+        return API_HANDLER_SCH::ScreenIdentityRefusal( aSchematic, aPath ? *aPath : aSchematic.Hierarchy().at( 0 ) );
+    };
+    SCHEMATIC&  doc = *schematic;
+    SCH_SCREEN* screen = doc.RootScreen();
+    BOOST_REQUIRE( doc.Hierarchy().at( 0 ).LastScreen() == screen );
+
+    // Precision: a new root, never loaded or saved, with nothing on it and no file at its path.
+    const fs::path file = fs::temp_directory_path() / ( "rebuilt-root-" + KIID().AsStdString() + ".kicad_sch" );
+    screen->SetFileName( wxString::FromUTF8( file.string() ) );
+    BOOST_CHECK_MESSAGE( !refusal( doc ), refusal( doc ).value_or( "" ) );
+
+    // A root KiCad loaded from its file.
+    screen->SetFileFormatVersionAtLoad( 20250318 );
+    BOOST_CHECK( refusal( doc ) );
+    screen->SetFileFormatVersionAtLoad( 0 );
+
+    // A root KiCad knows it saved.
+    screen->SetFileExists( true );
+    BOOST_CHECK( refusal( doc ) );
+    screen->SetFileExists( false );
+
+    // A file at the root's path that KiCad never read: it is kept, never replaced by a rebuild.
+    {
+        std::ofstream( file ) << "(kicad_sch)";
+    }
+    BOOST_CHECK( refusal( doc ) );
+    fs::remove( file );
+    BOOST_CHECK( !refusal( doc ) );
+
+    // A root holding an object.
+    auto* note = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "note" ) );
+    screen->Append( note );
+    BOOST_CHECK( refusal( doc ) );
+    screen->Remove( note );
+    delete note;
+    BOOST_CHECK( !refusal( doc ) );
+
+    // A child sheet cannot adopt the root's identity, and a root showing one holds its sheet symbol.
+    {
+        TRACKED_SCHEMATIC nested;
+        addChildSheet( *nested.schematic, wxS( "child.kicad_sch" ) );
+        BOOST_REQUIRE_EQUAL( nested.schematic->Hierarchy().size(), 2u );
+        BOOST_CHECK( refusal( *nested.schematic ) );
+        BOOST_CHECK( refusal( *nested.schematic, nested.schematic->Hierarchy().at( 1 ) ) );
+    }
+
+    // A root holding a library cache but no object.
+    {
+        TRACKED_SCHEMATIC cached;
+        cached.schematic->RootScreen()->AddLibSymbol( new LIB_SYMBOL( wxS( "R" ) ) );
+        BOOST_CHECK( refusal( *cached.schematic ) );
+    }
+
+    // A schematic with a second top-level sheet: neither root is the project's only root.
+    {
+        TRACKED_SCHEMATIC twoRoots;
+        SCHEMATIC& multi = *twoRoots.schematic;
+        const SCH_SHEET_PATH first = multi.Hierarchy().at( 0 );
+        BOOST_CHECK( !refusal( multi, first ) );
+        auto* second = new SCH_SHEET( &multi );
+        second->SetScreen( new SCH_SCREEN( &multi ) );
+        second->GetScreen()->SetFileName( wxS( "second.kicad_sch" ) );
+        multi.AddTopLevelSheet( second );
+        BOOST_REQUIRE_EQUAL( multi.GetTopLevelSheets().size(), 2u );
+        BOOST_CHECK( refusal( multi, first ) );
+        SCH_SHEET_PATH secondPath;
+        secondPath.push_back( second );
+        BOOST_CHECK( refusal( multi, secondPath ) );
+    }
+}
+
+
+namespace
+{
+using namespace kiapi::automation::v1;
+
+/// The checked batch controller over a scripted native peer, for its root-identity rule: a checked batch keeps the
+/// document's native identity (its root screen's), except that a rebuild's first operation may give it exactly the
+/// identity that operation requests, when the native result says it changed it.
+struct IDENTITY_CONTROLLER
+{
+    CHECKED_SCHEMATIC_CONTROLLER controller;
+    DocumentLifecycleState       state;
+    std::string                  process = KIID().AsStdString();
+    std::string                  identityAfter;     ///< Native identity after the batch; empty keeps it.
+    bool                         claimChanged = false;
+    bool                         reject = false;
+    unsigned                     mutations = 0;
+
+    IDENTITY_CONTROLLER()
+    {
+        auto* document = state.mutable_document();
+        document->set_type( kiapi::common::types::DOCTYPE_SCHEMATIC );
+        document->mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+        document->mutable_project()->set_name( "rebuilt" );
+        document->mutable_project()->set_path( fs::temp_directory_path().string() );
+        state.set_process_epoch( process );
+        state.set_native_identity( KIID().AsStdString() );
+        state.mutable_revision()->set_epoch( KIID().AsStdString() );
+        state.mutable_revision()->set_sequence( 2 );
+        state.set_scope( DLS_SCHEMATIC_HIERARCHY );
+        state.set_project_settings_included( true );
+        state.set_state_sha256( std::string( 64, 'a' ) );
+        state.set_native_content_dirty( true );
+        for( const char* name : { "rebuilt.kicad_sch", "rebuilt.kicad_pro" } )
+        {
+            const std::string path = ( fs::temp_directory_path() / name ).string();
+            state.add_native_files( path );
+            auto* baseline = state.add_file_baselines();
+            baseline->set_path( path );
+            baseline->set_baseline_path( path );
+            baseline->set_baseline_known( true );
+            baseline->set_current_known( true );
+            baseline->set_baseline_exists( false );
+            baseline->set_current_exists( false );
+            baseline->set_status( NFBS_UNCHANGED );
+        }
+    }
+
+    CheckedSchematicBatch Request( const std::vector<SchematicItemOperation>& aOperations )
+    {
+        CheckedSchematicBatch request;
+        request.mutable_expected_state()->CopyFrom( state );
+        auto* batch = request.mutable_batch();
+        batch->mutable_document()->CopyFrom( state.document() );
+        batch->set_operation_id( KIID().AsStdString() );
+        batch->set_document_epoch( state.revision().epoch() );
+        batch->mutable_expected_revision()->CopyFrom( state.revision() );
+        for( const SchematicItemOperation& operation : aOperations )
+            batch->add_operations()->CopyFrom( operation );
+        return request;
+    }
+
+    API_RESULT Dispatch( ApiRequest& aRequest )
+    {
+        ApiResponse response;
+        response.mutable_status()->set_status( ApiStatusCode::AS_OK );
+        if( aRequest.message().Is<ReadDocumentLifecycleState>() )
+        {
+            response.mutable_message()->PackFrom( state );
+            return response;
+        }
+        if( !aRequest.message().Is<ApplySchematicItemBatch>() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Unexpected request" );
+            return tl::unexpected( error );
+        }
+        ++mutations;
+        if( reject )
+        {
+            // KiCad rolled the batch back, the identity included: nothing changed.
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Atomic operation 1 rejected: scripted failure" );
+            return tl::unexpected( error );
+        }
+        state.mutable_revision()->set_sequence( state.revision().sequence() + 1 );
+        state.set_state_sha256( std::string( 64, 'd' ) );
+        if( !identityAfter.empty() )
+            state.set_native_identity( identityAfter );
+        SchematicItemBatchResult result;
+        result.mutable_revision()->CopyFrom( state.revision() );
+        result.set_screen_identity_changed( claimChanged );
+        response.mutable_message()->PackFrom( result );
+        return response;
+    }
+
+    CheckedSchematicBatchReceipt Apply( const CheckedSchematicBatch& aRequest )
+    {
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( aRequest );
+        auto response = controller.Handle( envelope, process, [this]( ApiRequest& aValue ) { return Dispatch( aValue ); } );
+        BOOST_REQUIRE( response );
+        CheckedSchematicBatchReceipt receipt;
+        BOOST_REQUIRE( response->message().UnpackTo( &receipt ) );
+        return receipt;
+    }
+};
+
+
+SchematicItemOperation adoptIdentity( const std::string& aIdentity )
+{
+    SchematicItemOperation operation;
+    operation.mutable_rebuild_screen_identity()->set_value( aIdentity );
+    return operation;
+}
+
+
+SchematicItemOperation titleEdit()
+{
+    SchematicItemOperation operation;
+    operation.mutable_set_title_block()->set_title( "Rebuilt" );
+    return operation;
+}
+} // namespace
+
+
+BOOST_AUTO_TEST_CASE( CheckedBatchesKeepTheRootIdentityUnlessARebuildAdoptsIt )
+{
+    const std::string saved = KIID().AsStdString();
+
+    // The rebuild's first operation adopts the saved identity, and KiCad reports exactly that change.
+    {
+        IDENTITY_CONTROLLER f;
+        f.identityAfter = saved;
+        f.claimChanged = true;
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( saved ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_COMPLETED );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), saved );
+        BOOST_CHECK( receipt.result().screen_identity_changed() );
+    }
+
+    // Must-catch: an identity other than the requested one, a change KiCad does not report, a change without an
+    // identity operation, and a change requested anywhere but first are never accepted as committed.
+    struct CASE { const char* what; std::vector<SchematicItemOperation> operations; std::string after; bool claimed; };
+    const std::string other = KIID().AsStdString();
+    for( const CASE& c : std::vector<CASE>{
+                 { "another identity", { adoptIdentity( saved ) }, other, true },
+                 { "unreported change", { adoptIdentity( saved ) }, saved, false },
+                 { "no identity operation", { titleEdit() }, other, true },
+                 { "identity not first", { titleEdit(), adoptIdentity( saved ) }, saved, true } } )
+    {
+        IDENTITY_CONTROLLER f;
+        f.identityAfter = c.after;
+        f.claimChanged = c.claimed;
+        const auto receipt = f.Apply( f.Request( c.operations ) );
+        BOOST_CHECK_MESSAGE( receipt.status() == CSBS_INDETERMINATE, c.what );
+        BOOST_CHECK_MESSAGE( receipt.error_code() == "post_state_mismatch", c.what << ": " << receipt.error_code() );
+    }
+
+    // Precision: an identity operation KiCad found already satisfied keeps the identity, and the batch commits.
+    {
+        IDENTITY_CONTROLLER f;
+        const std::string current = f.state.native_identity();
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( current ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_COMPLETED );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), current );
+        BOOST_CHECK( !receipt.result().screen_identity_changed() );
+    }
+
+    // A batch KiCad rejects after the identity operation leaves the identity it had: a clean rejection, no result.
+    {
+        IDENTITY_CONTROLLER f;
+        f.reject = true;
+        const std::string before = f.state.native_identity();
+        const auto receipt = f.Apply( f.Request( { adoptIdentity( saved ), titleEdit() } ) );
+        BOOST_CHECK_EQUAL( receipt.status(), CSBS_REJECTED );
+        BOOST_CHECK_EQUAL( receipt.error_code(), "native_batch_rejected" );
+        BOOST_CHECK( !receipt.has_result() );
+        BOOST_CHECK_EQUAL( receipt.observed_after().native_identity(), before );
+        BOOST_CHECK_EQUAL( f.mutations, 1u );
+    }
 }
 
 

@@ -185,24 +185,188 @@ public sealed class SchematicRebuildTests
         var unsettled = SchematicSynchronizationPlanner.Plan(State(baseline, renamed, empty, "loaded", "created"));
         Assert.AreEqual("rebuild_requires_settled_xml", unsettled.ErrorCode);
         Assert.IsEmpty(unsettled.NativeOperations);
-        // Net chains and shared screens are not rebuilt yet; the untyped project settings stay in the kept project file.
-        foreach (string missing in new[] { "net_chains", "shared_screen_root_ownership", "library_cache" })
+        // KiCad names the untyped project settings, shared-screen root ownership and net chains on every snapshot. A design
+        // with no sheet file shown twice and no net chain loses nothing to the latter two, and the project settings stay in
+        // the kept project file: it is rebuilt.
+        var covered = baseline with { Schematic = baseline.Schematic.Clone() };
+        foreach (var screen in covered.Schematic.Instances)
+            screen.Metadata.UnrepresentedState.Add(new[] { SchematicRebuild.RetainedProjectSettings, "shared_screen_root_ownership", "net_chains" });
+        Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(State(covered, covered, NewEmptyRoot(covered), "loaded", "created"), covered).Kind);
+        // Must-catch: net chains are not rebuilt yet, and a limitation the XML cannot answer is a loss.
+        var chained = covered with { Schematic = covered.Schematic.Clone() };
+        foreach (var screen in chained.Schematic.Instances) screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "DATA_PATH",
+            From = new() { Reference = "U1", Pin = "1" }, To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/DATA" } });
+        var withChains = SchematicRebuild.Classify(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"), chained);
+        Assert.AreEqual("rebuild_state_unrepresented", withChains.ErrorCode, withChains.ErrorMessage);
+        StringAssert.Contains(withChains.ErrorMessage, "net_chains");
+        foreach (string missing in new[] { "library_cache", "future_state_group" })
         {
-            var marked = baseline with { Schematic = baseline.Schematic.Clone() };
+            var marked = covered with { Schematic = covered.Schematic.Clone() };
             foreach (var screen in marked.Schematic.Instances) screen.Metadata.UnrepresentedState.Add(missing);
-            var refused = SchematicSynchronizationPlanner.Plan(State(marked, marked, empty, "loaded", "created"));
+            var refused = SchematicSynchronizationPlanner.Plan(State(marked, marked, NewEmptyRoot(marked), "loaded", "created"));
             Assert.AreEqual("rebuild_state_unrepresented", refused.ErrorCode, missing);
             StringAssert.Contains(refused.ErrorMessage, missing);
+            Assert.IsEmpty(refused.NativeOperations);
         }
-        var retained = baseline with { Schematic = baseline.Schematic.Clone() };
-        foreach (var screen in retained.Schematic.Instances) screen.Metadata.UnrepresentedState.Add(SchematicRebuild.RetainedProjectSettings);
-        var emptyRetained = NewEmptyRoot(retained);
-        Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(State(retained, retained, emptyRetained, "loaded", "created"), retained).Kind);
+        // Must-catch: shared ownership is lost when a sheet file is shown by two sheets, or when there is a second root.
+        Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", covered.Schematic));
+        var repeated = covered.Schematic.Clone();
+        var child = repeated.Instances.First(s => !s.Metadata.Document.Equals(repeated.Document)).Clone();
+        child.Metadata.Document.SheetPath.Path[^1] = new KIID { Value = Guid.NewGuid().ToString("D") };
+        repeated.Instances.Add(child);
+        Assert.IsTrue(SchematicRebuild.Lost("shared_screen_root_ownership", repeated));
+        var twoRoots = covered.Schematic.Clone();
+        var second = twoRoots.Instances.Single(s => s.Metadata.Document.Equals(twoRoots.Document)).Clone();
+        second.Metadata.Document.SheetPath.Path[0] = new KIID { Value = Guid.NewGuid().ToString("D") };
+        second.Metadata.ScreenId = new KIID { Value = Guid.NewGuid().ToString("D") };
+        twoRoots.Instances.Add(second);
+        Assert.IsTrue(SchematicRebuild.Lost("shared_screen_root_ownership", twoRoots));
+        Assert.IsFalse(SchematicRebuild.Lost(SchematicRebuild.RetainedProjectSettings, twoRoots));
         // Everything deleted inside KiCad keeps its document session: that is a native edit for the general path.
         Assert.AreEqual(SchematicRebuildKind.NotApplicable, SchematicRebuild.Classify(State(baseline, baseline, empty, "same", "same"), baseline).Kind);
         // A root KiCad loaded from a file is not a new root.
         var loaded = empty.Clone(); loaded.Instances[0].Metadata.LoadedNativeFormatVersion = SchematicItemDelta.SupportedWriterFormatVersion;
         Assert.AreEqual(SchematicRebuildKind.NotApplicable, SchematicRebuild.Classify(State(baseline, baseline, loaded, "loaded", "created"), baseline).Kind);
+    }
+
+    // A design whose sheets sheet generation made (so every sheet symbol carries a generated identity), with one sheet
+    // pin drawn on the PSU sheet symbol, as a person connecting PSU to the root would.
+    private static (SchematicDesign Design, string PsuSheetId) GeneratedWithSheetPin()
+    {
+        var root = RootOnly();
+        var sheets = root with { Engineering = PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly) };
+        var generation = SchematicSynchronizationPlanner.Plan(State(root, sheets));
+        Assert.IsTrue(generation.CanPrepare, generation.ErrorCode + ": " + generation.ErrorMessage);
+        var design = generation.Candidate! with { Schematic = generation.Candidate!.Schematic.Clone() };
+        var rootScreen = design.Schematic.Instances.Single(s => s.Metadata.Document.Equals(design.Schematic.Document));
+        string psuId = SchematicRebuild.GeneratedSheet(PsuCpuIds.Id(0x05, 2)).SheetSymbolId.ToString("D");
+        int index = rootScreen.Items.ToList().FindIndex(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Value == psuId);
+        var psu = rootScreen.Items[index].Unpack<SheetSymbol>();
+        psu.Pins.Add(new SheetPin
+        {
+            Id = new KIID { Value = Guid.NewGuid().ToString("D") },
+            Position = new Vector2 { XNm = psu.Position.XNm + psu.Size.XNm, YNm = psu.Position.YNm + 5_080_000 },
+            Text = new Text { Text_ = "TELEM_MCU_TO_CPU", Attributes = new TextAttributes { Size = new Vector2 { XNm = 1_270_000, YNm = 1_270_000 } } },
+            SpinStyle = SchematicLabelSpinStyle.SlssLeft, Shape = SchematicLabelShape.SlshPassive, Side = SheetSide.ShsRight,
+            Locked = LockedState.LsUnlocked
+        });
+        rootScreen.Items[index] = Any.Pack(psu);
+        return (design, psuId);
+    }
+
+    private static SchematicHierarchyData WithSheet(SchematicHierarchyData data, string sheetId, Action<SheetSymbol> edit)
+    {
+        var result = data.Clone();
+        foreach (var screen in result.Instances)
+            for (int i = 0; i < screen.Items.Count; ++i)
+                if (screen.Items[i].Is(SheetSymbol.Descriptor) && screen.Items[i].Unpack<SheetSymbol>() is { } sheet && sheet.Id.Value == sheetId)
+                {
+                    edit(sheet);
+                    screen.Items[i] = Any.Pack(sheet);
+                }
+        return result;
+    }
+
+    // Review finding (lane 2C, xml-rebuild): the relaxed check for sheet symbols that sheet generation creates also caught a
+    // rebuild, whose sheet symbols all carry generated identities. A rebuilt sheet symbol with sheet pins was then refused
+    // after KiCad had committed it, and any other difference on a rebuilt sheet symbol was accepted unseen.
+    [TestMethod]
+    public void RebuiltSheetSymbolsKeepTheirSheetPinsAndMustMatchExactly()
+    {
+        var (baseline, psuId) = GeneratedWithSheetPin();
+        var state = State(baseline, baseline, NewEmptyRoot(baseline), baselineEpoch: "loaded", observedEpoch: "created");
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.IsTrue(plan.NativeRebuildRequired);
+        var created = plan.NativeOperations.Where(o => o.Create?.Is(SheetSymbol.Descriptor) == true).Select(o => o.Create.Unpack<SheetSymbol>())
+            .Single(s => s.Id.Value == psuId);
+        Assert.HasCount(1, created.Pins, "The rebuilt sheet symbol is created with its sheet pin and that pin's identity.");
+        var batch = new ApplySchematicItemBatch { Description = SchematicRebuild.BatchDescription };
+        batch.Operations.Add(plan.NativeOperations.Select(o => o.Clone()));
+        var receipt = new CheckedSchematicBatchReceipt { Status = CheckedSchematicBatchStatus.CsbsCompleted };
+        var candidate = plan.Candidate!;
+        SchematicDesign Resolve(SchematicHierarchyData native) =>
+            SchematicRebuild.Resolve(candidate, state, new SchematicElectricalState { Hierarchy = new() { Data = native } }, batch, receipt);
+
+        // KiCad rebuilt exactly the plan, sheet pin included: that is what is published.
+        Assert.AreEqual(SchematicDesignXml.Write(candidate, []), SchematicDesignXml.Write(Resolve(candidate.Schematic.Clone()), []));
+        // Must-catch: any difference on a rebuilt sheet symbol is refused, whatever the checked subset of fields says.
+        foreach (var (what, edit) in new (string, Action<SheetSymbol>)[]
+        {
+            ("border stroke", s => s.BorderStroke = new StrokeAttributes { Width = new Distance { ValueNm = 254_000 }, Style = StrokeLineStyle.SlsDash }),
+            ("fill", s => s.Fill = new GraphicFillAttributes { FillType = GraphicFillType.GftFilled }),
+            ("sheet pin", s => s.Pins[0].Position.YNm += 2_540_000),
+            ("missing sheet pin", s => s.Pins.Clear()),
+            ("excluded from BOM", s => s.ExcludeFromBom = !s.ExcludeFromBom),
+        })
+            Assert.AreEqual("rebuild_native_mismatch", Assert.ThrowsExactly<AutomationException>(() =>
+                Resolve(WithSheet(candidate.Schematic, psuId, edit))).Code, what);
+
+        // Precision: sheet generation still adopts KiCad's own rendering of a sheet symbol it asked for.
+        var root = RootOnly();
+        var sheets = root with { Engineering = PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly) };
+        var generationState = State(root, sheets);
+        var generation = SchematicSynchronizationPlanner.Plan(generationState);
+        var generationBatch = new ApplySchematicItemBatch { Description = SchematicRebuild.BatchDescription };
+        generationBatch.Operations.Add(generation.NativeOperations.Select(o => o.Clone()));
+        var rendered = WithSheet(generation.Candidate!.Schematic, psuId, s => s.BorderStroke = new StrokeAttributes
+            { Width = new Distance { ValueNm = 152_400 }, Style = StrokeLineStyle.SlsSolid });
+        var adopted = SchematicRebuild.Resolve(generation.Candidate!, generationState,
+            new SchematicElectricalState { Hierarchy = new() { Data = rendered } }, generationBatch, receipt);
+        Assert.AreEqual(rendered, adopted.Schematic, "Generation publishes KiCad's copy of the sheet symbols it created.");
+        // A generated sheet symbol never arrives with sheet pins: KiCad would have made something the plan did not ask for.
+        Assert.AreEqual("rebuild_native_mismatch", Assert.ThrowsExactly<AutomationException>(() => SchematicRebuild.Resolve(generation.Candidate!,
+            generationState, new SchematicElectricalState { Hierarchy = new() { Data = baseline.Schematic.Clone() } }, generationBatch, receipt)).Code);
+    }
+
+    // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
+    // project settings other than the XML's is refused before anything reaches KiCad, and no rebuild journal holds a
+    // project setting.
+    [TestMethod]
+    public void RebuildRefusesAKeptProjectFileWhoseSettingsDifferFromTheXml()
+    {
+        var baseline = Placed();
+        foreach (var (what, edit) in new (string, Action<SchematicMetadata>)[]
+        {
+            ("text variables", m => m.TextVariables["REVISION"] = "B"),
+            ("bus aliases", m => m.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } })),
+            ("variants", m => m.VariantDescriptions["Lite"] = "Without telemetry"),
+            ("formatting", m => m.Formatting = new SchematicFormattingSettings { DefaultTextSizeNm = 1_524_000 }),
+            ("annotation", m => m.Annotation = new SchematicAnnotationSettings { StartAfter = 100 }),
+            ("used references", m => m.ReferenceInventory = new SchematicReferenceInventory { Allocated = { "R7" } }),
+        })
+        {
+            var kept = NewEmptyRoot(baseline);
+            edit(kept.Instances[0].Metadata);
+            var state = State(baseline, baseline, kept, "loaded", "created");
+            var shape = SchematicRebuild.Classify(state, baseline);
+            Assert.AreEqual(SchematicRebuildKind.Rejected, shape.Kind, what);
+            Assert.AreEqual("rebuild_project_settings_changed", shape.ErrorCode, what);
+            StringAssert.Contains(shape.ErrorMessage, what);
+            var plan = SchematicSynchronizationPlanner.Plan(state);
+            Assert.AreEqual("rebuild_project_settings_changed", plan.ErrorCode, what);
+            Assert.IsEmpty(plan.NativeOperations, what + ": nothing is sent to KiCad.");
+        }
+        // Precision: the schematic file's own state on the new root (here its page) is what a rebuild recreates.
+        var fresh = NewEmptyRoot(baseline);
+        Assert.IsNotNull(fresh.Instances[0].Metadata.Page);
+        fresh.Instances[0].Metadata.Page = new PageSettings { PageSize = PageSize.PsA2 };
+        var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
+        Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
+        Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
+        // No project setting ever enters a rebuild journal.
+        foreach (var setting in new SchematicItemOperation[]
+        {
+            new() { ReplaceTextVariables = new() }, new() { SetFormatting = new() }, new() { SetNetSettings = new() },
+            new() { SetErcSettings = new() }, new() { SetBomSettings = new() }, new() { SetAnnotation = new() },
+            new() { SetFieldTemplates = new() }, new() { SetSymbolComparison = new() }, new() { ReplaceNetChainClasses = new() },
+            new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
+            new() { ReplaceBusAliases = new() }, new() { ReplaceNetChains = new() },
+        })
+            Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
+        foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
+            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() } })
+            Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
     }
 
     [TestMethod]

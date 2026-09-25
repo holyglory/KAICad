@@ -19,7 +19,8 @@ public sealed partial class NativeSessionTests
     // the production server over STDIO, with nothing lost. From the S2 seed (a root sheet only):
     //  1. The fixture's four sheets are generated from XML that adds them (sheet generation), the CPU sheet's paper is
     //     set to A3 in the XML, and the fixture's eight components are created on their sheets from XML with a proposed
-    //     layout. Two of the fixture's nets are then drawn in KiCad with labels and published to the XML. This is the
+    //     layout. Three of the fixture's nets are then drawn in KiCad and published to the XML: two with local labels on
+    //     one sheet each, and one across sheets with hierarchical labels, sheet pins and a wire on the root. This is the
     //     original project, saved by KiCad.
     //  2. Every schematic file is deleted, KiCad creates a new empty root for the project, the recovery record adopts it,
     //     and apply rebuilds the schematic from the XML last synchronized with KiCad.
@@ -28,8 +29,12 @@ public sealed partial class NativeSessionTests
     //     (screens, sheets, symbols, pins), sheets, library caches, pin partition and settings. A second apply is a
     //     no-op, and one native undo returns to the empty root while redo restores the rebuild.
     // The fixture's Complete stage adds all eleven nets in XML; KiCad can draw XML nets only through lane 2A's connection
-    // realization, so this journey's original holds the Components stage plus two nets drawn in KiCad, whether or not an
-    // editor advertises it. The rebuild itself recreates whatever objects the XML holds, wires and labels included.
+    // realization, so this journey's original holds the Components stage plus three nets drawn in KiCad, whether or not
+    // an editor advertises it. The rebuild recreates whatever objects the XML holds: labels, wires, and sheet symbols with
+    // their sheet pins, each compared exactly with the original.
+    // The native rules of the root identity a rebuild adopts are exercised here too, in the live editor: a root KiCad
+    // loaded from its file, an identity that is not first or not canonical, and a batch that fails after the identity
+    // (which must leave the root's own identity) are refused with nothing changed.
     private static async Task VerifyPsuCpuXmlRebuild(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -52,6 +57,9 @@ public sealed partial class NativeSessionTests
         var saved = await PsuCpuFixture.InitializeRecoveryAsync(client, context, store.StatePath, token);
         var seed = await Capture();
         Assert.HasCount(1, seed.Electrical.Hierarchy.Data.Instances, "S2 holds the root sheet only.");
+        // Must-catch: a root KiCad loaded from its file never adopts another identity, even when it is empty.
+        Assert.IsEmpty(seed.Electrical.Hierarchy.Data.Instances[0].Items);
+        var refusals = new List<object> { await RefusedIdentity(seed, "never loaded from or saved to a file", Identity(Guid.NewGuid().ToString("D"))) };
 
         // 1a. Sheet generation: the XML adds the three sheets below the root and nothing else.
         var sheetsOnly = PsuCpuFixture.Desired(context, PsuCpuStage.SheetsOnly);
@@ -130,10 +138,16 @@ public sealed partial class NativeSessionTests
         PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, placed.Electrical, Stage);
 
         // 1d. Connections drawn in KiCad, as a person would: a local label on each pin of the fixture's VIN net (J1.1 and
-        // U1.2 on PSU) and MEM_SCL net (U5.161 and U6.6 on CPU), at the pin's connection point and facing away from it.
-        // The next synchronization publishes them to the XML as nets, so the rebuild must restore labels and connections.
-        var wired = new List<(string Net, string[] Pins)> { ("VIN", ["J1.1", "U1.2"]), ("MEM_SCL", ["U5.161", "U6.6"]) };
-        var labelled = await DrawLabels(placed, [(2, "VIN", ["J1.1", "U1.2"]), (3, "MEM_SCL", ["U5.161", "U6.6"])]);
+        // U1.2 on PSU) and MEM_SCL net (U5.161 and U6.6 on CPU), at the pin's connection point and facing away from it;
+        // and the TELEM_MCU_TO_CPU net across sheets (U4.8 on PSU, U5.74 on CPU): a hierarchical label on each pin, a sheet
+        // pin of that name on the PSU and CPU sheet symbols, and a wire joining the two sheet pins on the root. The next
+        // synchronization publishes them to the XML as nets, so the rebuild must restore labels, sheet pins, the wire and
+        // the connections.
+        const string Crossing = "TELEM_MCU_TO_CPU";
+        var wired = new List<(string Net, string[] Pins)> { ("VIN", ["J1.1", "U1.2"]), ("MEM_SCL", ["U5.161", "U6.6"]), (Crossing, ["U4.8", "U5.74"]) };
+        var labelled = await DrawConnections(placed, [(2, "VIN", ["J1.1", "U1.2"], ConnectionLabelKind.Local),
+            (3, "MEM_SCL", ["U5.161", "U6.6"], ConnectionLabelKind.Local), (2, Crossing, ["U4.8"], ConnectionLabelKind.Hierarchical),
+            (3, Crossing, ["U5.74"], ConnectionLabelKind.Hierarchical)], Crossing);
         var refresh = await host.Tool("kicad_design_recovery_refresh", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = store.Read()!.RevisionToken });
         RequireToolSuccess(refresh);
@@ -150,10 +164,18 @@ public sealed partial class NativeSessionTests
         var originalReferences = originalDesign.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
         CollectionAssert.AreEquivalent(wired.Select(w => string.Join(",", w.Pins.Order(StringComparer.Ordinal))).ToArray(),
             originalDesign.Engineering.Circuit.Nets.Select(n => string.Join(",", n.Pins.Select(p => originalReferences[p.ComponentId] + "." + p.Pin)
-                .Order(StringComparer.Ordinal))).ToArray(), "The XML holds exactly the two connections drawn in KiCad.");
+                .Order(StringComparer.Ordinal))).ToArray(), "The XML holds exactly the three connections drawn in KiCad.");
+        var originalSheetPins = OriginalSheetPins(original.Electrical.Hierarchy.Data);
+        Assert.HasCount(2, originalSheetPins, "The PSU and CPU sheet symbols each hold the crossing's sheet pin.");
+        // KiCad names what no snapshot holds completely; this schematic has no sheet file shown twice and no net chain, so
+        // only the untyped project settings are not in the XML, and they stay in the kept project file.
         foreach (var screen in original.Electrical.Hierarchy.Data.Instances)
-            CollectionAssert.AreEqual(new[] { SchematicRebuild.RetainedProjectSettings }, screen.Metadata.UnrepresentedState.ToArray(),
-                "The snapshot holds every part of this schematic except the untyped project settings (no net chains, no shared screens).");
+        {
+            CollectionAssert.AreEqual(new[] { SchematicRebuild.RetainedProjectSettings, "shared_screen_root_ownership", "net_chains" },
+                screen.Metadata.UnrepresentedState.ToArray(), "The snapshot's coverage list is the same for every schematic.");
+            Assert.IsEmpty(screen.Metadata.NetChains);
+        }
+        Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", original.Electrical.Hierarchy.Data));
         string projectFile = Path.Combine(context.ProjectDirectory, "fixture.kicad_pro");
         var schematicFiles = new[] { "fixture.kicad_sch", "psu.kicad_sch", "cpu.kicad_sch", "cpu_power.kicad_sch" }
             .Select(name => Path.Combine(context.ProjectDirectory, name)).ToArray();
@@ -187,19 +209,30 @@ public sealed partial class NativeSessionTests
         Assert.AreNotEqual(originalRootScreen, emptyRoot.Metadata.ScreenId.Value, "KiCad gives the new root a new screen identity.");
         CollectionAssert.AreEqual(originalXml, await File.ReadAllBytesAsync(path, token), "Losing the schematic files leaves the XML untouched.");
 
+        // Must-catch, in the live editor through the checked batch path apply uses: the identity is only ever a batch's
+        // first operation and one canonical UUID, and a batch that fails after it leaves the root the identity KiCad gave it.
+        var probeLabel = new LocalLabel { Id = new KIID { Value = Guid.NewGuid().ToString("D") }, Position = new Vector2(), Text = new Text { Text_ = "PROBE" } };
+        refusals.Add(await RefusedIdentity(empty, "must be the first operation",
+            new SchematicItemOperation { TargetDocument = document.Clone(), SetTitleBlock = emptyRoot.Metadata.TitleBlock?.Clone() ?? new TitleBlockInfo() },
+            Identity(originalRootScreen)));
+        refusals.Add(await RefusedIdentity(empty, "canonical", Identity(originalRootScreen.ToUpperInvariant())));
+        refusals.Add(await RefusedIdentity(empty, "", Identity(originalRootScreen),
+            new SchematicItemOperation { TargetDocument = document.Clone(), Update = Any.Pack(probeLabel) }));
+
         var reattach = await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = empty.State.Revision.Epoch });
         RequireToolSuccess(reattach);
         saved = store.Read()!;
 
-        // Must-catch: XML edited after the files were lost is refused with nothing sent to KiCad; so is an unrepresented
-        // net chain, whose rebuild is not proven yet. Planning alone, directly on the saved record.
+        // Must-catch: XML edited after the files were lost is refused with nothing sent to KiCad; so is a design with a net
+        // chain, whose rebuild is not proven yet. Planning alone, directly on the saved record.
         var renamed = originalDesign with { Engineering = originalDesign.Engineering with { Circuit = originalDesign.Engineering.Circuit with
             { Components = [.. originalDesign.Engineering.Circuit.Components.Select(c => c.Reference == "R1" ? c with { Reference = "R9" } : c)] } } };
         var unsettled = SchematicSynchronizationPlanner.Plan(saved.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(renamed, [])) }, token);
         Assert.AreEqual("rebuild_requires_settled_xml", unsettled.ErrorCode, unsettled.ErrorMessage);
         var chained = saved.State.Baseline with { Schematic = saved.State.Baseline.Schematic.Clone() };
-        foreach (var screen in chained.Schematic.Instances) screen.Metadata.UnrepresentedState.Add("net_chains");
+        foreach (var screen in chained.Schematic.Instances) screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "PSU_TO_CPU",
+            From = new() { Reference = "U4", Pin = "8" }, To = new() { Reference = "U5", Pin = "74" }, MemberNets = { "/TELEM_MCU_TO_CPU" } });
         var withChains = SchematicSynchronizationPlanner.Plan(saved.State with { Baseline = chained,
             DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(chained, [])) }, token);
         Assert.AreEqual("rebuild_state_unrepresented", withChains.ErrorCode, withChains.ErrorMessage);
@@ -211,7 +244,14 @@ public sealed partial class NativeSessionTests
             "The rebuild first gives the new root the identity its file had.");
         Assert.AreEqual(expected.Symbols.Count, rebuildOperations.Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true));
         Assert.AreEqual(3, rebuildOperations.Count(o => o.Create?.Is(SheetSymbol.Descriptor) == true));
-        Assert.AreEqual(labelled, rebuildOperations.Count(o => o.Create?.Is(LocalLabel.Descriptor) == true), "Every drawn label is rebuilt.");
+        Assert.AreEqual(labelled.LocalLabels, rebuildOperations.Count(o => o.Create?.Is(LocalLabel.Descriptor) == true), "Every drawn label is rebuilt.");
+        Assert.AreEqual(labelled.HierarchicalLabels, rebuildOperations.Count(o => o.Create?.Is(HierarchicalLabel.Descriptor) == true));
+        Assert.AreEqual(labelled.Wires, rebuildOperations.Count(o => o.Create?.Is(SchematicLine.Descriptor) == true), "The root's wire is rebuilt.");
+        CollectionAssert.AreEquivalent(originalSheetPins, rebuildOperations.Where(o => o.Create?.Is(SheetSymbol.Descriptor) == true)
+            .SelectMany(o => o.Create.Unpack<SheetSymbol>().Pins.Select(p => o.Create.Unpack<SheetSymbol>().Id.Value + "#" + p.Id.Value + "#" + p.Text.Text_)).ToArray(),
+            "Each sheet symbol is rebuilt with its sheet pin and that pin's identity.");
+        Assert.IsTrue(rebuildOperations.Select((o, i) => (o, i)).All(p => p.o.Create is not null || p.o.ReplaceLibraryCache is not null
+            || SchematicRebuild.RecreatesFileState(p.o, p.i)), "The rebuild sends no project setting, removal or move.");
         Assert.AreEqual(empty, await Capture(), "Planning must not change KiCad.");
         var rebuild = await Apply(saved, "rebuild");
 
@@ -247,6 +287,7 @@ public sealed partial class NativeSessionTests
         foreach (var (net, pins) in wired)
             Assert.IsTrue(comparison.PinPartitions!.Any(p => p.Pins.Select(x => rebuiltReferences[x.ComponentId] + "." + x.Pin).Order(StringComparer.Ordinal)
                 .SequenceEqual(pins.Order(StringComparer.Ordinal))), net + " is one native net of exactly its two pins after the rebuild.");
+        CollectionAssert.AreEquivalent(originalSheetPins, OriginalSheetPins(rebuilt.Electrical.Hierarchy.Data), "The sheet pins are the original ones.");
         Assert.AreEqual(SchematicDesignXml.Write(originalDesign with { Schematic = rebuiltDesign.Schematic }, []), SchematicDesignXml.Write(rebuiltDesign, []),
             "The published design is the original's engineering, bindings and part symbols.");
 
@@ -285,8 +326,8 @@ public sealed partial class NativeSessionTests
             deleted = schematicFiles.Select(Path.GetFileName), newRootScreen = emptyRoot.Metadata.ScreenId.Value,
             rebuild = new { operations = rebuildOperations.Count, firstOperation = "rebuild_screen_identity", result = rebuild },
             rebuilt = new { rebuilt.State.StateSha256, sameStateDigest = true, filesByteIdentical = originalFiles.Count, sameObjects = true,
-                samePinPartition = true, drawnLabels = labelled, connections = wired.Select(w => new { w.Net, w.Pins }) },
-            refused = new { unsettled = unsettled.ErrorCode, netChains = withChains.ErrorCode },
+                samePinPartition = true, drawn = labelled, sheetPins = originalSheetPins, connections = wired.Select(w => new { w.Net, w.Pins }) },
+            refused = new { unsettled = unsettled.ErrorCode, netChains = withChains.ErrorCode, nativeIdentity = refusals },
             secondApplyNoOp = true, undoRestoresEmptyRoot = true, redoRestoresRebuild = true, crossPlatformReady = false,
             remaining = "Complete stage (XML nets) needs lane 2A's connection realization; project-file reconstruction from XML; "
                 + "rebuild of net chains and shared screens."
@@ -309,15 +350,19 @@ public sealed partial class NativeSessionTests
             return content;
         }
 
-        // One local label per pin, at its connection point and facing away from the pin body, drawn in one native edit.
-        async Task<int> DrawLabels(CheckedSchematicState state, (int Sheet, string Net, string[] Pins)[] nets)
+        // One label per pin, at its connection point and facing away from the pin body; for the crossing net, a sheet pin
+        // on each of the PSU and CPU sheet symbols (on the edges that face each other) and a wire between them on the root.
+        // All in one native edit.
+        async Task<DrawnConnections> DrawConnections(CheckedSchematicState state, (int Sheet, string Net, string[] Pins, ConnectionLabelKind Kind)[] nets,
+            string crossing)
         {
             var design = store.Read()!.State.Baseline;
             var policy = SchematicConnectionPolicy.FromSnapshot(state.Electrical.Hierarchy.Data);
-            var batch = new ApplySchematicItemBatch { Document = document.Clone(), Description = "Label the VIN and MEM_SCL pins" };
-            foreach (var (sheet, net, pins) in nets)
+            var batch = new ApplySchematicItemBatch { Document = document.Clone(), Description = "Connect the VIN, MEM_SCL and " + crossing + " pins" };
+            string SheetPath(int sheet) => string.Join('/', design.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, sheet)).NativePath.Select(p => p.ToString("D")));
+            foreach (var (sheet, net, pins, kind) in nets)
             {
-                var nativePath = string.Join('/', design.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, sheet)).NativePath.Select(p => p.ToString("D")));
+                string nativePath = SheetPath(sheet);
                 var screen = state.Electrical.Hierarchy.Data.Instances.Single(s => RebuildPathKey(s) == nativePath);
                 var references = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
                     .ToDictionary(s => s.Id.Value, s => s.ReferenceField.Text.Text_);
@@ -331,12 +376,67 @@ public sealed partial class NativeSessionTests
                         .SelectMany(o => o.SymbolPins.Pins).Single(p => p.Number == number);
                     var spin = anchor.BodyDirectionX > 0 ? SchematicLabelSpinStyle.SlssLeft : anchor.BodyDirectionX < 0 ? SchematicLabelSpinStyle.SlssRight
                         : anchor.BodyDirectionY > 0 ? SchematicLabelSpinStyle.SlssUp : SchematicLabelSpinStyle.SlssBottom;
-                    var label = SchematicConnectionRealizer.LabelPayload(ConnectionLabelKind.Local, Guid.NewGuid(), anchor.Position, net, spin, policy);
+                    var label = SchematicConnectionRealizer.LabelPayload(kind, Guid.NewGuid(), anchor.Position, net, spin, policy);
                     batch.Operations.Add(new SchematicItemOperation { TargetDocument = screen.Metadata.Document.Clone(), Create = Any.Pack(label) });
                 }
             }
+            // The crossing on the root: PSU and CPU sit side by side in the row sheet generation placed them in.
+            var root = state.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document));
+            SheetSymbol Sheet(int sheet) => root.Items.Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>())
+                .Single(x => x.Id.Value == SheetPath(sheet)[(SheetPath(sheet).LastIndexOf('/') + 1)..]);
+            var psu = Sheet(2);
+            var cpu = Sheet(3);
+            Assert.AreEqual(psu.Position.YNm, cpu.Position.YNm, "Sheet generation placed PSU and CPU in one row.");
+            Assert.IsLessThan(cpu.Position.XNm, psu.Position.XNm + psu.Size.XNm, "PSU is left of CPU.");
+            long y = psu.Position.YNm + 2 * policy.SheetPinPitchNm;
+            y = (y + policy.GridNm - 1) / policy.GridNm * policy.GridNm;
+            Assert.IsLessThanOrEqualTo(psu.Position.YNm + psu.Size.YNm - policy.SheetPinPitchNm, y);
+            var from = new Vector2 { XNm = psu.Position.XNm + psu.Size.XNm, YNm = y };
+            var to = new Vector2 { XNm = cpu.Position.XNm, YNm = y };
+            foreach (var (sheet, at, side) in new[] { (psu, from, SheetSide.ShsRight), (cpu, to, SheetSide.ShsLeft) })
+            {
+                var updated = sheet.Clone();
+                updated.Pins.Add(new SheetPin
+                {
+                    Id = new KIID { Value = Guid.NewGuid().ToString("D") }, Position = at.Clone(),
+                    Text = new Text { Text_ = crossing, Attributes = new TextAttributes { Size = new Vector2 { XNm = policy.TextSizeNm, YNm = policy.TextSizeNm }, Multiline = false } },
+                    SpinStyle = side == SheetSide.ShsLeft ? SchematicLabelSpinStyle.SlssRight : SchematicLabelSpinStyle.SlssLeft,
+                    Shape = SchematicLabelShape.SlshPassive, Side = side, Locked = LockedState.LsUnlocked
+                });
+                batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), Update = Any.Pack(updated) });
+            }
+            batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), Create = Any.Pack(new SchematicLine
+            {
+                Id = new KIID { Value = Guid.NewGuid().ToString("D") }, Start = from, End = to, Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked
+            }) });
             await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
-            return batch.Operations.Count;
+            return new(nets.Where(n => n.Kind == ConnectionLabelKind.Local).Sum(n => n.Pins.Length),
+                nets.Where(n => n.Kind == ConnectionLabelKind.Hierarchical).Sum(n => n.Pins.Length), SheetPins: 2, Wires: 1);
+        }
+
+        // The identity a rebuild gives its new root, as its own operation on the project's root sheet.
+        SchematicItemOperation Identity(string screen) => new() { TargetDocument = document.Clone(), RebuildScreenIdentity = new KIID { Value = screen } };
+
+        // Send one checked batch at exactly this state, as apply does, and require KiCad to refuse it without any change:
+        // a clean rejection with KiCad's reason, no native result, the same state and native identity before and after.
+        async Task<object> RefusedIdentity(CheckedSchematicState at, string reason, params SchematicItemOperation[] operations)
+        {
+            var request = new CheckedSchematicBatch { ExpectedState = at.State.Clone(), Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = "Adopt a saved root identity (refusal probe)"
+            } };
+            request.Batch.Operations.Add(operations.Select(o => o.Clone()));
+            var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, token);
+            string summary = receipt.Status + " " + receipt.ErrorCode + ": " + receipt.ErrorMessage;
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsRejected, receipt.Status, summary);
+            Assert.AreEqual("native_batch_rejected", receipt.ErrorCode, summary);
+            StringAssert.Contains(receipt.ErrorMessage, reason, summary);
+            Assert.IsNull(receipt.Result, "A refused batch has no native result, so no identity change is reported.");
+            Assert.AreEqual(receipt.ObservedBefore, receipt.ObservedAfter, summary);
+            Assert.AreEqual(at.State.NativeIdentity, receipt.ObservedAfter.NativeIdentity, "The root keeps the identity it had.");
+            Assert.AreEqual(at, await Capture(), "A refused identity changes nothing in KiCad.");
+            return new { operations = operations.Select(o => o.OperationCase.ToString()), reason = receipt.ErrorMessage };
         }
 
         async Task<object> Apply(StoredDesignRecovery current, string name, bool nativeEdit = true)
@@ -384,6 +484,13 @@ public sealed partial class NativeSessionTests
     }
 
     private static string RebuildPathKey(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value));
+
+    private sealed record DrawnConnections(int LocalLabels, int HierarchicalLabels, int SheetPins, int Wires);
+
+    // Every sheet pin KiCad shows, as "sheet symbol#sheet pin#text", with their exact identities.
+    private static string[] OriginalSheetPins(SchematicHierarchyData data) => [.. data.Instances.SelectMany(s => s.Items)
+        .Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>())
+        .SelectMany(sheet => sheet.Pins.Select(p => sheet.Id.Value + "#" + p.Id.Value + "#" + p.Text.Text_)).Order(StringComparer.Ordinal)];
 
     private static SchematicHierarchyData RebuildWithoutProvenance(SchematicHierarchyData data)
     {

@@ -198,6 +198,9 @@ public sealed class DesignLayoutRecoveryTests
             (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [page, identity, Created()]),       // identity not first
             (connection, [page, Created(), Assertion()]),                                               // not a connection realization's
             (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, move]),                  // never a connected move
+            // Never a project setting: the project file is kept and a rebuild never overwrites it (lane 2C review).
+            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, page, new SchematicItemOperation { SetFormatting = new() }, Created()]),
+            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, new SchematicItemOperation { ReplaceTextVariables = new() }, Created()]),
         })
             Assert.AreEqual("invalid_layout_intent", Assert.ThrowsExactly<AutomationException>(() => new DesignRecoveryStore(f.Path + ".refused.json").Save(
                 f.Saved.State with { PendingMutation = LaneMutation(f, operations), PendingLayout = layout }, null)).Code);

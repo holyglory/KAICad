@@ -207,27 +207,48 @@ result reports today's file token and selected root, whether the level is on tod
 today's name of each implementation the context names (`implementations`, which a rename changes) and the present
 integrity of each attachment. Deeper levels are read with their own context. The tool reads only.
 It is refused with `recursive_block_file_changed` for an outdated token, `ambiguous_agent_context` when no level is
-named, and `invalid_agent_context_scope` for a path that does not start at the root, is not pinned revision by revision,
-or lies outside the named input's revisions.
+named, `unknown_refinement_input` for an input the diagram does not have, and `invalid_agent_context_scope` for a path
+that names a revision the diagram does not have, does not start at the root, is not pinned revision by revision, or lies
+outside the named input's revisions.
 
 **Stale proposals.** A proposal's base is the target revision its input captured. `kicad_diagram_proposal_compare`
 compares a published proposal, or a request this server retained after a refused publication, with today's saved
-design. It reports `stale` (today's target is no longer the base), `candidateSelected` (today's target already is the
-candidate), the target's current path, and three lists: `currentChanges` (base to today), `proposalChanges` (base to
-the candidate) and `changedOnBothSides`. Each change names its level (`levelPath`, block ids from the target down,
-including each changed child's own level), the connection and members that contain it (`connectionPath`), its
-category and kind (added, removed, changed, reordered), the element's id and name, the requirement field or `aspect`
-(a definition facet, a connection's kind, domain, direction or ends, or a list's order), and, for a child block or
-connection, its revision before and after. A target that left today's design is reported as removed.
+design. It reports the target's current path, three lists and three flags:
+
+- `proposalChanges`: what the proposal changes from the base to its candidate.
+- `currentChanges` and `changedOnBothSides`: what changed from the base to today's target, and the elements both sides
+  changed.
+- `candidateAdopted`: the proposal was chosen, so today's target is its candidate or descends from it: a later saved
+  revision of the candidate's implementation, or an implementation made from one of those (a duplicate, or a later
+  proposal that refined it). The proposal's own changes are then part of today's design: `currentChanges` lists only
+  what changed after the candidate (nothing right after the choice), and `changedOnBothSides` is empty.
+  `candidateSelected` says today's target is exactly the candidate.
+- `stale`: the proposal is not adopted and today's target is no longer the base (or has left the design), so choosing it
+  is refused rather than applied over the newer work. An adopted proposal is not stale; choosing it again is refused too.
+
+Each change names its level (`levelPath`, block ids from the target down, including each changed child's own level),
+the connection and members that contain it (`connectionPath`), its category and kind (added, removed, changed,
+reordered), the element's id and name, the requirement field or `aspect` (a definition facet, a connection's kind,
+domain, direction or ends, or a list's order), and, for a child block or connection, its revision before and after. A
+target that left today's design is reported as one removed block whose `levelPath` is today's root-to-block path of the
+deepest block of its base path that today's design still has: its old parent while that remains, otherwise the nearest
+remaining ancestor, at least the root.
 
 Nothing is merged or chosen silently:
 
 - publishing reports the comparison with the saved candidate;
 - a proposal sent with an outdated token is refused (`block_proposal_source_changed`) with the comparison against
   today's file, and nothing is written;
-- choosing a proposal whose target moved on is refused (`proposal_target_changed`, or a stale token or path) with the
-  same comparison; the refusal's `details` list one entry per change (`current_change`, `proposal_change`,
-  `changed_on_both_sides`) naming the level and element.
+- choosing is refused, with the same comparison, when the target changed after the base, left the design or already is
+  the adopted candidate (`proposal_target_changed`), for an outdated token (`block_proposal_source_changed`), an outdated
+  expected root or a path starting at another root revision (`stale_root_revision`), a path through a containing block
+  revision the design no longer pins although the target is unchanged (`stale_block_revision`), and a containing
+  implementation with a newer saved revision (`stale_parent_revision`); the comparison's `currentPath` is today's path to
+  the target. The refusal's `details` list one entry per change (`current_change`, `proposal_change`,
+  `changed_on_both_sides`) naming the level and element;
+- a comparison that cannot be made (for example, a retained request that is no longer a valid proposal) never replaces a
+  refusal's code or fails a saved publication: it is reported as `comparisonUnavailable` with its code
+  (`invalid_block_proposal` for a malformed proposal). Comparing such a request directly is refused with that code.
 
 **Cancellation and reattachment.** Operations are identified by the agent. Repeating the same proposal and operation
 identity after a cancelled or uncertain call returns the recorded candidate (`added=false`) with its publication
@@ -238,15 +259,24 @@ A server that restarts reattaches the saved instance with `kicad_instance_reatta
 state directory. An open native editor keeps its unsaved draft throughout; it is neither reloaded nor saved.
 
 Evidence: `NativeRecursiveEditorJourney` over the production MCP server and the rendered editor. It checks the input's
-context (prompt, attachment, fields) and a commented level's context (element and free-space comments, sketch points),
-both unchanged by fingerprint after many later edits, and the refusals. A proposal built on the original root is
-compared with today's root: its own changes exactly, and today's changes level by level against the saved history
-comparison (`kicad_diagram_history_compare` for the root, the model for each changed child). The same comparison comes
-back when a second stale proposal's publication and the stale proposal's choice are refused, and an outdated-token and
-an already-chosen refusal report no change on today's side and the chosen candidate. Finally, with an unsaved edit
-open in the editor, an agent's publication and its choice are each cancelled in flight. Each time a new server
-reattaches the instance, reads the same context, inspects (and if needed resumes) the receipt and repeats the
-operation: one input, one candidate and one new root revision exist, and the draft is unchanged.
+context (prompt, attachment, fields), a level below the input inside its revisions (the input without its focus, not on
+today's design) and a commented level's context (element and free-space comments, sketch points), all unchanged by
+fingerprint after many later edits, and the refusals, an unknown revision and an unknown input included. A proposal
+built on the original root is compared with today's root: its own changes exactly, and today's changes level by level
+against the saved history comparison (`kicad_diagram_history_compare` for the root, the model for each changed child).
+The same comparison comes back when a second stale proposal's publication and the stale proposal's choice are refused.
+An outdated-token refusal and an outdated-path refusal (through an older root revision) report no change on today's
+side, and the latter today's path. After the choice, the already-chosen refusal reports the adopted candidate with
+nothing changed on today's side or on both; after the chosen supply is edited in the editor, the comparison is still
+adopted and today's side is exactly that edit (against the saved history comparison). Finally, with an unsaved edit
+open in the editor, an agent's publication and its choice are each abandoned by the agent in flight (the step fails
+unless the call was cancelled on the agent's side). Each time a new server reattaches the instance, reads the same
+context, inspects the receipt (resuming it if it was interrupted) and repeats the operation: one input, one candidate
+and one new root revision exist, and the draft is unchanged. Which server-side branch ran is recorded as `serverBranch`
+in the journey's `agent-reattachment` evidence; in the runs so far the server finished each operation before the cancel
+arrived, so the repeat returned the recorded outcome. The interrupted-phase branches (process death at each recorded
+phase, then resumption) are proved by `BlockProposalInterruptionTests` and `BlockProposalSelectionInterruptionTests`.
 `RecursiveBlockProposalTests.StaleProposalComparisonNamesEachChangedElementOnEachSide` covers what the journey's fixture
-cannot reach: a nested level changed on both sides, the parts of a refined connection and of its member, and a target
-removed from the design.
+cannot reach: a nested level changed on both sides, the parts of a refined connection and of its member, an adopted
+proposal edited later and one refined by a later chosen proposal, an outdated path through a containing block
+(`stale_block_revision`) and a nested target removed from the design at each depth.

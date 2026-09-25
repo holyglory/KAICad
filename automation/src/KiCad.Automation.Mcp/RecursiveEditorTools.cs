@@ -27,7 +27,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
                 ?? throw new AutomationException("invalid_block_proposal", "The proposal JSON is empty.");
             proposal = BlockProposalFiles.Normalize(proposal);
         }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
+        catch (Exception error) when (error is JsonException || Malformed(error))
         { throw new AutomationException("invalid_block_proposal", error.Message); }
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "A proposal publication needs an explicit operation identity.");
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
@@ -46,7 +46,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             return await StaleRefusal(error, instanceId, session.Epoch, repositoryRoot, sourcePath, documentId,
                 graph => BlockProposalComparer.Request(graph, proposal), cancellationToken);
         }
-        catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
+        catch (Exception error) when (Malformed(error))
         { throw new AutomationException("invalid_block_proposal", error.Message); }
         var publication = new BlockProposalReceipts(registry.StateDirectory).Read(operationId);
         // The candidate is saved at this point; a comparison that cannot be made is reported, never turned into a failed publication.
@@ -117,7 +117,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_select"),
-     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path. A proposal whose target changed after the revision it was built on is refused (proposal_target_changed), as is an outdated token or path (block_proposal_source_changed, stale_root_revision, stale_parent_revision, stale_block_revision): nothing is written, and the refusal carries the comparison of kicad_diagram_proposal_compare, naming every element changed on today's side and in the proposal and those changed on both. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID. Repeating an operation ID whose selection completed (for example after a cancelled or uncertain call, or from a reattached server) returns that recorded outcome (recorded=true, the source token and root it produced, and whether the file still has them) and never chooses again.")]
+     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path. A proposal whose target changed after the revision it was built on, left the design or was already chosen is refused (proposal_target_changed), as is an outdated token (block_proposal_source_changed), an outdated expected root or a path starting at another root revision (stale_root_revision), a path naming a containing block revision the design no longer pins (stale_block_revision) and a containing implementation with a newer saved revision (stale_parent_revision): nothing is written, and the refusal carries the comparison of kicad_diagram_proposal_compare, naming every element changed on today's side and in the proposal and those changed on both, and today's path to the target. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID. Repeating an operation ID whose selection completed (for example after a cancelled or uncertain call, or from a reattached server) returns that recorded outcome (recorded=true, the source token and root it produced, and whether the file still has them) and never chooses again.")]
     public Task<CallToolResult> SelectProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, Guid proposalId, BlockSelection expectedRoot,
         BlockSelection[] currentPath, Guid[] ancestorRevisionIds, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
@@ -157,7 +157,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
 
     [McpServerTool(Name = "kicad_diagram_proposal_compare", ReadOnly = true),
      KiCadCapability("structural-diagram", "compiled-mcp", "source token, proposal identity"),
-     Description("Compare a proposal with today's saved design before choosing it. The proposal is either published in the diagram or a request this server retained after a refused publication (kicad_diagram_proposal_retained). Its base is the target revision its original input captured. Returns stale (today's target is no longer that revision, so choosing it would be refused), candidateSelected (today's target already is the candidate), the target's current root-to-block path, and three lists by exact identity: currentChanges (what changed from the base to today's revision), proposalChanges (what the proposal changes from the base) and changedOnBothSides. Each change names its level (levelPath: block ids from the target down), the connection and members containing it (connectionPath), its category (Name, Requirement, Block, Connection, Interface, Comment, Definition, PhysicalAllocation, Layout, InterfaceRealization, InterconnectRealization), kind (Added, Removed, Changed, Reordered), the element's id and name, the requirement field or aspect, and for a child block or connection its revision before and after. Nothing is merged, chosen or written.")]
+     Description("Compare a proposal with today's saved design before choosing it. The proposal is either published in the diagram or a request this server retained after a refused publication (kicad_diagram_proposal_retained). Its base is the target revision its original input captured. Returns stale (the proposal is not chosen and today's target is no longer that revision, so choosing it would be refused), candidateAdopted (the proposal was chosen: today's target is its candidate or descends from it, as a later revision of the candidate's implementation or an implementation made from one), candidateSelected (today's target is exactly the candidate), the target's current root-to-block path, and three lists by exact identity: proposalChanges (what the proposal changes from the base), currentChanges (what changed from the base to today's revision; for an adopted proposal only what changed after the candidate) and changedOnBothSides (always empty for an adopted proposal, whose changes are part of today's design). Each change names its level (levelPath: block ids from the target down; for a target that left the design, today's root-to-block path of the deepest block of its base path still in the design), the connection and members containing it (connectionPath), its category (Name, Requirement, Block, Connection, Interface, Comment, Definition, PhysicalAllocation, Layout, InterfaceRealization, InterconnectRealization), kind (Added, Removed, Changed, Reordered), the element's id and name, the requirement field or aspect, and for a child block or connection its revision before and after. Nothing is merged, chosen or written.")]
     public Task<CallToolResult> CompareProposal(string instanceId, string repositoryRoot, string sourcePath, string documentId,
         string expectedSourceToken, Guid proposalId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -175,7 +175,9 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
                 ?? throw new AutomationException("unknown_block_proposal", "No published or retained proposal has this identity.");
             if (retained.DesignPath != loaded.Path || retained.DocumentId != id)
                 throw new AutomationException("block_proposal_conflict", "The retained request belongs to a different diagram.");
-            comparison = BlockProposalComparer.Request(loaded.Graph, retained.Proposal);
+            // Preparing the request against today's graph refuses an invalid one with a code, as its publication would.
+            try { comparison = BlockProposalComparer.Request(loaded.Graph, retained.Proposal); }
+            catch (Exception error) when (Malformed(error)) { throw new AutomationException("invalid_block_proposal", error.Message); }
         }
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
             selectedRoot = loaded.Graph.SelectedRoot, comparison });
@@ -230,11 +232,19 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     }
 
+    /// <summary>A comparison that cannot be made is reported beside the result or refusal it belongs to, with the code the
+    /// preparation gave it (invalid_block_proposal for a malformed proposal, as publication reports it). It never replaces a
+    /// refusal's own code or turns a saved publication into a failed call.</summary>
     private static (BlockProposalComparison? Comparison, object? Unavailable) Compare(Func<BlockProposalComparison> compare)
     {
         try { return (compare(), null); }
         catch (AutomationException error) { return (null, new { code = error.Code, message = error.Message }); }
+        catch (Exception error) when (Malformed(error)) { return (null, new { code = "invalid_block_proposal", message = error.Message }); }
     }
+
+    /// <summary>The failures a malformed proposal can raise while it is normalized or prepared, besides coded refusals.</summary>
+    private static bool Malformed(Exception error) =>
+        error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException;
 
     private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
 

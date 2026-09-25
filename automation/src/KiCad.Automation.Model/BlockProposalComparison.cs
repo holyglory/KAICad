@@ -31,13 +31,16 @@ public sealed record DiagramElementOverlap(ImmutableArray<Guid> LevelPath, Immut
 
 /// <summary>A proposal compared with the design it would change (ledger pa48933d0fe0a5c2f). BaseRevision is the target
 /// revision the proposal was built on (its original input's), CurrentPath the target's root-to-block path in today's
-/// selected design (empty when the target is no longer part of it). CurrentChanges are what changed from the base to
-/// today's revision; ProposalChanges what the proposal changes from the base; ChangedOnBothSides the elements both
-/// touched. Stale: today's target is no longer the base revision, so choosing the proposal is refused rather than
-/// applied over the newer work. CandidateSelected: today's target already is the proposal's candidate.</summary>
+/// selected design (empty when the target is no longer part of it). ProposalChanges are what the proposal changes from
+/// the base. CandidateAdopted: the proposal has been chosen, so today's target is its candidate or descends from it: a
+/// later revision of the candidate's implementation, or an implementation made from one (CandidateSelected: exactly the
+/// candidate). Then CurrentChanges are only what changed after the candidate, and nothing is changed on both sides,
+/// because the proposal's own changes are part of today's design. Otherwise CurrentChanges are what changed from the base to today's revision and ChangedOnBothSides the
+/// elements both touched. Stale: the proposal is not adopted and today's target is no longer the base revision, so
+/// choosing it is refused rather than applied over the newer work. Choosing an adopted proposal again is refused too.</summary>
 public sealed record BlockProposalComparison(Guid DocumentId, Guid ProposalId, Guid InputId, bool Published,
     ImmutableArray<BlockSelection> BasePath, BlockSelection BaseRevision, BlockSelection Candidate,
-    ImmutableArray<BlockSelection> CurrentPath, bool Stale, bool CandidateSelected,
+    ImmutableArray<BlockSelection> CurrentPath, bool Stale, bool CandidateSelected, bool CandidateAdopted,
     ImmutableArray<DiagramElementChange> CurrentChanges, ImmutableArray<DiagramElementChange> ProposalChanges,
     ImmutableArray<DiagramElementOverlap> ChangedOnBothSides)
 {
@@ -81,25 +84,51 @@ public static class BlockProposalComparer
     {
         var target = basePath[^1];
         var currentPath = BlockProposalCompiler.FindPath(graph, target.BlockId);
-        ImmutableArray<DiagramElementChange> current;
+        var proposal = Revisions(graph, target, candidate);
         if (currentPath.IsEmpty)
         {
-            // The target left today's design: report its removal at the deepest level of its base path that still is.
-            var level = basePath.Take(basePath.Length - 1).Select(s => s.BlockId).ToImmutableArray();
-            current = [new(level.IsEmpty ? [target.BlockId] : level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed,
-                target.BlockId, graph.Inspect(target).Name, BeforeRevisionId: target.RevisionId)];
+            // The target left today's design: its removal is reported at the deepest block of its base path that today's design
+            // still has, by today's root-to-block path to that block. The root always remains, so such a block exists.
+            ImmutableArray<Guid> level = [];
+            for (int i = basePath.Length - 2; i >= 0 && level.IsEmpty; --i)
+                level = [.. BlockProposalCompiler.FindPath(graph, basePath[i].BlockId).Select(s => s.BlockId)];
+            ImmutableArray<DiagramElementChange> removed = [new(level.IsEmpty ? [target.BlockId] : level, [], DiagramHistoryChangeCategory.Block,
+                DiagramHistoryChangeKind.Removed, target.BlockId, graph.Inspect(target).Name, BeforeRevisionId: target.RevisionId)];
+            return new(graph.DocumentId, proposalId, inputId, published, basePath, target, candidate, currentPath, true, false, false,
+                removed, proposal, []);
         }
-        else current = Revisions(graph, target, currentPath[^1]);
-        var proposal = Revisions(graph, target, candidate);
+        var today = currentPath[^1];
+        if (Adopted(graph, today, candidate))
+            // The proposal was chosen: its own changes are in today's design, so only what changed after the candidate is today's
+            // side, and nothing is changed on both sides.
+            return new(graph.DocumentId, proposalId, inputId, published, basePath, target, candidate, currentPath, false, today == candidate, true,
+                Revisions(graph, candidate, today), proposal, []);
+        var current = Revisions(graph, target, today);
         var byKey = current.GroupBy(c => c.Key).ToDictionary(g => g.Key, g => g.First());
         var both = proposal.Where(p => byKey.ContainsKey(p.Key)).Select(p =>
         {
-            var today = byKey[p.Key];
-            return new DiagramElementOverlap(p.LevelPath, p.ConnectionPath, p.Category, p.ObjectId, p.Name, today.Kind, p.Kind, p.Field, p.Aspect);
+            var changed = byKey[p.Key];
+            return new DiagramElementOverlap(p.LevelPath, p.ConnectionPath, p.Category, p.ObjectId, p.Name, changed.Kind, p.Kind, p.Field, p.Aspect);
         }).ToImmutableArray();
-        bool stale = currentPath.IsEmpty || currentPath[^1] != target;
-        return new(graph.DocumentId, proposalId, inputId, published, basePath, target, candidate, currentPath, stale,
-            !currentPath.IsEmpty && currentPath[^1] == candidate, current, proposal, both);
+        return new(graph.DocumentId, proposalId, inputId, published, basePath, target, candidate, currentPath, today != target, false, false,
+            current, proposal, both);
+    }
+
+    /// <summary>Whether <paramref name="today"/> descends from the candidate: the candidate itself, a later saved revision of the
+    /// candidate's implementation, or an implementation made from one of those (a duplicate, or a later proposal that refined it),
+    /// and so on. Then the proposal has been chosen and its changes are part of today's design. Only the proposal's own candidate
+    /// implementation starts at the candidate, so descending from it means the proposal was adopted.</summary>
+    private static bool Adopted(RecursiveBlockGraph graph, BlockSelection today, BlockSelection candidate)
+    {
+        if (today.BlockId != candidate.BlockId) return false;
+        var states = graph.States.ToDictionary(s => s.Id); var seen = new HashSet<Guid>();
+        for (BlockSelection? revision = today; revision is not null && seen.Add(revision.RevisionId);)
+        {
+            if (revision == candidate) return true;
+            revision = graph.Inspect(revision).ParentRevisionId is { } parent ? revision with { RevisionId = parent }
+                : states[revision.StateId].ForkedFrom;
+        }
+        return false;
     }
 
     /// <summary>Every element that differs from <paramref name="before"/> to <paramref name="after"/>, two revisions of the same

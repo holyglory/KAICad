@@ -181,8 +181,15 @@ public static class BlockProposalCompiler
         ImmutableArray<BlockSelection> currentPath, ImmutableArray<Guid> ancestorIds, RequirementRevisionOrigin origin)
     {
         var proposal = graph.Proposal(proposalId);
-        if (currentPath.IsDefaultOrEmpty || currentPath[^1] != proposal.BasePath[^1])
+        var target = proposal.BasePath[^1]; var today = FindPath(graph, target.BlockId);
+        if (currentPath.IsDefaultOrEmpty || currentPath[^1] != target || today.IsEmpty || today[^1] != target)
             throw new AutomationException("proposal_target_changed", "The target no longer matches this proposal's original revision; retain both versions for comparison.");
+        // The target is unchanged, but the path to it names a root or containing revision the selected design no longer pins: an
+        // outdated path is refused as stale (like a connection edit's), so its refusal can report today's path to the target.
+        if (expectedRoot == graph.SelectedRoot && !currentPath.SequenceEqual(today))
+            throw currentPath[0] != graph.SelectedRoot
+                ? new AutomationException("stale_root_revision", "The path to the target starts at another root revision than the selected design; read the target's current path again. Nothing was changed.")
+                : new AutomationException("stale_block_revision", "The path to the target names a block revision the selected design no longer pins; read the target's current path again. Nothing was changed.");
         var linked = origin with { InputIds = origin.InputIds.Append(proposal.InputId).Append(proposal.Id).Distinct().ToImmutableArray() };
         return graph.Select(expectedRoot, currentPath, proposal.Candidate, ancestorIds, linked);
     }

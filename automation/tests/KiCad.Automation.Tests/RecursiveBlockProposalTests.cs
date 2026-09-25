@@ -145,8 +145,10 @@ public sealed class RecursiveBlockProposalTests
     }
 
     // Isolated rules of the stale-proposal comparison (ledger pa48933d0fe0a5c2f). The native journey compares a root proposal with the
-    // saved design through the production MCP server, but its fixture changes no nested level on both sides, no member of a refined
-    // connection and never takes the target out of the design; those cases are only reachable here.
+    // saved design through the production MCP server, and a chosen supply proposal before and after an edit, but its fixture changes no
+    // nested level on both sides, no member of a refined connection, chooses no proposal made from a chosen one, has no proposal below a
+    // direct child of the root (so no outdated path through a containing block) and never takes the target out of the design; those
+    // cases are only reachable here.
     [TestMethod]
     public void StaleProposalComparisonNamesEachChangedElementOnEachSide()
     {
@@ -230,11 +232,24 @@ public sealed class RecursiveBlockProposalTests
             System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Published(published, f.Proposal.Id), options));
         Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Published(published, f.Proposal.Id), options),
             System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Request(published, f.Proposal), options), "A published request compares as published.");
-        // Chosen over a refreshed path, today's supply is the candidate.
+        // Chosen over a refreshed path, today's supply is the candidate: the proposal is adopted, so its own changes are no longer
+        // reported as today's changes or as changed on both sides, and it is not stale.
         var chosen = published.Select(published.SelectedRoot, [published.SelectedRoot, psuNow], f.Proposal.Candidate, [Guid.NewGuid()], f.Proposal.Origin).Graph;
         var afterChoice = BlockProposalComparer.Published(chosen, f.Proposal.Id);
-        Assert.IsTrue(afterChoice.CandidateSelected); Assert.IsTrue(afterChoice.Stale);
-        CollectionAssert.AreEqual(afterChoice.ProposalChanges.Select(Key).ToArray(), afterChoice.CurrentChanges.Select(Key).ToArray());
+        Assert.IsTrue(afterChoice.CandidateAdopted); Assert.IsTrue(afterChoice.CandidateSelected); Assert.IsFalse(afterChoice.Stale);
+        Assert.IsEmpty(afterChoice.CurrentChanges); Assert.IsEmpty(afterChoice.ChangedOnBothSides);
+        CollectionAssert.AreEqual(request.ProposalChanges.Select(Key).ToArray(), afterChoice.ProposalChanges.Select(Key).ToArray(), "What the proposal changed stays listed.");
+        Assert.HasCount(afterChoice.ProposalChanges.Length, afterChoice.Details());
+        // Edited after the choice, the proposal is still adopted: today's side is exactly that later edit.
+        var candidateDraft = chosen.StartDraft(f.Proposal.Candidate);
+        var editedAfterChoice = chosen.SaveDraft(chosen.SelectedRoot, [chosen.SelectedRoot, f.Proposal.Candidate], candidateDraft with
+            { Requirements = candidateDraft.Requirements.Edit(DiagramRequirementField.Routing, "Test-only routing note written after the choice.") },
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var afterEdit = BlockProposalComparer.Published(editedAfterChoice, f.Proposal.Id);
+        Assert.IsTrue(afterEdit.CandidateAdopted); Assert.IsFalse(afterEdit.CandidateSelected); Assert.IsFalse(afterEdit.Stale);
+        CollectionAssert.AreEqual(new[] { Expect(level, [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, psu.BlockId, DiagramRequirementField.Routing) },
+            afterEdit.CurrentChanges.Select(Key).ToArray(), "Only the edit made after the choice.");
+        Assert.IsEmpty(afterEdit.ChangedOnBothSides);
 
         // A second proposal refines a member of the chosen supply's grouped connection: the connection, the member and the member's
         // own text are named, each at its exact place.
@@ -264,6 +279,15 @@ public sealed class RecursiveBlockProposalTests
         }, memberComparison.ProposalChanges.Select(Key).ToArray(), "The refined member of the grouped connection.");
         Assert.AreEqual(member.Selection.RevisionId, memberComparison.ProposalChanges[1].BeforeRevisionId);
         Assert.AreEqual(refinedMember.Selection.RevisionId, memberComparison.ProposalChanges[1].AfterRevisionId);
+        // Once that later proposal, made from the chosen candidate, is chosen too, the first one stays adopted: today's side is exactly
+        // what the later proposal changed, and nothing is changed on both sides.
+        var secondChosen = Publish(chosen, second);
+        secondChosen = secondChosen.Select(secondChosen.SelectedRoot, [secondChosen.SelectedRoot, f.Proposal.Candidate], second.Candidate, [Guid.NewGuid()],
+            second.Origin).Graph;
+        var firstAfterSecond = BlockProposalComparer.Published(secondChosen, f.Proposal.Id);
+        Assert.IsTrue(firstAfterSecond.CandidateAdopted); Assert.IsFalse(firstAfterSecond.CandidateSelected); Assert.IsFalse(firstAfterSecond.Stale);
+        CollectionAssert.AreEqual(memberComparison.ProposalChanges.Select(Key).ToArray(), firstAfterSecond.CurrentChanges.Select(Key).ToArray());
+        Assert.IsEmpty(firstAfterSecond.ChangedOnBothSides);
 
         // A target no longer in today's design is reported as removed, and the proposal is stale.
         var plain = RecursiveBlockFixture.Create(); var tree = plain.Graph; var plainPsu = plain.Selected["PSU"];
@@ -286,6 +310,52 @@ public sealed class RecursiveBlockProposalTests
         CollectionAssert.AreEqual(new[] { Expect([plainPsu.BlockId], [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, plainPsu.BlockId,
             DiagramRequirementField.General), Expect([plainPsu.BlockId], [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, plainPsu.BlockId,
             DiagramRequirementField.Schematic) }, removed.ProposalChanges.Select(Key).ToArray());
+
+        // A proposal for the power stage inside the supply. Today's supply is edited while the agent works, so the path the agent read
+        // (through the older supply revision) is outdated although the stage itself is unchanged: choosing over it is refused as stale
+        // and the comparison gives today's path, over which the choice succeeds.
+        static RecursiveBlockGraph Publish(RecursiveBlockGraph graph, BlockProposal proposal)
+        {
+            var prepared = BlockProposalCompiler.Prepare(graph, proposal);
+            return prepared.Graph.WithProposal(new(proposal.Id, proposal.InputId, BlockProposalFiles.Fingerprint(proposal), proposal.BasePath,
+                proposal.Candidate, proposal.Issues, prepared.Graph.Inspect(proposal.Candidate).Origin));
+        }
+        var stage = plain.Selected["Power stage"];
+        var stageInput = RecursiveBlockRefinementInputTests.Input(tree) with { BlockPath = [tree.SelectedRoot, plainPsu, stage], Attachments = [] };
+        tree = tree.WithRefinementInput(stageInput);
+        var stageProposal = CreateFor(tree, stageInput);
+        var withStageProposal = Publish(tree, stageProposal);
+        var supplyDraft = withStageProposal.StartDraft(plainPsu);
+        var supplyEdited = withStageProposal.SaveDraft(withStageProposal.SelectedRoot, [withStageProposal.SelectedRoot, plainPsu], supplyDraft with
+            { Requirements = supplyDraft.Requirements.Edit(DiagramRequirementField.General, "Test-only supply edited while the agent worked.") },
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var supplyToday = supplyEdited.Inspect(supplyEdited.SelectedRoot).Children.Single(c => c.BlockId == plainPsu.BlockId);
+        Assert.AreEqual(stage, supplyEdited.Inspect(supplyToday).Children[0], "The stage itself is unchanged.");
+        var agent = RecursiveBlockFixture.Origin("Compatible agent fixture");
+        Assert.AreEqual("stale_block_revision", Assert.ThrowsExactly<AutomationException>(() => BlockProposalCompiler.Select(supplyEdited, stageProposal.Id,
+            supplyEdited.SelectedRoot, [supplyEdited.SelectedRoot, plainPsu, stage], [Guid.NewGuid(), Guid.NewGuid()], agent)).Code);
+        Assert.AreEqual("stale_root_revision", Assert.ThrowsExactly<AutomationException>(() => BlockProposalCompiler.Select(supplyEdited, stageProposal.Id,
+            supplyEdited.SelectedRoot, [withStageProposal.SelectedRoot, plainPsu, stage], [Guid.NewGuid(), Guid.NewGuid()], agent)).Code);
+        var stageToday = BlockProposalComparer.Published(supplyEdited, stageProposal.Id);
+        Assert.IsFalse(stageToday.Stale); Assert.IsFalse(stageToday.CandidateAdopted); Assert.IsEmpty(stageToday.CurrentChanges);
+        CollectionAssert.AreEqual(new[] { supplyEdited.SelectedRoot, supplyToday, stage }, stageToday.CurrentPath.ToArray());
+        var stageChosen = BlockProposalCompiler.Select(supplyEdited, stageProposal.Id, supplyEdited.SelectedRoot, stageToday.CurrentPath,
+            [Guid.NewGuid(), Guid.NewGuid()], agent);
+        Assert.IsTrue(stageChosen.Changed);
+        Assert.IsTrue(BlockProposalComparer.Published(stageChosen.Graph, stageProposal.Id).CandidateSelected);
+        // Removed from the supply, the stage is reported removed at the supply's level; with the supply removed too, at the root's.
+        var stageDraft = withStageProposal.StartDraft(plainPsu);
+        var withoutStage = withStageProposal.SaveDraft(withStageProposal.SelectedRoot, [withStageProposal.SelectedRoot, plainPsu],
+            stageDraft with { Children = [plain.Selected["Telemetry"]] }, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var stageRemoved = BlockProposalComparer.Published(withoutStage, stageProposal.Id);
+        Assert.IsTrue(stageRemoved.Stale); Assert.IsEmpty(stageRemoved.CurrentPath);
+        CollectionAssert.AreEqual(new[] { Expect([tree.SelectedRoot.BlockId, plainPsu.BlockId], [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed,
+            stage.BlockId) }, stageRemoved.CurrentChanges.Select(Key).ToArray(), "The supply's level, by today's path to it.");
+        var systemDraft = withStageProposal.StartDraft(withStageProposal.SelectedRoot);
+        var withoutSupply = withStageProposal.SaveDraft(withStageProposal.SelectedRoot, [withStageProposal.SelectedRoot],
+            systemDraft with { Children = [plain.Selected["CPU"]] }, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
+        CollectionAssert.AreEqual(new[] { Expect([tree.SelectedRoot.BlockId], [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed, stage.BlockId) },
+            BlockProposalComparer.Published(withoutSupply, stageProposal.Id).CurrentChanges.Select(Key).ToArray(), "The root, the deepest level still in the design.");
     }
 
     [TestMethod]

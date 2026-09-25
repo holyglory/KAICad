@@ -1929,6 +1929,19 @@ public sealed partial class NativeSessionTests
             await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [originalInput.BlockPath[0], sketchPath[1]], expectError: "invalid_agent_context_scope");
             await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id, blockPath: [selectionBase.SelectedRoot],
                 expectError: "invalid_agent_context_scope");
+            // A revision the diagram does not have is a wrong scope too, and an input it does not have is unknown.
+            await AgentContextOverMcp(client, arguments, selectionToken, token,
+                blockPath: [originalInput.BlockPath[0] with { RevisionId = Guid.NewGuid() }], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: Guid.NewGuid(), expectError: "unknown_refinement_input");
+            // A level below the input's own, inside the input's revisions: the supply the input's root pinned. The input's prompt and
+            // attachments come with it, its focus does not, and that supply revision is no longer on today's design.
+            BlockSelection[] belowInput = [.. originalInput.BlockPath,
+                selectionBase.Inspect(originalInput.BlockPath[^1]).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId)];
+            var belowInputContext = await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id, blockPath: belowInput);
+            AssertAgentContext(belowInputContext, selectionBase, belowInput, originalInput, current: false, "a level below the input");
+            Assert.AreEqual(0, belowInputContext.GetProperty("context").GetProperty("focus").GetArrayLength(), "Only the input's own level has its focus.");
+            Assert.AreEqual(originalInput.Id, belowInputContext.GetProperty("context").GetProperty("input").GetProperty("id").GetGuid());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-below-input.json"), belowInputContext.GetRawText(), token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-later.json"), laterInputContext.GetRawText(), token);
             // The first proposal refined the original root revision; the native and agent edits above have since advanced that exact
             // target. Comparing it with today's design names what changed on each side by exact identity.
@@ -2013,6 +2026,17 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(outdatedToken.GetProperty("stale").GetBoolean());
             Assert.AreEqual(0, outdatedToken.GetProperty("currentChanges").GetArrayLength());
             Assert.AreNotEqual(0, outdatedToken.GetProperty("proposalChanges").GetArrayLength());
+            // A path through an older root revision is outdated even though that revision pins the same unchanged supply: the choice is
+            // refused as stale, not as a damaged file, and the comparison gives today's path to the supply.
+            var olderRoot = selectionBase.History(selectionBase.SelectedRoot.StateId).Select(r => r.Selection)
+                .First(r => r != selectionBase.SelectedRoot && selectionBase.Inspect(r).Children.Contains(psu));
+            selectArguments["expectedSourceToken"] = proposalToken; selectArguments["currentPath"] = new[] { olderRoot, psu };
+            var outdatedPath = (await RejectedSelection("outdated-path", "stale_root_revision")).GetProperty("comparison");
+            Assert.IsFalse(outdatedPath.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, outdatedPath.GetProperty("currentChanges").GetArrayLength());
+            CollectionAssert.AreEqual(new[] { selectionBase.SelectedRoot, psu }, outdatedPath.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson),
+                "The refusal names today's path to the target.");
+            selectArguments["currentPath"] = new[] { selectionBase.SelectedRoot, psu };
             Guid appliedRootRevision = Guid.NewGuid(), applyOperation = Guid.NewGuid();
             selectArguments["expectedSourceToken"] = proposalToken; selectArguments["ancestorRevisionIds"] = new[] { appliedRootRevision };
             selectArguments["operationId"] = applyOperation;
@@ -2094,6 +2118,12 @@ public sealed partial class NativeSessionTests
             selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
             var reselected = (await RejectedSelection("reselected-target", "proposal_target_changed")).GetProperty("comparison");
             Assert.IsTrue(reselected.GetProperty("candidateSelected").GetBoolean(), "The refusal says the candidate already is today's supply.");
+            // The chosen proposal is adopted: its own changes are not reported again as today's changes or as conflicts.
+            Assert.IsTrue(reselected.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(reselected.GetProperty("stale").GetBoolean(), "An adopted proposal is not outdated.");
+            Assert.AreEqual(0, reselected.GetProperty("currentChanges").GetArrayLength(), "Nothing changed after the choice.");
+            Assert.AreEqual(0, reselected.GetProperty("changedOnBothSides").GetArrayLength(), "An adopted proposal conflicts with nothing.");
+            Assert.AreNotEqual(0, reselected.GetProperty("proposalChanges").GetArrayLength(), "What the proposal changed stays listed.");
             // In the editor the chosen supply's General history continues across the switch: the row below the saved text is
             // the replaced implementation's text (labelled with that implementation's name and version). Using it and saving
             // makes a new revision of the chosen implementation that names the earlier revision the text came from.
@@ -2131,6 +2161,21 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, earlierGeneral.RequirementRevisionId),
                 continuedHistory.Current.Restorations.Single());
             Assert.AreEqual(psuProposal.Blocks[0].Requirements with { General = earlierGeneral.Text }, continuedHistory.Current.Requirements);
+            // Edited after the choice, the proposal is still adopted: today's side is exactly what this save changed after the candidate
+            // (its saved history comparison), and nothing is changed on both sides.
+            var afterEdit = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = await FileToken(source, token), ["proposalId"] = psuProposal.Id }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-compare-after-edit.json"), JsonSerializer.Serialize(afterEdit), token);
+            Assert.IsFalse(afterEdit.IsError == true, JsonSerializer.Serialize(afterEdit));
+            var editedComparison = JsonSerializer.SerializeToElement(afterEdit).GetProperty("structuredContent").GetProperty("comparison");
+            Assert.IsTrue(editedComparison.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(editedComparison.GetProperty("candidateSelected").GetBoolean(), "Today's supply is a later revision of the candidate.");
+            Assert.IsFalse(editedComparison.GetProperty("stale").GetBoolean());
+            string[] editedKeys = [.. editedComparison.GetProperty("currentChanges").EnumerateArray().Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString())];
+            CollectionAssert.AreEquivalent(DiagramHistoryQuery.Changes(continuedFile, psuProposal.Candidate, continuedPsu).Select(c => LevelChange([psu.BlockId], c))
+                .Select(c => c.Key + "=" + c.Kind).ToArray(), editedKeys, "Only what changed after the choice.");
+            CollectionAssert.Contains(editedKeys, ChangeKey([psu.BlockId], [], DiagramHistoryChangeCategory.Requirement, psu.BlockId, DiagramRequirementField.General, null) + "=Changed");
+            Assert.AreEqual(0, editedComparison.GetProperty("changedOnBothSides").GetArrayLength());
             AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, continuedPsu, "General", null, token),
                 [new(continuedHistory.Current.Id, continuedPsu.RevisionId, 3, "PSU", earlierGeneral.Text, continuedHistory.Current.Origin, true),
                  ProposedFieldEntry(psuProposal, DiagramRequirementField.General) with { IsSavedText = false },
@@ -4943,9 +4988,13 @@ public sealed partial class NativeSessionTests
             try { var result = await agent.CallToolAsync(tool, request, cancellationToken: abandon.Token); outcome = result.IsError == true ? "refused: " + Data(result).GetRawText() : "answered"; }
             catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "cancelled"; }
             record.Add(new { label, tool, outcome });
-            Assert.IsFalse(outcome.StartsWith("refused", StringComparison.Ordinal), label + ": " + outcome);
+            Assert.AreEqual("cancelled", outcome, label + ": the agent must abandon the call before its answer arrives, or this step proves no cancellation.");
             return outcome;
         }
+        // Which of the three server-side outcomes of a cancelled call ran is recorded as evidence (serverBranch): the operation had not
+        // started (no receipt), was interrupted between its recorded phases (resumed from its receipt) or completed before the cancel
+        // arrived (published receipt). Process death at each phase is proved by BlockProposalInterruptionTests and
+        // BlockProposalSelectionInterruptionTests; this journey proves the repeat over the production server for the branch that ran.
         async Task<JsonElement> Receipt(McpClient agent, Guid operation, string label)
         {
             var inspected = await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
@@ -4954,14 +5003,21 @@ public sealed partial class NativeSessionTests
             if (inspected.IsError == true)
             {
                 Assert.AreEqual("missing_block_proposal_receipt", Data(inspected).GetProperty("code").GetString(), label);
+                record.Add(new { label, serverBranch = "not started: no receipt" });
                 return default;
             }
             var receipt = Data(inspected).GetProperty("receipt");
-            if (receipt.GetProperty("stage").GetString() == "Published") return receipt;
+            string stage = receipt.GetProperty("stage").GetString()!;
+            if (stage == "Published")
+            {
+                record.Add(new { label, serverBranch = "completed before the cancel arrived: published receipt" });
+                return receipt;
+            }
             // An operation interrupted between its recorded phases is completed from its receipt, never repeated as a new write.
             var resumed = await Call(agent, "kicad_diagram_proposal_publication_resume", new Dictionary<string, object?>(arguments)
                 { ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, label + " resume");
             Assert.AreNotEqual("NeedsReview", resumed.GetProperty("recovery").GetProperty("disposition").GetString(), label);
+            record.Add(new { label, serverBranch = "interrupted at " + stage + ": resumed from its receipt" });
             return Data(await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
                 { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, cancellationToken: token)).GetProperty("receipt");
         }
@@ -5090,7 +5146,12 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(context.GetProperty("current").GetBoolean());
             var compared = await Call(agent, "kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
                 { ["expectedSourceToken"] = chosenToken, ["proposalId"] = proposal.Id }, "comparison after the choice");
-            Assert.IsTrue(compared.GetProperty("comparison").GetProperty("candidateSelected").GetBoolean());
+            var afterChoice = compared.GetProperty("comparison");
+            Assert.IsTrue(afterChoice.GetProperty("candidateSelected").GetBoolean()); Assert.IsTrue(afterChoice.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(afterChoice.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, afterChoice.GetProperty("currentChanges").GetArrayLength(), "The chosen proposal's changes are not today's changes.");
+            Assert.AreEqual(0, afterChoice.GetProperty("changedOnBothSides").GetArrayLength());
+            Assert.AreNotEqual(0, afterChoice.GetProperty("proposalChanges").GetArrayLength());
         }
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-reattachment.json"), JsonSerializer.Serialize(record, AgentJson), token);
     }

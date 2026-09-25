@@ -78,6 +78,10 @@ public static class RefinementContexts
             throw new AutomationException("invalid_diagram_identity", "Name the level by the exact block, implementation and revision of every block from the root down.");
         if (blockPath[0].BlockId != graph.SelectedRoot.BlockId)
             throw Scope("The path starts at a revision of the diagram's root block.");
+        // A revision the diagram does not have is a wrong scope, not a damaged file.
+        var saved = graph.Revisions.Select(r => r.Selection).ToHashSet();
+        if (blockPath.FirstOrDefault(s => !saved.Contains(s)) is { } unknown)
+            throw Scope($"Block {unknown.BlockId:D} has no saved revision {unknown.RevisionId:D} in implementation {unknown.StateId:D}; name revisions this diagram has.");
         for (int i = 0; i < blockPath.Length; ++i)
         {
             var revision = graph.Inspect(blockPath[i]);

@@ -16,7 +16,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_diagram_proposal_publish"),
-     Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. This does not generate or activate native electrical designs.")]
+     Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. Repeating the same proposal and operation identity after an uncertain or cancelled call returns the recorded candidate (added=false) and, when this operation wrote it, its publication receipt; it never creates a second candidate. The result compares the candidate with today's design (comparison: stale, currentChanges since the proposal's base revision, proposalChanges, changedOnBothSides; see kicad_diagram_proposal_compare). A proposal sent with an outdated source token is refused (block_proposal_source_changed) with the same comparison against today's file, and nothing is written. This does not generate or activate native electrical designs.")]
     public Task<CallToolResult> PublishProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, JsonElement proposalJson, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -39,10 +39,22 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             result = await BlockProposalFiles.PublishAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, proposal,
                 registry.StateDirectory, cancellationToken, operationId);
         }
+        catch (AutomationException error) when (error.Code == "block_proposal_source_changed")
+        {
+            // The agent built this proposal on a file that has changed since: nothing is written, and the refusal says exactly
+            // what changed on each side against today's file (ledger pa48933d0fe0a5c2f).
+            return await StaleRefusal(error, instanceId, session.Epoch, repositoryRoot, sourcePath, documentId,
+                graph => BlockProposalComparer.Request(graph, proposal), cancellationToken);
+        }
         catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
         { throw new AutomationException("invalid_block_proposal", error.Message); }
+        var publication = new BlockProposalReceipts(registry.StateDirectory).Read(operationId);
+        // The candidate is saved at this point; a comparison that cannot be made is reported, never turned into a failed publication.
+        var (comparison, unavailable) = Compare(() => BlockProposalComparer.Published(result.Snapshot.Graph, proposal.Id));
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.Snapshot.ContentSha256,
-            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal },
+            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal,
+            publication = publication is { ProposalId: var published } && published == proposal.Id ? Receipt(publication) : null,
+            comparison, comparisonUnavailable = unavailable },
             result.Snapshot.UpgradedFromSchemaVersion);
     });
 
@@ -105,7 +117,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_select"),
-     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path; a changed target is rejected for comparison. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID; a completed selection retry must be inspected before another mutation.")]
+     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path. A proposal whose target changed after the revision it was built on is refused (proposal_target_changed), as is an outdated token or path (block_proposal_source_changed, stale_root_revision, stale_parent_revision, stale_block_revision): nothing is written, and the refusal carries the comparison of kicad_diagram_proposal_compare, naming every element changed on today's side and in the proposal and those changed on both. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID. Repeating an operation ID whose selection completed (for example after a cancelled or uncertain call, or from a reattached server) returns that recorded outcome (recorded=true, the source token and root it produced, and whether the file still has them) and never chooses again.")]
     public Task<CallToolResult> SelectProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, Guid proposalId, BlockSelection expectedRoot,
         BlockSelection[] currentPath, Guid[] ancestorRevisionIds, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
@@ -115,12 +127,116 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "Identify this conceptual selection operation.");
+        // A retried operation returns the outcome it recorded instead of choosing again (ledger pa48933d0fe0a5c2f).
+        if (new BlockProposalReceipts(registry.StateDirectory).Read(operationId) is { Stage: BlockProposalOperationStage.Published,
+                Kind: BlockProposalOperationKind.Select } receipt && receipt.ProposalId == proposalId && receipt.DocumentId is { } recordedDocument
+            && recordedDocument == Identity(documentId))
+        {
+            var now = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, recordedDocument, cancellationToken);
+            if (receipt.DesignPath == now.Path)
+                return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recorded = true, sourceToken = receipt.AfterSha256,
+                    selectedRoot = receipt.CandidateXml is { } chosen ? RecursiveBlockGraphXml.Read(chosen).SelectedRoot : null, proposalId,
+                    currentSourceToken = now.ContentSha256, stillCurrent = now.ContentSha256 == receipt.AfterSha256, publication = Receipt(receipt) });
+        }
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow, "Choose proposed implementation", [], [operationId]);
-        var result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
-            expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, sourceToken = result.ContentSha256,
+        RecursiveBlockFileSnapshot result;
+        try
+        {
+            result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
+                expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
+        }
+        catch (AutomationException error) when (error.Code is "proposal_target_changed" or "block_proposal_source_changed"
+            or "stale_root_revision" or "stale_parent_revision" or "stale_block_revision")
+        {
+            return await StaleRefusal(error, instanceId, session.Epoch, repositoryRoot, sourcePath, documentId,
+                graph => BlockProposalComparer.Published(graph, proposalId), cancellationToken);
+        }
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recorded = false, sourceToken = result.ContentSha256,
             selectedRoot = result.Graph.SelectedRoot, proposalId }, result.UpgradedFromSchemaVersion);
     });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_compare", ReadOnly = true),
+     KiCadCapability("structural-diagram", "compiled-mcp", "source token, proposal identity"),
+     Description("Compare a proposal with today's saved design before choosing it. The proposal is either published in the diagram or a request this server retained after a refused publication (kicad_diagram_proposal_retained). Its base is the target revision its original input captured. Returns stale (today's target is no longer that revision, so choosing it would be refused), candidateSelected (today's target already is the candidate), the target's current root-to-block path, and three lists by exact identity: currentChanges (what changed from the base to today's revision), proposalChanges (what the proposal changes from the base) and changedOnBothSides. Each change names its level (levelPath: block ids from the target down), the connection and members containing it (connectionPath), its category (Name, Requirement, Block, Connection, Interface, Comment, Definition, PhysicalAllocation, Layout, InterfaceRealization, InterconnectRealization), kind (Added, Removed, Changed, Reordered), the element's id and name, the requirement field or aspect, and for a child block or connection its revision before and after. Nothing is merged, chosen or written.")]
+    public Task<CallToolResult> CompareProposal(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, Guid proposalId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the current file token before comparing a proposal with it.");
+        BlockProposalComparison comparison;
+        if (loaded.Graph.Proposals.Any(p => p.Id == proposalId)) comparison = BlockProposalComparer.Published(loaded.Graph, proposalId);
+        else
+        {
+            var retained = BlockProposalFiles.TryReadRetained(registry.StateDirectory, proposalId)
+                ?? throw new AutomationException("unknown_block_proposal", "No published or retained proposal has this identity.");
+            if (retained.DesignPath != loaded.Path || retained.DocumentId != id)
+                throw new AutomationException("block_proposal_conflict", "The retained request belongs to a different diagram.");
+            comparison = BlockProposalComparer.Request(loaded.Graph, retained.Proposal);
+        }
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            selectedRoot = loaded.Graph.SelectedRoot, comparison });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_agent_context", ReadOnly = true),
+     KiCadCapability("structural-diagram", "compiled-mcp", "source token, exact root-to-level path or original input"),
+     Description("Give an agent the revision-bound context of one saved diagram level, in a form no agent product or provider owns. Name the level by an original input (inputId, recorded with kicad_diagram_refinement_input_record: the level it captured, or a deeper level given by blockPath inside that input's revisions) or by blockPath alone: the exact root-to-level path, from a revision of the root block, each block pinned by the revision before it; historical revisions are allowed. The context holds the path, the level's block and its direct children (exact block, implementation and revision, name, General/Schematic/Routing text with its requirement revision, boundary ports, definition, component and physical choices, and how many children and connections lie below), every connection and member of the level (exact revision, kind, domain, direction, ends, members, the three fields, realization), the level's comments marked Element (on a block or connection) or FreeSpace (on the canvas, with any original sketch strokes), its interface realizations and saved layout, and, with an input, the original prompt, its author and captured file token, its scope and focus connections, and its attachment references (preserved asset path, SHA-256, byte count, media type, source). contextSha256 fingerprints exactly these contents, so the same revisions give the same context and fingerprint after later edits. Outside the context: today's source token and selected root, whether the level is on today's selected design (current, currentPath), today's name of each implementation the context names (implementations; a rename changes them, not the context) and the present integrity of each attachment (assets). Reads only; it never starts an agent, chooses anything or touches the editor.")]
+    public Task<CallToolResult> AgentContext(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, CancellationToken cancellationToken, Guid? inputId = null, BlockSelection[]? blockPath = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        if (inputId is null && blockPath is null)
+            throw new AutomationException("ambiguous_agent_context", "Name the level by an original input (inputId), a root-to-level block path (blockPath), or both.");
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the current file token before asking for a context.");
+        var input = inputId is { } recorded ? loaded.Graph.RefinementInput(recorded) : null;
+        ImmutableArray<BlockSelection> path = blockPath is null ? input!.BlockPath : [.. blockPath];
+        var context = RefinementContexts.Build(loaded.Graph, path, input);
+        var assets = new List<RefinementAssetObservation>();
+        foreach (var attachment in input?.Attachments ?? [])
+            assets.Add(await RefinementAssetFiles.InspectAsync(repositoryRoot, attachment, cancellationToken));
+        var verified = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (verified.ContentSha256 != loaded.ContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The diagram changed while its context was read; read a fresh token.");
+        var currentPath = BlockProposalCompiler.FindPath(loaded.Graph, path[^1].BlockId);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            storedSchemaVersion = loaded.StoredSchemaVersion, selectedRoot = loaded.Graph.SelectedRoot,
+            current = currentPath.SequenceEqual(path), currentPath, contextSha256 = context.Fingerprint(), context,
+            implementations = RefinementContexts.Implementations(loaded.Graph, context), assets });
+    });
+
+    private static object Receipt(BlockProposalPublicationReceipt receipt) => new { receipt.OperationId, receipt.Kind, receipt.Stage,
+        receipt.BeforeSha256, receipt.AfterSha256, receipt.ConfirmedAt };
+
+    /// <summary>A refused publication or choice of a proposal built on an older revision: nothing was written, and the refusal
+    /// carries the comparison with today's file, one detail per changed element, besides its code and message.</summary>
+    private static async Task<CallToolResult> StaleRefusal(AutomationException refusal, string instanceId, string epoch, string repositoryRoot,
+        string sourcePath, string documentId, Func<RecursiveBlockGraph, BlockProposalComparison> compare, CancellationToken cancellationToken)
+    {
+        RecursiveBlockFileSnapshot today;
+        try { today = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken); }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException) { throw refusal; }
+        var (comparison, unavailable) = Compare(() => compare(today.Graph));
+        var details = refusal.Details.Concat(comparison?.Details() ?? []).Select(d => new { kind = d.Kind, scopeBlockId = d.ScopeBlockId,
+            objectId = d.ObjectId, message = d.Message });
+        var data = JsonSerializer.SerializeToElement(new { code = refusal.Code, message = refusal.Message, details, instanceId, instanceEpoch = epoch,
+            documentId, sourceToken = today.ContentSha256, selectedRoot = today.Graph.SelectedRoot, comparison, comparisonUnavailable = unavailable }, Web);
+        return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
+
+    private static (BlockProposalComparison? Comparison, object? Unavailable) Compare(Func<BlockProposalComparison> compare)
+    {
+        try { return (compare(), null); }
+        catch (AutomationException error) { return (null, new { code = error.Code, message = error.Message }); }
+    }
+
+    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
 
     private static CallToolResult Data(object value, int upgradedFromSchemaVersion = 0)
     {

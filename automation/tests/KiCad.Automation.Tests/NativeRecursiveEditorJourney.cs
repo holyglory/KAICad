@@ -781,6 +781,12 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(originalInput.SameContents(graph.RefinementInput(originalInput.Id)));
             savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
             Assert.IsFalse(savedRead.IsError == true); savedReadData = JsonSerializer.SerializeToElement(savedRead).GetProperty("structuredContent");
+            // Ledger pa48933d0fe0a5c2f: the agent's revision-bound context of the recorded input, its level by exact revision with the
+            // three fields of every element, and the original prompt and attachment. Its fingerprint is compared after many later edits.
+            var inputContext = await AgentContextOverMcp(client, arguments, savedReadData.GetProperty("sourceToken").GetString()!, token, inputId: originalInput.Id);
+            AssertAgentContext(inputContext, graph, originalInput.BlockPath, originalInput, current: true, "recorded input");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-input.json"), inputContext.GetRawText(), token);
+            string inputContextSha = inputContext.GetProperty("contextSha256").GetString()!;
             await File.WriteAllTextAsync(Path.Combine(project, "original-requirements.txt"), "Later replacement, not the original.", token);
             var readInputArguments = new Dictionary<string, object?>(arguments)
             { ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(), ["inputId"] = originalInput.Id };
@@ -1149,6 +1155,25 @@ public sealed partial class NativeSessionTests
             Key("1", control: true); Key("a", control: true); Type("Reload the saved sketch without losing requirements."); await Wait(s => s.Dirty);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && s.Draft.LocalDiagram.Annotations.Any(n => n.Id == sketch.Id.ToString("D")));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-canvas-note.png"), token);
+            // The same level as an agent's context (ledger pa48933d0fe0a5c2f): the comments on its elements and in its free space, the
+            // original sketch strokes included, each with the exact revisions they were saved in.
+            var sketchedFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            BlockSelection[] sketchPath = [sketchedFile.SelectedRoot, sketchedFile.Inspect(sketchedFile.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["CPU"].BlockId)];
+            var sketchContext = await AgentContextOverMcp(client, arguments, await FileToken(source, token), token, blockPath: sketchPath);
+            AssertAgentContext(sketchContext, sketchedFile, sketchPath, null, current: true, "commented level");
+            var sketchComments = sketchContext.GetProperty("context").GetProperty("comments").EnumerateArray().ToArray();
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "Element" && c.GetProperty("comment").GetProperty("text").GetString() == "Leave pin choices open until placement."
+                && c.GetProperty("comment").GetProperty("target").GetProperty("kind").GetString() == "Connection"), "A comment on a connection is an element comment.");
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "Element" && c.GetProperty("comment").GetProperty("text").GetString() == "Prefer the cooler enclosure side."
+                && c.GetProperty("comment").GetProperty("target").GetProperty("kind").GetString() == "Block"), "A comment on a block is an element comment.");
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "FreeSpace" && c.GetProperty("comment").GetProperty("text").GetString() == "Keep this region accessible."),
+                "A comment placed on the canvas is a free-space comment.");
+            var sketchStrokes = sketchComments.Single(c => c.GetProperty("comment").GetProperty("id").GetGuid() == sketch.Id);
+            Assert.AreEqual("FreeSpace", sketchStrokes.GetProperty("placement").GetString());
+            CollectionAssert.AreEqual(sketch.Strokes[0].Points.Select(p => (p.X, p.Y)).ToArray(), sketchStrokes.GetProperty("comment").GetProperty("strokes")[0].GetProperty("points")
+                .EnumerateArray().Select(p => (p.GetProperty("x").GetDecimal(), p.GetProperty("y").GetDecimal())).ToArray(), "The original sketch points reach the agent exactly.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-comments.json"), sketchContext.GetRawText(), token);
+            string sketchContextSha = sketchContext.GetProperty("contextSha256").GetString()!;
             string original = graph.Requirements(fixture.Blocks["CPU"]).Requirements.General;
             Key("1", control: true); Key("a", control: true); Type("Cool near the enclosure edge.");
             await Wait(s => s.Dirty && s.Draft.Fields.General == "Cool near the enclosure edge.");
@@ -1754,6 +1779,10 @@ public sealed partial class NativeSessionTests
             var proposalData = JsonSerializer.SerializeToElement(proposalResult).GetProperty("structuredContent");
             Assert.IsTrue(proposalData.GetProperty("added").GetBoolean());
             Assert.IsFalse(proposalData.GetProperty("contextStillSelected").GetBoolean(), "The proposal was based on the original input while later edits had advanced the active root.");
+            // Publishing a proposal built on an older revision keeps it for comparison and says so (ledger pa48933d0fe0a5c2f).
+            Assert.IsTrue(proposalData.GetProperty("comparison").GetProperty("stale").GetBoolean(), "The published proposal is compared with the advanced root.");
+            Assert.AreNotEqual(0, proposalData.GetProperty("comparison").GetProperty("currentChanges").GetArrayLength());
+            Assert.AreEqual("Published", proposalData.GetProperty("publication").GetProperty("stage").GetString());
             var proposalPublication = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
             {
                 ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = proposalArguments["operationId"]
@@ -1858,14 +1887,15 @@ public sealed partial class NativeSessionTests
                 ["expectedRoot"] = selectionBase.SelectedRoot, ["currentPath"] = new[] { selectionBase.SelectedRoot },
                 ["ancestorRevisionIds"] = Array.Empty<Guid>(), ["actor"] = "Compatible agent fixture"
             };
-            async Task RejectedSelection(string label, string code)
+            async Task<JsonElement> RejectedSelection(string label, string code)
             {
-                string unchanged = await File.ReadAllTextAsync(source, token); var nativeBefore = await Read();
+                string unchanged = await File.ReadAllTextAsync(source, token); string unchangedToken = await FileToken(source, token); var nativeBefore = await Read();
                 Guid rejectedOperation = Guid.NewGuid(); selectArguments["operationId"] = rejectedOperation;
                 var rejected = await client.CallToolAsync("kicad_diagram_proposal_select", selectArguments, cancellationToken: token);
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-select-" + label + ".json"), JsonSerializer.Serialize(rejected), token);
                 Assert.IsTrue(rejected.IsError == true, "A " + label + " proposal selection must be rejected, not applied over newer work.");
-                Assert.AreEqual(code, JsonSerializer.SerializeToElement(rejected).GetProperty("structuredContent").GetProperty("code").GetString());
+                var refusal = JsonSerializer.SerializeToElement(rejected).GetProperty("structuredContent");
+                Assert.AreEqual(code, refusal.GetProperty("code").GetString());
                 Assert.AreEqual(unchanged, await File.ReadAllTextAsync(source, token), "A rejected " + label + " selection must leave the saved design unchanged.");
                 var nativeAfter = await Read();
                 Assert.AreEqual(nativeBefore.SourceToken, nativeAfter.SourceToken); Assert.AreEqual(nativeBefore.DiagramPath, nativeAfter.DiagramPath);
@@ -1874,10 +1904,74 @@ public sealed partial class NativeSessionTests
                     { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = rejectedOperation }, cancellationToken: token);
                 Assert.AreEqual("missing_block_proposal_receipt", JsonSerializer.SerializeToElement(noReceipt).GetProperty("structuredContent").GetProperty("code").GetString(),
                     "A rejected selection must not leave a prepared write behind.");
+                // The refusal names every element changed on each side, from today's file (ledger pa48933d0fe0a5c2f).
+                AssertRefusalComparison(refusal, label, unchangedToken);
+                return refusal;
             }
-            // The first proposal refined the original root revision; the native
-            // and agent edits above have since advanced that exact target.
-            await RejectedSelection("changed-target", "proposal_target_changed");
+            // Ledger pa48933d0fe0a5c2f: the input's context is bound to its revisions, so many edits later it is the same context with
+            // the same fingerprint, now marked as no longer on today's design; the commented level's context likewise.
+            var laterInputContext = await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id);
+            AssertAgentContext(laterInputContext, selectionBase, originalInput.BlockPath, originalInput, current: false, "recorded input after later edits");
+            Assert.AreEqual(inputContextSha, laterInputContext.GetProperty("contextSha256").GetString(), "Later edits do not change a revision-bound context.");
+            Assert.AreEqual(inputContext.GetProperty("context").GetRawText(), laterInputContext.GetProperty("context").GetRawText());
+            var laterSketchContext = await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: sketchPath);
+            AssertAgentContext(laterSketchContext, selectionBase, sketchPath, null, current: false, "commented level after later edits");
+            Assert.AreEqual(sketchContextSha, laterSketchContext.GetProperty("contextSha256").GetString());
+            var todayContext = await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [selectionBase.SelectedRoot]);
+            AssertAgentContext(todayContext, selectionBase, [selectionBase.SelectedRoot], null, current: true, "today's root");
+            Assert.AreNotEqual(inputContextSha, todayContext.GetProperty("contextSha256").GetString());
+            // A context that names no level, an outdated file, a path that does not start at the root or is not pinned revision by revision,
+            // or a level outside the input's revisions is refused.
+            await AgentContextOverMcp(client, arguments, selectionToken, token, expectError: "ambiguous_agent_context");
+            await AgentContextOverMcp(client, arguments, componentToken, token, blockPath: [selectionBase.SelectedRoot], expectError: "recursive_block_file_changed");
+            var todayPsu = selectionBase.Inspect(selectionBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
+            await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [todayPsu], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [originalInput.BlockPath[0], sketchPath[1]], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id, blockPath: [selectionBase.SelectedRoot],
+                expectError: "invalid_agent_context_scope");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-later.json"), laterInputContext.GetRawText(), token);
+            // The first proposal refined the original root revision; the native and agent edits above have since advanced that exact
+            // target. Comparing it with today's design names what changed on each side by exact identity.
+            var compared = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = proposal.Id }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-compare.json"), JsonSerializer.Serialize(compared), token);
+            Assert.IsFalse(compared.IsError == true, JsonSerializer.Serialize(compared));
+            var staleComparison = JsonSerializer.SerializeToElement(compared).GetProperty("structuredContent").GetProperty("comparison");
+            await AssertStaleRootComparison(client, arguments, selectionToken, staleComparison, selectionBase, originalInput, proposal, published: true, token);
+            // A second proposal on the same original input, sent with a token read before those edits, is refused with the same
+            // comparison against today's file; it writes nothing, and the retained request compares the same way afterwards.
+            var staleRequest = RecursiveBlockProposalTests.CreateFor(selectionBase, originalInput);
+            staleRequest = staleRequest with { Blocks = staleRequest.Blocks.SetItem(0, staleRequest.Blocks[0] with { ImplementationName = "Second agent proposal" }) };
+            string beforeStaleRequest = await File.ReadAllTextAsync(source, token);
+            var refusedPublish = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = componentToken, ["operationId"] = Guid.NewGuid(),
+                ["proposalJson"] = JsonSerializer.SerializeToElement(staleRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-publish-stale.json"), JsonSerializer.Serialize(refusedPublish), token);
+            Assert.IsTrue(refusedPublish.IsError == true, "A proposal sent with an outdated token must not be published silently.");
+            var publishRefusal = JsonSerializer.SerializeToElement(refusedPublish).GetProperty("structuredContent");
+            Assert.AreEqual("block_proposal_source_changed", publishRefusal.GetProperty("code").GetString());
+            Assert.AreEqual(beforeStaleRequest, await File.ReadAllTextAsync(source, token), "A refused publication writes nothing.");
+            AssertRefusalComparison(publishRefusal, "publish-outdated-token", selectionToken);
+            await AssertStaleRootComparison(client, arguments, selectionToken, publishRefusal.GetProperty("comparison"), selectionBase, originalInput, staleRequest,
+                published: false, token);
+            Assert.AreEqual(staleComparison.GetProperty("currentChanges").GetRawText(), publishRefusal.GetProperty("comparison").GetProperty("currentChanges").GetRawText(),
+                "Both proposals share the base revision, so today's side is the same.");
+            var retainedCompare = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = staleRequest.Id }, cancellationToken: token);
+            Assert.IsFalse(retainedCompare.IsError == true, JsonSerializer.Serialize(retainedCompare));
+            Assert.AreEqual(publishRefusal.GetProperty("comparison").GetRawText(),
+                JsonSerializer.SerializeToElement(retainedCompare).GetProperty("structuredContent").GetProperty("comparison").GetRawText());
+            var unknownCompare = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = Guid.NewGuid() }, cancellationToken: token);
+            Assert.AreEqual("unknown_block_proposal", JsonSerializer.SerializeToElement(unknownCompare).GetProperty("structuredContent").GetProperty("code").GetString());
+            var staleCompareToken = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = componentToken, ["proposalId"] = proposal.Id }, cancellationToken: token);
+            Assert.AreEqual("recursive_block_file_changed", JsonSerializer.SerializeToElement(staleCompareToken).GetProperty("structuredContent").GetProperty("code").GetString());
+            // Choosing the stale proposal is refused with that comparison instead of being applied over the newer root.
+            var changedTarget = await RejectedSelection("changed-target", "proposal_target_changed");
+            Assert.AreEqual(staleComparison.GetRawText(), changedTarget.GetProperty("comparison").GetRawText(), "The refusal carries the same comparison.");
             var psu = selectionBase.Inspect(selectionBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
             var psuInput = RecursiveBlockRefinementInputTests.Input(selectionBase) with
                 { SourceSha256 = selectionToken, BlockPath = [selectionBase.SelectedRoot, psu], Attachments = [] };
@@ -1914,7 +2008,11 @@ public sealed partial class NativeSessionTests
             selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() }; selectArguments["expectedSourceToken"] = inputToken;
             // A token observed before the proposal was saved is outdated, even
             // though the refined block itself has not changed.
-            await RejectedSelection("outdated-token", "block_proposal_source_changed");
+            var outdatedToken = (await RejectedSelection("outdated-token", "block_proposal_source_changed")).GetProperty("comparison");
+            // The supply block itself has not changed since the proposal's input: nothing on today's side, only the proposal's changes.
+            Assert.IsFalse(outdatedToken.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, outdatedToken.GetProperty("currentChanges").GetArrayLength());
+            Assert.AreNotEqual(0, outdatedToken.GetProperty("proposalChanges").GetArrayLength());
             Guid appliedRootRevision = Guid.NewGuid(), applyOperation = Guid.NewGuid();
             selectArguments["expectedSourceToken"] = proposalToken; selectArguments["ancestorRevisionIds"] = new[] { appliedRootRevision };
             selectArguments["operationId"] = applyOperation;
@@ -1994,7 +2092,8 @@ public sealed partial class NativeSessionTests
             // proposal again must not re-apply it over the now-current target.
             selectArguments["expectedSourceToken"] = appliedToken; selectArguments["expectedRoot"] = appliedRoot;
             selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
-            await RejectedSelection("reselected-target", "proposal_target_changed");
+            var reselected = (await RejectedSelection("reselected-target", "proposal_target_changed")).GetProperty("comparison");
+            Assert.IsTrue(reselected.GetProperty("candidateSelected").GetBoolean(), "The refusal says the candidate already is today's supply.");
             // In the editor the chosen supply's General history continues across the switch: the row below the saved text is
             // the replaced implementation's text (labelled with that implementation's name and version). Using it and saving
             // makes a new revision of the chosen implementation that names the earlier revision the text came from.
@@ -2098,6 +2197,22 @@ public sealed partial class NativeSessionTests
                  ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedSupply) with { IsSavedText = false },
                  .. supplyGeneral.Select(e => e with { IsSavedText = false })], "refined supply connection after restoring the earlier text",
                 Contexts(supplyArchive));
+            // Ledger pa48933d0fe0a5c2f: the user keeps an unsaved edit open while an agent's calls are cancelled and the agent comes back
+            // through a reattached server. Each operation keeps one record, and the open draft is neither saved, replaced nor lost.
+            // It runs once per themed session; the second project only proves instance isolation.
+            if (sessionWide)
+            {
+                const string unsavedText = "Unsaved text kept while an agent reconnects.";
+                Key("1", control: true); Key("a", control: true); Type(unsavedText);
+                var dirtyBefore = await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == unsavedText);
+                await VerifyAgentReattachment(native, stateRoot, source, project, graph.DocumentId, fixture.Blocks["CPU"].BlockId, instanceId, evidence, token);
+                var dirtyAfter = await Read();
+                Assert.IsTrue(dirtyAfter.Dirty, "The user's unsaved edit is still open.");
+                Assert.AreEqual(dirtyBefore.SourceToken, dirtyAfter.SourceToken, "The editor was not reloaded under the unsaved edit.");
+                Assert.AreEqual(dirtyBefore.Draft, dirtyAfter.Draft); Assert.AreEqual(dirtyBefore.ConnectionDraft, dirtyAfter.ConnectionDraft);
+                Assert.AreEqual(dirtyBefore.DiagramPath, dirtyAfter.DiagramPath);
+                Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
+            }
             Key("w", control: true);
             if (createdDiagram is not null)
                 await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
@@ -4799,6 +4914,414 @@ public sealed partial class NativeSessionTests
         Guid state = archive.Revisions.Single(r => r.Selection.RevisionId == revision).Selection.StateId;
         return (state, archive.States.Single(s => s.Id == state).Name);
     };
+
+    /// <summary>Ledger pa48933d0fe0a5c2f through production MCP servers sharing one state directory and the live instance: an agent
+    /// records a prompt with a preserved attachment for the CPU level, reads its context and publishes a proposal, but that call
+    /// is cancelled in flight and its server ends. A new server reattaches the saved instance; the context is unchanged, the
+    /// operation's receipt is inspected (and resumed if it was interrupted), and repeating the same operation returns the one
+    /// recorded candidate. Choosing it is cancelled the same way, and after another reattachment the repeated choice returns its
+    /// recorded outcome. Exactly one input, one candidate and one new root revision exist at the end.</summary>
+    private static async Task VerifyAgentReattachment(NativeClient native, string stateRoot, string source, string project, Guid documentId,
+        Guid cpuBlockId, string instanceId, string evidence, CancellationToken token)
+    {
+        var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project,
+            ["sourcePath"] = source, ["documentId"] = documentId.ToString("D") };
+        var record = new List<object>();
+        static JsonElement Data(ModelContextProtocol.Protocol.CallToolResult result) => JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+        async Task<JsonElement> Call(McpClient agent, string tool, Dictionary<string, object?> request, string label)
+        {
+            var result = await agent.CallToolAsync(tool, request, cancellationToken: token);
+            record.Add(new { label, tool, result = Data(result) });
+            Assert.IsFalse(result.IsError == true, label + ": " + Data(result).GetRawText());
+            return Data(result);
+        }
+        // A call the agent abandons shortly after sending it: the server is told to cancel it, and the answer, if any, is never used.
+        async Task<string> Cancelled(McpClient agent, string tool, Dictionary<string, object?> request, string label)
+        {
+            using var abandon = CancellationTokenSource.CreateLinkedTokenSource(token); abandon.CancelAfter(TimeSpan.FromMilliseconds(25));
+            string outcome;
+            try { var result = await agent.CallToolAsync(tool, request, cancellationToken: abandon.Token); outcome = result.IsError == true ? "refused: " + Data(result).GetRawText() : "answered"; }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "cancelled"; }
+            record.Add(new { label, tool, outcome });
+            Assert.IsFalse(outcome.StartsWith("refused", StringComparison.Ordinal), label + ": " + outcome);
+            return outcome;
+        }
+        async Task<JsonElement> Receipt(McpClient agent, Guid operation, string label)
+        {
+            var inspected = await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, cancellationToken: token);
+            record.Add(new { label, tool = "kicad_diagram_proposal_publication", result = Data(inspected) });
+            if (inspected.IsError == true)
+            {
+                Assert.AreEqual("missing_block_proposal_receipt", Data(inspected).GetProperty("code").GetString(), label);
+                return default;
+            }
+            var receipt = Data(inspected).GetProperty("receipt");
+            if (receipt.GetProperty("stage").GetString() == "Published") return receipt;
+            // An operation interrupted between its recorded phases is completed from its receipt, never repeated as a new write.
+            var resumed = await Call(agent, "kicad_diagram_proposal_publication_resume", new Dictionary<string, object?>(arguments)
+                { ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, label + " resume");
+            Assert.AreNotEqual("NeedsReview", resumed.GetProperty("recovery").GetProperty("disposition").GetString(), label);
+            return Data(await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, cancellationToken: token)).GetProperty("receipt");
+        }
+        async Task<McpClient> Server()
+        {
+            string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+            return await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = "dotnet", Arguments = [Path.Combine(FindRoot(), "automation", "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll")],
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = stateRoot }
+            }), cancellationToken: token);
+        }
+        async Task Reattach(McpClient agent, string label)
+        {
+            var reattached = await Call(agent, "kicad_instance_reattach", new Dictionary<string, object?> { ["instanceId"] = instanceId }, label);
+            Assert.AreEqual(instanceId, reattached.GetProperty("instanceId").GetString(), label + ": the saved instance.");
+        }
+        var before = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)); string beforeToken = await FileToken(source, token);
+        var cpu = before.Inspect(before.SelectedRoot).Children.Single(c => c.BlockId == cpuBlockId);
+        byte[] notes = System.Text.Encoding.UTF8.GetBytes("Hand notes: keep the CPU power entry on the left edge.\n");
+        await File.WriteAllBytesAsync(Path.Combine(project, "cpu-hand-notes.md"), notes, token);
+        Guid publishOperation = Guid.NewGuid(), selectOperation = Guid.NewGuid(), chosenRootRevision = Guid.NewGuid();
+        DiagramRefinementInput input; BlockProposal proposal; string contextSha, inputToken; Dictionary<string, object?> publish, select; int publishedRevisions;
+        await using (var agent = await Server())
+        {
+            var attached = await Call(agent, "kicad_instance_attach", new Dictionary<string, object?> { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, "agent attach");
+            Assert.AreEqual(instanceId, attached.GetProperty("instanceId").GetString());
+            var asset = await Call(agent, "kicad_diagram_refinement_asset_capture", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = beforeToken, ["attachmentPath"] = "cpu-hand-notes.md",
+                ["archiveDirectory"] = "assets/refinement", ["attachmentId"] = Guid.NewGuid(),
+                ["expectedSha256"] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(notes)), ["expectedByteCount"] = notes.LongLength,
+                ["mediaType"] = "text/markdown"
+            }, "attachment");
+            input = new DiagramRefinementInput(Guid.NewGuid(), documentId, beforeToken, [before.SelectedRoot, cpu], [],
+                "Split the CPU supply into core and I/O rails; values are still unknown.", RecursiveBlockFixture.Origin(),
+                [asset.GetProperty("attachment").Deserialize<DiagramRefinementAttachment>(AgentJson)!]);
+            var recorded = await Call(agent, "kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = beforeToken,
+                ["input"] = JsonSerializer.SerializeToElement(input, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, "record input");
+            Assert.IsTrue(recorded.GetProperty("added").GetBoolean());
+            inputToken = recorded.GetProperty("sourceToken").GetString()!;
+            var withInput = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var context = await AgentContextOverMcp(agent, arguments, inputToken, token, inputId: input.Id);
+            AssertAgentContext(context, withInput, input.BlockPath, input, current: true, "reattachment input");
+            contextSha = context.GetProperty("contextSha256").GetString()!;
+            proposal = RecursiveBlockProposalTests.CreateFor(withInput, input);
+            proposal = proposal with { Blocks = proposal.Blocks.SetItem(0, proposal.Blocks[0] with { ImplementationName = "Reattached agent proposal" }) };
+            publish = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = inputToken, ["operationId"] = publishOperation,
+                ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
+            await Cancelled(agent, "kicad_diagram_proposal_publish", publish, "cancelled publication");
+        }
+        string afterPublishToken;
+        await using (var agent = await Server())
+        {
+            await Reattach(agent, "reattach after cancelled publication");
+            var context = await AgentContextOverMcp(agent, arguments, await FileToken(source, token), token, inputId: input.Id);
+            Assert.AreEqual(contextSha, context.GetProperty("contextSha256").GetString(), "The reattached agent reads the same context.");
+            Assert.AreEqual(native.Epoch, context.GetProperty("instanceEpoch").GetString(), "The reattached server speaks to the same live process.");
+            var receipt = await Receipt(agent, publishOperation, "publication receipt after reattachment");
+            bool completed = receipt.ValueKind == JsonValueKind.Object;
+            var repeated = await Call(agent, "kicad_diagram_proposal_publish", publish, "repeated publication");
+            Assert.AreEqual(!completed, repeated.GetProperty("added").GetBoolean(), "A publication the receipt records is returned, not repeated.");
+            Assert.AreEqual(proposal.Id, repeated.GetProperty("proposal").GetProperty("id").GetGuid());
+            Assert.AreEqual("Published", repeated.GetProperty("publication").GetProperty("stage").GetString());
+            afterPublishToken = await FileToken(source, token);
+            if (completed) Assert.AreEqual(receipt.GetProperty("afterSha256").GetString(), afterPublishToken);
+            var again = await Call(agent, "kicad_diagram_proposal_publish", publish, "publication repeated again");
+            Assert.IsFalse(again.GetProperty("added").GetBoolean());
+            Assert.AreEqual(afterPublishToken, await FileToken(source, token), "Repeating the operation writes nothing.");
+            var reRecorded = await Call(agent, "kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = afterPublishToken,
+                ["input"] = JsonSerializer.SerializeToElement(input, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, "input recorded again");
+            Assert.IsFalse(reRecorded.GetProperty("added").GetBoolean(), "Repeating the input records nothing new.");
+            var published = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(1, published.RefinementInputs.Count(i => i.Id == input.Id));
+            Assert.AreEqual(1, published.Proposals.Count(p => p.Id == proposal.Id));
+            Assert.AreEqual(1, published.States.Count(s => s.Id == proposal.Candidate.StateId));
+            Assert.HasCount(before.States.Length + proposal.Blocks.Length, published.States, "One implementation per proposed block, once.");
+            Assert.HasCount(before.Revisions.Length + proposal.Blocks.Length + proposal.Blocks.Count(b => b.BasedOn is not null), published.Revisions,
+                "One revision per proposed block and one copy of the refined block's base, once.");
+            Assert.AreEqual(before.SelectedRoot, published.SelectedRoot, "Publishing does not choose.");
+            publishedRevisions = published.Revisions.Length;
+            select = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = afterPublishToken, ["proposalId"] = proposal.Id,
+                ["expectedRoot"] = published.SelectedRoot, ["currentPath"] = new[] { published.SelectedRoot, cpu },
+                ["ancestorRevisionIds"] = new[] { chosenRootRevision }, ["operationId"] = selectOperation, ["actor"] = "Reattaching agent fixture"
+            };
+            await Cancelled(agent, "kicad_diagram_proposal_select", select, "cancelled choice");
+        }
+        await using (var agent = await Server())
+        {
+            await Reattach(agent, "reattach after cancelled choice");
+            var receipt = await Receipt(agent, selectOperation, "choice receipt after reattachment");
+            bool completed = receipt.ValueKind == JsonValueKind.Object;
+            var repeated = await Call(agent, "kicad_diagram_proposal_select", select, "repeated choice");
+            Assert.AreEqual(completed, repeated.GetProperty("recorded").GetBoolean(), "A choice the receipt records is returned, not made again.");
+            string chosenToken = await FileToken(source, token);
+            Assert.AreEqual(chosenToken, repeated.GetProperty("sourceToken").GetString());
+            var again = await Call(agent, "kicad_diagram_proposal_select", select, "choice repeated again");
+            Assert.IsTrue(again.GetProperty("recorded").GetBoolean(), "The repeated choice returns its recorded outcome.");
+            Assert.IsTrue(again.GetProperty("stillCurrent").GetBoolean());
+            Assert.AreEqual(chosenToken, again.GetProperty("sourceToken").GetString());
+            Assert.AreEqual(chosenToken, await FileToken(source, token), "Repeating the choice writes nothing.");
+            var chosen = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var root = new BlockSelection(before.SelectedRoot.BlockId, before.SelectedRoot.StateId, chosenRootRevision);
+            Assert.AreEqual(root, chosen.SelectedRoot);
+            Assert.AreEqual(root, again.GetProperty("selectedRoot").Deserialize<BlockSelection>(AgentJson));
+            Assert.AreEqual(proposal.Candidate, chosen.Inspect(root).Children.Single(c => c.BlockId == cpuBlockId));
+            Assert.HasCount(publishedRevisions + 1, chosen.Revisions, "Choosing adds exactly one root revision, once.");
+            Assert.AreEqual(before.SelectedRoot.RevisionId, chosen.Inspect(root).ParentRevisionId);
+            Assert.AreEqual(1, chosen.Proposals.Count(p => p.Id == proposal.Id)); Assert.AreEqual(1, chosen.RefinementInputs.Count(i => i.Id == input.Id));
+            var receiptAfter = await Receipt(agent, selectOperation, "choice receipt at the end");
+            Assert.AreEqual(chosenToken, receiptAfter.GetProperty("afterSha256").GetString());
+            // The input's context is still the same after the choice; its level is now the replaced implementation.
+            var context = await AgentContextOverMcp(agent, arguments, chosenToken, token, inputId: input.Id);
+            Assert.AreEqual(contextSha, context.GetProperty("contextSha256").GetString());
+            Assert.IsFalse(context.GetProperty("current").GetBoolean());
+            var compared = await Call(agent, "kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = chosenToken, ["proposalId"] = proposal.Id }, "comparison after the choice");
+            Assert.IsTrue(compared.GetProperty("comparison").GetProperty("candidateSelected").GetBoolean());
+        }
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-reattachment.json"), JsonSerializer.Serialize(record, AgentJson), token);
+    }
+
+    private static readonly JsonSerializerOptions AgentJson = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+
+    private static async Task<string> FileToken(string path, CancellationToken token) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path, token)));
+
+    /// <summary>An agent's context read through the production MCP server (<c>kicad_diagram_agent_context</c>, ledger
+    /// pa48933d0fe0a5c2f), by original input, by root-to-level path, or both; with <paramref name="expectError"/> the refusal code.</summary>
+    private static async Task<JsonElement> AgentContextOverMcp(McpClient client, IReadOnlyDictionary<string, object?> arguments, string sourceToken,
+        CancellationToken token, Guid? inputId = null, BlockSelection[]? blockPath = null, string? expectError = null)
+    {
+        var request = new Dictionary<string, object?>(arguments) { ["expectedSourceToken"] = sourceToken };
+        if (inputId is { } id) request["inputId"] = id;
+        if (blockPath is not null) request["blockPath"] = blockPath;
+        var result = await client.CallToolAsync("kicad_diagram_agent_context", request, cancellationToken: token);
+        var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+        if (expectError is null) Assert.IsFalse(result.IsError == true, data.GetRawText());
+        else
+        {
+            Assert.IsTrue(result.IsError == true, "The context request must be refused with " + expectError + ": " + data.GetRawText());
+            Assert.AreEqual(expectError, data.GetProperty("code").GetString(), data.GetRawText());
+        }
+        return data;
+    }
+
+    /// <summary>The context names exactly the saved level: the path by exact revision, the level's block and direct children with
+    /// their three fields and ports, every connection and member with its fields, every comment of the level as element or
+    /// free-space comment, the input's prompt and attachments, and today's position of the level. Expectations are read from the
+    /// saved file through the model.</summary>
+    private static void AssertAgentContext(JsonElement data, RecursiveBlockGraph graph, IReadOnlyList<BlockSelection> path,
+        DiagramRefinementInput? input, bool current, string step)
+    {
+        var context = data.GetProperty("context");
+        Assert.AreEqual(1, context.GetProperty("version").GetInt32(), step);
+        Assert.AreEqual(graph.DocumentId, context.GetProperty("documentId").GetGuid(), step);
+        Assert.AreEqual(current, data.GetProperty("current").GetBoolean(), step + ": whether the level is on today's design.");
+        Assert.AreEqual(graph.SelectedRoot, data.GetProperty("selectedRoot").Deserialize<BlockSelection>(AgentJson), step);
+        CollectionAssert.AreEqual(BlockProposalCompiler.FindPath(graph, path[^1].BlockId).ToArray(),
+            data.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson), step + ": today's path to the level.");
+        StringAssert.Matches(data.GetProperty("contextSha256").GetString(), new System.Text.RegularExpressions.Regex("^[0-9a-f]{64}$"), step);
+        var levels = context.GetProperty("path").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(path.ToArray(), levels.Select(l => l.GetProperty("selection").Deserialize<BlockSelection>(AgentJson)).ToArray(), step + ": the exact path.");
+        foreach (var (level, selection) in levels.Zip(path)) Assert.AreEqual(graph.Inspect(selection).Name, level.GetProperty("name").GetString(), step);
+        // Today's implementation names are beside the context, where a rename can change them without changing the context.
+        var implementations = data.GetProperty("implementations").EnumerateArray().ToDictionary(i => i.GetProperty("stateId").GetGuid(),
+            i => (Owner: i.GetProperty("ownerId").GetGuid(), Name: i.GetProperty("name").GetString()!, Archived: i.GetProperty("archived").GetBoolean()));
+        foreach (var selection in path.Concat(graph.Inspect(path[^1]).Children))
+        {
+            var state = graph.States.Single(s => s.Id == selection.StateId);
+            Assert.AreEqual((state.BlockId, state.Name, state.Archived), implementations[selection.StateId], step + ": today's implementation name.");
+        }
+        void Block(JsonElement block, BlockSelection selection)
+        {
+            var revision = graph.Inspect(selection); var fields = graph.Requirements(selection);
+            Assert.AreEqual(selection, block.GetProperty("selection").Deserialize<BlockSelection>(AgentJson), step);
+            Assert.IsFalse(block.TryGetProperty("implementation", out _), step + ": a renameable name is not part of the context.");
+            Assert.AreEqual(revision.Name, block.GetProperty("name").GetString(), step);
+            Assert.AreEqual(fields.RevisionId, block.GetProperty("requirementRevisionId").GetGuid(), step + ": the fields' exact requirement revision.");
+            Assert.AreEqual(fields.Requirements, block.GetProperty("requirements").Deserialize<DiagramRequirements>(AgentJson), step + ": General, Schematic and Routing.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select(i => (i.Id, i.Name)).ToArray(),
+                block.GetProperty("interfaces").EnumerateArray().Select(i => (i.GetProperty("id").GetGuid(), i.GetProperty("name").GetString()!)).ToArray(), step + ": boundary ports.");
+            Assert.AreEqual(revision.Children.Length, block.GetProperty("childCount").GetInt32(), step);
+            Assert.AreEqual(revision.LocalDiagram.Connections.Length, block.GetProperty("connectionCount").GetInt32(), step);
+            Assert.IsTrue(revision.EffectiveComponentBindings.SameContents(block.GetProperty("componentBindings").Deserialize<BlockComponentBindings>(AgentJson)!), step);
+        }
+        var scope = graph.Inspect(path[^1]);
+        Block(context.GetProperty("block"), path[^1]);
+        var children = context.GetProperty("children").EnumerateArray().ToArray();
+        Assert.HasCount(scope.Children.Length, children, step + ": the direct children.");
+        foreach (var (child, selection) in children.Zip(scope.Children)) Block(child, selection);
+        var links = context.GetProperty("connections").EnumerateArray().ToArray();
+        if (scope.LocalDiagram.Connections.IsEmpty) Assert.IsEmpty(links, step);
+        else
+        {
+            var archive = graph.Connections(path[^1].BlockId);
+            var walked = archive.Walk(scope.LocalDiagram.Connections);
+            CollectionAssert.AreEqual(walked.ToArray(), links.Select(l => l.GetProperty("selection").Deserialize<ConnectionSelection>(AgentJson)).ToArray(),
+                step + ": every connection and member by exact revision.");
+            var parents = walked.SelectMany(w => archive.Inspect(w).Members.Select(m => (m.ConnectionId, Parent: w.ConnectionId))).ToDictionary(p => p.ConnectionId, p => p.Parent);
+            foreach (var (link, selection) in links.Zip(walked))
+            {
+                var fields = archive.Requirements(selection);
+                Assert.AreEqual(fields.RevisionId, link.GetProperty("requirementRevisionId").GetGuid(), step);
+                Assert.AreEqual(fields.Requirements, link.GetProperty("requirements").Deserialize<DiagramRequirements>(AgentJson), step + ": a connection's three fields.");
+                Assert.AreEqual(archive.Inspect(selection).Name, link.GetProperty("name").GetString(), step);
+                var linkState = archive.States.Single(s => s.Id == selection.StateId);
+                Assert.AreEqual((linkState.ConnectionId, linkState.Name, false), implementations[selection.StateId], step);
+                Assert.AreEqual(parents.TryGetValue(selection.ConnectionId, out var parent) ? parent : null,
+                    link.TryGetProperty("parentConnectionId", out var named) ? named.GetGuid() : (Guid?)null, step + ": the grouping connection.");
+            }
+        }
+        var comments = context.GetProperty("comments").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(scope.LocalDiagram.Notes.Select(n => (n.Id, n.Text, n.Target.Kind == DiagramAnnotationTargetKind.Canvas ? "FreeSpace" : "Element")).ToArray(),
+            comments.Select(c => (c.GetProperty("comment").GetProperty("id").GetGuid(), c.GetProperty("comment").GetProperty("text").GetString()!,
+                c.GetProperty("placement").GetString()!)).ToArray(), step + ": every comment of the level, on an element or in free space.");
+        if (input is null) Assert.IsFalse(context.TryGetProperty("input", out _), step + ": no input was named.");
+        else
+        {
+            var original = context.GetProperty("input");
+            Assert.AreEqual(input.Id, original.GetProperty("id").GetGuid(), step);
+            Assert.AreEqual(input.Prompt, original.GetProperty("prompt").GetString(), step + ": the prompt exactly as given.");
+            Assert.AreEqual(input.SourceSha256, original.GetProperty("sourceSha256").GetString(), step);
+            CollectionAssert.AreEqual(input.BlockPath.ToArray(), original.GetProperty("blockPath").Deserialize<BlockSelection[]>(AgentJson), step);
+            var attachments = original.GetProperty("attachments").EnumerateArray().ToArray();
+            CollectionAssert.AreEqual(input.Attachments.Select(a => (a.Id, a.AssetPath, a.ContentSha256, a.ByteCount, a.MediaType, a.OriginalName)).ToArray(),
+                attachments.Select(a => (a.GetProperty("id").GetGuid(), a.GetProperty("assetPath").GetString()!, a.GetProperty("contentSha256").GetString()!,
+                    a.GetProperty("byteCount").GetInt64(), a.GetProperty("mediaType").GetString()!, a.GetProperty("originalName").GetString()!)).ToArray(),
+                step + ": attachment references.");
+            var assets = data.GetProperty("assets").EnumerateArray().ToArray();
+            Assert.HasCount(input.Attachments.Length, assets, step);
+            Assert.IsTrue(assets.All(a => a.GetProperty("status").GetString() == "Available"), step + ": every preserved attachment is intact: " + data.GetProperty("assets").GetRawText());
+            CollectionAssert.AreEqual(path.Count == input.BlockPath.Length ? input.ConnectionPath.ToArray() : [],
+                context.GetProperty("focus").Deserialize<ConnectionSelection[]>(AgentJson), step + ": the input's focus.");
+        }
+    }
+
+    private static string ChangeKey(IEnumerable<Guid> level, IEnumerable<Guid> links, DiagramHistoryChangeCategory category, Guid objectId,
+        DiagramRequirementField? field, string? aspect) => string.Join("/", level.Select(g => g.ToString("D"))) + "|"
+        + string.Join("/", links.Select(g => g.ToString("D"))) + "|" + category + "|" + objectId.ToString("D") + "|" + field + "|" + aspect;
+
+    private static string ChangeKey(JsonElement change) => string.Join("/", change.GetProperty("levelPath").EnumerateArray().Select(e => e.GetString())) + "|"
+        + string.Join("/", change.GetProperty("connectionPath").EnumerateArray().Select(e => e.GetString())) + "|" + change.GetProperty("category").GetString() + "|"
+        + change.GetProperty("objectId").GetString() + "|" + (change.TryGetProperty("field", out var field) ? field.GetString() : "") + "|"
+        + (change.TryGetProperty("aspect", out var aspect) ? aspect.GetString() : "");
+
+    /// <summary>One level's history changes as the comparison names them: a definition facet and a list's order are aspects.</summary>
+    private static (string Key, string Kind) LevelChange(IEnumerable<Guid> level, DiagramHistoryChange change) => (ChangeKey(level, [], change.Category, change.ObjectId,
+        change.Field, change.Kind == DiagramHistoryChangeKind.Reordered ? (change.Category == DiagramHistoryChangeCategory.Block ? "Children" : change.Category + "s")
+            : change.Category == DiagramHistoryChangeCategory.Definition ? change.Name : null), change.Kind.ToString());
+
+    /// <summary>A refusal from today's file: its token, the comparison, and one detail per change on each side and per element changed
+    /// on both, in the comparison's order.</summary>
+    private static void AssertRefusalComparison(JsonElement refusal, string label, string todayToken)
+    {
+        Assert.AreEqual(todayToken, refusal.GetProperty("sourceToken").GetString(), label + ": the comparison is made against today's file.");
+        Assert.AreEqual(JsonValueKind.Null, refusal.GetProperty("comparisonUnavailable").ValueKind, label + ": " + refusal.GetRawText());
+        var comparison = refusal.GetProperty("comparison");
+        var current = comparison.GetProperty("currentChanges").EnumerateArray().ToArray();
+        var proposed = comparison.GetProperty("proposalChanges").EnumerateArray().ToArray();
+        var both = comparison.GetProperty("changedOnBothSides").EnumerateArray().ToArray();
+        var details = refusal.GetProperty("details").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(current.Select(c => ("current_change", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString()))
+                .Concat(proposed.Select(c => ("proposal_change", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString())))
+                .Concat(both.Select(c => ("changed_on_both_sides", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString()))).ToArray(),
+            details.Select(d => (d.GetProperty("kind").GetString(), d.GetProperty("objectId").GetString(), d.GetProperty("scopeBlockId").GetString())).ToArray(),
+            label + ": one detail per changed element.");
+        var todayKeys = current.Select(ChangeKey).ToHashSet();
+        CollectionAssert.AreEqual(proposed.Where(p => todayKeys.Contains(ChangeKey(p))).Select(ChangeKey).ToArray(),
+            both.Select(ChangeKey).ToArray(), label + ": the elements changed on both sides.");
+    }
+
+    /// <summary>The comparison of a proposal made from <see cref="RecursiveBlockProposalTests.CreateFor"/> on the original input's root
+    /// with today's root. The proposal's side is exactly what that proposal changes; today's side matches, level by level, the saved
+    /// history comparison (the root's through the production kicad_diagram_history_compare, each changed child's through the model),
+    /// and names the root's native Routing save, its component choice and its physical allocation, which both sides changed where the
+    /// proposal did too.</summary>
+    private static async Task AssertStaleRootComparison(McpClient client, IReadOnlyDictionary<string, object?> arguments, string sourceToken,
+        JsonElement comparison, RecursiveBlockGraph graph, DiagramRefinementInput input, BlockProposal proposal, bool published, CancellationToken token)
+    {
+        var baseRoot = input.BlockPath[^1]; Guid root = baseRoot.BlockId; Guid[] level = [root];
+        Assert.AreEqual(published, comparison.GetProperty("published").GetBoolean());
+        Assert.IsTrue(comparison.GetProperty("stale").GetBoolean(), "Today's root is no longer the revision the proposal was built on.");
+        Assert.IsFalse(comparison.GetProperty("candidateSelected").GetBoolean());
+        Assert.AreEqual(proposal.Id, comparison.GetProperty("proposalId").GetGuid()); Assert.AreEqual(input.Id, comparison.GetProperty("inputId").GetGuid());
+        Assert.AreEqual(baseRoot, comparison.GetProperty("baseRevision").Deserialize<BlockSelection>(AgentJson));
+        Assert.AreEqual(proposal.Candidate, comparison.GetProperty("candidate").Deserialize<BlockSelection>(AgentJson));
+        CollectionAssert.AreEqual(new[] { graph.SelectedRoot }, comparison.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson));
+        // The proposal's side: its rewritten fields, the component choice it leaves out, its two new blocks and its new connection.
+        Assert.IsFalse(graph.Inspect(baseRoot).EffectiveComponentBindings.SameContents(BlockComponentBindings.Empty), "The base states components.");
+        var expected = new List<(string Key, string Kind)>();
+        var baseFields = graph.Requirements(baseRoot).Requirements;
+        foreach (var field in Enum.GetValues<DiagramRequirementField>())
+            if (baseFields.Get(field) != proposal.Blocks[0].Requirements.Get(field))
+                expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, field, null), "Changed"));
+        expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components"), "Changed"));
+        foreach (var block in proposal.Blocks.Where(b => b.BasedOn is null))
+            expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Block, block.Selection.BlockId, null, null), "Added"));
+        foreach (var link in proposal.Connections.Where(c => c.BasedOn is null))
+            expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Connection, link.Selection.ConnectionId, null, null), "Added"));
+        var proposed = comparison.GetProperty("proposalChanges").EnumerateArray().ToArray();
+        CollectionAssert.AreEquivalent(expected.Select(e => e.Key + "=" + e.Kind).ToArray(),
+            proposed.Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(), "Exactly what the proposal changes.");
+        foreach (var block in proposal.Blocks.Where(b => b.BasedOn is null))
+            Assert.AreEqual(block.Selection.RevisionId, proposed.Single(c => c.GetProperty("objectId").GetGuid() == block.Selection.BlockId).GetProperty("afterRevisionId").GetGuid());
+        // Today's side, level by level.
+        var current = comparison.GetProperty("currentChanges").EnumerateArray().ToArray();
+        var today = graph.SelectedRoot;
+        Assert.AreEqual(baseRoot.StateId, today.StateId, "The root kept its implementation, so its saved history compares the two revisions.");
+        var history = await client.CallToolAsync("kicad_diagram_history_compare", new Dictionary<string, object?>(arguments)
+            { ["context"] = today, ["inspected"] = baseRoot, ["expectedSourceToken"] = sourceToken }, cancellationToken: token);
+        Assert.IsFalse(history.IsError == true, JsonSerializer.Serialize(history));
+        var saved = P.DiagramHistoryComparisonData.Parser.ParseJson(JsonSerializer.SerializeToElement(history).GetProperty("structuredContent").GetProperty("comparison").GetRawText());
+        var rootChanges = saved.Changes.Select(c => LevelChange(level, new((DiagramHistoryChangeCategory)((int)c.Category - 1), (DiagramHistoryChangeKind)((int)c.Kind - 1),
+            Guid.Parse(c.ObjectId), c.Name, c.Field == P.RequirementFieldKind.RfkUnknown ? null : (DiagramRequirementField)((int)c.Field - 1)))).ToArray();
+        CollectionAssert.AreEquivalent(rootChanges.Select(c => c.Key + "=" + c.Kind).ToArray(),
+            current.Where(c => c.GetProperty("levelPath").GetArrayLength() == 1 && c.GetProperty("connectionPath").GetArrayLength() == 0)
+                .Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(), "Today's root level is its saved history comparison.");
+        var baseChildren = graph.Inspect(baseRoot).Children.ToDictionary(c => c.BlockId);
+        foreach (var child in graph.Inspect(today).Children.Where(c => baseChildren.TryGetValue(c.BlockId, out var was) && was != c))
+        {
+            Guid[] childLevel = [root, child.BlockId];
+            var changed = current.Single(c => c.GetProperty("levelPath").GetArrayLength() == 1 && c.GetProperty("category").GetString() == "Block"
+                && c.GetProperty("objectId").GetGuid() == child.BlockId);
+            Assert.AreEqual("Changed", changed.GetProperty("kind").GetString());
+            Assert.AreEqual(baseChildren[child.BlockId].RevisionId, changed.GetProperty("beforeRevisionId").GetGuid());
+            Assert.AreEqual(child.RevisionId, changed.GetProperty("afterRevisionId").GetGuid());
+            CollectionAssert.AreEquivalent(DiagramHistoryQuery.Changes(graph, baseChildren[child.BlockId], child).Select(c => LevelChange(childLevel, c)).Select(c => c.Key + "=" + c.Kind).ToArray(),
+                current.Where(c => c.GetProperty("levelPath").GetArrayLength() == 2 && c.GetProperty("levelPath")[1].GetGuid() == child.BlockId
+                    && c.GetProperty("connectionPath").GetArrayLength() == 0).Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(),
+                "A changed child's own level: " + child.BlockId);
+        }
+        // Every changed connection names what changed in it.
+        foreach (var link in current.Where(c => c.GetProperty("category").GetString() == "Connection" && c.GetProperty("kind").GetString() == "Changed"
+            && c.GetProperty("connectionPath").GetArrayLength() == 0))
+            Assert.IsTrue(current.Any(c => ChangeKey(c).StartsWith(string.Join("/", link.GetProperty("levelPath").EnumerateArray().Select(e => e.GetString())) + "|"
+                + link.GetProperty("objectId").GetString(), StringComparison.Ordinal)), "The parts of changed connection " + link.GetProperty("objectId").GetString());
+        string[] todayKeys = [.. current.Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString())];
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, DiagramRequirementField.Routing, null) + "=Changed",
+            "The native Routing save.");
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components") + "=Changed", "The agent's component choice.");
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.PhysicalAllocation, root, null, null) + "=Changed", "The physical allocation.");
+        var both = comparison.GetProperty("changedOnBothSides").EnumerateArray().Select(ChangeKey).ToArray();
+        CollectionAssert.Contains(both, ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components"));
+        if (baseFields.Routing != proposal.Blocks[0].Requirements.Routing)
+            CollectionAssert.Contains(both, ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, DiagramRequirementField.Routing, null));
+        var todayKeySet = current.Select(ChangeKey).ToHashSet();
+        CollectionAssert.AreEqual(proposed.Where(p => todayKeySet.Contains(ChangeKey(p))).Select(ChangeKey).ToArray(), both, "Changed on both sides.");
+    }
 
     /// <summary>A complete field history read through the production MCP server (<c>kicad_diagram_field_history</c>) for an
     /// exact block revision, or for an exact connection or member of its level, page by page (at most 200 entries each)

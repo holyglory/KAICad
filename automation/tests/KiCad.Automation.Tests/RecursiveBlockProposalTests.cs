@@ -144,6 +144,150 @@ public sealed class RecursiveBlockProposalTests
         Assert.AreEqual(changed.Requirements(changed.SelectedRoot).Requirements, chosen.Requirements(chosen.SelectedRoot).Requirements);
     }
 
+    // Isolated rules of the stale-proposal comparison (ledger pa48933d0fe0a5c2f). The native journey compares a root proposal with the
+    // saved design through the production MCP server, but its fixture changes no nested level on both sides, no member of a refined
+    // connection and never takes the target out of the design; those cases are only reachable here.
+    [TestMethod]
+    public void StaleProposalComparisonNamesEachChangedElementOnEachSide()
+    {
+        static string Key(DiagramElementChange c) => string.Join("/", c.LevelPath) + "|" + string.Join("/", c.ConnectionPath) + "|" + c.Category + "|"
+            + c.ObjectId + "|" + c.Field + "|" + c.Aspect + "=" + c.Kind;
+        static string Expect(Guid[] level, Guid[] links, DiagramHistoryChangeCategory category, DiagramHistoryChangeKind kind, Guid id,
+            DiagramRequirementField? field = null, string? aspect = null) => string.Join("/", level) + "|" + string.Join("/", links) + "|" + category + "|"
+            + id + "|" + field + "|" + aspect + "=" + kind;
+        var f = Fixture(); var graph = f.Graph; var psu = f.Proposal.BasePath[^1];
+        Guid power = graph.Inspect(psu).Children[0].BlockId, oldTelemetry = graph.Inspect(psu).Children[1].BlockId;
+        Assert.AreEqual("Power stage", graph.Inspect(graph.Inspect(psu).Children[0]).Name);
+        // Today's side: the power stage's General text and then the supply's own General text were saved after the input.
+        var powerDraft = graph.StartDraft(graph.Inspect(psu).Children[0]);
+        graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psu, powerDraft.Baseline], powerDraft with
+            { Requirements = powerDraft.Requirements.Edit(DiagramRequirementField.General, "Test-only regulated output.") },
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid(), Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var psuNow = graph.Inspect(graph.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+        var psuDraft = graph.StartDraft(psuNow);
+        graph = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot, psuNow], psuDraft with
+            { Requirements = psuDraft.Requirements.Edit(DiagramRequirementField.General, "Test-only supply for both rails.") },
+            Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        psuNow = graph.Inspect(graph.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+        var powerNow = graph.Inspect(psuNow).Children.Single(c => c.BlockId == power);
+        string before = RecursiveBlockGraphXml.Write(graph);
+        var request = BlockProposalComparer.Request(graph, f.Proposal);
+        Assert.AreEqual(before, RecursiveBlockGraphXml.Write(graph), "Comparing writes nothing.");
+        Assert.IsTrue(request.Stale); Assert.IsFalse(request.CandidateSelected); Assert.IsFalse(request.Published);
+        Assert.AreEqual(psu, request.BaseRevision); Assert.AreEqual(f.Proposal.Candidate, request.Candidate);
+        CollectionAssert.AreEqual(new[] { graph.SelectedRoot, psuNow }, request.CurrentPath.ToArray());
+        Guid[] level = [psu.BlockId];
+        CollectionAssert.AreEqual(new[]
+        {
+            Expect(level, [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, psu.BlockId, DiagramRequirementField.General),
+            Expect(level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Changed, power),
+            Expect([psu.BlockId, power], [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, power, DiagramRequirementField.General)
+        }, request.CurrentChanges.Select(Key).ToArray(), "Today's side, down to the changed child's own level.");
+        var changedPower = request.CurrentChanges[1];
+        Assert.AreEqual(graph.Inspect(psu).Children[0].RevisionId, changedPower.BeforeRevisionId); Assert.AreEqual(powerNow.RevisionId, changedPower.AfterRevisionId);
+        var link = f.Proposal.Connections[0]; var member = f.Proposal.Connections[1];
+        var supply = graph.Inspect(psu).LocalDiagram.Connections[0]; var telemetryLink = graph.Inspect(psu).LocalDiagram.Connections[1];
+        Assert.AreEqual(link.BasedOn, telemetryLink);
+        Guid[] inLink = [telemetryLink.ConnectionId];
+        CollectionAssert.AreEquivalent(new[]
+        {
+            Expect(level, [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, psu.BlockId, DiagramRequirementField.General),
+            Expect(level, [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, psu.BlockId, DiagramRequirementField.Schematic),
+            Expect(level, [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, psu.BlockId, DiagramRequirementField.Routing),
+            Expect(level, [], DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, psu.BlockId, aspect: "Purpose"),
+            Expect(level, [], DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, psu.BlockId, aspect: "Type"),
+            Expect(level, [], DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, psu.BlockId, aspect: "Model"),
+            Expect(level, [], DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, psu.BlockId, aspect: "Package"),
+            Expect(level, [], DiagramHistoryChangeCategory.Definition, DiagramHistoryChangeKind.Changed, psu.BlockId, aspect: "Knowledge class"),
+            Expect(level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Added, f.Proposal.Blocks[1].Selection.BlockId),
+            Expect(level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Added, f.Proposal.Blocks[2].Selection.BlockId),
+            Expect(level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed, power),
+            Expect(level, [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed, oldTelemetry),
+            Expect(level, [], DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId),
+            Expect(level, [], DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Removed, supply.ConnectionId),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId, DiagramRequirementField.General),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId, DiagramRequirementField.Schematic),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId, DiagramRequirementField.Routing),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId, aspect: "Kind"),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Changed, telemetryLink.ConnectionId, aspect: "Endpoints"),
+            Expect(level, inLink, DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Added, member.Selection.ConnectionId)
+        }, request.ProposalChanges.Select(Key).ToArray(), "Exactly what the proposal changes, including the parts of its refined connection.");
+        var changedLink = request.ProposalChanges.Single(c => c.Category == DiagramHistoryChangeCategory.Connection && c.ObjectId == telemetryLink.ConnectionId
+            && c.ConnectionPath.IsEmpty);
+        Assert.AreEqual(telemetryLink.RevisionId, changedLink.BeforeRevisionId); Assert.AreEqual(link.Selection.RevisionId, changedLink.AfterRevisionId);
+        Assert.AreEqual(member.Selection.RevisionId, request.ProposalChanges.Single(c => c.ObjectId == member.Selection.ConnectionId).AfterRevisionId);
+        CollectionAssert.AreEqual(new[] { (DiagramHistoryChangeCategory.Requirement, psu.BlockId, DiagramHistoryChangeKind.Changed, DiagramHistoryChangeKind.Changed),
+                (DiagramHistoryChangeCategory.Block, power, DiagramHistoryChangeKind.Changed, DiagramHistoryChangeKind.Removed) },
+            request.ChangedOnBothSides.Select(c => (c.Category, c.ObjectId, c.CurrentKind, c.ProposalKind)).ToArray(),
+            "The supply's General text and the power stage were changed on both sides.");
+        Assert.HasCount(request.CurrentChanges.Length + request.ProposalChanges.Length + request.ChangedOnBothSides.Length, request.Details());
+        // Published, the same proposal compares the same way.
+        var prepared = BlockProposalCompiler.Prepare(graph, f.Proposal);
+        var published = prepared.Graph.WithProposal(new(f.Proposal.Id, f.Proposal.InputId, BlockProposalFiles.Fingerprint(f.Proposal), f.Proposal.BasePath,
+            f.Proposal.Candidate, f.Proposal.Issues, prepared.Graph.Inspect(f.Proposal.Candidate).Origin));
+        var options = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+        Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(request with { Published = true }, options),
+            System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Published(published, f.Proposal.Id), options));
+        Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Published(published, f.Proposal.Id), options),
+            System.Text.Json.JsonSerializer.Serialize(BlockProposalComparer.Request(published, f.Proposal), options), "A published request compares as published.");
+        // Chosen over a refreshed path, today's supply is the candidate.
+        var chosen = published.Select(published.SelectedRoot, [published.SelectedRoot, psuNow], f.Proposal.Candidate, [Guid.NewGuid()], f.Proposal.Origin).Graph;
+        var afterChoice = BlockProposalComparer.Published(chosen, f.Proposal.Id);
+        Assert.IsTrue(afterChoice.CandidateSelected); Assert.IsTrue(afterChoice.Stale);
+        CollectionAssert.AreEqual(afterChoice.ProposalChanges.Select(Key).ToArray(), afterChoice.CurrentChanges.Select(Key).ToArray());
+
+        // A second proposal refines a member of the chosen supply's grouped connection: the connection, the member and the member's
+        // own text are named, each at its exact place.
+        var input = RecursiveBlockRefinementInputTests.Input(chosen) with { BlockPath = [chosen.SelectedRoot, f.Proposal.Candidate], Attachments = [] };
+        chosen = chosen.WithRefinementInput(input);
+        var candidate = chosen.Inspect(f.Proposal.Candidate);
+        var refinedMember = new ProposedConnection(psu.BlockId, new(member.Selection.ConnectionId, Guid.NewGuid(), Guid.NewGuid()), member.Selection,
+            "Second pass", member.Name, member.Kind, Guid.NewGuid(), member.Requirements with { General = "Report power status and faults." },
+            member.Endpoints, [], Guid.NewGuid(), Guid.NewGuid());
+        var relink = new ProposedConnection(psu.BlockId, new(link.Selection.ConnectionId, Guid.NewGuid(), Guid.NewGuid()), link.Selection,
+            "Second pass", link.Name, link.Kind, Guid.NewGuid(), link.Requirements, link.Endpoints, [refinedMember.Selection], Guid.NewGuid(), Guid.NewGuid());
+        var second = new BlockProposal(Guid.NewGuid(), input.Id, input.BlockPath, new(psu.BlockId, Guid.NewGuid(), Guid.NewGuid()),
+            [new(new(psu.BlockId, Guid.NewGuid(), Guid.NewGuid()), f.Proposal.Candidate, "Second pass", candidate.Name, Guid.NewGuid(),
+                chosen.Requirements(f.Proposal.Candidate).Requirements, candidate.Children, candidate.LocalDiagram with { Connections = [relink.Selection] },
+                candidate.Definition, ForkRevisionId: Guid.NewGuid(), ForkRequirementRevisionId: Guid.NewGuid())],
+            [relink, refinedMember], [], RecursiveBlockFixture.Origin("Compatible agent fixture"));
+        second = second with { Candidate = second.Blocks[0].Selection };
+        var memberComparison = BlockProposalComparer.Request(chosen, second);
+        Assert.IsFalse(memberComparison.Stale); Assert.IsEmpty(memberComparison.CurrentChanges);
+        Guid[] path = [link.Selection.ConnectionId];
+        CollectionAssert.AreEqual(new[]
+        {
+            Expect(level, [], DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Changed, link.Selection.ConnectionId),
+            Expect(level, path, DiagramHistoryChangeCategory.Connection, DiagramHistoryChangeKind.Changed, member.Selection.ConnectionId),
+            Expect(level, [.. path, member.Selection.ConnectionId], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed,
+                member.Selection.ConnectionId, DiagramRequirementField.General)
+        }, memberComparison.ProposalChanges.Select(Key).ToArray(), "The refined member of the grouped connection.");
+        Assert.AreEqual(member.Selection.RevisionId, memberComparison.ProposalChanges[1].BeforeRevisionId);
+        Assert.AreEqual(refinedMember.Selection.RevisionId, memberComparison.ProposalChanges[1].AfterRevisionId);
+
+        // A target no longer in today's design is reported as removed, and the proposal is stale.
+        var plain = RecursiveBlockFixture.Create(); var tree = plain.Graph; var plainPsu = plain.Selected["PSU"];
+        var plainInput = RecursiveBlockRefinementInputTests.Input(tree) with { BlockPath = [tree.SelectedRoot, plainPsu], Attachments = [] };
+        tree = tree.WithRefinementInput(plainInput);
+        var original = tree.Inspect(plainPsu);
+        var rewrite = new BlockProposal(Guid.NewGuid(), plainInput.Id, plainInput.BlockPath, new(plainPsu.BlockId, Guid.NewGuid(), Guid.NewGuid()),
+            [new(new(plainPsu.BlockId, Guid.NewGuid(), Guid.NewGuid()), plainPsu, "Rewritten", original.Name, Guid.NewGuid(),
+                new("Test-only rewritten supply.", "", ""), original.Children, original.LocalDiagram, ForkRevisionId: Guid.NewGuid(), ForkRequirementRevisionId: Guid.NewGuid())],
+            [], [], RecursiveBlockFixture.Origin("Compatible agent fixture"));
+        rewrite = rewrite with { Candidate = rewrite.Blocks[0].Selection };
+        var rootDraft = tree.StartDraft(tree.SelectedRoot);
+        var withoutPsu = tree.SaveDraft(tree.SelectedRoot, [tree.SelectedRoot], rootDraft with { Children = [plain.Selected["CPU"]] },
+            Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
+        var removed = BlockProposalComparer.Request(withoutPsu, rewrite);
+        Assert.IsTrue(removed.Stale); Assert.IsEmpty(removed.CurrentPath);
+        CollectionAssert.AreEqual(new[] { Expect([tree.SelectedRoot.BlockId], [], DiagramHistoryChangeCategory.Block, DiagramHistoryChangeKind.Removed, plainPsu.BlockId) },
+            removed.CurrentChanges.Select(Key).ToArray());
+        Assert.AreEqual(plainPsu.RevisionId, removed.CurrentChanges[0].BeforeRevisionId);
+        CollectionAssert.AreEqual(new[] { Expect([plainPsu.BlockId], [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, plainPsu.BlockId,
+            DiagramRequirementField.General), Expect([plainPsu.BlockId], [], DiagramHistoryChangeCategory.Requirement, DiagramHistoryChangeKind.Changed, plainPsu.BlockId,
+            DiagramRequirementField.Schematic) }, removed.ProposalChanges.Select(Key).ToArray());
+    }
+
     [TestMethod]
     public void InvalidMembersUnreachableObjectsAndIdentityReuseRejectTheWholeProposal()
     {

@@ -180,3 +180,73 @@ Evidence: `RecursiveEditorFileCommandTests.AgentConnectionEditsBindEndsThroughTh
 `NativeRecursiveEditorJourney` (production MCP server, rendered editor) and
 `RecursiveBlockLocalDiagramTests.AgentConnectionEditsNameExactlyOneCurrentTarget` (the refusal
 matrix of the isolated rules).
+
+## Agent context and stale proposals (ledger pa48933d0fe0a5c2f)
+
+Any agent, whatever product or model runs it, gets the same context and compares its result the same way. These are
+contract parts only: the real journey with two agent clients is Phase 3 work.
+
+**Context.** `kicad_diagram_agent_context` returns one saved diagram level as plain JSON. The agent names the level by
+an original input (`inputId`: the level the input captured, or a deeper level inside that input's revisions given by
+`blockPath`) or by `blockPath` alone: the exact root-to-level path, starting at a revision of the root block, each
+block pinned by the revision before it. Older revisions are allowed. The context holds:
+
+- the path, and the level's block and direct children, each by exact block, implementation and revision, with its
+  name, General/Schematic/Routing text and the requirement revision that text belongs to, its boundary ports, its
+  definition, component and physical choices, and how many children and connections lie below it;
+- every connection and member of the level by exact revision, with its kind, domain, direction, ends, members,
+  realization and its own three fields;
+- every comment of the level, marked `Element` (on a block or connection) or `FreeSpace` (on the canvas, with any
+  original sketch strokes), and the level's interface realizations and saved layout;
+- with an input: the original prompt exactly as given, who recorded it, the file token it was captured at, its scope
+  and focus connections, and its attachment references (preserved asset path, SHA-256, byte count, media type, source).
+
+`contextSha256` fingerprints exactly these contents. Because they come from immutable revisions, the same input or
+path gives the same context and fingerprint after later edits, renames and a server restart. Outside the context the
+result reports today's file token and selected root, whether the level is on today's design (`current`, `currentPath`),
+today's name of each implementation the context names (`implementations`, which a rename changes) and the present
+integrity of each attachment. Deeper levels are read with their own context. The tool reads only.
+It is refused with `recursive_block_file_changed` for an outdated token, `ambiguous_agent_context` when no level is
+named, and `invalid_agent_context_scope` for a path that does not start at the root, is not pinned revision by revision,
+or lies outside the named input's revisions.
+
+**Stale proposals.** A proposal's base is the target revision its input captured. `kicad_diagram_proposal_compare`
+compares a published proposal, or a request this server retained after a refused publication, with today's saved
+design. It reports `stale` (today's target is no longer the base), `candidateSelected` (today's target already is the
+candidate), the target's current path, and three lists: `currentChanges` (base to today), `proposalChanges` (base to
+the candidate) and `changedOnBothSides`. Each change names its level (`levelPath`, block ids from the target down,
+including each changed child's own level), the connection and members that contain it (`connectionPath`), its
+category and kind (added, removed, changed, reordered), the element's id and name, the requirement field or `aspect`
+(a definition facet, a connection's kind, domain, direction or ends, or a list's order), and, for a child block or
+connection, its revision before and after. A target that left today's design is reported as removed.
+
+Nothing is merged or chosen silently:
+
+- publishing reports the comparison with the saved candidate;
+- a proposal sent with an outdated token is refused (`block_proposal_source_changed`) with the comparison against
+  today's file, and nothing is written;
+- choosing a proposal whose target moved on is refused (`proposal_target_changed`, or a stale token or path) with the
+  same comparison; the refusal's `details` list one entry per change (`current_change`, `proposal_change`,
+  `changed_on_both_sides`) naming the level and element.
+
+**Cancellation and reattachment.** Operations are identified by the agent. Repeating the same proposal and operation
+identity after a cancelled or uncertain call returns the recorded candidate (`added=false`) with its publication
+receipt; repeating a completed choice returns its recorded outcome (`recorded=true`, the source token and root it
+produced, and whether the file still has them). Neither creates a second candidate or root revision. An operation
+interrupted between its recorded phases is completed from its receipt with `kicad_diagram_proposal_publication_resume`.
+A server that restarts reattaches the saved instance with `kicad_instance_reattach` and finds the same receipts in its
+state directory. An open native editor keeps its unsaved draft throughout; it is neither reloaded nor saved.
+
+Evidence: `NativeRecursiveEditorJourney` over the production MCP server and the rendered editor. It checks the input's
+context (prompt, attachment, fields) and a commented level's context (element and free-space comments, sketch points),
+both unchanged by fingerprint after many later edits, and the refusals. A proposal built on the original root is
+compared with today's root: its own changes exactly, and today's changes level by level against the saved history
+comparison (`kicad_diagram_history_compare` for the root, the model for each changed child). The same comparison comes
+back when a second stale proposal's publication and the stale proposal's choice are refused, and an outdated-token and
+an already-chosen refusal report no change on today's side and the chosen candidate. Finally, with an unsaved edit
+open in the editor, an agent's publication and its choice are each cancelled in flight. Each time a new server
+reattaches the instance, reads the same context, inspects (and if needed resumes) the receipt and repeats the
+operation: one input, one candidate and one new root revision exist, and the draft is unchanged.
+`RecursiveBlockProposalTests.StaleProposalComparisonNamesEachChangedElementOnEachSide` covers what the journey's fixture
+cannot reach: a nested level changed on both sides, the parts of a refined connection and of its member, and a target
+removed from the design.

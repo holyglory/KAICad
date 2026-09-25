@@ -155,7 +155,7 @@ bool FileCoverage( const DocumentLifecycleState& aState )
 API_RESULT ReadCheckedView( ApiRequest& aEnvelope, const std::string& aProcessEpoch,
                             const DOCUMENT_LIFECYCLE_CONTROLLER::DISPATCH& aDispatch )
 {
-    ReadCheckedSchematicView request;
+    NativeCapabilityReadCheckedView request;
     if( !aEnvelope.message().UnpackTo( &request ) || request.process_epoch() != aProcessEpoch
             || !Uuid( aProcessEpoch ) || request.document().type() != kiapi::common::types::DOCTYPE_SCHEMATIC
             || request.document().sheet_path().path_size() != 1
@@ -173,7 +173,7 @@ API_RESULT ReadCheckedView( ApiRequest& aEnvelope, const std::string& aProcessEp
         query.mutable_message()->PackFrom( aMessage );
         return aDispatch( query );
     };
-    CheckedSchematicView result;
+    NativeCapabilityCheckedView result;
 
     ReadCheckedSchematicState checkedQuery;
     checkedQuery.mutable_document()->CopyFrom( request.document() );
@@ -229,7 +229,7 @@ const std::vector<std::string>& DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes()
             std::string( kiapi::automation::v1::CheckedSaveDocument::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::CheckedCloseDocument::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::ReadLifecycleOperation::descriptor()->full_name() ),
-            std::string( kiapi::automation::v1::ReadCheckedSchematicView::descriptor()->full_name() )
+            std::string( kiapi::automation::v1::NativeCapabilityReadCheckedView::descriptor()->full_name() )
         };
         std::sort( names.begin(), names.end() );
         return names;
@@ -433,7 +433,7 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         const std::string& aProcessEpoch, const DISPATCH& aDispatch )
 {
     using namespace kiapi::automation::v1;
-    if( aEnvelope.message().Is<ReadCheckedSchematicView>() )
+    if( aEnvelope.message().Is<NativeCapabilityReadCheckedView>() )
         return ReadCheckedView( aEnvelope, aProcessEpoch, aDispatch );
     if( aEnvelope.message().Is<ReadLifecycleOperation>() )
     {

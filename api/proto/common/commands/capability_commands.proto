@@ -9,19 +9,23 @@ import "common/commands/automation_commands.proto";
 // What an agent needs before it edits a live schematic: the rendered sheet it looks at and the
 // exact state a CheckedSchematicBatch must name, taken together at one native checkpoint.  KiCad
 // captures the whole-schematic checked state (ReadCheckedSchematicState), renders the displayed
-// sheet (CaptureSchematicObservation) and reads the document state again, all in this one request
-// on its own thread, so no editor event runs between them.  A state that differs afterwards
-// refuses the request (AS_NOT_READY) instead of pairing an image with another revision.
-message ReadCheckedSchematicView {
+// sheet (CaptureSchematicObservation) and reads the document state again, all within this one
+// request.  API requests run synchronously on KiCad's GUI thread, so no editor event (a keystroke,
+// a pointer edit, an undo) runs between those reads.  A state that differs afterwards, or an image
+// or object list of another revision or sheet, refuses the request (AS_NOT_READY) instead of
+// pairing an image with another revision.  A refusal of any of the three reads (for example
+// AS_BUSY while an edit is pending) is returned unchanged.
+message NativeCapabilityReadCheckedView {
   // The explicit schematic root, as for ReadCheckedSchematicState.
   kiapi.common.types.DocumentSpecifier document = 1;
   string process_epoch = 2;
   // The sheet instance the editor displays: the root itself or a sheet below it, in the same
-  // project.  A sheet the editor does not display is refused.
+  // project.  A sheet of another root or project is refused (AS_BAD_REQUEST) before anything is
+  // read, and a sheet the editor does not display is refused by the capture (AS_BAD_REQUEST).
   kiapi.common.types.DocumentSpecifier view = 3;
 }
 
-message CheckedSchematicView {
+message NativeCapabilityCheckedView {
   // checked.state is the expected_state of a batch planned from this view.
   CheckedSchematicState checked = 1;
   // The displayed sheet's image and objects; its snapshot and preview carry checked.state's revision.

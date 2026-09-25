@@ -41,13 +41,13 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_schematic_checked_view", ReadOnly = true),
-     Description("Look at a live schematic and get the exact state to edit it from, together: the displayed sheet as a PNG image and the whole-schematic checked state, captured in one native dispatch at one native checkpoint, so the image and the state always describe the same revision. Use it in an observe-then-apply loop while a person may be editing the same design: plan a CheckedSchematicBatch from structuredContent.checked (its state field is the batch's expectedState) and send it with kicad_schematic_apply_checked_batch; if anything changed in between, the batch is refused as stale_document_state and nothing changes, so observe again. documentJson is the explicit schematic root, as for kicad_schematic_checked_state. viewDocumentJson is the sheet instance the editor displays, the root when omitted; a sheet the editor does not display is refused. KiCad reads the checked state, renders the displayed sheet and reads the state again without running any editor event in between; a change refuses the capture (native_status_4, observe again), and a busy editor or pending edit refuses it too (native_status_7). structuredContent is a CheckedSchematicView: checked {state, electrical} and view {snapshot: the displayed sheet's objects, preview: its revision, viewport and size}; the image is the first content block. No design edits, file writes, navigation or selection changes occur."),
+     Description("Look at a live schematic and get the exact state to edit it from, together: the displayed sheet as a PNG image and the whole-schematic checked state, captured in one native dispatch at one native checkpoint, so the image and the state always describe the same revision. Use it in an observe-then-apply loop while a person may be editing the same design: plan a CheckedSchematicBatch from structuredContent.checked (its state field is the batch's expectedState) and send it with kicad_schematic_apply_checked_batch; if anything changed in between, the batch is refused as stale_document_state and nothing changes, so observe again. documentJson is the explicit schematic root, as for kicad_schematic_checked_state. viewDocumentJson is the sheet instance the editor displays, the root when omitted; a sheet of another schematic or project is refused before KiCad is asked (invalid_checked_document), and a sheet the editor does not display is refused by KiCad (native_status_3). KiCad reads the checked state, renders the displayed sheet and reads the state again within one request on its GUI thread, so no editor event runs in between; a change seen by the closing read refuses the capture (native_status_4, observe again), and a busy editor or pending edit refuses it too (native_status_7). structuredContent is a NativeCapabilityCheckedView: checked {state, electrical} and view {snapshot: the displayed sheet's objects, preview: its revision, viewport and size}; the image is the first content block. No design edits, file writes, navigation or selection changes occur."),
      KiCadCapability("schematic-design", "native-api", "explicit instance ID, root document and displayed sheet instance"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits")]
     public async Task<CallToolResult> ObserveView(string instanceId, string documentJson, CancellationToken cancellationToken,
         string? viewDocumentJson = null)
     {
-        CheckedSchematicView? result = null;
+        NativeCapabilityCheckedView? result = null;
         var response = await InstanceToolBoundary.Run(async () =>
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -61,7 +61,7 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
                 || !Equals(view.SheetPath.Path[0], document.SheetPath.Path[0]) || !Equals(view.Project, document.Project))
                 throw new AutomationException("invalid_checked_document", "The viewed sheet must be the root or a sheet below it in the same schematic.");
             var client = registry.Client(instanceId);
-            result = await client.InvokeAsync<ReadCheckedSchematicView, CheckedSchematicView>(new()
+            result = await client.InvokeAsync<NativeCapabilityReadCheckedView, NativeCapabilityCheckedView>(new()
                 { Document = document, ProcessEpoch = client.Epoch, View = view }, cancellationToken);
             ValidateView(result, document, view, client.Epoch);
             return "";
@@ -77,7 +77,7 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
     }
 
     // The checked state, the rendered view and its objects all belong to one checkpoint of this exact process and target.
-    internal static void ValidateView(CheckedSchematicView result, Kiapi.Common.Types.DocumentSpecifier document,
+    internal static void ValidateView(NativeCapabilityCheckedView result, Kiapi.Common.Types.DocumentSpecifier document,
         Kiapi.Common.Types.DocumentSpecifier view, string processEpoch)
     {
         if (result.Checked is null || result.View?.Preview is null || result.View.Snapshot?.Data?.Metadata is null)

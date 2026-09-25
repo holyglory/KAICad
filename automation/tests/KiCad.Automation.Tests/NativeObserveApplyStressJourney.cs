@@ -39,16 +39,19 @@ public sealed partial class NativeSessionTests
     }
 
     // One batch the agent planned from one view, with exactly what it asks KiCad to create or change (null: remove).
-    private sealed record StressBatch(int Iteration, CheckedSchematicView Observed, CheckedSchematicBatch Request,
+    private sealed record StressBatch(int Iteration, NativeCapabilityCheckedView Observed, CheckedSchematicBatch Request,
         IReadOnlyDictionary<string, IMessage?> Expected, IReadOnlyList<string> Created, IReadOnlyList<string> Removed);
 
     // An agent observes and edits the live schematic only through the compiled MCP STDIO server, 50 times, while the
     // harness makes real keyboard edits in the same KiCad window (rotate the selected note, undo, save) at varying moments,
     // including while the agent's view is being captured and while its batch is on its way (item observe-apply-stress,
-    // ledger p60776bb2239d1087). Every view's image and state describe one revision; every batch planned from an
-    // out-of-date view is refused as stale_document_state and changes nothing; every accepted batch is exactly one undo
-    // step holding exactly the requested change; nothing hangs; and undoing every step through the keyboard returns
-    // KiCad to exactly where the run started, with nothing else left on the undo stack. The native reads here are the
+    // ledger p60776bb2239d1087). Every view's image and state describe one revision, and in every iteration a direct
+    // capture with nothing in between (straight after the view, or straight before a key the view came first against)
+    // has the same state, objects and image bytes; every batch planned from an out-of-date view is refused as
+    // stale_document_state and changes nothing; every accepted batch is exactly one undo step holding exactly the
+    // requested change; nothing hangs; and undoing every step through the keyboard returns KiCad to exactly where the run
+    // started, with nothing else left on the undo stack. Before the loop the agent also views a sheet below the root
+    // while the editor shows it, and is refused for sheets the editor does not show. The native reads here are the
     // harness's own independent view of KiCad; every agent observation and edit goes through the MCP tools.
     private static async Task VerifyObserveApplyStress(NativeClient client, DocumentSpecifier document, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
@@ -69,6 +72,10 @@ public sealed partial class NativeSessionTests
         var accepted = new List<(StressBatch Batch, CheckedSchematicBatchReceipt Receipt)>();
         var refused = new List<(StressBatch Batch, CheckedSchematicBatchReceipt Receipt)>();
         int viewRetries = 0, rotations = 0, personUndos = 0, personSaves = 0, undoSteps = 0;
+        // How each iteration proved that the agent's image is KiCad's rendering of the state it received: by a direct
+        // capture straight after the view, or (when the view came before a racing key) by one straight before it.
+        int renderingCheckedAfter = 0, renderingCheckedBefore = 0;
+        Dictionary<string, object?>? subSheet = null;
         bool completed = false;
         var schedule = new List<StressTiming>();
         foreach (var (timing, count) in new[] { (StressTiming.NoPersonEdit, 5), (StressTiming.BeforeObservation, 6),
@@ -106,9 +113,10 @@ public sealed partial class NativeSessionTests
             return journal;
         }
         Task<SchematicChangeJournal> Journal(ulong after) => Native(t => ReadJournal(after, t), "Reading the change history");
-        Dictionary<string, Any> Root(CheckedSchematicState state) => ItemsByUuid(RootSheet(state).Items);
-        SchematicScreenData RootSheet(CheckedSchematicState state) => state.Electrical.Hierarchy.Data.Instances
-            .Single(screen => Equals(screen.Metadata.Document?.SheetPath, document.SheetPath));
+        Dictionary<string, Any> Root(CheckedSchematicState state) => ItemsByUuid(Sheet(state, document).Items);
+        // One sheet instance of the whole-schematic checked state.
+        SchematicScreenData Sheet(CheckedSchematicState state, DocumentSpecifier sheet) => state.Electrical.Hierarchy.Data.Instances
+            .Single(screen => Equals(screen.Metadata.Document?.SheetPath, sheet.SheetPath));
         async Task Screenshot(string name)
         {
             try { await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-stress-{name}.png"), CancellationToken.None); }
@@ -265,12 +273,16 @@ public sealed partial class NativeSessionTests
         }
         RequireToolSuccess(await Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }, "Attaching the agent"));
         // The agent's view: the rendered sheet and the checked state it plans from, returned together.
-        async Task<(CheckedSchematicView View, byte[] Png)> View(string what)
+        // Without a sheet the agent omits viewDocumentJson, so the tool views the root.
+        async Task<(NativeCapabilityCheckedView View, byte[] Png)> View(string what, DocumentSpecifier? sheet = null)
         {
+            var shown = sheet ?? document;
+            object arguments = sheet is null ? new { instanceId, documentJson }
+                : new { instanceId, documentJson, viewDocumentJson = SchematicJson.Formatter.Format(sheet) };
             for (int attempt = 1; ; attempt++)
             {
                 var watch = Stopwatch.StartNew();
-                var reply = await Tool("kicad_schematic_checked_view", new { instanceId, documentJson }, what);
+                var reply = await Tool("kicad_schematic_checked_view", arguments, what);
                 double elapsed = watch.Elapsed.TotalMilliseconds;
                 if (reply.TryGetProperty("isError", out var failed) && failed.GetBoolean())
                 {
@@ -288,39 +300,49 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual("image", image.GetProperty("type").GetString(), what + ": the view's first block is its image.");
                 Assert.AreEqual("image/png", image.GetProperty("mimeType").GetString(), what);
                 byte[] png = Convert.FromBase64String(image.GetProperty("data").GetString()!);
-                var view = SchematicJson.Parser.Parse<CheckedSchematicView>(reply.GetProperty("structuredContent").GetRawText());
+                var view = SchematicJson.Parser.Parse<NativeCapabilityCheckedView>(reply.GetProperty("structuredContent").GetRawText());
                 // The image and the state describe one revision of exactly this document in exactly this KiCad process.
                 var revision = view.Checked.State.Revision;
                 Assert.AreEqual(revision, view.Checked.Electrical.Hierarchy.Revision, what + ": the objects and the checked state share one revision.");
                 Assert.AreEqual(revision, view.View.Snapshot.Revision, what + ": the displayed objects belong to the checked revision.");
                 Assert.AreEqual(revision, view.View.Preview.Revision, what + ": the image belongs to the checked revision.");
                 Assert.AreEqual(document, view.Checked.State.Document, what);
-                Assert.AreEqual(document, view.View.Preview.Document, what);
+                Assert.AreEqual(shown, view.View.Preview.Document, what + ": the image is of the sheet the agent asked to view.");
+                Assert.AreEqual(shown, view.View.Snapshot.Data.Metadata.Document, what + ": the objects are of the sheet the agent asked to view.");
                 Assert.AreEqual(client.Epoch, view.Checked.State.ProcessEpoch, what);
                 CollectionAssert.AreEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, png.Take(8).ToArray(), what + ": the image is a PNG.");
                 Assert.AreEqual(view.View.Preview.WidthPixels, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)), what);
                 Assert.AreEqual(view.View.Preview.HeightPixels, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)), what);
                 Assert.IsTrue(view.View.Preview.Png.IsEmpty, what + ": the structured view leaves the image to its image block.");
-                // The sheet on screen is exactly the root sheet of the checked state.
-                Assert.AreEqual(RootSheet(view.Checked), view.View.Snapshot.Data, what + ": the displayed sheet's objects are the checked state's root sheet.");
+                // The sheet on screen is exactly that sheet instance of the checked state.
+                Assert.AreEqual(Sheet(view.Checked, shown), view.View.Snapshot.Data,
+                    what + ": the displayed sheet's objects are exactly that sheet instance of the checked state.");
                 return (view, png);
             }
         }
-        // Nothing ran since the view: KiCad still holds the viewed state, and its own capture now gives the same objects,
-        // viewport and image bytes, so the image the agent received is KiCad's rendering of the state it received.
-        async Task RecaptureMatches(CheckedSchematicView view, byte[] png, string what)
+        // The harness's own capture of the displayed sheet, with the state KiCad holds right after it.
+        async Task<(SchematicObservation Capture, DocumentLifecycleState State)> DirectRendering(string what, DocumentSpecifier? sheet = null)
         {
             var watch = Stopwatch.StartNew();
             var direct = await Native(t => client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(
-                new() { Document = document, SchemaVersion = 9 }, t), what + ": capturing the canvas directly");
+                new() { Document = sheet ?? document, SchemaVersion = 9 }, t), what + ": capturing the canvas directly");
             var now = await State();
             timings["recapture"].Add(watch.Elapsed.TotalMilliseconds);
-            Assert.AreEqual(view.Checked.State, now, what + ": KiCad still holds exactly the viewed state.");
-            Assert.AreEqual(view.View.Snapshot, direct.Snapshot, what + ": KiCad's own capture shows the same objects.");
-            Assert.AreEqual(view.View.Preview.Revision, direct.Preview.Revision, what);
-            Assert.AreEqual(view.View.Preview.Viewport, direct.Preview.Viewport, what);
-            Assert.IsTrue(direct.Preview.Png.Span.SequenceEqual(png), what + ": the agent's image is exactly KiCad's rendering of the viewed state.");
+            Assert.AreEqual(direct.Snapshot.Revision, now.Revision, what + ": the direct capture and the state read describe one revision.");
+            return (direct, now);
         }
+        // Nothing ran between the view and the direct capture: the capture shows the same state, objects, viewport and
+        // image bytes, so the image the agent received is KiCad's rendering of the state it received.
+        void AssertSameRendering(NativeCapabilityCheckedView view, byte[] png, (SchematicObservation Capture, DocumentLifecycleState State) direct, string what)
+        {
+            Assert.AreEqual(view.Checked.State, direct.State, what + ": KiCad held exactly the viewed state.");
+            Assert.AreEqual(view.View.Snapshot, direct.Capture.Snapshot, what + ": KiCad's own capture shows the same objects.");
+            Assert.AreEqual(view.View.Preview.Revision, direct.Capture.Preview.Revision, what);
+            Assert.AreEqual(view.View.Preview.Viewport, direct.Capture.Preview.Viewport, what);
+            Assert.IsTrue(direct.Capture.Preview.Png.Span.SequenceEqual(png), what + ": the agent's image is exactly KiCad's rendering of the viewed state.");
+        }
+        async Task RecaptureMatches(NativeCapabilityCheckedView view, byte[] png, string what, DocumentSpecifier? sheet = null) =>
+            AssertSameRendering(view, png, await DirectRendering(what, sheet), what + " (captured again straight after the view)");
 
         // The agent's plan, made only from what it viewed: new notes, rewritten notes, new labels and removed notes, one to
         // two operations per batch, in a free area of the sheet the canvas shows.
@@ -333,7 +355,7 @@ public sealed partial class NativeSessionTests
             int slot = slots++;
             return new() { XNm = (40 + 18 * (slot % 3)) * 1_270_000L, YNm = (96 + 3 * (slot / 3 % 14)) * 1_270_000L };
         }
-        StressBatch Plan(int iteration, CheckedSchematicView observed, string description)
+        StressBatch Plan(int iteration, NativeCapabilityCheckedView observed, string description)
         {
             var items = Root(observed.Checked);
             var live = agentNotes.Where(items.ContainsKey).ToList();
@@ -449,6 +471,84 @@ public sealed partial class NativeSessionTests
             refused.Add((batch, receipt));
         }
 
+        // The agent can view a sheet below the root while the editor shows it: the image and objects are that sheet
+        // instance of the checked state. A sheet the editor does not show, whether another instance of the same sheet
+        // file or the root (viewDocumentJson omitted), is refused by KiCad with native_status_3 and carries no image.
+        // Showing and viewing a sheet is no edit: KiCad's revision and content stay exactly as they were.
+        async Task VerifySubSheetView(CheckedSchematicState initial)
+        {
+            const string What = "Viewing a sheet below the root";
+            var children = initial.Electrical.Hierarchy.Data.Instances.Select(screen => screen.Metadata.Document)
+                .Where(sheet => sheet.SheetPath.Path.Count == 2).OrderBy(sheet => sheet.SheetPath.Path[1].Value, StringComparer.Ordinal).ToList();
+            Assert.IsGreaterThanOrEqualTo(2, children.Count, What + ": the fixture has two instances of one sheet below the root.");
+            var (shown, hidden) = (children[0], children[1]);
+            var record = new Dictionary<string, object?> { ["sheet"] = shown.SheetPath.Path[1].Value, ["hiddenSheet"] = hidden.SheetPath.Path[1].Value };
+            subSheet = record;
+            try
+            {
+                Assert.AreEqual(shown, await Native(t => client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(
+                    new() { Document = shown.Clone() }, t), What + ": showing the sheet"));
+                // The canvas draws the newly shown sheet before anything can be captured from it.
+                using (var drawn = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    drawn.CancelAfter(TimeSpan.FromSeconds(10));
+                    try
+                    {
+                        while (true)
+                        {
+                            try
+                            {
+                                await client.InvokeAsync<CaptureSchematicPreview, SchematicPreview>(new() { Document = shown }, drawn.Token);
+                                break;
+                            }
+                            catch (NativeApiException error) when (error.Status == 4) { await Task.Delay(100, drawn.Token); }
+                        }
+                    }
+                    catch (OperationCanceledException) when (drawn.IsCancellationRequested && !token.IsCancellationRequested)
+                    {
+                        await Screenshot("sub-sheet-not-drawn");
+                        throw new AssertFailedException(What + ": KiCad did not draw the shown sheet within 10 s.");
+                    }
+                }
+                var (view, png) = await View(What, shown);
+                Assert.AreEqual(initial.State.Revision, view.Checked.State.Revision, What + ": showing a sheet is no edit.");
+                Assert.AreEqual(initial.State.StateSha256, view.Checked.State.StateSha256, What + ": showing a sheet is no edit.");
+                Assert.IsNotEmpty(view.View.Snapshot.Data.Items, What + ": the sheet below the root has objects of its own.");
+                Assert.AreNotEqual(Sheet(view.Checked, document), view.View.Snapshot.Data, What + ": the objects are not the root's.");
+                await RecaptureMatches(view, png, What, shown);
+                await File.WriteAllBytesAsync(Path.Combine(evidence, $"{instanceId}-stress-view-sub-sheet.png"), png, token);
+                record["objects"] = view.View.Snapshot.Data.Items.Count;
+                record["imageSha256"] = Convert.ToHexStringLower(SHA256.HashData(png));
+                record["revision"] = view.Checked.State.Revision.Sequence;
+                var refusals = new Dictionary<string, string?>();
+                foreach (var (name, arguments) in new (string, object)[]
+                {
+                    ("another instance of the same sheet", new { instanceId, documentJson, viewDocumentJson = SchematicJson.Formatter.Format(hidden) }),
+                    ("the root, viewDocumentJson omitted", new { instanceId, documentJson })
+                })
+                {
+                    var reply = await Tool("kicad_schematic_checked_view", arguments, $"{What}: {name}");
+                    Assert.IsTrue(reply.TryGetProperty("isError", out var failed) && failed.GetBoolean(),
+                        $"{What}: viewing {name}, which the editor does not show, is refused: {reply.GetRawText()}");
+                    string? code = reply.GetProperty("structuredContent").GetProperty("code").GetString();
+                    Assert.AreEqual("native_status_3", code, $"{What}: {name}: {reply.GetRawText()}");
+                    Assert.IsFalse(reply.GetProperty("content").EnumerateArray().Any(block => block.GetProperty("type").GetString() == "image"),
+                        $"{What}: a refused view of {name} carries no image.");
+                    refusals[name] = code;
+                }
+                record["refusals"] = refusals;
+                Assert.AreEqual(view.Checked.State, await State(), What + ": the refused views changed nothing.");
+            }
+            finally
+            {
+                await Native(t => client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, t),
+                    What + ": showing the root again");
+            }
+            var back = await State();
+            Assert.AreEqual(initial.State.Revision, back.Revision, What + ": returning to the root is no edit.");
+            Assert.AreEqual(initial.State.StateSha256, back.StateSha256, What + ": returning to the root is no edit.");
+        }
+
         try
         {
             // Start from the saved design with an empty undo stack.
@@ -464,6 +564,7 @@ public sealed partial class NativeSessionTests
             noteTemplate = person.Clone();
             labelTemplate = initialItems.Values.Where(item => item.Is(LocalLabel.Descriptor)).Select(item => item.Unpack<LocalLabel>())
                 .OrderBy(label => label.Id.Value, StringComparer.Ordinal).First();
+            await VerifySubSheetView(initial);
             await EnsureCanvasFocus();
             await ProveUndoStackEmpty("Before the run", initial.State.StateSha256);
             var start = await Checked();
@@ -487,11 +588,14 @@ public sealed partial class NativeSessionTests
                 if (timing == StressTiming.BeforeObservation)
                     trace["personSequence"] = (await Rotate(idle.Revision.Sequence, what)).Sequence;
 
-                CheckedSchematicView observed;
+                NativeCapabilityCheckedView observed;
                 byte[] png;
                 if (timing == StressTiming.DuringObservation)
                 {
                     await SelectPersonNote();
+                    // KiCad's rendering of the design just before the race: if the view comes before the person's key,
+                    // nothing changes between this capture and the view.
+                    var beforeRace = await DirectRendering(what + " before the race");
                     var (viewed, sent, offset) = await Race(timing, () => View(what));
                     (observed, png) = viewed;
                     var change = await PersonChange(idle.Revision.Sequence, SchematicChange.Types.Kind.Commit, sent, what);
@@ -500,11 +604,28 @@ public sealed partial class NativeSessionTests
                     trace["keyOffsetMilliseconds"] = offset;
                     trace["personSequence"] = change.Sequence;
                     trace["viewShowedPersonEdit"] = personFirst;
+                    if (personFirst)
+                    {
+                        // The view showed the person's rotation, and nothing ran after it.
+                        Assert.AreEqual(change.Sequence, observed.Checked.State.Revision.Sequence, what + ": the view shows exactly the person's rotation.");
+                        await RecaptureMatches(observed, png, what);
+                        renderingCheckedAfter++;
+                        trace["renderingChecked"] = "after";
+                    }
+                    else
+                    {
+                        // The view came before the person's key, so it is exactly the rendering captured before the race.
+                        AssertSameRendering(observed, png, beforeRace, what + " (captured straight before the race)");
+                        renderingCheckedBefore++;
+                        trace["renderingChecked"] = "before";
+                    }
                 }
                 else
                 {
                     (observed, png) = await View(what);
                     await RecaptureMatches(observed, png, what);
+                    renderingCheckedAfter++;
+                    trace["renderingChecked"] = "after";
                 }
                 ulong observedSequence = observed.Checked.State.Revision.Sequence;
                 trace["observedSequence"] = observedSequence;
@@ -543,11 +664,18 @@ public sealed partial class NativeSessionTests
                 }
 
                 bool concurrent = timing == StressTiming.DuringApply;
+                // For a race, KiCad's state before the batch arrives is the person's rotation; the refusal proof below
+                // compares against it through the receipt and the history instead.
                 DocumentLifecycleState? beforeApply = concurrent ? null : await State();
                 SchematicSaveState? flagsBeforeApply = concurrent ? null : await Flags();
                 CheckedSchematicBatchReceipt receipt;
                 if (concurrent)
                 {
+                    // The unsaved-change flags before the race. The person's rotation of a note on the root marks the root
+                    // unsaved; nothing else in this run ever changes another sheet.
+                    var flagsBeforeRace = await Flags();
+                    Assert.IsTrue(flagsBeforeRace.ModifiedSheetInstances.All(sheet => Equals(sheet, document)),
+                        what + ": only the root sheet has unsaved changes before the race.");
                     await SelectPersonNote();
                     (receipt, var sent, int offset) = await Race(timing, () => Apply(batch, what));
                     var change = await PersonChange(observedSequence, SchematicChange.Types.Kind.Commit, sent, what);
@@ -559,7 +687,20 @@ public sealed partial class NativeSessionTests
                     if (batchFirst)
                         Assert.IsGreaterThan(receipt.ObservedAfter.Revision.Sequence, change.Sequence, what + ": KiCad handled the batch, then the person's key.");
                     else
+                    {
                         Assert.AreEqual(observedSequence + 1, change.Sequence, what + ": KiCad handled the person's key first, as the only step since the view.");
+                        Assert.AreEqual(change.Sequence, receipt.ObservedBefore.Revision.Sequence,
+                            what + ": KiCad refused the batch against exactly the state the person's rotation left.");
+                        Assert.IsTrue(receipt.ObservedBefore.NativeContentDirty, what + ": the person's rotation left unsaved work.");
+                        // The refused batch leaves exactly the flags KiCad reports right after the person's rotation:
+                        // unsaved, with the root sheet modified, at the rotation's revision.
+                        var rotated = flagsBeforeRace.Clone();
+                        rotated.Revision = receipt.ObservedBefore.Revision.Clone();
+                        rotated.UnsavedSchematicChanges = true;
+                        rotated.ModifiedSheetInstances.Clear();
+                        rotated.ModifiedSheetInstances.Add(document.Clone());
+                        flagsBeforeApply = rotated;
+                    }
                 }
                 else receipt = await Apply(batch, what);
                 trace["status"] = receipt.Status.ToString();
@@ -678,6 +819,8 @@ public sealed partial class NativeSessionTests
                 + string.Join(", ", records.Where(entry => entry.ContainsKey("personKeyHandledFirst"))
                     .Select(entry => $"{entry["keyOffsetMilliseconds"]} ms {((bool)entry["personKeyHandledFirst"]! ? "key" : "batch")} first")));
             Assert.IsGreaterThanOrEqualTo(21, refused.Count, "The schedule's stale iterations are always refused.");
+            Assert.AreEqual(Iterations, renderingCheckedAfter + renderingCheckedBefore,
+                "Every iteration proved the agent's image is KiCad's rendering of the state it received.");
             completed = true;
         }
         finally
@@ -707,6 +850,8 @@ public sealed partial class NativeSessionTests
                 },
                 person = new { rotations, undos = personUndos, saves = personSaves },
                 viewRetries, undoSteps,
+                renderingChecks = new { capturedStraightAfterView = renderingCheckedAfter, capturedStraightBeforeRace = renderingCheckedBefore },
+                subSheet,
                 timingMilliseconds = timings.ToDictionary(entry => entry.Key, entry => Percentiles(entry.Value)),
                 records
             };

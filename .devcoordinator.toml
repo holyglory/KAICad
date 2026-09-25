@@ -69,7 +69,7 @@ tier="development"
 requires=["contracts","native-protocol"]
 after=["native-ui"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
 
 [test.part-symbol-contracts]
@@ -3025,7 +3025,7 @@ name="psu-cpu-rendered"
 tier="development"
 requires=["native-build"]
 after=["rendered"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePsuCpuComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-psu-cpu-creation-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-psu-cpu-creation-tests", path = "automation/artifacts/native-psu-cpu-creation-tests", max_bytes = 16777216 }, { name = "native-psu-cpu-creation-evidence", path = "automation/artifacts/native-psu-cpu-creation/native-session-current", max_bytes = 67108864 }]
 
 [test.native-transform-sync]

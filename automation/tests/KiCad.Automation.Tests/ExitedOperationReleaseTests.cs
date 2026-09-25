@@ -130,6 +130,37 @@ public sealed class ExitedOperationReleaseTests
         }
     }
 
+    // A repeated call while a continuation waits reports the sheets it was planned from, compared again from the recovery
+    // record's own observation of the running KiCad at the revision the continuation is guarded by. The native journey
+    // cannot make that observation move on (refreshing or initializing the record is refused while work is pending), so the
+    // unknown case is checked here: without that observation the lists are null, never empty, and the next step says why.
+    [TestMethod]
+    public void PlannedSheetsAreUnknownOnceTheRecordObservationMovedOn()
+    {
+        string epoch = Guid.NewGuid().ToString("D");
+        var guarded = new DocumentRevision { Epoch = epoch, Sequence = 7 };
+        var later = new DocumentRevision { Epoch = epoch, Sequence = 9 };
+        var publication = DesignPublicationIntent.Create(Path.Combine(Path.GetTempPath(), "design.xml"), "<a/>"u8.ToArray(), "<b/>"u8.ToArray());
+        var receipt = Receipt(publication, new DesignReleasedFile(Path.Combine(Path.GetTempPath(), "psu.kicad_sch"), true,
+            new string('a', 64), true, new string('a', 64)));
+        var design = new SchematicDesign(PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly), new(), [], []);
+        DesignRecoveryState Waiting(DocumentRevision? observedAt, DocumentRevision? batchGuard) => new(Guid.NewGuid(), Guid.NewGuid(),
+            new KiCad.Automation.Model.DocumentRevision(epoch, guarded.Sequence), true, design, [], new(), [],
+            PendingMutation: batchGuard is null ? null : new ApplySchematicItemBatch { ExpectedRevision = batchGuard.Clone() },
+            ObservedElectrical: observedAt is null ? null
+                : new SchematicElectricalState { Hierarchy = new() { Data = new(), Revision = observedAt.Clone() } },
+            PendingNativeState: new DocumentLifecycleState { ProcessEpoch = epoch, Revision = guarded.Clone() }, PendingPublication: publication);
+
+        Assert.IsNull(ExitedOperationRelease.PlannedSheets(Waiting(null, null), receipt, default), "The record holds no observation.");
+        Assert.IsNull(ExitedOperationRelease.PlannedSheets(Waiting(later, null), receipt, default),
+            "The record's observation moved past the revision the continuation is guarded by.");
+        Assert.IsNull(ExitedOperationRelease.PlannedSheets(Waiting(guarded, later), receipt, default),
+            "The continuation's native edit is guarded by another revision than the observation.");
+        string step = ExitedOperationRelease.PendingStep(publication, null);
+        StringAssert.Contains(step, "Operation " + publication.OperationId.ToString("D") + " waits on the running KiCad");
+        StringAssert.Contains(step, "Its sheet lists are unknown (null): the recovery record's observation of the running KiCad has moved on");
+    }
+
     // A release receipt with the given publication (none: the operation was still resolving its native layout) whose save
     // named one sheet file.
     private static DesignReleasedOperation Receipt(DesignPublicationIntent? publication, DesignReleasedFile file)

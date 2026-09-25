@@ -249,7 +249,7 @@ public sealed partial class NativeSessionTests
             first.Session = await StartSynchronization(first, kicad, "resuming the operation left by the commit kill");
             RequireCompleted(first, commit.Held.State.PendingPublication!.OperationId, commitCandidate, await Capture(kicad), 6, "after-commit resumed");
             await RequireKeptNote(first, kicad, power, first.PowerFile, noteId, noteText, "after-commit resumed");
-            Assert.AreEqual("completed", (await Repeat(first, commit.Held, "resume")).GetProperty("outcome").GetString());
+            RequireUnknownSheets(await Repeat(first, commit.Held, "resume"), "completed", "after-commit, repeated after completion");
             // After the continuation the note is an ordinary part of the design: the user's next edit of it is synchronized.
             string editedText = noteText + " (edited after the continuation)";
             var resumedOperation = first.Store.Read()!.State.LastSynchronization!.OperationId;
@@ -308,7 +308,7 @@ public sealed partial class NativeSessionTests
             // U3 and U4 came from the replaced PSU sheet; only U5 and U6 were added: every unit exactly once.
             RequireCompleted(second, save.Held.State.PendingPublication.OperationId, saveCandidate, await Capture(kicad), 8, "during-save resumed");
             Assert.IsFalse((await Capture(kicad)).State.NativeContentDirty, "during-save: the completed sheets are saved.");
-            Assert.AreEqual("completed", (await Repeat(second, save.Held, "resume")).GetProperty("outcome").GetString());
+            RequireUnknownSheets(await Repeat(second, save.Held, "resume"), "completed", "during-save, repeated after completion");
             cases.Add(new { moment = "during-checked-save", operationId = save.Held.State.PendingPublication.OperationId,
                 killedEpoch = killed.Epoch, exit = save.Exit, stoppedAt = save.StoppedAt, operationSheetEditRefused = editedResume,
                 operationSheetEditRollbackRefused = editedRollback, resumed = resumedSave, repeatedWhilePending = repeatedSave, completedBy = appliedView,
@@ -382,7 +382,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(kept.ContentVerified == true && kept.Path is not null, $"The replaced XML is kept: {kept}");
             CollectionAssert.AreEqual(rolled.Edit, await File.ReadAllBytesAsync(kept.Path!, token), "The edit that started the operation is kept.");
             string previous = kept.Path!;
-            Assert.AreEqual("rolled-back", (await Repeat(third, rolled.Held, "roll-back")).GetProperty("outcome").GetString());
+            RequireUnknownSheets(await Repeat(third, rolled.Held, "roll-back"), "rolled-back", "roll-back, repeated after completion");
             // Making the edit again applies it once, from the restored design, and the note stays.
             await ApplyEdit(third, kicad, 8, "all eight components again after the roll-back");
             await RequireKeptNote(third, kicad, rootSheet, third.Root, rootNote, rootText, "all eight components again after the roll-back");
@@ -528,7 +528,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(held.State.LastSynchronization.DesignFileSha256, after.State.LastSynchronization.DesignFileSha256, moment);
             if (running is null)
             {
-                Assert.AreEqual("released", view.GetProperty("outcome").GetString(), view.GetRawText());
+                RequireUnknownSheets(view, "released", moment + ": no KiCad runs to compare with");
                 Assert.AreEqual(JsonValueKind.Null, view.GetProperty("continuedEpoch").ValueKind, view.GetRawText());
                 Assert.IsFalse(after.State.HasPendingWork, $"{moment}: the operation is released.");
                 StringAssert.Contains(view.GetProperty("nextStep").GetString(), "kicad_instance_start");
@@ -581,6 +581,15 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(candidate, File.ReadAllBytes(copy.Design), $"{moment}: the XML is exactly the continued candidate.");
             RequirePublished(copy, moment);
             RequirePlaced(state, components, moment + ": every unit exactly once");
+        }
+
+        // An outcome that compared no sheets: its three sheet lists are null (unknown), never an empty list that would
+        // claim that no sheet holds the operation's result or other edits.
+        static void RequireUnknownSheets(JsonElement view, string outcome, string moment)
+        {
+            Assert.AreEqual(outcome, view.GetProperty("outcome").GetString(), $"{moment}: {view.GetRawText()}");
+            foreach (string name in new[] { "operationSheets", "sheetsWithOperationResult", "sheetsWithOtherEdits" })
+                Assert.AreEqual(JsonValueKind.Null, view.GetProperty(name).ValueKind, $"{moment}: {name} is unknown. {view.GetRawText()}");
         }
 
         // Calling the release again reports what became of the operation instead of repeating anything.

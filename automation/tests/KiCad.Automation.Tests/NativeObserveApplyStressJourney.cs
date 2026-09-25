@@ -665,11 +665,13 @@ public sealed partial class NativeSessionTests
                 trace["operations"] = batch.Request.Batch.Operations.Select(operation => operation.OperationCase.ToString()).ToArray();
                 Dictionary<string, byte[]>? savedFiles = null;
                 SchematicSaveState? flagsBeforeRotation = null;
+                ulong rotationSequence = 0;
                 switch (timing)
                 {
                     case StressTiming.BeforeApply:
                         flagsBeforeRotation = await Flags();
-                        trace["personSequence"] = (await Rotate(observedSequence, what)).Sequence;
+                        rotationSequence = (await Rotate(observedSequence, what)).Sequence;
+                        trace["personSequence"] = rotationSequence;
                         break;
                     case StressTiming.RotateThenUndo:
                     {
@@ -699,8 +701,14 @@ public sealed partial class NativeSessionTests
                 SchematicSaveState? flagsBeforeApply = concurrent ? null : await Flags();
                 if (flagsBeforeRotation is not null)
                 {
-                    // KiCad's own reading right after the lone rotation is exactly the modelled shape the apply race relies on.
-                    Assert.AreEqual(AfterRotation(flagsBeforeRotation, beforeApply!.Revision), flagsBeforeApply,
+                    // KiCad's own reading right after the lone rotation is at the rotation's own revision in the viewed
+                    // session, as its history recorded it, so the modelled revision is checked too, not taken on trust.
+                    Assert.AreEqual(observed.Checked.State.Revision.Epoch, beforeApply!.Revision.Epoch,
+                        what + ": nothing replaced the viewed document session between the view and the rotation.");
+                    Assert.AreEqual(rotationSequence, beforeApply.Revision.Sequence,
+                        what + ": KiCad's revision right after the person's rotation is the rotation's own history sequence.");
+                    // It is exactly the modelled shape the apply race relies on.
+                    Assert.AreEqual(AfterRotation(flagsBeforeRotation, beforeApply.Revision), flagsBeforeApply,
                         what + ": the flags KiCad reports right after the person's rotation are the modelled after-rotation flags.");
                     rotationFlagsChecked++;
                     trace["rotationFlagsChecked"] = true;

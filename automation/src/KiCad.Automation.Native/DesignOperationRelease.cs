@@ -183,9 +183,12 @@ public enum ExitedOperationContinuation { Resume, RollBack }
 /// automatic synchronization, which completes pending work first. OperationSheets are the sheet paths the operation
 /// changes; SheetsWithOperationResult those the running KiCad already holds exactly as the operation left them; and
 /// SheetsWithOtherEdits the sheets the operation does not change that the running KiCad holds with other edits (for
-/// example a user's note), which the continuation leaves as they are. A repeated call while the continuation waits reports
-/// the three lists the continuation was planned from, compared again from the record's own observation of the running KiCad
-/// at the revision the continuation is guarded by; they are null (unknown) once the record no longer holds that observation.</summary>
+/// example a user's note), which the continuation leaves as they are. The three lists are null when no comparison was made:
+/// "released" (no KiCad runs yet), a repeated "completed", "rolled-back" or "replan" (the continuation already happened, and
+/// the running KiCad is not compared again), and a repeated call while the continuation waits once the record no longer
+/// holds the observation it was planned from. Otherwise a repeated call while the continuation waits reports the three lists
+/// the continuation was planned from, compared again from the record's own observation of the running KiCad at the revision
+/// the continuation is guarded by.</summary>
 public sealed record ExitedOperationReleaseResult(StoredDesignRecovery Recovery, DesignReleasedOperation Receipt, string ReceiptPath,
     bool ReleasedNow, string Outcome, string? ContinuedEpoch, Guid? ContinuationOperationId, IReadOnlyList<string>? SheetsWithOperationResult,
     int NativeOperations, string NextStep, IReadOnlyList<string>? OperationSheets, IReadOnlyList<string>? SheetsWithOtherEdits);
@@ -251,10 +254,7 @@ public static class ExitedOperationRelease
                 var planned = PlannedSheets(saved.State, earlier.Receipt, token);
                 return new(saved, earlier.Receipt, earlier.Path, false, pending == operationId ? "resume-pending" : "roll-back-pending", epoch,
                     pending, planned?.WithResult, saved.State.PendingMutation?.Operations.Count ?? 0,
-                    CompleteStep(saved.State.PendingPublication!) + (planned is null
-                        ? " Its sheet lists are unknown (null): the recovery record's observation of the running KiCad has moved on since the continuation was journaled."
-                        : planned.KeptEdits()),
-                    planned?.OperationSheets, planned?.OtherEdits);
+                    PendingStep(saved.State.PendingPublication!, planned), planned?.OperationSheets, planned?.OtherEdits);
             }
             if (pending != operationId)
                 throw Error("released_operation_mismatch", $"The recovery record holds operation {pending?.ToString("D") ?? "(a native edit without a synchronization ID)"}, not {operationId:D}; nothing was released.");
@@ -267,10 +267,11 @@ public static class ExitedOperationRelease
         else if (latest is { } done && (saved.State.LastSynchronization?.OperationId == operationId || saved.State.LastSynchronization?.OperationId == rollbackId))
         {
             bool completed = saved.State.LastSynchronization!.OperationId == operationId;
-            return new(saved, done.Receipt, done.Path, false, completed ? "completed" : "rolled-back", null, saved.State.LastSynchronization.OperationId, [], 0,
+            // The continuation is over, and the running KiCad is not compared again: the sheet lists are unknown (null).
+            return new(saved, done.Receipt, done.Path, false, completed ? "completed" : "rolled-back", null, saved.State.LastSynchronization.OperationId, null, 0,
                 completed ? "The released operation completed on the KiCad started again and its XML was published; nothing is left to release."
                     : "The roll-back completed: KiCad and the XML file hold the last synchronized design, and the replaced XML was kept as the previous version.",
-                [], []);
+                null, null);
         }
         // An automatic worker for this record would plan and apply while this runs; hold its ownership lock.
         using var ownership = AutomaticOwnership(store);
@@ -297,15 +298,16 @@ public static class ExitedOperationRelease
         // rolled-back continuation ends in its own completion (handled above); one that journaled nothing was a re-plan.
         if (!releasedNow && saved.State.NativeRevision.Epoch != receipt.NativeRevision.Epoch)
             return receipt.PendingPublication is null
-                ? new ExitedOperationReleaseResult(saved, receipt, receiptPath, false, "replan", null, null, [], 0,
-                    "The operation was continued already: the KiCad started again held nothing of it, so the record was attached to the KiCad started again and the next synchronization plans the XML again from the baseline.", [], [])
+                ? new ExitedOperationReleaseResult(saved, receipt, receiptPath, false, "replan", null, null, null, 0,
+                    "The operation was continued already: the KiCad started again held nothing of it, so the record was attached to the KiCad started again and the next synchronization plans the XML again from the baseline.", null, null)
                 : throw Error("released_operation_superseded", "This operation was continued already, and the record has moved on since (it was synchronized again, or attached to another KiCad document session); nothing is left to release or continue. Read the record with kicad_design_recovery_plan to see where it stands.");
 
         var client = LiveClient(registry, instanceId);
+        // No KiCad to compare with: the sheet lists are unknown (null).
         if (client is null || client.Epoch == receipt.ProcessEpoch)
-            return new(saved, receipt, receiptPath, releasedNow, "released", null, null, [], 0,
+            return new(saved, receipt, receiptPath, releasedNow, "released", null, null, null, 0,
                 "Start KiCad again for this project (kicad_instance_start, or attach a KiCad started with this instance ID), then call this tool again with the returned recovery revision token to resume or roll back. Until then the record stays on the ended KiCad's session: an ordinary reattachment is refused (released_operation_requires_continuation), because the KiCad started again may hold part of the operation's result.",
-                [], []);
+                null, null);
 
         var live = await Capture(client, saved.State, token);
         var liveData = live.Electrical.Hierarchy.Data;
@@ -352,7 +354,7 @@ public static class ExitedOperationRelease
             // Without a final candidate RequireOperationSheets has refused any difference on the operation's own sheets, since a
             // partial result there cannot be told from other edits: nothing of the operation is in KiCad.
             saved = store.ContinueReleasedOperation(await Attached(client, saved, live, token), saved.RevisionToken, receipt);
-            return new(saved, receipt, receiptPath, releasedNow, "replan", client.Epoch, null, [], 0,
+            return new(saved, receipt, receiptPath, releasedNow, "replan", client.Epoch, null, sheets.WithResult, 0,
                 "KiCad holds nothing of the operation: its sheets are as the last synchronization left them. The record is attached to the KiCad started again, and the next synchronization plans the XML again from the baseline."
                 + (sheets.OtherEdits.Count == 0 ? "" : $" The other edits KiCad holds on {sheets.Names(sheets.OtherEdits)} are ordinary edits for that synchronization."),
                 sheets.OperationSheets, sheets.OtherEdits);
@@ -382,6 +384,12 @@ public static class ExitedOperationRelease
 
     private static string CompleteStep(DesignPublicationIntent publication) =>
         $"Operation {publication.OperationId:D} waits on the running KiCad. Complete it with kicad_design_sync_apply (operationId {publication.OperationId:D}, expectedRevisionToken {publication.RequestedRecoveryRevisionToken}), or start automatic synchronization, which completes it first.";
+
+    // The next step a repeated call reports while the continuation waits, with the sheets it was planned from (null: unknown).
+    internal static string PendingStep(DesignPublicationIntent publication, ReleasedSheets? planned) =>
+        CompleteStep(publication) + (planned is null
+            ? " Its sheet lists are unknown (null): the recovery record's observation of the running KiCad has moved on since the continuation was journaled."
+            : planned.KeptEdits());
 
     // A refusal once the operation is released: the original error, with what the release did and what to call again with.
     private static ExitedOperationRefusal Refused(DesignRecoveryStore store, DesignReleasedOperation receipt, string receiptPath,
@@ -465,7 +473,7 @@ public static class ExitedOperationRelease
     // The sheets a journaled continuation was planned from. The continuation attached the record to the running KiCad with
     // the observation it was planned from, and guards its native edit by that same revision, so comparing that observation
     // again gives exactly the sheets it reported. Null (unknown) once the record's observation has moved past that revision.
-    private static ReleasedSheets? PlannedSheets(DesignRecoveryState state, DesignReleasedOperation receipt, CancellationToken token)
+    internal static ReleasedSheets? PlannedSheets(DesignRecoveryState state, DesignReleasedOperation receipt, CancellationToken token)
     {
         var observed = state.ObservedElectrical?.Hierarchy;
         if (observed?.Data is null || observed.Revision is null || state.PendingNativeState?.Revision is not { } guarded

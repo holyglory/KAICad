@@ -9,6 +9,15 @@
 #include <fstream>
 #include <file_content_baseline.h>
 #include <richio.h>
+#include <file_write_observer.h>
+#include <iterator>
+#include <json_common.h>
+#include <kiplatform/io.h>
+#include <lockfile.h>
+#include <project.h>
+#include <settings/settings_manager.h>
+#include <wx/filename.h>
+#include <wx/utils.h>
 
 namespace
 {
@@ -22,6 +31,8 @@ struct LIFECYCLE_FIXTURE
     bool failSave = false, throwSave = false, failAfter = false, changeIdentity = false;
     bool closed = false, failClose = false;
     std::function<void()> persist;
+    // Runs as the native saver inside the checked save; returning false fails the save.
+    std::function<bool()> native;
     LIFECYCLE_FIXTURE()
     {
         auto* document = state.mutable_document();
@@ -93,6 +104,11 @@ struct LIFECYCLE_FIXTURE
                 ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
                 error.set_error_message( "Fixture write failure" ); return tl::unexpected( error );
             }
+            if( native && !native() )
+            {
+                ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                error.set_error_message( "Fixture native saver failed" ); return tl::unexpected( error );
+            }
             if( persist ) persist();
             state.set_native_content_dirty( false );
             if( changeIdentity ) state.set_native_identity( KIID().AsStdString() );
@@ -123,6 +139,92 @@ struct LIFECYCLE_FIXTURE
         LifecycleOperationResult result; BOOST_REQUIRE( response->message().UnpackTo( &result ) ); return result;
     }
 };
+
+using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+
+// Real files for the fixture's observed board and project, so writers can replace them while the
+// checked save watches every write.
+struct DISK_DOCUMENT
+{
+    std::filesystem::path directory =
+            std::filesystem::temp_directory_path() / ( "lifecycle-save-" + KIID().AsStdString() );
+    std::string pcb, project;
+    explicit DISK_DOCUMENT( LIFECYCLE_FIXTURE& aFixture )
+    {
+        std::filesystem::create_directory( directory );
+        aFixture.state.clear_native_files(); aFixture.state.clear_file_baselines();
+        pcb = Add( aFixture, "fixture.kicad_pcb" );
+        project = Add( aFixture, "fixture.kicad_pro" );
+    }
+    ~DISK_DOCUMENT()
+    {
+        std::error_code error;
+        std::filesystem::permissions( directory, std::filesystem::perms::owner_all,
+                                      std::filesystem::perm_options::add, error );
+        std::filesystem::remove_all( directory, error );
+    }
+    std::string Add( LIFECYCLE_FIXTURE& aFixture, const char* aName )
+    {
+        const std::string path = ( directory / aName ).string();
+        { std::ofstream output( path ); output << "original " << aName; }
+        const auto baseline = FILE_CONTENT_BASELINE::Read( wxString::FromUTF8( path ) );
+        aFixture.state.add_native_files( path );
+        auto* file = aFixture.state.add_file_baselines();
+        file->set_path( path ); file->set_baseline_path( path );
+        file->set_baseline_known( true ); file->set_current_known( true );
+        file->set_baseline_exists( true ); file->set_current_exists( true );
+        file->set_baseline_sha256( baseline.Sha256() ); file->set_current_sha256( baseline.Sha256() );
+        file->set_baseline_bytes( baseline.Bytes() ); file->set_current_bytes( baseline.Bytes() );
+        file->set_status( NFBS_UNCHANGED );
+        return path;
+    }
+    static std::string Contents( const std::string& aPath )
+    {
+        std::ifstream input( aPath );
+        return std::string( std::istreambuf_iterator<char>( input ), std::istreambuf_iterator<char>() );
+    }
+};
+
+// Replaces a file the way KiCad's savers do, and reports a writer error the way
+// SCH_API_SAVE::SaveSheetToFile does.
+bool SaveLikeKiCad( const std::string& aPath )
+{
+    try
+    {
+        PRETTIFIED_FILE_OUTPUTFORMATTER writer( wxString::FromUTF8( aPath ) );
+        writer.Print( "(saved)" );
+        writer.Finish();
+        return true;
+    }
+    catch( const IO_ERROR& error )
+    {
+        DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, wxString::FromUTF8( aPath ),
+                                                          error.Problem() );
+        return false;
+    }
+}
+
+bool CanCreateIn( const std::filesystem::path& aDirectory )
+{
+    const auto probe = aDirectory / ( "probe-" + KIID().AsStdString() );
+    {
+        std::ofstream output( probe );
+        if( !output ) return false;
+    }
+    std::error_code error;
+    std::filesystem::remove( probe, error );
+    return true;
+}
+
+bool Contains( const std::string& aText, const std::string& aPart )
+{
+    return aText.find( aPart ) != std::string::npos;
+}
+
+std::vector<std::string> List( const google::protobuf::RepeatedPtrField<std::string>& aField )
+{
+    return std::vector<std::string>( aField.begin(), aField.end() );
+}
 }
 
 BOOST_AUTO_TEST_SUITE( DocumentLifecycleController )
@@ -294,6 +396,413 @@ BOOST_AUTO_TEST_CASE( SavedCheckpointAllowsCloseAndVetoDoesNotConsumeTheEditor )
     BOOST_CHECK_EQUAL( fixture.closes, 1 );
     BOOST_CHECK( fixture.Result( fixture.CloseRequest() ).status() == LOS_CLOSED );
     BOOST_CHECK_EQUAL( fixture.saves, 1 ); BOOST_CHECK_EQUAL( fixture.closes, 2 );
+}
+
+BOOST_AUTO_TEST_CASE( OnlyWriteBlockedProblemsMarkFilesNotWritable )
+{
+    for( int variant = 0; variant < 5; ++variant )
+    {
+        LIFECYCLE_FIXTURE fixture;
+        const std::string pcb = fixture.state.native_files( 0 );
+        const std::string project = fixture.state.native_files( 1 );
+        fixture.native = [&]()
+        {
+            if( variant == 4 )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_FAILED, wxString::FromUTF8( project ),
+                        wxS( "writing the project settings failed, and the settings writer gave no system reason" ) );
+            if( variant == 0 || variant == 3 )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, wxString::FromUTF8( pcb ),
+                                                                  wxS( "the file is read-only" ) );
+            if( variant == 1 || variant == 3 )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, wxString::FromUTF8( pcb ),
+                        wxS( "one shared sheet file has conflicting root page numbers" ) );
+            if( variant == 2 )
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, wxEmptyString,
+                                                                  wxS( "the root schematic has no file name" ) );
+            return false;
+        };
+        const auto request = fixture.Request();
+        const auto result = fixture.Result( request );
+        const std::string& message = result.error_message();
+        BOOST_CHECK( result.status() == LOS_FAILED );
+        BOOST_CHECK( result.written_files().empty() );
+        BOOST_CHECK( Contains( message, "KiCad replaced none of the document's files" ) );
+        if( variant == 0 || variant == 3 )
+        {
+            BOOST_CHECK_EQUAL( result.error_code(), "file_not_writable" );
+            BOOST_CHECK( List( result.blocked_files() ) == std::vector<std::string>{ pcb } );
+            BOOST_CHECK( Contains( message, "the file is read-only" ) );
+        }
+        else if( variant == 4 )
+        {
+            // A failure nobody could explain is neither a blocked file nor a refusal.
+            BOOST_CHECK_EQUAL( result.error_code(), "native_save_failed" );
+            BOOST_CHECK( result.blocked_files().empty() );
+            BOOST_CHECK( Contains( message, "KiCad could not write 'fixture.kicad_pro'" ) );
+            BOOST_CHECK( Contains( message, "gave no system reason" ) );
+            BOOST_CHECK( Contains( message, "KiCad found nothing that blocks the named files now" ) );
+            BOOST_CHECK( !Contains( message, "make the file or folder writable" ) );
+            BOOST_CHECK( !Contains( message, "KiCad refused to save" ) );
+        }
+        else
+        {
+            // A refusal is not a write problem: no blocked file, and no advice to make files writable.
+            BOOST_CHECK_EQUAL( result.error_code(), "native_save_refused" );
+            BOOST_CHECK( result.blocked_files().empty() );
+            BOOST_CHECK( Contains( message, "making the document's files writable does not help" ) );
+            BOOST_CHECK( !Contains( message, "make the file or folder writable" ) );
+        }
+        if( variant == 1 || variant == 3 )
+            BOOST_CHECK( Contains( message, "conflicting root page numbers" ) );
+        if( variant == 2 )
+            BOOST_CHECK( Contains( message, "the root schematic has no file name" ) );
+        // Reports belong to the one save that made them; the retained result never changes.
+        BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, fixture.Result( request ) ) );
+        BOOST_CHECK_EQUAL( fixture.saves, 1 );
+    }
+    // Outside a checked save a report goes nowhere, so it cannot fail a later save.
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, wxS( "/nowhere" ), wxS( "ignored" ) );
+    LIFECYCLE_FIXTURE clean;
+    BOOST_CHECK( clean.Result( clean.Request() ).status() == LOS_SAVED );
+}
+
+BOOST_AUTO_TEST_CASE( UnexplainedNativeFailureChecksTheFilesOrStaysGeneric )
+{
+    namespace fs = std::filesystem;
+    LIFECYCLE_FIXTURE fixture;
+    DISK_DOCUMENT disk( fixture );
+    fixture.failSave = true;
+    auto result = fixture.Result( fixture.Request() );
+    BOOST_CHECK( result.status() == LOS_FAILED );
+    BOOST_CHECK_EQUAL( result.error_code(), "native_save_failed" );
+    BOOST_CHECK( result.blocked_files().empty() );
+    BOOST_CHECK( Contains( result.error_message(), "KiCad reported: Fixture write failure" ) );
+    fs::permissions( disk.pcb, fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write,
+                     fs::perm_options::remove );
+    // Like the native journeys, these checks need an account that file modes really restrict.
+    BOOST_REQUIRE_MESSAGE( !wxFileName::IsFileWritable( wxString::FromUTF8( disk.pcb ) ),
+                           "This account can write read-only files, so the check cannot be staged" );
+    result = fixture.Result( fixture.Request() );
+    BOOST_CHECK_EQUAL( result.error_code(), "file_not_writable" );
+    BOOST_CHECK( List( result.blocked_files() ) == std::vector<std::string>{ disk.pcb } );
+    BOOST_CHECK( Contains( result.error_message(), "the file is read-only" ) );
+    BOOST_CHECK( Contains( result.error_message(), "KiCad reported: Fixture write failure" ) );
+}
+
+BOOST_AUTO_TEST_CASE( ControllerRefusalsKeepTheirOwnCodeAndNeverBlockFiles )
+{
+    namespace fs = std::filesystem;
+    const char* codes[] = { "file_changed_during_save", "save_outside_document", "file_unreadable_during_save" };
+
+    for( int variant = 0; variant < 3; ++variant )
+    {
+        LIFECYCLE_FIXTURE fixture;
+        DISK_DOCUMENT disk( fixture );
+        const std::string outside = ( disk.directory / "other.kicad_sch" ).string();
+        bool staged = true;
+        fixture.native = [&]()
+        {
+            if( variant == 1 )
+                return SaveLikeKiCad( outside );
+
+            if( variant == 2 )
+            {
+                // Another program leaves the board writable but unreadable once the save began.
+                fs::permissions( disk.pcb, fs::perms::owner_write, fs::perm_options::replace );
+                staged = !std::ifstream( disk.pcb ).is_open();
+                return SaveLikeKiCad( disk.pcb );
+            }
+
+            { std::ofstream external( disk.pcb ); external << "external"; }
+            return SaveLikeKiCad( disk.pcb );
+        };
+        const auto result = fixture.Result( fixture.Request() );
+        BOOST_REQUIRE_MESSAGE( staged, "This account can read unreadable files, so the case cannot be staged" );
+        const std::string& message = result.error_message();
+        BOOST_CHECK( result.status() == LOS_FAILED );
+        BOOST_CHECK_EQUAL( result.error_code(), codes[variant] );
+        // The writer reported the refused write as its own failure; that never marks a file blocked.
+        BOOST_CHECK( result.blocked_files().empty() );
+        BOOST_CHECK( result.written_files().empty() );
+        BOOST_CHECK( !Contains( message, "make the file or folder writable" ) );
+        if( variant == 0 )
+        {
+            BOOST_CHECK( Contains( message, "another program changed it" ) );
+            BOOST_CHECK_EQUAL( DISK_DOCUMENT::Contents( disk.pcb ), "external" );
+        }
+        else if( variant == 1 )
+        {
+            BOOST_CHECK( Contains( message, "not one of the observed document's files" ) );
+            BOOST_CHECK( !std::filesystem::exists( outside ) );
+        }
+        else
+        {
+            BOOST_CHECK( Contains( message, "could not read it to confirm" ) );
+            BOOST_CHECK( Contains( message, "Make the file readable again" ) );
+            fs::permissions( disk.pcb, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace );
+            BOOST_CHECK_EQUAL( DISK_DOCUMENT::Contents( disk.pcb ), "original fixture.kicad_pcb" );
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE( PartialSaveNamesWhatReachedTheDisk )
+{
+    namespace fs = std::filesystem;
+    for( int variant = 0; variant < 4; ++variant )
+    {
+        LIFECYCLE_FIXTURE fixture;
+        DISK_DOCUMENT disk( fixture );
+        bool staged = true;
+        fixture.native = [&]()
+        {
+            if( variant == 3 )
+            {
+                // The writer replaced the board and then failed, for example flushing its folder,
+                // so it never confirmed the write.
+                FILE_WRITE_OBSERVER::BeforeWrite( wxString::FromUTF8( disk.pcb ) );
+                { std::ofstream replaced( disk.pcb ); replaced << "(saved)"; }
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED,
+                        wxString::FromUTF8( disk.pcb ), wxS( "Cannot flush directory to disk" ) );
+                return false;
+            }
+
+            if( !SaveLikeKiCad( disk.pcb ) )
+                return false;
+
+            if( variant == 2 )
+            {
+                // The settings writer failed without a reason, and the file is still writable.
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_FAILED,
+                        wxString::FromUTF8( disk.project ),
+                        wxS( "writing the project settings failed after the sheets were written, and the settings "
+                             "writer gave no system reason" ) );
+                return false;
+            }
+
+            if( variant == 0 )
+            {
+                // The folder stops accepting new files once the board is written, so the project
+                // writer cannot create its temporary file: a real system error.
+                fs::permissions( disk.directory, fs::perms::owner_write | fs::perms::group_write
+                                 | fs::perms::others_write, fs::perm_options::remove );
+                staged = !CanCreateIn( disk.directory );
+            }
+            else
+            {
+                std::ofstream external( disk.project );
+                external << "external";
+            }
+
+            return SaveLikeKiCad( disk.project );
+        };
+        const auto request = fixture.Request();
+        const auto result = fixture.Result( request );
+        BOOST_REQUIRE_MESSAGE( staged, "This account can create files in a read-only folder, so the case cannot be staged" );
+        const std::string& message = result.error_message();
+        BOOST_CHECK( result.status() == LOS_FAILED );
+        BOOST_CHECK_EQUAL( result.error_code(), "partial_save" );
+        BOOST_CHECK( List( result.written_files() ) == std::vector<std::string>{ disk.pcb } );
+        // Only a file the file system blocks is listed; a failure without a found reason, and a
+        // file that was replaced before the failure, never are.
+        BOOST_CHECK( List( result.blocked_files() )
+                     == ( variant == 0 ? std::vector<std::string>{ disk.project } : std::vector<std::string>{} ) );
+        BOOST_CHECK( Contains( message, "Already written: fixture.kicad_pcb" ) );
+        BOOST_CHECK( Contains( message, "Not written: fixture.kicad_pro" ) );
+        const char* causes[] = { "KiCad cannot write 'fixture.kicad_pro'", "another program changed it",
+                                 "KiCad could not write 'fixture.kicad_pro'",
+                                 "After replacing it, KiCad reported a failure for 'fixture.kicad_pcb'" };
+        BOOST_CHECK( Contains( message, causes[variant] ) );
+        BOOST_CHECK( DISK_DOCUMENT::Contents( disk.pcb ) != "original fixture.kicad_pcb" );
+        BOOST_CHECK_EQUAL( DISK_DOCUMENT::Contents( disk.project ),
+                           variant == 1 ? "external" : "original fixture.kicad_pro" );
+        BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, fixture.Result( request ) ) );
+        BOOST_CHECK_EQUAL( fixture.saves, 1 );
+    }
+}
+
+BOOST_AUTO_TEST_CASE( UnknownOperationRefusalStartsWithTheFixedMarker )
+{
+    LIFECYCLE_FIXTURE fixture;
+    ReadLifecycleOperation query;
+    query.mutable_document()->CopyFrom( fixture.state.document() );
+    query.set_operation_id( KIID().AsStdString() ); query.set_process_epoch( fixture.epoch );
+    const auto reply = fixture.Call( query );
+    BOOST_REQUIRE( !reply );
+    BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_BAD_REQUEST );
+    BOOST_CHECK_EQUAL( reply.error().error_message().rfind(
+                               std::string( DOCUMENT_LIFECYCLE_CONTROLLER::UNKNOWN_OPERATION_MARKER ) + ":", 0 ), 0u );
+    BOOST_CHECK_EQUAL( fixture.reads + fixture.saves + fixture.closes, 0u );
+}
+
+// KiCad opens a project read-only when it cannot take the project lock (SETTINGS_MANAGER::
+// LoadProject), and the manager then keeps a lock object of its own for it
+// (KICAD_MANAGER_FRAME::ProjectChanged). The real-editor journeys prove the reasons a checked save
+// gives for another user's lock and for a read-only lock file; this proves every lock state with
+// real locks, including the ones a journey cannot stage reliably: another program holding the
+// lock, that program letting go, and KiCad's own lock object holding the lock file itself. Each
+// reason names what stands in the way now, never guesses, and says to reopen the project.
+BOOST_AUTO_TEST_CASE( LockedProjectReasonNamesWhatHoldsTheLockNow )
+{
+    namespace fs = std::filesystem;
+    struct FOLDER
+    {
+        fs::path path = fs::temp_directory_path() / ( "lifecycle-lock-" + KIID().AsStdString() );
+        FOLDER() { fs::create_directory( path ); }
+        ~FOLDER() { std::error_code error; fs::remove_all( path, error ); }
+    } folder;
+
+    // A loadable project whose lock file records aOwner.
+    auto seed = [&]( const std::string& aName, const nlohmann::json& aOwner )
+    {
+        const fs::path pro = folder.path / ( aName + ".kicad_pro" );
+        {
+            std::ofstream out( pro.string() );
+            out << R"({"meta": {"filename": ")" << aName << R"(.kicad_pro", "version": 3}})";
+        }
+        std::ofstream lock( LOCKFILE::LockPathFor( wxString( pro.string() ) ).ToStdString() );
+        lock << aOwner.dump();
+        return wxString( pro.string() );
+    };
+    auto owner = []( const wxString& aUser, const wxString& aHost )
+    {
+        nlohmann::json record;
+        record["username"] = std::string( aUser.mb_str() );
+        record["hostname"] = std::string( aHost.mb_str() );
+        record["token"] = "0123456789abcdef0123456789abcdef";
+        return record;
+    };
+    auto text = []( const wxString& aText ) { return aText.ToStdString( wxConvUTF8 ); };
+    // Loads the project the way KiCad does; it opens read-only and without a lock of its own.
+    auto load = []( SETTINGS_MANAGER& aManager, const wxString& aPath ) -> PROJECT&
+    {
+        BOOST_REQUIRE( aManager.LoadProject( aPath ) );
+        PROJECT* project = aManager.GetProject( aPath );
+        BOOST_REQUIRE( project );
+        BOOST_REQUIRE( project->IsReadOnly() );
+        BOOST_REQUIRE( project->GetProjectLock() == nullptr );
+        return *project;
+    };
+    auto reason = [&]( const PROJECT& aProject )
+    {
+        return text( DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( aProject ) );
+    };
+    const std::string me = "names user '" + text( wxGetUserId() ) + "' on computer '" + text( wxGetHostName() ) + "'";
+    const auto        self = owner( wxGetUserId(), wxGetHostName() );
+
+    // 1. Another open lock holds it (a second open file description, as another process has).
+    {
+        const wxString    path = seed( "held", self );
+        const std::string lockPath = text( LOCKFILE::LockPathFor( path ) );
+        {
+            KIPLATFORM::IO::FILE_LOCK holder;
+            bool created = false;
+            BOOST_REQUIRE( holder.Acquire( LOCKFILE::LockPathFor( path ), created )
+                           == KIPLATFORM::IO::FILE_LOCK::STATE::HELD );
+            SETTINGS_MANAGER manager;
+            PROJECT&         project = load( manager, path );
+            const std::string held = reason( project );
+            BOOST_CHECK( Contains( held, "another program holds its project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( held, me ) );
+            BOOST_CHECK( Contains( held, "close the project there, then reopen it in KiCad" ) );
+            BOOST_CHECK( !Contains( held, "nothing holds the lock now" ) );
+
+            // 2. The manager keeps a lock object of its own, as KICAD_MANAGER_FRAME::ProjectChanged
+            // does, while the other program still holds the lock: that object holds nothing, but
+            // KiCad never calls the holder another program once it keeps an object. It names the
+            // record and says to close the project in the other KiCad.
+            project.SetProjectLock( new LOCKFILE( path ) );
+            BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+            const std::string kept = reason( project );
+            BOOST_CHECK( Contains( kept, "could not take the project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( kept, me ) );
+            BOOST_CHECK( Contains( kept, "close the project in any other KiCad that has it open, then reopen it in KiCad" ) );
+            BOOST_CHECK( !Contains( kept, "another program holds" ) );
+            project.SetProjectLock( nullptr );
+
+            // 3. The holder lets go: the same read-only project now says nothing holds the lock,
+            // without guessing why KiCad could not take it when it opened the project.
+            holder.Release();
+            const std::string released = reason( project );
+            BOOST_CHECK( Contains( released, "could not take the project lock '" + lockPath + "'" ) );
+            BOOST_CHECK( Contains( released, "nothing holds the lock now, so reopen the project in KiCad" ) );
+            BOOST_CHECK( !Contains( released, "another program holds" ) );
+            BOOST_CHECK( !Contains( released, "for example" ) );
+        }
+
+        // Reopening the project, as the reason advises, really takes the lock.
+        SETTINGS_MANAGER reopened;
+        BOOST_REQUIRE( reopened.LoadProject( path ) );
+        BOOST_CHECK( !reopened.GetProject( path )->IsReadOnly() );
+        BOOST_CHECK( DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( *reopened.GetProject( path ) ).empty() );
+    }
+
+    // 4. Another user's record with nobody holding it: KiCad never takes it over.
+    {
+        const wxString    path = seed( "foreign", owner( wxS( "someone-else" ), wxS( "another-host" ) ) );
+        const std::string lockPath = text( LOCKFILE::LockPathFor( path ) );
+        SETTINGS_MANAGER  manager;
+        PROJECT&          project = load( manager, path );
+
+        for( bool kept : { false, true } )
+        {
+            // 5. The manager keeps its own lock object for that record (ProjectChanged). The
+            // object holds the lock file's system lock itself, so an inspection of the lock sees it
+            // held; the reason still names the other user, never another program.
+            if( kept )
+            {
+                project.SetProjectLock( new LOCKFILE( path ) );
+                BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+                BOOST_REQUIRE_MESSAGE( !LOCKFILE::Inspect( path ).Valid(),
+                                       "KiCad's own lock object must hold the lock file for this case" );
+            }
+
+            const std::string foreign = reason( project );
+            BOOST_TEST_CONTEXT( ( kept ? "with" : "without" ) << " KiCad's own lock object" )
+            {
+                BOOST_CHECK( Contains( foreign, "project lock '" + lockPath + "' belongs to user 'someone-else' on "
+                                                "computer 'another-host'" ) );
+                BOOST_CHECK( Contains( foreign, "never takes over another user's lock" ) );
+                BOOST_CHECK( Contains( foreign, "delete the lock file if nobody has the project open, then reopen "
+                                                "it in KiCad" ) );
+                BOOST_CHECK( !Contains( foreign, "another program holds" ) );
+                BOOST_CHECK( !Contains( foreign, "nothing holds the lock now" ) );
+            }
+        }
+    }
+
+    // 6. The lock file is read-only, so KiCad cannot take even its own abandoned lock, with and
+    // without the manager's own lock object.
+    {
+        const wxString path = seed( "unwritable", self );
+        const fs::path lock( text( LOCKFILE::LockPathFor( path ) ) );
+        fs::permissions( lock, fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write,
+                         fs::perm_options::remove );
+        // Like the native journeys, this needs an account that file modes really restrict.
+        BOOST_REQUIRE_MESSAGE( !wxFileName::IsFileWritable( LOCKFILE::LockPathFor( path ) ),
+                               "This account can write read-only files, so the case cannot be staged" );
+        SETTINGS_MANAGER manager;
+        PROJECT&         project = load( manager, path );
+
+        for( bool kept : { false, true } )
+        {
+            if( kept )
+            {
+                project.SetProjectLock( new LOCKFILE( path ) );
+                BOOST_REQUIRE( !project.GetProjectLock()->Valid() );
+            }
+
+            const std::string unwritable = reason( project );
+            BOOST_TEST_CONTEXT( ( kept ? "with" : "without" ) << " KiCad's own lock object" )
+            {
+                BOOST_CHECK( Contains( unwritable, "cannot write its project lock file '" + lock.string()
+                                                           + "' (the file is read-only)" ) );
+                BOOST_CHECK( Contains( unwritable, "make the lock file writable or delete it, then reopen the project "
+                                                   "in KiCad" ) );
+                BOOST_CHECK( !Contains( unwritable, "another program holds" ) );
+                BOOST_CHECK( !Contains( unwritable, "nothing holds the lock now" ) );
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

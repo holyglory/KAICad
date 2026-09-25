@@ -29,7 +29,7 @@ command=["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={ path = "/healthz", timeout_seconds = 300 }
-env={ ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env={ ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/linux-3f02-signed-000023", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 
 [test]
 default="automation"
@@ -62,6 +62,15 @@ requires=["contracts","native-protocol"]
 timeout_seconds=900
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216},{name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216},{name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216},{name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864},{name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864}]
+
+[[test.diagram-requirement-history.check]]
+name="psu-cpu-canvas"
+tier="development"
+requires=["contracts","native-protocol"]
+after=["native-ui"]
+timeout_seconds=900
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests"]
+retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
 
 [test.part-symbol-contracts]
 timeout_seconds=600
@@ -2635,7 +2644,7 @@ command=["cmake", "--build", "automation/artifacts/native", "--target", "qa_eesc
 [[test.native-symbol-library-identity.check]]
 name="identity"
 tier="development"
-command=["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--no-tests=error", "--output-on-failure", "-R", "^qa_schematic_(symbol_library_identity|formatting)$"]
+command=["xvfb-run", "-a", "ctest", "--test-dir", "automation/artifacts/native", "--no-tests=error", "--output-on-failure", "-R", "^qa_schematic_(symbol_library_identity|formatting)$|^qa_api_sch_proto$|^qa_sch_pin_geometry_facts$|^qa_sch_change_tracking$"]
 
 [[test.native-symbol-library-identity.check]]
 name="managed-build"
@@ -2669,7 +2678,7 @@ retained_artifacts=[{ name = "upstream-release", path = "automation/artifacts/up
 
 [test.delivery-receipts]
 timeout_seconds=900
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "be8312a6716c0f892da4c1eb0b7824eaa4fd9aba", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview22-delivery-receipts" }
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "3f023fc2aa358dfef4002fd5df52e7f9dfcd3c92", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/integration.20260923/automation/artifacts/preview23-delivery-receipts" }
 
 [[test.delivery-receipts.check]]
 name="build"
@@ -2681,8 +2690,8 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", 
 [[test.delivery-receipts.check]]
 name="observations"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview22-delivery-receipt-tests"]
-retained_artifacts=[{ name = "delivery-observations", path = "automation/artifacts/preview22-delivery-receipts", max_bytes = 536870912 }, { name = "delivery-receipt-tests", path = "automation/artifacts/preview22-delivery-receipt-tests", max_bytes = 16777216 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=DeliveryReceipts", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview23-delivery-receipt-tests"]
+retained_artifacts=[{ name = "delivery-observations", path = "automation/artifacts/preview23-delivery-receipts", max_bytes = 536870912 }, { name = "delivery-receipt-tests", path = "automation/artifacts/preview23-delivery-receipt-tests", max_bytes = 16777216 }]
 
 [test.write-observer-boundary]
 timeout_seconds=1800
@@ -3266,7 +3275,7 @@ command=["cmake", "--build", "automation/artifacts/native", "--target", "api_sch
 name="native-suites"
 tier="development"
 requires=["native-build"]
-command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_api_request_target$|^qa_automation_caption$|^qa_automation_update_client$|^qa_automation_wire_rollback$|^qa_checked_schematic_controller$|^qa_document_change_journal$|^qa_document_lifecycle_controller$|^qa_erc_override_edits$|^qa_file_content_baseline$|^qa_native_state_digest$|^qa_net_chain_terminals$|^qa_net_settings_capture$|^qa_netclass_proto$|^qa_pcbnew_file_baseline$|^qa_pcbnew_state_format$|^qa_schematic_bom_settings$|^qa_schematic_parity_netlist$|^qa_schematic_setup_draft$|^qa_schematic_state_format$|^qa_settings_save_outcome$|^qa_symbol_graphic_identity$|^qa_symbol_update_identity$|^qa_undo_geometry_policy$", "--output-on-failure", "--no-tests=error"]
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_api_request_target$|^qa_automation_caption$|^qa_automation_update_client$|^qa_automation_wire_rollback$|^qa_checked_schematic_controller$|^qa_document_change_journal$|^qa_document_lifecycle_controller$|^qa_erc_override_edits$|^qa_file_content_baseline$|^qa_native_state_digest$|^qa_net_chain_terminals$|^qa_net_settings_capture$|^qa_netclass_proto$|^qa_pcbnew_file_baseline$|^qa_pcbnew_state_format$|^qa_schematic_bom_settings$|^qa_schematic_parity_netlist$|^qa_schematic_setup_draft$|^qa_schematic_state_format$|^qa_settings_save_outcome$|^qa_symbol_graphic_identity$|^qa_symbol_update_identity$|^qa_undo_geometry_policy$|^qa_api_sch_proto$|^qa_sch_pin_geometry_facts$|^qa_sch_change_tracking$", "--output-on-failure", "--no-tests=error"]
 
 [[test.native-acceptance.check]]
 name="journey-native-foundation"
@@ -3381,70 +3390,70 @@ retained_artifacts=[{ name = "dialog-tests", path = "automation/artifacts/field-
 
 # Current Linux publication and latest Mac/Windows public verification recipes
 # (unified from the former delivery control point codex/xml-net-settings).
-[test.preview-be83-linux-stage]
+[test.preview-3f02-linux-stage]
 timeout_seconds=1800
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 
-[[test.preview-be83-linux-stage.check]]
+[[test.preview-3f02-linux-stage.check]]
 name="managed-build"
 tier="development"
 role="preflight"
 invalidates=["contracts", "sign", "stage"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.preview-be83-linux-stage.check]]
+[[test.preview-3f02-linux-stage.check]]
 name="contracts"
 tier="development"
 role="preflight"
 invalidates=["sign", "stage"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview-be83-stage-tests"]
-retained_artifacts=[{ name = "stage-tests", path = "automation/artifacts/preview-be83-stage-tests", max_bytes = 16777216 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SignedLinuxPreviewStagingTests|FullyQualifiedName~UpdatePublishingTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview-3f02-stage-tests"]
+retained_artifacts=[{ name = "stage-tests", path = "automation/artifacts/preview-3f02-stage-tests", max_bytes = 16777216 }]
 
-[[test.preview-be83-linux-stage.check]]
+[[test.preview-3f02-linux-stage.check]]
 name="sign"
 tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/linux-be8312a671-sequence22.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260923T140030Z-be8312a6716c", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/be83-preview22.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-2dc0-signed-000021/updates/preview.json"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/integration.20260923/automation/distribution/releases/linux-3f023fc2aa-sequence23.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/20260924T181444Z-3f023fc2aa35", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/3f02-preview23.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022/updates/preview.json"]
 
-[[test.preview-be83-linux-stage.check]]
+[[test.preview-3f02-linux-stage.check]]
 name="stage"
 tier="development"
 requires=["sign"]
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260923T140030Z-be8312a6716c", "--commit", "be8312a6716c0f892da4c1eb0b7824eaa4fd9aba", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-2dc0-signed-000021", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/be83-preview22.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-signed-linux", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/20260924T181444Z-3f023fc2aa35", "--commit", "3f023fc2aa358dfef4002fd5df52e7f9dfcd3c92", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022", "--output", "/mnt/build-storage/codex/kicad/public-candidates/linux-3f02-signed-000023", "--feed", "/mnt/build-storage/codex/kicad/public-candidates/3f02-preview23.json", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"]
 
-[test.preview22-public]
+[test.preview23-public]
 timeout_seconds=900
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260920T070246Z-2dc0fc1fa8e5", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260923T140030Z-be8312a6716c", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/preview22-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/linux-2dc0-signed-000021/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260923T140030Z-be8312a6716c", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260924T181444Z-3f023fc2aa35", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-3f02-signed-000023", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/integration.20260923/automation/artifacts/preview23-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/linux-be83-signed-000022/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
 
-[[test.preview22-public.check]]
+[[test.preview23-public.check]]
 name="build"
 tier="development"
 role="preflight"
 invalidates=["https", "rendered", "landing", "browser"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
-[[test.preview22-public.check]]
+[[test.preview23-public.check]]
 name="https"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicDownloads", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview22-download-tests"]
-retained_artifacts=[{ name = "preview21-download-tests", path = "automation/artifacts/preview22-download-tests", max_bytes = 16777216 }, { name = "preview21-download-evidence", path = "automation/artifacts/preview22-download-evidence", max_bytes = 16777216 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicDownloads", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview23-download-tests"]
+retained_artifacts=[{ name = "preview23-download-tests", path = "automation/artifacts/preview23-download-tests", max_bytes = 16777216 }, { name = "preview23-download-evidence", path = "automation/artifacts/preview23-download-evidence", max_bytes = 16777216 }]
 
-[[test.preview22-public.check]]
+[[test.preview23-public.check]]
 name="rendered"
 tier="development"
 requires=["https"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview22-caption-tests"]
-retained_artifacts=[{ name = "preview21-caption-tests", path = "automation/artifacts/preview22-caption-tests", max_bytes = 16777216 }, { name = "public-caption-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview23-caption-tests"]
+retained_artifacts=[{ name = "preview23-caption-tests", path = "automation/artifacts/preview23-caption-tests", max_bytes = 16777216 }, { name = "public-caption-evidence", path = "automation/artifacts/native-session-current", max_bytes = 33554432 }]
 
-[[test.preview22-public.check]]
+[[test.preview23-public.check]]
 name="landing"
 tier="development"
 command=["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automation/qualification/landing-page.json", "--review-against", "/mnt/build-storage/codex/kicad/evidence/windows-f120-f4c1e3-manual-review.json", "--fail-on", "critical"]
 
-[[test.preview22-public.check]]
+[[test.preview23-public.check]]
 name="browser"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview22-landing-browser"]
-retained_artifacts=[{ name = "download-browser", path = "automation/artifacts/preview22-landing-browser", max_bytes = 16777216 }]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=LandingBrowser", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/preview23-landing-browser"]
+retained_artifacts=[{ name = "download-browser", path = "automation/artifacts/preview23-landing-browser", max_bytes = 16777216 }]
 
 [test.windows-validator-isolation]
 timeout_seconds=900

@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Recursive block graph schema 2 (contract rbg-v2 section 5): version 1 plus interface domain and
      direction, the revision-bound per-level layout, interface realizations, the Harness physical
-     allocation kind, connection archive schema 2 and the one-time conversion receipt. Version 1
-     stays frozen byte-for-byte; readers accept both, and every changed diagram file write emits 2
-     (R4), so a version 1 file keeps its bytes only until its first changed write. -->
+     allocation kind and connection archive schema 2. Version 1 stays frozen byte-for-byte; readers
+     accept both, and every changed diagram file write emits 2 (R4), so a version 1 file keeps its
+     bytes only until its first changed write. The flat-diagram conversion receipt is retired: legacy
+     flat diagrams are discarded, not converted (owner decision n9af098253fec71da). -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            targetNamespace="urn:kicad:automation:recursive-block-graph:2"
            xmlns="urn:kicad:automation:recursive-block-graph:2"
@@ -60,45 +61,8 @@
   <xs:simpleType name="realization-target-kind"><xs:restriction base="xs:string">
     <xs:enumeration value="ChildInterface"/><xs:enumeration value="LocalConnection"/><xs:enumeration value="Pin"/>
   </xs:restriction></xs:simpleType>
-  <xs:simpleType name="sha256"><xs:restriction base="xs:string"><xs:pattern value="[0-9a-f]{64}"/></xs:restriction></xs:simpleType>
   <xs:simpleType name="endpoint-index"><xs:restriction base="xs:int"><xs:minInclusive value="1"/></xs:restriction></xs:simpleType>
   <xs:simpleType name="rgb"><xs:restriction base="xs:unsignedInt"><xs:maxInclusive value="16777215"/></xs:restriction></xs:simpleType>
-  <xs:simpleType name="migration-item-kind"><xs:restriction base="xs:string">
-    <xs:enumeration value="Structure"/><xs:enumeration value="Block"/><xs:enumeration value="Port"/><xs:enumeration value="Connection"/>
-    <xs:enumeration value="ConnectionEndpoint"/><xs:enumeration value="BlockPurpose"/><xs:enumeration value="ComponentLink"/>
-    <xs:enumeration value="NetLink"/><xs:enumeration value="ConnectionDescription"/><xs:enumeration value="Statement"/>
-    <xs:enumeration value="Property"/><xs:enumeration value="UnresolvedNetBinding"/><xs:enumeration value="UnresolvedComponentReference"/>
-    <xs:enumeration value="BlockPlacement"/><xs:enumeration value="PortPlacement"/><xs:enumeration value="ConnectionPlacement"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="migration-outcome"><xs:restriction base="xs:string">
-    <xs:enumeration value="Converted"/><xs:enumeration value="Partial"/><xs:enumeration value="Retained"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="migration-target-kind"><xs:restriction base="xs:string">
-    <xs:enumeration value="None"/><xs:enumeration value="Block"/><xs:enumeration value="Interface"/><xs:enumeration value="Connection"/>
-    <xs:enumeration value="UnresolvedEndpoint"/><xs:enumeration value="DefinitionPurpose"/><xs:enumeration value="ComponentBinding"/>
-    <xs:enumeration value="InterconnectSegment"/><xs:enumeration value="ConnectionName"/><xs:enumeration value="BlockPlacement"/>
-    <xs:enumeration value="PortPlacement"/><xs:enumeration value="ConnectionRoute"/><xs:enumeration value="RetainedGuidance"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="migration-reason"><xs:restriction base="xs:string">
-    <xs:enumeration value="Exact"/><xs:enumeration value="NameDerivedFromPortNames"/><xs:enumeration value="NameFromDescriptionFirstLine"/>
-    <xs:enumeration value="CrossLevelEndpoint"/><xs:enumeration value="SameBlockConnection"/><xs:enumeration value="NoManifestSupplied"/>
-    <xs:enumeration value="DesignNotDeclaredInManifest"/><xs:enumeration value="GuidanceUnclassified"/>
-    <xs:enumeration value="UnresolvedReferenceRetained"/><xs:enumeration value="TargetIsElectrical"/>
-    <xs:enumeration value="NetCompletenessUnrecorded"/><xs:enumeration value="PurposeStrengthUnrecorded"/>
-    <xs:enumeration value="PlacementReusedAsFrame"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="migration-source-envelope"><xs:restriction base="xs:string">
-    <xs:enumeration value="EngineeringDesign"/><xs:enumeration value="NativeSchematicDesign"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="retained-guidance-kind"><xs:restriction base="xs:string">
-    <xs:enumeration value="Statement"/><xs:enumeration value="Property"/><xs:enumeration value="ConnectionDescription"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="statement-role"><xs:restriction base="xs:string">
-    <xs:enumeration value="Intent"/><xs:enumeration value="Interpretation"/><xs:enumeration value="Realization"/>
-  </xs:restriction></xs:simpleType>
-  <xs:simpleType name="guidance-strength"><xs:restriction base="xs:string">
-    <xs:enumeration value="Information"/><xs:enumeration value="Preference"/><xs:enumeration value="Requirement"/>
-  </xs:restriction></xs:simpleType>
   <xs:complexType name="rect">
     <xs:attribute name="x" type="pdecimal" use="required"/><xs:attribute name="y" type="pdecimal" use="required"/>
     <xs:attribute name="width" type="pdecimal" use="required"/><xs:attribute name="height" type="pdecimal" use="required"/>
@@ -304,57 +268,6 @@
         <xs:attribute name="request-sha256" type="r:sha256" use="required"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
-    <!-- One-time conversion receipt of a flat structural diagram (contract rbg-v2 section 4.12). -->
-    <xs:element name="migration" minOccurs="0"><xs:complexType><xs:sequence>
-      <xs:element name="root" type="selection"/>
-      <xs:element name="origin" type="origin"/>
-      <xs:element name="items"><xs:complexType><xs:sequence>
-        <xs:element name="item" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
-          <xs:element name="detail" type="xs:string" minOccurs="0"/>
-        </xs:sequence>
-          <xs:attribute name="kind" type="migration-item-kind" use="required"/>
-          <xs:attribute name="source" type="h:identity" use="required"/>
-          <xs:attribute name="source-key" type="xs:string"/>
-          <xs:attribute name="outcome" type="migration-outcome" use="required"/>
-          <xs:attribute name="target-kind" type="migration-target-kind" use="required"/>
-          <xs:attribute name="target" type="h:identity"/>
-          <xs:attribute name="scope" type="h:identity"/>
-          <xs:attribute name="reason" type="migration-reason" use="required"/>
-        </xs:complexType></xs:element>
-      </xs:sequence></xs:complexType></xs:element>
-      <xs:element name="retained-guidance"><xs:complexType><xs:sequence>
-        <xs:element name="guidance" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
-          <xs:element name="text" type="xs:string"/>
-        </xs:sequence>
-          <xs:attribute name="kind" type="retained-guidance-kind" use="required"/>
-          <xs:attribute name="source" type="h:identity" use="required"/>
-          <xs:attribute name="target" type="h:identity" use="required"/>
-          <xs:attribute name="scope" type="h:identity"/>
-          <xs:attribute name="role" type="statement-role"/>
-          <xs:attribute name="strength" type="guidance-strength"/>
-          <xs:attribute name="key" type="xs:string"/>
-          <xs:attribute name="category" type="xs:string"/>
-          <xs:attribute name="has-quantity" type="xs:boolean" use="required"/>
-          <xs:attribute name="has-pin-connection" type="xs:boolean" use="required"/>
-        </xs:complexType></xs:element>
-      </xs:sequence></xs:complexType></xs:element>
-      <xs:element name="source-structure"><xs:complexType><xs:simpleContent><xs:extension base="xs:string">
-        <xs:attribute name="sha256" type="sha256" use="required"/>
-      </xs:extension></xs:simpleContent></xs:complexType></xs:element>
-    </xs:sequence>
-      <xs:attribute name="id" type="h:identity" use="required"/>
-      <xs:attribute name="source-path" type="xs:string" use="required"/>
-      <xs:attribute name="source-sha256" type="sha256" use="required"/>
-      <xs:attribute name="source-structure" type="h:identity" use="required"/>
-      <xs:attribute name="source-circuit" type="h:identity" use="required"/>
-      <xs:attribute name="source-envelope" type="migration-source-envelope" use="required"/>
-      <xs:attribute name="converter" type="xs:string" use="required" fixed="kicad-structural-migration/1"/>
-      <xs:attribute name="nanometres-per-diagram-unit" type="xs:long" use="required" fixed="100000"/>
-      <xs:attribute name="design" type="h:identity"/>
-      <xs:attribute name="manifest-path" type="xs:string"/>
-      <xs:attribute name="manifest-sha256" type="sha256"/>
-      <xs:attribute name="design-resolution" type="migration-reason" use="required"/>
-    </xs:complexType></xs:element>
   </xs:sequence>
     <xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="2"/>
     <xs:attribute name="document" type="h:identity" use="required"/>

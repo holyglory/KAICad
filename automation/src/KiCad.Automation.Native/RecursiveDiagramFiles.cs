@@ -29,7 +29,7 @@ public static class RecursiveDiagramFiles
             || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0 || request.Save is not null
             || request.Rebase is not null || request.SaveConnection is not null || request.Implementation is not null || request.InspectedBlock is not null
             || request.Restoration is not null || request.LevelEdit is not null || request.SaveLevel is not null || request.RebaseLevel is not null
-            || request.Reparent is not null || request.Migrate is not null || !create && request.Create is not null || create && request.Discover is not null
+            || request.Reparent is not null || !create && request.Create is not null || create && request.Discover is not null
             || !create && (request.RepositoryRoot.Length != 0 || request.SourcePath.Length != 0))
             throw Refused("ambiguous_diagram_file_request",
                 "Creating and discovering diagrams take only their own target and payload; no document identity or file token.");

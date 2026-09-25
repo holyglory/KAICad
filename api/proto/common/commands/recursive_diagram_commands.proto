@@ -155,6 +155,45 @@ message RecursiveDiagramEditorState {
   string facet_editor = 214;
   // Why the facet detail's entry cannot be kept yet, as shown beside it; "" when it can.
   string facet_notice = 215;
+  // Round A3 (owner decision nf53af9d74841b7d3): the details the inspector shows for the selected connection, in
+  // display order: "signals", "direction", "domain", "type" or "endpoints". A detail is shown once it has a value
+  // or once the person added its row; "endpoints" appears only when an end says more than its block or port.
+  repeated string shown_connection_details = 216;
+  // The selected connection's signals, as its Signals row lists them.
+  repeated string shown_signals = 217;
+  // Why the connection's caption or new signal cannot be kept, as shown in the inspector; "" when it can.
+  string connection_notice = 218;
+  // How each connection of the viewed level shows its direction on the canvas, as drawn.
+  repeated DiagramCanvasConnectionMarks connection_marks = 219;
+  // The viewed level's stored frame (its dashed boundary) as drawn, relative to the editor window; absent while the
+  // level has no stored frame. shown is true when the whole frame lies inside the canvas.
+  DiagramControlRect level_frame = 220;
+  // Each port on the level's boundary, with its name (label) as drawn beside the frame, relative to the editor window.
+  // shown is true when the whole name lies inside the canvas.
+  repeated DiagramControlRect boundary_port_names = 221;
+  // Presses the canvas has received, so rendered input can tell a press that changed nothing from one not yet delivered.
+  uint64 canvas_presses = 222;
+  // Each note placed on the viewed level's canvas, as drawn, in the level's note order.
+  repeated DiagramCanvasNote canvas_notes = 223;
+}
+
+// A note on the canvas as drawn: its box relative to the editor window, in pixels (shown is true when the whole box
+// lies inside the canvas), and the lines of text it shows. Lines break between words; only a word wider than the note
+// breaks inside it, and text that does not fit ends the last shown line with "…".
+message DiagramCanvasNote {
+  string annotation_id = 1;
+  DiagramControlRect rect = 2;
+  repeated string lines = 3;
+}
+
+// The arrowheads a connection shows on the canvas for its direction detail; a connection without a
+// direction has no entry.
+message DiagramCanvasConnectionMarks {
+  string connection_id = 1;
+  // The endpoints (by index) an arrowhead points into, in ascending order.
+  repeated uint32 arrow_endpoints = 2;
+  // Each arrowhead as drawn, relative to the editor window, in pixels (one per leg that ends in an arrowhead).
+  repeated DiagramControlRect arrows = 3;
 }
 
 // One component-choice chip on a block, relative to the editor window, in pixels.
@@ -192,6 +231,9 @@ message DiagramCanvasBlockChips {
   DiagramControlRect more = 6;
   // The block's caption text as drawn (clipped to the block's content area).
   DiagramControlRect caption = 7;
+  // The names of the block's placed ports as drawn just inside its edge; chips, "+N more", marks and the Review facets
+  // link keep clear of them.
+  repeated DiagramControlRect port_names = 8;
 }
 
 // One rendered control relative to the editor window, in pixels. active is the

@@ -26,6 +26,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <wx/event.h>
 #include <wx/filename.h>
@@ -77,6 +78,16 @@ public:
     // result after creating its window. Does not send an IPC reply or bypass
     // handler document validation.
     API_RESULT DispatchToHandlers( ApiRequest& aRequest );
+
+    /**
+     * The fully qualified request message types that this server dispatches at this moment, in
+     * ordinal order: its own session handshake, the automation controllers and every registered
+     * handler.  Editors register their handlers when they open and remove them when they close,
+     * so the list is a snapshot of the current process state, not of the build.  The automation
+     * handshake publishes it as handled_requests.
+     */
+    std::vector<std::string> AdvertisedRequestTypes() const;
+
     void RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& aDocument );
     bool IsCleanCloseActive() const;
 

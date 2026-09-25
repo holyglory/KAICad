@@ -18,6 +18,7 @@
  */
 
 #include <api/sch_api_save.h>
+#include <api/document_lifecycle_controller.h>
 
 #include <base_screen.h>
 #include <pgm_base.h>
@@ -42,17 +43,46 @@ namespace SCH_API_SAVE
 
 namespace
 {
+using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+
+// Tell a running checked save that the file system will not accept a write of this file; plain
+// saves only keep the trace.
+void ReportBlocked( const wxString& aPath, const wxString& aReason )
+{
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Cannot write '%s': %s" ), aPath, aReason );
+}
+
+
+// Tell a running checked save that KiCad refuses to save for a reason that writable files would
+// not fix. @a aPath may be empty.
+void ReportRefused( const wxString& aPath, const wxString& aReason )
+{
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Save refused for '%s': %s" ), aPath, aReason );
+}
+
+
+// Tell a running checked save that writing this file failed although neither the writer nor a
+// check of the file found why, so it is not reported as a blocked file.
+void ReportFailed( const wxString& aPath, const wxString& aReason )
+{
+    DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_FAILED, aPath, aReason );
+    wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "Writing '%s' failed: %s" ), aPath, aReason );
+}
+
+
+// The file and the folder it is replaced in must both accept the write, following a symbolic
+// link as the writer does, or no file of the save is written.
 bool WritableDestination( const wxString& aPath )
 {
-    wxFileName path( aPath );
-    if( aPath.empty() || !path.IsOk() || !path.IsAbsolute() || wxDirExists( aPath ) ) return false;
-    if( path.FileExists() ) return path.IsFileWritable();
-    if( path.DirExists() ) return path.IsDirWritable();
-    // Preserve SaveSheetToFile's existing single-directory creation workflow.
-    wxFileName parent( path.GetPath(), wxEmptyString );
-    if( parent.GetDirCount() == 0 ) return false;
-    parent.RemoveLastDir();
-    return parent.DirExists() && parent.IsDirWritable();
+    const wxString reason = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( aPath );
+
+    if( reason.empty() )
+        return true;
+
+    ReportBlocked( aPath, reason );
+    return false;
 }
 }
 
@@ -67,10 +97,16 @@ bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& 
     schematicFileName.MakeAbsolute();
 
     if( !schematicFileName.DirExists() && !wxMkdir( schematicFileName.GetPath() ) )
+    {
+        ReportBlocked( schematicFileName.GetFullPath(), wxS( "its folder could not be created" ) );
         return false;
+    }
 
     if( schematicFileName.FileExists() && !schematicFileName.IsFileWritable() )
+    {
+        ReportBlocked( schematicFileName.GetFullPath(), wxS( "the file is read-only" ) );
         return false;
+    }
 
     SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::GuessPluginTypeFromSchPath( schematicFileName.GetFullPath() );
 
@@ -86,7 +122,16 @@ bool SaveSheetToFile( SCH_SHEET* aSheet, SCHEMATIC& aSchematic, const wxString& 
     }
     catch( const IO_ERROR& ioe )
     {
-        wxLogTrace( wxS( "KI_TRACE_API" ), wxS( "SaveSheetToFile failed: %s" ), ioe.What() );
+        // Formatting refuses conflicting root page numbers before anything is written; every
+        // other error comes from writing the file, for example a full disk, and names the file
+        // and the system error.
+        if( ResolveRootInstance( &aSchematic, *aSheet ).conflict )
+            ReportRefused( schematicFileName.GetFullPath(),
+                           wxS( "one shared sheet file has conflicting root page numbers; set its root page "
+                                "number explicitly" ) );
+        else
+            ReportBlocked( schematicFileName.GetFullPath(), ioe.Problem() );
+
         return false;
     }
 }
@@ -165,31 +210,61 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
 {
     // All callers, including Save Copy targeting the current root filename,
     // must reject known conflicts before writing the first screen.
-    if( HasRootInstanceConflicts( aSchematic ) )
-        return false;
-
     SCH_SCREEN* rootScreen = aSchematic.RootScreen();
 
-    if( !rootScreen || rootScreen->GetFileName().IsEmpty() )
+    if( HasRootInstanceConflicts( aSchematic ) )
+    {
+        ReportRefused( wxEmptyString, wxS( "one shared sheet file has conflicting root page numbers; set its root "
+                                           "page number explicitly" ) );
         return false;
+    }
+
+    if( !rootScreen || rootScreen->GetFileName().IsEmpty() )
+    {
+        ReportRefused( wxEmptyString, wxS( "the root schematic has no file name" ) );
+        return false;
+    }
 
     SCH_SCREENS screens( aSchematic.Root() );
     screens.BuildClientSheetPathList();
 
-    if( aProject.IsReadOnly() || aProject.GetProjectFile().IsReadOnly()
-            || !WritableDestination( aProject.GetProjectFullName() ) )
-        return false;
+    // Check every file before writing the first one, and report each problem, so a blocked
+    // save changes nothing on disk and the caller can fix all causes at once.
+    bool writable = true;
+
+    // The file system decides whether the project file can be written, like every sheet file.
+    if( !WritableDestination( aProject.GetProjectFullName() ) )
+        writable = false;
+
+    // KiCad's own read-only state is fixed when the project is opened, so making the file writable
+    // alone does not change it.
+    if( const wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( aProject );
+        !readOnly.empty() )
+    {
+        ReportRefused( aProject.GetProjectFullName(), readOnly );
+        writable = false;
+    }
+
     for( size_t i = 0; i < screens.GetCount(); ++i )
     {
         const SCH_SHEET* sheet = screens.GetSheet( i );
         if( sheet && sheet->IsVirtualRootSheet() ) continue;
         const SCH_SCREEN* screen = screens.GetScreen( i );
-        if( !sheet || !screen || screen->GetFileName().empty()
-                || !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
-            return false;
+        if( !sheet || !screen || screen->GetFileName().empty() )
+        {
+            ReportRefused( wxEmptyString,
+                           sheet ? wxString::Format( wxS( "sheet '%s' has no file name" ), sheet->GetName() )
+                                 : wxString( wxS( "a sheet has no file name" ) ) );
+            writable = false;
+        }
+        else if( !WritableDestination( aProject.AbsolutePath( screen->GetFileName() ) ) )
+        {
+            writable = false;
+        }
     }
 
-    bool success = true;
+    if( !writable )
+        return false;
 
     for( size_t i = 0; i < screens.GetCount(); i++ )
     {
@@ -210,19 +285,34 @@ bool SaveSchematic( SCHEMATIC& aSchematic, PROJECT& aProject )
         else
             screen->SetVirtualPageNumber( 0 );
 
-        success &= SaveSheetToFile( screens.GetSheet( i ), aSchematic, fileName.GetFullPath() );
-
+        // Stop at the first failure: later files keep their old content, the editor keeps every
+        // change, and the next successful save writes the whole hierarchy again.
+        if( !SaveSheetToFile( screens.GetSheet( i ), aSchematic, fileName.GetFullPath() ) )
+            return false;
     }
 
-    if( success )
-        success = UpdateProjectFile( aSchematic, aProject );
+    if( !UpdateProjectFile( aSchematic, aProject ) )
+    {
+        // The project file and its folder accepted writes before the first sheet was written,
+        // so check again for what changed. The settings writer itself gives no reason, so a file
+        // the check finds writable is not reported as blocked.
+        const wxString reason = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( aProject.GetProjectFullName() );
 
-    if( success )
-        for( size_t i = 0; i < screens.GetCount(); ++i )
-            if( !screens.GetSheet( i )->IsVirtualRootSheet() )
-                screens.GetScreen( i )->SetContentModified( false );
+        if( reason.empty() )
+            ReportFailed( aProject.GetProjectFullName(),
+                          wxS( "writing the project settings failed after the sheets were written, and the "
+                               "settings writer gave no system reason" ) );
+        else
+            ReportBlocked( aProject.GetProjectFullName(), reason );
 
-    return success;
+        return false;
+    }
+
+    for( size_t i = 0; i < screens.GetCount(); ++i )
+        if( !screens.GetSheet( i )->IsVirtualRootSheet() )
+            screens.GetScreen( i )->SetContentModified( false );
+
+    return true;
 }
 
 

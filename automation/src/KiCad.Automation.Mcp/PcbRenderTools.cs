@@ -17,7 +17,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRenderTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_render_3d", ReadOnly = true),
-     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness.")]
+     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness."),
+     KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "board lifecycle state, native image snapshot"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Render3D(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Execute(async () =>
     {

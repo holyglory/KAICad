@@ -14,7 +14,9 @@ public sealed record InstanceReconnectionView(string InstanceId, string ProjectP
 public sealed class InstanceUpdateTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_instance_reconnect_after_update", UseStructuredContent = true),
-     Description("Reconnect one saved instance after an explicit verified application update or recovery. Requires its original epoch, the absolute managed installation root and exact handoff operation UUID. Verifies old-process exit, signed retained payloads, original native-session proof and the live replacement before changing the connection. Legacy journals without origin proof are refused. Never starts, closes or signals an editor. Retry the same identities if a reply is lost. Returns the new process/event epochs; take fresh document snapshots before editing or resuming events. Does not itself synchronize XML.")]
+     Description("Reconnect one saved instance after an explicit verified application update or recovery. Requires its original epoch, the absolute managed installation root and exact handoff operation UUID. Verifies old-process exit, signed retained payloads, original native-session proof and the live replacement before changing the connection. Legacy journals without origin proof are refused. Never starts, closes or signals an editor. Retry the same identities if a reply is lost. Returns the new process/event epochs; take fresh document snapshots before editing or resuming events. Does not itself synchronize XML."),
+     KiCadCapability("service", "compiled-mcp plus native-api", "saved instance ID, original process epoch, installation root, handoff operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.McpReconnectsToTheVerifiedNativeReplacementAndRejectsOldEvents", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> Reconnect(string instanceId, string installationRoot, string operationId,
         string expectedOldEpoch, CancellationToken cancellationToken)
     {

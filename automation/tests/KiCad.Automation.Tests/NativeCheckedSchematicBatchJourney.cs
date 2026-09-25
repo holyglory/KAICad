@@ -180,5 +180,7 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-checked-request.json"), requestJson, token);
         await client.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = initialTitle }, token);
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        // Write failures and cancellations through the MCP lifecycle tools keep the work safe.
+        await VerifySaveFailuresKeepWork(client, document, processId, evidence, instanceId, token);
     }
 }

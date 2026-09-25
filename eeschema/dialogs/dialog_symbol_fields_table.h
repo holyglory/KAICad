@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -61,6 +62,11 @@ private:
      */
     void LoadFieldNames();
     void stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename );
+
+    /// A changed export file name is saved with the project, so it becomes an undoable,
+    /// recorded commit rather than a bare modified flag.
+    void OnExport( wxCommandEvent& aEvent ) override;
+    void onBomSettingsChanged() override;
     FIELDS_TABLE_BOM_SETTINGS readBomUiSettings();
     void recordInitialBomUiState();
 
@@ -112,6 +118,7 @@ private:
 
     bool m_aborted = false;
     FIELDS_TABLE_BOM_SETTINGS m_bomUiBaseline;
+    std::optional<wxString>   m_exportFileNameBeforeExport;
     bool m_bomInitialViewSelected = false;
 
 public:

@@ -19,7 +19,9 @@
  */
 
 #include <api/api_handler_sch.h>
+#include <api/api_sch_state_groups.h>
 #include <api/api_server.h>
+#include <api/checked_schematic_controller.h>
 #include <pgm_base.h>
 #include <sch_file_versions.h>
 #include <project/project_file.h>
@@ -202,6 +204,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleActivateSheet );
     registerHandler<kiapi::automation::v1::ReadSchematicChangeJournal, kiapi::automation::v1::SchematicChangeJournal>(
             &API_HANDLER_SCH::handleReadChangeJournal );
+    registerHandler<kiapi::automation::v1::SchematicTrackingReadErcMarkers,
+                    kiapi::automation::v1::SchematicTrackingErcMarkers>( &API_HANDLER_SCH::handleReadErcMarkers );
     registerHandler<SaveDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
@@ -868,6 +872,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             selection.ClearReferencePoint();
     };
 
+    // Set once a connectivity assertion has rebuilt connectivity with this batch's updates
+    // applied (CN-1 §8.1). Rolling back must then forget those connections before Revert
+    // deletes the replaced children they point at, and rebuild from the restored document.
+    bool connectivityEvaluated = false;
+
     auto rollback = [&]()
     {
         // These groups have never become screen-owned. Existing member undo
@@ -878,12 +887,44 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             if( item->Type() == SCH_GROUP_T )
                 static_cast<SCH_GROUP*>( item.get() )->RemoveAll();
         }
+        if( connectivityEvaluated )
+        {
+            for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+            {
+                for( SCH_ITEM* item : path.LastScreen()->Items() )
+                {
+                    auto forget = [&]( SCH_ITEM* aItem )
+                    {
+                        aItem->ClearConnectedItems( path );
+                        aItem->SetConnectivityDirty();
+                    };
+                    forget( item );
+                    if( item->Type() == SCH_SYMBOL_T )
+                    {
+                        for( const std::unique_ptr<SCH_PIN>& pin : static_cast<SCH_SYMBOL*>( item )->GetRawPins() )
+                            forget( pin.get() );
+                    }
+                    else if( item->Type() == SCH_SHEET_T )
+                    {
+                        for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item )->GetPins() )
+                            forget( pin );
+                    }
+                }
+            }
+        }
         auto pending = m_commits.find( aCtx.ClientName );
 
         if( pending != m_commits.end() )
         {
             pending->second.second->Revert();
             m_commits.erase( pending );
+        }
+
+        if( connectivityEvaluated )
+        {
+            connectivityEvaluated = false;
+            if( CONNECTION_GRAPH* graph = schematic()->ConnectionGraph() )
+                graph->Recalculate( schematic()->Hierarchy(), true );
         }
 
         m_activeClients.erase( aCtx.ClientName );
@@ -909,6 +950,21 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
 
     try
     {
+        // CN-1 §8.1: admit an exact pin-partition post-condition before any operation, and
+        // capture the partition it is measured against immediately before the first one.
+        CHECKED_SCHEMATIC_CONTROLLER::CONNECTIVITY_ASSERTION assertion;
+        if( auto invalid = CHECKED_SCHEMATIC_CONTROLLER::PrepareConnectivityAssertion( aCtx.Request,
+                    [this]( const types::SheetPath& aPath )
+                    {
+                        return schematic()->Hierarchy().GetSheetPathByKIIDPath( UnpackSheetPath( aPath ) ).has_value();
+                    },
+                    assertion ) )
+            return reject( *invalid );
+        MOVE_PIN_PARTITIONS assertedBefore;
+        if( assertion.index >= 0 && !captureMovePinPartitions( *schematic(), assertedBefore ) )
+            return reject( fmt::format( "Atomic operation {} rejected: Cannot establish exact pin connections "
+                                        "in all loaded sheet instances", assertion.index ) );
+
         // Decode all cache replacements before mutating any native object.
         // Screen UUIDs survive sheet reparenting and disambiguate repeated paths.
         std::map<std::string, SCH_SYMBOL_CACHE_STATE> cacheCandidates;
@@ -1645,6 +1701,59 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     }
                 }
             }
+            else if( operation.has_assert_connectivity() )
+            {
+                // Admitted before the first operation: this is the last one, so every
+                // creation and update of the batch is staged, and admission already refused
+                // sheet creation. Measure the partition the commit would produce, with no
+                // cleanup, before anything is pushed.
+                connectivityEvaluated = true;
+                MOVE_PIN_PARTITIONS assertedAfter;
+                bool captured = false;
+                {
+                    // Show staged additions on the screens the commit appends them to, then
+                    // take them off again even if the capture throws. The commit performs
+                    // the real append, including library-cache bookkeeping.
+                    std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>> shown;
+                    shown.reserve( createdItems.size() );
+                    struct STAGED_VIEW
+                    {
+                        std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>>& items;
+                        ~STAGED_VIEW()
+                        {
+                            for( auto& [screen, item] : items )
+                            {
+                                screen->Remove( item, false );
+                                item->SetConnectivityDirty();
+                                if( item->Type() == SCH_SYMBOL_T )
+                                {
+                                    for( const std::unique_ptr<SCH_PIN>& pin : static_cast<SCH_SYMBOL*>( item )->GetRawPins() )
+                                        pin->SetConnectivityDirty();
+                                }
+                            }
+                        }
+                    } view{ shown };
+                    for( const auto& [key, item] : createdItems )
+                    {
+                        if( item->Type() == SCH_SHEET_PIN_T || item->Type() == SCH_FIELD_T
+                                || key.first->CheckIfOnDrawList( item.get() ) )
+                            continue;
+                        key.first->Append( item.get(), false );
+                        shown.emplace_back( key.first, item.get() );
+                    }
+                    captured = captureMovePinPartitions( *schematic(), assertedAfter );
+                }
+                // Connectivity again describes the document the commit starts from, so no
+                // live item refers to an addition that is not on its screen yet.
+                if( CONNECTION_GRAPH* graph = schematic()->ConnectionGraph() )
+                    graph->Recalculate( schematic()->Hierarchy(), true );
+                if( !captured )
+                    return reject( prefix + "Cannot establish exact pin connections in all loaded sheet instances" );
+                if( auto failure = CHECKED_SCHEMATIC_CONTROLLER::CheckConnectivity( assertedBefore, assertedAfter,
+                                                                                    assertion.expected ) )
+                    return reject( *failure );
+                result.set_connectivity_assertion_verified( true );
+            }
             else
                 return reject( prefix + "Operation kind is missing" );
         }
@@ -1894,28 +2003,17 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
         result.set_process_epoch( Pgm().GetApiServer().Token() );
         result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
-        NATIVE_DOCUMENT_DIGEST digest;
-        std::map<std::string, SCH_SHEET*> screens;
-        for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
-            screens.try_emplace( path.LastScreen()->GetUuid().AsStdString(), path.Last() );
-        // The first root owns schematic-wide embedded files and net chains.
-        auto* root = schematic()->GetTopLevelSheet( 0 );
-        screens[root->GetScreen()->GetUuid().AsStdString()] = root;
+        // The same grouped state that native change tracking compares, so a tracked owner
+        // records a revision exactly when this digest changes.
+        const SCH_STATE_GROUPS state = SCH_STATE_GROUPS::Capture( *schematic() );
         std::set<std::string> files;
-        for( const auto& [id, sheet] : screens )
+        for( SCH_SHEET* sheet : state.WrittenSheets() )
         {
-            NATIVE_STATE_DIGEST state;
-            SCH_IO_KICAD_SEXPR writer;
-            writer.FormatSchematicToFormatter( &state, sheet, schematic(), nullptr, false );
-            digest.Add( "screen:" + id, state );
             result.set_native_content_dirty( result.native_content_dirty() || sheet->GetScreen()->IsContentModified() );
             files.insert( project().AbsolutePath( sheet->GetScreen()->GetFileName() ).ToStdString( wxConvUTF8 ) );
             result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                     project().AbsolutePath( sheet->GetScreen()->GetFileName() ), sheet->GetScreen()->FileBaseline() ) );
         }
-        NATIVE_STATE_DIGEST settings;
-        settings.Append( project().GetProjectFile().CaptureCurrentState().dump() );
-        digest.Add( "project-settings", settings );
         result.set_project_settings_included( true );
         result.set_complete_change_tracking( false );
         result.set_disk_baseline_checked( false );
@@ -1923,7 +2021,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
-        result.set_state_sha256( digest.Hex() );
+        result.set_state_sha256( state.DocumentSha256() );
         if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
                 || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
         {
@@ -2487,8 +2585,8 @@ HANDLER_RESULT<types::PageSettings> API_HANDLER_SCH::handleSetPageSettings(
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
     }
 
-    onModified();
     schematic()->RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT, "Edit Page Settings" );
+    onModified();
     return API_HANDLER_EDITOR::handleGetPageSettings( query );
 }
 
@@ -2681,6 +2779,52 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> API_HANDLER_SCH::h
             break;
         }
     }
+
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> API_HANDLER_SCH::handleReadErcMarkers(
+        const HANDLER_CONTEXT<kiapi::automation::v1::SchematicTrackingReadErcMarkers>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForStableObservation() )
+        return tl::unexpected( *busy );
+
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    // Every loaded screen once, through the first sheet instance that shows it.
+    std::vector<std::pair<std::string, kiapi::automation::v1::SchematicTrackingErcMarker>> markers;
+    std::set<SCH_SCREEN*> seen;
+
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+
+        if( !screen || !seen.insert( screen ).second )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            const auto* marker = static_cast<SCH_MARKER*>( item );
+            kiapi::automation::v1::SchematicTrackingErcMarker entry;
+            entry.mutable_id()->set_value( marker->m_Uuid.AsStdString() );
+            *entry.mutable_marker() = ERC_EXCLUSION::FromMarker( *marker ).ToProto().marker();
+            entry.set_excluded( marker->IsExcluded() );
+            entry.set_comment( marker->GetComment().ToUTF8() );
+            entry.set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( marker->GetSeverity() ) );
+            kiapi::common::PackSheetPath( *entry.mutable_sheet(), path.Path() );
+            markers.emplace_back( entry.marker().SerializeAsString() + entry.id().value(), std::move( entry ) );
+        }
+    }
+
+    std::sort( markers.begin(), markers.end(),
+               []( const auto& a, const auto& b ) { return a.first < b.first; } );
+
+    kiapi::automation::v1::SchematicTrackingErcMarkers result;
+
+    for( auto& [key, entry] : markers )
+        result.add_markers()->Swap( &entry );
 
     return result;
 }

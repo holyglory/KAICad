@@ -207,6 +207,54 @@ public sealed class CheckedDesignRecoveryTests
         finally { Directory.Delete(directory, true); }
     }
 
+    // CN-1 §8.2 receipt contract for the MCP tool and durable recovery. Isolated validation of peer replies
+    // a real editor must never produce (a missing proof, an unrequested proof, a post-condition refusal that
+    // changed the document); the checked-batch native journey covers the real receipts end to end.
+    [TestMethod]
+    public void AssertedReceiptsRequireTheNativeProofAndAnUnchangedRejection()
+    {
+        var plain = CheckedSchematicToolTests.Request(Path.GetTempPath(), Guid.NewGuid().ToString("D"));
+        var asserted = plain.Clone(); asserted.Batch.Operations.Clear();
+        asserted.Batch.Operations.Add(new SchematicItemOperation { Create = new Any { TypeUrl = "type.googleapis.com/kiapi.schematic.types.LocalLabel" } });
+        asserted.Batch.Operations.Add(new SchematicItemOperation { AssertConnectivity = new() { Version = 1 } });
+        Assert.IsTrue(CheckedSchematicContract.Asserts(asserted.Batch)); Assert.IsFalse(CheckedSchematicContract.Asserts(plain.Batch));
+        CheckedSchematicBatchReceipt Completed(CheckedSchematicBatch request, bool verified)
+        {
+            var result = new CheckedSchematicBatchReceipt { Document = request.Batch.Document.Clone(), ProcessEpoch = request.ExpectedState.ProcessEpoch,
+                OperationId = request.Batch.OperationId, ExpectedRequestVerified = true, Status = CheckedSchematicBatchStatus.CsbsCompleted,
+                ObservedBefore = request.ExpectedState.Clone(), ObservedAfter = request.ExpectedState.Clone() };
+            result.ObservedAfter.Revision.Sequence++; result.ObservedAfter.StateSha256 = new string('d', 64);
+            result.Result = new() { Revision = result.ObservedAfter.Revision.Clone(), ConnectivityAssertionVerified = verified };
+            return result;
+        }
+        CheckedSchematicBatchReceipt Refused(CheckedSchematicBatch request, string message = "connectivity_postcondition_failed: expected=1 mismatches=2 first=unexpected_split:/a#b") => new()
+        {
+            Document = request.Batch.Document.Clone(), ProcessEpoch = request.ExpectedState.ProcessEpoch, OperationId = request.Batch.OperationId,
+            ExpectedRequestVerified = true, Status = CheckedSchematicBatchStatus.CsbsRejected, ObservedBefore = request.ExpectedState.Clone(),
+            ObservedAfter = request.ExpectedState.Clone(), ErrorCode = SchematicConnectionErrors.ConnectivityPostconditionFailed, ErrorMessage = message
+        };
+        void Invalid(CheckedSchematicBatch request, CheckedSchematicBatchReceipt receipt, string problem) =>
+            Assert.AreEqual("invalid_checked_batch", Assert.ThrowsExactly<AutomationException>(
+                () => CheckedSchematicContract.ValidateResult(request, receipt, false), problem).Code, problem);
+
+        // False positives: the proven realization, an ordinary edit and an unchanged refusal are accepted.
+        CheckedSchematicContract.ValidateResult(asserted, Completed(asserted, verified: true), false);
+        CheckedSchematicContract.ValidateResult(plain, Completed(plain, verified: false), false);
+        CheckedSchematicContract.ValidateResult(asserted, Refused(asserted), false);
+        // Must-catch: a commit without its proof, a proof nobody asked for, and refusals that do not
+        // prove nothing changed or that come from a batch without an assertion.
+        Invalid(asserted, Completed(asserted, verified: false), "asserted commit without the proof");
+        Invalid(plain, Completed(plain, verified: true), "unrequested proof");
+        Invalid(plain, Refused(plain), "post-condition refusal of a batch without an assertion");
+        var unobserved = Refused(asserted); unobserved.ObservedAfter = null;
+        Invalid(asserted, unobserved, "post-condition refusal without an after-observation");
+        var changed = Refused(asserted); changed.ObservedAfter.StateSha256 = new string('f', 64);
+        Invalid(asserted, changed, "post-condition refusal after a native change");
+        var indeterminate = Refused(asserted); indeterminate.Status = CheckedSchematicBatchStatus.CsbsIndeterminate;
+        Invalid(asserted, indeterminate, "post-condition code on an indeterminate receipt");
+        Invalid(asserted, Refused(asserted, "Atomic operation 1 rejected: something else"), "post-condition code without its detail");
+    }
+
     private sealed class ReceiptTransport : INativeTransport
     {
         internal NativeClientTests.FixtureTransport Session { get; } = new() { Epoch = Guid.NewGuid().ToString("D") };

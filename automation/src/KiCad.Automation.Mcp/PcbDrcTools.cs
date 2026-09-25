@@ -16,7 +16,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbDrcTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_drc_start"),
-     Description("Start a revision-guarded native PCB DRC job for an explicit PCB document. Requires process epoch, document revision and operation identity; optional schematic parity checks require the exact observed schematic state. candidateRequestJson may contain explicit Track/Arc/Via items for a detached dry-run qualification; those candidates are never added to the live board. Returns a job snapshot and does not claim completion until kicad_pcb_drc_job reports a terminal result.")]
+     Description("Start a revision-guarded native PCB DRC job for an explicit PCB document. Requires process epoch, document revision and operation identity; optional schematic parity checks require the exact observed schematic state. candidateRequestJson may contain explicit Track/Arc/Via items for a detached dry-run qualification; those candidates are never added to the live board. Returns a job snapshot and does not claim completion until kicad_pcb_drc_job reports a terminal result."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document revision, operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
         bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
         string processEpoch, CancellationToken cancellationToken, string? expectedSchematicStateJson = null,
@@ -80,7 +82,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_job", ReadOnly = true),
-     Description("Read one exact native PCB DRC job by instance epoch, document and job ID. Running jobs expose no findings; terminal results identify freshness and snapshot completeness. Does not rerun or mutate the board.")]
+     Description("Read one exact native PCB DRC job by instance epoch, document and job ID. Running jobs expose no findings; terminal results identify freshness and snapshot completeness. Does not rerun or mutate the board."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {
@@ -104,7 +108,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_cancel"),
-     Description("Cancel one exact native PCB DRC job by process epoch, document and job ID. Returns the terminal cancellation state and never treats cancellation as a successful DRC result.")]
+     Description("Cancel one exact native PCB DRC job by process epoch, document and job ID. Returns the terminal cancellation state and never treats cancellation as a successful DRC result."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "PcbDrcToolTests.JobControlsRoundTripStructuredStateAndRejectStaleEpoch")]
     public async Task<CallToolResult> Cancel(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {
@@ -128,7 +134,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_state", ReadOnly = true),
-     Description("Read the selected PCB's real native DRC marker inventory, identities, exclusion flags and comments. Reports running calculation without traversing in-progress markers. This does not run DRC or prove that existing findings are fresh for the current design; freshness remains explicit.")]
+     Description("Read the selected PCB's real native DRC marker inventory, identities, exclusion flags and comments. Reports running calculation without traversing in-progress markers. This does not run DRC or prove that existing findings are fresh for the current design; freshness remains explicit."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "explicit instance ID and PCB document"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> Read(string instanceId, string documentJson, CancellationToken cancellationToken) =>
         InstanceToolBoundary.Run(async () =>
         {

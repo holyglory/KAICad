@@ -674,7 +674,6 @@ public static partial class RecursiveBlockCodec
             P.ConnectionDraftData.DirectionFieldNumber, P.ConnectionDraftData.RealizationFieldNumber),
         .. Declared(P.ConnectionRevisionData.Descriptor, P.ConnectionRevisionData.DomainFieldNumber,
             P.ConnectionRevisionData.DirectionFieldNumber, P.ConnectionRevisionData.RealizationFieldNumber),
-        .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
         .. Declared(P.RecursiveEditorDocument.Descriptor,
             P.RecursiveEditorDocument.StoredSchemaVersionFieldNumber, P.RecursiveEditorDocument.SourceWritableFieldNumber),
         .. Declared(P.DiagramHistoryEntryData.Descriptor, P.DiagramHistoryEntryData.LayoutOnlyFieldNumber),
@@ -685,26 +684,18 @@ public static partial class RecursiveBlockCodec
         .. Declared(P.RecursiveDiagramView.Descriptor, P.RecursiveDiagramView.ResolvedLayoutFieldNumber),
     ];
 
-    // Schema 2 fields this build neither reads nor writes: the flat-diagram conversion receipt and
-    // conversion request, which are never implemented because legacy flat diagrams are discarded, not
-    // converted (owner decision n9af098253fec71da).
-    private static readonly HashSet<FieldDescriptor> Unimplemented =
-    [
-        .. Declared(P.RecursiveBlockGraphData.Descriptor, P.RecursiveBlockGraphData.MigrationFieldNumber),
-        .. Declared(P.RecursiveFileRequest.Descriptor, P.RecursiveFileRequest.MigrateFieldNumber),
-    ];
+    // Schema 2 carries every declared field. The flat-diagram conversion receipt and request were retired from the
+    // protocol (reserved numbers; owner decision n9af098253fec71da), so an older sender still setting them is refused
+    // by the strict unknown-field check in Known and by the helper's request check, like any other unknown field.
+    private static readonly HashSet<FieldDescriptor> NoFieldsBeyondSchemaTwo = [];
 
     private static IEnumerable<FieldDescriptor> Declared(MessageDescriptor message, params int[] numbers) => numbers.Select(number =>
         message.FindFieldByNumber(number) ?? throw new InvalidOperationException($"{message.FullName} does not declare field {number}."));
 
-    private static HashSet<FieldDescriptor> Refused(uint schemaVersion) => schemaVersion >= SchemaVersion ? Unimplemented : SchemaTwoFields;
+    private static HashSet<FieldDescriptor> Refused(uint schemaVersion) => schemaVersion >= SchemaVersion ? NoFieldsBeyondSchemaTwo : SchemaTwoFields;
 
-    /// <summary>True when a field the given schema version cannot carry (or this build does not
-    /// implement) holds a value anywhere in the message tree.</summary>
+    /// <summary>True when a field the given schema version cannot carry holds a value anywhere in the message tree.</summary>
     public static bool CarriesFieldBeyondSchema(IMessage message, uint schemaVersion) => Carries(message, Refused(schemaVersion));
-
-    /// <summary>True when a declared field this build does not implement in any schema holds a value.</summary>
-    public static bool CarriesUnimplementedField(IMessage message) => Carries(message, Unimplemented);
 
     private static bool Carries(IMessage message, HashSet<FieldDescriptor> refused)
     {

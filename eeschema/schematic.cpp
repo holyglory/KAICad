@@ -1354,14 +1354,20 @@ void SCHEMATIC::RecomputeIntersheetRefs( bool aUpdateFields )
 
     for( SCH_GLOBALLABEL* globalLabel : currentSheetGlobalLabels )
     {
-        std::vector<SCH_FIELD>& fields = globalLabel->GetFields();
+        // Found by its type, never by its place: a label written through the API or XML may
+        // carry custom fields, and a label without the field gets the default one rather than
+        // an out-of-range read.
+        SCH_FIELD* intersheetRefs = globalLabel->GetField( FIELD_T::INTERSHEET_REFS );
 
-        fields[0].SetVisible( show );
+        intersheetRefs->SetVisible( show );
 
         if( show )
         {
-            if( fields.size() == 1 && fields[0].GetTextPos() == globalLabel->GetPosition() )
+            if( globalLabel->GetFields().size() == 1
+                    && intersheetRefs->GetTextPos() == globalLabel->GetPosition() )
+            {
                 globalLabel->AutoplaceFields( CurrentSheet().LastScreen(), AUTOPLACE_AUTO );
+            }
 
             CurrentSheet().LastScreen()->Update( globalLabel );
 

@@ -222,10 +222,10 @@ std::unordered_set<SCH_SYMBOL*> getInferredSymbols( const SCH_SELECTION& aSelect
 }
 
 
-void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope,
-                                      ANNOTATE_ORDER_T aSortOption, ANNOTATE_ALGO_T aAlgoOption, bool aRecursive,
-                                      int aStartNumber, bool aResetAnnotation, bool aRegroupUnits,
-                                      bool aRepairTimestamps, REPORTER& aReporter, SYMBOL_FILTER aSymbolFilter )
+int SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope,
+                                     ANNOTATE_ORDER_T aSortOption, ANNOTATE_ALGO_T aAlgoOption, bool aRecursive,
+                                     int aStartNumber, bool aResetAnnotation, bool aRegroupUnits,
+                                     bool aRepairTimestamps, REPORTER& aReporter, SYMBOL_FILTER aSymbolFilter )
 {
     SCH_SELECTION_TOOL* selTool = m_toolManager->GetTool<SCH_SELECTION_TOOL>();
     SCH_SELECTION&      selection = selTool->GetSelection();
@@ -281,14 +281,18 @@ void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnn
 
     // Test for and replace duplicate time stamps in symbols and sheets.  Duplicate time stamps
     // can happen with old schematics, schematic conversions, or manual editing of files.
+    // The new identities are given outside the caller's commit, which cannot restore them, so
+    // their number is returned for the caller to record.
+    int replaced = 0;
+
     if( aRepairTimestamps )
     {
-        int count = screens.ReplaceDuplicateTimeStamps();
+        replaced = screens.ReplaceDuplicateTimeStamps();
 
-        if( count )
+        if( replaced )
         {
             wxString msg;
-            msg.Printf( _( "%d duplicate time stamps were found and replaced." ), count );
+            msg.Printf( _( "%d duplicate time stamps were found and replaced." ), replaced );
             aReporter.ReportTail( msg, RPT_SEVERITY_WARNING );
         }
     }
@@ -407,6 +411,10 @@ void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnn
         }
     }
 
+    // Annotation hands out designators, which the project's reference inventory records.  The
+    // caller's commit keeps the inventory from before, so a placement that is then cancelled
+    // returns them.
+    aCommit->KeepReferenceInventory();
     references.SetRefDesTracker( Schematic().Settings().m_refDesTracker );
 
     // Break full symbol reference into name (prefix) and number:
@@ -500,10 +508,14 @@ void SCH_EDIT_FRAME::AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnn
 
     SyncView();
     GetCanvas()->Refresh();
-    OnModify();
 
-    // Must go after OnModify() so the connectivity graph has been updated
+    // Every annotation is staged in the caller's commit, whose push marks the document
+    // modified.  A placement that is cancelled instead reverts it and must leave the document
+    // as it was, so annotating alone never marks it modified.  Replaced identities are not in
+    // the commit: the caller records them from the returned count.
     UpdateNetHighlightStatus();
+
+    return replaced;
 }
 
 

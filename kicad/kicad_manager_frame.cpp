@@ -30,6 +30,7 @@
 
 #include <advanced_config.h>
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <background_jobs_monitor.h>
 #include <bitmaps.h>
 #include <build_version.h>
@@ -1379,6 +1380,8 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
     if( !Prj().IsNullProject() &&
         Prj().GetProjectLock() == nullptr )
     {
+        const KICAD_API_SERVER* api = Pgm().ApiServerOrNull();
+        const bool              automation = api && api->IsAutomation();
         LOCKFILE lockFile( file );
 
         if( !lockFile.Valid() )
@@ -1389,7 +1392,9 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
                         lockFile.GetUsername(),
                         lockFile.GetHostname() );
 
-            if( AskOverrideLock( this, msg ) )
+            // Automation never waits on a dialog nobody can answer: the project stays read-only,
+            // its reason is logged below, and a checked save names it too.
+            if( !automation && AskOverrideLock( this, msg ) )
             {
                 lockFile.OverrideLock();
             }
@@ -1397,6 +1402,12 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
 
         Prj().SetReadOnly( !lockFile.Valid() || Prj().GetProjectFile().IsReadOnly() );
         Prj().SetProjectLock( new LOCKFILE( std::move( lockFile ) ) );
+
+        if( automation && !Prj().GetProjectLock()->Valid() )
+        {
+            wxLogError( "Automation opened project '%s' read-only: %s", file,
+                        DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() ) );
+        }
     }
 
     wxString title;

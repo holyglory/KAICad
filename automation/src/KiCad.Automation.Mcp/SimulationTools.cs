@@ -13,7 +13,9 @@ namespace KiCad.Automation.Mcp;
 public sealed class SimulationTools(InstanceRegistry instances)
 {
     [McpServerTool(Name = "kicad_simulation_start"),
-     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The native editor owns the simulator and its result vectors. Retry the same operation ID after a lost reply; a different operation cannot run concurrently in this document.")]
+     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The native editor owns the simulator and its result vectors. Retry the same operation ID after a lost reply; a different operation cannot run concurrently in this document."),
+     KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Start(string instanceId, string expectedInstanceEpoch, DocumentSpecifier document,
         string netlist, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -29,7 +31,9 @@ public sealed class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_job", ReadOnly = true),
-     Description("Read one exact native KiCad simulation job by process epoch and job ID. Only a completed job exposes copied result vectors; running, cancelled and failed states remain explicit.")]
+     Description("Read one exact native KiCad simulation job by process epoch and job ID. Only a completed job exposes copied result vectors; running, cancelled and failed states remain explicit."),
+     KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Job(string instanceId, string expectedInstanceEpoch, DocumentSpecifier document,
         Guid jobId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -42,7 +46,9 @@ public sealed class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_wait", ReadOnly = true),
-     Description("Wait for one exact native simulation job to change state. This targets only the simulator job, not the design; cancellation or timeout never becomes a successful result.")]
+     Description("Wait for one exact native simulation job to change state. This targets only the simulator job, not the design; cancellation or timeout never becomes a successful result."),
+     KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID, sequence"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public async Task<CallToolResult> Wait(string instanceId, string expectedInstanceEpoch, DocumentSpecifier document,
         Guid jobId, ulong afterSequence, CancellationToken cancellationToken)
     {
@@ -68,7 +74,9 @@ public sealed class SimulationTools(InstanceRegistry instances)
     }
 
     [McpServerTool(Name = "kicad_simulation_cancel"),
-     Description("Cancel one exact native KiCad simulation job. The native simulator is stopped before the terminal Cancelled state is returned; result vectors from a cancelled run are never reported as successful output.")]
+     Description("Cancel one exact native KiCad simulation job. The native simulator is stopped before the terminal Cancelled state is returned; result vectors from a cancelled run are never reported as successful output."),
+     KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Cancel(string instanceId, string expectedInstanceEpoch, DocumentSpecifier document,
         Guid jobId, CancellationToken cancellationToken) => Execute(async () =>
     {

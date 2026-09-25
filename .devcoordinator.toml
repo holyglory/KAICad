@@ -1459,15 +1459,39 @@ retained_artifacts=[{ name = "psu-cpu-seed-tests", path = "automation/artifacts/
 # only that the symbol writer changed (for example a schematic file-format bump): the lanes are
 # not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
 # as psu-cpu-fixture-writer-drift-evidence.
+
 # PSU/CPU native crash journey (lane 2D, ledger pcb5513dd69eda714): a KiCad dying
 # mid-session keeps the XML, recovery record and instance registry truthful.
-[[test.psu-cpu-fixture.check]]
+# Inconclusive counts as failed (fixture contract section 1.9).
+[test.native-crash]
+timeout_seconds=3600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-crash.check]]
+name="managed-build"
+tier="development"
+role="preflight"
+invalidates=["native-build", "native-crash"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.native-crash.check]]
+name="native-configure"
+tier="development"
+role="preflight"
+invalidates=["native-build", "native-crash"]
+command=["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON", "-DUSE_CCACHE=ON", "-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-crash.check]]
+name="native-build"
+tier="development"
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+
+[[test.native-crash.check]]
 name="native-crash"
 tier="development"
-requires=["native-runtime"]
-after=["native-seed"]
+requires=["native-build"]
 timeout_seconds=900
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }]
 
 [test.psu-cpu-fixture-writer-drift]

@@ -1459,6 +1459,17 @@ retained_artifacts=[{ name = "psu-cpu-seed-tests", path = "automation/artifacts/
 # only that the symbol writer changed (for example a schematic file-format bump): the lanes are
 # not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
 # as psu-cpu-fixture-writer-drift-evidence.
+# PSU/CPU native crash journey (lane 2D, ledger pcb5513dd69eda714): a KiCad dying
+# mid-session keeps the XML, recovery record and instance registry truthful.
+[[test.psu-cpu-fixture.check]]
+name="native-crash"
+tier="development"
+requires=["native-runtime"]
+after=["native-seed"]
+timeout_seconds=900
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests"]
+retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }]
+
 [test.psu-cpu-fixture-writer-drift]
 timeout_seconds=3600
 env={ DOTNET_CLI_TELEMETRY_OPTOUT = "1", DOTNET_NOLOGO = "1", TMPDIR = "/mnt/build-storage/codex/kicad/t" }

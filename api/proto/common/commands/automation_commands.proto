@@ -267,6 +267,13 @@ message DocumentLifecycleState {
   // Exact native state at a successful load/save checkpoint; empty means unavailable.
   string clean_checkpoint_sha256 = 13;
   // -- lane 2C (300-399) --
+  // state_sha256 without the project-file entries that every save writes from the schematic
+  // itself: the sheet list, the top-level sheet list, the root sheet's revision kept for IPC-2581
+  // and the project file name.  Saving writes nothing else into the project settings, so a save
+  // that only rewrites a stale sheet list (a project KiCad has not saved yet, or sheets added or
+  // renamed since the last save) changes state_sha256 but not this digest.  Empty when
+  // unavailable; a client must then require state_sha256 itself to be unchanged.
+  string save_stable_state_sha256 = 300;
   // -- end lane 2C --
   // -- lane 2D (400-499) --
   // -- end lane 2D --

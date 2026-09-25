@@ -171,8 +171,8 @@ public sealed partial class NativeSessionTests
     /// top-level sheet actions, Page Settings, Schematic Setup, Annotate Schematic (its settings
     /// and Annotate itself) and Place > Import Sheet, and compares the exact persisted state
     /// digest, journal revision and modified flag after each action.  The change-tracking oracle
-    /// requires every proven owner's OneChange and Unchanged steps here, as statements this method
-    /// always runs.  It also records what a lifecycle read costs on this fixture; the comparisons on
+    /// requires every proven owner's OneChange, Unchanged and Undone steps here, as statements this
+    /// method always runs.  It also records what a lifecycle read costs on this fixture; the comparisons on
     /// the largest demo design are measured afterwards by the native test binary.
     /// </summary>
     private static async Task VerifyDirectOwnerTracking(NativeClient client, DocumentSpecifier document,
@@ -723,30 +723,107 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog, false, true, 60, 25);
             await MessagePanel(ink => ink > 100, "Annotate's report", step);
         }
-        const string entireSchematic = "Entire schematic", selectionScope = "Selection",
+        const string entireSchematic = "Entire schematic", currentSheetScope = "Current sheet only", selectionScope = "Selection",
             keepAnnotations = "Keep existing annotations", resetAnnotations = "Reset existing annotations";
-        void AnnotateOption(string option)
+        // Each radio button's row from the dialog's top-left corner; its round indicator is drawn at the row's left.
+        static int AnnotateOptionRow(string option) => option switch
         {
-            var (left, top) = option switch
-            {
-                entireSchematic => (60, 39),
-                selectionScope => (60, 81),
-                keepAnnotations => (60, 167),
-                resetAnnotations => (60, 188),
-                _ => throw new ArgumentOutOfRangeException(nameof(option), option, "Not an Annotate option."),
-            };
+            entireSchematic => 39,
+            currentSheetScope => 60,
+            selectionScope => 81,
+            keepAnnotations => 167,
+            resetAnnotations => 188,
+            _ => throw new ArgumentOutOfRangeException(nameof(option), option, "Not an Annotate option."),
+        };
+        void AnnotateOption(string option) =>
             NativeKeyboard.SchematicShortcut(display, processId, "click", annotateDialog, false, true,
-                clickFromLeft: left, clickFromTop: top);
+                clickFromLeft: 60, clickFromTop: AnnotateOptionRow(option));
+        // A checked radio button is drawn filled with the theme's selection blue; an unchecked one, even
+        // while the pointer is over it, is not.  One capture of the indicator column gives each option's
+        // blue pixels in the 16x16 square around its indicator, 29 pixels from the dialog's left edge.
+        async Task<Dictionary<string, int>> CheckedInk(IReadOnlyList<string> choices)
+        {
+            (int X, int Y, int Width, int Height) at = default;
+            NativeKeyboard.SchematicShortcut(display, processId, "", annotateDialog, false, false,
+                observeGeometry: geometry => at = geometry);
+            const int size = 16, first = 39 - size / 2, height = 188 + size / 2 - first;
+            byte[] column = await DisplayRegionPixels(display, at.X + 29 - size / 2, at.Y + first, size, height, token);
+            var ink = new Dictionary<string, int>();
+            foreach (string choice in choices)
+            {
+                int blue = 0, top = AnnotateOptionRow(choice) - size / 2 - first;
+                for (int row = top; row < top + size; ++row)
+                for (int pixel = row * size * 3; pixel < (row + 1) * size * 3; pixel += 3)
+                    if (column[pixel + 2] >= 170 && column[pixel] <= 120 && column[pixel + 1] is >= 90 and <= 190) blue++;
+                ink[choice] = blue;
+            }
+            return ink;
         }
-        // Undo, then open and close Annotate Schematic: the editor handles the toolbar click after
-        // the undo key, so once the dialog has opened the undo has run or found nothing to undo.
-        async Task UndoThenFence(string step)
+        // The scope and option Annotate will use, read from the rendered dialog: exactly the named radio
+        // button of each group is checked.  The buttons animate after a click, so the dialog is read until
+        // it settles.
+        async Task AnnotateOptionsShown(string step, string scope, string option)
+        {
+            string[] scopes = [entireSchematic, currentSheetScope, selectionScope], options = [keepAnnotations, resetAnnotations];
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(5));
+            string shown = "";
+            try
+            {
+                while (true)
+                {
+                    var ink = await CheckedInk([.. scopes, .. options]);
+                    shown = string.Join(", ", ink.Select(i => $"{i.Key} {i.Value}"));
+                    if (scopes.All(s => s == scope ? ink[s] > 40 : ink[s] < 5) && options.All(o => o == option ? ink[o] > 40 : ink[o] < 5))
+                        return;
+                    await Task.Delay(100, limit.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                await Failed(step, $"The Annotate dialog did not show '{scope}' and '{option}' checked during {step} (checked-blue pixels: {shown}).");
+            }
+        }
+        // Ctrl+Z after an Annotate, proven by what it undid: exactly one "Undo" revision must follow.  A
+        // lost key leaves no revision and an undo with nothing to undo records none, so neither can pass
+        // unseen; each caller then requires the exact state that undo restores.
+        async Task<DocumentLifecycleState> Undone(DocumentLifecycleState after, string step, string slug)
         {
             NativeKeyboard.SchematicShortcut(display, processId, "z");
-            await OpenAnnotate(step);
-            await Button(annotateDialog, false, step);
+            var undone = await Advanced(after, slug);
+            var journal = await Changes(after);
+            Assert.IsFalse(journal.ResetRequired);
+            Assert.HasCount(1, journal.Changes, $"{step} must be exactly one revision.");
+            Assert.AreEqual(SchematicChange.Types.Kind.Undo, journal.Changes.Single().Kind, $"{step} must be an undo.");
+            Assert.AreEqual("Undo", journal.Changes.Single().Description);
+            Assert.IsTrue(undone.NativeContentDirty, $"{step} marks the design modified.");
+            return undone;
         }
         const string repeatedText = "Tracked repeated identity";
+        // An undo fence for an Annotate that must leave no undo entry: an ordinary undoable edit (a note on
+        // the root sheet moved through the API), saved just before Annotate, so it is the newest undo entry
+        // Annotate finds and the design starts unmodified.  The undo that follows Annotate must then undo the
+        // fence and put the note back; an undo entry Annotate left would be undone instead, keeping it moved.
+        SchematicText? fencedNote = null;
+        async Task<DocumentLifecycleState> Fence()
+        {
+            var note = (await ScreenData()).Items.Where(i => i.Is(SchematicText.Descriptor)).Select(i => i.Unpack<SchematicText>())
+                .FirstOrDefault(t => t.Text.Text_ != repeatedText);
+            Assert.IsNotNull(note, "The fixture's root sheet must hold a note to move as the undo fence.");
+            var moved = note.Clone(); moved.Text.Position.XNm += 2_540_000;
+            var fence = new ApplySchematicItemBatch { Document = document.Clone(), Description = "Move a note as an undo fence" };
+            fence.Operations.Add(new SchematicItemOperation { Update = Any.Pack(moved) });
+            await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(fence, token);
+            fencedNote = note;
+            var saved = await Saved();
+            Assert.AreEqual(moved.Text.Position, (await FencedNote()).Text.Position, "The fence edit must move the note.");
+            return saved;
+        }
+        async Task<SchematicText> FencedNote()
+        {
+            var query = new GetItemsById { Header = header.Clone() }; query.Items.Add(fencedNote!.Id.Clone());
+            return (await Settled(t => client.InvokeAsync<GetItemsById, GetItemsResponse>(query, t))).Items.Single().Unpack<SchematicText>();
+        }
         async Task<List<SchematicScreenData>> Sheets() => (await Settled(t =>
                 client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document.Clone() }, t)))
             .Hierarchy.Data.Instances.ToList();
@@ -819,8 +896,16 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(reference, await Reference());
         }
 
+        // The first repair uses the Entire schematic scope, set and read back from the rendered dialog: every
+        // symbol is staged, so the repair is pushed as an undo entry, the only one since loading.  Ctrl+Z then
+        // undoes exactly that entry: it restores the staged symbols, which Annotate left unchanged, and keeps
+        // the new identity, which was given outside the commit.
         var duplicated = await LoadRepeatedIdentity();
         await OpenAnnotate("annotate-repair");
+        AnnotateOption(entireSchematic);
+        AnnotateOption(keepAnnotations);
+        await AnnotateOptionsShown("annotate-repair", entireSchematic, keepAnnotations);
+        await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-entire-scope.png"), token);
         await PressAnnotate("annotate-repair");
         await Advanced(duplicated.State, "annotate-repair");
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-repaired.png"), token);
@@ -828,47 +913,64 @@ public sealed partial class NativeSessionTests
         var repaired = await State();
         await OneChange(duplicated.State, "Annotate", SchematicChange.Types.Kind.Commit);
         await OnlyTheIdentityRepaired(duplicated, repaired, "annotate-repair");
+        var undoneRepair = await Undone(repaired, "Undoing an identity repair that staged every symbol", "annotate-repair-undo");
+        Assert.AreEqual(repaired.StateSha256, undoneRepair.StateSha256,
+            "Undoing the pushed repair restores the unchanged staged symbols and keeps the identity given outside the commit.");
+        await OnlyTheIdentityRepaired(duplicated, undoneRepair, "annotate-repair-undo");
 
         // Put the saved design back and annotate it: every symbol is annotated and no identity
         // repeats, so Annotate has nothing to do and must leave no revision, saved change or
-        // modified flag.  Loading cleared the undo history, so an undo that follows finds nothing
-        // to undo only when Annotate also left no undo entry.
+        // modified flag.  Behind the undo fence, the undo that follows must undo the fence edit, which
+        // shows both that the key was handled and that Annotate left no undo entry.
         await File.WriteAllTextAsync(rootFile, savedRoot, token);
         await File.WriteAllTextAsync(childSheetFile, savedChild, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
         var reloaded = await State();
         Assert.AreEqual(annotatedDesign.StateSha256, reloaded.StateSha256, "Reloading the saved design must restore it exactly.");
         Assert.IsFalse(reloaded.NativeContentDirty);
+        var fencedNothing = await Fence();
         await OpenAnnotate("annotate-nothing");
+        await AnnotateOptionsShown("annotate-nothing", entireSchematic, keepAnnotations);
         await PressAnnotate("annotate-nothing");
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-nothing.png"), token);
         await Button(annotateDialog, false, "annotate-nothing");
-        await Unchanged(reloaded, "Annotating an annotated schematic");
-        await UndoThenFence("annotate-nothing-undo");
-        await Unchanged(reloaded, "Undoing after annotating an annotated schematic");
+        await Unchanged(fencedNothing, "Annotating an annotated schematic");
+        var undoneNothing = await Undone(fencedNothing, "Undoing after annotating an annotated schematic", "annotate-nothing-undo");
+        Assert.AreEqual(fencedNote!.Text.Position, (await FencedNote()).Text.Position,
+            "The undo after Annotate must undo the fence edit, so Annotate left no undo entry above it.");
+        Assert.AreEqual(reloaded.StateSha256, undoneNothing.StateSha256, "Undoing the fence edit must restore the reloaded design exactly.");
         Assert.AreEqual(reference, await Reference());
 
         // The same repair with nothing staged: with the Selection scope and nothing selected,
         // Annotate annotates no symbol and its commit stays empty, so nothing is pushed and the
         // dialog itself records the repaired identity as one "Annotate" revision and marks the
-        // design modified.  Nothing was pushed, so an undo that follows finds nothing to undo (with
-        // the Entire schematic scope every symbol would be staged and pushed as an undo entry).
+        // design modified.  Nothing was pushed, so behind the undo fence the undo that follows must
+        // undo the fence edit and keep the repaired identity.
         var unstaged = await LoadRepeatedIdentity();
+        await client.InvokeAsync<ClearSelection, Empty>(new() { Header = header.Clone() }, token);
+        var fencedUnstaged = await Fence();
         await client.InvokeAsync<ClearSelection, Empty>(new() { Header = header.Clone() }, token);
         Assert.IsEmpty((await client.InvokeAsync<GetSelection, SelectionResponse>(new() { Header = header.Clone() }, token)).Items,
             "Nothing may be selected for an Annotate of the selection to stage nothing.");
+        var fencedSheets = await Sheets();
+        var fenced = (State: fencedUnstaged, Sheets: fencedSheets, Notes: RepeatedNotes(fencedSheets));
+        Assert.HasCount(2, fenced.Notes, "Saving keeps both notes with their repeated identity.");
+        Assert.IsTrue(fenced.Notes.All(n => n.Id.Value == repeatedId), "Saving keeps the repeated identity for Annotate to repair.");
         await OpenAnnotate("annotate-repair-unstaged");
         AnnotateOption(selectionScope);
+        await AnnotateOptionsShown("annotate-repair-unstaged", selectionScope, keepAnnotations);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-selection-scope.png"), token);
         await PressAnnotate("annotate-repair-unstaged");
-        await Advanced(unstaged.State, "annotate-repair-unstaged");
+        await Advanced(fenced.State, "annotate-repair-unstaged");
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-repaired-unstaged.png"), token);
         await Button(annotateDialog, false, "annotate-repair-unstaged");
         var repairedUnstaged = await State();
-        await OneChange(unstaged.State, "Annotate", SchematicChange.Types.Kind.Commit);
-        await OnlyTheIdentityRepaired(unstaged, repairedUnstaged, "annotate-repair-unstaged");
-        await UndoThenFence("annotate-repair-unstaged-undo");
-        await Unchanged(repairedUnstaged, "Undoing an identity repair that staged nothing");
+        await OneChange(fenced.State, "Annotate", SchematicChange.Types.Kind.Commit);
+        await OnlyTheIdentityRepaired(fenced, repairedUnstaged, "annotate-repair-unstaged");
+        var undoneUnstaged = await Undone(repairedUnstaged, "Undoing after an identity repair that staged nothing", "annotate-repair-unstaged-undo");
+        Assert.AreEqual(fencedNote!.Text.Position, (await FencedNote()).Text.Position,
+            "The undo after Annotate must undo the fence edit, so the repair left no undo entry above it.");
+        await OnlyTheIdentityRepaired(unstaged, undoneUnstaged, "annotate-repair-unstaged-undo");
 
         // An Annotate whose only saved change is the reference inventory (the designators handed
         // out, saved with the project settings).  "Reset existing annotations" on one selected
@@ -932,6 +1034,7 @@ public sealed partial class NativeSessionTests
         await OpenAnnotate("annotate-inventory");
         AnnotateOption(selectionScope);
         AnnotateOption(resetAnnotations);
+        await AnnotateOptionsShown("annotate-inventory", selectionScope, resetAnnotations);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-inventory-options.png"), token);
         await PressAnnotate("annotate-inventory");
         await Advanced(trimmed, "annotate-inventory");
@@ -958,9 +1061,12 @@ public sealed partial class NativeSessionTests
             + "and cached definition must be unchanged on every sheet (both are kept as evidence).");
         await File.WriteAllTextAsync(Path.Combine(evidence, $"{instanceId}-owner-annotate.txt"),
             "Annotate with one repeated item identity and nothing else to do recorded one 'Annotate' revision and marked the "
-            + "design modified, with the Entire schematic scope (every symbol staged and pushed) and with the Selection scope "
-            + "and nothing selected (nothing staged, nothing to undo afterwards)." + Environment.NewLine
-            + "Annotate on the annotated design left no revision, saved change, modified flag or undo entry." + Environment.NewLine
+            + "design modified, with the Entire schematic scope (shown checked in the dialog; every symbol staged and pushed: "
+            + "Ctrl+Z was one 'Undo' revision that restored the unchanged symbols and kept the new identity) and with the "
+            + "Selection scope and nothing selected (shown checked; nothing staged: Ctrl+Z undid the saved undo-fence edit "
+            + "below it and kept the new identity)." + Environment.NewLine
+            + "Annotate on the annotated design left no revision, saved change or modified flag, and no undo entry: Ctrl+Z "
+            + "undid the saved undo-fence edit below it and restored the reloaded design exactly." + Environment.NewLine
             + $"Reset existing annotations on the selected {reissuedReference}, with {reissuedReference} taken out of the reference "
             + $"inventory ({trimmedInventory.Count} entries left), gave it {reissuedReference} again and handed it out again; that "
             + "inventory change alone was one 'Annotate' revision and marked the design modified." + Environment.NewLine, token);
@@ -970,6 +1076,7 @@ public sealed partial class NativeSessionTests
         await OpenAnnotate("annotate-options-restore");
         AnnotateOption(entireSchematic);
         AnnotateOption(keepAnnotations);
+        await AnnotateOptionsShown("annotate-options-restore", entireSchematic, keepAnnotations);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, $"{instanceId}-owner-annotate-options-restored.png"), token);
         await Button(annotateDialog, false, "annotate-options-restore");
         Assert.AreEqual(inventoried.Revision, (await State()).Revision, "The dialog's scope and option are not saved with the design.");
@@ -1164,6 +1271,10 @@ public sealed partial class NativeSessionTests
     /// measure <see cref="CountCanvasInk"/> applies), captured without the pointer.
     /// </summary>
     private static async Task<int> DisplayRegionInk(string display, int left, int top, int width, int height,
+        CancellationToken token) => CountCanvasInk(await DisplayRegionPixels(display, left, top, width, height, token));
+
+    /// <summary>The RGB pixels of one region of the fixture display, row by row.</summary>
+    private static async Task<byte[]> DisplayRegionPixels(string display, int left, int top, int width, int height,
         CancellationToken token)
     {
         var start = new ProcessStartInfo("ffmpeg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -1188,7 +1299,7 @@ public sealed partial class NativeSessionTests
         }
         byte[] image = pixels.ToArray();
         Assert.AreEqual(width * height * 3, image.Length, "The fixture display region was not captured whole.");
-        return CountCanvasInk(image);
+        return image;
     }
 
     /// <summary>

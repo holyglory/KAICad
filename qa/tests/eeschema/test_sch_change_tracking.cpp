@@ -57,10 +57,12 @@
 
 #if defined( EESCHEMA )
 #include <api/api_sch_state_groups.h>
+#include <api/sch_api_save.h>
 #include <bus_alias.h>
 #include <connection_graph.h>
 #include <embedded_files.h>
 #include <lib_symbol.h>
+#include <nlohmann/json.hpp>
 #include <project.h>
 #include <project/project_file.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
@@ -2437,15 +2439,17 @@ inline std::vector<UNPROVEN> unprovenRoutes()
 
 /// A routed owner whose change and whose cancel and no-op precision the rendered journey
 /// proves: among the statements the journey method always runs, an awaited OneChange(...) call
-/// asserts exactly one revision with this journal description, and an awaited Unchanged(...)
-/// call asserts each cancel or no-op step left the revision, saved state, modified flag and
-/// journal alone.
+/// asserts exactly one revision with this journal description, an awaited Unchanged(...) call
+/// asserts each cancel or no-op step left the revision, saved state, modified flag and journal
+/// alone, and an awaited Undone(...) call asserts each undo step was exactly one undo revision
+/// (its caller then requires the state that undo restores).
 struct PROOF
 {
     std::string              file;          ///< The owner's source.
     std::string              function;      ///< The owner; it must still route its change.
     std::string              description;   ///< The revision's exact journal description.
     std::vector<std::string> unchanged;     ///< The exact cancel and no-op step names.
+    std::vector<std::string> undone = {};   ///< The exact undo step names (awaited Undone(...)).
 };
 
 
@@ -2475,13 +2479,15 @@ inline std::vector<PROOF> journeyProofs()
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::~DIALOG_ANNOTATE", "Edit Annotation Settings",
           { "Closing unchanged Annotate Schematic" } },
         // Annotate itself.  Repairing one duplicated identity with nothing else to annotate is one
-        // revision, both when every symbol is staged and pushed and when nothing is staged (the
-        // dialog records it; nothing is left to undo), and so is handing out a designator again
-        // with every staged symbol unchanged (the kept reference inventory differs).  Annotating
-        // an annotated schematic is no revision and leaves nothing to undo.
+        // revision, both when every symbol is staged and pushed (the undo that follows is one
+        // revision) and when nothing is staged (the dialog records it; the undo that follows undoes
+        // the fence edit below it), and so is handing out a designator again with every staged
+        // symbol unchanged (the kept reference inventory differs).  Annotating an annotated
+        // schematic is no revision and leaves no undo entry (the undo undoes the fence edit).
         { ANNOTATE_DIALOG, "DIALOG_ANNOTATE::OnAnnotateClick", "Annotate",
-          { "Annotating an annotated schematic", "Undoing after annotating an annotated schematic",
-            "Undoing an identity repair that staged nothing" } },
+          { "Annotating an annotated schematic" },
+          { "Undoing an identity repair that staged every symbol", "Undoing after annotating an annotated schematic",
+            "Undoing after an identity repair that staged nothing" } },
     };
 }
 
@@ -2499,6 +2505,11 @@ inline std::map<std::string, std::vector<std::string>> journeyStepAssertions()
         { "OneChange",
           { "Assert.IsFalse(journal.ResetRequired)", "Assert.HasCount(1,journal.Changes",
             "Assert.AreEqual(kind,change.Kind)", "Assert.AreEqual(description,change.Description)" } },
+        // An undo step must see the undo happen: a lost key or an undo with nothing to undo records
+        // no revision, so the step fails instead of passing unseen.
+        { "Undone",
+          { "awaitAdvanced(after,", "Assert.IsFalse(journal.ResetRequired)", "Assert.HasCount(1,journal.Changes",
+            "Assert.AreEqual(SchematicChange.Types.Kind.Undo,journal.Changes.Single().Kind" } },
     };
 }
 
@@ -2512,6 +2523,7 @@ struct JOURNEY_STEPS
 {
     std::set<std::string>    changes;
     std::set<std::string>    unchanged;
+    std::set<std::string>    undone;
     std::set<std::string>    conditional;
     std::vector<std::string> failures;
 };
@@ -2549,7 +2561,8 @@ inline JOURNEY_STEPS journeySteps( const std::string& aSource, const std::string
     }
 
     for( const auto& [helper, found] : { std::make_pair( std::string( "OneChange" ), &steps.changes ),
-                                         std::make_pair( std::string( "Unchanged" ), &steps.unchanged ) } )
+                                         std::make_pair( std::string( "Unchanged" ), &steps.unchanged ),
+                                         std::make_pair( std::string( "Undone" ), &steps.undone ) } )
     {
         for( const AWAITED_CALL& call : awaitedLiteralCalls( aSource, blanked.code, helper, 1, begin, end ) )
         {
@@ -3634,6 +3647,14 @@ BOOST_AUTO_TEST_CASE( EveryProvenOwnerKeepsItsRenderedSteps )
                                          + " has no unconditional awaited Unchanged(..., \"" + step + "\") step"
                                          + where( step ) + "." );
         }
+
+        for( const std::string& step : proof.undone )
+        {
+            BOOST_CHECK_MESSAGE( steps.undone.count( step ),
+                                 proof.function + " is no longer proven: " + JOURNEY_METHOD
+                                         + " has no unconditional awaited Undone(..., \"" + step + "\", ...) step"
+                                         + where( step ) + "." );
+        }
     }
 
     // Recall and precision of the journey scan: steps named in comments, strings, raw strings
@@ -3660,7 +3681,19 @@ private static async Task VerifyDirectOwnerTracking(NativeClient client)
         // Assert.AreEqual(description, change.Description);
         return change;
     }
+    async Task<DocumentLifecycleState> Undone(DocumentLifecycleState after, string step, string slug)
+    {
+        var undone = await Advanced(after, slug);
+        var journal = await Changes(after);
+        Assert.IsFalse(journal.ResetRequired);
+        Assert.HasCount(1, journal.Changes, $"{step} must be exactly one revision.");
+        Assert.AreEqual(SchematicChange.Types.Kind.Undo, journal.Changes.Single().Kind);
+        return undone;
+    }
     // await OneChange(clean, "Commented", SchematicChange.Types.Kind.Commit);
+    // await Undone(clean, "Commented undo", "slug");
+    var undone = await Undone(clean, "Real undo", "real-undo");
+    if (clean.NativeContentDirty) await Undone(clean, "Undo inside a branch", "branch-undo");
     var text = "await OneChange(clean, "Quoted", kind)";
     var raw = """
         await Unchanged(clean, "Raw");
@@ -3692,11 +3725,13 @@ private static async Task Elsewhere() { await OneChange(clean, "Elsewhere", kind
     const JOURNEY_STEPS probed = journeySteps( probe, JOURNEY_METHOD );
 
     BOOST_CHECK( ( probed.changes == std::set<std::string>{ "Real change", "Assigned change" } ) );
+    BOOST_CHECK( ( probed.undone == std::set<std::string>{ "Real undo" } ) );
     BOOST_CHECK( ( probed.unchanged
                    == std::set<std::string>{ "Real cancel", "Inside a try", "Inside a using",
                                              "After a local function's return" } ) );
     BOOST_CHECK( ( probed.conditional
-                   == std::set<std::string>{ "Inside a branch", "Braceless branch", "Braceless else", "Inside a loop",
+                   == std::set<std::string>{ "Undo inside a branch", "Inside a branch", "Braceless branch",
+                                             "Braceless else", "Inside a loop",
                                              "Swallowed", "Inside a local function", "Inside a lambda",
                                              "Inside a conditional expression", "After an early return",
                                              "Also after an early return" } ) );
@@ -3932,6 +3967,98 @@ BOOST_FIXTURE_TEST_CASE( RecordsOnlyRealEditsOfTheSameDocument, TRACKED_SCHEMATI
     }
 
     BOOST_CHECK_EQUAL( doc.ChangeJournal().Sequence(), 1u );
+}
+
+
+/// A project KiCad has not saved yet, its sheet files and project file written by a harness or
+/// another program: the project file has none of the entries a save writes from the schematic
+/// itself.  KiCad's first save writes them (the sheet list, the top-level sheet list, the root
+/// sheet's revision kept for IPC-2581 and the project file name), which changes the saved state
+/// digest but must leave the save-stable digest alone, so publication can recognize that save as
+/// the planned one (ReadDocumentLifecycleState.save_stable_state_sha256).  Any other change moves
+/// the save-stable digest.
+BOOST_AUTO_TEST_CASE( FirstSaveOfAnUnsavedProjectKeepsTheSaveStableState )
+{
+    const fs::path source( KI_TEST::GetEeschemaTestDataDir() );
+    const fs::path copy = fs::temp_directory_path() / ( "kicad-save-stable-" + KIID().AsStdString() );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ copy };
+    fs::create_directories( copy );
+
+    for( const char* name : { "issue13212.kicad_sch", "issue13212_subsheet_1.kicad_sch",
+                              "issue13212_subsheet_2.kicad_sch" } )
+    {
+        fs::copy_file( source / name, copy / name );
+    }
+
+    {
+        // Written the way the native journeys' harness writes it: the settings format and nothing a
+        // save derives.
+        std::ofstream project( copy / "issue13212.kicad_pro" );
+        project << R"({ "meta": { "version": 3 } })";
+    }
+
+    SETTINGS_MANAGER           settings;
+    std::unique_ptr<SCHEMATIC> schematic;
+    KI_TEST::LoadSchematic( settings,
+                            fs::relative( copy / "issue13212", KI_TEST::GetEeschemaTestDataDir() ).generic_string(),
+                            schematic );
+    BOOST_REQUIRE( schematic );
+    schematic->RefreshHierarchy();
+    PROJECT& project = schematic->Project();
+    BOOST_REQUIRE( project.GetProjectFile().GetSheets().empty() );
+
+    size_t sheets = 0;
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy() )
+    {
+        if( !path.Last()->IsVirtualRootSheet() )
+            ++sheets;
+    }
+
+    BOOST_REQUIRE_GT( sheets, 1u );
+
+    const SCH_STATE_GROUPS before = SCH_STATE_GROUPS::Capture( *schematic );
+    BOOST_REQUIRE_EQUAL( before.SaveStableSha256().size(), 64u );
+    BOOST_CHECK_NE( before.SaveStableSha256(), before.DocumentSha256() );
+
+    // The save's own project-file writing.  UpdateProjectFile sets the entries it derives from the
+    // schematic and then asks the program's settings manager to write the file; this test's project
+    // belongs to its own settings manager, which then writes it exactly as that save does.
+    SCH_API_SAVE::UpdateProjectFile( *schematic, project );
+    BOOST_REQUIRE( settings.SaveProject( project.GetProjectFullName(), &project ) );
+    BOOST_CHECK_EQUAL( project.GetProjectFile().GetSheets().size(), sheets );
+
+    std::ifstream written( copy / "issue13212.kicad_pro" );
+    const nlohmann::json file = nlohmann::json::parse( written );
+    BOOST_REQUIRE( file.contains( "sheets" ) );
+    BOOST_CHECK_EQUAL( file.at( "sheets" ).size(), sheets );
+    BOOST_CHECK_EQUAL( file.at( "meta" ).at( "filename" ).get<std::string>(), "issue13212.kicad_pro" );
+
+    // Recall of the scenario: the save changed the project settings and nothing else, and the
+    // save-stable digest recognizes exactly that change.
+    const SCH_STATE_GROUPS saved = SCH_STATE_GROUPS::Capture( *schematic );
+    BOOST_CHECK_NE( before.DocumentSha256(), saved.DocumentSha256() );
+    BOOST_CHECK( before.ChangedGroups( saved ) == std::vector<std::string>{ "project-settings" } );
+    BOOST_CHECK_EQUAL( before.SaveStableSha256(), saved.SaveStableSha256() );
+
+    // A second save writes the same entries again: nothing changes.
+    SCH_API_SAVE::UpdateProjectFile( *schematic, project );
+    BOOST_REQUIRE( settings.SaveProject( project.GetProjectFullName(), &project ) );
+    BOOST_CHECK_EQUAL( SCH_STATE_GROUPS::Capture( *schematic ).DocumentSha256(), saved.DocumentSha256() );
+
+    // Precision: a project setting the save does not derive moves the save-stable digest, and
+    // putting it back restores it.
+    project.GetTextVars()[wxS( "SAVE_STABLE_PROBE" )] = wxS( "changed" );
+    BOOST_CHECK_NE( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+    project.GetTextVars().erase( wxS( "SAVE_STABLE_PROBE" ) );
+    BOOST_CHECK_EQUAL( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+
+    // So does any edit of a sheet.
+    schematic->RootScreen()->Append( new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "save-stable probe" ) ) );
+    BOOST_CHECK_NE( SCH_STATE_GROUPS::Capture( *schematic ).SaveStableSha256(), saved.SaveStableSha256() );
+
+    // A capture without the project settings has no save-stable digest.
+    BOOST_CHECK( SCH_STATE_GROUPS::CaptureScreens( *schematic, { schematic->RootScreen() } ).SaveStableSha256().empty() );
 }
 
 

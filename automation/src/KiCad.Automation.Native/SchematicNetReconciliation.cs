@@ -65,20 +65,31 @@ public static class SchematicNetReconciliation
             var gaps = before.CoverageGaps.Concat(current.CoverageGaps).Distinct().ToArray();
             if (!current.PinBindingsComplete) return new(null, [], [], current.Issues, gaps, "unresolved_electrical_bindings");
             var universe = before.PinPartitions!.SelectMany(g => g.Pins).ToArray();
-            var merged = PinPartitionEvolution.Plan(Partition(state.Baseline.Engineering.Circuit, universe),
-                Partition(desired.Circuit, universe), current.PinPartitions!.Select(p => p.Pins).ToArray(), token);
+            // KiCad always joins the pins one placed symbol's own definition stacks at one point (decision
+            // kicad-stacked-pins-one-node-20260924), so the model partitions are compared as KiCad shows them: the
+            // baseline with the stacking its native baseline showed, the desired XML with the stacking KiCad shows now.
+            // KiCad's own join is then no native edit and never becomes a generated net.
+            IReadOnlyList<IReadOnlyList<PinEndpoint>> stackedBefore = before.StackedPins ?? [], stackedNow = current.StackedPins ?? [];
+            var baselinePartition = Partition(state.Baseline.Engineering.Circuit, universe, stackedBefore);
+            var desiredPartition = Partition(desired.Circuit, universe, stackedNow);
+            var merged = PinPartitionEvolution.Plan(baselinePartition.Groups, desiredPartition.Groups,
+                current.PinPartitions!.Select(p => p.Pins).ToArray(), token);
             if (merged.Groups is null) return new(null, merged.Conflicts, [], [], gaps);
 
             // Preserve explicit XML identities and semantic names for every
             // exact surviving group. Native label names are not identity keys.
-            var desiredByGroup = desired.Circuit.Nets.Where(n => n.Pins.Count > 0).ToDictionary(n => Key(n.Pins), StringComparer.Ordinal);
-            var baselineGroups = Partition(state.Baseline.Engineering.Circuit, universe).Select(Key).ToHashSet(StringComparer.Ordinal);
+            // A net is found by its own pins or by its pins with the unconnected
+            // pins stacked on them, which KiCad joins to it.
+            var desiredByGroup = desiredPartition.Nets;
+            var baselineGroups = Partition(state.Baseline.Engineering.Circuit, universe, []).Groups
+                .Concat(baselinePartition.Groups).Select(Key).ToHashSet(StringComparer.Ordinal);
+            var stackedNodes = stackedNow.Select(Key).ToHashSet(StringComparer.Ordinal);
             var nativeByGroup = current.PinPartitions!.ToDictionary(p => Key(p.Pins), StringComparer.Ordinal);
             var desiredIds = desired.Circuit.Nets.Select(n => n.Id).ToHashSet();
             var desiredPins = desired.Circuit.Nets.SelectMany(n => n.Pins).ToHashSet();
             var resultById = new Dictionary<Guid, CircuitNet>();
-            var historicalByGroup = restoration?.History.Design.Engineering.Circuit.Nets.Where(n => n.Pins.Count > 0)
-                .ToDictionary(n => Key(n.Pins), StringComparer.Ordinal);
+            var historicalByGroup = restoration is null ? null
+                : Partition(restoration.History.Design.Engineering.Circuit, universe, stackedNow).Nets;
             var restoredNets = new HashSet<Guid>();
             var historicalImplicit = new HashSet<PinEndpoint>();
             if (restoration is not null)
@@ -103,6 +114,9 @@ public static class SchematicNetReconciliation
                 // net merely because it appeared in a native observation.
                 if (group.Count == 1 && (baselineGroups.Contains(key) || historicalImplicit.Contains(group[0]))
                     && !desiredPins.Contains(group[0])) continue;
+                // Nor do unconnected pins that KiCad joins only because one symbol
+                // stacks them: exactly a stacked node, none of it named by the XML.
+                if (stackedNodes.Contains(key) && !group.Any(desiredPins.Contains)) continue;
                 Guid id = GeneratedIdentity(state.OriginId, desired.Circuit.Id, group);
                 string name = nativeByGroup.TryGetValue(key, out var nativeGroup) && !string.IsNullOrWhiteSpace(nativeGroup.NativeName)
                     ? nativeGroup.NativeName : "NET-" + id.ToString("N")[..12];
@@ -136,11 +150,46 @@ public static class SchematicNetReconciliation
         catch (AutomationException error) { return new(null, [], [], [], [], error.Code, error.Message); }
     }
 
-    private static IReadOnlyList<IReadOnlyList<PinEndpoint>> Partition(Circuit circuit, IReadOnlyList<PinEndpoint> universe)
+    /// <summary>The circuit's pin partition over <paramref name="universe"/> as KiCad shows it: each net with the
+    /// unconnected pins stacked on its pins, and each group of unconnected stacked pins as one node (decision
+    /// kicad-stacked-pins-one-node-20260924). A stacked node the circuit spreads over two nets stays split: KiCad's join is
+    /// then a real difference, which the comparison and planning report. <c>Nets</c> finds every net by its own pins and
+    /// by its joined pins.</summary>
+    internal static (IReadOnlyList<IReadOnlyList<PinEndpoint>> Groups, Dictionary<string, CircuitNet> Nets) Partition(
+        Circuit circuit, IReadOnlyList<PinEndpoint> universe, IReadOnlyList<IReadOnlyList<PinEndpoint>> stacked)
     {
         var assigned = circuit.Nets.SelectMany(n => n.Pins).ToHashSet();
-        return circuit.Nets.Where(n => n.Pins.Count > 0).Select(n => n.Pins)
-            .Concat(universe.Where(p => !assigned.Contains(p)).Select(p => (IReadOnlyList<PinEndpoint>)new[] { p })).ToArray();
+        var groups = circuit.Nets.Where(n => n.Pins.Count > 0).Select(n => (Pins: n.Pins, Net: (CircuitNet?)n))
+            .Concat(universe.Where(p => !assigned.Contains(p)).Distinct()
+                .Select(p => (Pins: (IReadOnlyList<PinEndpoint>)new[] { p }, Net: (CircuitNet?)null)))
+            .ToArray();
+        var owner = new Dictionary<PinEndpoint, int>();
+        for (int group = 0; group < groups.Length; ++group)
+            foreach (var pin in groups[group].Pins) owner.TryAdd(pin, group);
+        var parent = Enumerable.Range(0, groups.Length).ToArray();
+        int Root(int group) { while (parent[group] != group) group = parent[group] = parent[parent[group]]; return group; }
+        foreach (var node in stacked)
+        {
+            var joined = node.Where(owner.ContainsKey).Select(p => Root(owner[p])).Distinct().ToArray();
+            // Nets already in the joined groups, not only the ones the node touches directly.
+            if (joined.Length < 2 || Enumerable.Range(0, groups.Length)
+                    .Count(g => groups[g].Net is not null && joined.Contains(Root(g))) > 1)
+                continue;
+            foreach (int root in joined.Skip(1)) parent[root] = joined[0];
+        }
+        var result = new List<IReadOnlyList<PinEndpoint>>();
+        var nets = new Dictionary<string, CircuitNet>(StringComparer.Ordinal);
+        foreach (var component in Enumerable.Range(0, groups.Length).GroupBy(Root))
+        {
+            IReadOnlyList<PinEndpoint> pins = [.. component.SelectMany(g => groups[g].Pins)];
+            result.Add(pins);
+            if (component.Select(g => groups[g].Net).OfType<CircuitNet>().SingleOrDefault() is { } net)
+            {
+                nets.TryAdd(Key(net.Pins), net);
+                nets.TryAdd(Key(pins), net);
+            }
+        }
+        return (result, nets);
     }
 
     internal static string Key(IEnumerable<PinEndpoint> pins) => JsonSerializer.Serialize(pins

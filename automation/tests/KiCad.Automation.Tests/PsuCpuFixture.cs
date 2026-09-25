@@ -303,9 +303,14 @@ internal static class PsuCpuFixture
             await System.IO.File.WriteAllTextAsync(File(name), content, token);
         (root, var loaded) = await ReloadAsync(client, root, schematic, token);
         RequireSeedHierarchy(loaded.Data, seed, rootInstance);
+        // KiCad saves the seed once, as it would have saved a project a person drew in it. The harness wrote the sheet
+        // files directly, so until KiCad saves them the project file lacks what a save derives from the schematic (its
+        // sheet list among them), and each seed file keeps the older format it was written in (ledger pc97a1139c2e34c36).
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = root.Clone() }, token);
 
         var state = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
             new() { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
+        Assert.IsFalse(state.State.NativeContentDirty, "KiCad saved the prepared seed, so the editor starts from its saved files.");
         var baseline = Baseline(state.Electrical.Hierarchy.Data, seed, rootInstance, token);
         await System.IO.File.WriteAllTextAsync(File("design.xml"), SchematicDesignXml.Write(baseline, []), token);
         var context = new PsuCpuNativeContext(projectDirectory, root, rootInstance, seed, partSymbols, baseline,

@@ -2022,6 +2022,9 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
         result.set_state_sha256( state.DocumentSha256() );
+        // What a save keeps: publication accepts a save that only rewrote the project-file
+        // entries saving derives from the schematic (a stale sheet list) by this digest.
+        result.set_save_stable_state_sha256( state.SaveStableSha256() );
         if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
                 || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
         {

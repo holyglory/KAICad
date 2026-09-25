@@ -127,6 +127,47 @@ public sealed class DesignPublicationRecoveryTests
         Assert.IsFalse(File.Exists(fixture.Intent.StagedPath));
     }
 
+    // KiCad's first save of a project whose file it has not written yet (or whose sheets were added or renamed since the
+    // last save) also writes the sheet list it derives from the schematic, so the saved state digest differs from the
+    // one observed before saving. The save-stable digest leaves exactly those derived project-file entries out; with it
+    // unchanged the save is the planned one and publication completes with nothing left pending.
+    [TestMethod]
+    public async Task SaveThatOnlyRewroteTheDerivedProjectEntriesPublishes()
+    {
+        string stable = new('5', 64);
+        using var fixture = new Fixture(stable);
+        var receipt = fixture.SaveReceipt.Clone();
+        receipt.ObservedState.StateSha256 = new string('e', 64);
+        Assert.AreNotEqual(fixture.Saved.State.PendingNativeSave!.ExpectedState.StateSha256, receipt.ObservedState.StateSha256);
+        var result = await DesignPublicationCommitter.CommitAsync(fixture.Store, fixture.Saved.RevisionToken, receipt);
+        Assert.AreEqual(DesignPublicationPhase.Published, result.Recovery.State.PendingPublication!.Phase);
+        Assert.IsTrue(result.ReplacementPerformed);
+        CollectionAssert.AreEqual(fixture.Intent.CandidateFileBytes, await File.ReadAllBytesAsync(fixture.Intent.DesignPath));
+        CollectionAssert.AreEqual(fixture.Intent.ExpectedFileBytes, await File.ReadAllBytesAsync(fixture.Intent.PreviousPath));
+    }
+
+    // Only that change is recognized. A save that also changed anything else (the save-stable digest moved), or an
+    // observation without the save-stable digest on either side, still needs the full digest unchanged; the XML and the
+    // recovery record stay exactly as they were.
+    [TestMethod]
+    [DataRow("5555555555555555555555555555555555555555555555555555555555555555", "6666666666666666666666666666666666666666666666666666666666666666", DisplayName = "save-stable digest changed")]
+    [DataRow("", "5555555555555555555555555555555555555555555555555555555555555555", DisplayName = "no save-stable digest before the save")]
+    [DataRow("5555555555555555555555555555555555555555555555555555555555555555", "", DisplayName = "no save-stable digest after the save")]
+    [DataRow("", "", DisplayName = "no save-stable digest on either side")]
+    [DataRow("5555", "5555", DisplayName = "malformed save-stable digest")]
+    public async Task SaveThatChangedMoreThanTheDerivedProjectEntriesIsNotConfirmed(string before, string after)
+    {
+        using var fixture = new Fixture(before);
+        var receipt = fixture.SaveReceipt.Clone();
+        receipt.ObservedState.StateSha256 = new string('e', 64);
+        receipt.ObservedState.SaveStableStateSha256 = after;
+        Assert.AreEqual("native_save_not_confirmed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignPublicationCommitter.CommitAsync(fixture.Store, fixture.Saved.RevisionToken, receipt))).Code);
+        Assert.AreEqual(fixture.Saved.RevisionToken, fixture.Store.Read()!.RevisionToken);
+        CollectionAssert.AreEqual(fixture.Intent.ExpectedFileBytes, await File.ReadAllBytesAsync(fixture.Intent.DesignPath));
+        Assert.IsFalse(File.Exists(fixture.Intent.StagedPath));
+    }
+
     [TestMethod]
     public void VersionSixPreservesExactPathsBytesAndPendingWorkWithoutANativeMutation()
     {
@@ -159,7 +200,7 @@ public sealed class DesignPublicationRecoveryTests
         internal StoredDesignRecovery Saved { get; }
         internal DesignPublicationIntent Intent { get; }
         internal LifecycleOperationResult SaveReceipt { get; }
-        internal Fixture()
+        internal Fixture(string saveStableStateSha256 = "")
         {
             RecordPath = Path.Combine(directory, "recovery.json"); Store = new(RecordPath);
             var input = SchematicSynchronizationPlanTests.Fixture();
@@ -170,6 +211,7 @@ public sealed class DesignPublicationRecoveryTests
             electrical.Hierarchy.Revision.Epoch = Guid.NewGuid().ToString("D");
             var guard = CheckedSchematicToolTests.Request(directory, Guid.NewGuid().ToString("D")).ExpectedState;
             guard.Document = schematic.Document.Clone(); guard.Revision = electrical.Hierarchy.Revision.Clone();
+            guard.SaveStableStateSha256 = saveStableStateSha256;
             byte[] before = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, input.KnowledgeLibraries));
             var candidate = baseline with { Schematic = schematic.Clone() };
             candidate.Schematic.Instances[0].Metadata.TitleBlock.Title = "Published candidate";

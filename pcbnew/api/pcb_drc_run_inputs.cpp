@@ -74,14 +74,32 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
 }
 }
 
+nlohmann::json PCB_DRC_PROJECT_BASELINE::ObserveSettings( const BOARD& aBoard )
+{
+    return ProjectInputs( aBoard );
+}
+
 bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
+{
+    try
+    {
+        return Unchanged( aBoard, ProjectInputs( aBoard ) );
+    }
+    catch( const std::exception& )
+    {
+        // Unreadable or unrepresentable inputs are not evidence of freshness.
+        return false;
+    }
+}
+
+bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard, const nlohmann::json& aObservedSettings ) const
 {
     try
     {
         const wxString rulesPath = aBoard.GetDesignRulesPath();
         const bool rulesUnchanged = m_rules.Path().empty() ? rulesPath.empty()
                 : m_rules.Check( rulesPath ) == FILE_BASELINE_CHECK::UNCHANGED;
-        return rulesUnchanged && m_settings == ProjectInputs( aBoard );
+        return rulesUnchanged && m_settings == aObservedSettings;
     }
     catch( const std::exception& )
     {

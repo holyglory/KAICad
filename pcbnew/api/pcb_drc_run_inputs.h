@@ -48,6 +48,11 @@ class PCB_DRC_PROJECT_BASELINE
 {
 public:
     bool Unchanged( const BOARD& aBoard ) const;
+    // The live project settings Unchanged() compares, observed once so that one
+    // checkpoint can compare many baselines of the same board. Throws when the
+    // settings cannot be represented; that is never evidence of freshness.
+    static nlohmann::json ObserveSettings( const BOARD& aBoard );
+    bool Unchanged( const BOARD& aBoard, const nlohmann::json& aObservedSettings ) const;
 
 private:
     friend class PCB_DRC_RUN_INPUTS;

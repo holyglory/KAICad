@@ -127,6 +127,20 @@ struct PCB_DRC_JOB_MANAGER::JOB
     mutable std::mutex mutex;
 };
 
+// How one call observes the live inputs of a receipt. A read observes them for its
+// receipt alone; a recovery checkpoint shares one observation of each input
+// between every live receipt of the board.
+struct PCB_DRC_JOB_MANAGER::LIVE_INPUTS
+{
+    SCHEMATIC_OBSERVER schematic;
+    LIBRARY_OBSERVER libraries;
+    AUXILIARY_OBSERVER auxiliary;
+    std::function<bool( const PCB_DRC_PROJECT_BASELINE& )> projectUnchanged;
+    // The receipt's native file notifications cover every library input, so this
+    // observation need not reread them. Reads never set it (n456d6b796cd7a9a3).
+    bool librariesNotified = false;
+};
+
 namespace
 {
 constexpr int NATIVE_FILE_EVENTS = wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE | wxFSW_EVENT_RENAME
@@ -262,6 +276,13 @@ struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
         std::set<wxString> libraries;   // Library nicknames whose content this path provides.
     };
     using LIBRARY_CONTENT = std::function<std::map<wxString, std::string>( const std::set<wxString>& )>;
+    // Library content observed while one native notification is handled: each
+    // library of a board is reread at most once, whatever the number of receipts.
+    struct LIBRARY_MEMO
+    {
+        std::map<const BOARD*, std::map<wxString, std::optional<std::string>>> content;
+        std::set<const BOARD*> unavailable;
+    };
 
     PCB_DRC_JOB_MANAGER& owner;
     BOARD& board;
@@ -385,20 +406,43 @@ struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
                                    || ( aInput.tree && Within( aPath, aInput.path ) ) );
     }
 
-    bool unchanged( const FILE_INPUT& aInput, JOB& aReceipt ) const
+    bool unchanged( const FILE_INPUT& aInput, JOB& aReceipt, LIBRARY_MEMO& aMemo ) const
     {
         try
         {
             if( aInput.libraries.empty() )
                 return aInput.baseline.Check( aInput.path ) == FILE_BASELINE_CHECK::UNCHANGED;
-            // Recheck only the libraries this path provides, never every library.
-            const auto current = libraryContent( aInput.libraries );
+            if( aMemo.unavailable.contains( &board ) ) return false;
+            // Recheck only the libraries this path provides, never every library,
+            // and none that another receipt already reread for this notification.
+            auto& known = aMemo.content[&board];
+            std::set<wxString> missing;
+            for( const auto& nickname : aInput.libraries )
+                if( !known.contains( nickname ) ) missing.insert( nickname );
+            if( !missing.empty() )
+            {
+                try
+                {
+                    const auto current = libraryContent( missing );
+                    for( const auto& nickname : missing )
+                    {
+                        const auto found = current.find( nickname );
+                        known[nickname] = found == current.end() ? std::optional<std::string>()
+                                                                 : std::optional<std::string>( found->second );
+                    }
+                }
+                catch( const std::exception& )
+                {
+                    aMemo.unavailable.insert( &board );
+                    return false;
+                }
+            }
             for( const auto& nickname : aInput.libraries )
             {
-                const auto now = current.find( nickname );
+                const auto& now = known.at( nickname );
                 const auto then = aReceipt.libraryFingerprints.find( nickname );
-                if( ( now == current.end() ) != ( then == aReceipt.libraryFingerprints.end() )
-                    || ( now != current.end() && now->second != then->second ) )
+                if( now.has_value() != ( then != aReceipt.libraryFingerprints.end() )
+                    || ( now && *now != then->second ) )
                     return false;
             }
             return true;
@@ -406,7 +450,7 @@ struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
         catch( const std::exception& ) { return false; }
     }
 
-    void fileChanged( const wxString& aPath, const wxString& aRenamed )
+    void fileChanged( const wxString& aPath, const wxString& aRenamed, LIBRARY_MEMO& aMemo )
     {
         auto receipt = job.lock();
         if( !receipt ) return;
@@ -416,7 +460,7 @@ struct PCB_DRC_JOB_MANAGER::INPUT_WATCHER : BOARD_LISTENER
         }
         for( const auto& input : inputs )
         {
-            if( ( matches( input, aPath ) || matches( input, aRenamed ) ) && !unchanged( input, *receipt ) )
+            if( ( matches( input, aPath ) || matches( input, aRenamed ) ) && !unchanged( input, *receipt, aMemo ) )
             {
                 invalidate( receipt, input.code, ChangeMessage( input.code ) );
                 return;
@@ -486,7 +530,8 @@ void PCB_DRC_JOB_MANAGER::fileEvent( wxFileSystemWatcherEvent& event )
     if( !lost && ( change & ( wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE | wxFSW_EVENT_RENAME
                               | wxFSW_EVENT_MODIFY | wxFSW_EVENT_ATTRIB ) ) )
     {
-        for( auto& [id, watch] : m_watches ) watch->fileChanged( path, renamed );
+        INPUT_WATCHER::LIBRARY_MEMO libraries;
+        for( auto& [id, watch] : m_watches ) watch->fileChanged( path, renamed, libraries );
     }
     // The kernel drops the subscription of a watched directory that is removed or
     // renamed, and nothing would report later changes below it.
@@ -510,17 +555,90 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
         std::lock_guard lock( m_mutex );
         for( const auto& [id, job] : m_jobs ) receipts.push_back( job );
     }
+    // One observation of each live input serves every receipt of this checkpoint.
+    // A failed observation is shared too, and never evidence of freshness.
+    using TEXT = tl::expected<std::string, std::string>;
+    std::optional<TEXT> auxiliary, catalogue;
+    bool projectObserved = false;
+    std::optional<nlohmann::json> project; // Empty after a failed observation.
+    std::vector<std::pair<DocumentSpecifier, tl::expected<DocumentLifecycleState, std::string>>> schematics;
+    LIVE_INPUTS shared;
+    if( schematic )
+    {
+        shared.schematic = [&]( const DocumentSpecifier& document )
+                -> tl::expected<DocumentLifecycleState, std::string>
+        {
+            for( const auto& [observed, result] : schematics )
+                if( SameDocument( observed, document ) ) return result;
+            tl::expected<DocumentLifecycleState, std::string> result = tl::unexpected( std::string() );
+            try { result = schematic( document ); }
+            catch( const std::exception& error ) { result = tl::unexpected( std::string( error.what() ) ); }
+            schematics.emplace_back( document, result );
+            return result;
+        };
+    }
+    if( libraries )
+    {
+        shared.libraries = [&]( BOARD& source ) -> TEXT
+        {
+            if( !catalogue )
+            {
+                try { catalogue = libraries( source ); }
+                catch( const std::exception& error ) { catalogue = tl::unexpected( std::string( error.what() ) ); }
+            }
+            return *catalogue;
+        };
+    }
+    if( m_observeAuxiliary )
+    {
+        shared.auxiliary = [&]( BOARD& source ) -> TEXT
+        {
+            if( !auxiliary )
+            {
+                try { auxiliary = m_observeAuxiliary( source ); }
+                catch( const std::exception& error ) { auxiliary = tl::unexpected( std::string( error.what() ) ); }
+            }
+            return *auxiliary;
+        };
+    }
+    shared.projectUnchanged = [&]( const PCB_DRC_PROJECT_BASELINE& baseline )
+    {
+        if( !projectObserved )
+        {
+            projectObserved = true;
+            try { project.emplace( PCB_DRC_PROJECT_BASELINE::ObserveSettings( board ) ); }
+            catch( const std::exception& ) { }
+        }
+        return project.has_value() && baseline.Unchanged( board, *project );
+    };
     for( const auto& job : receipts )
     {
         {
             std::lock_guard lock( job->mutex );
             if( job->invalidated || job->checkedBoardEpoch != board.m_Uuid.AsStdString() ) continue;
         }
+        // Library files of a covered receipt are watched by the current native
+        // subscription, so their changes arrive as notifications.
+        const auto watch = m_watches.find( job->id );
+        shared.librariesNotified = watch != m_watches.end() && watch->second->covered && m_files
+                                   && !m_files->retired && watch->second->generation == m_files->generation;
         // Activation/settings notification is a recovery checkpoint, including
         // changes made in another editor of this process. Never revive receipts
         // already invalidated by a change or an overflow.
-        state( job, board, epoch, schematic, libraries );
+        state( job, board, epoch, shared );
     }
+}
+
+int PCB_DRC_JOB_MANAGER::fileSubscribers( const wxString& aDirectory ) const
+{
+    if( !m_files ) return 0;
+    const auto found = m_files->paths.find( NormalizedPath( aDirectory ) );
+    return found == m_files->paths.end() ? 0 : found->second.references;
+}
+
+int PCB_DRC_JOB_MANAGER::nativeWatches() const
+{
+    return m_files && m_files->native ? m_files->native->GetWatchedPathsCount() : 0;
 }
 
 void PCB_DRC_JOB_MANAGER::retireWatches()
@@ -646,6 +764,22 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
         const SCHEMATIC_OBSERVER& aObserveSchematic,
         const LIBRARY_OBSERVER& aObserveLibraries ) const
 {
+    // A read observes every live input of its receipt itself (n456d6b796cd7a9a3).
+    LIVE_INPUTS inputs;
+    inputs.schematic = aObserveSchematic;
+    inputs.libraries = aObserveLibraries;
+    inputs.auxiliary = m_observeAuxiliary;
+    inputs.projectUnchanged = [&aBoard]( const PCB_DRC_PROJECT_BASELINE& baseline )
+    { return baseline.Unchanged( aBoard ); };
+    return state( aJob, aBoard, aProcessEpoch, inputs );
+}
+
+tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
+        const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
+        const LIVE_INPUTS& aInputs ) const
+{
+    const SCHEMATIC_OBSERVER& aObserveSchematic = aInputs.schematic;
+    const LIBRARY_OBSERVER& aObserveLibraries = aInputs.libraries;
     if( !aJob ) return tl::unexpected( "Unknown PCB DRC job" );
     if( aJob->processEpoch != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
@@ -675,19 +809,19 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     // wx notifications can still be queued when an IPC read arrives. Registration
     // is not a completeness barrier: retain the full content fallback for every
     // live receipt, without pumping unrelated native events or entering the UI.
-    const bool projectChanged = observeInputs && !aJob->projectBaseline.Unchanged( aBoard );
+    const bool projectChanged = observeInputs && !aInputs.projectUnchanged( aJob->projectBaseline );
     bool auxiliaryChanged = observeInputs;
-    if( observeInputs && m_observeAuxiliary )
+    if( observeInputs && aInputs.auxiliary )
     {
         try
         {
-            auto current = m_observeAuxiliary( aBoard );
+            auto current = aInputs.auxiliary( aBoard );
             auxiliaryChanged = !current || *current != aJob->auxiliaryFingerprint;
         }
         catch( const std::exception& ) { }
     }
     bool librariesChanged = false;
-    if( observeInputs && aJob->hasLibraryDependencies )
+    if( observeInputs && aJob->hasLibraryDependencies && !aInputs.librariesNotified )
     {
         if( !aObserveLibraries ) librariesChanged = true;
         else

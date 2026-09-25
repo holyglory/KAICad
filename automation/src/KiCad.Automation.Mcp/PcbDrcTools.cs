@@ -82,9 +82,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_job", ReadOnly = true),
-     Description("Read one exact native PCB DRC job by instance epoch, document and job ID. Running jobs expose no findings; terminal results identify freshness and snapshot completeness. A job becomes stale, with no findings, as soon as the live board, its custom rules file, footprint libraries, project settings, drawing sheet, router settings or parity schematic change; a running job is cancelled. A stale job never becomes current again, even if the change is undone: start a new job. Does not rerun or mutate the board."),
+     Description("Read one exact native PCB DRC job by instance epoch, document and job ID. Running jobs expose no findings; terminal results identify freshness and snapshot completeness. A job becomes stale, with no findings, once KiCad observes a change to the live board, its custom rules file, footprint libraries, project settings, drawing sheet, router settings or parity schematic, by a PCB editor notification, window activation or the next read; a running job is then cancelled. Once stale, a job never becomes current again: start a new job. Does not rerun or mutate the board."),
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken)
     {

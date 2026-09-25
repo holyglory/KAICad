@@ -158,9 +158,21 @@ public sealed partial class NativeSessionTests
         }
         finally { Directory.Delete(statePath, true); }
 
+        // A check of the edited board that is still current when the board is reloaded.
+        // The editor detaches it before it frees the edited board, so the check becomes
+        // stale for good instead of listening to a board that no longer exists.
+        var (_, edit) = await Run(await ObserveLifecycleState(client, board, token));
+        await Evidence("pcb-drc-job-edited-board.json", edit);
+        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, edit.Status, edit.ErrorCode + ": " + edit.ErrorMessage);
+        Assert.AreEqual(edit, await Read(edit, token), "Nothing changed the edited board before it was reloaded.");
+
         // Reverting replaces the edited board with the saved one. The stale check
         // stays stale, and replaying its start request returns it instead of a new check.
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
+        var detached = await Read(edit, token);
+        await Evidence("pcb-drc-job-reload-detached.json", detached);
+        AssertStale(detached, "input_events_lost",
+            "Reloading the board must detach the check that was still current, not compare it with the new board.");
         AssertStale(await Read(second, token), "document_changed", "Reloading the board must not revive an older check.");
         var replay = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(secondRequest, token);
         Assert.AreEqual(second.JobId, replay.JobId);

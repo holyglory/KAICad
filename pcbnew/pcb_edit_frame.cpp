@@ -532,11 +532,21 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_apiHandler = std::make_unique<API_HANDLER_PCB>( this );
     Pgm().GetApiServer().RegisterHandler( m_apiHandler.get() );
     // Activation is a DRC recovery checkpoint: changes made in another editor of
-    // this process are observed before an agent reads an older check.
-    Bind( wxEVT_ACTIVATE, [this]( wxActivateEvent& event )
+    // this process are observed before an agent reads an older check. A burst of
+    // activations (focus changes, dialogs closing) is observed once, after it; the
+    // pending call is discarded with the frame.
+    Bind( wxEVT_ACTIVATE, [this, pending = std::make_shared<bool>( false )]( wxActivateEvent& event )
     {
-        if( event.GetActive() && !m_isClosing && m_apiHandler )
-            m_apiHandler->ObserveNativeDrcInputs();
+        if( event.GetActive() && !m_isClosing && m_apiHandler && !*pending )
+        {
+            *pending = true;
+            CallAfter( [this, pending]()
+            {
+                *pending = false;
+                if( !m_isClosing && m_apiHandler )
+                    m_apiHandler->ObserveNativeDrcInputs();
+            } );
+        }
         event.Skip();
     } );
 

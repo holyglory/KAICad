@@ -15,6 +15,7 @@
 class BOARD;
 class FOOTPRINT_LIBRARY_ADAPTER;
 class wxFileSystemWatcherEvent;
+class wxString;
 struct PCB_DRC_CAPTURE_CONTEXT;
 
 /**
@@ -78,10 +79,12 @@ public:
     void DetachBoard( const BOARD* aBoard );
     // A native committed change, undo/redo or settings edit reached the owner.
     void BoardChanged( const BOARD* aBoard );
-    // Native notifications for this board may have been missed.
-    void InputEventsLost( const BOARD* aBoard );
     // A recovery checkpoint (activation or settings notification): observe every
-    // live receipt of this board again. Already stale receipts never revive.
+    // live receipt of this board again. Already stale receipts never revive. Each
+    // live input is observed at most once per checkpoint, whatever the number of
+    // receipts, and the libraries of receipts whose file notifications cover them
+    // are not reread at all: their changes arrive as notifications, and every read
+    // still compares them before exposing results.
     void ObserveInputs( BOARD& aBoard, const std::string& aProcessEpoch,
                         const SCHEMATIC_OBSERVER& aObserveSchematic,
                         const LIBRARY_OBSERVER& aObserveLibraries );
@@ -91,16 +94,27 @@ private:
     struct INPUT_WATCHER;
     struct FILE_EVENTS;
     struct JOB;
+    struct LIVE_INPUTS;
     static void invalidate( const std::shared_ptr<JOB>& aJob, const std::string& aCode,
                             const std::string& aMessage );
     std::unique_ptr<INPUT_WATCHER> watchInputs( BOARD& aBoard, const PCB_DRC_CAPTURE_CONTEXT& aContext );
+    // Native notifications for this board may have been missed. Production loses
+    // notifications only through fileEvent(); the lifecycle fixture calls this directly.
+    void InputEventsLost( const BOARD* aBoard );
     void fileEvent( wxFileSystemWatcherEvent& aEvent );
     void retireWatches();
+    // Lifecycle fixture introspection of the single shared native watcher: the
+    // receipts sharing one directory subscription, and its native watched paths.
+    int fileSubscribers( const wxString& aDirectory ) const;
+    int nativeWatches() const;
     std::shared_ptr<JOB> find( const std::string& aJobId ) const;
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
             const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
             const SCHEMATIC_OBSERVER& aObserveSchematic = {},
             const LIBRARY_OBSERVER& aObserveLibraries = {} ) const;
+    tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> state(
+            const std::shared_ptr<JOB>& aJob, BOARD& aBoard, const std::string& aProcessEpoch,
+            const LIVE_INPUTS& aInputs ) const;
 
     mutable std::mutex m_mutex;
     const AUXILIARY_OBSERVER m_observeAuxiliary;

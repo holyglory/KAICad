@@ -91,6 +91,11 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCrash")]
     public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
 
+    // The same crash fixture: the synchronizations the mid-apply kills left pending are released, then resumed or rolled
+    // back on the KiCad started again (decision nd2e75380e7f8aa7f).
+    [TestMethod, TestCategory("NativeCrash")]
+    public Task NativeCrashReleasesTheExitedOperation() => RunNativeSessions(NativeJourney.NativeCrash, "release");
+
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash }
 
@@ -280,7 +285,7 @@ public sealed partial class NativeSessionTests
                     try
                     {
                         await RunPsuCpuJourney(journey, client, emptyRoot, Path.GetDirectoryName(schematic)!, nativeProcess,
-                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                            ":" + displayNumber, evidence, target.Id, deadline.Token, theme);
                     }
                     catch (Exception error) when (error is not AssertInconclusiveException && !deadline.IsCancellationRequested)
                     {
@@ -871,7 +876,8 @@ public sealed partial class NativeSessionTests
     // Seeds per psu-cpu-fixture-and-ownership.md §1.9. The seed journey itself
     // prepares and checks S0, S1 and S2 inside the parent fixture.
     private static async Task RunPsuCpuJourney(NativeJourney journey, NativeClient client, DocumentSpecifier emptyRoot,
-        string projectDirectory, Process native, string display, string evidence, string instanceId, CancellationToken token)
+        string projectDirectory, Process native, string display, string evidence, string instanceId, CancellationToken token,
+        string variant = "light")
     {
         if (journey == NativeJourney.PsuCpuSeed)
         {
@@ -894,7 +900,9 @@ public sealed partial class NativeSessionTests
             NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
-            _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
+            _ => variant == "release"
+                ? VerifyPsuCpuExitedOperationRelease(client, context, native, native.Id, display, evidence, instanceId, token)
+                : VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
         });
     }
 

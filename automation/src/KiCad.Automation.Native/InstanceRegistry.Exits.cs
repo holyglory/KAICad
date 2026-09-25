@@ -39,12 +39,14 @@ public sealed record InstanceExit(string InstanceId, string Epoch, int ProcessId
         !OperatingSystem.IsWindows() && exitCode is > 128 and <= 128 + 64 ? exitCode - 128 : null;
 }
 
-/// <summary>Which Linux process an instance record names: the boot it ran in, the process ID
-/// namespace of the server that recorded it (the inode of /proc/self/ns/pid) and the kernel start
-/// time of the process. A later server proves that exact process ended only in the same namespace
-/// (or after the machine restarted), so a process ID read in another namespace or reused by
-/// another program is never taken for it.</summary>
-public sealed record ProcessStartIdentity(string BootId, ulong PidNamespace, ulong StartTicks);
+/// <summary>Which Linux process an instance record names: the machine it ran on (/etc/machine-id),
+/// the boot it ran in, the process ID namespace of the server that recorded it (the inode of
+/// /proc/self/ns/pid) and the kernel start time of the process. A later server proves that exact
+/// process ended only on the same machine: in the same namespace, or after that machine restarted.
+/// A record written on another computer (for example one sharing this home folder) proves nothing
+/// here, so its different boot is never taken for a restart, and a process ID read in another
+/// namespace or reused by another program is never taken for it.</summary>
+public sealed record ProcessStartIdentity(string MachineId, string BootId, ulong PidNamespace, ulong StartTicks);
 
 /// <summary>What this server can prove about the process behind an attached instance, without
 /// contacting KiCad. Only a proven exit ever changes what the registry reports.</summary>
@@ -197,29 +199,52 @@ internal static class ProcessIdentity
     }
 
     /// <summary>The identity to record for a running process, or null when it has ended, does not
-    /// exist, or the platform does not provide one (only Linux does).</summary>
+    /// exist, or the platform does not provide one (only Linux does), or this machine's identity or
+    /// boot cannot be read: an identity that does not name its machine could never prove anything.</summary>
     public static ProcessStartIdentity? Record(int? processId)
     {
-        if (processId is not { } pid || BootId() is not { } boot || PidNamespace() is not { } space
-            || LinuxStartTicks(pid) is not { } ticks) return null;
-        return new(boot, space, ticks);
+        if (processId is not { } pid || MachineId() is not { } machine || BootId() is not { } boot
+            || PidNamespace() is not { } space || LinuxStartTicks(pid) is not { } ticks) return null;
+        return new(machine, boot, space, ticks);
     }
 
-    /// <summary>True when the process ID names exactly the recorded process, still running: same boot,
-    /// same process ID namespace as this server, same start time.</summary>
+    /// <summary>True when the process ID names exactly the recorded process, still running: same machine,
+    /// same boot, same process ID namespace as this server, same start time. False when this machine's
+    /// identity cannot be read or differs from the recorded one.</summary>
     public static bool Runs(int processId, ProcessStartIdentity identity) =>
-        BootId() is { } boot && boot == identity.BootId && PidNamespace() == identity.PidNamespace
+        SameMachine(identity) && BootId() is { } boot && boot == identity.BootId && PidNamespace() == identity.PidNamespace
         && LinuxStartTicks(processId) == identity.StartTicks;
 
     /// <summary>True only when a recorded process, which this server may never have observed (for example
-    /// one recorded before the server restarted), is proven to have ended: the machine restarted since it
-    /// was recorded, or in the same process ID namespace its ID no longer names that process. In another
-    /// namespace, or without a boot identity, nothing is proven.</summary>
+    /// one recorded before the server restarted), is proven to have ended on this machine: this machine
+    /// restarted since it was recorded, or in the same process ID namespace its ID no longer names that
+    /// process. A record from another machine, or when this machine's identity or boot cannot be read, or
+    /// from another namespace of this boot, proves nothing: another computer's boot ID always differs, and
+    /// is never taken for a restart.</summary>
     public static bool Ended(int processId, ProcessStartIdentity identity)
     {
-        if (!OperatingSystem.IsLinux() || processId <= 0 || BootId() is not { } boot) return false;
+        if (!OperatingSystem.IsLinux() || processId <= 0 || !SameMachine(identity) || BootId() is not { } boot) return false;
         if (boot != identity.BootId) return true;
         return PidNamespace() == identity.PidNamespace && Gone(processId, identity.StartTicks);
+    }
+
+    private static bool SameMachine(ProcessStartIdentity identity) =>
+        MachineId() is { } machine && string.Equals(machine, identity.MachineId, StringComparison.Ordinal);
+
+    /// <summary>This machine's identity: /etc/machine-id, or /var/lib/dbus/machine-id where only that
+    /// exists; null off Linux or when neither can be read.</summary>
+    internal static string? MachineId()
+    {
+        if (!OperatingSystem.IsLinux()) return null;
+        foreach (string path in new[] { "/etc/machine-id", "/var/lib/dbus/machine-id" })
+        {
+            try
+            {
+                if (File.ReadAllText(path).Trim() is { Length: > 0 } machine) return machine;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+        return null;
     }
 
     private static string? BootId()
@@ -286,7 +311,8 @@ public sealed partial class InstanceRegistry
     /// this server observes for it decides: KiCad answered a handshake at that epoch, so neither a durable
     /// record nor a saved process ID overrides it, and an attached epoch whose process this server cannot
     /// observe is never proven to have ended. Otherwise the durable exit record decides, or a saved
-    /// registration of that epoch whose recorded process (boot, namespace, start time) is proven gone.</summary>
+    /// registration of that epoch whose recorded process (machine, boot, namespace, start time) is proven gone
+    /// on this machine.</summary>
     public async Task<InstanceExit?> ProvenExitAsync(string instanceId, string epoch, CancellationToken token = default)
     {
         if (!Guid.TryParseExact(instanceId, "D", out _) || string.IsNullOrWhiteSpace(epoch))
@@ -346,7 +372,7 @@ public sealed partial class InstanceRegistry
     }
 
     // A process this server did not start is observed by its process ID only when that ID runs this
-    // instance's KiCad and is exactly the recorded process (same boot, namespace and start time, read
+    // instance's KiCad and is exactly the recorded process (same machine, boot, namespace and start time, read
     // right after the verified handshake or saved when that epoch was verified), so the exit of exactly
     // that process can be proven later. Anything else stays unverified.
     private InstanceProcessObserver? Observe(string instanceId, string epoch, int? processId, ProcessStartIdentity? identity)

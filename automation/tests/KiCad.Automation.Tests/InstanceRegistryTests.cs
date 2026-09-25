@@ -293,7 +293,8 @@ public sealed class InstanceRegistryTests
         string executable = Path.Combine(state, "kicad");
         await File.WriteAllTextAsync(executable, "#!/bin/sh\nexec sleep 60\n");
         File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        var transport = new EchoTransport(project);
+        // KiCad names its own process in the handshake: here the stand-in the registry started.
+        var transport = new EchoTransport(project) { ProcessIdOf = StartedProcess(state) };
         var registry = new InstanceRegistry(transport, state);
         string? id = null;
         var processes = new List<int>();
@@ -408,11 +409,13 @@ public sealed class InstanceRegistryTests
         finally { await DeleteAsync(state); }
     }
 
-    // Review findings 2 and 3: after an MCP restart only a saved registration's recorded process identity (boot, process
-    // ID namespace, start time) proves how its KiCad ended. A saved KiCad shown still running this instance refuses a
-    // start; one proven ended lets the start continue its ID; one this server can neither prove ended nor show running
-    // (a record without that identity, or one written in another namespace) starts a new instance ID. Isolated: the
-    // native crash journey restarts KiCad while its server keeps observing it, never across a server restart.
+    // Review findings 2 and 3, and re-review finding 1: after an MCP restart only a saved registration's recorded process
+    // identity (machine, boot, process ID namespace, start time) proves how its KiCad ended. A saved KiCad shown still
+    // running this instance refuses a start; one proven ended lets the start continue its ID; one this server can neither
+    // prove ended nor show running (a record without that identity, one written in another namespace, or one written on
+    // another computer, whose boot differs but is no restart of this machine) starts a new instance ID. Isolated: the
+    // native crash journey restarts KiCad while its server keeps observing it, never across a server restart, and it
+    // cannot run a second computer.
     [TestMethod]
     public async Task ASavedRegistrationDecidesAStartOnlyByItsRecordedProcess()
     {
@@ -422,7 +425,7 @@ public sealed class InstanceRegistryTests
         Directory.CreateDirectory(Path.GetDirectoryName(project)!);
         await File.WriteAllTextAsync(project, "{}");
         string executable = await StandInExecutable(root);
-        var transport = new EchoTransport(project);
+        var transport = new EchoTransport(project) { ProcessIdOf = StartedProcess(root) };
         var started = new List<(string Id, int ProcessId)>();
         try
         {
@@ -468,7 +471,28 @@ public sealed class InstanceRegistryTests
             var live = ProcessIdentity.Record(Environment.ProcessId)!;
             string rebootedId = await Saved(rebooted, Environment.ProcessId, live with { BootId = Guid.NewGuid().ToString("D") });
             var afterReboot = await Start(rebooted);
-            Assert.AreEqual(rebootedId, afterReboot.Instance.InstanceId, "A record from an earlier boot is proven ended.");
+            Assert.AreEqual(rebootedId, afterReboot.Instance.InstanceId, "A record from an earlier boot of this machine is proven ended.");
+            Assert.AreEqual(InstanceExit.ProcessAbsentEvidence, afterReboot.ReplacedExit!.Evidence);
+
+            // The same record written on another computer (for example one sharing this home folder): its boot always
+            // differs from this machine's, which is no restart here, so nothing is proven and nothing is recorded.
+            string otherMachine = Path.Combine(root, "other-machine");
+            Assert.IsFalse(ProcessIdentity.Ended(Environment.ProcessId, live with { MachineId = "0123456789abcdef0123456789abcdef", BootId = Guid.NewGuid().ToString("D") }));
+            Assert.IsFalse(ProcessIdentity.Runs(Environment.ProcessId, live with { MachineId = "0123456789abcdef0123456789abcdef" }),
+                "A process of another machine is never taken for one running here, even with the same process ID and start time.");
+            string otherMachineId = await Saved(otherMachine, Environment.ProcessId,
+                live with { MachineId = "0123456789abcdef0123456789abcdef", BootId = Guid.NewGuid().ToString("D") });
+            var elsewhere = await Start(otherMachine);
+            Assert.AreNotEqual(otherMachineId, elsewhere.Instance.InstanceId, "A record from another computer is not proven ended here.");
+            Assert.IsNull(elsewhere.Replaced);
+            Assert.IsNull(await new InstanceRegistry(transport, otherMachine).ProvenExitAsync(otherMachineId, "saved-epoch"));
+            Assert.IsFalse(Directory.Exists(Path.Combine(otherMachine, "exits", otherMachineId)), "No exit is recorded for another computer's KiCad.");
+
+            // A record naming its process without a machine is invalid, never read as proof.
+            string unnamedMachine = Path.Combine(root, "unnamed-machine");
+            string unnamedId = await Saved(unnamedMachine, Environment.ProcessId, live with { MachineId = "" });
+            Assert.AreEqual("invalid_registry", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                new InstanceRegistry(transport, unnamedMachine).ReattachAsync(unnamedId))).Code);
 
             // Neither proven ended nor shown running: a new instance ID, and nothing recorded as exited.
             int gone;
@@ -496,11 +520,13 @@ public sealed class InstanceRegistryTests
         }
     }
 
-    // Review findings 4 and 5: KiCad started through a launcher that forks it and then ends. The handshake names KiCad's
-    // own process, so the launcher's exit is never reported as KiCad's: the server observes the process KiCad names, a
-    // second start is refused while it runs, and a request waiting on it fails soon after it ends (the server checks the
-    // process while the request waits) instead of after its reply timeout. Isolated: the product KiCad is never started
-    // through a launcher here, and the attached-KiCad wait is also proven by the native crash journey.
+    // Review findings 4 and 5, and re-review finding 2: KiCad started through a launcher that forks it and then ends. The
+    // handshake names KiCad's own process, so the launcher's exit is never reported as KiCad's: the server observes the
+    // process KiCad names, a second start is refused while it runs, and a request waiting on it fails soon after it ends
+    // (the server checks the process while the request waits) instead of after its reply timeout. An older KiCad names no
+    // process (0): nothing shows whether the started process is KiCad or its launcher, so the instance stays unverified
+    // and the launcher's exit never counts as KiCad's. Isolated: the product KiCad is never started through a launcher
+    // here, and the attached-KiCad wait is also proven by the native crash journey.
     [TestMethod]
     public async Task AKiCadStartedThroughALauncherIsObservedByItsOwnProcess()
     {
@@ -514,14 +540,39 @@ public sealed class InstanceRegistryTests
         await File.WriteAllTextAsync(executable, "#!/bin/bash\nbash -c 'sleep 60; true' kicad \"$@\" &\n"
             + "echo $! > \"$(dirname \"$0\")/kicad.pid\"\necho $$ > \"$(dirname \"$0\")/launcher.pid\"\nsleep 3\nexit 0\n");
         File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        string kicadPid = Path.Combine(state, "kicad.pid");
+        string kicadPid = Path.Combine(state, "kicad.pid"), launcherPid = Path.Combine(state, "launcher.pid");
+        var started = new List<(string Id, int ProcessId)>();
+        async Task<int> Pid(string file)
+        {
+            while (!File.Exists(file) || (await File.ReadAllTextAsync(file)).Trim().Length == 0) await Task.Delay(20);
+            return int.Parse((await File.ReadAllTextAsync(file)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+        try
+        {
+            string oldState = Path.Combine(state, "older-kicad");
+            var older = new InstanceRegistry(new EchoTransport(project), oldState);
+            var unnamed = await older.StartInstanceAsync(executable, project);
+            int olderKiCad = await Pid(kicadPid), olderLauncher = await Pid(launcherPid);
+            started.Add((unnamed.Instance.InstanceId, olderKiCad));
+            Assert.IsNull(unnamed.Instance.ProcessId, "A KiCad that names no process is not taken to be the started process.");
+            Assert.IsNull(unnamed.Instance.ProcessStart);
+            await WaitForAsync(() => ProcessIdentity.LinuxStartTicks(olderLauncher) is null, TimeSpan.FromSeconds(20));
+            Assert.AreEqual(InstanceProcessStatus.Unverified, older.Statuses().Single().State, "The launcher ended; that proves nothing about KiCad.");
+            Assert.IsNull(await older.ProvenExitAsync(unnamed.Instance.InstanceId, unnamed.Instance.Epoch));
+            Assert.IsFalse(Directory.Exists(Path.Combine(oldState, "exits")), "No exit is recorded for a KiCad that may still run.");
+            Assert.AreEqual("project_owned", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                older.StartInstanceAsync(executable, project))).Code, "A KiCad that may still run is never started twice.");
+            await StopStandIns(started);
+            started.Clear();
+            File.Delete(kicadPid); File.Delete(launcherPid);
+        }
+        catch { await StopStandIns(started); throw; }
         var transport = new EchoTransport(project) { ProcessIdOf = async (_, token) =>
         {
             while (!File.Exists(kicadPid) || (await File.ReadAllTextAsync(kicadPid, token)).Trim().Length == 0) await Task.Delay(20, token);
             return uint.Parse((await File.ReadAllTextAsync(kicadPid, token)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
         } };
         var registry = new InstanceRegistry(transport, state);
-        var started = new List<(string Id, int ProcessId)>();
         try
         {
             var launched = await registry.StartInstanceAsync(executable, project);
@@ -565,6 +616,24 @@ public sealed class InstanceRegistryTests
         File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return executable;
     }
+
+    // KiCad names its own process in the handshake. A stand-in KiCad is the process the registry started, whose ID the
+    // registry writes into the instance's launch receipt (under any state folder below root) before it waits for the
+    // handshake; without a receipt the handshake names no process (0).
+    private static Func<string, CancellationToken, Task<uint>> StartedProcess(string root) => async (id, token) =>
+    {
+        foreach (string receipt in Directory.EnumerateFiles(root, id + ".json", SearchOption.AllDirectories)
+                     .Where(path => Path.GetFileName(Path.GetDirectoryName(path)) == "launches"))
+        {
+            try
+            {
+                using var json = JsonDocument.Parse(await File.ReadAllTextAsync(receipt, token));
+                if (json.RootElement.GetProperty("ProcessId") is { ValueKind: JsonValueKind.Number } pid) return pid.GetUInt32();
+            }
+            catch (Exception error) when (error is IOException or JsonException) { }
+        }
+        return 0;
+    };
 
     // Stops only the stand-in processes a test started, and removes their runtime folders.
     private static async Task StopStandIns(IEnumerable<(string Id, int ProcessId)> started)

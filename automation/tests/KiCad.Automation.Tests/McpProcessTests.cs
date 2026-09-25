@@ -379,6 +379,81 @@ public sealed class McpProcessTests
                     designPath = Path.Combine(state, "design.xml"), expectedRevisionToken = "stale", operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(invalidApply.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("missing_design_recovery", invalidApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            CollectionAssert.Contains(names, "kicad_design_recovery_release_exited");
+            // A synchronization left pending in a recovery record is released only on a proven exit of exactly the KiCad
+            // process epoch that holds it. With no attached KiCad, the only proof is a saved registration of that epoch:
+            // written on this machine in an earlier boot it proves the exit; written on another computer (a different
+            // machine ID, whose boot always differs) it proves nothing. The release keeps the whole operation in a receipt
+            // and clears only the pending operation. The native journey NativeSessionTests.NativeCrashReleasesTheExitedOperation
+            // proves release, resume and roll-back against killed KiCad processes.
+            using (var released = new DesignPublicationRecoveryTests.Fixture())
+            {
+                var held = released.Saved;
+                string heldInstance = held.State.InstanceId.ToString("D"), heldEpoch = held.State.PendingNativeState!.ProcessEpoch;
+                string heldOperation = held.State.PendingPublication!.OperationId.ToString("D");
+                string nativeFile = held.State.PendingNativeSave!.ExpectedState.FileBaselines.Single().Path;
+                await File.WriteAllTextAsync(nativeFile, "(kicad_sch (version 20250114))", timeout.Token);
+                async Task<JsonElement> Release(int id, string token, string operation, string continuation) =>
+                    (await Request(id, "tools/call", new { name = "kicad_design_recovery_release_exited", arguments = new
+                        { instanceId = heldInstance, recoveryPath = released.RecordPath, expectedRevisionToken = token, operationId = operation, continuation } }))
+                    .GetProperty("result");
+                string Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                byte[] heldBytes = await File.ReadAllBytesAsync(released.RecordPath, timeout.Token);
+                Assert.AreEqual("invalid_continuation", Code(await Release(4090, held.RevisionToken, heldOperation, "discard")));
+                Assert.AreEqual("released_operation_mismatch", Code(await Release(4091, held.RevisionToken, Guid.NewGuid().ToString("D"), "resume")));
+                var unproven = await Release(4092, held.RevisionToken, heldOperation, "resume");
+                Assert.AreEqual("operation_exit_unproven", Code(unproven), unproven.GetRawText());
+                StringAssert.Contains(unproven.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), heldEpoch);
+                var live = ProcessIdentity.Record(Environment.ProcessId)!;
+                async Task Registration(ProcessStartIdentity identity) => await File.WriteAllTextAsync(Path.Combine(state, heldInstance + ".json"),
+                    JsonSerializer.Serialize(new InstanceRecord(heldInstance, Path.Combine(state, "released-project", "fixture.kicad_pro"),
+                        NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(heldInstance), "api.sock")), heldEpoch,
+                        Environment.ProcessId, DateTimeOffset.UtcNow, identity)), timeout.Token);
+                await Registration(live with { MachineId = "0123456789abcdef0123456789abcdef", BootId = Guid.NewGuid().ToString("D") });
+                Assert.AreEqual("operation_exit_unproven", Code(await Release(4093, held.RevisionToken, heldOperation, "resume")),
+                    "A registration written on another computer never proves the exit.");
+                // The recovery store itself accepts only the exit of the process epoch that holds the operation.
+                var otherProcess = new InstanceExit(heldInstance, Guid.NewGuid().ToString("D"), Environment.ProcessId, 137, 9,
+                    InstanceExit.ExitStatusEvidence, DateTimeOffset.UtcNow);
+                Assert.AreEqual("operation_exit_unproven", Assert.ThrowsExactly<AutomationException>(() =>
+                    new DesignRecoveryStore(released.RecordPath).ReleaseExitedOperation(held, otherProcess)).Code);
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(released.RecordPath, timeout.Token), "A refused release changes nothing.");
+                Assert.IsFalse(Directory.Exists(DesignReleasedOperations.Directory(released.RecordPath)), "A refused release keeps no receipt.");
+
+                await Registration(live with { BootId = Guid.NewGuid().ToString("D") });
+                var release = await Release(4094, held.RevisionToken, heldOperation, "resume");
+                Assert.IsFalse(release.TryGetProperty("isError", out var releaseError) && releaseError.GetBoolean(), release.GetRawText());
+                var view = release.GetProperty("structuredContent");
+                Assert.AreEqual("released", view.GetProperty("outcome").GetString(), "No KiCad runs for the instance, so nothing continues yet.");
+                Assert.IsTrue(view.GetProperty("releasedNow").GetBoolean());
+                Assert.AreEqual(heldEpoch, view.GetProperty("releasedEpoch").GetString());
+                Assert.AreEqual(InstanceExit.ProcessAbsentEvidence, view.GetProperty("exit").GetProperty("evidence").GetString());
+                CollectionAssert.AreEqual(new[] { nativeFile }, view.GetProperty("replacedFiles").EnumerateArray().Select(f => f.GetString()).ToArray());
+                var after = new DesignRecoveryStore(released.RecordPath).Read()!;
+                Assert.AreEqual(view.GetProperty("recoveryRevisionToken").GetString(), after.RevisionToken);
+                Assert.IsFalse(after.State.HasPendingWork);
+                Assert.IsNull(after.State.PendingNativeState);
+                Assert.IsNull(after.State.PendingNativeSave);
+                Assert.AreEqual(SchematicDesignXml.Write(held.State.Baseline, held.State.KnowledgeLibraries),
+                    SchematicDesignXml.Write(after.State.Baseline, after.State.KnowledgeLibraries), "The release never advances the baseline.");
+                CollectionAssert.AreEqual(held.State.DesiredFileBytes, after.State.DesiredFileBytes);
+                Assert.AreEqual(held.State.NativeRevision, after.State.NativeRevision);
+                var receipt = DesignReleasedOperations.Read(view.GetProperty("receiptPath").GetString()!);
+                Assert.AreEqual(held.State.PendingPublication.OperationId, receipt.OperationId);
+                Assert.AreEqual(held.RevisionToken, receipt.ReleasedFromRevisionToken);
+                Assert.AreEqual(held.State.PendingNativeState, receipt.NativeState(), "The receipt keeps the operation's native state.");
+                Assert.AreEqual(held.State.PendingNativeSave, receipt.NativeSave(), "The receipt keeps the save KiCad was cut off in.");
+                CollectionAssert.AreEqual(held.State.PendingPublication.CandidateFileBytes, receipt.PendingPublication!.CandidateFileBytes);
+                CollectionAssert.AreEqual(held.State.PendingPublication.ExpectedFileBytes, receipt.PendingPublication.ExpectedFileBytes);
+                Assert.IsTrue(receipt.Files.Single().Replaced);
+                Assert.AreEqual(heldEpoch, receipt.Exit.Epoch);
+                // Called again after the release: nothing is released twice, and it still waits for a running KiCad.
+                var again = (await Release(4095, after.RevisionToken, heldOperation, "roll-back")).GetProperty("structuredContent");
+                Assert.AreEqual("released", again.GetProperty("outcome").GetString(), again.GetRawText());
+                Assert.IsFalse(again.GetProperty("releasedNow").GetBoolean());
+                Assert.AreEqual(after.RevisionToken, new DesignRecoveryStore(released.RecordPath).Read()!.RevisionToken);
+                File.Delete(Path.Combine(state, heldInstance + ".json"));
+            }
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
             var syncFixture = SchematicSynchronizationPlanTests.Fixture();
             var syncStore = new DesignRecoveryStore(syncRecoveryPath);

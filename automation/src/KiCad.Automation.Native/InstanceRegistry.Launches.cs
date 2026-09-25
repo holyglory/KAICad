@@ -34,8 +34,8 @@ public sealed partial class InstanceRegistry
             if (saved is null || saved.InstanceId != id || string.IsNullOrWhiteSpace(saved.ProjectPath)
                 || !Path.IsPathFullyQualified(saved.ProjectPath) || string.IsNullOrWhiteSpace(saved.Epoch)
                 || saved.VerifiedAt == default || saved.ProcessId is <= 0 || string.IsNullOrWhiteSpace(saved.Endpoint)
-                || (saved.ProcessStart is { } identity && (saved.ProcessId is null || string.IsNullOrWhiteSpace(identity.BootId)
-                    || identity.PidNamespace == 0)))
+                || (saved.ProcessStart is { } identity && (saved.ProcessId is null || string.IsNullOrWhiteSpace(identity.MachineId)
+                    || string.IsNullOrWhiteSpace(identity.BootId) || identity.PidNamespace == 0)))
                 throw new AutomationException("invalid_registry", "The saved session record is invalid.");
             NngTransport.ValidateEndpoint(saved.Endpoint);
             return saved;

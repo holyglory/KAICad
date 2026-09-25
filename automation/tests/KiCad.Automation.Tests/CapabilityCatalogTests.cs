@@ -23,7 +23,8 @@ public sealed class CapabilityCatalogTests
 
     // Lane 2D tool types: each of their tools declares its capability and its verification.
     private static readonly System.Type[] DeclaredToolTypes =
-        [typeof(InstanceTools), typeof(InstanceUpdateTools), typeof(DocumentLifecycleTools), typeof(DocumentStateTools), typeof(CheckedSchematicTools)];
+        [typeof(InstanceTools), typeof(InstanceUpdateTools), typeof(DocumentLifecycleTools), typeof(DocumentStateTools), typeof(CheckedSchematicTools),
+         typeof(ExitedOperationTools)];
 
     [TestMethod]
     public async Task CompiledServerAdvertisesExactlyItsRegisteredTools()

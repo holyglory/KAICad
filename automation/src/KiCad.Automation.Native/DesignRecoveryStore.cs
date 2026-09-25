@@ -104,7 +104,8 @@ public sealed class DesignRecoveryStore(string statePath)
     public StoredDesignRecovery Save(DesignRecoveryState state, string? expectedRevisionToken) =>
         SaveCore(state, expectedRevisionToken, abandoningRealization: false);
 
-    private StoredDesignRecovery SaveCore(DesignRecoveryState state, string? expectedRevisionToken, bool abandoningRealization)
+    private StoredDesignRecovery SaveCore(DesignRecoveryState state, string? expectedRevisionToken, bool abandoningRealization,
+        bool releasingExited = false, Action? beforeReplace = null)
     {
         Validate(state);
         var fileIntent = state.PendingPublication ?? (state.PendingLayout is { } layout
@@ -144,8 +145,9 @@ public sealed class DesignRecoveryStore(string statePath)
             var current = ReadCore();
             if (current?.RevisionToken != expectedRevisionToken)
                 throw Failure("design_recovery_changed", "Recovery state changed; reload it before saving.");
-            ValidateTransition(current?.State, state, abandoningRealization);
+            ValidateTransition(current?.State, state, abandoningRealization, releasingExited);
             if (current?.RevisionToken == next.RevisionToken) return current;
+            beforeReplace?.Invoke();
             temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
@@ -275,6 +277,37 @@ public sealed class DesignRecoveryStore(string statePath)
             abandoningRealization: true);
     }
 
+    /// <summary>Release the pending operation of a KiCad process proven to have ended (decision
+    /// nd2e75380e7f8aa7f). The proof must be the exit of exactly the process epoch that holds the
+    /// operation: the epoch of its checked native state and, when one was journaled, of its save. The
+    /// caller takes it from the instance registry, which proves an exit only by this server's observer of
+    /// that process or by a saved registration of the same machine, boot and process ID namespace. Under the
+    /// record's lock, after the revision check, the whole pending operation is first kept in a durable release
+    /// receipt with the native files its save had already replaced, so later reconciliation treats a partial
+    /// result as that operation's and never as a user edit. Only the pending operation is then cleared:
+    /// baseline, desired XML, observation, choices and completed receipts stay exactly as they were.</summary>
+    public StoredDesignRecovery ReleaseExitedOperation(StoredDesignRecovery saved, InstanceExit proof)
+    {
+        ArgumentNullException.ThrowIfNull(saved);
+        ArgumentNullException.ThrowIfNull(proof);
+        var state = saved.State;
+        if (!state.HasPendingWork)
+            throw Failure("no_pending_operation", "The recovery record holds no pending operation to release.");
+        if (state.PendingNativeState is not { } native)
+            throw Failure("operation_process_unknown", "The pending operation does not record which KiCad process holds it.");
+        if (proof.InstanceId != state.InstanceId.ToString("D") || proof.Epoch != native.ProcessEpoch
+            || (state.PendingNativeSave is { } save && save.ExpectedState?.ProcessEpoch != proof.Epoch)
+            || proof.ProcessId <= 0 || proof.Evidence is not (InstanceExit.ExitStatusEvidence or InstanceExit.ProcessAbsentEvidence))
+            throw Failure("operation_exit_unproven", "Release requires the proven exit of exactly the KiCad process that holds the pending operation.");
+        var receipt = DesignReleasedOperation.Create(saved, proof);
+        return SaveCore(state with
+        {
+            PendingMutation = null, PendingNativeState = null, PendingNativeSave = null, PendingCandidateFileBytes = null,
+            PendingPublication = null, PendingLayout = null
+        }, saved.RevisionToken, abandoningRealization: false, releasingExited: true,
+            beforeReplace: () => DesignReleasedOperations.Write(path, receipt));
+    }
+
     private static void Validate(DesignRecoveryState state)
     {
         if (state.OriginId == Guid.Empty || state.InstanceId == Guid.Empty || state.NativeRevision is null
@@ -396,7 +429,8 @@ public sealed class DesignRecoveryStore(string statePath)
             throw Failure("invalid_design_publication", "Native-save identity must be retained before publishing XML.");
     }
 
-    private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next, bool abandoningRealization = false)
+    private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next, bool abandoningRealization = false,
+        bool releasingExited = false)
     {
         if (current?.HasPendingWork == true && !Equals(current.OwnershipResolution, next.OwnershipResolution)
             && !(next.OwnershipResolution is null && !next.HasPendingWork
@@ -417,6 +451,28 @@ public sealed class DesignRecoveryStore(string statePath)
                     .SequenceEqual(next.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary))
                 || SchematicDesignXml.Write(current.Baseline, current.KnowledgeLibraries) != SchematicDesignXml.Write(next.Baseline, next.KnowledgeLibraries))
                 throw Failure("layout_intent_changed", "Abandoning a rejected realization clears only its pending request.");
+            return;
+        }
+        if (releasingExited)
+        {
+            // Only ReleaseExitedOperation reaches here, after matching a proven process exit to the
+            // operation: clear exactly the pending operation, whatever its phase, and nothing else.
+            // Ordinary saves cannot clear a publication or layout without its completion.
+            static byte[] Serialized<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Json);
+            if (current is null || !current.HasPendingWork || next.HasPendingWork || next.PendingNativeState is not null
+                || next.PendingNativeSave is not null || next.PendingCandidateFileBytes is not null
+                || current.OriginId != next.OriginId || current.InstanceId != next.InstanceId
+                || current.NativeRevision != next.NativeRevision || current.TrackingComplete != next.TrackingComplete
+                || !Equals(current.Observed, next.Observed) || !Equals(current.ObservedElectrical, next.ObservedElectrical)
+                || !Equals(current.BaselineElectrical, next.BaselineElectrical)
+                || !current.DesiredFileBytes.AsSpan().SequenceEqual(next.DesiredFileBytes)
+                || !Serialized(current.HierarchyResolution).AsSpan().SequenceEqual(Serialized(next.HierarchyResolution))
+                || !Equals(current.OwnershipResolution, next.OwnershipResolution)
+                || !Serialized(current.LastSynchronization).AsSpan().SequenceEqual(Serialized(next.LastSynchronization))
+                || !current.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary)
+                    .SequenceEqual(next.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary))
+                || SchematicDesignXml.Write(current.Baseline, current.KnowledgeLibraries) != SchematicDesignXml.Write(next.Baseline, next.KnowledgeLibraries))
+                throw Failure("released_operation_changed", "Releasing an exited operation clears only that operation.");
             return;
         }
         if (current?.PendingLayout is { } layout)

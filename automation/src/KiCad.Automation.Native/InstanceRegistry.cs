@@ -8,8 +8,9 @@ using KiCad.Automation.Protocol;
 namespace KiCad.Automation.Native;
 
 /// <summary>A verified registration. ProcessId and ProcessStart name the KiCad process of that epoch only
-/// when this server verified it runs the instance (or started it); ProcessStart is null off Linux and in
-/// records written before it existed, and then a saved registration never proves that process ended.</summary>
+/// when this server verified it runs the instance (or started it and KiCad named that process); ProcessStart
+/// is null off Linux, when the machine's identity cannot be read, and in records written before it existed,
+/// and then a saved registration never proves that process ended.</summary>
 public sealed record InstanceRecord(string InstanceId, string ProjectPath, string Endpoint,
                                     string Epoch, int? ProcessId, DateTimeOffset VerifiedAt,
                                     ProcessStartIdentity? ProcessStart = null);
@@ -233,13 +234,15 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                         await changes.WaitAsync(deadline.Token);
                         try
                         {
-                            // KiCad names its own process in the handshake (0 from a KiCad built before that
-                            // field). The process this server started witnesses KiCad's exit only when it is
-                            // that KiCad: a launcher that started KiCad and ended is not, so its exit is never
-                            // reported as KiCad's. The process KiCad names is then observed instead, when it
-                            // runs this instance, or the instance stays unverified. The same epoch is attached
-                            // below, so its handshake names the same process.
-                            bool startedKiCad = ready.ProcessId == 0 || ready.ProcessId == (uint)process.Id;
+                            // KiCad names its own process in the handshake. The process this server started
+                            // witnesses KiCad's exit only when KiCad names exactly that process: a launcher that
+                            // started KiCad and ended is not KiCad, so its exit is never reported as KiCad's. A
+                            // KiCad built before that field names no process (0), so nothing shows that the
+                            // started process is KiCad rather than its launcher: it stays unverified and its
+                            // exit proves nothing. Otherwise the process KiCad names is observed instead, when
+                            // it runs this instance, or the instance stays unverified. The same epoch is
+                            // attached below, so its handshake names the same process.
+                            bool startedKiCad = ready.ProcessId != 0 && ready.ProcessId == (uint)process.Id;
                             var watcher = startedKiCad ? new ChildProcessObserver(id, ready.Epoch, process, RecordExit) : null;
                             observed = watcher is not null;
                             var attached = await AttachCoreAsync(endpoint, id, startedKiCad ? process.Id : null, deadline.Token,

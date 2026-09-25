@@ -12,11 +12,13 @@ using LockedState = Kiapi.Common.Types.LockedState;
 namespace KiCad.Automation.Tests;
 
 // CN-1 classification, preparation guards and connection intent (cn1-wiring-intent.md §4.1, §4.4 and §5).
-// These are unit tests of isolated pure logic: no editor can exercise an admitted connected addition until
-// native advertises schematic.connection-realization.v1, which it does not yet, and nothing can apply the
-// realizer's wires before lane 2C's native assertion exists. The rendered NativeXmlComponentCreation journey checks
-// the same gate, builds intents from real handshakes and captured states and realizes them against the editor's own
-// measurements without applying them; the existing plan tests here pin the unchanged general-path results.
+// These are unit tests of isolated pure logic. The admitted path is proven end to end on a real editor, which advertises
+// schematic.connection-realization.v1 for a project: the psu-cpu-connected journey plans and applies the PSU/CPU fixture's
+// Complete stage through the production MCP server, and McpReattachmentJourney realizes a revision through the automatic
+// worker and apply. What stays here needs states a live editor cannot be steered into, or handshakes it does not send:
+// every classification refusal and guard, sessions without the capability, and variants of the frozen fixtures that no
+// journey stage produces (hidden power pins on another net, stacked pins split across nets, crossings already wired); the
+// existing plan tests here pin the unchanged general-path results.
 public sealed partial class SchematicSynchronizationPlanTests
 {
     [TestMethod]

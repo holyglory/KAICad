@@ -247,7 +247,8 @@ public sealed partial class NativeSessionTests
         foreach (var screen in expectedSettled.Schematic.Instances)
             screen.Metadata.LoadedNativeFormatVersion = reloaded.Electrical.Hierarchy.Data.Instances
                 .Single(s => s.Metadata.Document.Equals(screen.Metadata.Document)).Metadata.LoadedNativeFormatVersion;
-        if (SchematicDesignXml.Write(expectedSettled, []) != SchematicDesignXml.Write(settledDesign, []))
+        bool settledIsPublished = SchematicDesignXml.Write(expectedSettled, []) == SchematicDesignXml.Write(settledDesign, []);
+        if (!settledIsPublished)
         {
             await File.WriteAllTextAsync(Evidence("settled-expected.xml"), SchematicDesignXml.Write(expectedSettled, []), token);
             await File.WriteAllTextAsync(Evidence("settled-actual.xml"), SchematicDesignXml.Write(settledDesign, []), token);
@@ -280,7 +281,10 @@ public sealed partial class NativeSessionTests
                 expectedGroups = intent.ExpectedGroups.Count },
             generated = realization.Generated.GroupBy(g => g.Role.ToString()).ToDictionary(g => g.Key, g => g.Count()),
             connectivityAssertionVerified = true, executorDrewRecordedRealization = true, labelStubs = stubs, forcedMismatch = mismatch,
-            exactReplay = true, repeatedPlanNoOp = true, repeatedApplyNoOp = true, nativeUndoRedoVerified = true, saveReloadVerified = true,
+            exactReplay = true, repeatedPlanNoOp = true, repeatedApplyNoOp = true, nativeUndoRedoVerified = true,
+            // Save and reload hold only when the reloaded sheets equal the realized ones and the settled plan is the published XML;
+            // either difference is also recorded in problems, and the journey fails below.
+            saveReloadVerified = reloadDifferences.Count == 0 && settledIsPublished,
             recoveryReattachedWithoutChanges = true, pullUps,
             publishedXml = new { length = published.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(published)) },
             crossPlatformReady = false, steps, problems

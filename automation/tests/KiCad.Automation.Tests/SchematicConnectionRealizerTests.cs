@@ -11,13 +11,15 @@ using DocumentRevision = KiCad.Automation.Protocol.DocumentRevision;
 
 namespace KiCad.Automation.Tests;
 
-// CN-1 milestone 1 label-stub realization (cn1-wiring-intent.md §6) and its resolution (§9.4). Why unit tests: no
-// editor can apply a realization until lane 2C's native connectivity assertion exists and KiCad advertises
-// schematic.connection-realization.v1, so the end-to-end journeys can only measure. They do: the NativeXmlComponentCreation
-// journey realizes real intents against a live editor's measurements without applying them and records those
-// measurements (automation/tests/fixtures/connection-realization) for the replay test. The admission rules, refusal
-// codes and resolution comparisons are isolated logic that needs exact control over geometry, which only a synthetic
-// measurement gives: every must-catch case here has a false-positive guard next to it. Lane 2A created this file with
+// CN-1 milestone 1 label-stub realization (cn1-wiring-intent.md §6) and its resolution (§9.4). The end-to-end proof is
+// native: KiCad advertises schematic.connection-realization.v1 for a project (CN-1 §8.3), and the psu-cpu-connected journey
+// (NativeXmlComponentCreationJourney.VerifyPsuCpuConnectedRealization) applies the PSU/CPU fixture's 11 nets through the
+// production MCP server, with KiCad's connectivity assertion, a forced mismatch, undo, redo, save and reload, while
+// McpReattachmentJourney realizes a revision on a real editor through the automatic worker and apply. The creation journeys
+// also record live measurements (automation/tests/fixtures/connection-realization) for the replay test below. These unit
+// tests stay because a live editor cannot be steered into each case: the admission rules, every refusal code and the
+// resolution comparisons need exact control over geometry, which only a synthetic measurement gives, and every must-catch
+// case here has a false-positive guard next to it. Lane 2A created this file with
 // SchematicConnectionRealizer.cs and SchematicConnectionResolution.cs under decision n2c2ef8777f8ace77.
 [TestClass]
 public sealed class SchematicConnectionRealizerTests
@@ -710,6 +712,171 @@ public sealed class SchematicConnectionRealizerTests
     }
 
     [TestMethod]
+    public async Task AJoinWithoutRoomForTheHierarchicalLabelNamesItsConnectionLocallyAndALaterStubCarriesIt()
+    {
+        // On the child sheet R1.1 and R2.1 are joined by an unlabelled wire. The XML joins root R5.1 to that connection (net
+        // LINK) and, with `carrier`, the child's unconnected TP1.1 as well. The child's island must name its connection (a join,
+        // §6.3 (a)) and needs a hierarchical label for its crossing to the root, which its first labelled stub carries when it
+        // has room. A join candidate without room for the hierarchical label, at any stub length or as a label on its pin, but
+        // with room for a local label is joined with a local label; a later stub of the island then carries the hierarchical
+        // label, and when none can, the refusal names the join (the §6.3 (d) clarification requested from the integration owner).
+        Scene Build(bool carrier)
+        {
+            var bench = new Bench();
+            Guid r = bench.Part("R", Passive("1"), Passive("2")), tp = bench.Part("TP", Passive("1"));
+            Guid r1 = bench.Component(r, "R1", BenchSheet.Child), r2 = bench.Component(r, "R2", BenchSheet.Child);
+            Guid tp1 = bench.Component(tp, "TP1", BenchSheet.Child), r5 = bench.Component(r, "R5");
+            string wire = bench.Wire(BenchSheet.Child);
+            var link = new CircuitNet(Guid.NewGuid(), "LINK", [new(r1, "1"), new(r2, "1")]);
+            var state = WithFormatting(bench.State([link], new() { [link.Id] = [(BenchSheet.Child, wire)] }));
+            PinEndpoint[] added = [new(r5, "1"), .. carrier ? [new PinEndpoint(tp1, "1")] : Array.Empty<PinEndpoint>()];
+            return Scene.Of(bench, state, design => WithNets(design, link with { Pins = [.. link.Pins, .. added] }));
+        }
+        static ConnectionIsland ChildIsland(Scene scene) =>
+            scene.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.ScreenId == scene.Bench!.ScreenId(BenchSheet.Child));
+        var roomy = Build(carrier: true);
+        var child = roomy.Bench!.ScreenId(BenchSheet.Child);
+        var island = ChildIsland(roomy);
+        Assert.IsTrue(island.JoinRequired, "LINK is drawn on the child sheet without a label.");
+        Assert.IsNotNull(island.UplinkSheetSymbolId, "LINK crosses from the child sheet to the root.");
+        var candidates = island.JoinCandidates;
+        Assert.HasCount(2, candidates);
+        var tp1 = island.Members.Single(m => m.RequiresStub).Pin;
+        string hierarchical = Any.Pack(new HierarchicalLabel()).TypeUrl, local = Any.Pack(new LocalLabel()).TypeUrl;
+        static GeneratedConnectionItem LabelOn(SchematicConnectionRealization realization, Guid pin) => realization.Generated
+            .Single(g => g.PlacedPinId == pin && g.Role is GeneratedConnectionRole.StubLabel or GeneratedConnectionRole.AnchorLabel);
+        static int HierarchicalOn(SchematicConnectionRealization realization, Guid screen) =>
+            realization.Generated.Count(g => g.ScreenId == screen && g.TypeUrl == Any.Pack(new HierarchicalLabel()).TypeUrl);
+
+        // Guard: with room, the join is the island's first labelled stub and carries the hierarchical label; TP1.1's is local.
+        var joined = await roomy.Realize();
+        Assert.AreEqual(GeneratedConnectionRole.StubLabel, LabelOn(joined, candidates[0].PlacedPinId).Role);
+        Assert.AreEqual(hierarchical, LabelOn(joined, candidates[0].PlacedPinId).TypeUrl, "The join carries the hierarchical label.");
+        Assert.AreEqual(local, LabelOn(joined, tp1.PlacedPinId).TypeUrl);
+        Assert.AreEqual(1, HierarchicalOn(joined, child));
+
+        // A keep-out left of both candidates that a local label on the pin just clears and a hierarchical one (a grid longer)
+        // does not; every stub's label runs into it. Must-catch for the anchor branch: the first candidate gets a local label
+        // on its pin, and TP1.1's stub carries the hierarchical label.
+        static Scene Anchored(Scene scene)
+        {
+            foreach (var candidate in ChildIsland(scene).JoinCandidates)
+            {
+                var a = scene.PinAt(candidate);
+                scene = scene.Obstacle(BenchSheet.Child, new(a.X - 12 * Grid, a.Y - Grid, a.X - 4 * Grid - Grid / 4, a.Y + Grid));
+            }
+            return scene;
+        }
+        var anchored = await Anchored(roomy).Realize();
+        var anchorLabel = LabelOn(anchored, candidates[0].PlacedPinId);
+        Assert.AreEqual(GeneratedConnectionRole.AnchorLabel, anchorLabel.Role);
+        Assert.AreEqual(local, anchorLabel.TypeUrl, "No room for the hierarchical label at either candidate: the join is named locally.");
+        Assert.IsFalse(anchored.Generated.Any(g => g.PlacedPinId == candidates[1].PlacedPinId), "One join names the connection.");
+        Assert.AreEqual(hierarchical, LabelOn(anchored, tp1.PlacedPinId).TypeUrl, "The island's next labelled stub carries the hierarchical label.");
+        Assert.AreEqual(1, HierarchicalOn(anchored, child));
+
+        // Must-catch for the join-stub branch: KiCad's hierarchical label drawn two grids to either side of its wire (a local
+        // one half a grid), and a keep-out strip from one to two grids above each candidate. No hierarchical label fits at either
+        // candidate, as a stub or on the pin, while the first candidate's shortest join stub has room for a local label.
+        static Scene Strips(Scene scene)
+        {
+            foreach (var candidate in ChildIsland(scene).JoinCandidates)
+            {
+                var a = scene.PinAt(candidate);
+                scene = scene.Obstacle(BenchSheet.Child, new(a.X - 12 * Grid, a.Y - 2 * Grid, a.X - Grid, a.Y - Grid));
+            }
+            scene.Geometry.Tamper = (request, reply) =>
+            {
+                for (int i = 0; i < reply.ItemCandidates.Count; i++)
+                {
+                    if (!request.ItemCandidates[i].Is(HierarchicalLabel.Descriptor)) continue;
+                    var measured = reply.ItemCandidates[i];
+                    measured.Bounds = new() { Position = new() { XNm = measured.Bounds.Position.XNm, YNm = measured.Anchor.YNm - 2 * Grid },
+                        Size = new() { XNm = measured.Bounds.Size.XNm, YNm = 4 * Grid } };
+                }
+                return reply;
+            };
+            return scene;
+        }
+        var stubbed = await Strips(roomy).Realize();
+        var joinLabel = LabelOn(stubbed, candidates[0].PlacedPinId);
+        Assert.AreEqual(GeneratedConnectionRole.StubLabel, joinLabel.Role);
+        Assert.AreEqual(local, joinLabel.TypeUrl);
+        Assert.AreEqual(2 * Grid, roomy.PinAt(candidates[0]).X - StubOf(stubbed, candidates[0].PlacedPinId).End.XNm, "The shortest join stub.");
+        Assert.AreEqual(hierarchical, LabelOn(stubbed, tp1.PlacedPinId).TypeUrl);
+        Assert.AreEqual(1, HierarchicalOn(stubbed, child));
+
+        // Must-catch: without TP1.1 nothing else on the child sheet can carry the hierarchical label, and the refusal names the
+        // join that carries a local label instead, for either branch.
+        var alone = Build(carrier: false);
+        var first = ChildIsland(alone).JoinCandidates[0].Endpoint;
+        string join = "so the stub of pin " + first.ComponentId.ToString("D") + "." + first.Pin + " carries a local label instead";
+        await RequireRefusal(Anchored(alone), SchematicConnectionErrors.RealizationNoFreeStub, join, "A local label on the joined pin.");
+        await RequireRefusal(Strips(alone), SchematicConnectionErrors.RealizationNoFreeStub, join, "A local label on the join stub.");
+        // Must-catch: with no room even for a local label at either candidate, the join itself is refused, naming both tries.
+        var boxed = roomy;
+        foreach (var candidate in candidates)
+        {
+            var a = roomy.PinAt(candidate);
+            boxed = boxed.Obstacle(BenchSheet.Child, new(a.X - 12 * Grid, a.Y - Grid, a.X - Grid / 2, a.Y + Grid));
+        }
+        await RequireRefusal(boxed, SchematicConnectionErrors.RealizationNoJoinAnchor, "(hierarchical label)");
+        await RequireRefusal(boxed, SchematicConnectionErrors.RealizationNoJoinAnchor, "(local label)");
+    }
+
+    [TestMethod]
+    public async Task ASheetPinWithoutRoomForTheHierarchicalLabelCarriesALocalOneAndTheNextCrossingCarriesIt()
+    {
+        // Net PASS joins root R5.1 with R7.1 and R8.1 on the child sheet's two grandchildren, so the child sheet has no pin of
+        // PASS: its island only crosses up to the root (a hierarchical label) and down through two new sheet pins, one on each
+        // grandchild's sheet symbol, allocated in port-text then sheet-symbol order. Their stubs run right from the symbols'
+        // right edges (x = 190 mm), since the island has no members (§6.5), and the first one carries the hierarchical label.
+        // A crossing whose stub has no room for the hierarchical label at any slot, but room for a local one, carries a local
+        // label, and the next crossing carries the hierarchical label; when none can, the refusal names every crossing (the
+        // §6.3 (d) clarification requested from the integration owner).
+        var bench = new Bench(secondGrand: true);
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid r5 = bench.Component(r, "R5"), r7 = bench.Component(r, "R7", BenchSheet.Grand), r8 = bench.Component(r, "R8", BenchSheet.Grand2);
+        var pass = new CircuitNet(Guid.NewGuid(), "PASS", [new(r5, "1"), new(r7, "1"), new(r8, "1")]);
+        var scene = Scene.Of(bench, WithFormatting(bench.State([])), design => WithNets(design, pass));
+        Guid child = bench.ScreenId(BenchSheet.Child);
+        var island = scene.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.ScreenId == child);
+        Assert.IsEmpty(island.Members);
+        Assert.AreEqual(bench.ChildSheetSymbol, island.UplinkSheetSymbolId);
+        Guid[] crossings = [.. new[] { bench.SheetSymbolOf(BenchSheet.Grand), bench.SheetSymbolOf(BenchSheet.Grand2) }.Order()];
+        CollectionAssert.AreEquivalent(crossings, island.ChildSheetSymbolIds.ToArray());
+        string hierarchical = Any.Pack(new HierarchicalLabel()).TypeUrl, local = Any.Pack(new LocalLabel()).TypeUrl;
+        long TopOf(Guid sheet) => sheet == bench.SheetSymbolOf(BenchSheet.Grand) ? 50_000_000 : 100_000_000;
+        static string LabelAt(SchematicConnectionRealization realization, Guid sheet) =>
+            realization.Generated.Single(g => g.SheetSymbolId == sheet && g.Role == GeneratedConnectionRole.SheetPinLabel).TypeUrl;
+        // A keep-out right of a crossing's sheet symbol, over its whole edge: a local label at the end of the shortest stub
+        // (3.75 grids long for PASS) clears it by half a grid, a hierarchical one (a grid longer) does not, and every longer
+        // stub's label runs into it. Without `localFits` it starts right after the shortest stub, so no label fits at all.
+        Scene Blocked(Scene from, Guid sheet, bool localFits = true) => from.Obstacle(BenchSheet.Child,
+            new(190_000_000 + 2 * Grid + (localFits ? 3 * Grid + 3 * Grid / 4 + Grid / 2 : Grid), TopOf(sheet) - Grid, 230_000_000, TopOf(sheet) + 40_000_000 + Grid));
+
+        // Guard: the first crossing carries the hierarchical label and the second a local one.
+        var free = await scene.Realize();
+        Assert.AreEqual(hierarchical, LabelAt(free, crossings[0]));
+        Assert.AreEqual(local, LabelAt(free, crossings[1]));
+        // Must-catch: with no room for the hierarchical label beside the first crossing, it carries a local label and the
+        // second crossing carries the hierarchical one, each at its first slot.
+        var second = await Blocked(scene, crossings[0]).Realize();
+        Assert.AreEqual(local, LabelAt(second, crossings[0]));
+        Assert.AreEqual(hierarchical, LabelAt(second, crossings[1]));
+        Assert.AreEqual(1, second.Generated.Count(g => g.ScreenId == child && g.TypeUrl == hierarchical));
+        foreach (var sheet in crossings)
+            Assert.AreEqual(TopOf(sheet) + Policy.SheetPinPitchNm, SheetUpdates(second).Single(u => u.Id.Value == sheet.ToString("D")).Pins.Single().Position.YNm);
+        // Must-catch: with no room for it beside either crossing, the refusal names both, which carry local labels instead.
+        var neither = Blocked(Blocked(scene, crossings[0]), crossings[1]);
+        foreach (var sheet in crossings)
+            await RequireRefusal(neither, SchematicConnectionErrors.RealizationNoFreeStub, "sheet pin 'PASS' on sheet symbol " + sheet.ToString("D"));
+        await RequireRefusal(neither, SchematicConnectionErrors.RealizationNoFreeStub, "none of its new stubs there has room for one");
+        // Must-catch: a crossing with no room for any label at any slot has no free slot, as before.
+        await RequireRefusal(Blocked(scene, crossings[0], localFits: false), SchematicConnectionErrors.RealizationNoFreeSheetPinSlot, "no free slot");
+    }
+
+    [TestMethod]
     public async Task ANewPinStackedOnAnExistingConnectionCarriesTheHierarchicalLabelOnlyWhenItHasRoom()
     {
         // VLOC is named on the child sheet by the local power symbol #LP0. The XML creates R5 on the child sheet with R5.1
@@ -1205,6 +1372,20 @@ public sealed class SchematicConnectionRealizerTests
             var checkpoint = Checkpoint.Clone();
             change(checkpoint.Electrical.Hierarchy.Data);
             return this with { Checkpoint = checkpoint, Geometry = Geometry.Copy() };
+        }
+
+        /// <summary>This scene with a keep-out of exactly <paramref name="rect"/> on <paramref name="sheet"/> of its bench.</summary>
+        public Scene Obstacle(BenchSheet sheet, Rect rect)
+        {
+            var id = Guid.NewGuid();
+            string screen = Bench!.ScreenId(sheet).ToString("D");
+            var copy = Edited(data => data.Instances.Single(s => s.Metadata.ScreenId.Value == screen).Items.Add(Any.Pack(new SchematicText
+            {
+                Id = new() { Value = id.ToString("D") }, Locked = LockedState.LsUnlocked,
+                Text = new() { Text_ = "keep out", Position = new() { XNm = rect.L, YNm = rect.T }, Attributes = new() { Multiline = true } }
+            })));
+            copy.Geometry.Sized[id] = rect;
+            return copy;
         }
 
         public Scene Obstacle(Rect rect)

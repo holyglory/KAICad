@@ -5,6 +5,9 @@ using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using ErcErrorType = Kiapi.Schematic.ErcErrorType;
+using ErcSeveritySetting = Kiapi.Schematic.ErcSeveritySetting;
+using NetClass = Kiapi.Common.Project.NetClass;
 
 namespace KiCad.Automation.Tests;
 
@@ -199,15 +202,35 @@ public sealed class SchematicRebuildTests
         var withChains = SchematicRebuild.Classify(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"), chained);
         Assert.AreEqual("rebuild_state_unrepresented", withChains.ErrorCode, withChains.ErrorMessage);
         StringAssert.Contains(withChains.ErrorMessage, "net_chains");
-        foreach (string missing in new[] { "library_cache", "future_state_group" })
         {
             var marked = covered with { Schematic = covered.Schematic.Clone() };
-            foreach (var screen in marked.Schematic.Instances) screen.Metadata.UnrepresentedState.Add(missing);
-            var refused = SchematicSynchronizationPlanner.Plan(State(marked, marked, NewEmptyRoot(marked), "loaded", "created"));
-            Assert.AreEqual("rebuild_state_unrepresented", refused.ErrorCode, missing);
-            StringAssert.Contains(refused.ErrorMessage, missing);
+            foreach (var screen in marked.Schematic.Instances) screen.Metadata.UnrepresentedState.Add("future_state_group");
+            var refused = SchematicSynchronizationPlanner.Plan(State(marked, marked, NewEmptyRoot(covered), "loaded", "created"));
+            Assert.AreEqual("rebuild_state_unrepresented", refused.ErrorCode);
+            StringAssert.Contains(refused.ErrorMessage, "future_state_group");
             Assert.IsEmpty(refused.NativeOperations);
         }
+        // Ledger p91fda8ca22a68141: preview 23 and earlier named library_cache on every snapshot although they held each
+        // screen's cache exactly. Their record is rebuilt when every placed symbol's definition is in its screen's cache
+        // (precision), with the upgraded KiCad's own coverage list; one missing definition is a loss (must-catch).
+        Assert.IsTrue(covered.Schematic.Instances.Any(s => s.CachedSymbols.Count != 0), "The placed design keeps its library caches.");
+        var preview23 = covered with { Schematic = covered.Schematic.Clone() };
+        foreach (var screen in preview23.Schematic.Instances) screen.Metadata.UnrepresentedState.Insert(2, "library_cache");
+        Assert.IsFalse(SchematicRebuild.Lost("library_cache", preview23.Schematic));
+        var upgradedRoot = NewEmptyRoot(covered);
+        var rebuilt = SchematicSynchronizationPlanner.Plan(State(preview23, preview23, upgradedRoot, "loaded", "created"));
+        Assert.IsTrue(rebuilt.CanPrepare, rebuilt.ErrorCode + ": " + rebuilt.ErrorMessage);
+        Assert.IsTrue(rebuilt.NativeRebuildRequired);
+        foreach (var screen in rebuilt.Candidate!.Schematic.Instances)
+            CollectionAssert.AreEqual(upgradedRoot.Instances[0].Metadata.UnrepresentedState.ToArray(), screen.Metadata.UnrepresentedState.ToArray(),
+                "The rebuilt design carries the upgraded KiCad's coverage list.");
+        var incomplete = preview23 with { Schematic = preview23.Schematic.Clone() };
+        incomplete.Schematic.Instances.First(s => s.CachedSymbols.Count != 0).CachedSymbols.RemoveAt(0);
+        Assert.IsTrue(SchematicRebuild.Lost("library_cache", incomplete.Schematic));
+        var lost = SchematicSynchronizationPlanner.Plan(State(incomplete, incomplete, NewEmptyRoot(covered), "loaded", "created"));
+        Assert.AreEqual("rebuild_state_unrepresented", lost.ErrorCode, lost.ErrorMessage);
+        StringAssert.Contains(lost.ErrorMessage, "library_cache");
+        Assert.IsEmpty(lost.NativeOperations);
         // Must-catch: shared ownership is lost when a sheet file is shown by two sheets, or when there is a second root.
         Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", covered.Schematic));
         var repeated = covered.Schematic.Clone();
@@ -321,20 +344,46 @@ public sealed class SchematicRebuildTests
 
     // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
     // project settings other than the XML's is refused before anything reaches KiCad, and no rebuild journal holds a
-    // project setting.
+    // project setting. Every one of the thirteen setting groups the project file holds is checked on its own, with the
+    // exact message naming only that group (ledger p001c485926b37099); the NativeXmlRebuild journey proves the refusal
+    // through kicad_design_sync_plan and kicad_design_sync_apply on a real changed project file.
+    private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
+        + "Restore the project file KiCad last saved with this XML, or synchronize its settings first.";
+
+    private static readonly (string What, Action<SchematicMetadata> Edit)[] ProjectSettingGroups =
+    [
+        ("text variables", m => m.TextVariables["REVISION"] = "B"),
+        ("bus aliases", m => m.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } })),
+        ("variants", m => m.VariantDescriptions["Lite"] = "Without telemetry"),
+        ("drawing ratios", m => m.DrawingRatios = new SchematicDrawingRatios { DashLengthRatio = 12, GapLengthRatio = 3, TextOffsetRatio = 0.15,
+            LabelSizeRatio = 0.375, OverbarHeightRatio = 1.23 }),
+        ("formatting", m => m.Formatting = Formatting(1_524_000)),
+        ("annotation", m => m.Annotation = new SchematicAnnotationSettings { StartAfter = 100 }),
+        ("field templates", m => m.FieldTemplates = new SchematicFieldTemplates { Fields = { new SchematicFieldTemplate { Name = "Supplier", Visible = true } } }),
+        ("symbol comparison", m => m.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = true, FieldTexts = true }),
+        ("BOM settings", m => m.BomSettings = new SchematicBomSettings { ExportFilename = "fixture-bom.csv" }),
+        ("net classes", m => m.NetSettings = new SchematicNetSettings { DefaultClass = new NetClass { Name = "Default" } }),
+        ("used references", m => m.ReferenceInventory = new SchematicReferenceInventory { Allocated = { "R7" } }),
+        ("net chain classes", m => m.NetChainClasses = new SchematicNetChainClassState { Definitions = { "fastbus" } }),
+        ("ERC settings", m => m.ErcSettings = new SchematicErcSettings { RuleSeverities =
+            { new ErcSeveritySetting { RuleType = ErcErrorType.ErcetPinNotConnected, Severity = RuleSeverity.RsError } } }),
+    ];
+
+    // A complete, valid formatting replacement (SchematicFormatting.Validate) with the given default text size.
+    private static SchematicFormattingSettings Formatting(long textSizeNm) => new()
+    {
+        DefaultLineWidthNm = 152_400, DefaultTextSizeNm = textSizeNm, PinSymbolSizeNm = 635_000, ConnectionGridNm = 1_270_000,
+        JunctionSizeChoice = 3, HopOverSizeChoice = 0,
+        OperatingPoint = new() { VoltagePrecision = 3, VoltageRange = "~V", CurrentPrecision = 3, CurrentRange = "~A" },
+        UnitReference = new() { SeparatorAscii = 0, FirstIdAscii = 'A' }
+    };
+
     [TestMethod]
     public void RebuildRefusesAKeptProjectFileWhoseSettingsDifferFromTheXml()
     {
         var baseline = Placed();
-        foreach (var (what, edit) in new (string, Action<SchematicMetadata>)[]
-        {
-            ("text variables", m => m.TextVariables["REVISION"] = "B"),
-            ("bus aliases", m => m.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } })),
-            ("variants", m => m.VariantDescriptions["Lite"] = "Without telemetry"),
-            ("formatting", m => m.Formatting = new SchematicFormattingSettings { DefaultTextSizeNm = 1_524_000 }),
-            ("annotation", m => m.Annotation = new SchematicAnnotationSettings { StartAfter = 100 }),
-            ("used references", m => m.ReferenceInventory = new SchematicReferenceInventory { Allocated = { "R7" } }),
-        })
+        Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
+        foreach (var (what, edit) in ProjectSettingGroups)
         {
             var kept = NewEmptyRoot(baseline);
             edit(kept.Instances[0].Metadata);
@@ -342,11 +391,18 @@ public sealed class SchematicRebuildTests
             var shape = SchematicRebuild.Classify(state, baseline);
             Assert.AreEqual(SchematicRebuildKind.Rejected, shape.Kind, what);
             Assert.AreEqual("rebuild_project_settings_changed", shape.ErrorCode, what);
-            StringAssert.Contains(shape.ErrorMessage, what);
+            Assert.AreEqual("The kept project file's settings (" + what + ") " + SettingsChangedMessage, shape.ErrorMessage, what);
             var plan = SchematicSynchronizationPlanner.Plan(state);
             Assert.AreEqual("rebuild_project_settings_changed", plan.ErrorCode, what);
+            Assert.AreEqual(shape.ErrorMessage, plan.ErrorMessage, what);
             Assert.IsEmpty(plan.NativeOperations, what + ": nothing is sent to KiCad.");
+            Assert.IsNull(plan.Candidate, what + ": nothing is published.");
         }
+        // All of them at once are named together, in the order the project file's groups are compared.
+        var all = NewEmptyRoot(baseline);
+        foreach (var (_, edit) in ProjectSettingGroups) edit(all.Instances[0].Metadata);
+        Assert.AreEqual("The kept project file's settings (" + string.Join(", ", ProjectSettingGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
+            SchematicRebuild.Classify(State(baseline, baseline, all, "loaded", "created"), baseline).ErrorMessage);
         // Precision: the schematic file's own state on the new root (here its page) is what a rebuild recreates.
         var fresh = NewEmptyRoot(baseline);
         Assert.IsNotNull(fresh.Instances[0].Metadata.Page);
@@ -367,6 +423,45 @@ public sealed class SchematicRebuildTests
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
             new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
+    }
+
+    // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that
+    // holds an edit a rebuild never makes, here the project formatting the kept root shows differently from the XML. The
+    // planner never reaches it this way (classification refuses the same state first, as asserted), so Prepare is called
+    // directly with an admitted classification; no journey can reach it without bypassing classification. Unit test,
+    // because no existing test prepares an admitted rebuild whose batch the journal would not admit.
+    [TestMethod]
+    public void PreparedRebuildRefusesABatchWithAnEditARebuildNeverMakes()
+    {
+        var baseline = Placed();
+        var recorded = baseline with { Schematic = baseline.Schematic.Clone() };
+        foreach (var screen in recorded.Schematic.Instances) screen.Metadata.Formatting = Formatting(1_270_000);
+        var kept = NewEmptyRoot(recorded);
+        kept.Instances[0].Metadata.Formatting = Formatting(1_524_000);
+        var state = State(recorded, recorded, kept, "loaded", "created");
+        var classified = SchematicRebuild.Classify(state, recorded);
+        Assert.AreEqual("rebuild_project_settings_changed", classified.ErrorCode, "Classification refuses this state first.");
+        Assert.AreEqual("The kept project file's settings (formatting) " + SettingsChangedMessage, classified.ErrorMessage);
+
+        var admitted = new SchematicRebuildClassification(SchematicRebuildKind.Admitted, [.. recorded.SheetBindings.Select(b => b.SheetInstanceId)]);
+        var hierarchy = SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, kept);
+        var plan = SchematicRebuild.Prepare(state, recorded, hierarchy, admitted, []);
+        Assert.AreEqual("rebuild_operation_unsupported", plan.ErrorCode, plan.ErrorMessage);
+        Assert.AreEqual("Rebuilding these sheets from the XML would need an edit a rebuild never makes; nothing was sent to KiCad.", plan.ErrorMessage);
+        Assert.IsEmpty(plan.NativeOperations, "No native operation is planned.");
+        Assert.IsNull(plan.Candidate);
+        Assert.IsNull(plan.CandidateXml);
+        Assert.IsNull(plan.Rebuild, "No rebuild intent reaches the executor.");
+        Assert.IsFalse(plan.CanPrepare);
+
+        // Precision: the same prepared rebuild with the kept root's formatting equal to the XML's is planned, and its batch
+        // sets no project setting.
+        var same = NewEmptyRoot(recorded);
+        var agreed = SchematicRebuild.Prepare(State(recorded, recorded, same, "loaded", "created"), recorded,
+            SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, same), admitted, []);
+        Assert.IsTrue(agreed.CanPrepare, agreed.ErrorCode + ": " + agreed.ErrorMessage);
+        Assert.IsTrue(agreed.NativeRebuildRequired);
+        Assert.IsFalse(agreed.NativeOperations.Any(o => o.SetFormatting is not null));
     }
 
     [TestMethod]

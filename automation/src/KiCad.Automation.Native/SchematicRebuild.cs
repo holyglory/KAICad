@@ -64,6 +64,7 @@ public static class SchematicRebuild
     public const string BatchDescription = "Rebuild native sheets from XML";
     private const string SharedScreenRootOwnership = "shared_screen_root_ownership";
     private const string NetChains = "net_chains";
+    private const string LibraryCache = "library_cache";
 
     private const long Grid = 1_270_000L;
     private const long SheetWidth = 38_100_000L;
@@ -359,7 +360,10 @@ public static class SchematicRebuild
     /// <summary>Whether the snapshot's coverage limitation <paramref name="marker"/> loses part of <paramref name="saved"/>.
     /// KiCad names shared-screen root ownership and net chains on every snapshot; they lose something only when the
     /// saved schematic has a sheet file shown by several sheets or roots, or net chains. Untyped project settings stay in
-    /// the kept project file. Any other limitation is a loss.</summary>
+    /// the kept project file. Builds up to preview 23 also named the library cache on every snapshot, although they held
+    /// each screen's cache exactly (a definition they could not read failed the whole read); a record they saved loses
+    /// its cache only where a placed symbol's definition is missing from its screen's cache. Any other limitation is a
+    /// loss.</summary>
     internal static bool Lost(string marker, SchematicHierarchyData saved)
     {
         ArgumentNullException.ThrowIfNull(marker);
@@ -370,8 +374,25 @@ public static class SchematicRebuild
             SharedScreenRootOwnership => saved.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1)
                 || saved.Instances.Count(s => s.Metadata.Document.SheetPath.Path.Count == saved.Document.SheetPath.Path.Count) != 1,
             NetChains => saved.Instances.Any(s => s.Metadata.NetChains.Count != 0),
+            LibraryCache => saved.Instances.Any(MissesCachedDefinition),
             _ => true
         };
+    }
+
+    // Whether a symbol placed on the screen has no definition in the screen's library cache under the key KiCad names it
+    // by (SCH_SYMBOL::GetSchSymbolLibraryName): its cache alias when it has one, otherwise its library identifier. A
+    // symbol whose key cannot be named counts as missing.
+    private static bool MissesCachedDefinition(SchematicScreenData screen)
+    {
+        var keys = screen.CachedSymbols.Select(c => c.CacheKey).ToHashSet(StringComparer.Ordinal);
+        foreach (var symbol in screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()))
+        {
+            var library = symbol.LibraryId ?? symbol.Definition?.Id;
+            string key = symbol.LibName.Length != 0 ? symbol.LibName : library is null ? ""
+                : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
+            if (key.Length == 0 || !keys.Contains(key)) return true;
+        }
+        return false;
     }
 
     /// <summary>The typed project settings (every one the project file holds) in which <paramref name="kept"/> differs

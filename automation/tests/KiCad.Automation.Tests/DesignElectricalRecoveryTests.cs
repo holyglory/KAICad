@@ -6,6 +6,7 @@ using Kiapi.Common;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using SchematicHierarchyData = Kiapi.Schematic.Types.SchematicHierarchyData;
 
 namespace KiCad.Automation.Tests;
 
@@ -116,6 +117,68 @@ public sealed class DesignElectricalRecoveryTests
             DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
         CollectionAssert.AreEqual(new byte[] { 0xfe }, f.Store.Read()!.State.DesiredFileBytes);
         Assert.IsNull(f.Store.Read()!.State.BaselineElectrical);
+    });
+
+    // Ledger p91fda8ca22a68141: preview 23's snapshots listed library_cache among the state they could not hold; this build's
+    // snapshot of the same schematic no longer does, because it holds the library cache exactly. A record saved by preview
+    // 23 without an electrical baseline must still establish one against the upgraded KiCad: that retired marker names the
+    // old reader's limits, not the design. Every real difference in the schematic, the library cache included, and any other
+    // coverage difference is still refused. The
+    // NativeXmlRebuild journey proves the same record through the public tools against a live KiCad; this isolates the
+    // comparison rule against the scripted peer, which the journey cannot vary (it would have to edit KiCad itself).
+    // Extends no existing test: the neighbouring cases assert a refusal, this one the absence of a spurious one.
+    [TestMethod]
+    public Task AnEarlierPreviewsCoverageListIsNotANativeEdit() => Isolated(async f =>
+    {
+        string[] upgraded = ["complete_project_settings", "shared_screen_root_ownership", "net_chains"];
+        string[] preview23 = ["complete_project_settings", "shared_screen_root_ownership", "library_cache", "net_chains"];
+        static SchematicHierarchyData Listing(SchematicHierarchyData data, string[] list)
+        {
+            var result = data.Clone();
+            foreach (var screen in result.Instances) { screen.Metadata.UnrepresentedState.Clear(); screen.Metadata.UnrepresentedState.Add(list); }
+            return result;
+        }
+        f.Peer.Electrical.Hierarchy.Data = Listing(f.Peer.Electrical.Hierarchy.Data, upgraded);
+        var written = f.Saved.State.Baseline with { Schematic = Listing(f.Saved.State.Baseline.Schematic, preview23) };
+        var old = f.Store.Save(f.Saved.State with { Baseline = written, Observed = Listing(f.Saved.State.Observed, preview23) }, f.Saved.RevisionToken);
+        Assert.AreEqual(1, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>(), "A record without electrical checkpoints.");
+        string writtenXml = SchematicDesignXml.Write(written, old.State.KnowledgeLibraries);
+
+        // Must-catch: a schematic that really differs is refused however its coverage list reads: a text variable, and a
+        // library cache the saved snapshot did not hold.
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.Add("changed", "native");
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.Remove("changed");
+        var cached = f.Peer.Electrical.Hierarchy.Data.Instances[0].CachedSymbols;
+        cached.Add(new Kiapi.Schematic.Types.SchematicCachedSymbol { CacheKey = "Device:R_extra", Definition = new() });
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        cached.RemoveAt(cached.Count - 1);
+        // Only the retired library_cache marker is exempt: a snapshot that names other state it cannot hold is refused too.
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Add("future_settings");
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Remove("future_settings");
+        Assert.AreEqual(old.RevisionToken, f.Store.Read()!.RevisionToken, "A refusal writes nothing.");
+        var differs = Listing(written.Schematic, upgraded);
+        differs.Instances[0].Metadata.TextVariables.Add("changed", "native");
+        Assert.IsFalse(DesignRecoveryInspector.SameSchematicContent(written.Schematic, differs));
+
+        // The same schematic under the upgraded reader's list: the baseline is established and the saved design is kept as
+        // preview 23 wrote it, for the next synchronization to publish with the current list.
+        Assert.IsTrue(DesignRecoveryInspector.SameSchematicContent(written.Schematic, f.Peer.Electrical.Hierarchy.Data));
+        var initialized = await DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken);
+        Assert.AreEqual(writtenXml, SchematicDesignXml.Write(initialized.State.Baseline, initialized.State.KnowledgeLibraries));
+        Assert.AreEqual(written.Schematic, initialized.State.BaselineElectrical!.Hierarchy.Data, "The baseline checkpoint belongs to the saved baseline.");
+        CollectionAssert.AreEqual(f.Peer.Electrical.Nets.ToArray(), initialized.State.BaselineElectrical.Nets.ToArray());
+        Assert.AreEqual(f.Peer.Electrical, initialized.State.ObservedElectrical, "The observation is KiCad's own, with its current list.");
+        Assert.AreEqual(f.Peer.Electrical.Hierarchy.Data, initialized.State.Observed);
+        CollectionAssert.AreEqual(f.Saved.State.DesiredFileBytes, initialized.State.DesiredFileBytes);
+        var reread = f.Store.Read()!;
+        Assert.AreEqual(initialized.RevisionToken, reread.RevisionToken);
+        Assert.AreEqual(initialized.State.BaselineElectrical, reread.State.BaselineElectrical);
+        Assert.AreEqual(3, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>(), "The record gained its electrical checkpoints.");
     });
 
     [TestMethod]

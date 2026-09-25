@@ -234,6 +234,20 @@ public static class SchematicItemDelta
         return null;
     }
 
+    /// <summary>Coverage markers earlier builds listed on every snapshot for state this build's snapshot holds exactly: the
+    /// library cache, which builds up to preview 23 listed although their cached symbols held every definition (a definition
+    /// they could not read failed the whole read; decision n864adb64162e43c5). A record those builds saved differs from this
+    /// build's snapshot of the same schematic only by these entries.</summary>
+    internal static readonly IReadOnlySet<string> RetiredCoverageMarkers = new HashSet<string>(StringComparer.Ordinal) { "library_cache" };
+
+    /// <summary>Whether two snapshot coverage lists name the same unrepresented state, apart from retired markers.</summary>
+    internal static bool SameCoverage(IEnumerable<string> first, IEnumerable<string> second)
+    {
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+        return first.Where(m => !RetiredCoverageMarkers.Contains(m)).SequenceEqual(second.Where(m => !RetiredCoverageMarkers.Contains(m)), StringComparer.Ordinal);
+    }
+
     private static List<SchematicItemOperation> MetadataOperations(SchematicMetadata current, SchematicMetadata desired)
     {
         if (desired is null) throw Invalid("Missing desired sheet metadata.");
@@ -257,6 +271,10 @@ public static class SchematicItemDelta
         remainder.NetSettings = current.NetSettings?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
+        // A record an earlier preview saved lists the retired library_cache marker where this build does not; that is no
+        // change to the schematic. Any other difference in the coverage list still stops planning.
+        if (SameCoverage(current.UnrepresentedState, desired.UnrepresentedState))
+        { remainder.UnrepresentedState.Clear(); remainder.UnrepresentedState.Add(current.UnrepresentedState); }
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();

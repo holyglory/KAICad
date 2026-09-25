@@ -16,9 +16,9 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
-    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9) for CN-1 milestone 1 end to end (ledgers
-    // pf1134ca32f913781 and p186c0db05be2a146), on the S1 seed, through the public MCP tools over STDIO against this editor,
-    // which advertises schematic.connection-realization.v1:
+    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9) for CN-1 milestones 1 and 2 end to end
+    // (ledgers pf1134ca32f913781 and p186c0db05be2a146), on the S1 seed, through the public MCP tools over STDIO against this
+    // editor, which advertises schematic.connection-realization.v1:
     // 1. The connection-aware layout tool places the fixture's Complete stage (CN-1 §10), and its Components stage (the same
     //    placements, no nets) is created first.
     // 2. The Complete stage's XML then adds all 11 nets across ROOT, PSU, CPU and CPU_POWER, including the stacked U2.1/U2.4 and
@@ -28,13 +28,17 @@ public sealed partial class NativeSessionTests
     //    by KiCad with connectivity_postcondition_failed, apply reports realization_connectivity_mismatch, and nothing is
     //    committed: KiCad's state, change journal and drawing, the XML and the recovery baseline are all unchanged.
     // 4. Apply then draws exactly that realization in one checked KiCad commit whose connectivity assertion KiCad verified, and
-    //    publishes the XML. KiCad's pin partition is exactly the 11 nets (PsuCpuFixture.AssertNative), and every generated stub,
-    //    label and sheet pin follows CN-1 §6. Replaying the apply returns its receipt, a repeated plan has nothing to do and a
-    //    repeated apply is a no-op.
+    //    publishes the XML. KiCad's pin partition is exactly the 11 nets (PsuCpuFixture.AssertNative). Every connection with two
+    //    or more new pins on a sheet is drawn as orthogonal wires with junctions and one name label (CN-1 §7) unless no route
+    //    fits, which the realization records per connection (kept as evidence, islands.json); every other generated stub, label
+    //    and sheet pin follows CN-1 §6. KiCad's own measurement shows no generated wire over a symbol body or any text.
+    //    Replaying the apply returns its receipt, a repeated plan has nothing to do and a repeated apply is a no-op.
     // 5. One native undo removes the whole realization and redo restores it; save and reload keep it, and the recovery record
     //    adopts the reloaded editor with nothing left to do.
     // 6. I2C pull-ups added to connected nets (two coordinate-free, one placed and locked) are placed by the connection-aware
-    //    layout tool, then created and connected by one more realization.
+    //    layout tool, then created and connected by one more realization, checked the same way.
+    // 7. The rendered wire check catches what it must: a probe wire run into a symbol body and one run through a label are
+    //    reported, and one native undo takes them away again.
     private static async Task VerifyPsuCpuConnectedRealization(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -141,6 +145,13 @@ public sealed partial class NativeSessionTests
             throw;
         }
         await KeepRecording("complete", created.State, saved.State, checkpoint, recorded, realization, null);
+        // CN-1 §7 on the realizer's own drawing: every connection with two or more new pins on a sheet is routed unless no route
+        // fits, which it records; KiCad's drawing is checked the same way after apply.
+        var netNames = nets.ToDictionary(n => n.Id, n => n.Name);
+        var sheetNames = sheetPaths.ToDictionary(p => p.Value, p => p.Key, StringComparer.Ordinal);
+        var islands = RequireRoutedWhereRoutable(realization, intent, SchematicConnectionRealizerTests.Measured(recorded), netNames, sheetNames, policy, "complete",
+            PsuCpuRoutedConnections);
+        await File.WriteAllTextAsync(Evidence("islands.json"), JsonSerializer.Serialize(islands), token);
         var prepared = await SchematicConnectedAddition.RealizeAsync(SchematicConnectionRealizerTests.Replay(recorded), session, saved.State, plan,
             checkpoint, token);
         CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), prepared.Operations.Select(o => o.ToByteString()).ToArray(),
@@ -179,7 +190,9 @@ public sealed partial class NativeSessionTests
         var drawn = GeneratedIn(components, realized);
         CollectionAssert.AreEquivalent(realization.Generated.Select(g => g.Id).ToArray(), drawn.ToArray(),
             "KiCad holds exactly the generated items of the recorded realization.");
-        var stubs = await RequireLabelStubs(client, components, realized, policy, token);
+        var stubs = await RequireLabelStubs(client, components, realized, policy, token, RoutedItems(realization));
+        var routes = await RequireRoutedInKiCad(client, realized, realization, intent, policy, "complete", token);
+        var clear = await RequireGeneratedWiresClear(client, realized, realization, "complete", token);
         await CheckPresentation(realized, synchronized, "complete");
         Step("complete stage realized");
 
@@ -277,6 +290,10 @@ public sealed partial class NativeSessionTests
         var pullUps = await RequirePullUpRealization(await Capture());
         Step("pull-ups realized");
 
+        // 7. The rendered wire check catches overlaps (recall), then one undo removes the probes.
+        var recall = await RequireWireCheckRecall(await Capture());
+        Step("rendered wire check recall");
+
         await NativeKeyboard.CaptureAsync(display, Evidence("window.png"), token);
         byte[] published = await File.ReadAllBytesAsync(path, token);
         await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
@@ -287,6 +304,7 @@ public sealed partial class NativeSessionTests
                 expectedGroups = intent.ExpectedGroups.Count },
             generated = realization.Generated.GroupBy(g => g.Role.ToString()).ToDictionary(g => g.Key, g => g.Count()),
             connectivityAssertionVerified = true, executorDrewRecordedRealization = true, labelStubs = stubs, forcedMismatch = mismatch,
+            islands, routedInKiCad = routes, generatedWiresClear = clear, renderedWireCheckRecall = recall,
             exactReplay = true, repeatedPlanNoOp = true, repeatedApplyNoOp = true, nativeUndoRedoVerified = true,
             // Save and reload hold only when the reloaded sheets equal the realized ones and the settled plan is the published XML;
             // either difference is also recorded in problems, and the journey fails below.
@@ -499,6 +517,49 @@ public sealed partial class NativeSessionTests
                 xmlUnchanged = true, baselineUnchanged = true, pendingAbandoned = true };
         }
 
+        // Recall of the rendered wire check on PSU: a probe wire from a generated label's own pin straight into that pin's symbol,
+        // and one from the label's anchor along its text. Each joins only its own connection, so KiCad's nets are unchanged. The
+        // check must report the first over the symbol's body and the second over the label, then one native undo removes both.
+        async Task<object> RequireWireCheckRecall(CheckedSchematicState at)
+        {
+            string psu = sheetPaths["PSU"];
+            var screen = at.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == psu);
+            var items = SchematicItemDelta.Index(screen.Items);
+            var named = realization.Generated.Where(g => g.PlacedPinId is not null && items.TryGetValue(g.Id, out var item) && item is LocalLabel)
+                .OrderBy(g => g.Id).First();
+            var label = (LocalLabel)items[named.Id];
+            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = at.State.Revision.Clone() }, token);
+            var (owner, pin) = measured.Obstacles.Where(o => o.SymbolPins is not null)
+                .SelectMany(o => o.SymbolPins.Pins.Select(p => (Owner: o, Pin: p))).Single(x => x.Pin.Id.Value == named.PlacedPinId!.Value.ToString("D"));
+            const long Probe = 3_000_000;
+            var (fx, fy) = SchematicConnectionRealizer.Facing(label.SpinStyle);
+            SchematicLine Wire(Vector2 from, long dx, long dy) => new() { Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = from.Clone(),
+                End = new() { XNm = from.XNm + dx, YNm = from.YNm + dy }, Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked };
+            var intoBody = Wire(pin.Position, pin.BodyDirectionX * Probe, pin.BodyDirectionY * Probe);
+            var alongText = Wire(label.Position, fx * Probe, fy * Probe);
+            var batch = new ApplySchematicItemBatch { Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = "Probe the rendered wire check" };
+            batch.Operations.Add(new[] { intoBody, alongText }.Select(w => new SchematicItemOperation { TargetDocument = screen.Metadata.Document.Clone(), Create = Any.Pack(w) }));
+            var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = batch, ExpectedState = at.State.Clone() }, token);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status, receipt.ErrorCode + ": " + receipt.ErrorMessage);
+            var probed = await Capture();
+            var comparison = SchematicElectricalComparison.Compare(store.Read()!.State.Baseline, probed.Electrical, [], token);
+            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "The probe wires join nothing new.");
+            var body = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
+                [Guid.Parse(intoBody.Id.Value)], cancellationToken: token);
+            var text = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
+                [Guid.Parse(alongText.Id.Value)], cancellationToken: token);
+            Assert.IsTrue(body.Any(f => f.Rule == PresentationVerifier.WireOverlapsSymbol && f.ObjectIds.Contains(Guid.Parse(owner.Id.Value))),
+                "A wire into a symbol body is reported: " + string.Join("; ", body.Select(f => f.Rule)));
+            Assert.IsTrue(text.Any(f => f.Rule == PresentationVerifier.WireOverlapsText && f.ObjectIds.Contains(named.Id)),
+                "A wire through a label is reported: " + string.Join("; ", text.Select(f => f.Rule)));
+            await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+            await Until("probe undo", s => Same(s.Electrical.Hierarchy.Data, at.Electrical.Hierarchy.Data));
+            return new { symbol = body.Where(f => f.Rule == PresentationVerifier.WireOverlapsSymbol).Select(f => f.Measured).Max(),
+                label = text.Where(f => f.Rule == PresentationVerifier.WireOverlapsText).Select(f => f.Measured).Max(), undone = true };
+        }
+
         // CN-1 §10 and §6 once more on the realized design: I2C pull-ups R2 (PSU_SCL to RAIL_B) and R4 (MEM_SCL to RAIL_B)
         // coordinate-free, and R3 (PSU_SDA to RAIL_B) placed explicitly and locked. The layout tool aims R2 and R4 at the pins
         // they connect to; apply creates the three resistors and connects their six pins in one verified KiCad commit. Nothing
@@ -528,6 +589,19 @@ public sealed partial class NativeSessionTests
             var pullPlan = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
             var pullIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(pullPlan);
             Assert.HasCount(3, pullIntent.CreatedSymbolIds, "The three pull-ups are created by the realization batch.");
+            // The realization apply will draw, from this editor's own measurements at this revision (I9).
+            var pullCheckpoint = await Capture();
+            var pullRecorded = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
+            var pullRealization = await SchematicConnectionRealizer.RealizeAsync(pullIntent, pullPlan.Candidate!, pullCheckpoint,
+                async (request, cancellation) =>
+                {
+                    var answer = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation);
+                    pullRecorded.Add((request.Clone(), answer.Clone()));
+                    return answer;
+                }, SchematicConnectionPolicy.FromSnapshot(pullCheckpoint.Electrical.Hierarchy.Data), token);
+            Assert.AreEqual(pullCheckpoint, await Capture(), "Measuring must not change KiCad.");
+            var pullIslands = RequireRoutedWhereRoutable(pullRealization, pullIntent, SchematicConnectionRealizerTests.Measured(pullRecorded), netNames,
+                sheetNames, policy, "pull-up", []);
             var reply = await Apply("pull-up");
             Assert.IsTrue(reply.GetProperty("nativeMutationCommitted").GetBoolean(), reply.GetRawText());
             Assert.IsTrue(reply.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(), reply.GetRawText());
@@ -543,23 +617,29 @@ public sealed partial class NativeSessionTests
             var symbols = SchematicModelProjection.NativeSymbols(design, after.Electrical.Hierarchy.Data);
             foreach (var reference in new[] { "R2", "R3", "R4" })
                 Assert.IsTrue(symbols.ContainsKey(added[reference].Occurrence), reference + " is drawn.");
-            var stubbed = await RequireLabelStubs(client, before, after, policy, token);
+            CollectionAssert.AreEquivalent(pullRealization.Generated.Select(g => g.Id).ToArray(), GeneratedIn(before, after).Except(pullIntent.CreatedSymbolIds).ToArray(),
+                "KiCad holds exactly the generated items the pull-ups' realization planned.");
+            var stubbed = await RequireLabelStubs(client, before, after, policy, token, RoutedItems(pullRealization));
+            var pullRoutes = await RequireRoutedInKiCad(client, after, pullRealization, pullIntent, policy, "pull-up", token);
+            var pullClear = await RequireGeneratedWiresClear(client, after, pullRealization, "pull-up", token);
             await CheckPresentation(after, design, "pull-up");
             return new { preferredAnchors = proposal.GetProperty("preferredAnchors").GetArrayLength(), created = 3,
-                createdItems = delta.Count, labelStubs = stubbed };
+                createdItems = delta.Count, labelStubs = stubbed, islands = pullIslands, routedInKiCad = pullRoutes, generatedWiresClear = pullClear };
         }
     }
 
     // CN-1 §6 on KiCad's own result, measured by KiCad at the realized revision. Everything the realization added (compared with
-    // `before`) is a wire or a local or hierarchical label, or a sheet pin on an existing sheet symbol: no global label, junction,
-    // symbol or other item. Every wire is a straight stub of 2, 3, 4, 6 or 8 connection-grid steps that leaves a pin away from its
-    // body, or a new sheet pin away from its sheet, and ends in exactly one new label turned the same way. A pin stub's label text
-    // is the name KiCad gives that pin's net (its last path part); a sheet pin's label and the sheet pin carry the same text.
-    // Hierarchical labels appear only on child sheets; every new sheet pin sits on the left or right edge of its sheet symbol and
-    // faces into it. Returns the counts per sheet and kind.
+    // `before`) apart from the items of routed connections (`routed`, checked by RequireRoutedInKiCad) is a wire or a local or
+    // hierarchical label, or a sheet pin on an existing sheet symbol: no global label, junction, symbol or other item. Every such
+    // wire is a straight stub of 2, 3, 4, 6 or 8 connection-grid steps that leaves a pin away from its body, or a new sheet pin
+    // away from its sheet, and ends in exactly one new label turned the same way. A pin stub's label text is the name KiCad gives
+    // that pin's net (its last path part); a sheet pin's label and the sheet pin carry the same text. Hierarchical labels appear
+    // only on child sheets; every new sheet pin sits on the left or right edge of its sheet symbol and faces into it. Returns the
+    // counts per sheet and kind.
     private static async Task<object> RequireLabelStubs(NativeClient client, CheckedSchematicState before, CheckedSchematicState after,
-        SchematicConnectionPolicy policy, CancellationToken token)
+        SchematicConnectionPolicy policy, CancellationToken token, IReadOnlySet<Guid>? routed = null)
     {
+        routed ??= new HashSet<Guid>();
         var lengths = SchematicConnectionPolicy.StubMultiples.Select(m => m * policy.GridNm).ToHashSet();
         var netOf = new Dictionary<(string Path, string Item), string>();
         foreach (var net in after.Electrical.Nets)
@@ -576,7 +656,7 @@ public sealed partial class NativeSessionTests
             var old = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(screen.Metadata.Document));
             var oldItems = SchematicItemDelta.Index(old.Items);
             var items = SchematicItemDelta.Index(screen.Items);
-            var added = items.Where(p => !oldItems.ContainsKey(p.Key)).ToArray();
+            var added = items.Where(p => !oldItems.ContainsKey(p.Key) && !routed.Contains(p.Key)).ToArray();
             var oldPins = oldItems.Values.OfType<SheetSymbol>().SelectMany(s => s.Pins).Select(p => p.Id.Value).ToHashSet(StringComparer.Ordinal);
             var sheetPins = items.Values.OfType<SheetSymbol>().SelectMany(s => s.Pins.Where(p => !oldPins.Contains(p.Id.Value)).Select(p => (Sheet: s, Pin: p))).ToArray();
             foreach (var (_, item) in added)
@@ -661,6 +741,106 @@ public sealed partial class NativeSessionTests
         {
             LocalLabel l => l.Text.Text_, HierarchicalLabel h => h.Text.Text_, _ => throw new ArgumentException("Not a label.")
         };
+    }
+
+    // The PSU/CPU Complete-stage connections that the fixture's layout leaves room to route (CN-1 §7), by sheet and net; the
+    // realizer's replay of recorded measurements holds the same list (SchematicConnectionRealizerTests.ThePsuCpuSheetsAreWiredWhereARouteFits).
+    internal static readonly IReadOnlyCollection<(string Sheet, string Net)> PsuCpuRoutedConnections =
+        [("PSU", "DCDC_OUT"), ("PSU", "GND"), ("PSU", "PSU_SCL"), ("PSU", "PSU_SDA"), ("PSU", "RAIL_A"), ("PSU", "RAIL_B"), ("PSU", "VIN"),
+            ("CPU", "GND"), ("CPU", "MEM_SCL")];
+
+    // The items of the connections a realization routed (CN-1 §7): their wires, junctions and labels.
+    private static IReadOnlySet<Guid> RoutedItems(SchematicConnectionRealization realization)
+    {
+        var routed = realization.Outcomes.Where(o => o.Strategy == ConnectionRealizationStrategy.OrthogonalWire).SelectMany(o => o.GeneratedIds).ToHashSet();
+        return realization.Generated.Where(g => routed.Contains(g.Id)
+            && g.Role is GeneratedConnectionRole.RouteWire or GeneratedConnectionRole.Junction or GeneratedConnectionRole.StubLabel).Select(g => g.Id).ToHashSet();
+    }
+
+    // CN-1 §7 on a realization, against the sheets as KiCad measured them for it: every routed connection has the drawn form
+    // RoutedConnectionChecks requires; a connection with two or more new pins on a sheet is routed or records why it is not; one
+    // with fewer keeps its label stubs, which is no fallback; and every connection named in `mustRoute` (sheet key, net) is routed.
+    // Returns the evidence of every connection: its net, sheet, new pins, how it was drawn and why not routed, and what was
+    // generated for it.
+    private static List<object> RequireRoutedWhereRoutable(SchematicConnectionRealization realization, SchematicConnectionIntent intent,
+        IReadOnlyDictionary<string, SchematicPlacementGeometry> measured, IReadOnlyDictionary<Guid, string> netNames,
+        IReadOnlyDictionary<string, string> sheetNames, SchematicConnectionPolicy policy, string stage, IReadOnlyCollection<(string Sheet, string Net)> mustRoute)
+    {
+        var problems = SchematicConnectionRealizerTests.RoutedProblems(realization, intent, measured, policy);
+        Assert.IsEmpty(problems, stage + ": " + string.Join("; ", problems.Take(12)));
+        var evidence = new List<object>();
+        foreach (var outcome in realization.Outcomes.OrderBy(o => sheetNames.GetValueOrDefault(o.RepresentativePathKey, o.RepresentativePathKey), StringComparer.Ordinal)
+                     .ThenBy(o => netNames[o.NetId], StringComparer.Ordinal))
+        {
+            string name = netNames[outcome.NetId], sheet = sheetNames.GetValueOrDefault(outcome.RepresentativePathKey, outcome.RepresentativePathKey);
+            int pins = SchematicConnectionRealizerTests.Terminals(intent, outcome, measured).Count;
+            if (pins < 2)
+                Assert.IsTrue(outcome.Strategy == ConnectionRealizationStrategy.LabelStub && outcome.FallbackReason is null,
+                    $"{stage}: {name} on {sheet} has {pins} new pin(s) and keeps its label stubs, which is no fallback.");
+            else
+                Assert.IsTrue(outcome.Strategy == ConnectionRealizationStrategy.OrthogonalWire || outcome.FallbackReason is not null,
+                    $"{stage}: {name} on {sheet} has {pins} new pins, so it is routed or says why not.");
+            if (mustRoute.Contains((sheet, name)))
+                Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, outcome.Strategy, $"{stage}: {name} on {sheet} has room for a route: {outcome.FallbackReason}");
+            var generated = realization.Generated.Where(g => outcome.GeneratedIds.Contains(g.Id)).ToArray();
+            evidence.Add(new
+            {
+                net = name, sheet, newPins = pins, strategy = outcome.Strategy.ToString(), fallbackReason = outcome.FallbackReason,
+                wires = generated.Count(g => g.Role is GeneratedConnectionRole.RouteWire or GeneratedConnectionRole.StubWire or GeneratedConnectionRole.SheetPinWire),
+                junctions = generated.Count(g => g.Role == GeneratedConnectionRole.Junction),
+                labels = generated.Count(g => g.Role is GeneratedConnectionRole.StubLabel or GeneratedConnectionRole.AnchorLabel or GeneratedConnectionRole.SheetPinLabel),
+                sheetPins = generated.Count(g => g.Role == GeneratedConnectionRole.SheetPin)
+            });
+        }
+        var named = realization.Outcomes.Select(o => (sheetNames.GetValueOrDefault(o.RepresentativePathKey, o.RepresentativePathKey), netNames[o.NetId])).ToHashSet();
+        foreach (var required in mustRoute) Assert.IsTrue(named.Contains(required), $"{stage}: {required.Net} is realized on {required.Sheet}.");
+        return evidence;
+    }
+
+    // CN-1 §7 on what KiCad holds after committing a realization: every routed connection's wires, junctions and label are drawn,
+    // in the form RoutedConnectionChecks requires, against the pins KiCad measures at that revision.
+    private static async Task<object> RequireRoutedInKiCad(NativeClient client, CheckedSchematicState after, SchematicConnectionRealization realization,
+        SchematicConnectionIntent intent, SchematicConnectionPolicy policy, string stage, CancellationToken token)
+    {
+        var routed = realization.Outcomes.Where(o => o.Strategy == ConnectionRealizationStrategy.OrthogonalWire).ToArray();
+        var measured = new Dictionary<string, SchematicPlacementGeometry>(StringComparer.Ordinal);
+        foreach (var path in routed.Select(o => o.RepresentativePathKey).Distinct(StringComparer.Ordinal))
+        {
+            var screen = after.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == path);
+            measured[path] = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = after.State.Revision.Clone() }, token);
+        }
+        var problems = SchematicConnectionRealizerTests.RoutedProblems(realization, intent, measured, policy, after.Electrical.Hierarchy.Data);
+        Assert.IsEmpty(problems, stage + ": KiCad's routed connections: " + string.Join("; ", problems.Take(12)));
+        var drawn = after.Electrical.Hierarchy.Data.Instances.SelectMany(s => SchematicItemDelta.Index(s.Items)).GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
+        var ids = RoutedItems(realization).ToArray();
+        return new { connections = routed.Length, wires = ids.Count(id => drawn[id] is SchematicLine), junctions = ids.Count(id => drawn[id] is Junction),
+            labels = ids.Count(id => drawn[id] is LocalLabel or GlobalLabel or HierarchicalLabel) };
+    }
+
+    // No generated wire runs over a symbol body or any text, as KiCad measures its own rendering at the realized revision
+    // (NativePresentationChecks.CheckWireOverlapsAsync), on every sheet instance that holds one.
+    private static async Task<object> RequireGeneratedWiresClear(NativeClient client, CheckedSchematicState after, SchematicConnectionRealization realization,
+        string stage, CancellationToken token)
+    {
+        string line = Any.Pack(new SchematicLine()).TypeUrl;
+        var wires = realization.Generated.Where(g => g.TypeUrl == line).Select(g => g.Id).ToHashSet();
+        var findings = new List<PresentationFinding>();
+        int checkedWires = 0, sheets = 0;
+        foreach (var screen in after.Electrical.Hierarchy.Data.Instances)
+        {
+            var here = SchematicItemDelta.Index(screen.Items).Keys.Where(wires.Contains).ToArray();
+            if (here.Length == 0) continue;
+            sheets++;
+            checkedWires += here.Length;
+            findings.AddRange(await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, after.State.Revision, here,
+                cancellationToken: token));
+        }
+        Assert.AreEqual(0, findings.Count, stage + ": generated wires run over symbols or text: " + string.Join("; ", findings.Take(10)
+            .Select(f => f.Rule + " " + string.Join("/", f.ObjectIds) + " " + f.Measured + " mm on " + f.SheetName)));
+        Assert.AreEqual(wires.Count, after.Electrical.Hierarchy.Data.Instances.SelectMany(s => SchematicItemDelta.Index(s.Items).Keys).Where(wires.Contains).Distinct().Count(),
+            stage + ": every generated wire was checked.");
+        return new { sheets, wires = checkedWires, findings = findings.Count };
     }
 
     // Creation-only PSU/CPU journey on the S1 seed (ledger p95e0c19e6143deb6): the frozen fixture's
@@ -1973,7 +2153,7 @@ public sealed partial class NativeSessionTests
     // keeps the room for its shortest stub (two connection-grid steps) and each label its net may put there, as KiCad measures
     // them at the proposed positions: no other symbol, item or other symbol's stub room is inside it. Must-catch: the same
     // symbols laid out by the ordinary, connection-unaware planner (the layout this journey creates next) leave pins without
-    // that room. No symbol has an already placed partner, so no preferred anchor is reported. The milestone-1 realizer is run
+    // that room. No symbol has an already placed partner, so no preferred anchor is reported. The connection realizer is run
     // on the proposal from the same live measurements and its outcome recorded here, not asserted: the NativeConnectedRealization
     // journey draws these connections in KiCad and asserts them. Nothing is saved, published or sent to the editor.
     private static async Task<object> RequirePsuCpuConnectedCompleteLayout(NativeClient client, PsuCpuNativeContext context,
@@ -2012,7 +2192,7 @@ public sealed partial class NativeSessionTests
         CollectionAssert.Contains(unawareIssues.Select(i => i.Code).Distinct().ToArray(), ConnectionRoomBlocked,
             "The connection-unaware layout must leave some pin without room for its stub and label.");
 
-        // The milestone-1 realizer on the connection-aware proposal, measuring this editor, recorded as it answers.
+        // The realizer (label stubs and routed wires) on the connection-aware proposal, measuring this editor, recorded as it answers.
         var checkpoint = await CaptureChecked(client, context.Root, token);
         Assert.AreEqual(nativeBefore, checkpoint, "Layout measurement must not change the native document.");
         object realizer;
@@ -2244,7 +2424,7 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(caught["unchanged"], "False-positive guard: the real layout passes every check.");
         string[] Codes(ConnectedSheetGeometry sheet) => [.. ConnectedPlacementIssues(sheet, expectation).Select(i => i.Code).Distinct().Order(StringComparer.Ordinal)];
 
-        // The milestone-1 realizer on the proposal, measuring this editor, recorded as it answers (not asserted): the Components
+        // The realizer (label stubs and routed wires) on the proposal, measuring this editor, recorded as it answers (not asserted): the Components
         // stage it would also wire was laid out before its connections existed.
         object realizer;
         try

@@ -214,6 +214,32 @@ BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& symbol, const SCH_SHEET
 }
 
 
+SCHEMATIC_SYMBOL_DRAWN_PARTS MeasureSchematicSymbolDrawnParts( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path )
+{
+    const LIB_SYMBOL* definition = symbol.GetEffectiveLibSymbol( &path );
+    if( !definition )
+        definition = LIB_SYMBOL::GetDummy();
+    const int unit = symbol.GetUnitSelection( &path );
+    const int bodyStyle = symbol.GetBodyStyle();
+    const TRANSFORM& transform = symbol.GetTransform();
+    SCHEMATIC_SYMBOL_DRAWN_PARTS parts;
+    // Without its pins the body box takes in each visible pin's root, never its line or the target at its end.
+    parts.body = definition->GetBodyBoundingBox( unit, bodyStyle, false, false );
+    parts.body = transform.TransformCoordinate( parts.body );
+    parts.body.Normalize();
+    parts.body.Offset( symbol.GetPosition() );
+    // The same pins GetBodyBoundingBox merges: this unit and body style, visible, not private.
+    for( const SCH_PIN* pin : definition->GetGraphicalPins( unit, bodyStyle ) )
+    {
+        if( !pin->IsVisible() || pin->IsPrivate() )
+            continue;
+        parts.pins.emplace_back( transform.TransformCoordinate( pin->GetPosition() ) + symbol.GetPosition(),
+                                 transform.TransformCoordinate( pin->GetPinRoot() ) + symbol.GetPosition() );
+    }
+    return parts;
+}
+
+
 BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
                                     const wxString& variant )
 {
@@ -1072,7 +1098,19 @@ void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_REND
 
         if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( copy.get() ) )
         {
-            object( *symbol, nullptr, "symbol", Fact::GRAPHIC, MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
+            Fact* drawn = object( *symbol, nullptr, "symbol", Fact::GRAPHIC,
+                                  MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
+            const SCHEMATIC_SYMBOL_DRAWN_PARTS parts = MeasureSchematicSymbolDrawnParts( *symbol, aPath );
+            BOX2I body = parts.body;
+            body.Normalize();
+            PackBox2( *drawn->mutable_body_bounds(), body, schIUScale );
+            for( const auto& [connection, root] : parts.pins )
+            {
+                kiapi::common::types::PolyLine* line = drawn->add_pin_lines();
+                PackVector2( *line->add_nodes()->mutable_point(), connection, schIUScale );
+                PackVector2( *line->add_nodes()->mutable_point(), root, schIUScale );
+                line->set_closed( false );
+            }
             // Power and virtual ('#') symbols hide their references by design.
             const bool required = !symbol->IsPower() && !symbol->GetRef( &aPath ).StartsWith( wxT( "#" ) );
             for( const SCH_FIELD& symbolField : symbol->GetFields() )

@@ -30,6 +30,8 @@
 #include <pin_map.h>
 
 #include <optional>
+#include <utility>
+#include <vector>
 
 class EDA_ITEM;
 class SCH_FIELD;
@@ -53,6 +55,20 @@ BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PAT
 /// it: like MeasureSchematicSymbolBody, but without the circle the editor draws at an unconnected pin end, which a
 /// touching wire, label or power symbol removes and which is never printed.
 BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
+
+/// The drawn body of a placed symbol at an explicit sheet instance split into its parts, from the same definition,
+/// unit and body style as MeasureSchematicSymbolDrawnBody: the box of its graphics and visible pin roots (the body
+/// without its pins), and each visible pin as the straight line the painter draws from its connection point to its
+/// root, all in sheet coordinates. A wire check needs the parts: a symbol whose pins differ in length has a drawn box
+/// that reaches past its shorter pins' ends, where nothing is drawn.
+struct SCHEMATIC_SYMBOL_DRAWN_PARTS
+{
+    BOX2I                                    body;
+    std::vector<std::pair<VECTOR2I, VECTOR2I>> pins; ///< (connection point, root)
+};
+
+SCHEMATIC_SYMBOL_DRAWN_PARTS MeasureSchematicSymbolDrawnParts( const SCH_SYMBOL& aSymbol,
+                                                               const SCH_SHEET_PATH& aPath );
 
 /// Extent of the glyphs SCH_PAINTER::draw( SCH_FIELD ) paints for @a aField at an explicit sheet
 /// instance, from the exact native glyph geometry: the text KiCad shows there, centred on the

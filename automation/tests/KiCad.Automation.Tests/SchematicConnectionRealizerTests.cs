@@ -34,7 +34,8 @@ public sealed class SchematicConnectionRealizerTests
     public async Task RootAdditionDrawsOneStubAndLabelPerNewPinAndEndsWithTheAssertion()
     {
         // §15 "Root addition": R1.1 is in SIG with a local label; TP1.1 is bare. The XML adds R2, puts R2.1 in SIG
-        // and makes {R2.2, TP1.1} a new net /OUT.
+        // and makes {R2.2, TP1.1} a new net /OUT. The bench draws its pins off the 1.27 mm connection grid, so /OUT, which
+        // §7 would join with wires, falls back to label stubs and says why; SIG has one new pin and keeps its stub (no fallback).
         var scene = RootAddition();
         var realization = await scene.Realize();
         var screen = scene.Intent.Screens.Single();
@@ -89,7 +90,10 @@ public sealed class SchematicConnectionRealizerTests
         string xml = SchematicDesignXml.Write(realization.Design, []);
         Assert.AreEqual(xml, SchematicDesignXml.Write(SchematicDesignXml.Read(xml, []), []));
         CollectionAssert.AreEquivalent(scene.Intent.Nets.Select(n => n.NetId).ToArray(), realization.Outcomes.Select(o => o.NetId).ToArray());
-        Assert.IsTrue(realization.Outcomes.All(o => o.Strategy == ConnectionRealizationStrategy.LabelStub && !o.AttachedCarrier && o.FallbackReason is null));
+        Assert.IsTrue(realization.Outcomes.All(o => o.Strategy == ConnectionRealizationStrategy.LabelStub && !o.AttachedCarrier));
+        var output = scene.Intent.Nets.Single(n => n.Name == "/OUT").NetId;
+        Assert.IsNull(realization.Outcomes.Single(o => o.NetId != output).FallbackReason, "One new pin is drawn with a stub; that is no fallback.");
+        StringAssert.Contains(realization.Outcomes.Single(o => o.NetId == output).FallbackReason, "is not on the connection grid");
         Assert.AreEqual(6, realization.Outcomes.Sum(o => o.GeneratedIds.Count));
         Assert.IsFalse(realization.Diagnostics.Any(d => d.Code == SchematicConnectionErrors.ExistingNetNamedByRealization));
         Assert.IsTrue(realization.Diagnostics.Any(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified));
@@ -234,6 +238,175 @@ public sealed class SchematicConnectionRealizerTests
         var other = scene.PinAt(candidates[1]);
         var none = blocked.Obstacle(new(other.X - 12 * Grid, other.Y - Grid, other.X - Grid / 2, other.Y + Grid));
         await RequireRefusal(none, SchematicConnectionErrors.RealizationNoJoinAnchor, "no existing pin of it has room");
+    }
+
+    // Lay a pin at `at` pointing left out of a small body to its right, as the Pair test does, and every other pin of its symbol
+    // two grids further down each, so the whole symbol sits on the connection grid.
+    private static void LayLeft(Scene target, ConnectionPlacedPin pin, Point at)
+    {
+        var symbol = target.Plan.Candidate!.Schematic.Instances.Single(s => Key(s) == pin.SheetPathKey).Items
+            .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Single(x => Guid.Parse(x.Id.Value) == pin.SymbolId);
+        var others = SchematicPlacedPins.Active(symbol, symbol.Unit?.Unit ?? 1).Select(p => Guid.Parse(p.Id.Value)).Where(id => id != pin.PlacedPinId)
+            .Order().ToArray();
+        target.Geometry.Place[pin.PlacedPinId] = at;
+        target.Geometry.Direction[pin.PlacedPinId] = (1, 0);
+        for (int i = 0; i < others.Length; i++)
+        {
+            target.Geometry.Place[others[i]] = new(at.X, at.Y + 2 * Grid * (i + 1));
+            target.Geometry.Direction[others[i]] = (1, 0);
+        }
+        target.Geometry.Body[pin.SymbolId] = new(at.X, at.Y - Grid / 4, at.X + 4 * Grid, at.Y + 2 * Grid * others.Length + Grid / 4);
+    }
+
+    [TestMethod]
+    public async Task TwoNewPinsAreJoinedByWiresNamedByOneLabelAtTheFirstPin()
+    {
+        // CN-1 §7: two test points, ten grids apart one above the other on the connection grid and both pointing left, form the
+        // new net X. The tree grows from the upper pin (first by escape y), whose two-grid stub carries the one label X; the
+        // lower pin leaves by one grid, turns up and lands on the inside of that stub, where the wire is split and a junction
+        // drawn. Every wire, the junction and the label have their §6.7 identities.
+        var scene = Pair();
+        var stubbed = scene.Intent.Screens.Single().Islands.Single().Members.Where(m => m.RequiresStub).Select(m => m.Pin).ToArray();
+        var (upper, lower) = (stubbed[0], stubbed[1]);
+        LayLeft(scene, upper, new(80 * Grid, 60 * Grid));
+        LayLeft(scene, lower, new(80 * Grid, 70 * Grid));
+        var (realization, measured) = await scene.RealizeMeasured();
+        var outcome = realization.Outcomes.Single();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, outcome.Strategy, outcome.FallbackReason);
+        Assert.IsNull(outcome.FallbackReason);
+        var problems = RoutedProblems(realization, scene.Intent, measured, Policy);
+        Assert.IsEmpty(problems, string.Join("\n", problems));
+        // Wires by segment ordinal (their identity order): by start, then end, each wire starting at its lower-left end.
+        string netKey = SchematicConnectionIdentity.NetKey([upper.PlacedPinId, lower.PlacedPinId]);
+        var screen = scene.Intent.Screens.Single().ScreenId;
+        Guid RouteId(int ordinal) => SchematicConnectionIdentity.Generated(scene.Intent.OriginId, scene.Intent.NativeRevision, scene.Intent.DesiredSha256,
+            screen, GeneratedConnectionRole.RouteWire, SchematicConnectionIdentity.RouteAnchorKey(netKey, ordinal), ordinal);
+        var byId = Generated<SchematicLine>(realization).ToDictionary(w => Guid.Parse(w.Id.Value));
+        Assert.HasCount(4, byId);
+        var wires = Enumerable.Range(0, 4).Select(ordinal => byId[RouteId(ordinal)]).ToArray();
+        (long, long, long, long) Wire(SchematicLine w) => (w.Start.XNm / Grid, w.Start.YNm / Grid, w.End.XNm / Grid, w.End.YNm / Grid);
+        CollectionAssert.AreEqual(new[] { (78L, 60L, 79L, 60L), (79L, 60L, 79L, 70L), (79L, 60L, 80L, 60L), (79L, 70L, 80L, 70L) },
+            wires.Select(Wire).ToArray(), "Wires in identity order, split at the junction.");
+        Assert.IsTrue(wires.All(w => w.Type == SchematicLineType.SltWire && w.Locked == LockedState.LsUnlocked));
+        var junction = Generated<Junction>(realization).Single();
+        Assert.AreEqual(new Vector2 { XNm = 79 * Grid, YNm = 60 * Grid }, junction.Position);
+        var label = Generated<LocalLabel>(realization).Single();
+        Assert.AreEqual("X", label.Text.Text_);
+        Assert.AreEqual(new Vector2 { XNm = 78 * Grid, YNm = 60 * Grid }, label.Position);
+        Assert.AreEqual(SchematicLabelSpinStyle.SlssLeft, label.SpinStyle);
+        Assert.IsTrue(label.FieldsAutoplaced);
+        // §6.7: the junction by net key and position, the label by its pin.
+        Assert.AreEqual(Generated(scene, screen, GeneratedConnectionRole.Junction, SchematicConnectionIdentity.JunctionAnchorKey(netKey, 79 * Grid, 60 * Grid))
+            .ToString("D"), junction.Id.Value);
+        var named = realization.Generated.Single(g => g.Role == GeneratedConnectionRole.StubLabel);
+        Assert.AreEqual(upper.PlacedPinId, named.PlacedPinId);
+        Assert.AreEqual(Generated(scene, screen, GeneratedConnectionRole.StubLabel, SchematicConnectionIdentity.PinAnchorKey(upper.PlacedPinId)), named.Id);
+        CollectionAssert.AreEquivalent(realization.Generated.Select(g => g.Id).ToArray(), outcome.GeneratedIds.ToArray());
+        Assert.AreEqual(4, realization.Generated.Count(g => g.Role == GeneratedConnectionRole.RouteWire));
+        // The batch creates exactly these items and ends with the assertion; the same measurements give the same batch (I9).
+        Assert.IsTrue(realization.Operations.Take(realization.Operations.Count - 1).All(o => o.Create is not null));
+        Assert.AreEqual(6, realization.Operations.Count - 1);
+        Assert.IsNotNull(realization.Operations[^1].AssertConnectivity);
+        var again = await scene.Realize();
+        CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), again.Operations.Select(o => o.ToByteString()).ToArray());
+        string xml = SchematicDesignXml.Write(realization.Design, []);
+        Assert.AreEqual(xml, SchematicDesignXml.Write(SchematicDesignXml.Read(xml, []), []), "Wires and junctions round-trip through the design file.");
+    }
+
+    [TestMethod]
+    public async Task AConnectionNoRouteFitsFallsBackToLabelStubsAndSaysWhy()
+    {
+        var scene = Pair();
+        var stubbed = scene.Intent.Screens.Single().Islands.Single().Members.Where(m => m.RequiresStub).Select(m => m.Pin).ToArray();
+        LayLeft(scene, stubbed[0], new(80 * Grid, 60 * Grid));
+        LayLeft(scene, stubbed[1], new(80 * Grid, 70 * Grid));
+        // Must-catch: a foreign junction within the clearance of the lower pin's one-grid escape leaves it no way out, though its
+        // two-grid stub and label still fit: the connection is drawn with label stubs and says why.
+        var blocked = scene.Junction(new(79 * Grid, 70 * Grid + Policy.ClearanceNm));
+        var (fallback, measured) = await blocked.RealizeMeasured();
+        var outcome = fallback.Outcomes.Single();
+        Assert.AreEqual(ConnectionRealizationStrategy.LabelStub, outcome.Strategy);
+        StringAssert.Contains(outcome.FallbackReason, "has no room to leave its symbol by one grid step");
+        Assert.HasCount(2, Generated<SchematicLine>(fallback)); Assert.HasCount(2, Generated<LocalLabel>(fallback));
+        Assert.IsEmpty(Generated<Junction>(fallback));
+        Assert.IsTrue(fallback.Generated.All(g => g.Role is GeneratedConnectionRole.StubWire or GeneratedConnectionRole.StubLabel));
+        Assert.IsEmpty(RoutedProblems(fallback, blocked.Intent, measured, Policy));
+        // Guard: 100 nm further away the junction is no contact and the pins are routed.
+        var clear = await scene.Junction(new(79 * Grid, 70 * Grid + Policy.ClearanceNm + 100)).Realize();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, clear.Outcomes.Single().Strategy, clear.Outcomes.Single().FallbackReason);
+        // The budget: a search that may expand no node falls back as well.
+        var (starved, _) = await scene.RealizeMeasured(new(0, 4));
+        StringAssert.Contains(starved.Outcomes.Single().FallbackReason, "expanded more than 0 grid nodes");
+        Assert.HasCount(2, Generated<SchematicLine>(starved));
+    }
+
+    [TestMethod]
+    public async Task AGlobalNetIsRoutedWithOneGlobalLabel()
+    {
+        // GND holds the existing power symbol #PWR01; the XML joins R1.2 and R2.2 to it. They are routed together and named by
+        // one global label at the first pin, which joins them to the power symbol by name; no local label is drawn.
+        var bench = new Bench();
+        Guid r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid gnd = bench.Part("GND", SchematicSymbolType.SstGlobalPower, new BenchPin("1", "GND", 1, ElectricalPinType.EptPowerInput, false));
+        Guid pwr = bench.Component(gnd, "#PWR01", value: "GND");
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2");
+        var ground = new CircuitNet(Guid.NewGuid(), "GND", [new(pwr, "1")]);
+        var scene = Scene.Of(bench, WithFormatting(bench.State([ground])), design => WithNets(design, ground with { Pins = [.. ground.Pins, new(r1, "2"), new(r2, "2")] }));
+        var island = scene.Intent.Screens.Single().Islands.Single();
+        Assert.AreEqual(ConnectionScope.Global, island.Scope);
+        var pins = island.Members.Where(m => m.RequiresStub).Select(m => m.Pin).ToArray();
+        LayLeft(scene, pins[0], new(80 * Grid, 60 * Grid));
+        LayLeft(scene, pins[1], new(80 * Grid, 66 * Grid));
+        var (realization, measured) = await scene.RealizeMeasured();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, realization.Outcomes.Single().Strategy, realization.Outcomes.Single().FallbackReason);
+        var label = Generated<GlobalLabel>(realization).Single();
+        Assert.AreEqual("GND", label.Text.Text_);
+        Assert.AreEqual(SchematicLabelShape.SlshPassive, label.Shape);
+        Assert.IsEmpty(Generated<LocalLabel>(realization));
+        Assert.IsFalse(realization.Outcomes.Single().AttachedCarrier);
+        Assert.IsEmpty(RoutedProblems(realization, scene.Intent, measured, Policy));
+    }
+
+    [TestMethod]
+    public async Task AnUnlabelledExistingConnectionIsReachedByWireAndNamedByTheRoutesLabel()
+    {
+        // R1.1 and R2.1 are joined by an unlabelled wire (elsewhere on the sheet); the XML adds TP1.1 and TP2.1 to that net
+        // (a join, §6.3 (a)). The new pins are routed together and the route reaches the existing connection through the
+        // one-grid corridor of R1.1 (§7: an existing island attaches only at its own connection points); the route's one label
+        // names the whole connection, which is reported.
+        var bench = new Bench();
+        Guid r = bench.Part("R", Passive("1"), Passive("2")), tp = bench.Part("TP", Passive("1"));
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2"), tp1 = bench.Component(tp, "TP1"), tp2 = bench.Component(tp, "TP2");
+        string wire = bench.Wire(BenchSheet.Root);
+        var link = new CircuitNet(Guid.NewGuid(), "LINK", [new(r1, "1"), new(r2, "1")]);
+        var state = WithFormatting(bench.State([link], new() { [link.Id] = [(BenchSheet.Root, wire)] }));
+        var scene = Scene.Of(bench, state, design => WithNets(design, link with { Pins = [.. link.Pins, new(tp1, "1"), new(tp2, "1")] }));
+        var island = scene.Intent.Screens.Single().Islands.Single();
+        Assert.IsTrue(island.JoinRequired);
+        var member = (Guid component) => island.Members.Single(m => m.Pin.Endpoint.ComponentId == component).Pin;
+        LayLeft(scene, member(tp1), new(80 * Grid, 60 * Grid));
+        LayLeft(scene, member(tp2), new(80 * Grid, 66 * Grid));
+        LayLeft(scene, member(r1), new(80 * Grid, 80 * Grid));
+        LayLeft(scene, member(r2), new(120 * Grid, 80 * Grid));
+        var (realization, measured) = await scene.RealizeMeasured();
+        var outcome = realization.Outcomes.Single();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, outcome.Strategy, outcome.FallbackReason);
+        var wires = Generated<SchematicLine>(realization);
+        var r1At = new Vector2 { XNm = 80 * Grid, YNm = 80 * Grid };
+        Assert.IsTrue(wires.Any(w => w.Start.Equals(r1At) || w.End.Equals(r1At)), "The route reaches R1.1 through its corridor.");
+        Assert.AreEqual("LINK", Generated<LocalLabel>(realization).Single().Text.Text_);
+        Assert.IsTrue(realization.Diagnostics.Any(d => d.Code == SchematicConnectionErrors.ExistingNetNamedByRealization && d.NetId == island.NetId));
+        Assert.IsEmpty(RoutedProblems(realization, scene.Intent, measured, Policy));
+        // Must-catch: with keep-outs above and below the rows of R1.1 and R2.1 and a wall across each row beyond the room a join
+        // label needs, nothing can reach the existing connection; the island falls back to its join and stubs and says why.
+        var hemmed = scene;
+        foreach (long x in new long[] { 80 * Grid, 120 * Grid })
+            hemmed = hemmed.Obstacle(new(x - 10 * Grid, 70 * Grid, x - Grid / 2, 79 * Grid)).Obstacle(new(x - 10 * Grid, 81 * Grid, x - Grid / 2, 90 * Grid))
+                .Obstacle(new(x - 8 * Grid - Grid / 5, 70 * Grid, x - 8 * Grid + Grid / 5, 90 * Grid));
+        var fallback = (await hemmed.RealizeMeasured()).Realization.Outcomes.Single();
+        Assert.AreEqual(ConnectionRealizationStrategy.LabelStub, fallback.Strategy);
+        StringAssert.Contains(fallback.FallbackReason, "existing");
     }
 
     [TestMethod]
@@ -1420,6 +1593,20 @@ public sealed class SchematicConnectionRealizerTests
 
         public Task<SchematicConnectionRealization> Realize() =>
             SchematicConnectionRealizer.RealizeAsync(Intent, Plan.Candidate!, Checkpoint, Measure, Policy);
+
+        /// <summary>Realize with <paramref name="limits"/> (the contract's by default), keeping every measurement and its answer.</summary>
+        public async Task<(SchematicConnectionRealization Realization, IReadOnlyDictionary<string, SchematicPlacementGeometry> Measured)> RealizeMeasured(
+            SchematicRoutingLimits? limits = null)
+        {
+            var measured = new List<(MeasureSchematicPlacement, SchematicPlacementGeometry)>();
+            var realization = await SchematicConnectionRealizer.RealizeAsync(Intent, Plan.Candidate!, Checkpoint, async (request, token) =>
+            {
+                var reply = await Measure(request, token);
+                measured.Add((request.Clone(), reply.Clone()));
+                return reply;
+            }, Policy, limits ?? SchematicRoutingLimits.Contract);
+            return (realization, SchematicConnectionRealizerTests.Measured(measured));
+        }
     }
 
     /// <summary>A stable recovery record whose every sheet reports the standard formatting (1.27 mm grid and text).</summary>
@@ -1920,6 +2107,120 @@ public sealed class SchematicConnectionRealizerTests
             "join-turned-link names its last candidate, so blocking that label leaves nothing to name the connection.");
     }
 
+    [TestMethod]
+    public async Task ThePsuCpuSheetsAreWiredWhereARouteFits()
+    {
+        // CN-1 §7 on the PSU/CPU fixture's Complete stage exactly as a live KiCad measured it (the psu-cpu-connected journey's
+        // recording): every connection with two or more new pins on a sheet is joined by orthogonal wires with one name label,
+        // unless no route fits, which is recorded as its fallback reason; every other connection keeps its label stubs. Routing
+        // asks KiCad nothing beyond what label stubs need, and the same measurements give the same batch (I9).
+        var recording = LoadRecording(Path.Combine(RecordingDirectory, "psu-cpu-complete.measurement.json.gz"));
+        var policy = SchematicConnectionPolicy.FromSnapshot(recording.Checkpoint.Electrical.Hierarchy.Data);
+        int asked = 0;
+        var replay = Replay(recording.Measurements);
+        var realization = await SchematicConnectionRealizer.RealizeAsync(recording.Intent, recording.Plan.Candidate!, recording.Checkpoint,
+            (request, token) => { asked++; return replay(request, token); }, policy);
+        Assert.AreEqual(recording.Measurements.Count, asked, "Routing asks KiCad nothing beyond what label stubs need.");
+        var measured = Measured(recording.Measurements);
+        var names = recording.Desired.Engineering.Circuit.Nets.ToDictionary(n => n.Id, n => n.Name);
+        foreach (var outcome in realization.Outcomes.OrderBy(o => o.RepresentativePathKey, StringComparer.Ordinal).ThenBy(o => names[o.NetId], StringComparer.Ordinal))
+            Console.WriteLine($"{names[outcome.NetId]} on {outcome.RepresentativePathKey}: {outcome.Strategy}, {outcome.GeneratedIds.Count} items"
+                + (outcome.FallbackReason is null ? "" : "; fallback: " + outcome.FallbackReason));
+        var routed = realization.Outcomes.Where(o => o.Strategy == ConnectionRealizationStrategy.OrthogonalWire).ToArray();
+        var problems = RoutedProblems(realization, recording.Intent, measured, policy);
+        Assert.IsEmpty(problems, string.Join("\n", problems));
+        foreach (var outcome in realization.Outcomes)
+        {
+            int terminals = Terminals(recording.Intent, outcome, measured).Count;
+            if (terminals < 2)
+                Assert.IsTrue(outcome.Strategy == ConnectionRealizationStrategy.LabelStub && outcome.FallbackReason is null,
+                    names[outcome.NetId] + ": fewer than two new pins on a sheet keep their label stubs, which is no fallback.");
+            else
+                Assert.IsTrue(outcome.Strategy == ConnectionRealizationStrategy.OrthogonalWire || outcome.FallbackReason is not null,
+                    names[outcome.NetId] + ": a connection with " + terminals + " new pins is routed or says why not.");
+        }
+        // Exactly the connections the fixture's layout leaves room for are routed, the same list the live journey requires;
+        // LDO_FAULT (U2.8 to U4.4) falls back: the wires routed before it leave U4.4 no way through, which it records.
+        var sheetOf = PsuCpuFixture.ExpectedNative(PsuCpuStage.Complete).Sheets.Where(s => s.NativeSheetSymbol is not null)
+            .ToDictionary(s => s.NativeSheetSymbol!.Value.ToString("D"), s => s.Key);
+        string Sheet(string path) => sheetOf.GetValueOrDefault(path[(path.LastIndexOf('/') + 1)..], "ROOT");
+        CollectionAssert.AreEquivalent(NativeSessionTests.PsuCpuRoutedConnections.ToArray(),
+            routed.Select(o => (Sheet(o.RepresentativePathKey), names[o.NetId])).ToArray());
+        var ldo = realization.Outcomes.Single(o => names[o.NetId] == "LDO_FAULT");
+        StringAssert.Contains(ldo.FallbackReason, "cannot reach the rest of its connection");
+        // The assertion KiCad must prove is the plan's, whatever is drawn.
+        Assert.AreEqual(recording.Operations[^1], realization.Operations[^1]);
+        var again = await SchematicConnectionRealizer.RealizeAsync(recording.Intent, recording.Plan.Candidate!, recording.Checkpoint, Replay(recording.Measurements), policy);
+        CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), again.Operations.Select(o => o.ToByteString()).ToArray(),
+            "The same measurements give the same batch (I9).");
+    }
+
+    // The first answer for each sheet instance: the one that lists its items and pins.
+    internal static IReadOnlyDictionary<string, SchematicPlacementGeometry> Measured(
+        IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> measurements)
+    {
+        var result = new Dictionary<string, SchematicPlacementGeometry>(StringComparer.Ordinal);
+        foreach (var (request, reply) in measurements)
+            result.TryAdd(string.Join('/', request.Document.SheetPath.Path.Select(p => p.Value)), reply);
+        return result;
+    }
+
+    // The anchors of an island's new pins on its representative sheet, one per point, as §7 joins them.
+    internal static IReadOnlyCollection<RoutedConnectionChecks.P> Terminals(SchematicConnectionIntent intent, ConnectionIslandOutcome outcome,
+        IReadOnlyDictionary<string, SchematicPlacementGeometry> measured)
+    {
+        var island = intent.Screens.SelectMany(s => s.Islands).Single(i => i.NetId == outcome.NetId && i.ScreenId == outcome.ScreenId);
+        var pins = PinsAt(measured[outcome.RepresentativePathKey]);
+        var connected = island.Members.Where(m => m.AlreadyConnected).Select(m => pins[m.Pin.PlacedPinId]).ToHashSet();
+        return island.Members.Where(m => m.RequiresStub).Select(m => pins[m.Pin.PlacedPinId]).Where(p => !connected.Contains(p)).ToHashSet();
+    }
+
+    private static Dictionary<Guid, RoutedConnectionChecks.P> PinsAt(SchematicPlacementGeometry geometry) =>
+        geometry.Obstacles.Concat(geometry.Candidates).Where(o => o.SymbolPins is not null).SelectMany(o => o.SymbolPins.Pins)
+            .ToDictionary(p => Guid.Parse(p.Id.Value), p => new RoutedConnectionChecks.P(p.Position.XNm, p.Position.YNm));
+
+    /// <summary>Everything wrong with the routed connections of a realization (RoutedConnectionChecks), measured against the
+    /// sheets as KiCad reported them: the realizer's own drawing, or with <paramref name="drawn"/> what KiCad holds after
+    /// committing it (every planned item must be there with the planned geometry's form).</summary>
+    internal static List<string> RoutedProblems(SchematicConnectionRealization realization, SchematicConnectionIntent intent,
+        IReadOnlyDictionary<string, SchematicPlacementGeometry> measured, SchematicConnectionPolicy policy, SchematicHierarchyData? drawn = null)
+    {
+        var problems = new List<string>();
+        static RoutedConnectionChecks.P P(Vector2 v) => new(v.XNm, v.YNm);
+        foreach (var outcome in realization.Outcomes.Where(o => o.Strategy == ConnectionRealizationStrategy.OrthogonalWire))
+        {
+            string path = outcome.RepresentativePathKey;
+            var geometry = measured[path];
+            var screen = (drawn ?? realization.Design.Schematic).Instances.Single(i => string.Join('/', i.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == path);
+            var items = SchematicItemDelta.Index(screen.Items);
+            // The route's own wires, junctions and label; the island's sheet pins, if any, are drawn as stubs of their own.
+            var ids = realization.Generated.Where(g => outcome.GeneratedIds.Contains(g.Id)
+                && g.Role is GeneratedConnectionRole.RouteWire or GeneratedConnectionRole.Junction or GeneratedConnectionRole.StubLabel).Select(g => g.Id).ToHashSet();
+            foreach (var missing in ids.Where(id => !items.ContainsKey(id)))
+                problems.Add(outcome.NetId.ToString("D") + " on " + path + ": generated item " + missing.ToString("D") + " is not drawn");
+            var mine = ids.Where(items.ContainsKey).Select(id => items[id]).ToArray();
+            var wires = mine.OfType<SchematicLine>().Select(l => (P(l.Start), P(l.End))).ToArray();
+            var others = items.Where(i => !ids.Contains(i.Key)).Select(i => i.Value).OfType<SchematicLine>()
+                .Where(l => l.Type is SchematicLineType.SltWire or SchematicLineType.SltBus).Select(l => (P(l.Start), P(l.End))).ToArray();
+            var labels = mine.Select(i => i switch
+            {
+                LocalLabel l => (P(l.Position), SchematicConnectionRealizer.Facing(l.SpinStyle)),
+                GlobalLabel l => (P(l.Position), SchematicConnectionRealizer.Facing(l.SpinStyle)),
+                HierarchicalLabel l => (P(l.Position), SchematicConnectionRealizer.Facing(l.SpinStyle)),
+                _ => ((RoutedConnectionChecks.P, (int, int))?)null
+            }).OfType<(RoutedConnectionChecks.P, (int, int))>().ToArray();
+            var symbolsAt = geometry.Obstacles.Concat(geometry.Candidates).Where(o => o.SymbolPins is not null)
+                .SelectMany(o => o.SymbolPins.Pins.Select(p => (Symbol: o.Id.Value, At: new RoutedConnectionChecks.P(p.Position.XNm, p.Position.YNm))))
+                .GroupBy(x => x.At).ToDictionary(g => g.Key, g => g.Select(x => x.Symbol).Distinct().Count());
+            var page = geometry.PageBounds;
+            long inset = policy.PageInsetNm;
+            var usable = (page.Position.XNm + inset, page.Position.YNm + inset, page.Position.XNm + page.Size.XNm - inset, page.Position.YNm + page.Size.YNm - inset);
+            problems.AddRange(RoutedConnectionChecks.Problems(outcome.NetId.ToString("D") + " on " + path, policy.GridNm, usable, wires,
+                mine.OfType<Junction>().Select(j => P(j.Position)).ToArray(), labels, symbolsAt, Terminals(intent, outcome, measured), others));
+        }
+        return problems;
+    }
+
     /// <summary>One recorded live realization (automation/tests/fixtures/connection-realization), optionally with a
     /// fault injected into the editor's recorded answers.</summary>
     internal sealed record Recording(string Scenario, DesignRecoveryState Saved, SchematicDesign Desired, DesignRecoveryState State,
@@ -2000,40 +2301,55 @@ public sealed class SchematicConnectionRealizerTests
 
     internal static string RecordingDirectory => Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "tests", "fixtures", "connection-realization");
 
-    internal static IReadOnlyList<Recording> Recordings()
+    internal static IReadOnlyList<Recording> Recordings() =>
+        [.. Directory.GetFiles(RecordingDirectory, "*.measurement.json").Order(StringComparer.Ordinal).Select(LoadRecording)];
+
+    /// <summary>One recording of the fixture directory, plain or compressed (<c>.gz</c>); a compressed recording keeps its
+    /// saved record compressed beside it too, under the recorded name plus <c>.gz</c>.</summary>
+    internal static Recording LoadRecording(string file)
     {
-        var result = new List<Recording>();
-        foreach (var file in Directory.GetFiles(RecordingDirectory, "*.measurement.json").Order(StringComparer.Ordinal))
+        static string Text(string path)
         {
-            var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!;
-            Assert.AreEqual("connection-realization", root["fixture"]!.GetValue<string>());
-            Assert.AreEqual(1, root["version"]!.GetValue<int>());
-            // Every scenario was planned from its saved record (shared by the scenarios of one editor state) with only its
-            // nets replaced, exactly as the journey did. Recordings made before records were named use editor.recovery.json.
-            string record = root["recovery"]?.GetValue<string>() ?? "editor.recovery.json";
-            Assert.AreEqual(Path.GetFileName(record), record);
-            var saved = new DesignRecoveryStore(Path.Combine(RecordingDirectory, record)).Read()!.State;
-            var nets = root["nets"]!.AsArray().Select(n => new CircuitNet(Guid.Parse(n!["id"]!.GetValue<string>()), n["name"]!.GetValue<string>(),
-                [.. n["pins"]!.AsArray().Select(p => new PinEndpoint(Guid.Parse(p!["component"]!.GetValue<string>()), p["number"]!.GetValue<string>()))])).ToArray();
-            // Recordings made before the circuit was kept changed only the nets; a revision that declares part symbols keeps
-            // all of them.
-            var circuit = root["circuit"] is { } kept ? CircuitXml.Read(kept.GetValue<string>()) : saved.Baseline.Engineering.Circuit with { Nets = nets };
-            T Parse<T>(System.Text.Json.Nodes.JsonNode node) where T : IMessage<T>, new() => SchematicJson.Parser.Parse<T>(node.ToJsonString());
-            var desired = saved.Baseline with { Engineering = saved.Baseline.Engineering with { Circuit = circuit },
-                PartSymbols = root["partSymbols"] is { } declared ? declared.AsArray().Select(d => new SchematicPartSymbol(Guid.Parse(d!["part"]!.GetValue<string>()),
-                    Parse<Kiapi.Common.Types.LibraryIdentifier>(d["library"]!), Parse<SchematicCachedSymbol>(d["symbol"]!), d["bodyStyle"]!.GetValue<int>())).ToArray()
-                    : saved.Baseline.PartSymbols };
-            CollectionAssert.AreEqual(nets.Select(n => n.Id).ToArray(), circuit.Nets.Select(n => n.Id).ToArray());
-            var state = Recording.Revision(saved, desired);
-            Assert.AreEqual(root["desiredSha256"]!.GetValue<string>(), Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(state.DesiredFileBytes)),
-                "The recorded revision is reconstructed byte for byte.");
-            var plan = SchematicConnectionIntentBuilderTests.Plan(state);
-            _ = RequireRealizationPlan(plan);
-            result.Add(new(root["scenario"]!.GetValue<string>(), saved, desired, state, plan, Parse<CheckedSchematicState>(root["checkpoint"]!),
-                [.. root["measurements"]!.AsArray().Select(m => (Parse<MeasureSchematicPlacement>(m!["request"]!), Parse<SchematicPlacementGeometry>(m!["response"]!)))],
-                [.. root["operations"]!.AsArray().Select(o => Parse<SchematicItemOperation>(o!))], [.. root["generated"]!.AsArray()]));
+            if (!path.EndsWith(".gz", StringComparison.Ordinal)) return File.ReadAllText(path);
+            using var input = new System.IO.Compression.GZipStream(File.OpenRead(path), System.IO.Compression.CompressionMode.Decompress);
+            using var reader = new StreamReader(input, Encoding.UTF8);
+            return reader.ReadToEnd();
         }
-        return result;
+        var root = System.Text.Json.Nodes.JsonNode.Parse(Text(file))!;
+        Assert.AreEqual("connection-realization", root["fixture"]!.GetValue<string>());
+        Assert.AreEqual(1, root["version"]!.GetValue<int>());
+        // Every scenario was planned from its saved record (shared by the scenarios of one editor state) with only its
+        // nets replaced, exactly as the journey did. Recordings made before records were named use editor.recovery.json.
+        string record = root["recovery"]?.GetValue<string>() ?? "editor.recovery.json";
+        Assert.AreEqual(Path.GetFileName(record), record);
+        string recordPath = Path.Combine(RecordingDirectory, record);
+        if (!File.Exists(recordPath) && File.Exists(recordPath + ".gz"))
+        {
+            // The recovery store reads a plain file; a compressed record is read from a private copy.
+            string copy = Path.Combine(Directory.CreateTempSubdirectory("connection-realization-").FullName, record);
+            File.WriteAllText(copy, Text(recordPath + ".gz"));
+            recordPath = copy;
+        }
+        var saved = new DesignRecoveryStore(recordPath).Read()!.State;
+        var nets = root["nets"]!.AsArray().Select(n => new CircuitNet(Guid.Parse(n!["id"]!.GetValue<string>()), n["name"]!.GetValue<string>(),
+            [.. n["pins"]!.AsArray().Select(p => new PinEndpoint(Guid.Parse(p!["component"]!.GetValue<string>()), p["number"]!.GetValue<string>()))])).ToArray();
+        // Recordings made before the circuit was kept changed only the nets; a revision that declares part symbols keeps
+        // all of them.
+        var circuit = root["circuit"] is { } kept ? CircuitXml.Read(kept.GetValue<string>()) : saved.Baseline.Engineering.Circuit with { Nets = nets };
+        T Parse<T>(System.Text.Json.Nodes.JsonNode node) where T : IMessage<T>, new() => SchematicJson.Parser.Parse<T>(node.ToJsonString());
+        var desired = saved.Baseline with { Engineering = saved.Baseline.Engineering with { Circuit = circuit },
+            PartSymbols = root["partSymbols"] is { } declared ? declared.AsArray().Select(d => new SchematicPartSymbol(Guid.Parse(d!["part"]!.GetValue<string>()),
+                Parse<Kiapi.Common.Types.LibraryIdentifier>(d["library"]!), Parse<SchematicCachedSymbol>(d["symbol"]!), d["bodyStyle"]!.GetValue<int>())).ToArray()
+                : saved.Baseline.PartSymbols };
+        CollectionAssert.AreEqual(nets.Select(n => n.Id).ToArray(), circuit.Nets.Select(n => n.Id).ToArray());
+        var state = Recording.Revision(saved, desired);
+        Assert.AreEqual(root["desiredSha256"]!.GetValue<string>(), Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(state.DesiredFileBytes)),
+            "The recorded revision is reconstructed byte for byte.");
+        var plan = SchematicConnectionIntentBuilderTests.Plan(state);
+        _ = RequireRealizationPlan(plan);
+        return new(root["scenario"]!.GetValue<string>(), saved, desired, state, plan, Parse<CheckedSchematicState>(root["checkpoint"]!),
+            [.. root["measurements"]!.AsArray().Select(m => (Parse<MeasureSchematicPlacement>(m!["request"]!), Parse<SchematicPlacementGeometry>(m!["response"]!)))],
+            [.. root["operations"]!.AsArray().Select(o => Parse<SchematicItemOperation>(o!))], [.. root["generated"]!.AsArray()]);
     }
 
     private static async Task RequireRecordingRefusal(Recording recording, string code)

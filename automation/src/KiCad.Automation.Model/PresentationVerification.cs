@@ -19,11 +19,15 @@ public enum PresentationObjectKind { Graphic, Image, Text, ReferenceDesignator }
 public enum PresentationRole { Other, Symbol, Sheet, Label, Field, SheetPin, Text }
 // FullBounds are measured before clipping, not the already-cropped visible box. For a field they
 // are its painted glyphs. Visible incorporates native field, unit, layer and rendering visibility.
-// ReadingAngleDegrees is the painted reading direction, counter-clockwise from left to right.
+// ReadingAngleDegrees is the painted reading direction, counter-clockwise from left to right. For a symbol,
+// FullBounds take in its body and pins; BodyBounds, when the renderer reports them, are its body without the
+// pins (graphics and pin roots) and PinLines its visible pins as drawn, each from its connection point to its root.
 public sealed record PresentationObject(Guid Id, PresentationObjectKind Kind, PresentationBounds FullBounds,
     bool Visible, decimal? TextHeightMm = null, string? Text = null, PresentationBounds? ClipBounds = null,
     PresentationBounds? TextBounds = null, PresentationRole Role = PresentationRole.Other, Guid? OwnerId = null,
-    decimal? ReadingAngleDegrees = null);
+    decimal? ReadingAngleDegrees = null, PresentationBounds? BodyBounds = null, IReadOnlyList<PresentationSegment>? PinLines = null);
+// A straight drawn line, such as a symbol pin from its connection point (Start) to its root (End).
+public readonly record struct PresentationSegment(PresentationPoint Start, PresentationPoint End);
 // SignalKey is scoped to this document revision; it is not an XML net identity.
 public sealed record PresentationWire(Guid Id, string SignalKey, PresentationPoint Start, PresentationPoint End);
 // Name is the human-readable sheet-instance path (for example "/CPU/CPU_POWER/").
@@ -293,6 +297,104 @@ public static class PresentationVerifier
         if (snapshot.Sheets.Count == 0) throw Invalid("At least one sheet is required.");
         return new(snapshot.DocumentId, snapshot.Revision,
             snapshot.CoverageComplete && findings.All(f => f.Severity != PresentationSeverity.Unavailable), findings, coverage, policy);
+    }
+
+    public const string WireOverlapsSymbol = "wire_overlaps_symbol";
+    public const string WireOverlapsText = "wire_overlaps_text";
+
+    /// <summary>Every place where one of <paramref name="wires"/> runs over a symbol or sheet body, a symbol's pin, a label, a
+    /// visible field's painted text, a sheet pin or a text item on <paramref name="sheet"/> (wire_overlaps_symbol for bodies
+    /// and pins, wire_overlaps_text for the rest), measured as the length of wire inside the object's box. A wire may start on
+    /// the object it connects to: within <paramref name="toleranceMm"/> of a wire end that lies on or inside an object's box (a
+    /// label's anchor, a sheet pin, a pin at its symbol's edge), the wire does not count, which absorbs the pen width of native
+    /// bounds and how far a label's box reaches behind its anchor. The tolerance must stay below half the 1.27 mm schematic
+    /// grid (<see cref="PresentationPolicy.OverlapToleranceLimitMm"/>). A symbol the renderer reports in parts is measured by
+    /// them: its body without the pins as a box, and each pin as its drawn line, which a wire may meet only at the pin's
+    /// connection point with one of its own ends (running along a pin or crossing it anywhere else is reported, with the
+    /// length run along it, 0 for a crossing). Otherwise the symbol's whole box, pins included, counts as its body; that box
+    /// reaches past the ends of a symbol's shorter pins where nothing is drawn. Only axis-aligned wires are measured; any other
+    /// wire is refused.</summary>
+    public static IReadOnlyList<PresentationFinding> WireOverlaps(PresentationSheet sheet, IReadOnlyCollection<Guid> wires, decimal toleranceMm,
+        DocumentRevision? revision = null)
+    {
+        ArgumentNullException.ThrowIfNull(sheet);
+        ArgumentNullException.ThrowIfNull(wires);
+        if (toleranceMm < 0 || toleranceMm >= PresentationPolicy.OverlapToleranceLimitMm)
+            throw Invalid($"The wire overlap tolerance must be at least 0 mm and below {PresentationPolicy.OverlapToleranceLimitMm} mm.");
+        long tolerance = (long)(toleranceMm * 1_000_000m);
+        string path = string.Join('/', sheet.SheetPath.Select(id => id.ToString("D")));
+        var byId = sheet.Wires.GroupBy(w => w.Id).ToDictionary(g => g.Key, g => g.First());
+        var missing = wires.Where(id => !byId.ContainsKey(id)).ToArray();
+        if (missing.Length != 0) throw Invalid("The rendering facts do not list wire " + missing[0].ToString("D") + ".");
+        var objects = sheet.Objects.Where(o => o.Visible && o.Role switch
+        {
+            PresentationRole.Symbol or PresentationRole.Sheet or PresentationRole.Label or PresentationRole.SheetPin => true,
+            PresentationRole.Field or PresentationRole.Text => !string.IsNullOrWhiteSpace(o.Text),
+            _ => false
+        }).OrderBy(o => o.Id).ToArray();
+        var findings = new List<PresentationFinding>();
+        foreach (var id in wires.Distinct().Order())
+        {
+            var wire = byId[id];
+            bool horizontal = wire.Start.YNm == wire.End.YNm, vertical = wire.Start.XNm == wire.End.XNm;
+            if (horizontal == vertical) throw Invalid("Wire " + id.ToString("D") + " is not a straight step along one axis.");
+            long line = horizontal ? wire.Start.YNm : wire.Start.XNm;
+            long lo = horizontal ? Math.Min(wire.Start.XNm, wire.End.XNm) : Math.Min(wire.Start.YNm, wire.End.YNm);
+            long hi = horizontal ? Math.Max(wire.Start.XNm, wire.End.XNm) : Math.Max(wire.Start.YNm, wire.End.YNm);
+            foreach (var item in objects)
+            {
+                bool body = item.Role is PresentationRole.Symbol or PresentationRole.Sheet;
+                bool parts = item.Role == PresentationRole.Symbol && item.BodyBounds is not null;
+                if (BoxOverlap(parts ? item.BodyBounds! : item.FullBounds) is (long start, long end))
+                    findings.Add(new(body ? WireOverlapsSymbol : WireOverlapsText, PresentationSeverity.Error, path, [id, item.Id], Along(start, end),
+                        Millimetres(end - start), 0m, body
+                            ? "A generated wire runs over a symbol or sheet body; route it round the body."
+                            : "A generated wire runs over a label, field, sheet pin or text; route it clear of the text.",
+                        Revision: revision, SheetName: sheet.Name, Unit: PresentationUnits.Millimetres));
+                if (!parts) continue;
+                foreach (var pin in item.PinLines ?? [])
+                    if (PinContact(item.Id, pin) is (long from, long to))
+                        findings.Add(new(WireOverlapsSymbol, PresentationSeverity.Error, path, [id, item.Id], Along(from, to), Millimetres(to - from), 0m,
+                            "A generated wire runs along or across a pin of a symbol away from the pin's connection point; route it clear of the pin.",
+                            Revision: revision, SheetName: sheet.Name, Unit: PresentationUnits.Millimetres));
+            }
+
+            PresentationBounds Along(long from, long to) =>
+                horizontal ? new PresentationBounds(from, line, to, line) : new PresentationBounds(line, from, line, to);
+
+            // The stretch of the wire inside the box's open interior across the wire, less the tolerance at a wire end on or in it.
+            (long Start, long End)? BoxOverlap(PresentationBounds box)
+            {
+                long across0 = horizontal ? box.TopNm : box.LeftNm, across1 = horizontal ? box.BottomNm : box.RightNm;
+                if (line <= across0 || line >= across1) return null;
+                long along0 = horizontal ? box.LeftNm : box.TopNm, along1 = horizontal ? box.RightNm : box.BottomNm;
+                long start = Math.Max(lo, along0), end = Math.Min(hi, along1);
+                if (end - start <= 0) return null;
+                bool Holds(long at) => at >= along0 && at <= along1;
+                if (Holds(lo)) start = Math.Max(start, Math.Min(end, lo + tolerance));
+                if (Holds(hi)) end = Math.Min(end, Math.Max(start, hi - tolerance));
+                return end - start <= 0 ? null : (start, end);
+            }
+
+            // Where the wire meets a pin's drawn line, along the wire: a stretch run along it, or the one point where it crosses or
+            // touches it. Null when it does not meet the pin, or meets it only at the pin's connection point with one of its ends.
+            (long From, long To)? PinContact(Guid symbol, PresentationSegment pin)
+            {
+                long connectionAlong = horizontal ? pin.Start.XNm : pin.Start.YNm, connectionAcross = horizontal ? pin.Start.YNm : pin.Start.XNm;
+                long rootAlong = horizontal ? pin.End.XNm : pin.End.YNm, rootAcross = horizontal ? pin.End.YNm : pin.End.XNm;
+                if (connectionAlong != rootAlong && connectionAcross != rootAcross)
+                    throw Invalid("A pin line of symbol " + symbol.ToString("D") + " is not straight along one axis.");
+                long a0 = Math.Min(connectionAlong, rootAlong), a1 = Math.Max(connectionAlong, rootAlong);
+                long c0 = Math.Min(connectionAcross, rootAcross), c1 = Math.Max(connectionAcross, rootAcross);
+                if (line < c0 || line > c1) return null;
+                long from = Math.Max(lo, a0), to = Math.Min(hi, a1);
+                if (to < from) return null;
+                if (to > from) return (from, to);
+                bool atConnection = from == connectionAlong && line == connectionAcross;
+                return atConnection && (from == lo || from == hi) ? null : (from, from);
+            }
+        }
+        return findings;
     }
 
     // How far the inner box reaches beyond the outer one, in nanometres (0 when it fits).

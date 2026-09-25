@@ -375,4 +375,119 @@ public sealed class PresentationVerificationTests
         }
         Assert.ThrowsExactly<ArgumentException>(() => NativePresentationChecks.SymbolPlacementIssues([a, b], bodies, fields, usable));
     }
+
+    // The rendered wire check of generated connections (CN-1 §6.4, §7), on exact synthetic rendering facts: unit-tested because
+    // each boundary (the tolerance at a wire end, touching versus crossing a box, each object role) needs exact geometry that a
+    // live sheet cannot be steered into. The psu-cpu-connected journey runs it on KiCad's own rendering of every generated wire,
+    // and proves there that it reports a probe wire into a symbol body and one through a label.
+    [TestMethod]
+    public void WireOverlapsCatchWiresOverBodiesAndTextButNotWiresEndingOnWhatTheyConnect()
+    {
+        const long Mm = 1_000_000;
+        Guid symbol = Guid.NewGuid(), field = Guid.NewGuid(), label = Guid.NewGuid(), hidden = Guid.NewGuid(), graphic = Guid.NewGuid();
+        var objects = new List<PresentationObject>
+        {
+            new(symbol, PresentationObjectKind.Graphic, new(20 * Mm, 20 * Mm, 40 * Mm, 40 * Mm), true, Role: PresentationRole.Symbol),
+            new(field, PresentationObjectKind.ReferenceDesignator, new(20 * Mm, 14 * Mm, 26 * Mm, 16 * Mm), true, 1.27m, "U1",
+                Role: PresentationRole.Field, OwnerId: symbol),
+            new(label, PresentationObjectKind.Text, new(60 * Mm - 160_000, 57_900_000, 70 * Mm, 60 * Mm + 265_000), true, 1.27m, "VIN",
+                Role: PresentationRole.Label),
+            new(hidden, PresentationObjectKind.Text, new(80 * Mm, 20 * Mm, 90 * Mm, 40 * Mm), false, 1.27m, "hidden", Role: PresentationRole.Field, OwnerId: symbol),
+            new(graphic, PresentationObjectKind.Graphic, new(100 * Mm, 20 * Mm, 110 * Mm, 40 * Mm), true)
+        };
+        var wires = new List<PresentationWire>();
+        Guid Wire(long x0, long y0, long x1, long y1)
+        {
+            var id = Guid.NewGuid();
+            wires.Add(new(id, "net", new(x0, y0), new(x1, y1)));
+            return id;
+        }
+        // Guards: a wire leaving a pin on the body's edge, one ending on a label's anchor from behind (reaching the 0.16 mm the
+        // label's box extends behind it), one passing just beside the body, one touching the body's edge, and wires over a hidden
+        // field or a plain graphic.
+        Guid pin = Wire(20 * Mm, 30 * Mm, 10 * Mm, 30 * Mm), anchor = Wire(55 * Mm, 60 * Mm, 60 * Mm, 60 * Mm),
+            beside = Wire(10 * Mm, 41 * Mm, 50 * Mm, 41 * Mm), edge = Wire(10 * Mm, 40 * Mm, 50 * Mm, 40 * Mm),
+            overHidden = Wire(85 * Mm, 10 * Mm, 85 * Mm, 50 * Mm), overGraphic = Wire(105 * Mm, 10 * Mm, 105 * Mm, 50 * Mm);
+        // Must-catch: a wire across the body, one into it from a pin by 3 mm, one through the reference text, and one from the
+        // label's anchor along its text.
+        Guid across = Wire(10 * Mm, 25 * Mm, 50 * Mm, 25 * Mm), into = Wire(20 * Mm, 35 * Mm, 23 * Mm, 35 * Mm),
+            throughField = Wire(23 * Mm, 10 * Mm, 23 * Mm, 18 * Mm), alongLabel = Wire(60 * Mm, 60 * Mm, 63 * Mm, 60 * Mm);
+        var sheet = Sheet() with { Objects = objects, Wires = wires };
+        var findings = PresentationVerifier.WireOverlaps(sheet, [pin, anchor, beside, edge, overHidden, overGraphic, across, into, throughField, alongLabel], 0.5m);
+        string Rules(Guid wire) => string.Join(",", findings.Where(f => f.ObjectIds[0] == wire).Select(f => f.Rule + ":" + f.ObjectIds[1].ToString("D")[..4]));
+        foreach (var guard in new[] { pin, anchor, beside, edge, overHidden, overGraphic })
+            Assert.AreEqual("", Rules(guard), "No finding for a guard wire.");
+        var body = findings.Single(f => f.ObjectIds[0] == across);
+        Assert.AreEqual(PresentationVerifier.WireOverlapsSymbol, body.Rule);
+        Assert.AreEqual(symbol, body.ObjectIds[1]);
+        Assert.AreEqual(20m, body.Measured);
+        Assert.AreEqual(PresentationSeverity.Error, body.Severity);
+        Assert.AreEqual(new PresentationBounds(20 * Mm, 25 * Mm, 40 * Mm, 25 * Mm), body.Bounds);
+        var inward = findings.Single(f => f.ObjectIds[0] == into);
+        Assert.AreEqual(PresentationVerifier.WireOverlapsSymbol, inward.Rule);
+        Assert.AreEqual(2m, inward.Measured, "The 0.5 mm at each end (the pin, and the end inside the body) does not count; the other 2 mm do.");
+        var reference = findings.Single(f => f.ObjectIds[0] == throughField);
+        Assert.AreEqual(PresentationVerifier.WireOverlapsText, reference.Rule);
+        Assert.AreEqual(field, reference.ObjectIds[1]);
+        var text = findings.Single(f => f.ObjectIds[0] == alongLabel);
+        Assert.AreEqual(PresentationVerifier.WireOverlapsText, text.Rule);
+        Assert.AreEqual(label, text.ObjectIds[1]);
+        Assert.AreEqual(2m, text.Measured);
+        // A tolerance of zero counts everything inside, and one of half a grid or more is refused, as is a diagonal wire or one
+        // missing from the rendering facts.
+        Assert.AreEqual(3m, PresentationVerifier.WireOverlaps(sheet, [into], 0m).Single().Measured);
+        Assert.ThrowsExactly<AutomationException>(() => PresentationVerifier.WireOverlaps(sheet, [into], 0.635m));
+        var diagonal = Wire(0, 0, 5 * Mm, 5 * Mm);
+        Assert.ThrowsExactly<AutomationException>(() => PresentationVerifier.WireOverlaps(Sheet() with { Wires = wires }, [diagonal], 0.5m));
+        Assert.ThrowsExactly<AutomationException>(() => PresentationVerifier.WireOverlaps(sheet, [Guid.NewGuid()], 0.5m));
+    }
+
+    // The same check on a symbol KiCad reports in parts (its body without the pins, and each pin as drawn), in the shape of
+    // the PSU/CPU fixture's STM32C011J on the PSU sheet: its right-hand pins end 2.54 mm from the body, one of them a grid
+    // further out, so the whole box reaches past the shorter pins' ends where nothing is drawn. Unit-tested for the exact
+    // boundary cases (touching a pin only at its connection point, crossing or running along it anywhere else); the
+    // psu-cpu-connected journey measures KiCad's own parts for every generated wire.
+    [TestMethod]
+    public void WireOverlapsMeasureASymbolReportedInPartsByItsBodyAndItsPins()
+    {
+        const long Mm = 1_000_000;
+        Guid symbol = Guid.NewGuid();
+        PresentationSegment Pin(decimal x0, decimal y0, decimal x1, decimal y1) =>
+            new(new((long)(x0 * Mm), (long)(y0 * Mm)), new((long)(x1 * Mm), (long)(y1 * Mm)));
+        var parts = new PresentationObject(symbol, PresentationObjectKind.Graphic, new(22_460_000, 20 * Mm, 41_270_000, 40 * Mm), true,
+            Role: PresentationRole.Symbol, BodyBounds: new(25 * Mm, 20 * Mm, 37_460_000, 40 * Mm),
+            PinLines: [Pin(40m, 25m, 37.46m, 25m), Pin(41.27m, 35m, 37.46m, 35m), Pin(22.46m, 30m, 25m, 30m)]);
+        var wires = new List<PresentationWire>();
+        Guid Wire(decimal x0, decimal y0, decimal x1, decimal y1)
+        {
+            var id = Guid.NewGuid();
+            wires.Add(new(id, "net", new((long)(x0 * Mm), (long)(y0 * Mm)), new((long)(x1 * Mm), (long)(y1 * Mm))));
+            return id;
+        }
+        // Guards: a wire leaving the short pin's connection point outward, past where the longer pin reaches; and one arriving at
+        // the longer pin's connection point at a right angle.
+        Guid outward = Wire(40m, 25m, 50m, 25m), arriving = Wire(41.27m, 30m, 41.27m, 35m);
+        // Must-catch: a wire run from a pin's connection point into the symbol along that pin, one crossing a pin, one passing
+        // over a pin's connection point without ending there, and one across the body.
+        Guid inward = Wire(40m, 25m, 37m, 25m), crossing = Wire(39m, 22m, 39m, 28m), passing = Wire(40m, 22m, 40m, 28m),
+            across = Wire(20m, 32m, 45m, 32m);
+        var sheet = Sheet() with { Objects = [parts], Wires = wires };
+        var findings = PresentationVerifier.WireOverlaps(sheet, [outward, arriving, inward, crossing, passing, across], 0.5m);
+        IReadOnlyList<decimal?> Measured(Guid wire) => [.. findings.Where(f => f.ObjectIds[0] == wire).Select(f => f.Measured)];
+        Assert.IsEmpty(Measured(outward), "A wire leaving a pin's connection point outward is clear of the symbol.");
+        Assert.IsEmpty(Measured(arriving), "A wire ending on a pin's connection point is clear of the symbol.");
+        Assert.IsTrue(findings.All(f => f.Rule == PresentationVerifier.WireOverlapsSymbol && f.ObjectIds[1] == symbol && f.Severity == PresentationSeverity.Error));
+        CollectionAssert.AreEqual(new[] { 2.54m }, Measured(inward).ToArray(), "Along its own pin for the pin's 2.54 mm; the rest is in the tolerance.");
+        CollectionAssert.AreEqual(new[] { 0m }, Measured(crossing).ToArray(), "A crossing is reported as a point.");
+        Assert.AreEqual(new PresentationBounds(39 * Mm, 25 * Mm, 39 * Mm, 25 * Mm), findings.Single(f => f.ObjectIds[0] == crossing).Bounds);
+        CollectionAssert.AreEqual(new[] { 0m }, Measured(passing).ToArray(), "Over a connection point it does not end on.");
+        CollectionAssert.AreEquivalent(new[] { 12.46m }, Measured(across).ToArray(), "Across the body, clear of every pin line.");
+        // The same symbol without its parts is measured by its whole box, which reports the outward wire: the false positive the
+        // parts remove.
+        var whole = sheet with { Objects = [parts with { BodyBounds = null, PinLines = null }] };
+        CollectionAssert.AreEqual(new[] { 0.77m }, PresentationVerifier.WireOverlaps(whole, [outward], 0.5m).Select(f => f.Measured).ToArray());
+        // A pin line that is not straight along one axis is refused.
+        var bent = sheet with { Objects = [parts with { PinLines = [Pin(40m, 25m, 37.46m, 26m)] }] };
+        Assert.ThrowsExactly<AutomationException>(() => PresentationVerifier.WireOverlaps(bent, [outward], 0.5m));
+    }
 }

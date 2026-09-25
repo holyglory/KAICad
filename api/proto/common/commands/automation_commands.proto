@@ -719,6 +719,14 @@ message SchematicPresentationObject {
   // pins), "sheet" (sheet symbol body), "label" (label body), "field", "sheet_pin", "text" or
   // "other". Empty from peers that predate it.
   string presentation_role = 103;
+  // For a "symbol": its drawn body without the pins, that is its graphics and the root of every
+  // visible pin (LIB_SYMBOL::GetBodyBoundingBox without pins), in sheet coordinates; bounds also
+  // takes in the pins. Absent for other objects and from peers that predate it.
+  kiapi.common.types.Box2 body_bounds = 104;
+  // For a "symbol": every visible pin as the painter draws it, an open two-point line from the
+  // pin's connection point to its root, in sheet coordinates. Empty for other objects and from
+  // peers that predate it.
+  repeated kiapi.common.types.PolyLine pin_lines = 105;
   // -- end lane 2A --
 }
 

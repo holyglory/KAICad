@@ -142,9 +142,10 @@ public sealed partial class NativeSessionTests
     // realization plan (CN-1 §4.2), with no publishable XML and no native operations, because only the realization itself
     // measures KiCad. With no attached instance, or only a saved registration after a restart, it is the general plan. The
     // automatic worker and apply each take their own live handshake and realize the revision on this editor (CN-1 §9.1-9.2):
-    // one checked KiCad commit whose connectivity assertion KiCad verified, a stub and a local label for each probe pin, KiCad
-    // showing both pins in one net named PROBE_LINK, and exactly that drawing published to the XML. Both start from the same
-    // saved sheet and draw exactly the same items. The advertised case with a test double stays in
+    // one checked KiCad commit whose connectivity assertion KiCad verified, the two probe pins joined by orthogonal wires with
+    // one local label PROBE_LINK (CN-1 §7; the probes sit on the connection grid, so the route fits), exactly as this editor's
+    // own measurements plan them, KiCad showing both pins in one net named PROBE_LINK, and exactly that drawing published to
+    // the XML. Both start from the same saved sheet and draw exactly the same items. The advertised case with a test double stays in
     // McpProcessTests.SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio.
     private static async Task VerifyRecordedHandshakePlanning(NativeClient client, string registryState, string schematic,
         string evidence, CancellationToken token)
@@ -195,7 +196,17 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(realizing.NativeOperations, "Only the realization measures KiCad and produces native operations.");
         var island = realizing.Connections!.Screens.Single().Islands.Single();
         Assert.AreEqual("PROBE_LINK", island.LabelText);
-        Assert.HasCount(2, island.Members.Where(m => m.RequiresStub).ToArray(), "Both probe pins need a stub.");
+        Assert.HasCount(2, island.Members.Where(m => m.RequiresStub).ToArray(), "Both probe pins are new to the connection.");
+        // The drawing this editor's own measurements plan (CN-1 §7): the two probe pins joined by wires named by one label.
+        var planned = await SchematicConnectionRealizer.RealizeAsync(realizing.Connections!, realizing.Candidate!, initial,
+            (request, cancellation) => client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation),
+            SchematicConnectionPolicy.FromSnapshot(initial.Electrical.Hierarchy.Data), token);
+        var plannedOutcome = planned.Outcomes.Single();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, plannedOutcome.Strategy, "The probe pins are routed: " + plannedOutcome.FallbackReason);
+        var plannedShapes = Shapes(SchematicItemDelta.Index(planned.Design.Schematic.Instances.Single().Items)
+            .Where(p => plannedOutcome.GeneratedIds.Contains(p.Key)).Select(p => p.Value));
+        Assert.AreEqual(1, plannedShapes.Count(s => s.StartsWith("label ", StringComparison.Ordinal)), string.Join("; ", plannedShapes));
+        Assert.AreEqual(initial, await Capture(), "Measuring must not change KiCad.");
 
         string folder = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(registryState)!, "handshake-planning")).FullName;
         (string Recovery, string Design, string Token) Record(string name, DesignRecoveryState state)
@@ -318,9 +329,11 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEquivalent(link.Pins.ToArray(), joined.Pins.ToArray(), name);
             Assert.AreEqual("PROBE_LINK", joined.NativeName![(joined.NativeName!.LastIndexOf('/') + 1)..], name + ": the label names the net.");
             var items = NewItems(before.Electrical.Hierarchy.Data, after.Electrical.Hierarchy.Data);
-            Assert.HasCount(4, items, name + ": " + string.Join("; ", items));
-            Assert.AreEqual(2, items.Count(i => i.StartsWith(SchematicLine.Descriptor.FullName, StringComparison.Ordinal)), name);
-            Assert.AreEqual(2, items.Count(i => i.StartsWith(LocalLabel.Descriptor.FullName, StringComparison.Ordinal) && i.Contains("\"PROBE_LINK\"", StringComparison.Ordinal)), name);
+            // Exactly the planned route: its wires, junctions and one PROBE_LINK label, whatever identities the revision gave them.
+            var old = SchematicItemDelta.Index(before.Electrical.Hierarchy.Data.Instances.Single().Items).Keys.ToHashSet();
+            var drawn = Shapes(SchematicItemDelta.Index(after.Electrical.Hierarchy.Data.Instances.Single().Items).Where(p => !old.Contains(p.Key)).Select(p => p.Value));
+            CollectionAssert.AreEquivalent(plannedShapes, drawn, name + ": KiCad drew exactly the planned route: " + string.Join("; ", drawn));
+            Assert.AreEqual(items.Count, drawn.Count, name);
             return new(items, after.State.StateSha256, receipt.OperationId, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(xml)));
         }
 
@@ -339,6 +352,16 @@ public sealed partial class NativeSessionTests
     }
 
     private sealed record Drawing(IReadOnlyList<string> Items, string NativeStateSha256, string OperationId, string PublishedXmlSha256);
+
+    // The geometry of generated connection items, without identities or the presentation details KiCad fills in.
+    private static List<string> Shapes(IEnumerable<Google.Protobuf.IMessage> items) => [.. items.Select(item => item switch
+    {
+        SchematicLine line => "wire " + Math.Min(line.Start.XNm, line.End.XNm) + "," + Math.Min(line.Start.YNm, line.End.YNm) + "-"
+            + Math.Max(line.Start.XNm, line.End.XNm) + "," + Math.Max(line.Start.YNm, line.End.YNm) + " " + line.Type,
+        Junction junction => "junction " + junction.Position.XNm + "," + junction.Position.YNm,
+        LocalLabel label => "label " + label.Text.Text_ + " " + label.Position.XNm + "," + label.Position.YNm + " " + label.SpinStyle,
+        _ => "unexpected " + item.Descriptor.FullName
+    }).Order(StringComparer.Ordinal)];
 
     // Items KiCad holds after that it did not hold before, per sheet, each written without the identities it was given, so that
     // two drawings of the same connections compare equal whatever identities their revisions gave them.

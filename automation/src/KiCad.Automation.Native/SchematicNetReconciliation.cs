@@ -16,6 +16,12 @@ public sealed record SchematicNetReconciliationResult(EngineeringDesign? Candida
     IReadOnlyList<Guid>? RestoredSymbolOccurrences = null, IReadOnlyList<Guid>? RestoredNetIds = null)
 {
     internal SchematicNativeRestorationResult? Restoration { get; init; }
+    /// <summary>Symbol occurrences and components adopted from symbols placed in KiCad (new identities).</summary>
+    public IReadOnlyList<Guid>? AddedSymbolOccurrences { get; init; }
+    public IReadOnlyList<Guid>? AddedComponents { get; init; }
+    public IReadOnlyList<Guid>? AddedParts { get; init; }
+    /// <summary>Decisions exact identities cannot take; set with <see cref="SchematicNativeAdditionProjection.ResolutionRequired"/>.</summary>
+    public IReadOnlyList<SchematicOwnershipResolutionRequest>? ResolutionRequests { get; init; }
 }
 
 /// <summary>Pure three-way electrical-model reconciliation over stable exact
@@ -49,7 +55,17 @@ public static class SchematicNetReconciliation
                 {
                     if (removal.ErrorCode != "electrical_ownership_changed" || history is null)
                         return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage);
-                    restoration = SchematicNativeRestorationProjection.Project(state, history, token);
+                    try { restoration = SchematicNativeRestorationProjection.Project(state, history, token); }
+                    catch (AutomationException error) when (error.Code == "native_ownership_history_not_matched")
+                    {
+                        // No verified history knows these owners: they are symbols placed in KiCad since.
+                        var addition = SchematicNativeAdditionProjection.Project(state, history, token);
+                        if (addition.Adoption is null)
+                            return new(null, [], [], addition.Issues.Select(i => new ElectricalBindingIssue(i.Code, i.NativePath,
+                                i.NativeObjectId?.ToString("D"), i.ModelId)).ToArray(), addition.CoverageGaps, addition.ErrorCode, addition.ErrorMessage)
+                                { ResolutionRequests = addition.Requests.Count == 0 ? null : addition.Requests };
+                        restoration = addition.Adoption;
+                    }
                     removal = null;
                 }
                 // Circuit/layout edits need their own three-way owner resolution.
@@ -90,17 +106,27 @@ public static class SchematicNetReconciliation
             var desiredIds = desired.Circuit.Nets.Select(n => n.Id).ToHashSet();
             var desiredPins = desired.Circuit.Nets.SelectMany(n => n.Pins).ToHashSet();
             var resultById = new Dictionary<Guid, CircuitNet>();
-            var historicalByGroup = restoration is null ? null
-                : Partition(restoration.History.Design.Engineering.Circuit, universe, stackedNow).Nets;
+            var historicalByGroup = restoration?.History is not { } source ? null
+                : Partition(source.Design.Engineering.Circuit, universe, stackedNow).Nets;
             var restoredNets = new HashSet<Guid>();
             var historicalImplicit = new HashSet<PinEndpoint>();
-            if (restoration is not null)
+            if (restoration is { AddedComponents.Count: > 0 })
             {
-                var past = restoration.History.Design.Engineering.Circuit;
+                // A symbol placed in KiCad starts with every pin unconnected: a lone new pin is no new net.
+                var adoptedCircuit = restoration.BindingCandidate.Engineering.Circuit;
+                var adoptedParts = adoptedCircuit.Parts.ToDictionary(p => p.Id);
+                var adoptedDefinitions = adoptedCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
+                foreach (var component in adoptedCircuit.Components.Where(c => restoration.AddedComponents.Contains(c.Id)))
+                    foreach (var pin in adoptedParts[adoptedDefinitions[component.DefinitionId].PartId].Pins)
+                        historicalImplicit.Add(new(component.Id, pin.Number));
+            }
+            if (restoration?.History is not null)
+            {
+                var past = restoration.Source.Design.Engineering.Circuit;
                 var parts = past.Parts.ToDictionary(p => p.Id);
                 var definitions = past.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
-                historicalImplicit = past.Components.SelectMany(c => parts[definitions[c.DefinitionId].PartId].Pins
-                    .Select(p => new PinEndpoint(c.Id, p.Number))).Except(past.Nets.SelectMany(n => n.Pins)).ToHashSet();
+                historicalImplicit.UnionWith(past.Components.SelectMany(c => parts[definitions[c.DefinitionId].PartId].Pins
+                    .Select(p => new PinEndpoint(c.Id, p.Number))).Except(past.Nets.SelectMany(n => n.Pins)));
             }
             foreach (var empty in desired.Circuit.Nets.Where(n => n.Pins.Count == 0)) resultById.Add(empty.Id, empty);
             foreach (var group in merged.Groups)
@@ -142,13 +168,23 @@ public static class SchematicNetReconciliation
                 changes.Add(new(retired.Id, kind, $"Native connectivity changed net '{retired.Name}'; its requirement binding needs explicit resolution.",
                     candidates.Select(n => n.Id).Order().ToArray()));
             }
-            var candidate = ComponentReferenceRetention.Retain(desired, circuit, removal?.ComponentChanges ?? [], state.KnowledgeLibraries, changes);
-            if (restoration is not null)
+            var componentChanges = removal?.ComponentChanges ?? restoration?.ComponentChanges ?? [];
+            var candidate = ComponentReferenceRetention.Retain(desired, circuit, componentChanges, state.KnowledgeLibraries, changes);
+            if (restoration?.History is not null)
                 candidate = SchematicNativeRestorationProjection.ResolveRetained(candidate, restoration, restoredNets, state.KnowledgeLibraries);
             candidate.Validate(state.KnowledgeLibraries);
-            return new(candidate, [], changes, [], gaps, RemovedSymbolOccurrences: removal?.RemovedOccurrences,
-                ComponentChanges: removal?.ComponentChanges, RestoredSymbolOccurrences: restoration?.RestoredOccurrences,
-                RestoredNetIds: restoration is null ? null : restoredNets.Order().ToArray()) { Restoration = restoration };
+            bool adopted = restoration is { History: null };
+            return new(candidate, [], changes, [], gaps,
+                RemovedSymbolOccurrences: removal?.RemovedOccurrences ?? (adopted && restoration!.RemovedOccurrences.Count != 0 ? restoration.RemovedOccurrences : null),
+                ComponentChanges: componentChanges.Count == 0 && removal is null ? null : componentChanges,
+                RestoredSymbolOccurrences: adopted ? null : restoration?.RestoredOccurrences,
+                RestoredNetIds: restoration is null || adopted ? null : restoredNets.Order().ToArray())
+            {
+                Restoration = restoration,
+                AddedSymbolOccurrences = adopted ? restoration!.AddedOccurrences : null,
+                AddedComponents = adopted ? restoration!.AddedComponents : null,
+                AddedParts = adopted ? restoration!.AddedParts : null
+            };
         }
         catch (DecoderFallbackException error) { return new(null, [], [], [], [], "invalid_desired_design", error.Message); }
         catch (AutomationException error) { return new(null, [], [], [], [], error.Code, error.Message); }

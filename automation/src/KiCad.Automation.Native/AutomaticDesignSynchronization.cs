@@ -21,7 +21,15 @@ internal interface IAutomaticDesignDriver : IAsyncDisposable
     Task<StoredDesignRecovery> RefreshAsync(AutomaticDesignInput input, CancellationToken token);
     Task<SchematicSynchronizationExecution> ApplyAsync(StoredDesignRecovery saved, Guid operationId,
         string requestRevisionToken, CancellationToken token);
+    /// <summary>Bind the synchronized design's unowned components to their blocks (ledger p74ee7c1da24272d9). Null when
+    /// this worker keeps no block graph.</summary>
+    Task<BlockOwnershipResult?> SynchronizeBlocksAsync(StoredDesignRecovery saved, CancellationToken token) =>
+        Task.FromResult<BlockOwnershipResult?>(null);
 }
+
+/// <summary>The block graph whose selected design owns this design's components, and the design's exact identity in
+/// the hardware repository.</summary>
+public sealed record BlockOwnershipTarget(string BlockGraphPath, Guid DesignId);
 
 /// <summary>One serial event-to-application owner. Internal until live service
 /// lifecycle, ownership and conflict behavior are qualified.</summary>
@@ -38,6 +46,7 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
     private AutomaticDesignInput? pending;
     private AutomaticDesignStatus status = new(0, AutomaticDesignPhase.Starting, null, null, false, null, null);
     private string? settledRevision;
+    private string? blocksSettledRevision;
     private bool resumeRequested;
     private int disposed;
 
@@ -51,7 +60,14 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
 
     public static async Task<AutomaticDesignSynchronization> StartAsync(DesignRecoveryStore store, NativeClient client,
         string designPath, string expectedRecoveryRevision, CancellationToken token = default)
-        => new(await AutomaticDesignDriver.CreateAsync(store, client, designPath, expectedRecoveryRevision, token));
+        => new(await AutomaticDesignDriver.CreateAsync(store, client, designPath, expectedRecoveryRevision, null, token));
+
+    /// <summary>As <see cref="StartAsync(DesignRecoveryStore, NativeClient, string, string, CancellationToken)"/>, also
+    /// keeping block ownership: after each synchronization, components no block owns are bound to the block of their sheet,
+    /// and a component whose block cannot be decided pauses the worker until the person binds it.</summary>
+    public static async Task<AutomaticDesignSynchronization> StartAsync(DesignRecoveryStore store, NativeClient client,
+        string designPath, string expectedRecoveryRevision, BlockOwnershipTarget? blocks, CancellationToken token = default)
+        => new(await AutomaticDesignDriver.CreateAsync(store, client, designPath, expectedRecoveryRevision, blocks, token));
 
     public AutomaticDesignStatus Inspect() { lock (gate) return status; }
 
@@ -168,7 +184,10 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                             continue;
                         }
                         if (saved.RevisionToken == settledRevision)
-                        { Publish(AutomaticDesignPhase.Watching, saved.RevisionToken, Inspect().OperationId, false, null, null); continue; }
+                        {
+                            if (!await SettleBlocksAsync(saved, Inspect().OperationId)) continue;
+                            Publish(AutomaticDesignPhase.Watching, saved.RevisionToken, Inspect().OperationId, false, null, null); continue;
+                        }
                         var plan = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(driver.Store, saved,
                             driver.Session, stopping.Token);
                         if (!plan.CanPrepare) throw Error(plan.ErrorCode ?? "design_sync_conflict", plan.ErrorMessage ?? "Resolve the saved design conflicts before resuming.");
@@ -179,6 +198,7 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                     var complete = driver.Store.Read() ?? throw Error("missing_design_recovery", "The completed recovery record is unavailable.");
                     if (complete.State.HasPendingWork) throw Error("automatic_sync_incomplete", "The operation remains pending; inspect recovery before resuming.");
                     settledRevision = complete.RevisionToken;
+                    if (!await SettleBlocksAsync(complete, operation)) continue;
                     Publish(AutomaticDesignPhase.Watching, complete.RevisionToken, operation, false, null, null);
                 }
                 catch (OperationCanceledException) when (stopping.IsCancellationRequested) { throw; }
@@ -202,6 +222,23 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
         finally { Publish(AutomaticDesignPhase.Stopped, Inspect().RecoveryRevisionToken, Inspect().OperationId, false, null, null); }
+    }
+
+    // The synchronized design's components reach their blocks. A component whose block cannot be decided pauses the worker
+    // with the request; after the person binds it, resuming finds it owned.
+    private async Task<bool> SettleBlocksAsync(StoredDesignRecovery saved, Guid? operation)
+    {
+        if (blocksSettledRevision == saved.RevisionToken) return true;
+        var result = await driver.SynchronizeBlocksAsync(saved, stopping.Token);
+        if (result?.Plan is { ResolutionRequired: true } plan)
+        {
+            Pause(BlockOwnershipSynchronization.ResolutionRequired, "Choose the block that owns "
+                + string.Join("; ", plan.Requests.Select(r => $"component {r.ComponentId} ({r.Reference}) on sheet {r.SheetInstanceId}: {r.Reason}"))
+                + " Bind it with kicad_diagram_components_set, then resume.", false, operation);
+            return false;
+        }
+        blocksSettledRevision = saved.RevisionToken;
+        return true;
     }
 
     private void Pause(string code, string? message, bool reattach, Guid? operation = null) =>

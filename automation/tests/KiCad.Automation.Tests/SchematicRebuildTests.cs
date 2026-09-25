@@ -21,7 +21,7 @@ public sealed class SchematicRebuildTests
 {
     private static readonly Guid Root = Guid.Parse("0b6f4c33-9a71-4d0e-8f1c-2a5b6c7d8e9f");
 
-    private static DesignRecoveryState State(SchematicDesign baseline, SchematicDesign desired, SchematicHierarchyData? observed = null,
+    internal static DesignRecoveryState State(SchematicDesign baseline, SchematicDesign desired, SchematicHierarchyData? observed = null,
         string baselineEpoch = "e1", string observedEpoch = "e1")
     {
         var native = observed ?? baseline.Schematic.Clone();
@@ -33,7 +33,7 @@ public sealed class SchematicRebuildTests
 
     private static SchematicDesign RootOnly() => PsuCpuFixture.Baseline(PsuCpuFixture.SeedHierarchy(Root, PsuCpuSeed.RootOnly), PsuCpuSeed.RootOnly, Root, CancellationToken.None);
 
-    private static SchematicDesign Placed()
+    internal static SchematicDesign Placed()
     {
         var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
         return SchematicNativeCreationProjection.Project(sheets, components, []).Candidate;
@@ -484,5 +484,87 @@ public sealed class SchematicRebuildTests
         Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = other, PendingLayout = Layout(DesignLayoutIntent.RebuildLane) }));
         Assert.AreEqual("cpu_power", SchematicRebuild.GeneratedFileStem("CPU_POWER"));
         Assert.AreEqual("dc-dc_stage_2", SchematicRebuild.GeneratedFileStem(" DC-DC stage/2 "));
+    }
+
+    // XML removal of units and components (ledger p74ee7c1da24272d9), the isolated rules behind the hook the PSU/CPU
+    // ownership journey (NativeSymbolSheetOwnershipJourney, check ownership-sync) drives through KiCad: which XML shapes are
+    // removals, the exact native removals they plan, and the guards that keep other shapes on the general path or keep both
+    // versions. Extending an existing test was not possible: no test covered XML-side removal before this item.
+    internal static SchematicDesign WithoutOccurrences(SchematicDesign design, params Guid[] occurrences)
+    {
+        var circuit = design.Engineering.Circuit;
+        var retired = circuit.Components.Where(c => circuit.Symbols.Where(s => s.ComponentId == c.Id).All(s => occurrences.Contains(s.Id)))
+            .Select(c => c.Id).ToHashSet();
+        var definitions = circuit.Components.Where(c => retired.Contains(c.Id)).Select(c => c.DefinitionId).ToHashSet();
+        return design with
+        {
+            Engineering = design.Engineering with { Circuit = circuit with
+            {
+                Symbols = [.. circuit.Symbols.Where(s => !occurrences.Contains(s.Id))],
+                Components = [.. circuit.Components.Where(c => !retired.Contains(c.Id))],
+                Sheets = [.. circuit.Sheets.Select(s => s with { Components = [.. s.Components.Where(c => !definitions.Contains(c.Id))] })],
+                Nets = [.. circuit.Nets.Select(n => n with { Pins = [.. n.Pins.Where(p => !retired.Contains(p.ComponentId))] })]
+            } },
+            SymbolBindings = [.. design.SymbolBindings.Where(b => !occurrences.Contains(b.SymbolOccurrenceId))]
+        };
+    }
+
+    [TestMethod]
+    public void XmlThatRemovesAUnitAndAComponentRemovesExactlyTheirSymbolsInKiCad()
+    {
+        var baseline = Placed();
+        Guid unitFour = PsuCpuIds.Id(0x09, 10), memory = PsuCpuIds.Id(0x09, 11);
+        var desired = WithoutOccurrences(baseline, unitFour, memory);
+        var state = State(baseline, desired);
+        var shape = SchematicRebuild.Classify(state, desired);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, shape.Kind, shape.ErrorCode + ": " + shape.ErrorMessage);
+        var natives = new[] { unitFour, memory }.Select(o => baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == o).NativeObjectId.ToString("D")).ToArray();
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.IsNull(plan.Rebuild, "A removal is an ordinary synchronization, not a rebuild.");
+        CollectionAssert.AreEquivalent(natives, plan.NativeOperations.Where(o => o.Remove is not null).Select(o => o.Remove.Value).ToArray(),
+            "Only the two symbols are removed.");
+        Assert.IsTrue(plan.NativeOperations.Where(o => o.Remove is null).All(o => o.ReplaceLibraryCache is not null),
+            "Besides the removals, only the touched screens' library caches are stated, unchanged.");
+        CollectionAssert.AreEquivalent(new[] { unitFour, memory }, plan.Electrical!.RemovedSymbolOccurrences!.ToArray());
+        var candidate = plan.Candidate!;
+        Assert.IsFalse(candidate.Engineering.Circuit.Components.Any(c => c.Id == PsuCpuIds.Id(0x07, 8)), "U6 is gone.");
+        Assert.IsTrue(candidate.Engineering.Circuit.Components.Any(c => c.Id == PsuCpuIds.Id(0x07, 7)), "U5 keeps its other units.");
+        Assert.IsFalse(candidate.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Any(i => natives.Contains(i.Unpack<SchematicSymbolInstance>().Id.Value)), "The candidate draws neither symbol.");
+        Assert.IsTrue(SchematicDesignBindings.Inspect(candidate, []).IdentitiesResolved);
+        Assert.AreEqual(plan.CandidateXml, SchematicDesignXml.Write(candidate, []));
+        // Planning is pure: the same state plans the same removal again.
+        CollectionAssert.AreEqual(plan.NativeOperations.ToArray(), SchematicSynchronizationPlanner.Plan(state).NativeOperations.ToArray());
+    }
+
+    [TestMethod]
+    public void OtherXmlShapesKeepTheGeneralPathAndAConcurrentKiCadChangeKeepsBothVersions()
+    {
+        var baseline = Placed();
+        Guid memory = PsuCpuIds.Id(0x09, 11);
+        var removal = WithoutOccurrences(baseline, memory);
+        // Must-not-claim: XML that drops the occurrence but keeps its native binding is not a consistent removal.
+        var inconsistent = removal with { SymbolBindings = baseline.SymbolBindings };
+        Assert.AreEqual(SchematicRebuildKind.NotApplicable, SchematicRebuild.Classify(State(baseline, inconsistent), inconsistent).Kind);
+        Assert.AreEqual("electrical_ownership_changed", SchematicSynchronizationPlanner.Plan(State(baseline, inconsistent)).ErrorCode);
+        // Must-not-claim: a removal together with another XML edit.
+        var renamed = removal with { Engineering = removal.Engineering with { Circuit = removal.Engineering.Circuit with
+        { Components = [.. removal.Engineering.Circuit.Components.Select(c => c.Id == PsuCpuIds.Id(0x07, 1) ? c with { Reference = "J9" } : c)] } } };
+        Assert.AreEqual(SchematicRebuildKind.NotApplicable, SchematicRebuild.Classify(State(baseline, renamed), renamed).Kind);
+        Assert.AreEqual(SchematicRebuildKind.NotApplicable, SchematicRebuild.Classify(State(baseline, baseline), baseline).Kind, "Nothing removed.");
+        // Must-catch: KiCad moved a symbol since the last synchronization; neither version is applied.
+        var moved = baseline.Schematic.Clone();
+        var screen = moved.Instances.First(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)));
+        int index = screen.Items.ToList().FindIndex(i => i.Is(SchematicSymbolInstance.Descriptor));
+        var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>(); symbol.Position.XNm += 2_540_000; screen.Items[index] = Any.Pack(symbol);
+        var both = State(baseline, removal, moved);
+        var refused = SchematicRebuild.Classify(both, removal);
+        Assert.AreEqual(SchematicRebuildKind.Rejected, refused.Kind);
+        Assert.AreEqual("ownership_change_with_xml_edits", refused.ErrorCode);
+        var plan = SchematicSynchronizationPlanner.Plan(both);
+        Assert.AreEqual("ownership_change_with_xml_edits", plan.ErrorCode);
+        Assert.IsEmpty(plan.NativeOperations); Assert.IsNull(plan.CandidateXml);
+        CollectionAssert.AreEqual(Encoding.UTF8.GetBytes(SchematicDesignXml.Write(removal, [])), both.DesiredFileBytes, "The XML version is kept.");
     }
 }

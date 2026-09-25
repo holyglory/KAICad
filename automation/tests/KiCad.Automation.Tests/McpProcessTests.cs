@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -528,6 +529,57 @@ public sealed class McpProcessTests
             await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
                 syncFixture.InstanceId.ToString("D"), syncRecoveryPath, syncSaved.RevisionToken, new CancellationToken(true)));
             CollectionAssert.AreEqual(committedRecoveryBytes, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
+            // Block ownership over STDIO (ledger p74ee7c1da24272d9): the PSU/CPU Components design with a block graph in which
+            // no block owns J1. The plan binds it to PSU, the block of its sheet; apply writes one PSU revision and a new root;
+            // a repeat writes nothing; a changed file and invalid inputs are refused before anything is written.
+            CollectionAssert.Contains(names, "kicad_design_block_owners_plan");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_apply");
+            string ownershipRecoveryPath = Path.Combine(state, "designs", "ownership-recovery.json");
+            string ownershipBlocks = Path.Combine(state, "designs", "system.blocks.xml");
+            var ownershipDesign = SchematicRebuildTests.Placed();
+            var ownershipStore = new DesignRecoveryStore(ownershipRecoveryPath);
+            var ownershipSaved = ownershipStore.Save(SchematicRebuildTests.State(ownershipDesign, ownershipDesign), null);
+            var fixtureGraph = PsuCpuFixture.Graph();
+            var psuPath = fixtureGraph.Walk(fixtureGraph.SelectedRoot).Where(s => s.BlockId == PsuCpuIds.Id(0x11, 1) || s.BlockId == PsuCpuIds.Id(0x11, 2)).ToImmutableArray();
+            var psuDraft = fixtureGraph.StartDraft(psuPath[^1]);
+            var unowned = fixtureGraph.SaveDraft(fixtureGraph.SelectedRoot, psuPath, psuDraft with { ComponentBindings = new([]) }, Guid.NewGuid(),
+                Guid.NewGuid(), [Guid.NewGuid()], new(RequirementRevisionActor.User, "fixture", DateTimeOffset.UtcNow, "Leave J1 unowned", [], [])).Graph;
+            await File.WriteAllTextAsync(ownershipBlocks, RecursiveBlockGraphXml.Write(unowned, RecursiveBlockGraphXml.SchemaVersion), timeout.Token);
+            object Owners(string? sha = null, string? design = null, string? blocks = null) => sha is null
+                ? new { instanceId = ownershipSaved.State.InstanceId.ToString("D"), recoveryPath = ownershipRecoveryPath, expectedRevisionToken = ownershipSaved.RevisionToken,
+                    blockGraphPath = blocks ?? ownershipBlocks, designId = design ?? PsuCpuIds.Id(0x01, 2).ToString("D") }
+                : new { instanceId = ownershipSaved.State.InstanceId.ToString("D"), recoveryPath = ownershipRecoveryPath, expectedRevisionToken = ownershipSaved.RevisionToken,
+                    blockGraphPath = blocks ?? ownershipBlocks, designId = design ?? PsuCpuIds.Id(0x01, 2).ToString("D"), expectedBlockGraphSha256 = sha };
+            var ownersPlan = (await Request(4090, "tools/call", new { name = "kicad_design_block_owners_plan", arguments = Owners() })).GetProperty("result");
+            Assert.IsFalse(ownersPlan.TryGetProperty("isError", out var ownersPlanError) && ownersPlanError.GetBoolean(), ownersPlan.GetRawText());
+            var ownersData = ownersPlan.GetProperty("structuredContent");
+            var assignment = ownersData.GetProperty("assignments").EnumerateArray().Single();
+            Assert.AreEqual(PsuCpuIds.Id(0x07, 1), assignment.GetProperty("componentId").GetGuid());
+            Assert.AreEqual(PsuCpuIds.Id(0x11, 2), assignment.GetProperty("blockId").GetGuid(), "J1 belongs to the block of its sheet, PSU.");
+            string blocksSha = ownersData.GetProperty("blockGraphSha256").GetString()!;
+            byte[] unownedBytes = await File.ReadAllBytesAsync(ownershipBlocks, timeout.Token);
+            var staleOwners = (await Request(4091, "tools/call", new { name = "kicad_design_block_owners_apply", arguments = Owners(new string('0', 64)) })).GetProperty("result");
+            Assert.AreEqual("recursive_block_file_changed", staleOwners.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var badDesign = (await Request(4092, "tools/call", new { name = "kicad_design_block_owners_plan", arguments = Owners(design: "not-a-design") })).GetProperty("result");
+            Assert.AreEqual("invalid_block_design", badDesign.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var relativeBlocks = (await Request(4093, "tools/call", new { name = "kicad_design_block_owners_plan", arguments = Owners(blocks: "system.blocks.xml") })).GetProperty("result");
+            Assert.AreEqual("invalid_block_graph_path", relativeBlocks.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            CollectionAssert.AreEqual(unownedBytes, await File.ReadAllBytesAsync(ownershipBlocks, timeout.Token), "Refusals write nothing.");
+            var ownersApply = (await Request(4094, "tools/call", new { name = "kicad_design_block_owners_apply", arguments = Owners(blocksSha) })).GetProperty("result");
+            Assert.IsFalse(ownersApply.TryGetProperty("isError", out var ownersApplyError) && ownersApplyError.GetBoolean(), ownersApply.GetRawText());
+            Assert.IsTrue(ownersApply.GetProperty("structuredContent").GetProperty("blockGraphWritten").GetBoolean());
+            var owned = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(ownershipBlocks, timeout.Token));
+            Assert.IsTrue(owned.Inspect(owned.Walk(owned.SelectedRoot).Single(s => s.BlockId == PsuCpuIds.Id(0x11, 2))).EffectiveComponentBindings.Targets
+                .Any(t => t.ComponentId == PsuCpuIds.Id(0x07, 1)));
+            string ownedSha = ownersApply.GetProperty("structuredContent").GetProperty("blockGraphSha256").GetString()!;
+            var repeatOwners = (await Request(4095, "tools/call", new { name = "kicad_design_block_owners_apply", arguments = Owners(ownedSha) })).GetProperty("result");
+            Assert.IsFalse(repeatOwners.GetProperty("structuredContent").GetProperty("blockGraphWritten").GetBoolean(), "A repeat is a no-op.");
+            Assert.AreEqual(ownedSha, repeatOwners.GetProperty("structuredContent").GetProperty("blockGraphSha256").GetString());
+            var halfTarget = (await Request(4096, "tools/call", new { name = "kicad_design_automatic_sync_start", arguments = new { instanceId = Guid.NewGuid().ToString("D"),
+                recoveryPath = ownershipRecoveryPath, designPath = Path.Combine(state, "designs", "design.xml"), expectedRecoveryRevision = "token",
+                blockGraphPath = ownershipBlocks } })).GetProperty("result");
+            Assert.AreEqual("invalid_automatic_sync_target", halfTarget.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                "Block ownership needs both the block graph and the design identity.");
             string netRecoveryPath = Path.Combine(state, "designs", "net-recovery.json");
             var netFixture = SchematicNetReconciliationTests.Fixture();
             var netStore = new DesignRecoveryStore(netRecoveryPath);

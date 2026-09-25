@@ -118,7 +118,7 @@ public sealed class RecoveryTools
     }
 
     [McpServerTool(Name = "kicad_design_sync_plan", ReadOnly = true),
-     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. When the saved XML only adds connections, between pins already drawn or to parts it also adds, and leaves every existing part, symbol, sheet, binding and connection unchanged, and the instance's handshake recorded at attach advertises connection realization, a plan that can be prepared returns connectionRealizationRequired true, candidateDesignXml null (the drawing is measured and made in KiCad during apply) and connectionIntent summarizing the planned connections: each net with its scope and global name, each sheet's island with its label text, members, roles, stub and join needs, the sheet ports, the number of native pin groups apply must prove and the symbols it creates. Any other revision, a revision KiCad already shows, or a plan that cannot be prepared returns connectionRealizationRequired false and connectionIntent null. nativeRebuildRequired is true when apply generates native sheets the saved XML adds (as empty sheets, below sheets KiCad shows) or rebuilds deleted schematic files from the XML last synchronized with KiCad after KiCad created a new empty root for the project; rebuildSheetInstances lists the model sheets involved, candidateDesignXml is the planned design and nativeOperationsJson the planned native batch. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
+     Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. When the saved XML only adds connections, between pins already drawn or to parts it also adds, and leaves every existing part, symbol, sheet, binding and connection unchanged, and the instance's handshake recorded at attach advertises connection realization, a plan that can be prepared returns connectionRealizationRequired true, candidateDesignXml null (the drawing is measured and made in KiCad during apply) and connectionIntent summarizing the planned connections: each net with its scope and global name, each sheet's island with its label text, members, roles, stub and join needs, the sheet ports, the number of native pin groups apply must prove and the symbols it creates. Any other revision, a revision KiCad already shows, or a plan that cannot be prepared returns connectionRealizationRequired false and connectionIntent null. nativeRebuildRequired is true when apply generates native sheets the saved XML adds (as empty sheets, below sheets KiCad shows) or rebuilds deleted schematic files from the XML last synchronized with KiCad after KiCad created a new empty root for the project; rebuildSheetInstances lists the model sheets involved, candidateDesignXml is the planned design and nativeOperationsJson the planned native batch. Symbols placed in KiCad since the last synchronization become new design components with stable identities derived from the circuit, their sheet and the symbol's own UUID (addedSymbolOccurrences, addedComponents, and addedParts for a library symbol no existing part is drawn with); when their part or component cannot be decided from exact identities (several parts drawn with the same library symbol and pins, or a new unit of a multi-unit part) the plan cannot be prepared (native_ownership_resolution_required) and ownershipResolutionRequests names each symbol, its sheet and the exact candidates. A saved XML revision that only removes units or whole components with their bindings, while KiCad still shows the last synchronized design, removes their symbols in KiCad (removedSymbolOccurrences, nativeOperationsJson); when KiCad changed too, both versions are kept and the plan is refused with ownership_change_with_xml_edits. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
     public Task<CallToolResult> PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,
         CancellationToken cancellationToken) => ExecuteAsync(async () =>
     {
@@ -143,6 +143,11 @@ public sealed class RecoveryTools
             connectionIntent = plan.Connections is { } connections ? SchematicConnectionIntentBuilder.Summary(connections) : null,
             // Lane 2C: native sheets generated or rebuilt from the saved XML (SchematicRebuild).
             nativeRebuildRequired = plan.NativeRebuildRequired, rebuildSheetInstances = plan.Rebuild?.SheetInstanceIds,
+            // Lane 2C ownership synchronization (ledger p74ee7c1da24272d9): symbols placed in KiCad adopted as new design
+            // components, units and components the XML or KiCad removed, and the decisions exact identities cannot take.
+            addedSymbolOccurrences = plan.Electrical?.AddedSymbolOccurrences, addedComponents = plan.Electrical?.AddedComponents,
+            addedParts = plan.Electrical?.AddedParts, removedSymbolOccurrences = plan.Electrical?.RemovedSymbolOccurrences,
+            ownershipResolutionRequests = plan.Electrical?.ResolutionRequests,
             hierarchyConflicts = plan.Hierarchy?.Conflicts.Select(x => new { x.InstancePath, x.Reason }),
             electricalConflicts = plan.Electrical?.Conflicts, netChanges = plan.Electrical?.NetChanges,
             restoredSymbolOccurrences = plan.Electrical?.RestoredSymbolOccurrences, restoredNetIds = plan.Electrical?.RestoredNetIds,
@@ -156,6 +161,52 @@ public sealed class RecoveryTools
             throw new AutomationException("design_recovery_changed", "Recovery changed while planning; reload it.");
         return new() { IsError = !plan.CanPrepare, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
+
+    [McpServerTool(Name = "kicad_design_block_owners_plan", ReadOnly = true),
+     KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, absolute block graph path, design identity"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeEditsReachTheOwningBlockByExactIdentity",
+         "McpProcessTests.InitializeDiscoverAndCallOverStdio"),
+     Description("Plan which block of a block graph's selected design owns each component of the design last synchronized with KiCad (from one explicit instance's recovery record at its revision token). designId is the design's identity in the hardware repository; blockGraphPath the absolute path of the block graph file. A component no block owns, such as a symbol placed in KiCad and adopted by synchronization, belongs to the block of the sheet it sits on: the deepest block of the selected design that owns every other component on that sheet, decided by exact identities only. Returns assignments, resolution requests (a sheet with no owned component, or a component several blocks claim), detachedComponents (bound but no longer in the design; their bindings, requirements and connection endpoints are kept as detached targets) and the block graph file's SHA256. Reads files only; never writes or contacts KiCad.")]
+    public Task<CallToolResult> PlanBlockOwners(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string blockGraphPath, string designId, CancellationToken cancellationToken) => ExecuteAsync(async () =>
+    {
+        var (_, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        var (plan, sha256) = await BlockOwnershipSynchronization.PlanAsync(blockGraphPath, DesignIdentity(designId), saved.State.Baseline, cancellationToken);
+        return BlockOwnersResult(saved, plan, sha256, null);
+    });
+
+    [McpServerTool(Name = "kicad_design_block_owners_apply", Destructive = false),
+     KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, block graph SHA256, design identity"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeEditsReachTheOwningBlockByExactIdentity",
+         "McpProcessTests.InitializeDiscoverAndCallOverStdio"),
+     Description("Bind the components kicad_design_block_owners_plan assigns to their blocks, as one new revision of each owning block and a new selected root snapshot, through the block graph's guarded file write. Requires the recovery revision token and the block graph SHA256 the plan returned; a changed file is refused with recursive_block_file_changed and nothing is written. Earlier revisions, requirements and every other block stay unchanged; resolution requests are returned unanswered for the person to bind with kicad_diagram_components_set. An unchanged plan writes nothing, so repeating it is a no-op.")]
+    public Task<CallToolResult> ApplyBlockOwners(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string blockGraphPath, string designId, string expectedBlockGraphSha256, CancellationToken cancellationToken) => ExecuteAsync(async () =>
+    {
+        var (_, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        if (string.IsNullOrEmpty(expectedBlockGraphSha256))
+            throw new AutomationException("recursive_block_file_changed", "Supply the block graph SHA256 the plan returned.");
+        var result = await BlockOwnershipSynchronization.SynchronizeAsync(blockGraphPath, DesignIdentity(designId), saved.State.Baseline,
+            BlockOwnershipSynchronization.NativeOrigin("Bind unowned components to the block of their sheet"), expectedBlockGraphSha256, cancellationToken);
+        return BlockOwnersResult(saved, result.Plan, result.BlockGraphSha256, result);
+    });
+
+    private static Guid DesignIdentity(string designId) => Guid.TryParseExact(designId, "D", out var id) && id != Guid.Empty ? id
+        : throw new AutomationException("invalid_block_design", "Identify the design by its exact UUID in the hardware repository.");
+
+    private static CallToolResult BlockOwnersResult(StoredDesignRecovery saved, BlockOwnershipPlan plan, string sha256, BlockOwnershipResult? applied)
+    {
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken, documentId = plan.DocumentId,
+            designId = plan.DesignId, circuitId = plan.CircuitId, blockGraphSha256 = sha256,
+            selectedRoot = applied?.SelectedRoot ?? plan.SelectedRoot, assignments = plan.Assignments, resolutionRequests = plan.Requests,
+            resolutionRequired = plan.ResolutionRequired, detachedComponents = plan.DetachedComponents,
+            savedBlocks = applied?.SavedBlocks ?? [], blockGraphWritten = applied?.Changed ?? false,
+            designFileWritten = false, nativeMutationAuthorized = false
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
 
     [McpServerTool(Name = "kicad_design_nets_reconcile", ReadOnly = true),
      Description("Plan three-way pin connectivity reconciliation from an explicit instance's saved recovery record and its expected revision token. Combines independent or matching XML/native net edits through exact pin identities. Contradictory changes return conflicts and no candidate; ambiguous requirement bindings remain unresolved. Returns candidate engineering XML only, not a reconstructed schematic or an applied synchronization. Requires matched baseline/current electrical checkpoints and unchanged component, sheet, unit and pin ownership. Does not contact KiCad, establish live freshness, write files, edit native objects or advance the baseline.")]

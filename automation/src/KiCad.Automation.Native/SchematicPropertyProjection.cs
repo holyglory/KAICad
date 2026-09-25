@@ -38,7 +38,9 @@ public static class SchematicPropertyProjection
             string id = bindings[occurrence.Id];
             int index = screen.Items.ToList().FindIndex(item => item.Is(SchematicSymbolInstance.Descriptor)
                 && item.Unpack<SchematicSymbolInstance>().Id.Value == id);
-            bool restored = restoration?.RestoredOccurrences.Contains(occurrence.Id) == true;
+            // Restored and adopted occurrences are new to the baseline; their properties are KiCad's own.
+            bool restored = restoration is not null && (restoration.RestoredOccurrences.Contains(occurrence.Id)
+                || restoration.AddedOccurrences.Contains(occurrence.Id));
             if (index < 0 || (!oldOccurrences.TryGetValue(occurrence.Id, out var original) && !restored))
                 throw Error("unresolved_design_bindings", "Property changes require an existing exact symbol occurrence.");
             var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>();

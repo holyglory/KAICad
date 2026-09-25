@@ -558,7 +558,13 @@ public static partial class SchematicConnectionIntentBuilder
                         + plan.GlobalName + "', but another connection in the editor already carries it. Add the pins to that net in the XML instead.");
             }
             // Every created power pin must land in the net of its own global name, unless that name exists nowhere else.
+            // Sources are compared by model node: every unit's placement of a pin common to several units is one physical
+            // pin, and pins one symbol stacks at one point are one connection (SchematicElectricalComparison.StackedPinNodes).
             var createdSources = created.Where(p => IsGlobalPowerSymbol(p.Symbol) || IsImplicitPower(p.Symbol, p.NativePin)).ToArray();
+            var nodes = new Dictionary<PinEndpoint, PinEndpoint>();
+            foreach (var group in SchematicElectricalComparison.StackedPinNodes(candidate, token))
+                foreach (var pin in group) nodes[pin] = group[0];
+            PinEndpoint Node(Placement placement) => nodes.GetValueOrDefault(placement.Pin.Endpoint, placement.Pin.Endpoint);
             var memberOf = new Dictionary<ItemKey, NetPlan>();
             foreach (var plan in plans)
                 foreach (var placement in plan.Placements)
@@ -579,7 +585,7 @@ public static partial class SchematicConnectionIntentBuilder
                     continue;
                 }
                 bool elsewhere = nativeCarriers.ContainsKey(name) || plans.Any(p => p.GlobalName == name)
-                    || createdSources.Any(other => other.Key != placement.Key
+                    || createdSources.Any(other => Node(other) != Node(placement)
                         && (IsGlobalPowerSymbol(other.Symbol) ? CarrierName(other.Symbol) : ImplicitName(other.NativePin)) == name);
                 if (elsewhere)
                     throw Error(code, what + " is named '" + name + "', which KiCad connects to every other '" + name
@@ -874,27 +880,25 @@ public static partial class SchematicConnectionIntentBuilder
                             Claim(key, index, plan.Net.Name);
                 }
             }
-            // Pins a created symbol stacks at one point are one connection in KiCad (decision
-            // kicad-stacked-pins-one-node-20260924): a stacked pin no net lists joins its partner's group, and
-            // partners that no net lists form one group. Nets that split a stack were refused before this point.
-            var createdKeys = created.Select(p => p.Key).ToHashSet();
-            var units = circuit.Symbols.ToDictionary(s => s.Id, s => s.Unit);
-            foreach (var symbol in created.GroupBy(p => (p.Pin.SheetPathKey, p.Pin.SymbolId, p.Pin.SymbolOccurrenceId)))
+            // Created pins that KiCad joins among themselves without any wire are one connection: pins a created symbol
+            // stacks at one point (decision kicad-stacked-pins-one-node-20260924), and created power pins of one name, such
+            // as every unit's placement of a common hidden power input (SchematicNativeCreationProjection.CreatedPinGroups).
+            // A joined pin no net lists joins its partners' group, and partners that no net lists form one group. Nets that
+            // split such a group were refused before this point.
+            var createdKeys = created.ToDictionary(p => p.Key);
+            var added = shape.AddedComponentIds.ToHashSet();
+            foreach (var joined in SchematicNativeCreationProjection.CreatedPinGroups(candidate, circuit.Symbols.Where(s => added.Contains(s.ComponentId)), token))
             {
-                var first = symbol.First();
-                foreach (var stack in SchematicElectricalComparison.StackedDefinitionPins(first.Symbol, units[first.Pin.SymbolOccurrenceId]))
-                {
-                    var keys = new List<ItemKey>();
-                    foreach (var pin in stack)
-                        if (Canonical(pin.Id?.Value, out var id) && createdKeys.Contains(new(first.Pin.SheetPathKey, id))) keys.Add(new(first.Pin.SheetPathKey, id));
-                    if (keys.Count < 2) continue;
-                    var claimed = keys.Where(owner.ContainsKey).Select(k => owner[k]).Distinct().ToArray();
-                    if (claimed.Length > 1)
-                        throw Inconsistent("Pins drawn at one point in the symbol of " + Describe(first.Pin.Endpoint) + " would belong to different connections.");
-                    int group = claimed.Length == 1 ? claimed[0] : groups.Count;
-                    if (claimed.Length == 0) groups.Add(new SortedSet<ItemKey>(order));
-                    foreach (var key in keys.Where(k => !owner.ContainsKey(k))) Claim(key, group, "(stacked pins)");
-                }
+                if (joined.Count < 2) continue;
+                var keys = joined.Select(k => new ItemKey(k.SheetPathKey, k.PlacedPinId)).ToArray();
+                if (keys.Any(k => !createdKeys.ContainsKey(k))) throw Inconsistent("A created pin KiCad joins without a wire is not a placed pin of its symbol.");
+                var claimed = keys.Where(owner.ContainsKey).Select(k => owner[k]).Distinct().ToArray();
+                if (claimed.Length > 1)
+                    throw Inconsistent("Pins " + string.Join(", ", keys.Select(k => Describe(createdKeys[k].Pin.Endpoint)).Distinct(StringComparer.Ordinal))
+                        + ", which KiCad joins without any wire, would belong to different connections.");
+                int group = claimed.Length == 1 ? claimed[0] : groups.Count;
+                if (claimed.Length == 0) groups.Add(new SortedSet<ItemKey>(order));
+                foreach (var key in keys.Where(k => !owner.ContainsKey(k))) Claim(key, group, "(joined created pins)");
             }
             foreach (var placement in created.Where(p => !owner.ContainsKey(p.Key)))
             {

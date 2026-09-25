@@ -2829,13 +2829,20 @@ public sealed partial class NativeSessionTests
         //    holding both hidden pins. The connection-aware layout tool places them, and apply creates them in one checked KiCad
         //    commit whose pin-partition assertion KiCad verified: this is the existing global power net of the next steps.
         // 2. The XML adds VP3 with its hidden pin in no net. The public preview, apply and layout tools all refuse it while
-        //    planning with connected_implicit_power_conflict, naming the pin and the name it would silently join; KiCad, its
-        //    change journal, the XML file and the recovery record stay unchanged.
+        //    planning with connected_implicit_power_conflict, naming the pin, the name it would silently join and the net to
+        //    put it in; automatic synchronization pauses with the same refusal. KiCad, its change journal, the XML file and the
+        //    recovery record's baseline stay unchanged.
         // 3. The same creation as the unconnected path sent it before this fix, with the creation assertion that the seam request
         //    asks the executor to append, is refused by KiCad itself (connectivity_postcondition_failed, unexpected_join) with no
         //    change at all: the assertion also stops joins no plan can foresee.
         // 4. The XML declares VP3's hidden pin in VPROBE: apply creates VP3 in one checked commit, and KiCad's pin partition is
         //    exactly the one before, with VP3's hidden pin added to VPROBE and its other pin alone.
+        // 5. A two-unit part whose hidden power input VPAIR is common to both units, a name used nowhere else: the layout tool
+        //    places VW1's two units and apply creates them with no net at all. The two units' placements of the one common pin
+        //    are one source of VPAIR, so nothing is refused, and KiCad's pin partition is exactly what the creation assertion
+        //    states: both placements joined by their name, every other pin alone.
+        // 6. VW2 of the same part is a second source of VPAIR: the public layout and preview tools refuse it while planning,
+        //    naming VW2.2 and VW1.2 once each, and nothing changes.
         async Task<object> RequireHiddenPowerPinCreation()
         {
             string Evidence(string name) => Path.Combine(evidence, instanceId + "-hidden-power-" + name);
@@ -2950,7 +2957,7 @@ public sealed partial class NativeSessionTests
             string message = previewContent.GetProperty("errorMessage").GetString()!;
             StringAssert.Contains(message, "Hidden power pin VP3.2 is named 'VPROBE'");
             StringAssert.Contains(message, "including hidden power pin VP");
-            StringAssert.Contains(message, "Add VP3.2 to the XML net that carries 'VPROBE'");
+            StringAssert.Contains(message, "Add VP3.2 to net 'VPROBE', which holds VP", "The message names the XML net that already carries the name.");
             Assert.AreEqual(JsonValueKind.Null, previewContent.GetProperty("candidateDesignXml").ValueKind);
             Assert.AreEqual(0, previewContent.GetProperty("nativeOperationsJson").GetArrayLength());
             var refusedApply = await Apply("undeclared");
@@ -2968,12 +2975,39 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, layoutCode, layoutRefusal.GetRawText());
             await RequireUnchanged("The refused layout", coordinateFree.RevisionToken);
             Write(undeclared);
+            // Automatic synchronization plans with the same planner: the saved revision pauses it with the same refusal before
+            // any operation starts. Its observation refresh may rewrite the record, but never its baseline or pending work.
+            object automaticRefusal;
+            await using (var automatic = await AutomaticDesignSynchronization.StartAsync(store, client, path, store.Read()!.RevisionToken, token))
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(60));
+                var status = automatic.Inspect();
+                while (status.Phase != AutomaticDesignPhase.Paused)
+                {
+                    Assert.IsFalse(status.Phase is AutomaticDesignPhase.Watching or AutomaticDesignPhase.Applying or AutomaticDesignPhase.InvalidDesign
+                        or AutomaticDesignPhase.Stopped, status.Phase + ": the refused revision must pause automatic synchronization before it applies anything.");
+                    status = await automatic.WaitAsync(status.Sequence, deadline.Token);
+                }
+                Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, status.ErrorCode, status.ErrorMessage);
+                StringAssert.Contains(status.ErrorMessage!, "Hidden power pin VP3.2 is named 'VPROBE'");
+                Assert.IsNull(status.OperationId, "No synchronization operation was started.");
+                automaticRefusal = new { phase = status.Phase.ToString(), status.ErrorCode, status.ErrorMessage };
+            }
+            Assert.AreEqual(nativeBefore, await Capture(), "Paused automatic synchronization must not reach KiCad.");
+            Assert.IsEmpty((await Journal(journal)).Changes, "Paused automatic synchronization adds no KiCad change.");
+            Assert.IsFalse(store.Read()!.State.HasPendingWork, "Paused automatic synchronization leaves no pending operation.");
+            Assert.AreEqual(baselineXml, SchematicDesignXml.Write(store.Read()!.State.Baseline, []), "Paused automatic synchronization does not advance the baseline.");
+            CollectionAssert.AreEqual(refusedXml, await File.ReadAllBytesAsync(path, token), "Paused automatic synchronization publishes no XML.");
 
             // 3. The unconnected creation as it was sent before this fix, with the creation assertion appended, sent to KiCad.
             var record = store.Read()!.State;
             var checkpoint = await Capture();
             Assert.AreEqual(record.NativeRevision, new DocumentRevision(checkpoint.State.Revision.Epoch, checkpoint.State.Revision.Sequence));
-            var unguarded = SchematicNativeCreationProjection.Project(record.Baseline, undeclared, record.KnowledgeLibraries, token, allowConnected: true);
+            // Both modes of the creation projection now refuse the undeclared revision (CN-1 §4.3). The declared revision places
+            // VP3 at the same point with the same symbols, so its projection is the batch the unconnected path sent before.
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, Assert.ThrowsExactly<AutomationException>(() =>
+                SchematicNativeCreationProjection.Project(record.Baseline, undeclared, record.KnowledgeLibraries, token, allowConnected: true)).Code);
+            var unguarded = SchematicNativeCreationProjection.Project(record.Baseline, declared, record.KnowledgeLibraries, token, allowConnected: true);
             var batch = new ApplySchematicItemBatch { Document = checkpoint.State.Document.Clone(), DocumentEpoch = checkpoint.State.Revision.Epoch,
                 ExpectedRevision = checkpoint.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
                 OriginId = record.OriginId.ToString("D"), Description = "Apply XML synchronization candidate" };
@@ -3013,6 +3047,116 @@ public sealed partial class NativeSessionTests
                 "The published XML is what KiCad shows.");
             var settled = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
             Assert.IsTrue(settled.CanPrepare && settled.NativeOperations.Count == 0 && settled.Connections is null, settled.ErrorCode + ": " + settled.ErrorMessage);
+
+            // 5. A two-unit part from the probe drawing: the probe pin in unit 1, a copy numbered 3 below it in unit 2, and the
+            // hidden power input VPAIR, numbered 2, common to both units, 5.08 mm to the right of the probe pin.
+            var pairSymbol = rootScreen.CachedSymbols.Single(c => c.CacheKey == probeKey).Clone();
+            pairSymbol.CacheKey = "Automation:CommonPowerPair";
+            pairSymbol.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "CommonPowerPairDefinition" };
+            pairSymbol.Definition.UnitCount = 2;
+            var pairPins = new List<PartPin>();
+            foreach (var child in pairSymbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                pin.Id.Value = Guid.NewGuid().ToString("D");
+                child.Unit = new() { Unit = 1 };
+                child.Item = Any.Pack(pin);
+                pairPins.Add(new(pin.Number, pin.Name, 1));
+            }
+            Assert.IsFalse(pairPins.Any(p => p.Number is "2" or "3"), "The probe drawing leaves pin numbers 2 and 3 free.");
+            SchematicSymbolChild PairPin(string number, string name, int unit, ElectricalPinType type, bool visible, long dx, long dy)
+            {
+                var child = pairSymbol.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+                var pin = child.Item.Unpack<SchematicPin>();
+                pin.Id = new() { Value = Guid.NewGuid().ToString("D") }; pin.Number = number; pin.Name = name;
+                pin.ElectricalType = type; pin.Visible = visible;
+                pin.Position = new() { XNm = (pin.Position?.XNm ?? 0) + dx, YNm = (pin.Position?.YNm ?? 0) + dy };
+                child.Unit = new() { Unit = unit }; child.Item = Any.Pack(pin);
+                pairPins.Add(new(number, name, unit));
+                return child;
+            }
+            pairSymbol.Definition.Items.Add(PairPin("3", "B", 2, ElectricalPinType.EptPassive, true, 0, 5_080_000));
+            pairSymbol.Definition.Items.Add(PairPin("2", "VPAIR", 0, ElectricalPinType.EptPowerInput, false, 5_080_000, 0));
+            var pairPart = new PartDefinition(Guid.NewGuid(), "XML two-unit common power probe", 2, pairPins);
+            var pairDeclaration = new SchematicPartSymbol(pairPart.Id, new() { LibraryNickname = "Declared", EntryName = "CommonPowerPair" }, pairSymbol);
+            (ComponentInstance Component, ComponentDefinition Definition, SymbolOccurrence[] Units) Pair(string reference)
+            {
+                var definition = new ComponentDefinition(Guid.NewGuid(), pairPart.Id, "Common power probe");
+                var component = new ComponentInstance(Guid.NewGuid(), definition.Id, rootSheet.Id, reference);
+                return (component, definition, [new(Guid.NewGuid(), component.Id, 1, null), new(Guid.NewGuid(), component.Id, 2, null)]);
+            }
+            SchematicDesign AddingPair(SchematicDesign design, (ComponentInstance Component, ComponentDefinition Definition, SymbolOccurrence[] Units) pair, bool addPart)
+            {
+                var c = design.Engineering.Circuit;
+                return design with
+                {
+                    PartSymbols = addPart ? [.. design.PartSymbols ?? [], pairDeclaration] : design.PartSymbols,
+                    Engineering = design.Engineering with { Circuit = c with
+                    {
+                        Parts = addPart ? [.. c.Parts, pairPart] : c.Parts,
+                        Sheets = [.. c.Sheets.Select(s => s.Id == rootSheet.DefinitionId ? s with { Components = [.. s.Components, pair.Definition] } : s)],
+                        Components = [.. c.Components, pair.Component], Symbols = [.. c.Symbols, .. pair.Units]
+                    } }
+                };
+            }
+            var vw1 = Pair("VW1");
+            var pairLaid = await Laid(AddingPair(connected, vw1, addPart: true), "pair");
+            Write(pairLaid);
+            var pairBefore = await Capture();
+            var pairMark = await Journal(null);
+            var pairApply = await Apply("pair");
+            RequireToolSuccess(pairApply);
+            Assert.IsTrue(pairApply.GetProperty("structuredContent").GetProperty("nativeMutationCommitted").GetBoolean(), pairApply.GetRawText());
+            var pairAfter = await Capture();
+            var pairRecord = store.Read()!;
+            var pairReceipt = pairRecord.State.LastSynchronization!.Result(pairRecord.RevisionToken, false).NativeReceipt!;
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, pairReceipt.Status);
+            Assert.AreEqual(pairReceipt.OperationId, (await Journal(pairMark)).Changes.Single().OperationId, "VW1 is one KiCad commit.");
+            var paired = pairRecord.State.Baseline;
+            var pairAssertion = SchematicNativeCreationProjection.CreationAssertion(connected, paired, token).AssertConnectivity;
+            var common = Keys(paired, (vw1.Component.Id, "2"));
+            Assert.HasCount(2, common, "Both units show the common hidden power input.");
+            var pairGroups = AssertedGroups(pairAssertion).Select(g => g.Order(StringComparer.Ordinal).ToArray()).ToArray();
+            Assert.IsTrue(pairGroups.Any(g => g.SequenceEqual(common.Order(StringComparer.Ordinal))), "The assertion joins both placements of the common pin.");
+            Assert.AreEqual(pairPins.Count, pairGroups.Length, "VPAIR's two placements together, and each unit's own pins alone.");
+            RequireAssertedPartition(pairBefore, pairAfter, AssertedGroups(pairAssertion), "VW1 created with its common hidden power input");
+
+            // 6. VW2 of the same part: a second source of VPAIR, refused while planning by the layout and preview tools.
+            var vw2 = Pair("VW2");
+            var pairNative = await Capture();
+            var pairJournal = await Journal(null);
+            var pairBaselineXml = SchematicDesignXml.Write(paired, []);
+            var secondFree = Write(AddingPair(paired, vw2, addPart: false));
+            var secondLayout = await host.Tool("kicad_design_propose_initial_layout", LayoutArguments(secondFree.RevisionToken));
+            await File.WriteAllTextAsync(Evidence("second-pair-layout.json"), RetainedToolEvidence(secondLayout), token);
+            Assert.IsTrue(secondLayout.GetProperty("isError").GetBoolean(), secondLayout.GetRawText());
+            var secondError = JsonDocument.Parse(secondLayout.GetProperty("content")[0].GetProperty("text").GetString()!).RootElement;
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, secondError.GetProperty("code").GetString(), secondLayout.GetRawText());
+            string secondMessage = secondError.GetProperty("message").GetString()!;
+            StringAssert.Contains(secondMessage, "Hidden power pin VW2.2 is named 'VPAIR'");
+            StringAssert.Contains(secondMessage, "including hidden power pin VW1.2");
+            StringAssert.Contains(secondMessage, "Declare a net holding VW2.2 and VW1.2");
+            // The same part placed beside VW1 (coordinates are all planning needs): the preview refuses it the same way.
+            var vw1Units = paired.Engineering.Circuit.Symbols.Where(s => s.ComponentId == vw1.Component.Id).ToDictionary(s => s.Unit, s => s.Placement!);
+            var placedSecond = Write(AddingPair(paired, vw2 with { Units = [.. vw2.Units.Select(u => u with { Placement = vw1Units[u.Unit] with
+                { XMillimeters = vw1Units[u.Unit].XMillimeters + 25.4m } })] }, addPart: false));
+            var secondPreview = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = placedSecond.RevisionToken });
+            await File.WriteAllTextAsync(Evidence("second-pair-plan.json"), RetainedToolEvidence(secondPreview), token);
+            var secondContent = secondPreview.GetProperty("structuredContent");
+            Assert.IsFalse(secondContent.GetProperty("canPrepare").GetBoolean(), secondPreview.GetRawText());
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, secondContent.GetProperty("errorCode").GetString(), secondPreview.GetRawText());
+            StringAssert.Contains(secondContent.GetProperty("errorMessage").GetString()!, "including hidden power pin VW1.2");
+            Assert.AreEqual(pairNative, await Capture(), "The refused second part must not reach KiCad.");
+            Assert.IsEmpty((await Journal(pairJournal)).Changes, "The refused second part adds no KiCad change.");
+            Assert.AreEqual(pairBaselineXml, SchematicDesignXml.Write(store.Read()!.State.Baseline, []), "The refused second part does not advance the baseline.");
+            Assert.IsFalse(store.Read()!.State.HasPendingWork);
+            // Leave the editor as published: the saved XML and the record's desired revision are VW1's again, with nothing to do.
+            await File.WriteAllBytesAsync(path, pairRecord.State.DesiredFileBytes, token);
+            var restoring = store.Read()!;
+            store.Save(restoring.State with { DesiredFileBytes = pairRecord.State.DesiredFileBytes }, restoring.RevisionToken);
+            var published = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
+            Assert.IsTrue(published.CanPrepare && published.NativeOperations.Count == 0 && published.Connections is null, published.ErrorCode + ": " + published.ErrorMessage);
+
             var result = new
             {
                 part = new { vPart.Name, hiddenPin = "2", powerName = "VPROBE" },
@@ -3021,7 +3165,14 @@ public sealed partial class NativeSessionTests
                 undeclared = new { planErrorCode = previewContent.GetProperty("errorCode").GetString(), message,
                     applyErrorCode = refusedApply.GetProperty("structuredContent").GetProperty("errorCode").GetString(), layoutErrorCode = layoutCode,
                     nativeUnchanged = true, journalUnchanged = true, xmlUnchanged = true, recordUnchanged = true },
-                creationAssertion = new { status = guarded.Status.ToString(), guarded.ErrorCode, guarded.ErrorMessage, nativeUnchanged = true }
+                automaticRefusal,
+                creationAssertion = new { status = guarded.Status.ToString(), guarded.ErrorCode, guarded.ErrorMessage, nativeUnchanged = true },
+                commonPowerPart = new { pairPart.Name, commonPin = "2", powerName = "VPAIR", units = pairPart.Units, operationId = pairReceipt.OperationId,
+                    journalChanges = 1, assertedGroups = pairGroups.Length, partitionMatchesAssertion = true,
+                    // Until the seam request lands, an unconnected creation is committed without the assertion and checked after.
+                    assertionSent = pairReceipt.Result?.ConnectivityAssertionVerified ?? false,
+                    secondPartLayoutErrorCode = secondError.GetProperty("code").GetString(), secondPartMessage = secondMessage,
+                    secondPartPlanErrorCode = secondContent.GetProperty("errorCode").GetString(), nativeUnchanged = true }
             };
             await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(result), token);
             return result;

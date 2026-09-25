@@ -186,6 +186,21 @@ public sealed class DesignLayoutRecoveryTests
         // A rebuild may omit the assertion; an ordinary connected move still needs its move.
         new DesignRecoveryStore(f.Path + ".rebuild.json").Save(f.Saved.State with { PendingMutation = LaneMutation(f, Created()),
             PendingLayout = f.Intent with { Lane = DesignLayoutIntent.RebuildLane } }, null);
+        // A rebuild also recreates a deleted file's page, title block and root identity (lane 2C). The root identity
+        // comes first; no other lane journals any of these.
+        var identity = new SchematicItemOperation { RebuildScreenIdentity = new KIID { Value = Guid.NewGuid().ToString("D") } };
+        var page = new SchematicItemOperation { SetPageSettings = new() { PageSize = PageSize.PsA4 } };
+        var title = new SchematicItemOperation { SetTitleBlock = new() };
+        new DesignRecoveryStore(f.Path + ".rebuilt.json").Save(f.Saved.State with { PendingMutation = LaneMutation(f, identity, page, title, Created()),
+            PendingLayout = f.Intent with { Lane = DesignLayoutIntent.RebuildLane } }, null);
+        foreach (var (layout, operations) in new (DesignLayoutIntent, SchematicItemOperation[])[]
+        {
+            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [page, identity, Created()]),       // identity not first
+            (connection, [page, Created(), Assertion()]),                                               // not a connection realization's
+            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, move]),                  // never a connected move
+        })
+            Assert.AreEqual("invalid_layout_intent", Assert.ThrowsExactly<AutomationException>(() => new DesignRecoveryStore(f.Path + ".refused.json").Save(
+                f.Saved.State with { PendingMutation = LaneMutation(f, operations), PendingLayout = layout }, null)).Code);
         Assert.ThrowsExactly<ArgumentException>(() => DesignLayoutIntent.Create(f.Intent.DesignPath, f.Intent.ExpectedFileBytes,
             f.Intent.PlannedDesignFileBytes, Guid.NewGuid(), f.Intent.RequestedRecoveryRevisionToken, "unknown-lane"));
     }

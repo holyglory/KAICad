@@ -864,6 +864,15 @@ message SchematicItemOperation {
     // -- lane 2A (100-199) --
     // -- end lane 2A --
     // -- lane 2C (300-399) --
+    // Rebuilding deleted native files from saved XML: the screen identity the root's saved file had.
+    // A schematic KiCad creates for a project whose files are missing gets a new root screen
+    // identity; this gives that root the recorded one, so the rebuilt root file is the original.
+    // Nothing else changes: not the root sheet's own identity, which the project file declares,
+    // nor any path. Only as the first operation, targeting the root sheet of a single-root
+    // schematic whose only screen was never loaded or saved and holds no item or cached
+    // definition, and never an identity another loaded screen has. Undo and a rejected batch
+    // restore the previous identity.
+    kiapi.common.types.KIID rebuild_screen_identity = 300;
     // -- end lane 2C --
   }
 }
@@ -989,6 +998,8 @@ message SchematicItemBatchResult {
   // -- lane 2A (100-199) --
   // -- end lane 2A --
   // -- lane 2C (300-399) --
+  // True only when a rebuild_screen_identity operation changed the root screen's identity.
+  bool screen_identity_changed = 300;
   // -- end lane 2C --
 }
 

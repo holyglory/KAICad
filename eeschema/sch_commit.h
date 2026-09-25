@@ -127,6 +127,12 @@ public:
     void ReplaceLibraryCache( SCH_SCREEN& aScreen, SCH_SYMBOL_CACHE_STATE& aCandidate );
     bool ValidateLibraryCaches( wxString& aFailure );
     void SetRootInstance( SCH_SHEET* aSheet, const std::optional<wxString>& aPageNumber );
+    /**
+     * Give @a aScreen the identity @a aId (a rebuilt root adopting the identity its saved file had).
+     * Only the screen's own identity changes; sheets and paths keep theirs.  Undo, redo and a
+     * rejected batch restore it with the page states.  The caller checks that the change is safe.
+     */
+    void SetScreenIdentity( SCH_SCREEN* aScreen, const KIID& aId );
     void SetTitleBlock( SCH_SCREEN* aScreen, const TITLE_BLOCK& aTitle );
     void SetBusAliases( const std::vector<std::shared_ptr<BUS_ALIAS>>& aAliases );
     void SetTextVariables( const std::map<wxString, wxString>& aVariables );

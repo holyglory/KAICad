@@ -22,6 +22,11 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
     public string Endpoint { get; } = endpoint;
     public string Epoch => epoch ?? throw new InvalidOperationException("Handshake has not completed.");
 
+    /// <summary>What the registry can prove about the KiCad process behind this client. Once that
+    /// process is proven to have ended, every request fails at once with instance_exited instead of
+    /// waiting for a reply that cannot come; a request in flight is abandoned when the exit is seen.</summary>
+    internal InstanceProcessObserver? Process { get; set; }
+
     public async Task<AutomationSession> HandshakeAsync(CancellationToken cancellationToken = default)
     {
         AutomationSession session = await InvokeAsync<GetAutomationSession, AutomationSession>(
@@ -85,7 +90,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
                     Header = new ApiRequestHeader { KicadToken = observedEpoch ?? "", ClientName = clientName },
                     Message = Any.Pack(CurrentSnapshotRequest(request, requestedSchema))
                 };
-                byte[] bytes = await transport.ExchangeAsync(Endpoint, envelope.ToByteArray(), TimeSpan.FromSeconds(15), cancellationToken);
+                byte[] bytes = await ExchangeAsync(envelope.ToByteArray(), cancellationToken);
                 ApiResponse response = ApiResponse.Parser.ParseFrom(bytes);
                 string? peerEpoch = response.Header?.KicadToken;
                 if (string.IsNullOrWhiteSpace(peerEpoch))
@@ -113,6 +118,27 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
             }
         }
         finally { serial.Release(); }
+    }
+
+    private async Task<byte[]> ExchangeAsync(byte[] request, CancellationToken token)
+    {
+        var process = Process;
+        if (process is null) return await transport.ExchangeAsync(Endpoint, request, TimeSpan.FromSeconds(15), token);
+        // A local check first, so a request to a KiCad that has already ended fails at once.
+        if (process.Probe() is { } known) throw process.ExitedError(known, requestMayHaveReached: false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
+        Task<byte[]> exchange = transport.ExchangeAsync(Endpoint, request, TimeSpan.FromSeconds(15), linked.Token);
+        if (await Task.WhenAny(exchange, process.Exited) == exchange)
+        {
+            try { return await exchange; }
+            // A transport failure of a process proven to have ended is that ending, not a network fault.
+            catch (NngException error) when (!token.IsCancellationRequested && process.Probe() is { } exit)
+            { throw process.ExitedError(exit, error.RequestDelivered); }
+        }
+        await linked.CancelAsync();
+        try { return await exchange; } // A reply that arrived before the exit is still the reply.
+        catch (Exception) when (!token.IsCancellationRequested)
+        { throw process.ExitedError(await process.Exited, requestMayHaveReached: true); }
     }
 
     // New clients opt into all current schematic fields. Explicit legacy or

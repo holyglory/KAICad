@@ -13,7 +13,10 @@ public sealed record InstanceRecord(string InstanceId, string ProjectPath, strin
 public sealed partial class InstanceRegistry(INativeTransport transport, string stateDirectory,
     Action<ProcessStartInfo>? configureProcess = null)
 {
-    private sealed record Connection(InstanceRecord Record, NativeClient Client, AutomationSession Handshake);
+    // Process is what this server can prove about the KiCad process behind the connection: the exit
+    // status of a process it started, or the process ID and start time of one it attached to.
+    private sealed record Connection(InstanceRecord Record, NativeClient Client, AutomationSession Handshake,
+        InstanceProcessObserver? Process = null);
     // One immutable slot keeps the record, its epoch-pinned client and the handshake that
     // verified it together, so an explicitly verified replacement or a reattachment replaces
     // all three at once.
@@ -28,7 +31,14 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
 
     public InstanceRecord Get(string instanceId) => Find(instanceId).Record;
 
-    public NativeClient Client(string instanceId) => Find(instanceId).Client;
+    /// <summary>The epoch-pinned client of an attached instance. An instance whose process is proven to
+    /// have ended fails here with instance_exited, which says how it ended and how to continue.</summary>
+    public NativeClient Client(string instanceId)
+    {
+        var connection = Find(instanceId);
+        if (connection.Process?.KnownExit is { } exit) throw connection.Process.ExitedError(exit, requestMayHaveReached: false);
+        return connection.Client;
+    }
 
     /// <summary>The handshake this server recorded when it last verified the instance: at attach,
     /// start, reattach or an adopted replacement, each of which replaces the previous one. Reading it
@@ -43,13 +53,21 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         ? connection : throw new AutomationException("unknown_instance", "The instance ID is not attached to this server.");
 
     public async Task<InstanceRecord> AttachAsync(string endpoint, string expectedInstanceId,
-                                                 CancellationToken cancellationToken = default)
+                                                 CancellationToken cancellationToken = default) =>
+        (await AttachInstanceAsync(endpoint, expectedInstanceId, cancellationToken)).Instance;
+
+    /// <summary>Attach an explicitly identified instance. A different KiCad process under an instance ID
+    /// this registry knows continues that ID only when the registered process is proven to have ended;
+    /// the result then names the registration it replaced.</summary>
+    public async Task<InstanceRegistration> AttachInstanceAsync(string endpoint, string expectedInstanceId,
+                                                             CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParseExact(expectedInstanceId, "D", out _))
             throw new AutomationException("invalid_instance", "An instance UUID is required.");
         NngTransport.ValidateEndpoint(endpoint);
         await changes.WaitAsync(cancellationToken);
-        try { return await AttachCoreAsync(endpoint, expectedInstanceId, null, cancellationToken); }
+        // A registration whose KiCad process is proven to have ended continues with the attached process.
+        try { return await AttachCoreAsync(endpoint, expectedInstanceId, null, cancellationToken, replaceExited: true); }
         finally { changes.Release(); }
     }
 
@@ -67,7 +85,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 var attached = await AttachCoreAsync(launch.Endpoint, instanceId, launch.ProcessId,
                     cancellationToken, launch.ProjectPath);
                 RetireLaunch(instanceId);
-                return attached;
+                return attached.Instance;
             }
             finally { changes.Release(); }
         }
@@ -78,14 +96,24 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             var attached = await AttachCoreAsync(saved.Endpoint, saved.InstanceId, saved.ProcessId,
                 cancellationToken, saved.ProjectPath, saved.Epoch);
             RetireLaunch(instanceId);
-            return attached;
+            return attached.Instance;
         }
         finally { changes.Release(); }
     }
 
     public async Task<InstanceRecord> StartAsync(string executable, string projectPath,
                                                 CancellationToken cancellationToken = default,
-                                                bool? softwareRendering = null)
+                                                bool? softwareRendering = null) =>
+        (await StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering)).Instance;
+
+    /// <summary>Start KiCad for a project. When the project's registered KiCad is proven to have ended
+    /// (this server saw its exit status, or its process no longer exists), the new process continues
+    /// that instance ID with a new epoch, so recovery records and journals that name the instance can
+    /// be reattached; the result names the replaced registration and how its process ended. A project
+    /// whose registered KiCad may still run is refused as before.</summary>
+    public async Task<InstanceRegistration> StartInstanceAsync(string executable, string projectPath,
+                                                             CancellationToken cancellationToken = default,
+                                                             bool? softwareRendering = null)
     {
         projectPath = Path.GetFullPath(projectPath);
         executable = Path.GetFullPath(executable);
@@ -94,16 +122,30 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         if (!File.Exists(executable))
             throw new AutomationException("missing_executable", "The native KiCad executable does not exist.");
 
+        InstanceRecord? replacing = null;
+        InstanceExit? replacedExit = null;
         await changes.WaitAsync(cancellationToken);
         try
         {
-            if (connections.Values.Any(r => r.Record.ProjectPath == projectPath) || !startingProjects.Add(projectPath))
+            if (startingProjects.Contains(projectPath))
                 throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
+            if (connections.Values.FirstOrDefault(r => r.Record.ProjectPath == projectPath) is { } owner)
+            {
+                replacedExit = await ProvenExitAsync(owner.Record, owner.Process, cancellationToken)
+                    ?? throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
+                replacing = owner.Record;
+            }
+            else if (await LatestSavedAsync(projectPath, cancellationToken) is { } saved
+                     && await ProvenExitAsync(saved.InstanceId, saved.Epoch, cancellationToken) is { } exit)
+            {
+                replacing = saved; replacedExit = exit;
+            }
+            startingProjects.Add(projectPath);
         }
         finally { changes.Release(); }
         try
         {
-            string id = Guid.NewGuid().ToString("D");
+            string id = replacing?.InstanceId ?? Guid.NewGuid().ToString("D");
             string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
             string socket = Path.Combine(runtime, "api.sock");
             string endpoint = NativeIpcEndpoint.FromSocketPath(socket);
@@ -125,6 +167,8 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             await SaveLaunchAsync(launch, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             Process process = Process.Start(start) ?? throw new AutomationException("start_failed", "KiCad could not be started.");
+            // Once attached, the process belongs to its exit observer, which disposes it when KiCad ends.
+            bool observed = false;
             // The native --automation-log option redirects its own descriptors, so
             // editor lifetime does not depend on MCP's diagnostic pipes (SA-04).
             _ = CaptureAsync(process.StandardOutput, Path.Combine(runtime, "bootstrap.stdout.log"));
@@ -169,7 +213,10 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                         await changes.WaitAsync(deadline.Token);
                         try
                         {
-                            var attached = await AttachCoreAsync(endpoint, id, process.Id, deadline.Token, projectPath, ready.Epoch);
+                            var watcher = new ChildProcessObserver(id, ready.Epoch, process, RecordExit);
+                            observed = true;
+                            var attached = await AttachCoreAsync(endpoint, id, process.Id, deadline.Token, projectPath, ready.Epoch,
+                                replaceExited: replacing is not null, child: watcher);
                             RetireLaunch(id);
                             return attached;
                         }
@@ -184,7 +231,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             {
                 throw new AutomationException("startup_timeout", $"KiCad did not become ready; it was not killed. Inspect {runtime} and reattach instance {id} at {endpoint} if it recovers.");
             }
-            finally { process.Dispose(); } // Dispose never kills the native process.
+            finally { if (!observed) process.Dispose(); } // Dispose never kills the native process.
         }
         finally
         {
@@ -194,9 +241,10 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         }
     }
 
-    private async Task<InstanceRecord> AttachCoreAsync(string endpoint, string expectedId, int? processId,
+    private async Task<InstanceRegistration> AttachCoreAsync(string endpoint, string expectedId, int? processId,
                                                        CancellationToken cancellationToken,
-                                                       string? expectedProject = null, string? expectedEpoch = null)
+                                                       string? expectedProject = null, string? expectedEpoch = null,
+                                                       bool replaceExited = false, InstanceProcessObserver? child = null)
     {
         var client = new NativeClient(transport, endpoint, expectedEpoch);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
@@ -205,11 +253,37 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         if ((expectedProject is not null && session.ProjectPath != expectedProject)
             || (expectedEpoch is not null && session.Epoch != expectedEpoch))
             throw new AutomationException("instance_changed", "The native session no longer matches the requested project or recorded epoch.");
+        // KiCad reports its own process ID in the handshake; it is recorded once it is shown to run this instance.
+        // A process this server started is known by its child ID.
+        if (child is null && session.ProcessId is > 0 and <= int.MaxValue && ProcessIdentity.RunsInstance((int)session.ProcessId, expectedId))
+            processId = (int)session.ProcessId;
+        // A different process under a known identity is adopted only as the replacement of a
+        // registration whose process is proven to have ended; anything else stays a changed identity.
+        InstanceRecord? previous = null;
         if (connections.TryGetValue(expectedId, out var existing)
             && (existing.Record.Epoch != session.Epoch || existing.Record.ProjectPath != session.ProjectPath || existing.Record.Endpoint != endpoint))
-            throw new AutomationException("instance_changed", "An attached identity cannot be rebound to another process, project or endpoint.");
+        {
+            if (!replaceExited || existing.Record.Epoch == session.Epoch || existing.Record.ProjectPath != session.ProjectPath)
+                throw new AutomationException("instance_changed", "An attached identity cannot be rebound to another process, project or endpoint.");
+            previous = existing.Record;
+        }
         if (connections.Values.Any(r => r.Record.ProjectPath == session.ProjectPath && r.Record.InstanceId != expectedId))
             throw new AutomationException("project_owned", "A different instance already owns this project's registry entry.");
+        if (previous is null && existing is null && File.Exists(Path.Combine(directory, expectedId + ".json")))
+        {
+            var saved = await ReadSavedAsync(expectedId, cancellationToken);
+            if (saved.Epoch != session.Epoch && replaceExited && saved.ProjectPath == session.ProjectPath) previous = saved;
+        }
+        if (previous is not null)
+        {
+            var exit = await ProvenExitAsync(previous, existing?.Process, cancellationToken)
+                ?? throw new AutomationException("instance_changed", $"Instance {expectedId} is registered to another KiCad process "
+                    + $"(epoch {previous.Epoch}) that this server cannot prove has ended. Inspect that process; a replacement is adopted only after its exit.");
+            var observer = child ?? Observe(expectedId, session.Epoch, processId);
+            client.Process = observer;
+            return new(await AdoptExitReplacementAsync(previous, exit, client, session, endpoint, processId, observer, cancellationToken),
+                previous, exit);
+        }
         var record = new InstanceRecord(session.InstanceId, session.ProjectPath, endpoint,
                                         session.Epoch, processId, DateTimeOffset.UtcNow);
         using var lease = await MetadataLease(cancellationToken);
@@ -220,11 +294,30 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 throw new AutomationException("instance_changed", "A saved identity requires explicit verified replacement, not ordinary attachment.");
             if (record.ProcessId is null) record = record with { ProcessId = saved.ProcessId };
         }
-        // A repeated attachment keeps the shared serialized client but records this handshake.
-        var connection = new Connection(record, existing?.Client ?? client, session.Clone());
+        // A repeated attachment keeps the shared serialized client and what it knows about the process,
+        // but records this handshake.
+        var process = existing?.Process ?? child ?? Observe(record.InstanceId, record.Epoch, record.ProcessId);
+        if (existing is null) client.Process = process;
+        var connection = new Connection(record, existing?.Client ?? client, session.Clone(), process);
         await WriteRecordAsync(record, cancellationToken);
         connections[record.InstanceId] = connection;
-        return record;
+        return new(record, null, null);
+    }
+
+    // The most recently verified saved registration of a project that no attached instance holds.
+    // Unreadable records are skipped here; reattaching them reports why.
+    private async Task<InstanceRecord?> LatestSavedAsync(string projectPath, CancellationToken token)
+    {
+        if (!Directory.Exists(directory)) return null;
+        InstanceRecord? latest = null;
+        foreach (string file in Directory.EnumerateFiles(directory, "*.json"))
+        {
+            InstanceRecord saved;
+            try { saved = await ReadSavedAsync(Path.GetFileNameWithoutExtension(file), token); }
+            catch (AutomationException) { continue; }
+            if (saved.ProjectPath == projectPath && (latest is null || saved.VerifiedAt > latest.VerifiedAt)) latest = saved;
+        }
+        return latest;
     }
 
     // KiCad logs why a start failed ("Error: ..." lines in its automation log, for example a

@@ -11,7 +11,14 @@ using ModelContextProtocol.Protocol;
 
 namespace KiCad.Automation.Mcp;
 
-public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt);
+public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt,
+                                  string? Epoch = null, int? ProcessId = null, string? ProcessState = null,
+                                  InstanceExitView? Exit = null, InstanceReplacementView? Replaces = null);
+// How a KiCad process ended, as this server proved it (see InstanceExit).
+public sealed record InstanceExitView(string Epoch, int ProcessId, int? ExitCode, int? Signal, string? SignalName,
+                                      string Evidence, DateTimeOffset ObservedAt, string Description);
+// The registration a started or attached KiCad continues, because its process is proven to have ended.
+public sealed record InstanceReplacementView(string Epoch, int? ProcessId, string Endpoint, InstanceExitView Exit);
 // NativeCapabilities keeps its original meaning: the named feature contracts of the handshake.
 public sealed record InspectedInstance(string InstanceId, string ProjectPath, string NativeVersion,
                                       IReadOnlyList<string> NativeCapabilities, string NativeRequestCoverage,
@@ -23,10 +30,13 @@ public sealed record InstanceCapability(string Name, string Scope, string Source
 public sealed class InstanceTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_instances_list", ReadOnly = true),
-     Description("List instances attached to this MCP server. LastVerifiedAt is historical, not a claim that the process is still running."),
+     Description("List instances attached to this MCP server with their process epoch, process ID and processState, without contacting KiCad. processState is 'running' when this server observes the same KiCad process still running (one it started, or on Linux one whose process ID and start time it recorded), 'exited' when the process is proven to have ended, with exit: its exit status and, when a signal ended it, the signal (for example exit status 137 from signal 9, SIGKILL; a process this server did not start has evidence 'process-absent' and no exit status), or 'unverified' when this server cannot observe the process. Tools called for an exited instance fail with instance_exited. LastVerifiedAt is historical; a running process can still be busy or not answering."),
      KiCadCapability("service", "compiled-mcp", "explicit instance ID"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
-    public IReadOnlyList<InstanceView> List() => registry.List().Select(View).ToArray();
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "NativeSessionTests.NativeCrashKeepsXmlAndRegistryTruthful", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public IReadOnlyList<InstanceView> List() => registry.Statuses().Select(status => View(status.Instance) with
+    {
+        ProcessState = status.State, Exit = status.Exit is null ? null : ExitView(status.Exit)
+    }).ToArray();
 
     [McpServerTool(Name = "kicad_instance_saved_sessions", ReadOnly = true),
      Description("List saved connection records, including after MCP restarts. These are historical verification records, not live process status or attached sessions. Reattach the chosen instance to verify its identity and recover it."),
@@ -44,27 +54,28 @@ public sealed class InstanceTools(InstanceRegistry registry)
         InstanceToolBoundary.Run(() => registry.PendingLaunchesAsync(cancellationToken));
 
     [McpServerTool(Name = "kicad_instance_start"),
-     Description("Start a separate native KiCad automation process for an existing .kicad_pro. Requires the matching fork executable; preserves the process when MCP disconnects."),
+     Description("Start a separate native KiCad automation process for an existing .kicad_pro. Requires the matching fork executable; preserves the process when MCP disconnects. A project whose attached or saved KiCad may still run is refused (project_owned). When that KiCad is proven to have ended (processState 'exited' in kicad_instances_list, or its recorded process no longer exists), the new process continues the same instance ID with a new epoch, and replaces names the ended registration and how it ended, so recovery records of that instance can be reattached to it."),
      KiCadCapability("service", "compiled-mcp plus native-process", "absolute matching executable, existing .kicad_pro path"),
-     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeCrashKeepsXmlAndRegistryTruthful", "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public async Task<CallToolResult> Start(string executable, string projectPath, CancellationToken cancellationToken,
         [Description("Use the native software-rendering path. Defaults to enabled on Linux and native preferences on Mac.")]
         bool? softwareRendering = null) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.StartAsync(executable, projectPath, cancellationToken, softwareRendering)));
+        await InstanceToolBoundary.Run(async () =>
+            Registered(await registry.StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering)));
 
     [McpServerTool(Name = "kicad_instance_attach"),
-     Description("Attach an explicitly identified automation instance at an absolute ipc:/// endpoint. Verifies the expected UUID before recording the connection."),
+     Description("Attach an explicitly identified automation instance at an absolute ipc:/// endpoint. Verifies the expected UUID before recording the connection, and observes the process KiCad names in its handshake when that process runs this instance (processState). A different KiCad process under an instance ID this server knows is refused (instance_changed) unless the registered process is proven to have ended; the new process then continues that instance ID with its own epoch, and replaces names the ended registration and how it ended."),
      KiCadCapability("service", "compiled-mcp plus native-api", "absolute ipc endpoint, expected instance ID"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "NativeSessionTests.NativeCrashKeepsXmlAndRegistryTruthful")]
     public async Task<CallToolResult> Attach(string endpoint, string expectedInstanceId, CancellationToken cancellationToken) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.AttachAsync(endpoint, expectedInstanceId, cancellationToken)));
+        await InstanceToolBoundary.Run(async () => Registered(await registry.AttachInstanceAsync(endpoint, expectedInstanceId, cancellationToken)));
 
     [McpServerTool(Name = "kicad_instance_reattach"),
      Description("Recover a saved session or an unverified interrupted launch after an MCP restart. Verifies the instance and project, and checks the previous process epoch when one was recorded. Never restarts or kills KiCad."),
      KiCadCapability("service", "compiled-mcp plus native-api", "saved instance ID, recorded process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public async Task<CallToolResult> Reattach(string instanceId, CancellationToken cancellationToken) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.ReattachAsync(instanceId, cancellationToken)));
+        await InstanceToolBoundary.Run(async () => Registered(new(await registry.ReattachAsync(instanceId, cancellationToken), null, null)));
 
     [McpServerTool(Name = "kicad_instance_inspect", ReadOnly = true),
      Description("Verify a live native instance and return its actual build version, its advertised native capabilities (named feature contracts such as session.info, each advertised only when the whole feature works) and nativeRequests: the request types it dispatches to registered handlers right now. nativeRequestCoverage is 'unknown' and nativeRequests null for a KiCad built before that list existed."),
@@ -145,7 +156,23 @@ public sealed class InstanceTools(InstanceRegistry registry)
         return JsonFormatter.Default.Format(response.Document);
     });
 
-    private static InstanceView View(InstanceRecord record) => new(record.InstanceId, record.ProjectPath, record.VerifiedAt);
+    private static InstanceView View(InstanceRecord record) => new(record.InstanceId, record.ProjectPath, record.VerifiedAt,
+        record.Epoch, record.ProcessId);
+
+    // A verified registration with what this server can prove about its process right now.
+    private InstanceView Registered(InstanceRegistration registration)
+    {
+        var status = registry.Statuses().SingleOrDefault(s => s.Instance.InstanceId == registration.Instance.InstanceId);
+        return View(registration.Instance) with
+        {
+            ProcessState = status?.State, Exit = status?.Exit is { } ended ? ExitView(ended) : null,
+            Replaces = registration.Replaced is { } replaced && registration.ReplacedExit is { } exit
+                ? new InstanceReplacementView(replaced.Epoch, replaced.ProcessId, replaced.Endpoint, ExitView(exit)) : null
+        };
+    }
+
+    private static InstanceExitView ExitView(InstanceExit exit) => new(exit.Epoch, exit.ProcessId, exit.ExitCode, exit.Signal,
+        exit.SignalName, exit.Evidence, exit.ObservedAt, "KiCad " + exit.Describe() + ".");
 
     [McpServerTool(Name = "kicad_schematic_create"),
      Description("Create an unsaved empty root schematic for an explicitly attached instance if its project-root .kicad_sch is missing. Existing files and already open documents are returned without replacement. Requires an absolute path belonging to that instance's project. Save explicitly to persist the new schematic. Does not reconstruct a design or create another project."),

@@ -110,6 +110,9 @@ public static class CapabilityCatalog
         ("agent-client-qualification", "qualification",
             "Operation through an actual agent client is verified only for the Linux Codex fixture. The Mac-local and Mac-to-VPS modes and other agent clients are not qualified.",
             ["p8bf96f1c4b709a28", "p9bdc0986708bd9b2"]),
+        ("exited-operation-release", "schematic-design",
+            "When KiCad ends while an XML synchronization is applying its edit or saving it, the design recovery record keeps that operation exactly, and the operation is never replayed on another KiCad process: reattaching the record and resuming the operation are refused. Releasing such an operation so that a restarted KiCad can resume the design from its saved files is unfinished; a KiCad that ends while synchronization is idle resumes normally.",
+            ["pcb5513dd69eda714"]),
         ("platform-qualification", "qualification",
             "The KiCad design workflow through this MCP server (native editing, synchronization and capability discovery) is verified only on Linux, where this build's native editing journeys run. Installed Mac (Apple Silicon and Intel) and Windows packages are not qualified for it; their separate startup, packaged-MCP, installer and update-helper runs do not qualify this workflow, and new Mac and Windows builds are on hold until the XML editing workflow is complete.",
             ["kicad-hold-mac-windows-until-xml-editor", "p9bdc0986708bd9b2", "p4d6c4ee22fd8078d", "p67f11d25763f499e"])

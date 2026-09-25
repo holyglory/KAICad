@@ -101,6 +101,32 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_apply_checked_batch");
             CollectionAssert.Contains(names, "kicad_schematic_checked_state");
             CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
+            // A checked object batch that is unreadable or names no attached KiCad is refused before anything is sent, and
+            // the agent is told so; NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo drives the
+            // same tools against a rendered editor.
+            string checkedBatch = SchematicJson.Formatter.Format(new Protocol.CheckedSchematicBatch
+            {
+                Batch = new() { OperationId = Guid.NewGuid().ToString("D"), Operations = { new Protocol.SchematicItemOperation
+                    { Create = Any.Pack(new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") } }) } } }
+            });
+            foreach (var (requestId, tool, requestJson, code) in new[]
+            {
+                (9090, "kicad_schematic_apply_checked_batch", "{\"batch\":", "invalid_checked_batch"),
+                (9091, "kicad_schematic_apply_checked_batch", checkedBatch, "unknown_instance"),
+                (9092, "kicad_schematic_checked_batch_receipt", checkedBatch, "unknown_instance")
+            })
+            {
+                var refused = (await Request(requestId, "tools/call", new { name = tool,
+                    arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson } })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                var refusal = refused.GetProperty("structuredContent");
+                Assert.AreEqual(code, refusal.GetProperty("errorCode").GetString(), refused.GetRawText());
+                Assert.IsFalse(refusal.GetProperty("mutationSubmitted").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual("not_submitted", refusal.GetProperty("outcome").GetString(), refused.GetRawText());
+            }
+            StringAssert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_apply_checked_batch").GetProperty("description").GetString(),
+                "\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\"", "The tool shows an agent how to write a typed object.");
             CollectionAssert.Contains(names, "kicad_document_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_state");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");

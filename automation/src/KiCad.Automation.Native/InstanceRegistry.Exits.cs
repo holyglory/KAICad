@@ -280,6 +280,27 @@ internal static class ProcessIdentity
     }
 }
 
+/// <summary>The exit of one KiCad process epoch as an instance registry proved it (InstanceRegistry.ProvenExitAsync):
+/// this server's own observer of that process saw it end, or a saved registration of that epoch written on this
+/// machine, in the same boot and process ID namespace, shows the process is gone. Nothing else creates one: the
+/// constructor is private and ProveAsync returns one only when the registry proves the exit, so a caller cannot hand
+/// the recovery store an exit it made up (DesignRecoveryStore.ReleaseExitedOperation takes only this type).</summary>
+public sealed class ProvenInstanceExit
+{
+    private ProvenInstanceExit(InstanceExit exit) => Exit = exit;
+
+    public InstanceExit Exit { get; }
+
+    /// <summary>The registry's proof that the process serving <paramref name="epoch"/> of the instance ended, or null
+    /// when the registry cannot prove it (the process may still run, possibly stopped, or cannot be observed).</summary>
+    public static async Task<ProvenInstanceExit?> ProveAsync(InstanceRegistry registry, string instanceId, string epoch,
+        CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(registry);
+        return await registry.ProvenExitAsync(instanceId, epoch, token) is { } exit ? new(exit) : null;
+    }
+}
+
 public sealed record InstanceProcessStatus(InstanceRecord Instance, string State, InstanceExit? Exit)
 {
     public const string Running = "running", Exited = "exited", Unverified = "unverified";

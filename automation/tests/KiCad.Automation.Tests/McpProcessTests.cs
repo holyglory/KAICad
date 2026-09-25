@@ -405,18 +405,26 @@ public sealed class McpProcessTests
                 Assert.AreEqual("operation_exit_unproven", Code(unproven), unproven.GetRawText());
                 StringAssert.Contains(unproven.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), heldEpoch);
                 var live = ProcessIdentity.Record(Environment.ProcessId)!;
-                async Task Registration(ProcessStartIdentity identity) => await File.WriteAllTextAsync(Path.Combine(state, heldInstance + ".json"),
+                async Task Registration(ProcessStartIdentity identity, string? registry = null, string? epoch = null) => await File.WriteAllTextAsync(
+                    Path.Combine(registry ?? state, heldInstance + ".json"),
                     JsonSerializer.Serialize(new InstanceRecord(heldInstance, Path.Combine(state, "released-project", "fixture.kicad_pro"),
-                        NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(heldInstance), "api.sock")), heldEpoch,
+                        NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(heldInstance), "api.sock")), epoch ?? heldEpoch,
                         Environment.ProcessId, DateTimeOffset.UtcNow, identity)), timeout.Token);
                 await Registration(live with { MachineId = "0123456789abcdef0123456789abcdef", BootId = Guid.NewGuid().ToString("D") });
                 Assert.AreEqual("operation_exit_unproven", Code(await Release(4093, held.RevisionToken, heldOperation, "resume")),
                     "A registration written on another computer never proves the exit.");
-                // The recovery store itself accepts only the exit of the process epoch that holds the operation.
-                var otherProcess = new InstanceExit(heldInstance, Guid.NewGuid().ToString("D"), Environment.ProcessId, 137, 9,
-                    InstanceExit.ExitStatusEvidence, DateTimeOffset.UtcNow);
+                // The recovery store takes only an exit an instance registry proved (a ProvenInstanceExit, which nothing else
+                // creates), and only the exit of exactly the process epoch that holds the operation: here a registry proves
+                // that another epoch of the instance ended on this machine (its registration names an earlier boot).
+                string otherRegistry = Directory.CreateDirectory(Path.Combine(state, "other-epoch-registry")).FullName;
+                string otherEpoch = Guid.NewGuid().ToString("D");
+                await Registration(live with { BootId = Guid.NewGuid().ToString("D") }, otherRegistry, otherEpoch);
+                var otherProcess = await ProvenInstanceExit.ProveAsync(new InstanceRegistry(new NngTransport(), otherRegistry), heldInstance, otherEpoch,
+                    timeout.Token) ?? throw new AssertFailedException("The registry proves the other epoch's exit.");
+                Assert.AreEqual(otherEpoch, otherProcess.Exit.Epoch);
                 Assert.AreEqual("operation_exit_unproven", Assert.ThrowsExactly<AutomationException>(() =>
                     new DesignRecoveryStore(released.RecordPath).ReleaseExitedOperation(held, otherProcess)).Code);
+                Directory.Delete(otherRegistry, true);
                 CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(released.RecordPath, timeout.Token), "A refused release changes nothing.");
                 Assert.IsFalse(Directory.Exists(DesignReleasedOperations.Directory(released.RecordPath)), "A refused release keeps no receipt.");
 
@@ -452,6 +460,25 @@ public sealed class McpProcessTests
                 Assert.AreEqual("released", again.GetProperty("outcome").GetString(), again.GetRawText());
                 Assert.IsFalse(again.GetProperty("releasedNow").GetBoolean());
                 Assert.AreEqual(after.RevisionToken, new DesignRecoveryStore(released.RecordPath).Read()!.RevisionToken);
+                // Until the operation is continued the record stays on the ended KiCad's document session: a save that attaches
+                // it to another session, as kicad_design_recovery_reattach does, is refused, since the KiCad started again may
+                // hold part of the operation's result. The native journey shows the reattach tool refusing it. Only the
+                // continuation that ExitedOperationRelease journals moves the record, once; ordinary saves work again after it.
+                var store = new DesignRecoveryStore(released.RecordPath);
+                DesignRecoveryState Session(DesignRecoveryState recovery) => recovery with
+                    { NativeRevision = new(Guid.NewGuid().ToString("D"), 1), ObservedElectrical = null, HierarchyResolution = null };
+                var moved = Session(after.State);
+                var refusedReattach = Assert.ThrowsExactly<AutomationException>(() => store.Save(moved, after.RevisionToken));
+                Assert.AreEqual("released_operation_requires_continuation", refusedReattach.Code);
+                StringAssert.Contains(refusedReattach.Message, heldOperation);
+                StringAssert.Contains(refusedReattach.Message, "kicad_design_recovery_release_exited");
+                Assert.AreEqual(after.RevisionToken, store.Read()!.RevisionToken, "A refused reattachment changes nothing.");
+                var continued = store.ContinueReleasedOperation(moved, after.RevisionToken, receipt);
+                Assert.AreEqual(moved.NativeRevision, continued.State.NativeRevision);
+                Assert.AreEqual("released_operation_not_open", Assert.ThrowsExactly<AutomationException>(() =>
+                    store.ContinueReleasedOperation(Session(continued.State), continued.RevisionToken, receipt)).Code, "An operation is continued once.");
+                Assert.AreNotEqual(continued.RevisionToken, store.Save(Session(continued.State), continued.RevisionToken).RevisionToken,
+                    "Once continued, the record can be attached like any other.");
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
             }
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");

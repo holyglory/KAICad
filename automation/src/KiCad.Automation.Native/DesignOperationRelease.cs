@@ -130,6 +130,22 @@ public static class DesignReleasedOperations
         return latest;
     }
 
+    /// <summary>The receipts still open on <paramref name="state"/>: operations of this instance released while the
+    /// record sat on the document session it still sits on. The release does not change that session and only the
+    /// continuation moves the record off it (KiCad gives every loaded document a new session), so such an operation
+    /// has not been continued yet. An unreadable receipt fails the check rather than being skipped.</summary>
+    internal static IReadOnlyList<DesignReleasedOperation> OpenOn(string recoveryPath, DesignRecoveryState state)
+    {
+        string folder = Directory(recoveryPath);
+        if (!System.IO.Directory.Exists(folder)) return [];
+        return System.IO.Directory.EnumerateFiles(folder, "*.json").Order(StringComparer.Ordinal).Select(Read)
+            .Where(receipt => receipt.InstanceId == state.InstanceId && receipt.NativeRevision.Epoch == state.NativeRevision.Epoch)
+            .ToArray();
+    }
+
+    internal static string Describe(DesignReleasedOperation receipt) =>
+        receipt.OperationId?.ToString("D") ?? "(native edit " + receipt.NativeOperationId + ")";
+
     public static DesignReleasedOperation Read(string path)
     {
         try
@@ -197,7 +213,7 @@ public static class ExitedOperationRelease
 
         var latest = DesignReleasedOperations.Latest(store.StatePath, operationId, instance);
         Guid? rollbackId = latest is { } released ? RollbackOperation(released.Receipt) : null;
-        InstanceExit? exit = null;
+        ProvenInstanceExit? exit = null;
         if (saved.State.HasPendingWork)
         {
             Guid? pending = saved.State.PendingPublication?.OperationId ?? saved.State.PendingLayout?.OperationId;
@@ -212,7 +228,7 @@ public static class ExitedOperationRelease
             if (epoch is null)
                 throw Error("operation_process_unknown", "The pending operation does not record which KiCad process holds it; inspect it with kicad_design_recovery_plan instead.");
             // Proven before anything changes, and without contacting KiCad (which may be stopped).
-            exit = await registry.ProvenExitAsync(instanceId, epoch, token)
+            exit = await ProvenInstanceExit.ProveAsync(registry, instanceId, epoch, token)
                 ?? throw Error("operation_exit_unproven", $"Operation {operationId:D} belongs to KiCad process epoch {epoch}, and this server cannot prove that process has ended: it may still be running (possibly stopped), or this server cannot observe it, for example because it was attached from another process ID namespace or its registration was written on another computer. Nothing was released. Stop that KiCad, or wait until it has ended, then call again.");
         }
         else if (latest is { } done && (saved.State.LastSynchronization?.OperationId == operationId || saved.State.LastSynchronization?.OperationId == rollbackId))
@@ -233,10 +249,18 @@ public static class ExitedOperationRelease
         if (!releasedNow && DesignReleasedOperation.BaselineDigest(saved.State) != receipt.BaselineSha256)
             throw Error("released_operation_superseded", "The design was synchronized again after this operation was released; its candidate no longer applies. Plan the XML afresh.");
 
+        // Only the continuation moves the record off the document session the operation was released from. A resumed or
+        // rolled-back continuation ends in its own completion (handled above); one that journaled nothing was a re-plan.
+        if (!releasedNow && saved.State.NativeRevision.Epoch != receipt.NativeRevision.Epoch)
+            return receipt.PendingPublication is null
+                ? new ExitedOperationReleaseResult(saved, receipt, receiptPath, false, "replan", null, null, [], 0,
+                    "The operation was continued already: nothing of it had reached KiCad's files, so the record was attached to the KiCad started again and the next synchronization plans the XML again from the baseline.")
+                : throw Error("released_operation_superseded", "The design was synchronized again after this operation was continued; nothing is left to release.");
+
         var client = LiveClient(registry, instanceId);
         if (client is null || client.Epoch == receipt.ProcessEpoch)
             return new(saved, receipt, receiptPath, releasedNow, "released", null, null, [], 0,
-                "Start KiCad again for this project (kicad_instance_start, or attach a KiCad started with this instance ID), then call this tool again with the returned recovery revision token to resume or roll back.");
+                "Start KiCad again for this project (kicad_instance_start, or attach a KiCad started with this instance ID), then call this tool again with the returned recovery revision token to resume or roll back. Until then the record stays on the ended KiCad's session: an ordinary reattachment is refused (released_operation_requires_continuation), because the KiCad started again may hold part of the operation's result.");
 
         var live = await Capture(client, saved.State, token);
         var liveData = live.Electrical.Hierarchy.Data;
@@ -252,21 +276,23 @@ public static class ExitedOperationRelease
         try { xml = await File.ReadAllBytesAsync(designPath, token); }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
         { throw Error("design_file_changed", $"The XML file {designPath} no longer exists; restore it before continuing."); }
+        // The record attached to the running KiCad; saved together with the continuation in one step, so no record
+        // ever sits on the new session without it.
+        var attached = await Attached(client, saved, live, token);
 
         if (continuation == ExitedOperationContinuation.RollBack)
         {
             if (!xml.AsSpan().SequenceEqual(state.DesiredFileBytes))
-                throw Error("design_file_changed", "The XML file differs from the version the recovery record last read; let it catch up (or start automatic synchronization) before rolling back.");
-            saved = await Reattach(store, client, saved, live, token);
+                throw Error("design_file_changed", $"The XML file {designPath} is not the version the recovery record holds (SHA-256 {receipt.DesiredSha256}): it changed after the recovery record last read it. Rolling back would overwrite that change, so nothing was changed. Put that version of the XML back, call again to roll back, then make the change again.");
             var restore = SchematicHierarchyDelta.Plan(liveData, baseline.Schematic, token);
             byte[] restored = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, state.KnowledgeLibraries));
             var intent = DesignPublicationIntent.Create(designPath, xml, restored, RollbackOperation(receipt), saved.RevisionToken);
-            saved = store.Save(saved.State with
+            saved = store.ContinueReleasedOperation(attached with
             {
                 PendingMutation = restore.Count == 0 ? null : Batch(live.State, state.OriginId,
                     $"Roll back synchronization {operationId:D} left by KiCad process epoch {receipt.ProcessEpoch}", restore),
                 PendingNativeState = live.State.Clone(), PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = intent
-            }, saved.RevisionToken);
+            }, saved.RevisionToken, receipt);
             return new(saved, receipt, receiptPath, releasedNow, "roll-back-pending", client.Epoch, intent.OperationId, sheets, restore.Count,
                 CompleteStep(intent) + " It removes the operation's partial result from KiCad, saves those sheets and publishes the last synchronized design; the XML file it replaces is kept as the previous version.");
         }
@@ -275,25 +301,24 @@ public static class ExitedOperationRelease
         {
             if (sheets.Count != 0)
                 throw Error("released_operation_not_resumable", "The operation had no final XML candidate yet (it was still resolving its native layout), so its result cannot be resumed; roll it back instead.");
-            saved = await Reattach(store, client, saved, live, token);
+            saved = store.ContinueReleasedOperation(attached, saved.RevisionToken, receipt);
             return new(saved, receipt, receiptPath, releasedNow, "replan", client.Epoch, null, [], 0,
-                "Nothing of the operation reached KiCad's files. The next synchronization plans the XML again from the baseline.");
+                "Nothing of the operation reached KiCad's files. The record is attached to the KiCad started again, and the next synchronization plans the XML again from the baseline.");
         }
         if (resumed.Phase != DesignPublicationPhase.Prepared)
-            throw Error("released_publication_started", $"The operation's XML publication had reached phase {resumed.Phase}; inspect the XML file and the recovery record before continuing.");
+            throw Error("released_publication_started", $"The operation's XML publication had reached phase {resumed.Phase} when KiCad ended; this tool resumes or rolls back only an operation whose XML was not yet being published. Nothing was changed.");
         if (!xml.AsSpan().SequenceEqual(resumed.ExpectedFileBytes) || !state.DesiredFileBytes.AsSpan().SequenceEqual(resumed.ExpectedFileBytes))
             throw Error("released_operation_input_changed", "The XML changed after the operation started, so its candidate no longer matches it; roll the operation back instead.");
-        saved = await Reattach(store, client, saved, live, token);
         // Only what KiCad does not hold yet: sheets that already hold the operation's result are left as they are.
         var remainder = SchematicHierarchyDelta.Plan(liveData, candidate!.Schematic, token);
         var continued = DesignPublicationIntent.Create(resumed.DesignPath, resumed.ExpectedFileBytes,
             Encoding.UTF8.GetBytes(SchematicDesignXml.Write(candidate, state.KnowledgeLibraries)), resumed.OperationId, resumed.RequestedRecoveryRevisionToken);
-        saved = store.Save(saved.State with
+        saved = store.ContinueReleasedOperation(attached with
         {
             PendingMutation = remainder.Count == 0 ? null : Batch(live.State, state.OriginId,
                 $"Resume synchronization {operationId:D} left by KiCad process epoch {receipt.ProcessEpoch}", remainder),
             PendingNativeState = live.State.Clone(), PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = continued
-        }, saved.RevisionToken);
+        }, saved.RevisionToken, receipt);
         return new(saved, receipt, receiptPath, releasedNow, "resume-pending", client.Epoch, continued.OperationId, sheets, remainder.Count,
             CompleteStep(continued) + " Only the part KiCad does not hold yet is applied; its XML candidate records the sheet files as this KiCad loaded them.");
     }
@@ -373,14 +398,25 @@ public static class ExitedOperationRelease
         return found.Count == 0 ? "" : " Differing sheet settings: " + string.Join("; ", found) + ".";
     }
 
-    private static async Task<StoredDesignRecovery> Reattach(DesignRecoveryStore store, NativeClient client, StoredDesignRecovery saved,
-        CheckedSchematicState live, CancellationToken token)
+    // The record as attached to the running KiCad: the same checks as kicad_design_recovery_reattach (the KiCad names
+    // the record's instance; the observation is of its root, in its process epoch, and never regresses within a
+    // session), without saving it. Pending requests are never carried over and the baseline does not move.
+    private static async Task<DesignRecoveryState> Attached(NativeClient client, StoredDesignRecovery saved, CheckedSchematicState live,
+        CancellationToken token)
     {
-        var reattached = await DesignRecoveryReattachment.ReattachAsync(store, client, saved.RevisionToken, live.State.Revision.Epoch, token);
-        if (reattached.State.NativeRevision.Epoch != live.State.Revision.Epoch || reattached.State.NativeRevision.Sequence != live.State.Revision.Sequence
-            || !Equals(reattached.State.ObservedElectrical, live.Electrical))
-            throw Error("native_changed_during_release", "KiCad changed while the record was reattached to it; call again to continue.");
-        return reattached;
+        var session = await client.HandshakeAsync(token);
+        if (session.InstanceId != saved.State.InstanceId.ToString("D"))
+            throw Error("recovery_instance_mismatch", "The running KiCad is not the instance recorded by this design.");
+        var revision = live.State.Revision;
+        if (revision.Epoch == saved.State.NativeRevision.Epoch && revision.Sequence < saved.State.NativeRevision.Sequence)
+            throw Error("invalid_recovery_revision", "The native document session regressed.");
+        _ = SchematicDataXml.Read(SchematicDataXml.Write(live.Electrical.Hierarchy.Data));
+        return saved.State with
+        {
+            Observed = live.Electrical.Hierarchy.Data.Clone(), ObservedElectrical = live.Electrical.Clone(),
+            NativeRevision = new(revision.Epoch, revision.Sequence), TrackingComplete = live.Electrical.Hierarchy.TrackingComplete,
+            HierarchyResolution = null, OwnershipResolution = null
+        };
     }
 
     private static NativeClient? LiveClient(InstanceRegistry registry, string instanceId)

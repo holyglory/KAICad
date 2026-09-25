@@ -54,16 +54,19 @@ public sealed partial class NativeSessionTests
 
     // The same crash fixture, for the operations the mid-apply kills leave pending (decision nd2e75380e7f8aa7f). While the
     // killed KiCad is only held, kicad_design_recovery_release_exited refuses: its exit is not proven. After the kill it
-    // releases the operation, keeping a receipt of the whole operation, reattaches the record to the KiCad started again,
-    // recognises what that KiCad loaded sheet by sheet, and journals the continuation, which automatic synchronization
-    // then completes:
+    // releases the operation, keeping a receipt of the whole operation. Once KiCad runs again it recognises what that
+    // KiCad loaded sheet by sheet, and in one step attaches the record to it and journals the continuation, which then
+    // completes like any pending synchronization:
     //   1. killed right after the commit: released before KiCad runs again (nothing continues yet), then resumed once it
-    //      runs; the released operation itself completes, and every unit is placed exactly once;
-    //   2. killed during the save after the root and PSU sheets were replaced: released and resumed in one call; only the
-    //      CPU sheet's part is applied, so U3 and U4, which KiCad loaded from the replaced PSU sheet, are not doubled;
-    //   3. killed the same way, then rolled back: U3 and U4 are removed from the replaced PSU sheet, KiCad and the XML
-    //      return to the last synchronized design, the edit is kept as the previous XML, and making the edit again
-    //      applies it once.
+    //      runs; automatic synchronization completes the released operation itself, and every unit is placed exactly once;
+    //   2. killed during the save after the root and PSU sheets were replaced: released and resumed in one call; the agent
+    //      completes it with kicad_design_sync_apply; only the CPU sheet's part is applied, so U3 and U4, which KiCad loaded
+    //      from the replaced PSU sheet, are not doubled;
+    //   3. killed the same way and released before KiCad runs again: while the KiCad started again holds U3 and U4 from
+    //      the replaced PSU sheet, an ordinary kicad_design_recovery_reattach is refused and changes nothing, so the
+    //      partial result can never be synchronized as a user edit; then rolled back: U3 and U4 are removed, the XML is
+    //      the synchronized baseline the record holds and the same design as the XML published before the edit, the edit
+    //      is kept as the previous XML, and making the edit again applies it once.
     // The baseline, desired XML and last completed synchronization are unchanged by every release itself.
     private static Task VerifyPsuCpuExitedOperationRelease(NativeClient client, PsuCpuNativeContext context, Process native,
         int processId, string display, string evidence, string instanceId, CancellationToken token) =>
@@ -246,24 +249,40 @@ public sealed partial class NativeSessionTests
             RequirePartial(second, resumedSave, "during-save");
             var saveCandidate = RequireResumed(second, kicad, save.Held, resumedSave, "during-save");
             RequirePlaced(await Capture(kicad), 6, "during-save: the release itself applies nothing");
-            second.Session = await StartSynchronization(second, kicad, "resuming the operation left by the save kill");
+            // The agent completes the continuation itself, with the operation ID and request token the release returned.
+            var applied = await mcp.Tool("kicad_design_sync_apply", new { instanceId = kicad.Id, recoveryPath = second.Store.StatePath,
+                designPath = second.Design, expectedRevisionToken = resumedSave.GetProperty("requestedRecoveryRevisionToken").GetString(),
+                operationId = resumedSave.GetProperty("continuationOperationId").GetString() });
+            RequireToolSuccess(applied);
+            var appliedView = applied.GetProperty("structuredContent").Clone();
+            Assert.AreEqual(save.Held.State.PendingPublication!.OperationId.ToString("D"), appliedView.GetProperty("operationId").GetString(), appliedView.GetRawText());
+            Assert.IsTrue(appliedView.GetProperty("synchronizationCommitted").GetBoolean(), appliedView.GetRawText());
+            Assert.IsTrue(appliedView.GetProperty("nativeMutationCommitted").GetBoolean(), "U5 and U6 were applied on the running KiCad.");
+            Assert.IsTrue(appliedView.GetProperty("nativeFilesSaved").GetBoolean(), appliedView.GetRawText());
+            Assert.IsFalse(appliedView.GetProperty("replayed").GetBoolean(), appliedView.GetRawText());
+            Assert.AreEqual(Sha(saveCandidate), appliedView.GetProperty("designFileSha256").GetString(), "It published the continued candidate.");
             // U3 and U4 came from the replaced PSU sheet; only U5 and U6 were added: every unit exactly once.
-            RequireCompleted(second, save.Held.State.PendingPublication!.OperationId, saveCandidate, await Capture(kicad), 8, "during-save resumed");
+            RequireCompleted(second, save.Held.State.PendingPublication.OperationId, saveCandidate, await Capture(kicad), 8, "during-save resumed");
+            Assert.IsFalse((await Capture(kicad)).State.NativeContentDirty, "during-save: the completed sheets are saved.");
             Assert.AreEqual("completed", (await Repeat(second, save.Held, "resume")).GetProperty("outcome").GetString());
             cases.Add(new { moment = "during-checked-save", operationId = save.Held.State.PendingPublication.OperationId,
-                killedEpoch = killed.Epoch, exit = save.Exit, stoppedAt = save.StoppedAt, resumed = resumedSave,
+                killedEpoch = killed.Epoch, exit = save.Exit, stoppedAt = save.StoppedAt, resumed = resumedSave, completedBy = appliedView,
                 completedOperation = second.Store.Read()!.State.LastSynchronization!.OperationId, placements = Expected(8).Length });
 
-            // ---- Third copy: killed during the save the same way; rolled back -------------------------------------------
+            // ---- Third copy: killed during the save the same way; released, reattachment refused, rolled back ----------
             var third = await Prepare("third");
             kicad = third.KiCad;
             await ApplyEdit(third, kicad, 4, "J1, U1, R1 and U2");
+            // The XML published by the last synchronization before the edit, and the synchronized design the record holds.
+            byte[] synchronizedXml = await File.ReadAllBytesAsync(third.Design, token);
             var rolled = await KillDuringSave(third, kicad, 8, "roll-back-during-save");
             killed = kicad;
             await RequireKilledOperation(third, kicad, rolled.Held, rolled.Edit, null, "roll-back-during-save");
             await StopSynchronization(kicad, third.Session);
+            var releasedRollback = await Release(third, killed, rolled.Held, "roll-back", null, "roll-back, before KiCad runs again");
             kicad = await Start(third, "after the save kill to roll back", killed);
             RequirePlaced(await Capture(kicad), 6, "fresh KiCad after the save kill to roll back");
+            var refusedReattach = await RequireReattachRefused(third, kicad, "roll-back");
             var rollback = await Release(third, killed, rolled.Held, "roll-back", kicad, "roll-back");
             Assert.AreEqual("roll-back-pending", rollback.GetProperty("outcome").GetString(), rollback.GetRawText());
             RequirePartial(third, rollback, "roll-back");
@@ -287,7 +306,16 @@ public sealed partial class NativeSessionTests
                 "The saved PSU sheet no longer holds the operation's U3 and U4.");
             var restored = third.Store.Read()!;
             Assert.AreEqual(rollbackId, restored.State.LastSynchronization!.OperationId, "The roll-back completed.");
-            CollectionAssert.AreEqual(restore.CandidateFileBytes, await File.ReadAllBytesAsync(third.Design, token), "The XML is the last synchronized design.");
+            byte[] rolledXml = await File.ReadAllBytesAsync(third.Design, token);
+            CollectionAssert.AreEqual(restore.CandidateFileBytes, rolledXml, "The XML is the roll-back's candidate.");
+            // The last synchronized design: exactly the baseline the record held when KiCad was killed (apart from the
+            // sheet files' load-format version, which the KiCad started again read anew), and the same design as the XML
+            // that synchronization published: every part but the native sheets byte for byte, and no native object differs.
+            // That XML is not byte-identical: it kept the synchronization's candidate sheets, while the baseline committed
+            // with it records the sheets as KiCad reported them after saving (the evidence names the first difference).
+            Assert.AreEqual(WithoutLoadProvenance(Encoding.UTF8.GetBytes(SchematicDesignXml.Write(rolled.Held.State.Baseline, []))),
+                WithoutLoadProvenance(rolledXml), "The XML is exactly the synchronized baseline the record held.");
+            RequireSameDesign(synchronizedXml, rolledXml, "rolled back: the XML published before the edit");
             RequirePublished(third, "rolled back");
             // The XML the roll-back replaced, with the edit that started the operation, is kept in the design's sync history.
             var kept = RetainedXmlHistory.Inspect(restored.State.LastSynchronization);
@@ -298,7 +326,11 @@ public sealed partial class NativeSessionTests
             // Making the edit again applies it once, from the restored design.
             await ApplyEdit(third, kicad, 8, "all eight components again after the roll-back");
             cases.Add(new { moment = "roll-back-during-checked-save", operationId = rolled.Held.State.PendingPublication.OperationId,
-                killedEpoch = killed.Epoch, exit = rolled.Exit, rolledBack = rollback, rollbackOperation = rollbackId, previousXml = previous,
+                killedEpoch = killed.Epoch, exit = rolled.Exit, releasedBeforeRestart = releasedRollback, ordinaryReattach = refusedReattach,
+                rolledBack = rollback, rollbackOperation = rollbackId, previousXml = previous,
+                rolledBackXmlSha256 = Sha(rolledXml), synchronizedXmlSha256 = Sha(synchronizedXml),
+                byteIdenticalApartFromLoadFormat = WithoutLoadProvenance(synchronizedXml) == WithoutLoadProvenance(rolledXml),
+                firstDifferenceFromPublished = FirstDifference(WithoutLoadProvenance(synchronizedXml), WithoutLoadProvenance(rolledXml)),
                 appliedAgainBy = third.Store.Read()!.State.LastSynchronization!.OperationId, placements = Expected(8).Length });
         }
 
@@ -497,7 +529,6 @@ public sealed partial class NativeSessionTests
         // counts it as unchanged: a replaced file is one whose content differs from the version the save started from.
         void RequirePartial(CrashCopy copy, JsonElement view, string moment)
         {
-            Assert.IsTrue(view.GetProperty("releasedNow").GetBoolean(), view.GetRawText());
             CollectionAssert.AreEquivalent(new[] { "psu.kicad_sch" },
                 view.GetProperty("replacedFiles").EnumerateArray().Select(file => Path.GetFileName(file.GetString())).ToArray(), $"{moment}: {view.GetRawText()}");
             CollectionAssert.IsSubsetOf(new[] { "fixture.kicad_sch", "cpu.kicad_sch", "cpu_power.kicad_sch" },
@@ -801,6 +832,30 @@ public sealed partial class NativeSessionTests
             RequirePlaced(await Capture(target), placements, moment + ": the refused resume changed nothing");
         }
 
+        // After a release and before its continuation, the record stays on the killed KiCad's document session: the ordinary
+        // reattachment to the KiCad started again is refused and changes nothing, because that KiCad holds part of the
+        // released operation's result, which the next synchronization would otherwise take for a user edit.
+        async Task<JsonElement> RequireReattachRefused(CrashCopy copy, CrashKiCad target, string moment)
+        {
+            var before = copy.Store.Read()!;
+            Assert.IsFalse(before.State.HasPendingWork, $"{moment}: the operation was released.");
+            var state = await mcp.Tool("kicad_schematic_checked_state", new { instanceId = target.Id,
+                documentJson = SchematicJson.Formatter.Format(target.Document) });
+            RequireToolSuccess(state);
+            string documentEpoch = state.GetProperty("structuredContent").GetProperty("state").GetProperty("revision").GetProperty("epoch").GetString()!;
+            Assert.AreNotEqual(before.State.NativeRevision.Epoch, documentEpoch, $"{moment}: the KiCad started again is a new document session.");
+            var reattach = await mcp.Tool("kicad_design_recovery_reattach", new { instanceId = target.Id, recoveryPath = copy.Store.StatePath,
+                expectedRevisionToken = before.RevisionToken, expectedDocumentEpoch = documentEpoch });
+            Assert.AreEqual("released_operation_requires_continuation", Error(reattach), $"{moment}: {reattach.GetRawText()}");
+            using var refusal = JsonDocument.Parse(Text(reattach));
+            string message = refusal.RootElement.GetProperty("message").GetString()!;
+            StringAssert.Contains(message, "kicad_design_recovery_release_exited", message);
+            Assert.AreEqual(before.RevisionToken, copy.Store.Read()!.RevisionToken, $"{moment}: the refused reattachment changes nothing.");
+            RequirePlaced(await Capture(target), 6, $"{moment}: the refused reattachment changes nothing in KiCad");
+            Phase($"{moment}: the ordinary reattachment to KiCad {target.ProcessId} is refused until the released operation continues");
+            return refusal.RootElement.Clone();
+        }
+
         async Task Reattach(CrashCopy copy, CrashKiCad target)
         {
             var state = await mcp.Tool("kicad_schematic_checked_state", new { instanceId = target.Id,
@@ -1046,6 +1101,37 @@ public sealed partial class NativeSessionTests
             screen.Metadata.WriterNativeFormatVersion = 0;
         }
         return SchematicDesignXml.Write(design with { Schematic = schematic }, []);
+    }
+
+    // The same design: every part but the native sheets byte for byte, and no native object differs (the sheets' load-format
+    // version aside). The native sheet records themselves may differ in form, for example as KiCad reported them after saving.
+    private static void RequireSameDesign(byte[] expected, byte[] actual, string when)
+    {
+        SchematicDesign Normalized(byte[] xml) => SchematicDesignXml.Read(WithoutLoadProvenance(xml), []);
+        var before = Normalized(expected);
+        var after = Normalized(actual);
+        Assert.AreEqual(SchematicDesignXml.Write(before with { Schematic = after.Schematic }, []), SchematicDesignXml.Write(after, []),
+            $"{when}: every part but the native sheets is identical.");
+        var differences = SchematicHierarchyDelta.Plan(after.Schematic, before.Schematic, CancellationToken.None);
+        Assert.IsEmpty(differences, $"{when}: no native object differs: {string.Join("; ", differences.Select(operation => operation.ToString()))}");
+    }
+
+    // The first line where two texts differ, with a little of each side, for evidence; null when they are equal.
+    private static object? FirstDifference(string expected, string actual)
+    {
+        string[] a = expected.Split('\n'), b = actual.Split('\n');
+        for (int line = 0; line < Math.Max(a.Length, b.Length); line++)
+        {
+            string left = line < a.Length ? a[line] : "", right = line < b.Length ? b[line] : "";
+            if (left == right) continue;
+            int column = 0;
+            while (column < left.Length && column < right.Length && left[column] == right[column]) column++;
+            int from = Math.Max(0, column - 80);
+            string Excerpt(string text) => text.Length <= from ? "" : text.Substring(from, Math.Min(240, text.Length - from));
+            return new { line = line + 1, column = column + 1, published = Excerpt(left), rolledBack = Excerpt(right),
+                publishedLines = a.Length, rolledBackLines = b.Length };
+        }
+        return null;
     }
 
     // The unit placements a design XML declares, as "reference/unit".

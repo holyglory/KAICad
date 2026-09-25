@@ -52,6 +52,7 @@ public sealed class SchematicConnectionRealizerTests
             Assert.AreEqual(HorizontalAlignment.HaRight, label.Text.Attributes.HorizontalAlignment, "A left-facing label is right-justified on its anchor.");
             Assert.AreEqual(LockedState.LsUnlocked, label.Locked);
             Assert.IsEmpty(label.Fields);
+            Assert.IsTrue(label.FieldsAutoplaced, "KiCad marks every label it loads without fields as auto-placed, so the label survives save and reload.");
         }
         CollectionAssert.AreEquivalent(new[] { "SIG", "OUT", "OUT" }, labels.Select(l => l.Text.Text_).ToArray());
         // Identities: the §6.7 construction, keyed by the attached placed pin.
@@ -633,6 +634,79 @@ public sealed class SchematicConnectionRealizerTests
         // Must-catch: with R5.1 alone, its only stub attaches, so nothing on the child sheet can carry the label.
         var alone = Local(second: false);
         await RequireRefusal(alone, SchematicConnectionErrors.RealizationNoFreeStub, "every new stub there ends on one of its power symbols");
+    }
+
+    [TestMethod]
+    public async Task FixedLabelsAreDrawnBeforeAHierarchicalLabelThatAnotherStubCanCarry()
+    {
+        // KiCad's own label shapes (the recorded PSU/CPU measurements): a local label reaches 2.0957 mm above its wire and
+        // 0.2652 mm below it, a hierarchical label 0.81 mm to either side. On the child sheet U1.1 (net UPLINK_NET, which
+        // crosses to root R1.1 and so needs a hierarchical label there) sits one pin pitch (2.54 mm) above U1.2 (net
+        // LOCAL_SIGNAL_NET, local to the child sheet), both pointing left. UPLINK_NET is realized after LOCAL_SIGNAL_NET
+        // although its net identity sorts first: a hierarchical label on U1.1 would overlap U1.2's local label at every stub
+        // length, which is what happened to the LP3982's pins 1 and 8 in the PSU/CPU journey before this rule (drawn first, the
+        // hierarchical label left U1.2 no room, and the whole realization was refused). So U1.2 gets its local label, U1.1's
+        // stub (no room for the hierarchical label) carries a local label as well, and U3.1, further up the sheet, carries the
+        // hierarchical label. Must-catch: without U3, nothing on the child sheet can carry it and the refusal names U1.1's stub.
+        Scene Build(bool carrier)
+        {
+            var bench = new Bench();
+            Guid u = bench.Part("U", Passive("1"), Passive("2")), r = bench.Part("R", Passive("1"), Passive("2"));
+            // U1 sorts before U3, so U1.1 is UPLINK_NET's first stub on the child sheet.
+            Guid u1 = bench.Component(u, "U1", BenchSheet.Child, id: Guid.Parse("00000000-0000-4000-8000-0000000000a1"));
+            Guid u4 = bench.Component(u, "U4", BenchSheet.Child);
+            Guid u3 = carrier ? bench.Component(u, "U3", BenchSheet.Child, id: Guid.Parse("00000000-0000-4000-8000-0000000000a3")) : Guid.Empty;
+            Guid r1 = bench.Component(r, "R1");
+            var uplink = new CircuitNet(Guid.Parse("00000000-0000-4000-8000-000000000001"), "UPLINK_NET",
+                [new(u1, "1"), new(r1, "1"), .. carrier ? [new PinEndpoint(u3, "1")] : Array.Empty<PinEndpoint>()]);
+            var local = new CircuitNet(Guid.Parse("00000000-0000-4000-8000-000000000002"), "LOCAL_SIGNAL_NET", [new(u1, "2"), new(u4, "1")]);
+            var scene = Scene.Of(bench, WithFormatting(bench.State([])), design => WithNets(design, uplink, local));
+            var members = scene.Intent.Screens.SelectMany(s => s.Islands).Where(i => i.ScreenId == bench.ScreenId(BenchSheet.Child))
+                .SelectMany(i => i.Members).ToDictionary(m => (m.Pin.Endpoint.ComponentId, m.Pin.Endpoint.Pin));
+            void Draw(Guid component, long x, long y)
+            {
+                var pin1 = members.TryGetValue((component, "1"), out var first) ? first.Pin : null;
+                var pin2 = members.TryGetValue((component, "2"), out var second) ? second.Pin : null;
+                var symbol = (pin1 ?? pin2)!.SymbolId;
+                var symbolPins = scene.Plan.Candidate!.Schematic.Instances.First(i => i.Metadata.ScreenId.Value == bench.ScreenId(BenchSheet.Child).ToString("D")).Items
+                    .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).Single(i => Guid.Parse(i.Id.Value) == symbol)
+                    .Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).ToDictionary(p => p.Number, p => Guid.Parse(p.Id.Value));
+                scene.Geometry.Place[symbolPins["1"]] = new(x, y);
+                scene.Geometry.Place[symbolPins["2"]] = new(x, y + 2 * Grid);
+                scene.Geometry.Body[symbol] = new(x, y - Grid, x + 8 * Grid, y + 3 * Grid);
+            }
+            Draw(u1, 100_000_000, 100_000_000);
+            Draw(u4, 100_000_000, 150_000_000);
+            if (carrier) Draw(u3, 100_000_000, 40_000_000);
+            scene.Geometry.Tamper = (request, reply) =>
+            {
+                for (int i = 0; i < reply.ItemCandidates.Count; i++)
+                {
+                    var measured = reply.ItemCandidates[i];
+                    long y = measured.Anchor.YNm, x0 = measured.Bounds.Position.XNm, x1 = x0 + measured.Bounds.Size.XNm;
+                    bool hierarchical = request.ItemCandidates[i].Is(HierarchicalLabel.Descriptor);
+                    long top = y - (hierarchical ? 809_600 : 2_095_700), bottom = y + (hierarchical ? 809_700 : 265_200);
+                    measured.Bounds = new() { Position = new() { XNm = x0, YNm = top }, Size = new() { XNm = x1 - x0, YNm = bottom - top } };
+                }
+                return reply;
+            };
+            return scene;
+        }
+        var guarded = Build(carrier: true);
+        var realization = await guarded.Realize();
+        var child = guarded.Bench!.ScreenId(BenchSheet.Child);
+        var circuit = guarded.Plan.Candidate!.Engineering.Circuit;
+        Guid Pin(string reference, string number) => guarded.Intent.Screens.SelectMany(s => s.Islands).SelectMany(i => i.Members)
+            .Single(m => m.Pin.Endpoint == new PinEndpoint(circuit.Components.Single(c => c.Reference == reference).Id, number)).Pin.PlacedPinId;
+        var hierarchical = realization.Generated.Single(g => g.ScreenId == child && g.TypeUrl == Any.Pack(new HierarchicalLabel()).TypeUrl);
+        Assert.AreEqual(Pin("U3", "1"), hierarchical.PlacedPinId, "U3.1's stub has room for the hierarchical label.");
+        string LabelOn(string reference, string number) => realization.Generated
+            .Single(g => g.PlacedPinId == Pin(reference, number) && g.Role == GeneratedConnectionRole.StubLabel).TypeUrl;
+        Assert.AreEqual(Any.Pack(new LocalLabel()).TypeUrl, LabelOn("U1", "2"), "U1.2 keeps its local label.");
+        Assert.AreEqual(Any.Pack(new LocalLabel()).TypeUrl, LabelOn("U1", "1"), "U1.1 has no room for a hierarchical label beside U1.2's local label.");
+        Assert.AreEqual(2 * Grid, 100_000_000 - StubOf(realization, Pin("U1", "2")).End.XNm, "U1.2 keeps its shortest stub.");
+        Assert.AreEqual(2 * Grid, 100_000_000 - StubOf(realization, Pin("U1", "1")).End.XNm, "U1.1's local label fits its shortest stub.");
+        await RequireRefusal(Build(carrier: false), SchematicConnectionErrors.RealizationNoFreeStub, "none of its new stubs there has room for one");
     }
 
     [TestMethod]

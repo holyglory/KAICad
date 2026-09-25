@@ -395,6 +395,18 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
             session.add_capabilities( "session.info" );
             session.add_capabilities( "version.read" );
 
+            // XML connections drawn as labelled wires and admitted only when KiCad proves the
+            // resulting pin connections (cn1-wiring-intent.md §8.3).  Only the KiCad manager runs
+            // in automation mode (kicad.cpp), and it hosts this build's schematic editor in this
+            // process.  That editor serves every piece the contract requires: the atomic
+            // connectivity assertion of ApplySchematicItemBatch (api_handler_sch.cpp), which the
+            // checked controller admits and verifies (checked_schematic_controller.cpp), label and
+            // other item_candidates measurement (api_handler_sch_placement_geometry.cpp), and the
+            // pin power facts and incomplete-pin reasons of every measured pin (api_sch_utils.cpp).
+            // Like the other feature contracts it describes the build, so it stays the same while
+            // editors open and close; handled_requests below says what is dispatched right now.
+            session.add_capabilities( "schematic.connection-realization.v1" );
+
             // The individual requests this process dispatches right now.
             for( const std::string& type : AdvertisedRequestTypes() )
                 session.add_handled_requests( type );

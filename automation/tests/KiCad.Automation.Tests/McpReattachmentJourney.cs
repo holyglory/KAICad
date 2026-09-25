@@ -5,7 +5,9 @@ using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -133,89 +135,93 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    // Decision n39ac0ccc5c9270f2 / ledger pbfcccd896f17cf27 against a real KiCad and the compiled MCP server. The
-    // saved revision only connects the drawn, unconnected pins of two probes: exactly what an editor advertising
-    // schematic.connection-realization.v1 would draw, and this KiCad does not advertise it (CN-1 §8.3). The
-    // kicad_design_sync_plan preview classifies it with the handshake the server recorded when it attached or
-    // reattached this instance, and with no attached instance it is today's plan. The automatic worker and apply
-    // take their own live handshakes and classify it the same way: the general path, which journals the XML
-    // publication and then refuses it because KiCad does not show the connection. KiCad is never changed. The
-    // advertising case needs a test double (McpProcessTests.SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio).
+    // Decision n39ac0ccc5c9270f2 / ledgers pbfcccd896f17cf27 and p186c0db05be2a146 against a real KiCad and the compiled MCP
+    // server, now that KiCad advertises schematic.connection-realization.v1 (CN-1 §8.3). The saved revision only connects the
+    // drawn, unconnected pins of two probes, as the net PROBE_LINK (declared, never inferred). The kicad_design_sync_plan
+    // preview classifies it with the handshake the server recorded when it attached or reattached this instance: the
+    // realization plan (CN-1 §4.2), with no publishable XML and no native operations, because only the realization itself
+    // measures KiCad. With no attached instance, or only a saved registration after a restart, it is the general plan. The
+    // automatic worker and apply each take their own live handshake and realize the revision on this editor (CN-1 §9.1-9.2):
+    // one checked KiCad commit whose connectivity assertion KiCad verified, a stub and a local label for each probe pin, KiCad
+    // showing both pins in one net named PROBE_LINK, and exactly that drawing published to the XML. Both start from the same
+    // saved sheet and draw exactly the same items. The advertised case with a test double stays in
+    // McpProcessTests.SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio.
     private static async Task VerifyRecordedHandshakePlanning(NativeClient client, string registryState, string schematic,
         string evidence, CancellationToken token)
     {
-        var live = await client.HandshakeAsync(token);
-        string instanceId = live.InstanceId;
-        // This step proves the unadvertised case only. The change that makes KiCad advertise the capability (CN-1 §8.3,
-        // §16 step 3) must replace it with the native advertised-case proof, so it fails here rather than silently
-        // proving less.
-        Assert.IsFalse(live.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
-            "KiCad now advertises " + SchematicConnectedAddition.NativeCapability + ": replace this unadvertised-case step with the native "
-            + "advertised-case proof (the preview is the realization plan and the worker and apply realize it identically; ledger "
-            + "pf1134ca32f913781). Capabilities: " + string.Join(",", live.Capabilities));
         var root = (await Ready(() => client.OpenRootSchematicAsync(schematic, token))).Document;
         await Ready(() => client.InvokeAsync<SaveDocument, Empty>(new() { Document = root.Clone() }, token));
+        var live = await client.HandshakeAsync(token);
+        string instanceId = live.InstanceId;
+        NativeFeatureContracts.Verify(live);
+        Assert.IsTrue(live.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
+            "This KiCad serves every CN-1 §8.3 piece, so it must advertise " + SchematicConnectedAddition.NativeCapability + ": "
+            + string.Join(",", live.Capabilities));
+        byte[] savedSheet = await File.ReadAllBytesAsync(schematic, token);
         Task<CheckedSchematicState> Capture() => Ready(() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
             new() { Document = root.Clone(), ProcessEpoch = client.Epoch }, token));
         var initial = await Capture();
         Assert.IsTrue(CheckedSchematicContract.FileCoverage(initial.State),
             "The saved root must have known, unchanged file baselines so apply can reach its classification: " + SchematicJson.Formatter.Format(initial.State));
-        // The baseline declares no connection; the saved revision joins both probe pins (declared, never inferred).
-        var connected = ProbeElectricalModel(initial.Electrical);
-        var baseline = connected with { Engineering = connected.Engineering with { Circuit = connected.Engineering.Circuit with { Nets = [] } } };
-        byte[] desired = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, []));
-        DesignRecoveryState Revision() => new(Guid.NewGuid(), Guid.Parse(instanceId),
-            new(initial.State.Revision.Epoch, initial.State.Revision.Sequence), initial.Electrical.Hierarchy.TrackingComplete,
-            baseline, desired, initial.Electrical.Hierarchy.Data.Clone(), [],
-            BaselineElectrical: initial.Electrical.Clone(), ObservedElectrical: initial.Electrical.Clone());
-        var reference = Revision();
-        var wanted = DesignRecoveryStore.ReadDesired(reference);
-        var advertised = live.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
-        var classifiedIfAdvertised = SchematicConnectedAddition.Classify(reference, wanted, advertised, token).Kind;
-        var classified = SchematicConnectedAddition.Classify(reference, wanted, live, token).Kind;
-        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, classifiedIfAdvertised,
-            "The saved revision must only add a connection over drawn pins, which an advertising editor would realize.");
-        Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, classified);
+        Assert.IsFalse(initial.State.NativeContentDirty);
+        // The baseline declares no connection; the saved revision joins both probe pins as PROBE_LINK.
+        var probe = ProbeElectricalModel(initial.Electrical);
+        var link = probe.Engineering.Circuit.Nets.Single() with { Name = "PROBE_LINK" };
+        var unconnected = probe.Engineering with { Circuit = probe.Engineering.Circuit with { Nets = [] } };
+        var connected = probe.Engineering with { Circuit = probe.Engineering.Circuit with { Nets = [link] } };
+        // A record of this editor at one captured state, with the saved revision as its desired XML.
+        DesignRecoveryState Revision(CheckedSchematicState at)
+        {
+            var data = at.Electrical.Hierarchy.Data;
+            var design = probe with { Engineering = connected, Schematic = data.Clone() };
+            return new(Guid.NewGuid(), Guid.Parse(instanceId), new(at.State.Revision.Epoch, at.State.Revision.Sequence),
+                at.Electrical.Hierarchy.TrackingComplete, design with { Engineering = unconnected },
+                Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, [])), data.Clone(), [],
+                BaselineElectrical: at.Electrical.Clone(), ObservedElectrical: at.Electrical.Clone());
+        }
+        var reference = Revision(initial);
+        var classified = SchematicConnectedAddition.Classify(reference, DesignRecoveryStore.ReadDesired(reference), live, token);
+        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, classified.Kind, classified.ErrorCode + ": " + classified.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { link.Id }, classified.ChangedNetIds.ToArray());
+        // Without a handshake the planner keeps the general path; this KiCad's own handshake plans the realization.
         var today = SchematicSynchronizationPlanner.Plan(reference, token);
         Assert.IsTrue(today.CanPrepare, today.ErrorCode + ": " + today.ErrorMessage);
         Assert.IsFalse(today.NativeConnectionRealizationRequired);
-        Assert.IsEmpty(today.NativeOperations, "The general path has nothing to draw.");
-        Assert.IsTrue(today.NativeConnectivityValidationRequired, "The general path leaves the new connection to native validation.");
-        Assert.AreEqual(today.CandidateXml, SchematicSynchronizationPlanner.Plan(reference, live, token).CandidateXml,
-            "This KiCad's own handshake keeps today's plan.");
+        Assert.IsNotNull(today.CandidateXml, "The general path previews its candidate XML.");
+        var realizing = SchematicSynchronizationPlanner.Plan(reference, live, token);
+        Assert.IsTrue(realizing.CanPrepare, realizing.ErrorCode + ": " + realizing.ErrorMessage);
+        Assert.IsTrue(realizing.NativeConnectionRealizationRequired, "This KiCad's handshake plans the connection's realization (CN-1 §4.3).");
+        Assert.IsNull(realizing.CandidateXml, "A realization plan has no publishable preview (CN-1 §4.2).");
+        Assert.IsEmpty(realizing.NativeOperations, "Only the realization measures KiCad and produces native operations.");
+        var island = realizing.Connections!.Screens.Single().Islands.Single();
+        Assert.AreEqual("PROBE_LINK", island.LabelText);
+        Assert.HasCount(2, island.Members.Where(m => m.RequiresStub).ToArray(), "Both probe pins need a stub.");
 
         string folder = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(registryState)!, "handshake-planning")).FullName;
-        (string Recovery, string Design, string Token) Record(string name)
+        (string Recovery, string Design, string Token) Record(string name, DesignRecoveryState state)
         {
             string recovery = Path.Combine(folder, name + ".recovery.json"), design = Path.Combine(folder, name + ".design.xml");
-            File.WriteAllBytes(design, desired);
-            return (recovery, design, new DesignRecoveryStore(recovery).Save(Revision(), null).RevisionToken);
+            File.WriteAllBytes(design, state.DesiredFileBytes);
+            return (recovery, design, new DesignRecoveryStore(recovery).Save(state, null).RevisionToken);
         }
         async Task<JsonElement> Preview(StdioMcpFixture mcp, (string Recovery, string Design, string Token) target) =>
             (await mcp.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = target.Recovery, expectedRevisionToken = target.Token }))
                 .GetProperty("structuredContent").Clone();
-        var preview = Record("preview");
-        var before = await Capture();
+        var preview = Record("preview", reference);
         JsonElement unattached, afterAttach, afterRestart, afterReattach;
-        (string? Code, Guid? Operation) worker;
-        string? applied;
-        var journaled = new Dictionary<string, object>();
+        Drawing worker, applied;
+        string? workerCode;
         await using (var mcp = await StdioMcpFixture.StartAsync(registryState, Path.Combine(evidence, "handshake-planning-attach.stderr.log"), token))
         {
             unattached = await Preview(mcp, preview);
-            Assert.IsTrue(unattached.GetProperty("canPrepare").GetBoolean(), unattached.GetRawText());
-            Assert.AreEqual(JsonValueKind.Null, unattached.GetProperty("errorCode").ValueKind, unattached.GetRawText());
-            Assert.AreEqual(today.CandidateXml, unattached.GetProperty("candidateDesignXml").GetString(),
-                "Without an attached instance the preview publishes exactly today's candidate.");
-            Assert.AreEqual(0, unattached.GetProperty("nativeOperationsJson").GetArrayLength());
-            Assert.IsTrue(unattached.GetProperty("nativeConnectivityValidationRequired").GetBoolean());
+            RequirePlan(today, unattached, "Without an attached instance the preview is the general plan.");
             RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
             afterAttach = await Preview(mcp, preview);
-            Assert.AreEqual(unattached.GetRawText(), afterAttach.GetRawText(),
-                "The handshake recorded at attach does not advertise realization, so the preview stays today's plan.");
+            RequirePlan(realizing, afterAttach, "The handshake recorded at attach advertises realization, so the preview is the realization plan.");
+            Assert.AreNotEqual(unattached.GetRawText(), afterAttach.GetRawText());
 
-            // The automatic worker takes its own handshake, plans, and applies the general plan.
-            var automatic = Record("worker");
+            // The automatic worker takes its own handshake, plans and realizes the revision.
+            var automatic = Record("worker", reference);
             var started = await mcp.Tool("kicad_design_automatic_sync_start", new { instanceId, recoveryPath = automatic.Recovery,
                 designPath = automatic.Design, expectedRecoveryRevision = automatic.Token });
             RequireToolSuccess(started);
@@ -228,59 +234,94 @@ public sealed partial class NativeSessionTests
                 RequireToolSuccess(next); status = next.GetProperty("structuredContent").GetProperty("status").Clone();
             }
             RequireToolSuccess(await mcp.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId }));
-            Assert.AreEqual("Paused", status.GetProperty("phase").GetString(), status.GetRawText());
-            worker = (status.GetProperty("errorCode").GetString(),
-                status.GetProperty("operationId").ValueKind == JsonValueKind.Null ? null : (Guid?)status.GetProperty("operationId").GetGuid());
+            workerCode = status.GetProperty("errorCode").GetString();
+            Assert.AreEqual("Watching", status.GetProperty("phase").GetString(), "The worker must realize the revision: " + status.GetRawText());
+            Assert.AreNotEqual(JsonValueKind.Null, status.GetProperty("operationId").ValueKind, status.GetRawText());
+            worker = await Drawn("worker", automatic, initial, status.GetProperty("operationId").GetGuid());
 
-            // Apply, called directly, takes its own handshake too.
-            var direct = Record("apply");
+            // Apply starts from the same saved sheet: the worker's drawing is taken back by reloading that sheet.
+            await File.WriteAllBytesAsync(schematic, savedSheet, token);
+            await Ready(() => client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token));
+            var restored = await Capture();
+            // Loading the file KiCad wrote changes the sheet's loaded-format provenance, not any object on it.
+            var probesAlone = initial.Electrical.Hierarchy.Data.Clone();
+            foreach (var screen in probesAlone.Instances)
+                screen.Metadata.LoadedNativeFormatVersion = restored.Electrical.Hierarchy.Data.Instances
+                    .Single(s => s.Metadata.Document.Equals(screen.Metadata.Document)).Metadata.LoadedNativeFormatVersion;
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(probesAlone, restored.Electrical.Hierarchy.Data, token),
+                "Reloading the saved sheet restores the unconnected probes.");
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(restored.Electrical.Hierarchy.Data, probesAlone, token));
+            Assert.IsFalse(restored.State.NativeContentDirty);
+            var direct = Record("apply", Revision(restored));
+            Guid applyOperation = Guid.NewGuid();
             var apply = await mcp.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = direct.Recovery,
-                designPath = direct.Design, expectedRevisionToken = direct.Token, operationId = Guid.NewGuid().ToString("D") });
-            Assert.IsTrue(apply.GetProperty("isError").GetBoolean(), apply.GetRawText());
-            applied = apply.GetProperty("structuredContent").GetProperty("errorCode").GetString();
-
-            // Both classified the revision as the preview did: the general path journals the XML publication (no
-            // realization layout and no native batch) and refuses it because KiCad does not show the new connection.
-            foreach (var (name, target, code) in new[] { ("worker", automatic, worker.Code), ("apply", direct, applied) })
-            {
-                Assert.AreEqual("native_sync_connectivity_mismatch", code, $"The {name} must refuse the general plan's XML publication.");
-                var journal = new DesignRecoveryStore(target.Recovery).Read()!.State;
-                Assert.IsNotNull(journal.PendingPublication, $"The {name} journals the general path's XML publication.");
-                Assert.IsNull(journal.PendingLayout, $"The {name} must not plan a connection realization.");
-                Assert.IsNull(journal.PendingMutation, $"The {name} has no native batch to send.");
-                CollectionAssert.AreEqual(desired, File.ReadAllBytes(target.Design), $"The {name} must not publish XML.");
-                journaled[name] = new { publication = journal.PendingPublication is not null, layout = journal.PendingLayout is not null,
-                    mutation = journal.PendingMutation is not null };
-            }
-            Assert.AreEqual(worker.Operation, new DesignRecoveryStore(automatic.Recovery).Read()!.State.PendingPublication!.OperationId,
-                "The worker journaled the operation it paused on.");
+                designPath = direct.Design, expectedRevisionToken = direct.Token, operationId = applyOperation.ToString("D") });
+            RequireToolSuccess(apply);
+            var result = apply.GetProperty("structuredContent");
+            Assert.IsTrue(result.GetProperty("nativeMutationCommitted").GetBoolean(), apply.GetRawText());
+            Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), apply.GetRawText());
+            Assert.IsTrue(result.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(),
+                "KiCad verified the connectivity assertion of apply's commit: " + apply.GetRawText());
+            applied = await Drawn("apply", direct, restored, applyOperation);
+            CollectionAssert.AreEqual(worker.Items.ToArray(), applied.Items.ToArray(), "The worker and apply draw exactly the same items from the same saved sheet.");
         }
         // A restarted server holds only the saved registration, which is not a handshake, until it reattaches.
         await using (var mcp = await StdioMcpFixture.StartAsync(registryState, Path.Combine(evidence, "handshake-planning-reattach.stderr.log"), token))
         {
             afterRestart = await Preview(mcp, preview);
             Assert.AreEqual(unattached.GetRawText(), afterRestart.GetRawText(),
-                "A saved registration is not a recorded handshake: the preview is today's plan.");
+                "A saved registration is not a recorded handshake: the preview is the general plan.");
             RequireToolSuccess(await mcp.Tool("kicad_instance_reattach", new { instanceId }));
             afterReattach = await Preview(mcp, preview);
-            Assert.AreEqual(unattached.GetRawText(), afterReattach.GetRawText(),
-                "The handshake recorded at reattach does not advertise realization either.");
+            Assert.AreEqual(afterAttach.GetRawText(), afterReattach.GetRawText(),
+                "The handshake recorded at reattach advertises realization again.");
         }
-        var after = await Capture();
-        Assert.AreEqual(before.State, after.State, "Planning, the worker and apply must leave KiCad unchanged.");
         Assert.AreEqual(preview.Token, new DesignRecoveryStore(preview.Recovery).Read()!.RevisionToken, "The preview writes nothing.");
         static string Sha256(JsonElement plan) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(plan.GetRawText())));
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-handshake-planning.json"), JsonSerializer.Serialize(new
         {
-            instanceId, nativeCapabilities = live.Capabilities.ToArray(),
-            classification = classified.ToString(), classificationIfAdvertised = classifiedIfAdvertised.ToString(),
+            instanceId, nativeCapabilities = live.Capabilities.ToArray(), classification = classified.Kind.ToString(),
             todayCandidateXmlSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(today.CandidateXml!))),
             previewSha256 = new { withoutAttachment = Sha256(unattached), afterAttach = Sha256(afterAttach),
                 afterRestart = Sha256(afterRestart), afterReattach = Sha256(afterReattach) },
-            workerErrorCode = worker.Code, applyErrorCode = applied, journaled,
-            nativeStateSha256 = new { before = before.State.StateSha256, after = after.State.StateSha256 }
+            realizationPlan = new { label = island.LabelText, stubs = island.Members.Count(m => m.RequiresStub),
+                expectedGroups = realizing.Connections!.ExpectedGroups.Count },
+            workerErrorCode = workerCode, worker, apply = applied
         }), token);
-        Console.WriteLine($"Recorded handshake planning {instanceId}: preview, worker and apply all took the general path.");
+        Console.WriteLine($"Recorded handshake planning {instanceId}: the preview is the realization plan; the worker and apply each drew "
+            + $"{applied.Items.Count} items in one verified KiCad commit.");
+
+        // What one realization left in KiCad and its record: the committed receipt with KiCad's verified assertion, exactly
+        // two stubs and two PROBE_LINK labels, both probe pins in one native net named PROBE_LINK, and that drawing published.
+        async Task<Drawing> Drawn(string name, (string Recovery, string Design, string Token) target, CheckedSchematicState before, Guid operation)
+        {
+            var after = await Capture();
+            Assert.IsFalse(after.State.NativeContentDirty, name + ": the realization is saved.");
+            var record = new DesignRecoveryStore(target.Recovery).Read()!.State;
+            Assert.IsFalse(record.HasPendingWork, name);
+            // A worker that saw its own commit afterwards may have archived this receipt behind a later settled one.
+            var synchronization = record.LastSynchronization?.OperationId == operation ? record.LastSynchronization
+                : new DesignSynchronizationReceipts(target.Recovery).Read(operation) ?? throw new AssertFailedException(name + ": no receipt for " + operation);
+            var receipt = CheckedSchematicBatchReceipt.Parser.ParseFrom(synchronization.NativeReceipt
+                ?? throw new AssertFailedException(name + ": the synchronization committed no native batch."));
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status, name);
+            Assert.IsTrue(receipt.Result.ConnectivityAssertionVerified, name + ": KiCad verified the connectivity assertion.");
+            byte[] xml = await File.ReadAllBytesAsync(target.Design, token);
+            CollectionAssert.AreEqual(record.DesiredFileBytes, xml, name + ": the record holds the published XML.");
+            var published = SchematicDesignXml.Read(Encoding.UTF8.GetString(xml), []);
+            Assert.AreEqual(CircuitXml.Write(connected.Circuit), CircuitXml.Write(published.Engineering.Circuit), name + ": the circuit is the saved revision's.");
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(after.Electrical.Hierarchy.Data, published.Schematic, token), name + ": the XML holds KiCad's drawing.");
+            var comparison = SchematicElectricalComparison.Compare(published, after.Electrical, [], token);
+            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, name + ": KiCad shows exactly the XML nets.");
+            var joined = comparison.PinPartitions!.Single(p => p.Pins.Count == 2);
+            CollectionAssert.AreEquivalent(link.Pins.ToArray(), joined.Pins.ToArray(), name);
+            Assert.AreEqual("PROBE_LINK", joined.NativeName![(joined.NativeName!.LastIndexOf('/') + 1)..], name + ": the label names the net.");
+            var items = NewItems(before.Electrical.Hierarchy.Data, after.Electrical.Hierarchy.Data);
+            Assert.HasCount(4, items, name + ": " + string.Join("; ", items));
+            Assert.AreEqual(2, items.Count(i => i.StartsWith(SchematicLine.Descriptor.FullName, StringComparison.Ordinal)), name);
+            Assert.AreEqual(2, items.Count(i => i.StartsWith(LocalLabel.Descriptor.FullName, StringComparison.Ordinal) && i.Contains("\"PROBE_LINK\"", StringComparison.Ordinal)), name);
+            return new(items, after.State.StateSha256, receipt.OperationId, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(xml)));
+        }
 
         // An editor that has just opened can answer busy or not ready for a moment.
         async Task<T> Ready<T>(Func<Task<T>> request)
@@ -294,6 +335,41 @@ public sealed partial class NativeSessionTests
                 { await Task.Delay(100, deadline.Token); }
             }
         }
+    }
+
+    private sealed record Drawing(IReadOnlyList<string> Items, string NativeStateSha256, string OperationId, string PublishedXmlSha256);
+
+    // Items KiCad holds after that it did not hold before, per sheet, each written without the identities it was given, so that
+    // two drawings of the same connections compare equal whatever identities their revisions gave them.
+    private static IReadOnlyList<string> NewItems(SchematicHierarchyData before, SchematicHierarchyData after)
+    {
+        string known = SchematicJson.Formatter.Format(before);
+        var result = new List<string>();
+        foreach (var screen in after.Instances)
+        {
+            string path = string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value));
+            var old = before.Instances.SingleOrDefault(s => s.Metadata.Document.Equals(screen.Metadata.Document));
+            var existing = old is null ? [] : SchematicItemDelta.Index(old.Items).Keys.ToHashSet();
+            foreach (var (id, item) in SchematicItemDelta.Index(screen.Items).Where(p => !existing.Contains(p.Key)))
+            {
+                string json = System.Text.RegularExpressions.Regex.Replace(SchematicJson.Formatter.Format(item),
+                    "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", match => known.Contains(match.Value, StringComparison.Ordinal) ? match.Value : "new");
+                result.Add(item.Descriptor.FullName + " " + path + " " + json);
+            }
+        }
+        result.Sort(StringComparer.Ordinal);
+        return result;
+    }
+
+    // The public preview reports exactly the planner's own plan for the same record and handshake.
+    private static void RequirePlan(SchematicSynchronizationPlan expected, JsonElement preview, string because)
+    {
+        Assert.AreEqual(expected.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), because + " " + preview.GetRawText());
+        Assert.AreEqual(expected.ErrorCode, preview.GetProperty("errorCode").GetString(), because + " " + preview.GetRawText());
+        Assert.AreEqual(expected.CandidateXml, preview.GetProperty("candidateDesignXml").GetString(), because);
+        CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
+            preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray(), because);
+        Assert.AreEqual(expected.NativeConnectivityValidationRequired, preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), because);
     }
 
     // Two probes on the declared project root whose single pins are drawn and not connected to anything.

@@ -16,11 +16,642 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
-    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9).
-    // Lane 2A replaces this body when it delivers the journey.
-    private static Task VerifyPsuCpuConnectedRealization(NativeClient client, PsuCpuNativeContext context, int processId,
+    // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9) for CN-1 milestone 1 end to end (ledgers
+    // pf1134ca32f913781 and p186c0db05be2a146), on the S1 seed, through the public MCP tools over STDIO against this editor,
+    // which advertises schematic.connection-realization.v1:
+    // 1. The connection-aware layout tool places the fixture's Complete stage (CN-1 §10), and its Components stage (the same
+    //    placements, no nets) is created first.
+    // 2. The Complete stage's XML then adds all 11 nets across ROOT, PSU, CPU and CPU_POWER, including the stacked U2.1/U2.4 and
+    //    processor unit 4 on CPU_POWER. The preview is the realization plan; realizing it from this editor's measurements is
+    //    recorded as a replay fixture.
+    // 3. A forced mismatch first: that realization's batch, journaled with one foreign wire joining two of its nets, is refused
+    //    by KiCad with connectivity_postcondition_failed, apply reports realization_connectivity_mismatch, and nothing is
+    //    committed: KiCad's state, change journal and drawing, the XML and the recovery baseline are all unchanged.
+    // 4. Apply then draws exactly that realization in one checked KiCad commit whose connectivity assertion KiCad verified, and
+    //    publishes the XML. KiCad's pin partition is exactly the 11 nets (PsuCpuFixture.AssertNative), and every generated stub,
+    //    label and sheet pin follows CN-1 §6. Replaying the apply returns its receipt, a repeated plan has nothing to do and a
+    //    repeated apply is a no-op.
+    // 5. One native undo removes the whole realization and redo restores it; save and reload keep it, and the recovery record
+    //    adopts the reloaded editor with nothing left to do.
+    // 6. I2C pull-ups added to connected nets (two coordinate-free, one placed and locked) are placed by the connection-aware
+    //    layout tool, then created and connected by one more realization.
+    private static async Task VerifyPsuCpuConnectedRealization(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
-        => throw new AssertInconclusiveException("Phase 2 lane 2A has not delivered this journey");
+    {
+        var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Complete);
+        var document = context.Root;
+        var seedBaseline = context.Baseline ?? throw new AssertFailedException("The S1 seed must provide a native baseline.");
+        string path = context.DesignPath;
+        string Evidence(string name) => Path.Combine(evidence, instanceId + "-psu-cpu-connected-" + name);
+        var store = new DesignRecoveryStore(Evidence("recovery.json"));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var steps = new List<object>();
+        var problems = new List<string>();
+        void Step(string name) { steps.Add(new { name, seconds = Math.Round(clock.Elapsed.TotalSeconds, 1) });
+            Console.WriteLine($"PSU/CPU connected realization {instanceId}: {name} at {clock.Elapsed.TotalSeconds:F1}s"); }
+        // The same project-file workaround as VerifyPsuCpuComponentCreation: the harness wrote the S1 files directly, so KiCad
+        // saves the project once before any XML is applied.
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+        var saved = await PsuCpuFixture.InitializeRecoveryAsync(client, context, store.StatePath, token);
+        var session = RequireRealizationAdvertised(await client.HandshakeAsync(token));
+        Assert.AreEqual(instanceId, session.InstanceId);
+        var seeded = await Capture();
+        Assert.IsFalse(seeded.State.NativeContentDirty);
+        var (regions, usable, sheetPaths) = await PsuCpuRegions(client, seedBaseline, expected, seeded.State.Revision, token);
+        // The production MCP server: its preview classifies with the handshake recorded when it attached this editor.
+        await using var host = await StdioMcpFixture.StartAsync(Evidence("host"), Evidence("host.log"), token);
+        RequireToolSuccess(await host.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+
+        // 1. The connection-aware layout of the whole Complete stage, then the Components stage created with its placements.
+        var completeStage = PsuCpuFixture.Desired(context, PsuCpuStage.Complete);
+        Assert.HasCount(11, completeStage.Engineering.Circuit.Nets);
+        Assert.IsTrue(completeStage.Engineering.Circuit.Symbols.All(s => s.Placement is null), "The frozen fixture occurrences are coordinate-free.");
+        saved = Write(saved, completeStage);
+        var layout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = saved.RevisionToken, gridNm = PsuCpuLayoutPolicy.GridNm, clearanceNm = PsuCpuLayoutPolicy.ClearanceNm,
+            pageInsetNm = PsuCpuLayoutPolicy.PageInsetNm, regions,
+            userInstructions = "Lay out the PSU/CPU circuit on its sheets with room for every connection." });
+        await File.WriteAllTextAsync(Evidence("layout.json"), RetainedToolEvidence(layout), token);
+        RequireToolSuccess(layout);
+        Assert.IsTrue(layout.GetProperty("structuredContent").GetProperty("canPropose").GetBoolean(), layout.GetRawText());
+        var laidOut = SchematicDesignXml.Read(layout.GetProperty("structuredContent").GetProperty("desiredXml").GetString()!, []);
+        Assert.AreEqual(CircuitXml.Write(completeStage.Engineering.Circuit), CircuitXml.Write(laidOut.Engineering.Circuit.WithoutPlacement()),
+            "Layout only adds coordinates.");
+        var placements = laidOut.Engineering.Circuit.Symbols.ToDictionary(s => s.Id, s => s.Placement ?? throw new AssertFailedException("Every unit is placed."));
+        Assert.AreEqual(seeded, await Capture(), "Layout must not change KiCad.");
+        Step("complete-stage layout");
+
+        var componentsStage = PsuCpuFixture.Desired(context, PsuCpuStage.Components);
+        componentsStage = componentsStage with { Engineering = componentsStage.Engineering with { Circuit = componentsStage.Engineering.Circuit with
+            { Symbols = [.. componentsStage.Engineering.Circuit.Symbols.Select(s => s with { Placement = placements[s.Id] })] } } };
+        Assert.IsEmpty(componentsStage.Engineering.Circuit.Nets);
+        saved = Write(store.Read()!, componentsStage);
+        var creationPreview = await Preview("components");
+        Assert.IsNotNull(creationPreview.GetProperty("candidateDesignXml").GetString(), "Creation previews its candidate XML.");
+        Assert.AreEqual(expected.Symbols.Count, creationPreview.GetProperty("nativeOperationsJson").EnumerateArray()
+            .Select(o => SchematicJson.Parser.Parse<SchematicItemOperation>(o.GetString()!))
+            .Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true), "Eleven units are created.");
+        var creation = await Apply("components");
+        Assert.IsTrue(creation.GetProperty("nativeMutationCommitted").GetBoolean(), creation.GetRawText());
+        var components = await Capture();
+        var created = store.Read()!;
+        PsuCpuFixture.AssertNative(created.State.Baseline, components.Electrical, PsuCpuStage.Components);
+        Assert.IsFalse(components.State.NativeContentDirty, "Apply saves the created sheets.");
+        Step("components created");
+
+        // 2. The Complete stage: the created design with the fixture's 11 nets. Its preview is the realization plan.
+        var nets = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
+        var completeDesign = created.State.Baseline with { Engineering = created.State.Baseline.Engineering with
+            { Circuit = created.State.Baseline.Engineering.Circuit with { Nets = nets } } };
+        saved = Write(created, completeDesign);
+        byte[] completeXml = await File.ReadAllBytesAsync(path, token);
+        var realizationPreview = await Preview("complete");
+        Assert.AreEqual(JsonValueKind.Null, realizationPreview.GetProperty("candidateDesignXml").ValueKind,
+            "A realization plan has no publishable preview (CN-1 §4.2).");
+        Assert.AreEqual(0, realizationPreview.GetProperty("nativeOperationsJson").GetArrayLength(), "Only the realization produces native operations.");
+        Assert.IsTrue(realizationPreview.GetProperty("nativeConnectivityValidationRequired").GetBoolean());
+        var plan = SchematicSynchronizationPlanner.Plan(saved.State, session, token);
+        var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
+        SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, plan.Candidate!, created: false);
+        Assert.IsEmpty(intent.CreatedSymbolIds, "The Complete stage only connects the created units.");
+        Assert.AreEqual(components, await Capture(), "Planning must not change KiCad.");
+
+        // The realization of this exact checkpoint from this editor's measurements, recorded as a replay fixture. The executor
+        // plans and measures the same checkpoint, so its batch must be exactly this one (CN-1 I9).
+        var checkpoint = await Capture();
+        var recorded = new List<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)>();
+        async Task<SchematicPlacementGeometry> Recording(MeasureSchematicPlacement request, CancellationToken cancellation)
+        {
+            var reply = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, cancellation);
+            recorded.Add((request.Clone(), reply.Clone()));
+            return reply;
+        }
+        var policy = SchematicConnectionPolicy.FromSnapshot(checkpoint.Electrical.Hierarchy.Data);
+        SchematicConnectionRealization realization;
+        try { realization = await SchematicConnectionRealizer.RealizeAsync(intent, plan.Candidate!, checkpoint, Recording, policy, token); }
+        catch (AutomationException refusal)
+        {
+            await KeepRecording("complete", created.State, saved.State, checkpoint, recorded, null, refusal);
+            throw;
+        }
+        await KeepRecording("complete", created.State, saved.State, checkpoint, recorded, realization, null);
+        var prepared = await SchematicConnectedAddition.RealizeAsync(SchematicConnectionRealizerTests.Replay(recorded), session, saved.State, plan,
+            checkpoint, token);
+        CollectionAssert.AreEqual(realization.Operations.Select(o => o.ToByteString()).ToArray(), prepared.Operations.Select(o => o.ToByteString()).ToArray(),
+            "The same measurements give the same batch (I9).");
+        Assert.AreEqual(checkpoint, await Capture(), "Measuring must not change KiCad.");
+        Step("realization measured");
+
+        // 3. Forced mismatch through the executor: the same batch journaled with a foreign wire from the VIN label to the DCDC_OUT
+        // label on PSU. KiCad's assertion refuses it and the executor abandons it (CN-1 §8.1, §9.2, §9.3).
+        var mismatch = await RequireForcedMismatch(checkpoint, completeXml);
+        Step("forced mismatch refused");
+
+        // 4. Apply realizes the Complete stage.
+        Guid operation = Guid.NewGuid();
+        var applyArguments = new { instanceId, recoveryPath = store.StatePath, designPath = path, expectedRevisionToken = store.Read()!.RevisionToken,
+            operationId = operation.ToString("D") };
+        var applied = await host.Tool("kicad_design_sync_apply", applyArguments);
+        await File.WriteAllTextAsync(Evidence("complete-apply.json"), RetainedToolEvidence(applied), token);
+        RequireToolSuccess(applied);
+        var result = applied.GetProperty("structuredContent");
+        Assert.IsTrue(result.GetProperty("nativeMutationCommitted").GetBoolean(), applied.GetRawText());
+        Assert.IsTrue(result.GetProperty("nativeFilesSaved").GetBoolean(), applied.GetRawText());
+        Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), applied.GetRawText());
+        Assert.IsTrue(result.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(),
+            "KiCad verified the connectivity assertion of the realization: " + applied.GetRawText());
+        var realized = await Capture();
+        Assert.IsFalse(realized.State.NativeContentDirty, "Apply saves the realized sheets.");
+        var synchronized = store.Read()!.State.Baseline;
+        PsuCpuFixture.AssertNative(synchronized, realized.Electrical, PsuCpuStage.Complete);
+        string publishedXml = await File.ReadAllTextAsync(path, token);
+        Assert.AreEqual(SchematicDesignXml.Write(synchronized, []), SchematicDesignXml.Write(SchematicDesignXml.Read(publishedXml, []) with
+            { Schematic = synchronized.Schematic }, []), "The published XML is the synchronized design.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(realized.Electrical.Hierarchy.Data, SchematicDesignXml.Read(publishedXml, []).Schematic, token),
+            "The XML holds exactly KiCad's drawing.");
+        // The executor drew exactly the recorded realization: the same generated items and sheet pins, with the same identities.
+        var drawn = GeneratedIn(components, realized);
+        CollectionAssert.AreEquivalent(realization.Generated.Select(g => g.Id).ToArray(), drawn.ToArray(),
+            "KiCad holds exactly the generated items of the recorded realization.");
+        var stubs = await RequireLabelStubs(client, components, realized, policy, token);
+        await CheckPresentation(realized, synchronized, "complete");
+        Step("complete stage realized");
+
+        var replay = await host.Tool("kicad_design_sync_apply", applyArguments);
+        RequireToolSuccess(replay);
+        Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(), replay.GetRawText());
+        var repeated = await Preview("repeated");
+        var repeatedDesign = SchematicDesignXml.Read(repeated.GetProperty("candidateDesignXml").GetString()
+            ?? throw new AssertFailedException("A repeated plan is the general path, with its candidate XML."), []);
+        var publishedNow = SchematicDesignXml.Read(publishedXml, []);
+        Assert.AreEqual(publishedXml, SchematicDesignXml.Write(repeatedDesign with { Schematic = publishedNow.Schematic }, []),
+            "A repeated plan publishes nothing new.");
+        Assert.IsTrue(Same(repeatedDesign.Schematic, publishedNow.Schematic), "A repeated plan draws nothing new.");
+        Assert.AreEqual(0, repeated.GetProperty("nativeOperationsJson").GetArrayLength(), "A repeated plan sends nothing to KiCad.");
+        var again = await Apply("repeated");
+        Assert.IsFalse(again.GetProperty("nativeMutationCommitted").GetBoolean(), again.GetRawText());
+        Assert.IsFalse(again.GetProperty("nativeFilesSaved").GetBoolean(), again.GetRawText());
+        Assert.AreEqual(realized, await Capture(), "A repeated apply leaves KiCad unchanged.");
+        Assert.AreEqual(publishedXml, await File.ReadAllTextAsync(path, token), "A repeated apply leaves the XML unchanged.");
+        Step("repeat is a no-op");
+
+        // 5. One native undo removes the whole realization, and redo restores it.
+        await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+        var undone = await Until("native undo", s => Same(s.Electrical.Hierarchy.Data, components.Electrical.Hierarchy.Data));
+        Assert.IsEmpty(GeneratedIn(components, undone), "Undo removes every generated wire, label and sheet pin.");
+        PsuCpuFixture.AssertNative(created.State.Baseline, undone.Electrical, PsuCpuStage.Components);
+        await FocusedSchematicShortcut(client, document, processId, display, "y", token);
+        var redone = await Until("native redo", s => Same(s.Electrical.Hierarchy.Data, realized.Electrical.Hierarchy.Data));
+        PsuCpuFixture.AssertNative(synchronized, redone.Electrical, PsuCpuStage.Complete);
+        Step("undo and redo");
+
+        // Save and reload the realized sheets from disk.
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+        Assert.IsFalse((await Capture()).State.NativeContentDirty);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+        var reloaded = await Capture();
+        Assert.IsFalse(reloaded.State.NativeContentDirty);
+        Assert.AreNotEqual(realized.State.Revision.Epoch, reloaded.State.Revision.Epoch, "Revert reloads a new native document.");
+        // Loading the files KiCad wrote changes each sheet's loaded-format provenance, not any persisted object.
+        var loadedExpected = realized.Electrical.Hierarchy.Data.Clone();
+        foreach (var screen in loadedExpected.Instances)
+        {
+            var actual = reloaded.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(screen.Metadata.Document));
+            Assert.AreEqual(screen.Metadata.WriterNativeFormatVersion, actual.Metadata.LoadedNativeFormatVersion);
+            screen.Metadata.LoadedNativeFormatVersion = actual.Metadata.LoadedNativeFormatVersion;
+        }
+        // A difference is recorded with every changed field and the journey continues on the reloaded editor, so one run
+        // reports every later problem too; the journey still fails at its end.
+        var reloadDifferences = Differences(reloaded.Electrical.Hierarchy.Data, loadedExpected);
+        if (reloadDifferences.Count != 0)
+        {
+            await File.WriteAllTextAsync(Evidence("realized.xml"), SchematicDataXml.Write(realized.Electrical.Hierarchy.Data), token);
+            await File.WriteAllTextAsync(Evidence("reloaded.xml"), SchematicDataXml.Write(reloaded.Electrical.Hierarchy.Data), token);
+            problems.Add("Save and reload changed the realized sheets: " + string.Join("; ", reloadDifferences.Take(12)));
+        }
+        PsuCpuFixture.AssertNative(synchronized, reloaded.Electrical, PsuCpuStage.Complete);
+        var beforeReattach = store.Read()!;
+        RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = beforeReattach.RevisionToken, expectedDocumentEpoch = reloaded.State.Revision.Epoch }));
+        Assert.AreEqual(SchematicDesignXml.Write(beforeReattach.State.Baseline, []), SchematicDesignXml.Write(store.Read()!.State.Baseline, []),
+            "The recovery record adopts the reloaded editor unchanged.");
+        var settled = await Preview("reloaded");
+        Assert.AreEqual(0, settled.GetProperty("nativeOperationsJson").GetArrayLength(), "Nothing is left to send to KiCad.");
+        Assert.AreEqual(0, settled.GetProperty("netChanges").GetArrayLength(), "No published net changes.");
+        Assert.AreEqual(0, settled.GetProperty("electricalConflicts").GetArrayLength());
+        // The settled candidate is the published XML apart from the reloaded files' loaded-format provenance, which a reload
+        // records and which is published to XML, never sent to KiCad.
+        var publishedDesign = SchematicDesignXml.Read(publishedXml, []);
+        var settledDesign = SchematicDesignXml.Read(settled.GetProperty("candidateDesignXml").GetString()!, []);
+        var expectedSettled = publishedDesign with { Schematic = publishedDesign.Schematic.Clone() };
+        foreach (var screen in expectedSettled.Schematic.Instances)
+            screen.Metadata.LoadedNativeFormatVersion = reloaded.Electrical.Hierarchy.Data.Instances
+                .Single(s => s.Metadata.Document.Equals(screen.Metadata.Document)).Metadata.LoadedNativeFormatVersion;
+        if (SchematicDesignXml.Write(expectedSettled, []) != SchematicDesignXml.Write(settledDesign, []))
+        {
+            await File.WriteAllTextAsync(Evidence("settled-expected.xml"), SchematicDesignXml.Write(expectedSettled, []), token);
+            await File.WriteAllTextAsync(Evidence("settled-actual.xml"), SchematicDesignXml.Write(settledDesign, []), token);
+            problems.Add("Apart from the reloaded files' provenance, the settled candidate must be exactly the published XML: "
+                + string.Join("; ", Differences(settledDesign.Schematic, expectedSettled.Schematic).Take(8))
+                + (SchematicDesignXml.Write(expectedSettled with { Schematic = settledDesign.Schematic }, []) == SchematicDesignXml.Write(settledDesign, [])
+                    ? "" : " (the engineering design differs too)"));
+        }
+        Assert.AreEqual(reloaded, await Capture());
+        // Applying the settled plan publishes that provenance to the XML and sends nothing to KiCad; the next XML change
+        // then starts from the reloaded editor.
+        var provenance = await Apply("reloaded");
+        Assert.IsFalse(provenance.GetProperty("nativeMutationCommitted").GetBoolean(), provenance.GetRawText());
+        Assert.AreEqual(settled.GetProperty("candidateDesignXml").GetString(), await File.ReadAllTextAsync(path, token));
+        Assert.IsTrue(Same(reloaded.Electrical.Hierarchy.Data, (await Capture()).Electrical.Hierarchy.Data), "Publishing provenance changes nothing in KiCad.");
+        PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, (await Capture()).Electrical, PsuCpuStage.Complete);
+        Step("save, reload and reattach");
+
+        // 6. Pull-ups on the connected I2C nets, placed by the connection-aware layout tool and realized.
+        var pullUps = await RequirePullUpRealization(await Capture());
+        Step("pull-ups realized");
+
+        await NativeKeyboard.CaptureAsync(display, Evidence("window.png"), token);
+        byte[] published = await File.ReadAllBytesAsync(path, token);
+        await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
+        {
+            instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, stage = PsuCpuStage.Complete.ToString(), seed = context.Seed.ToString(),
+            nativeCapabilities = session.Capabilities.ToArray(), realStdioApply = true, operation,
+            intent = new { nets = intent.Nets.Count, islands = intent.Screens.Sum(s => s.Islands.Count), ports = intent.Ports.Count,
+                expectedGroups = intent.ExpectedGroups.Count },
+            generated = realization.Generated.GroupBy(g => g.Role.ToString()).ToDictionary(g => g.Key, g => g.Count()),
+            connectivityAssertionVerified = true, executorDrewRecordedRealization = true, labelStubs = stubs, forcedMismatch = mismatch,
+            exactReplay = true, repeatedPlanNoOp = true, repeatedApplyNoOp = true, nativeUndoRedoVerified = true, saveReloadVerified = true,
+            recoveryReattachedWithoutChanges = true, pullUps,
+            publishedXml = new { length = published.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(published)) },
+            crossPlatformReady = false, steps, problems
+        }), token);
+        Step("done");
+        if (problems.Count != 0) throw new AssertFailedException(string.Join(" | ", problems));
+
+        Task<CheckedSchematicState> Capture() => CaptureChecked(client, document, token);
+
+        // Write a design as the saved XML and the record's desired revision.
+        StoredDesignRecovery Write(StoredDesignRecovery current, SchematicDesign design)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, []));
+            File.WriteAllBytes(path, bytes);
+            return store.Save(current.State with { DesiredFileBytes = bytes }, current.RevisionToken);
+        }
+
+        // The public preview of the current record; it never changes KiCad or the record.
+        async Task<JsonElement> Preview(string name)
+        {
+            var current = store.Read()!;
+            var nativeBefore = await Capture();
+            var preview = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = current.RevisionToken });
+            await File.WriteAllTextAsync(Evidence(name + "-plan.json"), RetainedToolEvidence(preview), token);
+            RequireToolSuccess(preview);
+            var content = preview.GetProperty("structuredContent").Clone();
+            Assert.IsTrue(content.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+            Assert.AreEqual(JsonValueKind.Null, content.GetProperty("errorCode").ValueKind, preview.GetRawText());
+            Assert.AreEqual(nativeBefore, await Capture(), name + ": planning must not change KiCad.");
+            Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, name + ": planning writes nothing.");
+            return content;
+        }
+
+        // Apply the current record through the public tool and require it to succeed.
+        async Task<JsonElement> Apply(string name)
+        {
+            var current = store.Read()!;
+            var reply = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = store.StatePath, designPath = path,
+                expectedRevisionToken = current.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+            await File.WriteAllTextAsync(Evidence(name + "-apply.json"), RetainedToolEvidence(reply), token);
+            RequireToolSuccess(reply);
+            return reply.GetProperty("structuredContent").Clone();
+        }
+
+        // The recorded measurements beside the saved record they were planned from, in the replay-fixture format of
+        // automation/tests/fixtures/connection-realization (the record compressed, because the evidence has a size cap).
+        async Task KeepRecording(string name, DesignRecoveryState record, DesignRecoveryState revision, CheckedSchematicState at,
+            IReadOnlyList<(MeasureSchematicPlacement Request, SchematicPlacementGeometry Reply)> measurements,
+            SchematicConnectionRealization? outcome, Exception? failure)
+        {
+            string kept = Evidence("realization-" + name + ".recovery.json");
+            new DesignRecoveryStore(kept).Save(record with { LastSynchronization = null }, null);
+            await using (var input = File.OpenRead(kept))
+            await using (var output = File.Create(kept + ".gz"))
+            await using (var zip = new System.IO.Compression.GZipStream(output, System.IO.Compression.CompressionLevel.SmallestSize))
+                await input.CopyToAsync(zip, CancellationToken.None);
+            File.Delete(kept); File.Delete(kept + ".lock");
+            string text = SchematicConnectionRealizerTests.FormatRecording("psu-cpu-" + name, revision, at, measurements, outcome,
+                Path.GetFileName(kept), failure);
+            await using (var output = File.Create(Evidence("realization-" + name + (failure is null ? ".measurement.json.gz" : ".refused.json.gz"))))
+            await using (var zip = new System.IO.Compression.GZipStream(output, System.IO.Compression.CompressionLevel.SmallestSize))
+                await zip.WriteAsync(Encoding.UTF8.GetBytes(text), CancellationToken.None);
+        }
+
+        // KiCad's identities of the generated items: new top-level items and new sheet pins of existing sheet symbols.
+        static IReadOnlySet<Guid> GeneratedIn(CheckedSchematicState before, CheckedSchematicState after)
+        {
+            var result = new HashSet<Guid>();
+            foreach (var screen in after.Electrical.Hierarchy.Data.Instances)
+            {
+                var old = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(screen.Metadata.Document));
+                var oldItems = SchematicItemDelta.Index(old.Items);
+                var oldPins = oldItems.Values.OfType<SheetSymbol>().SelectMany(s => s.Pins).Select(p => Guid.Parse(p.Id.Value)).ToHashSet();
+                foreach (var (id, item) in SchematicItemDelta.Index(screen.Items))
+                {
+                    if (!oldItems.ContainsKey(id)) result.Add(id);
+                    if (item is SheetSymbol sheet)
+                        foreach (var pin in sheet.Pins.Select(p => Guid.Parse(p.Id.Value)).Where(p => !oldPins.Contains(p))) result.Add(pin);
+                }
+            }
+            return result;
+        }
+
+        bool Same(SchematicHierarchyData left, SchematicHierarchyData right) =>
+            SchematicHierarchyDelta.Plan(left, right, token).Count == 0 && SchematicHierarchyDelta.Plan(right, left, token).Count == 0;
+
+        // What turns `actual` into `wanted`: each operation with, for an update, every top-level field that differs.
+        List<string> Differences(SchematicHierarchyData actual, SchematicHierarchyData wanted)
+        {
+            IReadOnlyList<SchematicItemOperation> operations;
+            try { operations = SchematicHierarchyDelta.Plan(actual, wanted, token); }
+            catch (AutomationException error) { return [error.Code + ": " + error.Message]; }
+            var existing = actual.Instances.SelectMany(screen => SchematicItemDelta.Index(screen.Items)).GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
+            var result = new List<string>();
+            foreach (var operation in operations)
+            {
+                if (operation.Update is { } packed)
+                {
+                    var (id, item) = SchematicItemDelta.Index([packed]).Single();
+                    var after = JsonNode.Parse(SchematicJson.Formatter.Format(item))!.AsObject();
+                    var before = existing.TryGetValue(id, out var old) ? JsonNode.Parse(SchematicJson.Formatter.Format(old))!.AsObject() : new JsonObject();
+                    var fields = after.Select(p => p.Key).Union(before.Select(p => p.Key))
+                        .Where(k => (after[k]?.ToJsonString() ?? "") != (before[k]?.ToJsonString() ?? ""))
+                        .Select(k => k + ": " + Short(before[k]?.ToJsonString()) + " -> " + Short(after[k]?.ToJsonString()));
+                    result.Add("update " + item.Descriptor.Name + " " + id.ToString("D") + " {" + string.Join(", ", fields) + "}");
+                }
+                else if (operation.Create is { } created)
+                    result.Add("missing " + SchematicItemDelta.Index([created]).Single().Value.Descriptor.Name + " " + Short(SchematicJson.Formatter.Format(operation)));
+                else result.Add(operation.OperationCase + " " + Short(SchematicJson.Formatter.Format(operation)));
+            }
+            return result;
+            static string Short(string? text) => text is null ? "(none)" : text.Length <= 300 ? text : text[..300] + "...";
+        }
+
+        // A native shortcut is processed asynchronously; read checked state until it takes effect.
+        async Task<CheckedSchematicState> Until(string what, Func<CheckedSchematicState, bool> reached)
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(20));
+            while (true)
+            {
+                var state = await Capture();
+                if (reached(state)) return state;
+                try { await Task.Delay(250, wait.Token); }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    await File.WriteAllTextAsync(Evidence(what.Replace(' ', '-') + "-actual.xml"), SchematicDataXml.Write(state.Electrical.Hierarchy.Data), token);
+                    throw new AssertFailedException(what + " did not reach the expected schematic within 20 s.");
+                }
+            }
+        }
+
+        // Every symbol's body, pins and visible fields lie inside its sheet's usable region and no two symbol bodies on one
+        // sheet overlap (§1.6.3, NativePresentationChecks in KiCad); each sheet is rendered as retained evidence.
+        async Task CheckPresentation(CheckedSchematicState state, SchematicDesign design, string name)
+        {
+            var bindings = design.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+            var occurrences = design.Engineering.Circuit.Symbols;
+            var owners = design.Engineering.Circuit.Components.ToDictionary(c => c.Id);
+            var sheetOf = expected.Sheets.ToDictionary(s => s.ModelSheetInstance, s => s.Key);
+            foreach (var sheet in expected.Sheets)
+            {
+                var screen = state.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == sheetPaths[sheet.Key]);
+                await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = screen.Metadata.Document.Clone() }, token);
+                var ids = occurrences.Where(o => sheetOf[o.EffectiveSheetInstanceId(owners[o.ComponentId])] == sheet.Key)
+                    .Select(o => bindings[o.Id]).ToArray();
+                if (ids.Length > 0)
+                {
+                    var issues = await NativePresentationChecks.CheckSymbolPlacementAsync(client, screen.Metadata.Document, ids, usable[sheet.Key], token);
+                    Assert.AreEqual(0, issues.Count, $"{name} {sheet.Key}: " + string.Join("; ", issues.Select(i => i.Code + " " + string.Join(" and ", i.Symbols))));
+                }
+                var image = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = screen.Metadata.Document.Clone() }, token);
+                await File.WriteAllBytesAsync(Evidence(name + "-render-" + sheet.Key.ToLowerInvariant() + ".png"), image.Preview.Png.ToByteArray(), token);
+            }
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, token);
+        }
+
+        // The recorded realization's batch as the executor journals it, plus one foreign wire before its assertion that joins
+        // the VIN and DCDC_OUT labels on PSU. Resuming it through apply sends it to KiCad, whose assertion refuses it without
+        // any change; the executor abandons the pending request and reports realization_connectivity_mismatch.
+        async Task<object> RequireForcedMismatch(CheckedSchematicState at, byte[] xml)
+        {
+            var before = store.Read()!;
+            var labels = prepared.Operations.Where(o => o.Create?.Is(LocalLabel.Descriptor) == true)
+                .Select(o => (o.TargetDocument, Label: o.Create.Unpack<LocalLabel>())).ToArray();
+            var vin = labels.First(l => l.Label.Text.Text_ == "VIN");
+            var dcdc = labels.First(l => l.Label.Text.Text_ == "DCDC_OUT" && l.TargetDocument.Equals(vin.TargetDocument));
+            var foreign = new SchematicItemOperation { TargetDocument = vin.TargetDocument.Clone(), Create = Any.Pack(new SchematicLine
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = vin.Label.Position.Clone(), End = dcdc.Label.Position.Clone(),
+                Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked
+            }) };
+            var batch = new ApplySchematicItemBatch { Document = at.State.Document.Clone(), DocumentEpoch = at.State.Revision.Epoch,
+                ExpectedRevision = at.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"),
+                OriginId = before.State.OriginId.ToString("D"), Description = SchematicConnectionRealizer.BatchDescription };
+            batch.Operations.Add(prepared.Operations.Take(prepared.Operations.Count - 1).Select(o => o.Clone()));
+            batch.Operations.Add(foreign);
+            batch.Operations.Add(prepared.Operations[^1].Clone());
+            Guid request = Guid.NewGuid();
+            var journal = await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(new() { Document = document.Clone() }, token);
+            store.Save(before.State with { PendingMutation = batch, PendingNativeState = at.State.Clone(),
+                PendingLayout = DesignLayoutIntent.Create(path, xml, prepared.PlannedDesignFileBytes, request, before.RevisionToken,
+                    DesignLayoutIntent.ConnectionRealizationLane) }, before.RevisionToken);
+            var refused = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = store.StatePath, designPath = path,
+                expectedRevisionToken = before.RevisionToken, operationId = request.ToString("D") });
+            await File.WriteAllTextAsync(Evidence("mismatch-apply.json"), refused.GetRawText(), token);
+            Assert.IsTrue(refused.TryGetProperty("isError", out var failed) && failed.GetBoolean(), refused.GetRawText());
+            var content = refused.GetProperty("structuredContent");
+            Assert.AreEqual(SchematicConnectionErrors.RealizationConnectivityMismatch, content.GetProperty("errorCode").GetString(), refused.GetRawText());
+            string message = content.GetProperty("errorMessage").GetString()!;
+            StringAssert.Contains(message, SchematicConnectionErrors.ConnectivityPostconditionFailed + ":", "The refusal carries KiCad's own detail.");
+            StringAssert.Contains(message, "unexpected_join", "KiCad names the foreign join.");
+            // Nothing was committed: KiCad's state, drawing and change journal, the XML and the recovery baseline are unchanged,
+            // and the abandoned request is no longer pending.
+            var after = await Capture();
+            Assert.AreEqual(at.State, after.State, "The refused batch changes no revision, digest or dirty flag.");
+            Assert.IsTrue(Same(at.Electrical.Hierarchy.Data, after.Electrical.Hierarchy.Data), "The refused batch draws nothing.");
+            Assert.AreEqual(journal, await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(new() { Document = document.Clone() }, token),
+                "The refused batch adds no journal entry.");
+            CollectionAssert.AreEqual(xml, await File.ReadAllBytesAsync(path, token), "No XML is published.");
+            var abandoned = store.Read()!.State;
+            Assert.IsFalse(abandoned.HasPendingWork, "The rejected request is abandoned.");
+            Assert.AreEqual(SchematicDesignXml.Write(before.State.Baseline, []), SchematicDesignXml.Write(abandoned.Baseline, []), "The baseline does not advance.");
+            CollectionAssert.AreEqual(before.State.DesiredFileBytes, abandoned.DesiredFileBytes);
+            Assert.AreEqual(before.State.NativeRevision, abandoned.NativeRevision);
+            return new { errorCode = content.GetProperty("errorCode").GetString(), message, nativeStateUnchanged = true, journalUnchanged = true,
+                xmlUnchanged = true, baselineUnchanged = true, pendingAbandoned = true };
+        }
+
+        // CN-1 §10 and §6 once more on the realized design: I2C pull-ups R2 (PSU_SCL to RAIL_B) and R4 (MEM_SCL to RAIL_B)
+        // coordinate-free, and R3 (PSU_SDA to RAIL_B) placed explicitly and locked. The layout tool aims R2 and R4 at the pins
+        // they connect to; apply creates the three resistors and connects their six pins in one verified KiCad commit. Nothing
+        // that existed before is changed, and KiCad's pin partition is exactly the XML nets.
+        async Task<object> RequirePullUpRealization(CheckedSchematicState before)
+        {
+            var current = store.Read()!;
+            Assert.IsFalse(current.State.HasPendingWork);
+            var (connected, added) = WithPullUps(current.State.Baseline, expected, new SymbolPlacement(215.9m, 76.2m, 0, false, false, true));
+            var written = Write(current, connected);
+            var screenOf = expected.Sheets.ToDictionary(s => s.Key, s => s.NativeScreen);
+            var pullRegions = regions.Where(r => r.ScreenId == screenOf["PSU"] || r.ScreenId == screenOf["CPU"]).ToArray();
+            var proposed = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = written.RevisionToken, gridNm = PsuCpuLayoutPolicy.GridNm, clearanceNm = PsuCpuLayoutPolicy.ClearanceNm,
+                pageInsetNm = PsuCpuLayoutPolicy.PageInsetNm, regions = pullRegions, userInstructions = "Place the I2C pull-ups next to the bus pins they serve." });
+            await File.WriteAllTextAsync(Evidence("pull-up-layout.json"), RetainedToolEvidence(proposed), token);
+            RequireToolSuccess(proposed);
+            var proposal = proposed.GetProperty("structuredContent");
+            Assert.IsTrue(proposal.GetProperty("canPropose").GetBoolean(), proposed.GetRawText());
+            Assert.AreEqual(2, proposal.GetProperty("preferredAnchors").GetArrayLength(), "The two coordinate-free pull-ups are aimed at their partners.");
+            var placed = SchematicDesignXml.Read(proposal.GetProperty("desiredXml").GetString()!, []);
+            Assert.AreEqual(new SymbolPlacement(215.9m, 76.2m, 0, false, false, true),
+                placed.Engineering.Circuit.Symbols.Single(s => s.Id == added["R3"].Occurrence).Placement, "R3 keeps its explicit, locked position.");
+            Write(store.Read()!, placed);
+            var preview = await Preview("pull-up");
+            Assert.AreEqual(JsonValueKind.Null, preview.GetProperty("candidateDesignXml").ValueKind, "The pull-ups are a connected addition to realize.");
+            var pullPlan = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
+            var pullIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(pullPlan);
+            Assert.HasCount(3, pullIntent.CreatedSymbolIds, "The three pull-ups are created by the realization batch.");
+            var reply = await Apply("pull-up");
+            Assert.IsTrue(reply.GetProperty("nativeMutationCommitted").GetBoolean(), reply.GetRawText());
+            Assert.IsTrue(reply.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(), reply.GetRawText());
+            var after = await Capture();
+            var design = store.Read()!.State.Baseline;
+            var comparison = SchematicElectricalComparison.Compare(design, after.Electrical, [], token);
+            Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent,
+                "KiCad's pin partition is exactly the XML nets with the pull-ups: " + string.Join("; ", comparison.Differences.Select(d => d.Kind)));
+            // Only creations: the three resistors and the generated items for their six pins; nothing existing changes.
+            var delta = SchematicHierarchyDelta.Plan(before.Electrical.Hierarchy.Data, after.Electrical.Hierarchy.Data, token);
+            Assert.IsTrue(delta.All(o => o.Create is not null || o.ReplaceLibraryCache is not null),
+                "Realizing the pull-ups only creates items: " + string.Join(", ", delta.Select(o => o.OperationCase)));
+            var symbols = SchematicModelProjection.NativeSymbols(design, after.Electrical.Hierarchy.Data);
+            foreach (var reference in new[] { "R2", "R3", "R4" })
+                Assert.IsTrue(symbols.ContainsKey(added[reference].Occurrence), reference + " is drawn.");
+            var stubbed = await RequireLabelStubs(client, before, after, policy, token);
+            await CheckPresentation(after, design, "pull-up");
+            return new { preferredAnchors = proposal.GetProperty("preferredAnchors").GetArrayLength(), created = 3,
+                createdItems = delta.Count, labelStubs = stubbed };
+        }
+    }
+
+    // CN-1 §6 on KiCad's own result, measured by KiCad at the realized revision. Everything the realization added (compared with
+    // `before`) is a wire or a local or hierarchical label, or a sheet pin on an existing sheet symbol: no global label, junction,
+    // symbol or other item. Every wire is a straight stub of 2, 3, 4, 6 or 8 connection-grid steps that leaves a pin away from its
+    // body, or a new sheet pin away from its sheet, and ends in exactly one new label turned the same way. A pin stub's label text
+    // is the name KiCad gives that pin's net (its last path part); a sheet pin's label and the sheet pin carry the same text.
+    // Hierarchical labels appear only on child sheets; every new sheet pin sits on the left or right edge of its sheet symbol and
+    // faces into it. Returns the counts per sheet and kind.
+    private static async Task<object> RequireLabelStubs(NativeClient client, CheckedSchematicState before, CheckedSchematicState after,
+        SchematicConnectionPolicy policy, CancellationToken token)
+    {
+        var lengths = SchematicConnectionPolicy.StubMultiples.Select(m => m * policy.GridNm).ToHashSet();
+        var netOf = new Dictionary<(string Path, string Item), string>();
+        foreach (var net in after.Electrical.Nets)
+            foreach (var sheet in net.Sheets)
+                foreach (var item in sheet.Items)
+                    netOf[(string.Join('/', sheet.Path.Path.Select(p => p.Value)), item.Value)] = net.Name;
+        string Leaf(string name) => name[(name.LastIndexOf('/') + 1)..];
+        var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        void Count(string key) => counts[key] = counts.GetValueOrDefault(key) + 1;
+        foreach (var screen in after.Electrical.Hierarchy.Data.Instances)
+        {
+            string path = SheetPathKey(screen.Metadata.Document);
+            bool child = screen.Metadata.Document.SheetPath.Path.Count > 1;
+            var old = before.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(screen.Metadata.Document));
+            var oldItems = SchematicItemDelta.Index(old.Items);
+            var items = SchematicItemDelta.Index(screen.Items);
+            var added = items.Where(p => !oldItems.ContainsKey(p.Key)).ToArray();
+            var oldPins = oldItems.Values.OfType<SheetSymbol>().SelectMany(s => s.Pins).Select(p => p.Id.Value).ToHashSet(StringComparer.Ordinal);
+            var sheetPins = items.Values.OfType<SheetSymbol>().SelectMany(s => s.Pins.Where(p => !oldPins.Contains(p.Id.Value)).Select(p => (Sheet: s, Pin: p))).ToArray();
+            foreach (var (_, item) in added)
+                Assert.IsTrue(item is SchematicLine { Type: SchematicLineType.SltWire } or LocalLabel or HierarchicalLabel or SchematicSymbolInstance,
+                    path + ": a realization adds only wires, local and hierarchical labels (and the symbols it creates), not " + item.Descriptor.FullName);
+            Assert.IsTrue(child || !added.Any(p => p.Value is HierarchicalLabel), path + ": hierarchical labels only on child sheets.");
+            var wires = added.Select(p => p.Value).OfType<SchematicLine>().ToArray();
+            var labels = added.Where(p => p.Value is LocalLabel or HierarchicalLabel).Select(p => (Id: p.Key, Item: p.Value)).ToArray();
+            if (wires.Length == 0 && labels.Length == 0 && sheetPins.Length == 0) continue;
+            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = after.State.Revision.Clone() }, token);
+            var pins = measured.Obstacles.Where(o => o.SymbolPins is not null).SelectMany(o => o.SymbolPins.Pins)
+                .ToLookup(p => (p.Position.XNm, p.Position.YNm));
+            var labelled = new HashSet<Guid>();
+            var stubbedSheetPins = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var wire in wires)
+            {
+                var (sx, sy, ex, ey) = (wire.Start.XNm, wire.Start.YNm, wire.End.XNm, wire.End.YNm);
+                Assert.IsTrue(sx == ex || sy == ey, path + ": a stub is straight along one axis.");
+                long length = Math.Abs(ex - sx) + Math.Abs(ey - sy);
+                Assert.IsTrue(lengths.Contains(length), $"{path}: stub length {length} nm is not 2, 3, 4, 6 or 8 connection-grid steps.");
+                // Which end the stub leaves from: a pin or a new sheet pin; the label sits on the other end.
+                bool FromPin((long X, long Y) at) => pins[at].Any();
+                var startSheetPin = sheetPins.Where(s => s.Pin.Position.XNm == sx && s.Pin.Position.YNm == sy).ToArray();
+                var endSheetPin = sheetPins.Where(s => s.Pin.Position.XNm == ex && s.Pin.Position.YNm == ey).ToArray();
+                bool fromStart = FromPin((sx, sy)) || startSheetPin.Length != 0, fromEnd = FromPin((ex, ey)) || endSheetPin.Length != 0;
+                Assert.IsTrue(fromStart != fromEnd, $"{path}: a stub has exactly one end on a pin or sheet pin ({sx},{sy})-({ex},{ey}).");
+                var (ax, ay, bx, by) = fromStart ? (sx, sy, ex, ey) : (ex, ey, sx, sy);
+                var direction = (Math.Sign(bx - ax), Math.Sign(by - ay));
+                var at = labels.Where(l => Position(l.Item) == (bx, by)).ToArray();
+                Assert.HasCount(1, at, $"{path}: exactly one new label ends the stub at ({bx},{by}).");
+                var label = at[0];
+                labelled.Add(label.Id);
+                Assert.AreEqual(SchematicConnectionGeometry.Spin(direction), Spin(label.Item), $"{path}: the label faces away from its pin.");
+                string text = Text(label.Item);
+                var sheetPin = fromStart ? startSheetPin : endSheetPin;
+                if (sheetPin.Length != 0)
+                {
+                    Assert.HasCount(1, sheetPin);
+                    var (sheet, pin) = sheetPin[0];
+                    var side = pin.Side;
+                    Assert.AreEqual(side == SheetSide.ShsLeft ? (-1, 0) : (1, 0), direction, $"{path}: a sheet-pin stub leaves its sheet outward.");
+                    Assert.AreEqual(pin.Text.Text_, text, $"{path}: a sheet-pin stub's label carries the sheet pin's name.");
+                    Assert.IsTrue(stubbedSheetPins.Add(pin.Id.Value), $"{path}: one stub per new sheet pin.");
+                    Count(label.Item is HierarchicalLabel ? "sheet-pin-stub-hierarchical" : "sheet-pin-stub-local");
+                }
+                else
+                {
+                    var anchors = pins[(ax, ay)].ToArray();
+                    Assert.IsTrue(anchors.Any(p => SchematicConnectionGeometry.Outward(p) == direction), $"{path}: the stub leaves pin at ({ax},{ay}) away from its body.");
+                    var named = anchors.Select(p => netOf.GetValueOrDefault((path, p.Id.Value))).OfType<string>().Distinct().ToArray();
+                    Assert.HasCount(1, named, $"{path}: the pin at ({ax},{ay}) is in one KiCad net.");
+                    Assert.AreEqual(Leaf(named[0]), text, $"{path}: the label names the net KiCad reports for its pin.");
+                    Count(label.Item is HierarchicalLabel ? "hierarchical-stub" : "local-stub");
+                }
+            }
+            Assert.AreEqual(labels.Length, labelled.Count, path + ": every new label ends a new stub.");
+            foreach (var (sheet, pin) in sheetPins)
+            {
+                Assert.IsTrue(stubbedSheetPins.Contains(pin.Id.Value), $"{path}: new sheet pin {pin.Text.Text_} has its stub.");
+                Assert.AreEqual(pin.Side == SheetSide.ShsLeft ? sheet.Position.XNm : sheet.Position.XNm + sheet.Size.XNm, pin.Position.XNm,
+                    $"{path}: sheet pin {pin.Text.Text_} sits on its sheet's edge.");
+                Assert.AreEqual(pin.Side == SheetSide.ShsLeft ? SchematicLabelSpinStyle.SlssRight : SchematicLabelSpinStyle.SlssLeft, pin.SpinStyle,
+                    $"{path}: sheet pin {pin.Text.Text_} faces into its sheet.");
+                Assert.IsTrue(pin.Side is SheetSide.ShsLeft or SheetSide.ShsRight, $"{path}: sheet pins go on the left or right edge.");
+                Count("sheet-pin");
+            }
+            counts[path + " wires"] = wires.Length;
+        }
+        return counts;
+
+        static (long, long) Position(IMessage item) => item switch
+        {
+            LocalLabel l => (l.Position.XNm, l.Position.YNm), HierarchicalLabel h => (h.Position.XNm, h.Position.YNm),
+            _ => throw new ArgumentException("Not a label.")
+        };
+        static SchematicLabelSpinStyle Spin(IMessage item) => item switch
+        {
+            LocalLabel l => l.SpinStyle, HierarchicalLabel h => h.SpinStyle, _ => throw new ArgumentException("Not a label.")
+        };
+        static string Text(IMessage item) => item switch
+        {
+            LocalLabel l => l.Text.Text_, HierarchicalLabel h => h.Text.Text_, _ => throw new ArgumentException("Not a label.")
+        };
+    }
 
     // Creation-only PSU/CPU journey on the S1 seed (ledger p95e0c19e6143deb6): the frozen fixture's
     // Components stage written as XML, laid out, prepared and applied through the public MCP tools over
@@ -63,27 +694,7 @@ public sealed partial class NativeSessionTests
         var seeded = await Capture();
         Assert.IsTrue(expected.Symbols.All(s => circuit.Symbols.Any(o => o.Id == s.Occurrence)));
 
-        // Explicit fixture policy (§1.6.3 presentation): a 10 mm page inset and the bottom 50 mm kept
-        // for the title block, for every sheet that receives a symbol. The root sheet receives none.
-        string PathKey(IEnumerable<Guid> ids) => string.Join('/', ids.Select(id => id.ToString("D")));
-        var sheetPaths = expected.Sheets.ToDictionary(s => s.Key,
-            s => PathKey(seedBaseline.SheetBindings.Single(b => b.SheetInstanceId == s.ModelSheetInstance).NativePath));
-        var targetSheets = expected.Sheets.Where(s => expected.Symbols.Any(x => x.Sheet == s.Key)).ToArray();
-        CollectionAssert.AreEquivalent(new[] { "PSU", "CPU", "CPU_POWER" }, targetSheets.Select(s => s.Key).ToArray());
-        var regions = new List<SchematicLayoutRegion>();
-        var usable = new Dictionary<string, PresentationBounds>(StringComparer.Ordinal);
-        foreach (var sheet in targetSheets)
-        {
-            var screen = seedBaseline.Schematic.Instances.Single(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == sheetPaths[sheet.Key]);
-            var page = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
-                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = seeded.State.Revision.Clone() }, token);
-            Assert.AreEqual(sheet.NativeScreen.ToString("D"), page.ScreenId.Value, sheet.Key);
-            long inset = expected.Presentation.PageInsetMm * 1_000_000L, reserve = expected.Presentation.ReservedBottomMm * 1_000_000L;
-            var bounds = new PresentationBounds(page.PageBounds.Position.XNm + inset, page.PageBounds.Position.YNm + inset,
-                page.PageBounds.Position.XNm + page.PageBounds.Size.XNm - inset, page.PageBounds.Position.YNm + page.PageBounds.Size.YNm - reserve);
-            regions.Add(new(sheet.NativeScreen, bounds, []));
-            usable.Add(sheet.Key, bounds);
-        }
+        var (regions, usable, sheetPaths) = await PsuCpuRegions(client, seedBaseline, expected, seeded.State.Revision, token);
 
         Guid operation = Guid.NewGuid();
         string? coordinateFreeCode;
@@ -288,25 +899,24 @@ public sealed partial class NativeSessionTests
             { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
 
         // CN-1 connection intent for the fixture's Complete stage (cn1-wiring-intent.md §5), planned from this editor's
-        // real S1 capture, the part symbols it captured and the laid-out placements, as an editor advertising
-        // schematic.connection-realization.v1 would receive it. This editor does not advertise it and nothing can draw
-        // the connections yet, so the plan is only inspected against expected-native.json: every net, crossing,
-        // hierarchical label, sheet pin and native group. Nothing is saved, published or sent to the editor.
+        // real S1 capture, the part symbols it captured and the laid-out placements, with this editor's own handshake, which
+        // advertises schematic.connection-realization.v1. The plan is inspected against expected-native.json: every net,
+        // crossing, hierarchical label, sheet pin and native group. Without a handshake the same revision stays on the general
+        // path, which refuses it (its code is recorded). Drawing the connections is the NativeConnectedRealization journey;
+        // nothing here is saved, published or sent to the editor.
         async Task<object> RequirePsuCpuConnectionIntent(SchematicDesign layout)
         {
             var session = await client.HandshakeAsync(token);
             Assert.AreEqual(instanceId, session.InstanceId);
-            Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
-                "This editor must not advertise connection realization before every native piece exists: " + string.Join(",", session.Capabilities));
-            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var advertised = RequireRealizationAdvertised(session);
             var current = store.Read()!;
             var nativeBefore = await Capture();
             byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
             var nets = PsuCpuFixture.Engineering(PsuCpuStage.Complete).Circuit.Nets;
             var connected = layout with { Engineering = layout.Engineering with { Circuit = layout.Engineering.Circuit with { Nets = nets } } };
             var revision = current.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, [])) };
-            var gated = SchematicSynchronizationPlanner.Plan(revision, session, token);
-            Assert.IsNull(gated.Connections, "This editor's own handshake admits no wiring.");
+            var gated = SchematicSynchronizationPlanner.Plan(revision, token);
+            Assert.IsNull(gated.Connections, "Without a handshake the planner admits no wiring.");
             var plan = SchematicSynchronizationPlanner.Plan(revision, advertised, token);
             var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(plan);
             SchematicSynchronizationPlanTests.RequirePsuCpuIntent(intent, plan.Candidate!, created: true);
@@ -319,8 +929,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken, "Planning connections must not advance recovery.");
             CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning connections must not publish XML.");
             await File.WriteAllTextAsync(Evidence("connection-intent.json"), JsonSerializer.Serialize(new
-                { gatedErrorCode = gated.ErrorCode, intent = SchematicConnectionIntentBuilder.Summary(intent), stackedSplit = refused }), token);
-            return new { gatedErrorCode = gated.ErrorCode, nets = intent.Nets.Count, islands = intent.Screens.Sum(s => s.Islands.Count),
+                { withoutHandshakeErrorCode = gated.ErrorCode, intent = SchematicConnectionIntentBuilder.Summary(intent), stackedSplit = refused }), token);
+            return new { withoutHandshakeErrorCode = gated.ErrorCode, nets = intent.Nets.Count, islands = intent.Screens.Sum(s => s.Islands.Count),
                 ports = intent.Ports.Count, expectedGroups = intent.ExpectedGroups.Count, createdSymbols = intent.CreatedSymbolIds.Count,
                 stackedSplit = refused };
         }
@@ -331,7 +941,7 @@ public sealed partial class NativeSessionTests
         async Task<object> RequireStackedPinsOnCreatedSymbols()
         {
             var session = await client.HandshakeAsync(token);
-            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var advertised = RequireRealizationAdvertised(session);
             var current = store.Read()!;
             Assert.IsFalse(current.State.HasPendingWork);
             var nativeBefore = await Capture();
@@ -1259,6 +1869,43 @@ public sealed partial class NativeSessionTests
 
     // The layout policy the PSU/CPU journeys use: the 1.27 mm placement grid, 2.54 mm between symbols, and the page
     // inset carried by the explicit usable regions instead.
+    // Explicit fixture policy (§1.6.3 presentation): a 10 mm page inset and the bottom 50 mm kept for the title block, for every
+    // sheet that receives a symbol, on the page KiCad measures at this revision. The root sheet receives none. Also returns each
+    // fixture sheet's native path key.
+    private static async Task<(List<SchematicLayoutRegion> Regions, Dictionary<string, PresentationBounds> Usable, Dictionary<string, string> SheetPaths)>
+        PsuCpuRegions(NativeClient client, SchematicDesign seedBaseline, PsuCpuExpectedNative expected,
+            KiCad.Automation.Protocol.DocumentRevision revision, CancellationToken token)
+    {
+        string PathKey(IEnumerable<Guid> ids) => string.Join('/', ids.Select(id => id.ToString("D")));
+        var sheetPaths = expected.Sheets.ToDictionary(s => s.Key,
+            s => PathKey(seedBaseline.SheetBindings.Single(b => b.SheetInstanceId == s.ModelSheetInstance).NativePath));
+        var targetSheets = expected.Sheets.Where(s => expected.Symbols.Any(x => x.Sheet == s.Key)).ToArray();
+        CollectionAssert.AreEquivalent(new[] { "PSU", "CPU", "CPU_POWER" }, targetSheets.Select(s => s.Key).ToArray());
+        var regions = new List<SchematicLayoutRegion>();
+        var usable = new Dictionary<string, PresentationBounds>(StringComparer.Ordinal);
+        foreach (var sheet in targetSheets)
+        {
+            var screen = seedBaseline.Schematic.Instances.Single(s => SheetPathKey(s.Metadata.Document) == sheetPaths[sheet.Key]);
+            var page = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = revision.Clone() }, token);
+            Assert.AreEqual(sheet.NativeScreen.ToString("D"), page.ScreenId.Value, sheet.Key);
+            long inset = expected.Presentation.PageInsetMm * 1_000_000L, reserve = expected.Presentation.ReservedBottomMm * 1_000_000L;
+            var bounds = new PresentationBounds(page.PageBounds.Position.XNm + inset, page.PageBounds.Position.YNm + inset,
+                page.PageBounds.Position.XNm + page.PageBounds.Size.XNm - inset, page.PageBounds.Position.YNm + page.PageBounds.Size.YNm - reserve);
+            regions.Add(new(sheet.NativeScreen, bounds, []));
+            usable.Add(sheet.Key, bounds);
+        }
+        return (regions, usable, sheetPaths);
+    }
+
+    // This KiCad serves every piece CN-1 §8.3 requires and advertises connection realization, so plans use its own handshake.
+    private static AutomationSession RequireRealizationAdvertised(AutomationSession session)
+    {
+        Assert.IsTrue(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
+            "This KiCad must advertise " + SchematicConnectedAddition.NativeCapability + ": " + string.Join(",", session.Capabilities));
+        return session;
+    }
+
     private static readonly InitialLayoutPolicy PsuCpuLayoutPolicy = new(1_270_000, 2_540_000, 0);
 
     /// <summary>The stated distance, a nearest-connection bound: every new, coordinate-free symbol lands with at least one of its
@@ -1280,22 +1927,21 @@ public sealed partial class NativeSessionTests
     private static string SheetPathKey(DocumentSpecifier document) => string.Join('/', document.SheetPath.Path.Select(p => p.Value));
 
     // CN-1 §10 on the S1 seed: the frozen Complete stage, every occurrence coordinate-free, laid out as a connected addition
-    // the way an editor advertising schematic.connection-realization.v1 would receive it, from this editor's own measurements.
+    // with this editor's own handshake (it advertises schematic.connection-realization.v1) and its own measurements.
     // No symbol overlaps another or an existing item or leaves its sheet's usable region, and every pin that needs a connection
     // keeps the room for its shortest stub (two connection-grid steps) and each label its net may put there, as KiCad measures
     // them at the proposed positions: no other symbol, item or other symbol's stub room is inside it. Must-catch: the same
     // symbols laid out by the ordinary, connection-unaware planner (the layout this journey creates next) leave pins without
     // that room. No symbol has an already placed partner, so no preferred anchor is reported. The milestone-1 realizer is run
-    // on the proposal from the same live measurements and its outcome recorded, not asserted: drawing the connections is the
-    // next batch, gated behind lane 2C's assertion. Nothing is saved, published or sent to the editor.
+    // on the proposal from the same live measurements and its outcome recorded here, not asserted: the NativeConnectedRealization
+    // journey draws these connections in KiCad and asserts them. Nothing is saved, published or sent to the editor.
     private static async Task<object> RequirePsuCpuConnectedCompleteLayout(NativeClient client, PsuCpuNativeContext context,
         DesignRecoveryStore store, string path, string instanceId, IReadOnlyList<SchematicLayoutRegion> regions,
         Func<string, string> evidence, CancellationToken token)
     {
         var session = await client.HandshakeAsync(token);
         Assert.AreEqual(instanceId, session.InstanceId);
-        Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability), string.Join(",", session.Capabilities));
-        var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+        var advertised = RequireRealizationAdvertised(session);
         var current = store.Read()!;
         var nativeBefore = await CaptureChecked(client, context.Root, token);
         byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
@@ -1414,22 +2060,22 @@ public sealed partial class NativeSessionTests
 
     // CN-1 §10 on the created Components stage: the fixture's Complete nets plus I2C pull-up resistors, R2 (PSU_SCL to RAIL_B)
     // coordinate-free and R3 (PSU_SDA to RAIL_B) placed explicitly and locked on PSU, and R4 (MEM_SCL to RAIL_B) coordinate-free
-    // on CPU. The public layout tool over STDIO refuses the connected addition because this editor does not advertise connection
-    // realization; the same planner, as an editor advertising it would run it on this editor's measurements, aims R2 and R4 at the
+    // on CPU. The public layout tool over STDIO proposes the connected addition with this editor's handshake, which advertises
+    // connection realization, exactly as the same planner does in process on this editor's measurements: it aims R2 and R4 at the
     // placed pins they connect to. KiCad then measures the proposal: existing symbols unmoved, R3 exactly where the XML put it,
     // R2 and R4 each with its nearest connection within NearestConnectionDistanceNm (at least one connected pin that close to a
     // placed pin it connects to; every pin's distance is recorded, and a pull-up's other pin may be farther), no symbol
     // overlapping another, every symbol inside its usable region, and the room for each new pin's shortest stub and its label
     // clear of every other symbol, item and other symbol's stub room. The checks are shown to catch an overlap, a symbol off the
     // page, a moved existing symbol, a distant symbol and a blocked stub, and to pass the real layout unchanged. Applying the
-    // addition waits for connection realization; the design file and recovery record are restored and KiCad is never changed.
+    // addition is the NativeConnectedRealization journey's; here the design file and recovery record are restored and KiCad is
+    // never changed.
     private static async Task<object> RequirePsuCpuConnectedAddition(NativeClient client, PsuCpuNativeContext context, DesignRecoveryStore store,
         string path, string instanceId, StdioMcpFixture host, PsuCpuExpectedNative expected, IReadOnlyDictionary<string, string> sheetPaths,
         IReadOnlyList<SchematicLayoutRegion> allRegions, Func<string, string> evidence, CancellationToken token)
     {
         var session = await client.HandshakeAsync(token);
-        Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability), string.Join(",", session.Capabilities));
-        var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+        var advertised = RequireRealizationAdvertised(session);
         var current = store.Read()!;
         Assert.IsFalse(current.State.HasPendingWork);
         byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
@@ -1445,20 +2091,14 @@ public sealed partial class NativeSessionTests
         var nativeBefore = await CaptureChecked(client, context.Root, token);
         const string Instructions = "Place the I2C pull-ups next to the bus pins they serve.";
 
-        // The public tool over STDIO: this editor cannot draw and verify XML connections yet, so the connected addition is
-        // refused before anything is measured, written or sent.
-        var gated = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
+        // The public tool over STDIO proposes the connected addition from its own handshake and measurements, and writes nothing.
+        var publicLayout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = saved.RevisionToken, gridNm = PsuCpuLayoutPolicy.GridNm, clearanceNm = PsuCpuLayoutPolicy.ClearanceNm,
             pageInsetNm = PsuCpuLayoutPolicy.PageInsetNm, regions, userInstructions = Instructions });
-        await File.WriteAllTextAsync(evidence("connected-layout-gated.json"), gated.GetRawText(), token);
-        Assert.IsTrue(gated.TryGetProperty("isError", out var gatedError) && gatedError.GetBoolean(), gated.GetRawText());
-        // This tool reports a refusal as a JSON text block with its code and message.
-        using (var refusal = JsonDocument.Parse(string.Concat(gated.GetProperty("content").EnumerateArray()
-            .Where(b => b.TryGetProperty("text", out _)).Select(b => b.GetProperty("text").GetString()))))
-        {
-            Assert.AreEqual("unsupported_layout_creation", refusal.RootElement.GetProperty("code").GetString(), gated.GetRawText());
-            StringAssert.Contains(refusal.RootElement.GetProperty("message").GetString()!, "draw and verify XML connections");
-        }
+        await File.WriteAllTextAsync(evidence("connected-layout-public.json"), RetainedToolEvidence(publicLayout), token);
+        RequireToolSuccess(publicLayout);
+        var published = publicLayout.GetProperty("structuredContent");
+        Assert.IsTrue(published.GetProperty("canPropose").GetBoolean(), publicLayout.GetRawText());
         Assert.AreEqual(nativeBefore, await CaptureChecked(client, context.Root, token));
         Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
         CollectionAssert.AreEqual(connectedBytes, await File.ReadAllBytesAsync(path, token));
@@ -1466,6 +2106,8 @@ public sealed partial class NativeSessionTests
         var live = LiveMeasure(client);
         var proposal = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(saved.State, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
         Assert.IsTrue(proposal.CanPropose, "Connected addition layout: " + string.Join("; ", proposal.Layout.Issues.Select(i => i.Code + " " + i.BodyId)));
+        Assert.AreEqual(proposal.DesiredXml, published.GetProperty("desiredXml").GetString(),
+            "The public tool proposes exactly the planner's connected layout for this editor.");
         var again = await SchematicInitialLayoutPlanner.ProposeMeasuredAsync(saved.State, PsuCpuLayoutPolicy, regions, Instructions, live, advertised, token);
         Assert.AreEqual(proposal.DesiredXml, again.DesiredXml, "The same saved revision and editor revision give the same layout.");
         var design = proposal.DesiredDesign!;
@@ -1581,7 +2223,7 @@ public sealed partial class NativeSessionTests
         var names = candidate.Engineering.Circuit.Components.ToDictionary(c => c.Id, c => c.Reference);
         var summary = new
         {
-            gatedErrorCode = "unsupported_layout_creation", deterministic = true, preferredAnchors = proposal.PreferredAnchors.Count,
+            publicToolMatchesPlanner = true, deterministic = true, preferredAnchors = proposal.PreferredAnchors.Count,
             pinnedR3Preserved = true, existingSymbolsUnmoved = true, nearestConnectionBoundNm = NearestConnectionDistanceNm,
             nearestConnectionNm = distances.GroupBy(d => names[d.Endpoint.ComponentId]).ToDictionary(g => g.Key, g => g.Min(d => d.DistanceNm)),
             longestConnectionNm = distances.GroupBy(d => names[d.Endpoint.ComponentId]).ToDictionary(g => g.Key, g => g.Max(d => d.DistanceNm)),
@@ -2034,8 +2676,8 @@ public sealed partial class NativeSessionTests
             var noOp = await SchematicSynchronizationExecutor.ApplyAsync(store, client, path, store.Read()!.RevisionToken, Guid.NewGuid(), token);
             Assert.IsFalse(noOp.NativeMutationCommitted); Assert.IsFalse(noOp.NativeFilesSaved);
             Assert.AreEqual(beforeNoOp, await Capture());
-            // The CN-1 gate plans through this same attached public host rather than starting another one.
-            connectionGate = await RequireConnectionRealizationGated(host);
+            // The CN-1 admission previews through the production MCP server, which records the attach-time handshake.
+            connectionGate = await RequireConnectionRealizationGated();
         }
         await using (var automatic = await AutomaticDesignSynchronization.StartAsync(store, client, path, store.Read()!.RevisionToken, token))
         {
@@ -2208,7 +2850,7 @@ public sealed partial class NativeSessionTests
         async Task<object> PlanBesideUnresolvedSymbol(CheckedSchematicState clean, CheckedSchematicState loaded, string unresolvedId)
         {
             var session = await client.HandshakeAsync(token);
-            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var advertised = RequireRealizationAdvertised(session);
             var current = store.Read()!;
             Assert.IsFalse(current.State.HasPendingWork);
             string revisionBefore = current.RevisionToken;
@@ -2296,12 +2938,12 @@ public sealed partial class NativeSessionTests
         //   recording was not kept.
         // Each new probe is measured live first, turned and placed where KiCad's own measurement leaves room for its stub and
         // label, and the realizer must draw exactly the predicted stub. Each realization is measured live and not applied
-        // (lane 2C's native assertion is still missing), kept as the replay fixture of that scene's name, and the redraw is
+        // here (the NativeConnectedRealization journey applies realizations), kept as the replay fixture of that scene's name, and the redraw is
         // undone natively.
         async Task<object> RequireAnchorLabelJoin()
         {
             var session = await client.HandshakeAsync(token);
-            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            var advertised = RequireRealizationAdvertised(session);
             var current = store.Read()!;
             Assert.IsFalse(current.State.HasPendingWork);
             await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
@@ -2476,8 +3118,8 @@ public sealed partial class NativeSessionTests
                             new(x / 1_000_000m, (y + i * UnitPitch) / 1_000_000m, degrees, false, false, false)))],
                         Nets = [.. circuit.Nets.Select(n => n.Id == link.Id ? named : n)]
                     } } }, [])) };
-                Assert.IsNull(SchematicSynchronizationPlanner.Plan(Revision(30 * Step, 10 * Step, 0), session, token).Connections,
-                    name + ": this editor's own handshake admits no wiring.");
+                Assert.IsNull(SchematicSynchronizationPlanner.Plan(Revision(30 * Step, 10 * Step, 0), token).Connections,
+                    name + ": without a handshake the planner admits no wiring.");
 
                 // The new probe as the planner creates it, measured live on the redrawn sheet in each orientation, with the label
                 // its stub would carry: the first orientation in which some policy stub length keeps that label clear of the
@@ -2832,21 +3474,23 @@ public sealed partial class NativeSessionTests
             await File.WriteAllBytesAsync(path, original, token);
             return store.Save(after.State with { DesiredFileBytes = original }, after.RevisionToken);
         }
-        // CN-1 gate (cn1-wiring-intent.md §4.1, §8.3) against this editor's real handshake and captured state.
-        // A saved XML revision that only connects drawn pins of the created components is exactly what a
-        // connection-realizing editor would receive, yet this editor does not advertise
-        // schematic.connection-realization.v1, so nothing admits it: the public plan keeps its existing
-        // result and KiCad, the recovery record and the XML file stay untouched.
-        async Task<object> RequireConnectionRealizationGated(StdioMcpFixture host)
+        // CN-1 admission (cn1-wiring-intent.md §4.1, §4.3, §8.3) against this editor's real handshake and captured state.
+        // A saved XML revision that only connects drawn pins of the created components is admitted as a connected addition,
+        // because this editor advertises schematic.connection-realization.v1. The public plan over the attached host is
+        // exactly the planner's realization plan for the saved record: preparable, with no publishable XML and no native
+        // operations (only the realization measures KiCad). Without a handshake the same revision keeps the general path.
+        // KiCad, the recovery record and the XML file stay untouched.
+        async Task<object> RequireConnectionRealizationGated()
         {
             var session = await client.HandshakeAsync(token);
             Assert.AreEqual(instanceId, session.InstanceId);
-            Assert.IsFalse(session.Capabilities.Contains(SchematicConnectedAddition.NativeCapability),
-                "This editor must not advertise connection realization before every native piece exists: " + string.Join(",", session.Capabilities));
+            RequireRealizationAdvertised(session);
             var current = store.Read()!;
             Assert.IsFalse(current.State.HasPendingWork);
             var circuit = current.State.Baseline.Engineering.Circuit;
-            var ends = circuit.Components.Where(c => createdIds.Contains(c.Id)).OrderBy(c => c.Id).Take(2).ToArray();
+            // The two probes created on the repeated channel sheet, whose shared pin every channel draws identically.
+            var rootSheet = circuit.SheetInstances.Single(s => s.ParentId is null);
+            var ends = circuit.Components.Where(c => createdIds.Contains(c.Id) && c.SheetInstanceId != rootSheet.Id).OrderBy(c => c.Id).ToArray();
             var drawnPin = part.Pins.Where(p => p.Unit is 0 or 1).OrderBy(p => p.Number, StringComparer.Ordinal).First();
             Assert.HasCount(2, ends);
             Assert.IsFalse(circuit.Nets.Any(n => n.Pins.Any(p => ends.Any(c => c.Id == p.ComponentId))), "Created components start unconnected.");
@@ -2857,61 +3501,64 @@ public sealed partial class NativeSessionTests
             var probe = current.State with { DesiredFileBytes = connectedBytes };
             var probeDesign = DesignRecoveryStore.ReadDesired(probe);
             var real = SchematicConnectedAddition.Classify(probe, probeDesign, session, token);
-            Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, real.Kind, real.ErrorCode + ": " + real.ErrorMessage);
-            var advertised = session.Clone(); advertised.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
-            var withCapability = SchematicConnectedAddition.Classify(probe, probeDesign, advertised, token);
-            Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, withCapability.Kind,
-                "The real captured state must be recognized as a connected addition: " + withCapability.ErrorCode + " " + withCapability.ErrorMessage);
-            CollectionAssert.AreEqual(new[] { probeNet }, withCapability.ChangedNetIds.ToArray());
-            Assert.IsEmpty(withCapability.AddedComponentIds);
+            Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, real.Kind,
+                "The real captured state must be recognized as a connected addition: " + real.ErrorCode + " " + real.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { probeNet }, real.ChangedNetIds.ToArray());
+            Assert.IsEmpty(real.AddedComponentIds);
+            var withoutHandshake = SchematicConnectedAddition.Classify(probe, probeDesign, null, token);
+            Assert.AreEqual(SchematicConnectedAdditionKind.NotApplicable, withoutHandshake.Kind, "Without a handshake nothing is admitted.");
 
             var nativeBefore = await Capture();
             byte[] fileBefore = await File.ReadAllBytesAsync(path, token);
             var planned = store.Save(probe, current.RevisionToken);
-            // The planner's own result for the saved record is what the public tool must report unchanged.
-            var expected = SchematicSynchronizationPlanner.Plan(store.Read()!.State, token);
-            Assert.IsTrue(expected.CanPrepare, expected.ErrorCode + ": " + expected.ErrorMessage);
-            Assert.IsNull(expected.Connections);
-            var plan = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
-                expectedRevisionToken = planned.RevisionToken });
+            // The planner's own result for the saved record and this editor's handshake is what the public tool must report.
+            var expected = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
+            var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(expected);
+            Assert.AreEqual("XML_CONNECTION_PROBE", intent.Nets.Single().Name);
+            var general = SchematicSynchronizationPlanner.Plan(store.Read()!.State, token);
+            Assert.IsTrue(general.CanPrepare, general.ErrorCode + ": " + general.ErrorMessage);
+            Assert.IsNull(general.Connections, "Without a handshake the revision keeps the general path.");
+            // The production MCP server previews with the handshake it recorded at attach. (The test-only synchronization
+            // harness that serves this journey's other steps records no handshake, so its preview is the general path.)
+            JsonElement plan;
+            await using (var production = await StdioMcpFixture.StartAsync(Path.Combine(evidence, instanceId + "-connection-gate-mcp"),
+                Path.Combine(evidence, instanceId + "-connection-gate-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await production.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                plan = await production.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = planned.RevisionToken });
+            }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-connection-gate-plan.json"), plan.GetRawText(), token);
             var planContent = plan.GetProperty("structuredContent");
             string? planCode = planContent.GetProperty("errorCode").GetString();
-            // Today's general path: a preparable candidate with no native operations whose new connection
-            // is left to post-apply native connectivity validation, exactly as the planner computes it.
             RequireToolSuccess(plan);
             Assert.IsTrue(planContent.GetProperty("canPrepare").GetBoolean(), plan.GetRawText());
             Assert.AreEqual(JsonValueKind.Null, planContent.GetProperty("errorCode").ValueKind, plan.GetRawText());
-            Assert.AreEqual(JsonValueKind.Null, planContent.GetProperty("errorMessage").ValueKind, plan.GetRawText());
+            Assert.AreEqual(JsonValueKind.Null, planContent.GetProperty("candidateDesignXml").ValueKind,
+                "A realization plan has no publishable preview (CN-1 §4.2): " + plan.GetRawText());
             Assert.AreEqual(0, planContent.GetProperty("nativeOperationsJson").GetArrayLength(), plan.GetRawText());
             Assert.IsTrue(planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), plan.GetRawText());
-            Assert.IsFalse(planContent.GetProperty("observedConnectivity").GetProperty("ConnectivityEquivalent").GetBoolean(),
-                "The unrealized connection must still show as a native difference.");
-            Assert.AreEqual(expected.CanPrepare, planContent.GetProperty("canPrepare").GetBoolean());
             Assert.AreEqual(expected.ErrorCode, planCode);
-            Assert.AreEqual(expected.CandidateXml, planContent.GetProperty("candidateDesignXml").GetString(),
-                "The public plan must publish exactly the planner's general-path candidate.");
-            CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
-                planContent.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray());
+            Assert.AreEqual(expected.CandidateXml, planContent.GetProperty("candidateDesignXml").GetString());
             Assert.AreEqual(expected.NativeConnectivityValidationRequired, planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean());
-            Assert.AreEqual(expected.ObservedConnectivity!.ConnectivityEquivalent,
-                planContent.GetProperty("observedConnectivity").GetProperty("ConnectivityEquivalent").GetBoolean());
-            Assert.AreEqual(nativeBefore, await Capture(), "Planning a gated connected addition must not change the native document.");
+            Assert.AreEqual(nativeBefore, await Capture(), "Planning a connected addition must not change the native document.");
             Assert.AreEqual(planned.RevisionToken, store.Read()!.RevisionToken, "Planning must not advance recovery.");
             CollectionAssert.AreEqual(fileBefore, await File.ReadAllBytesAsync(path, token), "Planning must not publish XML.");
             store.Save(current.State, planned.RevisionToken);
-            var intents = await RequireRealConnectionIntents(store.Read()!.State, session, advertised);
+            var intents = await RequireRealConnectionIntents(store.Read()!.State, session, session);
             return new { nativeCapabilities = session.Capabilities.ToArray(), classification = real.Kind.ToString(),
-                classificationIfAdvertised = withCapability.Kind.ToString(), changedNets = withCapability.ChangedNetIds,
+                classificationWithoutHandshake = withoutHandshake.Kind.ToString(), changedNets = real.ChangedNetIds,
                 publicPlanCanPrepare = planContent.GetProperty("canPrepare").GetBoolean(), publicPlanErrorCode = planCode,
                 publicPlanNativeOperations = planContent.GetProperty("nativeOperationsJson").GetArrayLength(),
                 publicPlanNativeConnectivityValidationRequired = planContent.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
-                publicPlanMatchesPlanner = true, intents };
+                publicPlanIsRealizationPlan = true, generalPathCandidateXmlSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(general.CandidateXml!))),
+                intents };
         }
 
-        // CN-1 connection intent (cn1-wiring-intent.md §5) planned from this editor's real captured state, as an
-        // editor that advertises schematic.connection-realization.v1 would receive it. Planning is offline and this
-        // editor cannot draw the connections yet, so each plan is only inspected: nothing is saved, published or sent.
+        // CN-1 connection intent (cn1-wiring-intent.md §5) planned from this editor's real captured state with its own
+        // handshake, which advertises schematic.connection-realization.v1; the general path is what planning without a
+        // handshake gives. Each plan is inspected and realized from live measurements, never applied: nothing is saved,
+        // published or sent.
         // The repeated channel sheet shares one symbol per unit between its two instances, and the root's two probe
         // pins are joined by a wire and the local label SIGNAL.
         async Task<object> RequireRealConnectionIntents(DesignRecoveryState state, AutomationSession session, AutomationSession advertised)
@@ -2930,14 +3577,14 @@ public sealed partial class NativeSessionTests
             {
                 var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with { Nets = [.. nets] } } };
                 var revision = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, [])) };
-                return (SchematicSynchronizationPlanner.Plan(revision, session, token), SchematicSynchronizationPlanner.Plan(revision, advertised, token), revision);
+                return (SchematicSynchronizationPlanner.Plan(revision, token), SchematicSynchronizationPlanner.Plan(revision, advertised, token), revision);
             }
 
             // The two channel probes share one physical pin, so joining them draws one hierarchical label on the
             // shared channel sheet and one sheet pin per channel on the root.
             var pairNet = new CircuitNet(Guid.NewGuid(), "XML_CHANNEL_PAIR", [.. channels.Select(c => new PinEndpoint(c.Id, drawnPin.Number))]);
             var pair = PlanNets([.. circuit.Nets, pairNet]);
-            Assert.IsNull(pair.Real.Connections, "This editor's own handshake admits no wiring.");
+            Assert.IsNull(pair.Real.Connections, "Without a handshake the planner admits no wiring.");
             var pairIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(pair.Realizing);
             Assert.AreEqual(ConnectionScope.Local, pairIntent.Nets.Single().Scope);
             var channelScreen = pairIntent.Screens.Single(s => s.InstancePathKeys.Count == 2);
@@ -3018,8 +3665,8 @@ public sealed partial class NativeSessionTests
                 channelPairGenerated = pairRealization.Generated.Count, joinExistingLinkGenerated = joinRealization.Generated.Count };
         }
 
-        // Realize a planned intent against this editor's own measurements without applying anything (the native
-        // connectivity assertion that would admit the batch is lane 2C's). The lane entry point must turn the same
+        // Realize a planned intent against this editor's own measurements without applying anything (applying goes through
+        // synchronization and KiCad's connectivity assertion, proven by NativeConnectedRealization). The lane entry point must turn the same
         // recorded measurements into the identical batch, and the recording is kept as a replay fixture beside the saved
         // record the revision was planned from (<instance>-realization-<record>.gz, compressed because the evidence artifact
         // has a fixed size cap; committed decompressed as <record>).

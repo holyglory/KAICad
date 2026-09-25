@@ -42,6 +42,7 @@ tools.
 
 ### Codex Desktop
 
+OpenAI's current documentation calls Codex Desktop the ChatGPT desktop app.
 Codex Desktop, the Codex CLI and the Codex IDE extension read their MCP servers
 from one shared file, `~/.codex/config.toml`. A trusted project can also have its
 own `.codex/config.toml`. Use the file on the machine where the Codex app-server
@@ -59,11 +60,15 @@ command = "/absolute/path/to/kicad-install/manager/current/kicad-mcp"
 KICAD_AUTOMATION_STATE_DIRECTORY = "/absolute/path/to/kicad-mcp-state"
 ```
 
-Change only `command`. Keep the `env` block and any timeouts you already had.
-The state directory is where the server keeps its saved KiCad sessions, and
-keeping it lets the new server find and reattach them. If the variable is not
-set, the server uses `$XDG_DATA_HOME/kicad-automation`, or
-`~/.local/share/kicad-automation` when `XDG_DATA_HOME` is not set.
+Change only `command`. Keep the `env` block, any `args` and any timeouts you
+already had. The state directory is where the server keeps its saved KiCad
+sessions, and keeping it lets the new server find and reattach them. The server
+chooses its state directory in this order:
+
+1. `--state-directory <folder>`, if the entry passes it in `args`.
+2. The `KICAD_AUTOMATION_STATE_DIRECTORY` variable.
+3. `$XDG_DATA_HOME/kicad-automation`, or `~/.local/share/kicad-automation` when
+   `XDG_DATA_HOME` is not set.
 
 `codex mcp get kicad` prints the command Codex will start. With the managed path
 shown above, you edit this entry once: later caption updates only need step 3.
@@ -93,8 +98,6 @@ from its retained folder. Nothing fails; the new tools are simply missing.
 - **Codex Desktop connected over SSH:** the app-server runs as a daemon on the
   Linux machine and keeps running after you close Codex Desktop. Restart it
   there with `codex app-server daemon restart`, then reconnect Codex Desktop.
-  If step 4 still shows an app-server started before your change, stop that
-  process and reconnect Codex Desktop.
 - **Claude Code:** exit `claude` and start it again, or reconnect the server
   from `/mcp` inside the session.
 
@@ -108,38 +111,53 @@ you restart the client.
 List the running servers with their command lines:
 
 ```sh
-pgrep -af 'kicad-automation/kicad-mcp'
+pgrep -a -x kicad-mcp
 ```
 
-Ignore lines that include `--check-update`, `--prepare-update`,
-`--restart-update` or another `--` option: those are KiCad's own update helper,
-not your client's server. For each remaining process ID:
+`-x` matches the program's name, not its command line, so the list does not
+include the shell that runs `pgrep`. This matters when an agent runs the
+command for you. Your client's server has no arguments, or only
+`--state-directory` and its folder. Ignore a process whose first argument is
+another `--` option, such as `--check-update` or `--diagram-file`. Those are
+short-lived helpers that KiCad starts to check for updates or to read diagram
+files. They are not your client's server. For each remaining process ID:
 
 ```sh
 pid=12345   # a process ID from the list
 exe=$(readlink /proc/$pid/exe); echo "$exe"
-ps -o lstart= -p "$pid"
-ps -o pid=,lstart=,args= -p "$(ps -o ppid= -p "$pid")"
 cat "${exe%/runtime/lib/kicad-automation/kicad-mcp}/package.json"
 ```
 
-What to check in the output:
+The client has loaded the new preview when both of these hold:
 
 - **The program path.** `exe` is the file that is actually running, and it must
   be inside the new preview's folder. The launcher resolves symbolic links first,
   so a server started through `manager/current` shows its real
   `versions/<digest>/payload` folder. A path that ends in ` (deleted)` means the
   program's files were removed after it started.
-- **The start time.** The server's start time must be later than your restart.
-- **The parent process.** The last `ps` line is the client that started the
-  server: a `codex app-server` process for Codex, or `claude` for Claude Code.
-  For Codex, the app-server's start time must also be later than your
-  configuration change.
 - **The preview identity.** `package.json` names the `version` and `commit`.
   Compare them with the preview you installed.
 
 A client can run one server for each conversation, so you may see several
 processes. Every one of them should belong to the new preview.
+
+If a server still runs the earlier preview, find out what did not restart:
+
+```sh
+ps -o lstart= -p "$pid"
+ps -o pid=,lstart=,args= -p "$(ps -o ppid= -p "$pid")"
+```
+
+The first line is when the server started. If that is before your restart, the
+client kept its old server: repeat step 3. The second line is the client that
+started the server: a `codex app-server` process for Codex, or `claude` for
+Claude Code. If a server started after your restart still runs the earlier
+preview, the client started it from its old entry. Check that
+`codex mcp get kicad` or `claude mcp get kicad` shows the new path, then look at
+the client's start time. A client that started before your configuration change
+has not read the new entry. For Codex over SSH, run
+`codex app-server daemon restart` again, or stop that app-server process, then
+reconnect Codex Desktop.
 
 ### The handshake
 
@@ -156,7 +174,7 @@ path and `package.json` above for that. To see the handshake of an installed
 server without a client, start a throwaway copy with an empty state directory:
 
 ```sh
-{ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"refresh-check","version":"1"}}}'; sleep 2; } \
+{ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"refresh-check","version":"1"}}}'; sleep 5; } \
   | KICAD_AUTOMATION_STATE_DIRECTORY="$(mktemp -d)" /absolute/path/to/kicad-install/manager/current/kicad-mcp 2>/dev/null \
   | head -n 1 | grep -o '"serverInfo":{[^}]*}'
 ```
@@ -187,9 +205,11 @@ In a new conversation, ask the agent to do the following:
 ## Keeping this runbook accurate
 
 `CapabilityCatalogTests.RuntimeRefreshRunbookMatchesWhatAClientSees` starts the
-compiled server with a real MCP client. It fails when this page names a tool
-that the server does not register, when the quoted `serverInfo` differs from the
-server's handshake, or when the first two calls of step 5 answer differently.
+compiled server twice. It sends this page's `initialize` line to the first copy
+and fails when the quoted `serverInfo` differs from what the one-liner's `grep`
+would print from the reply. It connects a real MCP client to the second copy and
+fails when this page names a tool that the server does not register, or when
+the first two calls of step 5 answer differently.
 The folder layouts in step 1 come from
 `tools/KiCad.Automation.Validation/LinuxPackage.cs` and `DebianPackage.cs`, and
 from `src/KiCad.Automation.Distribution/LinuxVerifiedInstallation.cs` with

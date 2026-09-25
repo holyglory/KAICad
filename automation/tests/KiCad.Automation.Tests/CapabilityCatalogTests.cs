@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Google.Protobuf;
@@ -96,17 +98,47 @@ public sealed class CapabilityCatalogTests
             "The runbook's smoke check names the two tools a freshly started server answers without KiCad.");
 
         string state = Directory.CreateTempSubdirectory("kicad-runtime-refresh-").FullName;
+        string handshakeState = Directory.CreateTempSubdirectory("kicad-runtime-refresh-handshake-").FullName;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         try
         {
+            // The runbook's handshake one-liner: its own initialize line goes to a plain server process, and the quote must
+            // be what its grep prints from the raw first reply line, so field order or an added field cannot hide.
+            string request = Regex.Match(runbook, @"'(\{""jsonrpc"":""2\.0"",""id"":1,""method"":""initialize""[^']*)'").Groups[1].Value;
+            Assert.AreNotEqual("", request, "The runbook shows the initialize request its handshake check sends.");
+            JsonDocument.Parse(request).Dispose();
+            var raw = UpdateCommandTests.StartInfo();
+            raw.RedirectStandardInput = true;
+            raw.StandardInputEncoding = new UTF8Encoding(false);
+            raw.Environment["KICAD_AUTOMATION_STATE_DIRECTORY"] = handshakeState;
+            using (var server = Process.Start(raw)!)
+            {
+                Task<string> serverErrors = server.StandardError.ReadToEndAsync(deadline.Token);
+                try
+                {
+                    await server.StandardInput.WriteLineAsync(request);
+                    await server.StandardInput.FlushAsync(deadline.Token);
+                    string firstLine = await server.StandardOutput.ReadLineAsync(deadline.Token) ?? "";
+                    server.StandardInput.Close();
+                    string printed = Regex.Match(firstLine, @"""serverInfo"":\{[^}]*\}").Value;
+                    Assert.AreNotEqual("", printed, "The server's first reply line carries serverInfo: " + firstLine);
+                    StringAssert.Contains(runbook, printed, "The runbook must quote the handshake the server really prints.");
+                    await server.WaitForExitAsync(deadline.Token);
+                }
+                finally
+                {
+                    if (!server.HasExited) server.Kill(entireProcessTree: true);
+                    await server.WaitForExitAsync();
+                    try { await serverErrors; } catch (OperationCanceledException) { }
+                }
+            }
+
             var start = UpdateCommandTests.StartInfo();
             await using var client = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
             {
                 Name = "runtime-refresh-runbook", Command = start.FileName, Arguments = start.ArgumentList.ToArray(),
                 EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = state }
             }), cancellationToken: deadline.Token);
-            string handshake = $"\"serverInfo\":{{\"name\":\"{client.ServerInfo.Name}\",\"version\":\"{client.ServerInfo.Version}\"}}";
-            StringAssert.Contains(runbook, handshake, "The runbook must quote the handshake identity the server really reports.");
 
             string[] listed = (await client.ListToolsAsync(cancellationToken: deadline.Token)).Select(tool => tool.Name).ToArray();
             string[] missing = named.Except(listed, StringComparer.Ordinal).ToArray();
@@ -124,7 +156,7 @@ public sealed class CapabilityCatalogTests
                 .Select(entry => entry.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.AreEquivalent(listed, catalogued, "kicad_service_capabilities lists exactly the tools a client sees.");
         }
-        finally { Directory.Delete(state, true); }
+        finally { Directory.Delete(state, true); Directory.Delete(handshakeState, true); }
     }
 
     // Tool-shaped names in running text: lower-case kicad_ words not directly after a letter, digit, '.', '/' or '-'.

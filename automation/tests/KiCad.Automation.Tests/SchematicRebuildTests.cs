@@ -285,13 +285,17 @@ public sealed class SchematicRebuildTests
         Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(State(covered, covered, NewEmptyRoot(covered), "loaded", "created"), covered).Kind);
         // Net chains are typed schematic metadata and are rebuilt with the rest of the lost files.
         var chained = covered with { Schematic = covered.Schematic.Clone() };
-        foreach (var screen in chained.Schematic.Instances) screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "DATA_PATH",
+        foreach (var screen in chained.Schematic.Instances) screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "DATA_PATH", Committed = true,
             From = new() { Reference = "U1", Pin = "1" }, To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/DATA" } });
         var withChains = SchematicRebuild.Classify(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"), chained);
         Assert.AreEqual(SchematicRebuildKind.Admitted, withChains.Kind, withChains.ErrorMessage);
         var chainedPlan = SchematicSynchronizationPlanner.Plan(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"));
         Assert.IsTrue(chainedPlan.CanPrepare, chainedPlan.ErrorCode + ": " + chainedPlan.ErrorMessage);
         Assert.IsTrue(chainedPlan.NativeOperations.Any(o => o.ReplaceNetChains is not null), "The rebuild carries the typed net-chain state into the native batch.");
+        Assert.IsTrue(chainedPlan.NativeOperations.Where(o => o.ReplaceNetChains is not null)
+            .SelectMany(o => o.ReplaceNetChains.Definitions).All(c => !c.Committed), "Rebuild recreates declarations without writing the historical computed bit.");
+        Assert.IsTrue(chainedPlan.Candidate!.Schematic.Instances.All(s => s.Metadata.NetChains.Single().Committed),
+            "The expected rebuilt snapshot still requires the original computed result.");
         {
             var marked = covered with { Schematic = covered.Schematic.Clone() };
             foreach (var screen in marked.Schematic.Instances) screen.Metadata.UnrepresentedState.Add("future_state_group");

@@ -814,7 +814,14 @@ public static class SchematicRebuild
             currentRoot.Metadata.EmbeddedFiles = root.Metadata.EmbeddedFiles?.Clone();
             currentRoot.Metadata.EmbeddedFonts = root.Metadata.EmbeddedFonts;
         }
-        operations.AddRange(SchematicHierarchyDelta.Plan(current, DeltaTarget(schematic, current), token));
+        var target = DeltaTarget(schematic, current);
+        // Recreate saved declarations, letting KiCad recompute membership from
+        // the restored objects. Only this settled lost-file rebuild may adapt
+        // a historical computed value to the empty editor's observation.
+        foreach (var screen in target.Instances)
+            foreach (var chain in screen.Metadata.NetChains)
+                chain.Committed = currentRoot.Metadata.NetChains.SingleOrDefault(c => c.Name == chain.Name)?.Committed ?? false;
+        operations.AddRange(SchematicHierarchyDelta.Plan(current, target, token));
         return new(desired with { Schematic = schematic }, operations);
     }
 

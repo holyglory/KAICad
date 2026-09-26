@@ -98,6 +98,41 @@ public sealed class DesignSynchronizationReceiptTests
         var newer = fixture.Store.Save(saved.State with { DesiredFileBytes = [0xff] }, saved.RevisionToken);
         CollectionAssert.AreEqual(new byte[] { 0xff }, newer.State.DesiredFileBytes);
         Assert.AreEqual(publication.OperationId, newer.State.PendingPublication!.OperationId);
+
+        // A pending native-save identity must not make identical candidate XML
+        // an escape hatch for changing the request's envelope.
+        foreach (var altered in new[]
+        {
+            publication with { RequestedRecoveryRevisionToken = new string('b', 64) },
+            DesignPublicationIntent.Create(publication.DesignPath, publication.ExpectedFileBytes,
+                publication.CandidateFileBytes, Guid.NewGuid(), publication.RequestedRecoveryRevisionToken),
+            DesignPublicationIntent.Create(Path.Combine(Path.GetDirectoryName(publication.DesignPath)!, "other.xml"),
+                publication.ExpectedFileBytes, publication.CandidateFileBytes, publication.OperationId, publication.RequestedRecoveryRevisionToken)
+        })
+            Assert.AreEqual("sync_intent_changed", Assert.ThrowsExactly<AutomationException>(() => fixture.Store.Save(
+                newer.State with { PendingPublication = altered }, newer.RevisionToken)).Code);
+
+        // A derived observation may change only the candidate, while it is
+        // still Prepared. Once bytes are staged they stay immutable on retries.
+        using var computed = new DesignPublicationRecoveryTests.Fixture();
+        var libraries = computed.Saved.State.KnowledgeLibraries;
+        var design = SchematicDesignXml.Read(Encoding.UTF8.GetString(computed.Intent.CandidateFileBytes), libraries);
+        foreach (var screen in design.Schematic.Instances)
+            screen.Metadata.NetChains.Add(new Kiapi.Schematic.Types.SchematicNetChainDefinition { Name = "CHAIN" });
+        var provisional = computed.Intent with { CandidateFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, libraries)),
+            RequestedRecoveryRevisionToken = computed.Saved.RevisionToken };
+        var prepared = computed.Store.Save(computed.Saved.State with { PendingPublication = provisional }, computed.Saved.RevisionToken);
+        foreach (var screen in design.Schematic.Instances)
+        {
+            screen.Metadata.NetChains[0].Committed = true;
+            screen.Metadata.NetChains[0].Exclusions = new();
+        }
+        var resolved = provisional with { CandidateFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, libraries)) };
+        var persisted = computed.Store.Save(prepared.State with { PendingPublication = resolved }, prepared.RevisionToken);
+        CollectionAssert.AreEqual(resolved.CandidateFileBytes, new DesignRecoveryStore(computed.RecordPath).Read()!.State.PendingPublication!.CandidateFileBytes);
+        var staged = computed.Store.Save(persisted.State with { PendingPublication = resolved with { Phase = DesignPublicationPhase.Staged } }, persisted.RevisionToken);
+        Assert.AreEqual("sync_intent_changed", Assert.ThrowsExactly<AutomationException>(() => computed.Store.Save(
+            staged.State with { PendingPublication = provisional with { Phase = DesignPublicationPhase.Staged } }, staged.RevisionToken)).Code);
     }
 
     [TestMethod]

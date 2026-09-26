@@ -647,6 +647,8 @@ public sealed class DesignRecoveryStore(string statePath)
             byte[] a = JsonSerializer.SerializeToUtf8Bytes(before with { Phase = DesignPublicationPhase.Prepared }, Json);
             byte[] b = JsonSerializer.SerializeToUtf8Bytes(after with { Phase = DesignPublicationPhase.Prepared }, Json);
             bool computedNetChainUpdate = current.PendingNativeSave is not null
+                && before.Phase == DesignPublicationPhase.Prepared && after.Phase == DesignPublicationPhase.Prepared
+                && a.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(after with { CandidateFileBytes = before.CandidateFileBytes }, Json))
                 && ComputedNetChainOnlyChange(before.CandidateFileBytes, after.CandidateFileBytes, current.KnowledgeLibraries);
             if ((!a.AsSpan().SequenceEqual(b) && !computedNetChainUpdate) || !Equals(current.PendingMutation, next.PendingMutation)
                 || !Equals(current.PendingNativeState, next.PendingNativeState)

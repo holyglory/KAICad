@@ -145,8 +145,8 @@ public sealed class SchematicItemDeltaTests
         Assert.AreEqual("PENDING", SchematicItemDelta.Plan(current, desired).Single().ReplaceNetChains.Definitions[0].Name);
         var newlyObserved = Fixture();
         newlyObserved.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "SAVED", Committed = true });
-        var savedDeclaration = SchematicItemDelta.Plan(Fixture(), newlyObserved).Single().ReplaceNetChains.Definitions.Single();
-        Assert.IsFalse(savedDeclaration.Committed, "A newly observed saved declaration is sent back as a pending native declaration.");
+        Assert.ThrowsExactly<AutomationException>(() => SchematicItemDelta.Plan(Fixture(), newlyObserved),
+            "Only a verified rebuild may reconstruct a historical computed value; ordinary XML cannot supply one.");
     }
 
     [TestMethod]

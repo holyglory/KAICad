@@ -3781,7 +3781,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", 
 name="rebuild-contracts"
 tier="development"
 requires=["managed-build"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyTopologyTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/rebuild-recovery-contracts", "--", "MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~DesignPublicationRecoveryTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/rebuild-recovery-contracts", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="rebuild-recovery-contracts", path="automation/artifacts/rebuild-recovery-contracts", max_bytes=16777216}]
 
 # Bounded diagnostic for the recursive editor journey; the broader diagram graph

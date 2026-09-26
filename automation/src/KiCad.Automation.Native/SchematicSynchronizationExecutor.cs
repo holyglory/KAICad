@@ -215,11 +215,13 @@ internal static class SchematicSynchronizationExecutor
         var afterSave = await Capture(client, saved.State, token);
         if (!afterSave.State.Equals(save.ObservedState))
             throw Error("native_changed_during_sync", "The native document changed after saving; preserve the pending candidate for reconciliation.");
-        candidate = AdoptComputedNetChainMembership(candidate, afterSave.Electrical);
+        if (intent.Phase == DesignPublicationPhase.Prepared)
+            candidate = AdoptComputedNetChainMembership(candidate, afterSave.Electrical);
         RequireCandidate(candidate, afterSave.Electrical, saved.State, token);
-        byte[] computedCandidateBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(candidate, saved.State.KnowledgeLibraries));
-        if (!computedCandidateBytes.AsSpan().SequenceEqual(intent.CandidateFileBytes))
+        if (!candidate.Schematic.Equals(SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.CandidateFileBytes),
+                saved.State.KnowledgeLibraries).Schematic))
         {
+            byte[] computedCandidateBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(candidate, saved.State.KnowledgeLibraries));
             saved = store.Save(saved.State with { PendingPublication = intent with { CandidateFileBytes = computedCandidateBytes } }, saved.RevisionToken);
             intent = saved.State.PendingPublication!;
         }
@@ -451,7 +453,7 @@ internal static class SchematicSynchronizationExecutor
                     // saves a declaration that omitted the optional message.
                     // Preserve non-empty XML restrictions, but adopt this
                     // representation-only native default at the boundary.
-                    if (chain.Exclusions is null && computed.Exclusions is not null)
+                    if (chain.Exclusions is null && computed.Exclusions is { NetNames.Count: 0, Pins.Count: 0 })
                         chain.Exclusions = computed.Exclusions.Clone();
                 }
         return result;

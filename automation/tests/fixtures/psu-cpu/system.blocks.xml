@@ -38,7 +38,7 @@
             </origin>
             <text>Keep PSU replaceable as a unit.</text>
             <target kind="Canvas" />
-            <position x="40" y="260" />
+            <position x="40" y="320" />
             <strokes />
           </annotation>
           <annotation id="7e57f1c5-0000-4000-8000-001a00000002" role="Comment" units="diagram-unit">
@@ -92,7 +92,7 @@
             </origin>
             <text>Keep sensing away from switching nodes.</text>
             <target kind="Canvas" />
-            <position x="40" y="300" />
+            <position x="40" y="580" />
             <strokes />
           </annotation>
         </annotations>
@@ -131,7 +131,7 @@
             </origin>
             <text>Compare memory-interface implementations.</text>
             <target kind="Canvas" />
-            <position x="40" y="300" />
+            <position x="40" y="320" />
             <strokes />
           </annotation>
           <annotation id="7e57f1c5-0000-4000-8000-001a00000005" role="Comment" units="diagram-unit">

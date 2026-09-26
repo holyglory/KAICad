@@ -109,22 +109,32 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual("Initial approach", initialName);
             string[] wholeRows = [.. result.GetProperty("row_labels").EnumerateArray().Select(r => r.GetString()!)];
             CollectionAssert.AreEqual(new[] { "v2 · Saved · AI agent", $"{initialName} · v2 · Fixture user", $"{initialName} · v1 · Fixture user" }, wholeRows);
-            // Mockup audit M1-3 (review of e62ac6dce7): in the list every row shows its version and author whole, as the approved
-            // rows read "v2 · User"; a row too wide for the list shortens only the name of the earlier implementation it was
-            // saved in ("Initi… · v2 · Fixture user"). The native case measures each row as drawn against its cell in GTK, at the
-            // default and the compact size, so GTK's own "…" cuts nothing of it.
+            // Mockup audit M1-3 and M1-12: the list draws every row in the approved diagram history's two-line pattern, the version
+            // in bold, beside it the saved marker and the author, then the earlier implementation the row was saved in. The version,
+            // the saved marker and the author are always whole (they continue on the next line rather than being cut); only the
+            // implementation's name may end in "…". The native case measures every row as drawn, at the default and the compact
+            // size: each lies whole inside its row and the list, and its text's ink is where the dialog reports it.
             string[] names = ["", initialName, initialName];
             foreach (string key in new[] { "shown_rows", "compact_shown_rows" })
             {
-                string[] shown = [.. result.GetProperty(key).EnumerateArray().Select(r => r.GetString()!)];
+                var shown = result.GetProperty(key).EnumerateArray().ToArray();
                 Assert.HasCount(wholeRows.Length, shown, $"{theme}: {key} lists every row.");
                 for (int row = 0; row < shown.Length; ++row)
-                    Assert.IsTrue(IsShownHistoryRow(wholeRows[row], names[row], shown[row]),
-                        $"{theme}: {key} row {row} reads '{shown[row]}': '{wholeRows[row]}' whole, or with only '{names[row]}' shortened.");
-                Assert.AreNotEqual(wholeRows[1], shown[1], $"{theme}: {key}: the earlier implementation's rows are too wide for the list whole.");
+                {
+                    string version = shown[row].GetProperty("version").GetString()!;
+                    string[] lines = [.. shown[row].GetProperty("lines").EnumerateArray().Select(l => l.GetString()!)];
+                    Assert.IsTrue(IsShownHistoryRow(wholeRows[row], names[row], version, lines),
+                        $"{theme}: {key} row {row} reads '{version} | {string.Join(" | ", lines)}' for '{wholeRows[row]}'.");
+                    Assert.IsTrue(shown[row].GetProperty("fits").GetBoolean(), $"{theme}: {key} row {row} is drawn whole inside the list.");
+                }
+                Assert.AreEqual("Saved · AI agent", string.Join(" ", shown[0].GetProperty("lines").EnumerateArray().Select(l => l.GetString())),
+                    $"{theme}: {key}: the saved row shows its saved marker and author whole.");
             }
-            Assert.IsTrue(result.GetProperty("rows_fit").GetBoolean(), theme + ": every history row as drawn fits the list, so GTK cuts none of it.");
-            Assert.IsTrue(result.GetProperty("compact_rows_fit").GetBoolean(), theme + ": every history row as drawn fits the list in the compact dialog.");
+            Assert.IsTrue(result.GetProperty("rows_fit").GetBoolean(), theme + ": every history row is drawn whole in the list.");
+            Assert.IsTrue(result.GetProperty("compact_rows_fit").GetBoolean(), theme + ": every history row is drawn whole in the list of the compact dialog.");
+            // The list draws its rows itself; assistive technology reads the selected row whole from the list's name.
+            Assert.AreEqual(wholeRows[1], result.GetProperty("selected_row_accessible_name").GetString(),
+                theme + ": assistive technology reads the selected row whole.");
             Assert.AreEqual($"{initialName} · v2 · Fixture user — Selected text", result.GetProperty("selected_heading").GetString());
             // In the compact dialog the heading is too narrow for the whole text: only the implementation's name is shortened, and
             // the version and author stay whole (the native case also checks that the shown heading fits its column).
@@ -134,12 +144,9 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual($"Use {initialName} · v2 text in draft", result.GetProperty("restore_label").GetString());
             // An "&" in an implementation's name shows on the Use button as written, not as a keyboard mnemonic.
             Assert.AreEqual("Use C&K approach · v2 text in draft", result.GetProperty("ampersand_restore_label").GetString());
-            // Mockup audit M1-3 to M1-5, measured in the rendered dialog (02-earlier-text.png): a row too wide for the list even
-            // with its implementation's name shortened ends in "…" instead of being cut off mid-word; "Use … text in draft" is
-            // filled with the accent like the editor's Save (3:1 from the dialog, its label 4.5:1 on the fill), as the approved
-            // mockup shows it; and both compared texts start 8 pixels or more inside their boxes, as the editor's boxes do
-            // (design QA P2-9).
-            Assert.IsTrue(result.GetProperty("rows_ellipsize").GetBoolean(), theme + ": a row too wide even for its version and author ends in \"…\".");
+            // Mockup audit M1-4 and M1-5, measured in the rendered dialog (02-earlier-text.png): "Use … text in draft" is filled with
+            // the accent like the editor's Save (3:1 from the dialog, its label 4.5:1 on the fill), as the approved mockup shows it;
+            // and both compared texts start 8 pixels or more inside their boxes, as the editor's boxes do (design QA P2-9).
             Assert.IsTrue(result.GetProperty("restore_fill_on_dialog").GetDouble() >= 3.0,
                 $"{theme}: the Use button's fill stands {result.GetProperty("restore_fill_on_dialog").GetDouble():F2}:1 from the dialog, 3:1 or more.");
             Assert.IsTrue(result.GetProperty("restore_label_on_fill").GetDouble() >= 4.5,
@@ -201,6 +208,19 @@ public sealed class NativeFieldHistoryTests
             foreach (string check in new[] { "selection_preserved", "failure_preserved_rows", "malformed_page_rejected", "cancelled_load_without_restore" })
                 Assert.IsTrue(paging.RootElement.GetProperty(check).GetBoolean(), check);
             Assert.AreEqual(206, paging.RootElement.GetProperty("loaded_count").GetInt32());
+            // Review of 6b528e157a: after "Load older", every row, those saved in an earlier implementation with a long name too, is
+            // drawn whole inside the list beside its scroll bar; a name wider than the row ends in "…" on its own line.
+            Assert.IsTrue(paging.RootElement.GetProperty("older_rows_fit").GetBoolean(), theme + ": the rows loaded with Load older are drawn whole.");
+            var olderRows = paging.RootElement.GetProperty("older_rows").EnumerateArray().ToArray();
+            Assert.HasCount(206, olderRows, theme + ": every loaded row is measured.");
+            // The older rows were saved in "Initial approach with a longer implementation name" (the native test's page): the
+            // last line names it whole, or its start ending in "…" where the row is narrower.
+            const string olderName = "Initial approach with a longer implementation name";
+            Assert.IsTrue(olderRows.Skip(200).All(r =>
+                {
+                    string line = r.GetProperty("lines").EnumerateArray().Last().GetString()!;
+                    return line == olderName || (line.Length > 1 && line.EndsWith('…') && olderName.StartsWith(line[..^1], StringComparison.Ordinal));
+                }), theme + ": each older row names the earlier implementation on its second line.");
             Assert.AreEqual(fixture.Graph.Requirements(fixture.Graph.SelectedRoot).RevisionId.ToString("D"),
                 paging.RootElement.GetProperty("oldest_revision_id").GetString());
             foreach (string capture in new[] { "06-history-loading.png", "07-history-load-error.png", "08-history-oldest.png" })
@@ -220,19 +240,26 @@ public sealed class NativeFieldHistoryTests
         finally { Directory.Delete(temporary, recursive: true); }
     }
 
-    /// <summary>Whether <paramref name="shown"/> is how the field-history list may show the row <paramref name="whole"/>
-    /// (mockup audit M1-3): whole, or with only the leading name of the earlier implementation it was saved in,
-    /// <paramref name="name"/>, shortened with "…" or replaced by "…" or left out, so the version and author after it are
-    /// always whole.</summary>
-    internal static bool IsShownHistoryRow(string whole, string name, string shown)
+    /// <summary>Whether a history row drawn as <paramref name="version"/> beside <paramref name="lines"/> is the row
+    /// <paramref name="whole"/> ("[name · ]vN · [Saved · ]author") in the approved diagram history's two-line pattern (mockup
+    /// audit M1-3 and M1-12): the version is the row's; the lines up to the last one, read with a space between them, are the
+    /// saved marker and the author, whole; and when the row names the earlier implementation it was saved in,
+    /// <paramref name="name"/>, the last line is that name, whole or ending in "…".</summary>
+    internal static bool IsShownHistoryRow(string whole, string name, string version, IReadOnlyList<string> lines)
     {
-        if (shown == whole) return true;
-        if (name.Length == 0 || !whole.StartsWith(name + " · ", StringComparison.Ordinal)) return false;
-        string rest = whole[(name.Length + " · ".Length)..];
-        if (shown == rest || shown == "… · " + rest) return true;
-        if (!shown.EndsWith("… · " + rest, StringComparison.Ordinal)) return false;
-        string kept = shown[..^("… · " + rest).Length];
-        return kept.Length > 0 && kept.Length < name.Length && name.StartsWith(kept, StringComparison.Ordinal);
+        string rest = whole;
+        if (name.Length > 0)
+        {
+            if (!whole.StartsWith(name + " · ", StringComparison.Ordinal) || lines.Count < 2) return false;
+            rest = whole[(name.Length + " · ".Length)..];
+            string last = lines[^1];
+            bool nameShown = last == name || (last.EndsWith('…') && last.Length >= 2 && name.StartsWith(last[..^1].TrimEnd(), StringComparison.Ordinal));
+            if (!nameShown) return false;
+            lines = [.. lines.Take(lines.Count - 1)];
+        }
+        int split = rest.IndexOf(" · ", StringComparison.Ordinal);
+        if (split < 0 || rest[..split] != version) return false;
+        return lines.Count > 0 && lines.All(l => l.Length > 0) && string.Join(" ", lines) == rest[(split + " · ".Length)..];
     }
 
     private static string FindRoot()

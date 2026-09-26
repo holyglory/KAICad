@@ -280,11 +280,20 @@ Annotations (`DiagramAnnotation`, role Comment, no strokes, fixed origin, `units
 
 | a | Diagram | Target | Position | Text |
 |---|---|---|---|---|
-| 1 | System | canvas | (40, 260) | "Keep PSU replaceable as a unit." |
+| 1 | System | canvas | (40, 320) | "Keep PSU replaceable as a unit." |
 | 2 | System | block PSU | — | "Explore a quieter supply." |
-| 3 | PSU | canvas | (40, 300) | "Keep sensing away from switching nodes." |
-| 4 | CPU | canvas | (40, 300) | "Compare memory-interface implementations." |
+| 3 | PSU | canvas | (40, 580) | "Keep sensing away from switching nodes." |
+| 4 | CPU | canvas | (40, 320) | "Compare memory-interface implementations." |
 | 5 | CPU | connection 1d | — | "Keep pin choices open for placement." |
+
+Content amendment 2026-09-26 (decision `n7fb0ee3089916669`, mockup audit M1-7; no format change): the canvas notes lie in
+free space below their level's blocks, 24 pixels or more clear of every block with its handles, every port square and every
+wire, at the editor's default size and in its compact window. They were at (40, 260), (40, 300) and (40, 300): the System
+note sat 5 units under the PSU and read as its comment, and the PSU note covered part of Telemetry ADC. The decision's
+"about (40, 300)" and "about (40, 560)" became (40, 320) and (40, 580): at (40, 300) a note lies 45 units under its level's
+first row, which the compact window draws about 23 pixels (System) and 18 pixels (CPU) from the blocks' handles. The CPU
+note, at (40, 300) the same distance under the Processor, moved to (40, 320) with the System note. `fixture.json` pins the
+new `system.blocks.xml`.
 
 Invariants checked by `PsuCpuFixtureTests`:
 - **G-1 Ownership totality.** In the selected-root closure, each circuit component is bound by exactly one block.

@@ -221,12 +221,14 @@ internal static partial class PsuCpuFixtureBuilder
         DiagramAnnotation Note(int n, string text, DiagramAnnotationTarget target, DiagramAnnotationPoint? position) =>
             new(Id(0x1a, n), DiagramAnnotationRole.Comment, text, target, position, [], Origin);
         var canvas = new DiagramAnnotationTarget(DiagramAnnotationTargetKind.Canvas, null);
+        // Each canvas note lies in free space below its level's blocks, 24 pixels or more clear of them at the default size and in
+        // the compact window (§1.5.3 as amended by decision n7fb0ee3089916669; mockup audit M1-7).
         var notes = new Dictionary<int, ImmutableArray<DiagramAnnotation>>
         {
-            [1] = [Note(1, "Keep PSU replaceable as a unit.", canvas, new(40, 260)),
+            [1] = [Note(1, "Keep PSU replaceable as a unit.", canvas, new(40, 320)),
                    Note(2, "Explore a quieter supply.", new(DiagramAnnotationTargetKind.Block, Id(0x11, 2)), null)],
-            [2] = [Note(3, "Keep sensing away from switching nodes.", canvas, new(40, 300))],
-            [3] = [Note(4, "Compare memory-interface implementations.", canvas, new(40, 300)),
+            [2] = [Note(3, "Keep sensing away from switching nodes.", canvas, new(40, 580))],
+            [3] = [Note(4, "Compare memory-interface implementations.", canvas, new(40, 320)),
                    Note(5, "Keep pin choices open for placement.", new(DiagramAnnotationTargetKind.Connection, Id(0x16, 0x1d)), null)],
         };
         var revisions = Blocks.Select((b, i) => new RecursiveBlockRevision(Block(i + 1), null, b.Name, Id(0x14, i + 1),

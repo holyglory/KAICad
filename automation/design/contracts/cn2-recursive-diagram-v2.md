@@ -1085,10 +1085,42 @@ Integration-owner decision `n03892aa8cecf933f` (2026-09-25): every connection is
 When another writer saved the level first, a rebase keeps the draft's drawn signals and succeeds, unless that writer
 changed or removed the same root connection, which is refused as a connection conflict. Nothing drawn is dropped.
 
-### Finished connections around blocks (decision n7fb0ee3089916669; implementation pending in lane 2B)
+### Finished connections around blocks (decision n7fb0ee3089916669; implemented in lane 2B)
 
 A computed leg whose three-segment path would run through a block or across a port's name leaves its first end outward
 for 20 units, goes around the blocks 10 units clear of them with as few turns as it can, and enters its other end from
 the side that end's edge faces. `resolved_layout` reports every point of it. Legs whose three-segment path crosses no
 block keep it. A finished connection takes the path its Connect preview showed.
+
+Exact rule as implemented (lane 2B, item audit-p2-closeout, 2026-09-26):
+
+- **When a leg goes around.** After F4 has laid out the computed legs (candidates, score and order, re-layout rounds
+  included), each computed leg is checked in level order. Its three-segment path crosses when one of its runs passes
+  through the inside of a child block, its own blocks included (a run along a block's edge is not inside it), or when one
+  of its points lies outside the level. The names of a block's ports are drawn just inside the block's edge, and the names
+  of the level's own ports outside the level, so these two tests are "through a block or across a port's name" in diagram
+  units, at every zoom. The level is the stored frame; without one, F3's fallback frame (the box of the children, notes and
+  boundary anchors, expanded by 40), whose left side is the fallback column at x 40 while a boundary port has no placement.
+  Stored routes are drawn as stored, as before.
+- **The way around.** From the first end, a lead of 20 units along the way that end leaves (F4c, F4d); then only horizontal
+  and vertical runs that never pass through the inside of a child block expanded by 10 units on each side (they may run
+  along that outline) and stay inside the level, to the point 20 units out from the other end along the way that end
+  leaves; then a lead of 20 units into that end. The way never turns back along a lead. Of the possible ways it takes the
+  one with, compared in this order: (a) the fewest turns, where leaving the first lead point in another direction than the
+  lead's, and arriving at the second lead point in another direction than into its end, each count as a turn; (b) the
+  shortest length run beside other legs: level runs less than 10 units apart in height, or upright runs less than 10 units
+  apart, over the length they overlap, against the stored routes, the other legs' paths and the ways around found before
+  it, leaving out a run of another leg that touches an end this leg shares (two connections of one port); (c) the shortest
+  length; (d) the first reached by a best-first search on the points where the lines through the two lead points and along
+  the expanded outlines cross, which takes points in order of height, then of x, then of the move that reached them
+  (right, left, down, up). `resolved_layout` reports its corners: the first end, each turn and the other end.
+- **No way around.** A leg whose lead point lies inside an expanded block or outside the level, or that has no such way,
+  keeps its three-segment path.
+- **The Connect preview.** Aimed at a port or a block, the preview is the new connection's path in the level laid out with
+  it exactly as Save stores it (after the level's other connections, with the channel routes that follow their ends
+  following them); aimed at empty canvas, it is this rule's path from the first end to the pointer, which it may reach from
+  any side. So a finished connection takes the path its preview showed, point for point.
+- **Example.** On the PSU/CPU fixture's PSU level, Rail B's three-segment path (510, 182.5) (415, 182.5) (415, 175)
+  (40, 175) ran through DC-DC; it now runs (510, 182.5) (490, 182.5) (490, 100) (60, 100) (60, 175) (40, 175). Every other
+  leg of the System, PSU and CPU levels keeps its three-segment path.
 

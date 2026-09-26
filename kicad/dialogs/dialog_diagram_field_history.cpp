@@ -5,7 +5,8 @@
 #include <set>
 #include <utility>
 #include <wx/button.h>
-#include <wx/listbox.h>
+#include <wx/arrstr.h>
+#include <wx/dc.h>
 #include <wx/sizer.h>
 #include <wx/statline.h>
 #include <wx/stattext.h>
@@ -42,6 +43,45 @@ wxString Joined( const std::pair<wxString, wxString>& aParts )
 }
 
 
+/// The lines aText takes in aRoom pixels as aWidth measures it: broken between words, and inside a word only when the word
+/// alone is wider than aRoom, so nothing of it is cut (mockup audit M1-12).
+std::vector<wxString> Wrapped( const std::function<int( const wxString& )>& aWidth, const wxString& aText, int aRoom )
+{
+    std::vector<wxString> lines;
+    wxString line;
+    auto place = [&]( wxString word )
+    {
+        // A word wider than the room on its own is broken where the room ends, at least one character a line.
+        while( aWidth( word ) > aRoom && word.length() > 1 )
+        {
+            size_t keep = word.length() - 1;
+            while( keep > 1 && aWidth( word.Left( keep ) ) > aRoom ) --keep;
+            lines.push_back( word.Left( keep ) ); word = word.Mid( keep );
+        }
+        line = word;
+    };
+    for( const wxString& word : wxSplit( aText, ' ', '\0' ) )
+    {
+        if( word.IsEmpty() ) continue;
+        if( line.IsEmpty() ) { place( word ); continue; }
+        if( aWidth( line + wxS( " " ) + word ) <= aRoom ) { line += wxS( " " ) + word; continue; }
+        lines.push_back( line ); place( word );
+    }
+    if( !line.IsEmpty() || lines.empty() ) lines.push_back( line );
+    return lines;
+}
+
+
+/// aText ending in "…" where it is wider than aRoom pixels as aWidth measures it (at least its first character stays).
+wxString EndEllipsized( const std::function<int( const wxString& )>& aWidth, const wxString& aText, int aRoom )
+{
+    if( aWidth( aText ) <= aRoom ) return aText;
+    wxString kept = aText;
+    while( kept.length() > 1 && aWidth( wxString( kept ).Trim() + wxS( "…" ) ) > aRoom ) kept.RemoveLast();
+    return wxString( kept ).Trim() + wxS( "…" );
+}
+
+
 /// "aName · aRest" no wider than aRoom pixels as aWidth measures it: whole when it fits; otherwise only aName is shortened
 /// with "…" (or left out when not even "…" fits), so the version and author in aRest stay whole and readable (mockup audit
 /// M1-3). Only when aRest alone is wider than aRoom does the control end it in "…". A room of 0 or less (not laid out yet)
@@ -59,6 +99,88 @@ wxString FitName( const std::function<int( const wxString& )>& aWidth, const wxS
     if( aWidth( ellipsis + separator + aRest ) <= aRoom ) return ellipsis + separator + aRest;
     return aRest;
 }
+}
+
+
+DIAGRAM_HISTORY_ROW_LAYOUT LayHistoryRow( const wxWindow* aList, const wxRect& aBounds, const DIAGRAM_HISTORY_ROW& aRow )
+{
+    // The approved diagram history's row: 10 DIP in from the sides and 6 from the top, the version in bold, its lines 50 DIP in
+    // (or 12 past a wider version), 3 DIP apart.
+    DIAGRAM_HISTORY_ROW_LAYOUT layout;
+    const wxFont normal = aList->GetFont(), bold = normal.Bold();
+    auto width = [&]( const wxString& text ) { int x = 0, y = 0; aList->GetTextExtent( text, &x, &y, nullptr, nullptr, &normal ); return x; };
+    wxRect inner = aBounds; inner.Deflate( aList->FromDIP( 10 ), aList->FromDIP( 6 ) );
+    int versionWidth = 0, versionHeight = 0;
+    aList->GetTextExtent( aRow.version, &versionWidth, &versionHeight, nullptr, nullptr, &bold );
+    layout.version = aRow.version; layout.versionRect = wxRect( inner.GetTopLeft(), wxSize( versionWidth, versionHeight ) );
+    const int inset = std::max( aList->FromDIP( 50 ), versionWidth + aList->FromDIP( 12 ) );
+    const int room = std::max( 1, inner.width - inset ), height = aList->GetCharHeight(), pitch = height + aList->FromDIP( 3 );
+    layout.lines = Wrapped( width, aRow.first, room );
+    if( !aRow.second.IsEmpty() ) layout.lines.push_back( EndEllipsized( width, aRow.second, room ) );
+    for( size_t k = 0; k < layout.lines.size(); ++k )
+        layout.lineRects.emplace_back( inner.x + inset, inner.y + static_cast<int>( k ) * pitch, width( layout.lines[k] ), height );
+    layout.fits = inset <= inner.width && versionWidth + aList->FromDIP( 12 ) <= inset && inner.Contains( layout.versionRect.GetTopLeft() );
+    for( const wxRect& line : layout.lineRects )
+        layout.fits = layout.fits && line.GetRight() <= inner.GetRight() + 1 && line.GetBottom() <= aBounds.GetBottom();
+    return layout;
+}
+
+
+int HistoryRowHeight( const wxWindow* aList, int aWidth, const DIAGRAM_HISTORY_ROW& aRow )
+{
+    const size_t lines = std::max<size_t>( 2, LayHistoryRow( aList, wxRect( 0, 0, aWidth, 10000 ), aRow ).lines.size() );
+    const int count = static_cast<int>( lines );
+    return count * aList->GetCharHeight() + ( count - 1 ) * aList->FromDIP( 3 ) + aList->FromDIP( 15 );
+}
+
+
+void DrawHistoryRow( wxDC& aDC, const wxWindow* aList, const DIAGRAM_HISTORY_ROW_LAYOUT& aLayout, bool aSelected )
+{
+    aDC.SetTextForeground( wxSystemSettings::GetColour( aSelected ? wxSYS_COLOUR_HIGHLIGHTTEXT : wxSYS_COLOUR_WINDOWTEXT ) );
+    aDC.SetFont( aList->GetFont().Bold() ); aDC.DrawText( aLayout.version, aLayout.versionRect.GetTopLeft() );
+    aDC.SetFont( aList->GetFont() );
+    for( size_t k = 0; k < aLayout.lines.size(); ++k ) aDC.DrawText( aLayout.lines[k], aLayout.lineRects[k].GetTopLeft() );
+}
+
+
+DIAGRAM_HISTORY_LIST::DIAGRAM_HISTORY_LIST( wxWindow* aParent, const wxString& aName ) : wxVListBox( aParent, wxID_ANY )
+{
+    SetName( aName );
+    // A row's height follows the list's width (its lines wrap), so every width change measures the rows again.
+    Bind( wxEVT_SIZE, [this]( wxSizeEvent& aEvent )
+    {
+        if( GetClientSize().x != m_width ) { m_width = GetClientSize().x; RefreshAll(); }
+        aEvent.Skip();
+    } );
+}
+
+
+void DIAGRAM_HISTORY_LIST::SetRows( std::vector<DIAGRAM_HISTORY_ROW> aRows )
+{
+    m_rows = std::move( aRows ); SetItemCount( m_rows.size() ); RefreshAll();
+}
+
+
+wxRect DIAGRAM_HISTORY_LIST::RowRect( size_t aIndex ) const { return GetItemRect( aIndex ); }
+
+
+DIAGRAM_HISTORY_ROW_LAYOUT DIAGRAM_HISTORY_LIST::RowLayout( size_t aIndex ) const
+{
+    wxRect row = GetItemRect( aIndex );
+    if( row.IsEmpty() ) row = wxRect( 0, 0, GetClientSize().x, OnMeasureItem( aIndex ) );
+    return LayHistoryRow( this, row, m_rows[aIndex] );
+}
+
+
+wxCoord DIAGRAM_HISTORY_LIST::OnMeasureItem( size_t aIndex ) const
+{
+    return aIndex < m_rows.size() ? HistoryRowHeight( this, GetClientSize().x, m_rows[aIndex] ) : GetCharHeight() * 2 + FromDIP( 18 );
+}
+
+
+void DIAGRAM_HISTORY_LIST::OnDrawItem( wxDC& aDC, const wxRect& aRect, size_t aIndex ) const
+{
+    if( aIndex < m_rows.size() ) DrawHistoryRow( aDC, this, LayHistoryRow( this, aRect, m_rows[aIndex] ), IsSelected( aIndex ) );
 }
 
 
@@ -133,16 +255,15 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     outer->Add( context, 0, wxEXPAND | wxALL, gap );
 
     auto* comparison = new wxBoxSizer( wxHORIZONTAL );
-    m_history = new wxListBox( this, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 200, 300 ) ),
-                              0, nullptr, wxLB_SINGLE );
-    m_history->SetName( "DiagramFieldHistoryRevisions" );
+    // The rows use the approved diagram history's two-line pattern: the version in bold, beside it the saved marker and the
+    // author, then the earlier implementation the row was saved in. The saved marker and the author continue on the next line
+    // rather than being cut, so every row's version, saved marker and author stay whole at every size (mockup audit M1-3 and
+    // M1-12). The list keeps its 200 DIP, which leaves the compact dialog's heading room for its version and author. The
+    // heading and the Use button name the implementation whole.
+    m_history = new DIAGRAM_HISTORY_LIST( this, "DiagramFieldHistoryRevisions" );
     OptOut( m_history );
     m_history->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
-    // A row wider than the list, such as "Initial approach · v2 · Fixture user", shortens only the earlier implementation's
-    // name ("Initi… · v2 · Fixture user", fitRows), so every row's version and author stay readable; a row too wide even for
-    // those ends in "…" instead of being cut off mid-word. The Use button names the implementation whole (mockup audit M1-3).
-    m_rowsEllipsize = DIAGRAM_LOOK::EllipsizeRows( m_history );
-    appendRows( m_entries );
+    showRows();
     auto* revisionColumn = new wxBoxSizer( wxVERTICAL );
     revisionColumn->Add( m_history, 1, wxEXPAND );
     m_pageStatus = new wxStaticText( this, wxID_ANY, wxEmptyString );
@@ -260,10 +381,15 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
 }
 
 
-void DIALOG_DIAGRAM_FIELD_HISTORY::appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& entries )
+void DIALOG_DIAGRAM_FIELD_HISTORY::showRows()
 {
-    // Whole at first; the next layout fits each row to the list (fitRows).
-    for( const auto& entry : entries ) m_history->Append( Joined( RowParts( entry ) ) );
+    std::vector<DIAGRAM_HISTORY_ROW> rows;
+    for( const auto& entry : m_entries )
+    {
+        auto [name, version] = NameAndVersion( entry );
+        rows.push_back( { version, entry.saved ? _( "Saved" ) + wxS( " · " ) + entry.actor : entry.actor, name } );
+    }
+    m_history->SetRows( std::move( rows ) );
 }
 
 
@@ -297,8 +423,37 @@ std::vector<wxString> DIALOG_DIAGRAM_FIELD_HISTORY::RowLabels() const
 std::vector<wxString> DIALOG_DIAGRAM_FIELD_HISTORY::ShownRowLabels() const
 {
     std::vector<wxString> labels;
-    for( unsigned row = 0; row < m_history->GetCount(); ++row ) labels.push_back( m_history->GetString( row ) );
+    for( size_t row = 0; row < m_history->GetItemCount(); ++row )
+    {
+        const DIAGRAM_HISTORY_ROW_LAYOUT drawn = m_history->RowLayout( row );
+        wxString label = drawn.version;
+        for( const wxString& line : drawn.lines ) label += wxS( "\n" ) + line;
+        labels.push_back( label );
+    }
     return labels;
+}
+
+
+std::vector<DIALOG_DIAGRAM_FIELD_HISTORY::SHOWN_ROW> DIALOG_DIAGRAM_FIELD_HISTORY::ShownRows() const
+{
+    std::vector<SHOWN_ROW> rows;
+    const wxRect visible( wxPoint( 0, 0 ), m_history->GetClientSize() );
+    auto screen = [this]( wxRect rect ) { rect.SetPosition( m_history->ClientToScreen( rect.GetPosition() ) ); return rect; };
+    for( size_t index = 0; index < m_history->GetItemCount(); ++index )
+    {
+        const wxRect row = m_history->RowRect( index );
+        const DIAGRAM_HISTORY_ROW_LAYOUT drawn = m_history->RowLayout( index );
+        SHOWN_ROW shown;
+        shown.version = drawn.version; shown.lines = drawn.lines;
+        shown.shown = !row.IsEmpty() && visible.Contains( row );
+        // Whole: every line inside its row, and the row as wide as the list's visible width (nothing under a scroll bar).
+        shown.fits = drawn.fits && ( row.IsEmpty() || ( row.x >= 0 && row.GetRight() <= visible.GetRight() ) );
+        shown.rect = screen( row.IsEmpty() ? wxRect( 0, 0, visible.width, 0 ) : row );
+        shown.versionRect = screen( drawn.versionRect );
+        for( const wxRect& line : drawn.lineRects ) shown.lineRects.push_back( screen( line ) );
+        rows.push_back( std::move( shown ) );
+    }
+    return rows;
 }
 
 
@@ -319,8 +474,9 @@ bool DIALOG_DIAGRAM_FIELD_HISTORY::AppendPage( size_t offset, size_t total,
     for( const auto& row : entries ) valid = !row.revisionId.empty() && ids.insert( row.revisionId ).second && valid;
     if( !valid ) { PageFailed( _( "Older changes did not match this history. Try again." ) ); return false; }
     int selected = m_history->GetSelection();
-    m_history->Freeze(); appendRows( entries );
+    m_history->Freeze();
     m_entries.insert( m_entries.end(), entries.begin(), entries.end() );
+    showRows();
     m_history->SetSelection( selected ); m_history->Thaw();
     m_loading = false; m_pageError->SetLabel( wxEmptyString ); updatePaging();
     return true;
@@ -368,6 +524,8 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
         m_restore->SetLabel( wxControl::EscapeMnemonics( wxString::Format( _( "Use %s text in draft" ), entry.revisionLabel ) ) );
         m_source->Show( m_openSource && !entry.sourceDescription.IsEmpty() );
         m_source->SetToolTip( entry.sourceDescription );
+        // The list draws its rows itself; assistive technology reads the selected row whole from the list's name.
+        DIAGRAM_LOOK::NameForAssistiveTechnology( m_history, Joined( RowParts( entry ) ) );
     }
     else
     {
@@ -386,7 +544,6 @@ bool DIALOG_DIAGRAM_FIELD_HISTORY::Layout()
     // Fitting after every layout, not only on the heading's own size event, keeps the heading right however the toolkit
     // orders a resize: the sizer has just given the heading the width it will be drawn at.
     bool laidOut = DIALOG_SHIM::Layout();
-    if( m_history ) fitRows();
     if( m_selectedHeading ) fitHeading();
     return laidOut;
 }
@@ -399,21 +556,4 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::fitHeading()
     wxString shown = FitName( [this]( const wxString& text ) { return m_selectedHeading->GetTextExtent( text ).x; },
                               m_headingImplementation, m_headingRest, m_selectedHeading->GetClientSize().x );
     if( m_selectedHeading->GetLabelText() != shown ) m_selectedHeading->SetLabelText( shown );
-}
-
-
-void DIALOG_DIAGRAM_FIELD_HISTORY::fitRows()
-{
-    // Each row as the heading is fitted: a row wider than the list shortens only the name of the earlier implementation it
-    // was saved in, so its version and author are always shown whole (mockup audit M1-3; the approved rows read "v2 · User").
-    // A row's text gets the list's width less GTK's frame, cell spacing, focus line and text padding (about 10 pixels),
-    // with a few pixels to spare.
-    const int room = m_history->GetClientSize().x - FromDIP( 16 );
-    auto width = [this]( const wxString& text ) { return m_history->GetTextExtent( text ).x; };
-    for( unsigned row = 0; row < m_entries.size() && row < m_history->GetCount(); ++row )
-    {
-        auto [name, rest] = RowParts( m_entries[row] );
-        wxString shown = FitName( width, name, rest, room );
-        if( m_history->GetString( row ) != shown ) m_history->SetString( row, shown );
-    }
 }

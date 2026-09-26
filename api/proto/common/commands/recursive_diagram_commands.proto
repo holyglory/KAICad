@@ -26,9 +26,33 @@ message FieldHistoryViewState {
   // Lane 2B: every loaded row of the history list, in list order, as its whole text (the revision label, with the
   // implementation's name for a row saved in an earlier implementation, the saved marker and the author).
   repeated string row_labels = 200;
-  // Lane 2B: the same rows exactly as the list shows them at its current width: whole, or with only the earlier
-  // implementation's name shortened with "…" so the version and author stay whole (mockup audit M1-3).
+  // Lane 2B: the same rows exactly as the list shows them at its current width, one line per line drawn: the version, then
+  // the saved marker and the author (broken between words onto more lines where the row is narrower), then the name of the
+  // earlier implementation the row was saved in, shortened with "…" only when it is wider than the row (mockup audit M1-3
+  // and M1-12).
   repeated string shown_row_labels = 201;
+  // Lane 2B: every row as the list draws it, in list order (mockup audit M1-12).
+  repeated FieldHistoryRowView shown_rows = 202;
+  // Lane 2B: the history dialog's client size, in pixels.
+  uint32 dialog_width = 203;
+  uint32 dialog_height = 204;
+}
+// One row of a history list as drawn, in the approved diagram history's two-line pattern: the version in bold on the left, the
+// saved marker and the author beside it, and a second line (mockup audit M1-12).
+message FieldHistoryRowView {
+  // The version as drawn, for example "v2".
+  string version = 1;
+  // The lines beside the version, top to bottom: the saved marker and the author, broken between words onto more lines where
+  // the row is narrower (never cut), then the name of the earlier implementation the row was saved in.
+  repeated string lines = 2;
+  // Whether every line lies whole inside the row as the list shows it: the version and every line fit the row's width and
+  // height, measured with the list's own font, and the row lies inside the list's visible width.
+  bool fits = 3;
+  // The row and each line as drawn, relative to the history dialog's window, in pixels; shown is false for a row outside the
+  // list's view (scrolled away).
+  DiagramControlRect rect = 4;
+  DiagramControlRect version_rect = 5;
+  repeated DiagramControlRect line_rects = 6;
 }
 message DiagramHistoryViewState {
   BlockSelectionData context = 1;
@@ -222,6 +246,9 @@ message RecursiveDiagramEditorState {
   // the pointer there, relative to the editor window, so a journey can tell a hover that has not arrived from one that did.
   uint64 canvas_motions = 236;
   DiagramCanvasPoint canvas_pointer = 237;
+  // The selected connection's end handles as drawn, relative to the editor window, with the connection's id as object_id; empty
+  // when no connection is selected (owner default n7fb0ee3089916669).
+  repeated DiagramControlRect connection_handles = 238;
 }
 
 // A point on the canvas, relative to the editor window, in pixels.

@@ -13,9 +13,9 @@
 #include <vector>
 #include <wx/button.h>
 #include <wx/colour.h>
-#include <wx/listbox.h>
 #include <wx/settings.h>
 #include <wx/textctrl.h>
+#include <wx/vlbox.h>
 #if defined( __WXGTK__ )
 #include <dlfcn.h>
 #endif
@@ -138,52 +138,19 @@ inline void PadTextBox( wxTextCtrl* aControl, int aHorizontal, int aVertical )
     aControl->SetMargins( aHorizontal, aVertical );
 #endif
 }
-/// Makes a list's rows that are wider than the list end in "…" instead of being cut off mid-word (mockup audit M1-3). The
-/// field-history dialog first shortens only a row's earlier implementation name (DIALOG_DIAGRAM_FIELD_HISTORY::fitRows), so
-/// this is the last resort, for a version and author too wide for the list on their own. On GTK the list is a GtkTreeView
-/// whose one text column is given the list's width and told to ellipsize. Other platforms are left as they are. Returns
-/// whether the rows now ellipsize.
-inline bool EllipsizeRows( wxListBox* aList )
+/// Gives aWindow aName for assistive technology (GTK's ATK object; elsewhere nothing changes): the history lists draw their
+/// rows themselves, so the list is named after the row selected in it, whole (mockup audit P3 item 10).
+inline void NameForAssistiveTechnology( wxWindow* aWindow, const wxString& aName )
 {
 #if defined( __WXGTK__ )
-    struct GLIST { void* data; GLIST* next; GLIST* prev; };
-    using CHILD = void* ( * )( void* );
-    using COLUMN = void* ( * )( void*, int );
-    using CELLS = GLIST* ( * )( void* );
-    using SET = void ( * )( void*, const char*, ... );
-    using FREE = void ( * )( GLIST* );
-    using TYPE = unsigned long ( * )();
-    using ISA = int ( * )( void*, unsigned long );
-    using INTEGER = void ( * )( void*, int );
-    static const auto child = reinterpret_cast<CHILD>( dlsym( RTLD_DEFAULT, "gtk_bin_get_child" ) );
-    static const auto column = reinterpret_cast<COLUMN>( dlsym( RTLD_DEFAULT, "gtk_tree_view_get_column" ) );
-    static const auto cells = reinterpret_cast<CELLS>( dlsym( RTLD_DEFAULT, "gtk_cell_layout_get_cells" ) );
-    static const auto set = reinterpret_cast<SET>( dlsym( RTLD_DEFAULT, "g_object_set" ) );
-    static const auto release = reinterpret_cast<FREE>( dlsym( RTLD_DEFAULT, "g_list_free" ) );
-    static const auto treeType = reinterpret_cast<TYPE>( dlsym( RTLD_DEFAULT, "gtk_tree_view_get_type" ) );
-    static const auto textType = reinterpret_cast<TYPE>( dlsym( RTLD_DEFAULT, "gtk_cell_renderer_text_get_type" ) );
-    static const auto isA = reinterpret_cast<ISA>( dlsym( RTLD_DEFAULT, "g_type_check_instance_is_a" ) );
-    static const auto sizing = reinterpret_cast<INTEGER>( dlsym( RTLD_DEFAULT, "gtk_tree_view_column_set_sizing" ) );
-    static const auto fixedWidth = reinterpret_cast<INTEGER>( dlsym( RTLD_DEFAULT, "gtk_tree_view_column_set_fixed_width" ) );
-    if( !child || !column || !cells || !set || !release || !treeType || !textType || !isA || !sizing || !fixedWidth ) return false;
-    void* view = aList->GetHandle() ? child( aList->GetHandle() ) : nullptr;
-    if( !view || !isA( view, treeType() ) ) return false;
-    void* first = column( view, 0 );
-    if( !first ) return false;
-    bool ellipsized = false;
-    GLIST* renderers = cells( first );
-    for( GLIST* item = renderers; item; item = item->next )
-        if( item->data && isA( item->data, textType() ) ) { set( item->data, "ellipsize", 3 /* PANGO_ELLIPSIZE_END */, nullptr ); ellipsized = true; }
-    release( renderers );
-    if( !ellipsized ) return false;
-    // A column sized to its widest row would push the ends out of view; a fixed column as wide as the list ellipsizes them.
-    sizing( first, 2 /* GTK_TREE_VIEW_COLUMN_FIXED */ );
-    auto fit = [aList, first] { fixedWidth( first, std::max( 1, aList->GetClientSize().x ) ); };
-    fit();
-    aList->Bind( wxEVT_SIZE, [fit]( wxSizeEvent& aEvent ) { fit(); aEvent.Skip(); } );
-    return true;
+    using ACCESSIBLE = void* ( * )( void* );
+    using NAME = void ( * )( void*, const char* );
+    static const auto accessibleOf = reinterpret_cast<ACCESSIBLE>( dlsym( RTLD_DEFAULT, "gtk_widget_get_accessible" ) );
+    static const auto setName = reinterpret_cast<NAME>( dlsym( RTLD_DEFAULT, "atk_object_set_name" ) );
+    if( !accessibleOf || !setName || !aWindow || !aWindow->GetHandle() ) return;
+    if( void* accessible = accessibleOf( aWindow->GetHandle() ) ) setName( accessible, aName.utf8_str() );
 #else
-    return false;
+    wxUnusedVar( aWindow ); wxUnusedVar( aName );
 #endif
 }
 /// The fill that marks the words in which two versions of a text differ (mockup audit M1-6; the approved conflict mockup
@@ -240,6 +207,60 @@ inline std::vector<std::pair<long, long>> DifferingWords( const wxString& aText,
 }
 }
 
+/** One row of a history list in the approved diagram history's two-line pattern (mockup 01-diagram-history): the version in
+ * bold on the left; beside it the saved marker and the author; then a second line (the diagram history's change summary, the
+ * field history's earlier implementation). */
+struct DIAGRAM_HISTORY_ROW
+{
+    wxString version;
+    /// "Saved · Author", or the author alone.
+    wxString first;
+    /// The second line, or empty.
+    wxString second;
+};
+
+/** A history row as laid out in a row rectangle of a list, in the list's client pixels (mockup audit M1-12). The saved marker
+ * and the author are never cut: where they are wider than the row they continue on the next line, broken between words (and
+ * inside a word only when the word alone is wider than the row). Only the second line ends in "…", when it is wider. */
+struct DIAGRAM_HISTORY_ROW_LAYOUT
+{
+    wxString version;
+    wxRect versionRect;
+    std::vector<wxString> lines;
+    std::vector<wxRect> lineRects;
+    /// The version and every line lie whole inside the row.
+    bool fits = true;
+};
+/// aRow laid out in aBounds, a row of aList, with aList's font (the version in its bold weight) and its DIP scale.
+DIAGRAM_HISTORY_ROW_LAYOUT LayHistoryRow( const wxWindow* aList, const wxRect& aBounds, const DIAGRAM_HISTORY_ROW& aRow );
+/// The height of aRow in a list aWidth pixels wide: two lines at least, as the approved rows, and one more for each line the
+/// saved marker and the author need.
+int HistoryRowHeight( const wxWindow* aList, int aWidth, const DIAGRAM_HISTORY_ROW& aRow );
+/// Draws a laid-out row, in the selection's text colour when aSelected.
+void DrawHistoryRow( wxDC& aDC, const wxWindow* aList, const DIAGRAM_HISTORY_ROW_LAYOUT& aLayout, bool aSelected );
+
+/** A list of history rows drawn in that pattern, each as tall as its lines need at the list's width. Selection, keyboard and
+ * the listbox events are the platform list's (wxVListBox). */
+class DIAGRAM_HISTORY_LIST : public wxVListBox
+{
+public:
+    DIAGRAM_HISTORY_LIST( wxWindow* aParent, const wxString& aName );
+    void SetRows( std::vector<DIAGRAM_HISTORY_ROW> aRows );
+    const std::vector<DIAGRAM_HISTORY_ROW>& Rows() const { return m_rows; }
+    /// Row aIndex as drawn at the list's current width, in client pixels (its rectangle whether or not it is scrolled into view).
+    DIAGRAM_HISTORY_ROW_LAYOUT RowLayout( size_t aIndex ) const;
+    /// Row aIndex's rectangle in client pixels at the current scroll position.
+    wxRect RowRect( size_t aIndex ) const;
+
+protected:
+    wxCoord OnMeasureItem( size_t aIndex ) const override;
+    void OnDrawItem( wxDC& aDC, const wxRect& aRect, size_t aIndex ) const override;
+
+private:
+    std::vector<DIAGRAM_HISTORY_ROW> m_rows;
+    int m_width = -1;
+};
+
 struct DIAGRAM_FIELD_HISTORY_ENTRY
 {
     std::string revisionId;
@@ -289,11 +310,20 @@ public:
     /// Every loaded row's whole text: its revision label (with the name of the earlier implementation it was saved in), the
     /// saved marker and the author.
     std::vector<wxString> RowLabels() const;
-    /// Every loaded row as the list shows it at its current width: the whole text, or, where that is wider than the list,
-    /// with only the earlier implementation's name shortened with "…", so "vN · Author" stays whole (mockup audit M1-3).
+    /// Every loaded row as the list shows it at its current width, one line per line drawn: the version, the saved marker and
+    /// the author (on more lines where the row is narrower), then the earlier implementation's name (mockup audit M1-12).
     std::vector<wxString> ShownRowLabels() const;
-    /// Whether a row too wide even for "vN · Author" ends in "…" instead of being cut off mid-word (mockup audit M1-3).
-    bool RowsEllipsize() const { return m_rowsEllipsize; }
+    /// Every loaded row as the list draws it: its version and lines, where they are on screen, and whether they lie whole
+    /// inside the row and the list (mockup audit M1-12).
+    struct SHOWN_ROW
+    {
+        wxString version;
+        std::vector<wxString> lines;
+        wxRect rect, versionRect;
+        std::vector<wxRect> lineRects;
+        bool fits = false, shown = false;
+    };
+    std::vector<SHOWN_ROW> ShownRows() const;
 
     /// Lays the dialog out and then fits the selected row's heading to the width its column got.
     bool Layout() override;
@@ -301,9 +331,9 @@ public:
 private:
     void updateSelection();
     void fitHeading();
-    void fitRows();
     void updatePaging();
-    void appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& aEntries );
+    /// The list's rows for every loaded entry, in the diagram history's two-line pattern.
+    void showRows();
 
     std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> m_entries;
     const std::function<void( const std::string& )> m_openSource;
@@ -311,9 +341,8 @@ private:
     size_t m_total = 0;
     bool m_loading = false;
     bool m_showPageCount = false;
-    bool m_rowsEllipsize = false;
     std::optional<std::string> m_restoreRevision;
-    wxListBox* m_history = nullptr;
+    DIAGRAM_HISTORY_LIST* m_history = nullptr;
     wxStaticText* m_pageStatus;
     wxStaticText* m_pageError;
     wxButton* m_older;

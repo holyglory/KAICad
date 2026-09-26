@@ -128,7 +128,7 @@ public sealed partial class NativeSessionTests
             while (NativeKeyboard.HasWindow(display, processId, title)) await Task.Delay(50, closing.Token);
         }
         // The level as the fixture stores it: its exact revision, children, connections, ports and notes, no stored layout, nothing new.
-        void Level(P.RecursiveDiagramEditorState at, string step, BlockSelection scope, RecursiveBlockRevision revision)
+        void Level(P.RecursiveDiagramEditorState at, string step, BlockSelection scope, RecursiveBlockRevision revision, bool compact = false)
         {
             Assert.AreEqual("", at.ErrorCode, step + ": the level opens without an error.");
             Assert.AreEqual(S(scope.RevisionId), at.DiagramPath[^1].RevisionId, step + ": the level shown is the fixture's exact revision.");
@@ -152,7 +152,23 @@ public sealed partial class NativeSessionTests
             foreach (var (note, drawn) in canvasNotes.Zip(at.CanvasNotes))
             {
                 Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
-                Assert.AreEqual(note.Text, string.Join(" ", drawn.Lines), step + ": the note's lines break between words.");
+                string shown = string.Join(" ", drawn.Lines);
+                if (!compact || shown == note.Text)
+                {
+                    Assert.AreEqual(note.Text, shown, step + ": the note's lines break between words.");
+                    continue;
+                }
+                // In the compact window a note keeps its text at full size in its smaller box, as a block's caption does (design
+                // QA P2-7), so a note too short for its text ends in "…" (the note repair of the canvas QA): the lines before the last
+                // still break between words, and the last is the start of the rest of the text.
+                Assert.IsTrue(drawn.Lines.Count > 0 && drawn.Lines[^1].Length > 1 && drawn.Lines[^1].EndsWith('…'),
+                    step + ": the note \"" + note.Text + "\" is drawn whole or ends in \"…\" (shown: \"" + shown + "\").");
+                string whole = string.Join(" ", drawn.Lines.Take(drawn.Lines.Count - 1));
+                Assert.IsTrue(whole.Length == 0 || note.Text.StartsWith(whole + " ", StringComparison.Ordinal),
+                    step + ": the shortened note's lines break between words (shown: \"" + shown + "\").");
+                string rest = whole.Length == 0 ? note.Text : note.Text[(whole.Length + 1)..];
+                Assert.IsTrue(rest.StartsWith(drawn.Lines[^1][..^1].TrimEnd(), StringComparison.Ordinal),
+                    step + ": the shortened note's last line is the start of the rest of its text (shown: \"" + shown + "\").");
             }
             // Mockup audit M1-1: Comments opens on the selected element's own comment, or on a new one, never on a note in the
             // level's free space (typing there used to rewrite the note, and the note was drawn as the selected comment).
@@ -190,7 +206,9 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(opened.IsError == true, "The PSU/CPU diagram opens in the native per-level editor; the response is retained.");
                 return await Wait(step, s => s.Ready && s.Rendered && s.DiagramPath.Count == 1);
             }
-            // The layout the editor actually drew for the viewed level (contract rbg-v2 section 9.2), as an agent observes it.
+            // The layout the editor actually drew for the viewed level (contract rbg-v2 section 9.2), as an agent observes it; the
+            // whole observed view (with the level's notes) stays in lastView.
+            JsonElement lastView = default;
             async Task<JsonElement> Observe(string label)
             {
                 var at = await Read();
@@ -206,7 +224,19 @@ public sealed partial class NativeSessionTests
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation.json"), view.GetRawText(), token);
                 // Mockup audit M1-11: no connection runs through or against a boundary port's name, in every observed level.
                 VerifyBoundaryNamesOffWires(at, view.GetProperty("resolvedLayout"), label);
+                lastView = view.Clone();
                 return view.GetProperty("resolvedLayout");
+            }
+            // Mockup audit M1-7, M1-8 and M1-9 on one of the fixture's own levels, at the window's current size: every canvas note is
+            // 24 px or more clear of every block with its handles, every port square and every wire (a note pressed against a block
+            // read as that block's comment), and no computed connection runs through a block or a note (decision n7fb0ee3089916669,
+            // CN-2 erratum 2026-09-26).
+            async Task FixtureLevel(string step, P.RecursiveDiagramEditorState at, JsonElement layout)
+            {
+                await Capture(step);
+                var shot = await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-canvas-" + step + ".png"), WindowOrigin(display, processId, title), token);
+                VerifyNotesClear(at, layout, step, shot);
+                VerifyRoutesOffBlocksAndNotes(lastView, step);
             }
             static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
             static string Box(JsonElement rect) => string.Join(",", new[] { "x", "y", "width", "height" }.Select(p => rect.GetProperty(p).GetString()));
@@ -239,7 +269,7 @@ public sealed partial class NativeSessionTests
             FallbackBoundary(systemLayout, "system", system, systemRevision);
             CollectionAssert.AreEqual(systemRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(systemLayout));
             VerifyRoutesClear(systemLayout, "system");
-            await Capture("system");
+            await FixtureLevel("system", opened, systemLayout);
 
             // System -> PSU: the four PSU blocks on the two-column grid, every connection on its computed path.
             Key("Escape"); Key("Right");
@@ -254,8 +284,8 @@ public sealed partial class NativeSessionTests
             var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
             Level(psuLevel, "psu", psu, psuRevision);
             // Design QA P2-7 and round 2 (R2-P2-1) at the default window size: every connection caption of the crowded PSU level is
-            // drawn, the four that end at a boundary port as well (the approved sketch A3 captions such a connection beside the
-            // port's own name), each clear of blocks, handles, ports, wires and the other captions, beside its own connection or in
+            // drawn, the four that end at a boundary port as well (the approved sketch A3 captions such a connection above its own
+            // wire), each clear of blocks, handles, ports, wires and the other captions, beside its own connection or in
             // the free space around it. A caption whose whole text has no clear place is shortened with "…", as a block caption is,
             // and shows its whole text on hover; none is left out. Each caption is matched to its own connection by identity, not
             // by its text ("Rail…" could otherwise stand for either rail's sense connection).
@@ -277,22 +307,19 @@ public sealed partial class NativeSessionTests
             // blocks' edges. Connections keep apart: LDO supply and Rail B sense no longer meet end to end at (445, 182.5), and
             // Telemetry no longer runs along Measurements' leg at 468.75 (they turn up 10 units apart, at x 445 and 455). Only
             // connections from one port (Rail B and Rail B sense from the LDO's output, Rail A and Rail B into the Power port) share
-            // the leg at that port. Level runs 7.5 units apart count as running beside each other too (the formal QA asks for 8
-            // pixels): Rail A's and LDO supply's runs at 182.5 lie beside Rail B's run into the Power port at 175, so both turn
-            // at their 20-unit limit (Rail A at x 120, LDO supply at x 400) and Rail B turns at x 415, which keeps each of those
-            // runs beside it to the 20 units the end itself needs.
+            // the leg at that port.
+            // Mockup audit M1-8 (CN-2 erratum 2026-09-26, decision n7fb0ee3089916669): Rail B's three-segment path ran behind DC-DC
+            // at y 175 into the Power port, so it looked as if it ended at DC-DC's port. It now goes around the blocks: 20 units out
+            // of the LDO, up past DC-DC 10 units clear of it at y 100, and into the Power port from inside the level. With it, no two
+            // connections run beside each other any more (Rail A's and LDO supply's runs at 182.5 had lain 7.5 units from Rail B's).
             CollectionAssert.AreEqual(new[] {
                     "40,90 90,90 90,146.25 140,146.25", "140,182.5 120,182.5 120,175 40,175", "380,182.5 400,182.5 400,146.25 510,146.25",
-                    "510,182.5 415,182.5 415,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
+                    "510,182.5 490,182.5 490,100 60,100 60,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
                     "380,468.75 445,468.75 445,396.25 510,396.25", "510,218.75 490,218.75 490,432.5 510,432.5", "510,468.75 455,468.75 455,260 40,260" },
                 psuLayout.GetProperty("routes").EnumerateArray().Select(r => string.Join(" ", r.GetProperty("points").EnumerateArray().Select(Point))).ToArray(),
                 "psu: every connection runs on its computed path.");
-            // Those two are the only runs beside another, and neither can be avoided with three-segment paths: Rail B's run into the
-            // Power port at 175 must reach the port, and Rail A's and LDO supply's runs at 182.5 must first leave their ends by 20
-            // units. Each is held to exactly those 20 units.
-            string Link(string name) => psuConnections.Single(c => c.Value == name).Key;
-            VerifyRoutesClear(psuLayout, "psu", (Link("Rail A"), Link("Rail B")), (Link("LDO supply"), Link("Rail B")));
-            await Retain("psu", psuLevel); await Capture("psu");
+            VerifyRoutesClear(psuLayout, "psu");
+            await Retain("psu", psuLevel); await FixtureLevel("psu", psuLevel, psuLayout);
 
             // PSU -> System (Backspace keeps the PSU selected, as the level was left) -> CPU.
             Key("BackSpace");
@@ -309,7 +336,40 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(cpuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(cpuLayout));
             VerifyRoutesClear(cpuLayout, "cpu");
             CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Opening and navigating never write.");
-            await Retain("cpu", cpuLevel); await Capture("cpu");
+            await Retain("cpu", cpuLevel); await FixtureLevel("cpu", cpuLevel, cpuLayout);
+
+            // The same three levels in the compact window (1100 × 760, mockup audit M1-7 and M1-8): each is fitted to the smaller
+            // canvas when it is shown (a level left at the default size is fitted again, not shown at the scale it was left at), its
+            // notes stay 24 px or more clear of every block with its handles, every port square and every wire, and no connection
+            // runs through a block or a note. The walk ends on the CPU level at the default size, as before.
+            ulong beforeCompact = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
+            var compactCpu = await Wait("compact-cpu", s => s.Rendered && s.ViewRevision > beforeCompact && s.CanvasPixelWidth < 800);
+            Level(compactCpu, "compact-cpu", cpu, cpuRevision, compact: true);
+            var compactCpuLayout = await Observe("compact-cpu"); VerifyRoutesClear(compactCpuLayout, "compact-cpu");
+            await FixtureLevel("compact-cpu", compactCpu, compactCpuLayout);
+            Key("BackSpace");
+            var compactSystem = await Wait("compact-system", s => s.Rendered && s.DiagramPath.Count == 1 && s.Draft.Baseline.BlockId == S(cpu.BlockId)
+                && s.CanvasPixelWidth < 800);
+            Assert.IsTrue(compactSystem.CanvasScale < 1 && compactSystem.CanvasNotes.All(n => n.Rect.Shown),
+                "compact-system: the System level, left at the default size, is fitted to the compact canvas again.");
+            var compactSystemLayout = await Observe("compact-system"); VerifyRoutesClear(compactSystemLayout, "compact-system");
+            await FixtureLevel("compact-system", compactSystem, compactSystemLayout);
+            Key("Left"); await Wait("compact-psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Return");
+            var compactPsu = await Wait("compact-psu", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
+            Level(compactPsu, "compact-psu", psu, psuRevision, compact: true);
+            Assert.IsTrue(compactPsu.CanvasScale < 1, "compact-psu: the PSU level is fitted to the compact canvas.");
+            var compactPsuLayout = await Observe("compact-psu"); VerifyRoutesClear(compactPsuLayout, "compact-psu");
+            await FixtureLevel("compact-psu", compactPsu, compactPsuLayout);
+            Key("BackSpace"); await Wait("compact-system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Right"); await Wait("compact-cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
+            Key("Return"); await Wait("compact-cpu-again", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(cpu.BlockId));
+            ulong beforeDefault = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
+            await Wait("default-cpu", s => s.Rendered && s.ViewRevision > beforeDefault && s.CanvasPixelWidth > 900 && s.CanvasScale == cpuLevel.CanvasScale
+                && s.CanvasOriginX == cpuLevel.CanvasOriginX && s.CanvasOriginY == cpuLevel.CanvasOriginY);
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "The compact walk writes nothing.");
 
             // Decline: a first drawn block stores the two unplaced blocks where they are drawn (F1a) and itself where it was put;
             // Decline discards all of it and the file stays the fixture's schema 1 bytes.
@@ -2379,9 +2439,24 @@ public sealed partial class NativeSessionTests
             var earlierPsuImplementation = Contexts(selectionBase)(earlierGeneral.ContextRevisionId);
             Assert.AreNotEqual(psuProposal.Candidate.StateId, earlierPsuImplementation.State);
             StringAssert.StartsWith(psuHistoryDialog.FieldHistory.RowLabels[1], earlierPsuImplementation.Name + " · v");
-            VerifyShownHistoryRows(psuHistoryDialog.FieldHistory,
-                ["", .. psuGeneral.Select(e => HistoryRowName(Contexts(selectionBase), e, psuProposal.Candidate.StateId))], "continued-field-history");
+            string[] psuRowNames = ["", .. psuGeneral.Select(e => HistoryRowName(Contexts(selectionBase), e, psuProposal.Candidate.StateId))];
+            // Mockup audit M1-12: the saved row by "Compatible agent fixture" once read "v2 · Saved · Compatib…" here. Every row is
+            // drawn whole in the approved two-line pattern, measured in the dialog's own capture at its default size and again in
+            // the compact dialog (590 × 440).
+            await Task.Delay(FadeSettleMilliseconds, token);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-field-history.png"), token);
+            VerifyShownHistoryRows(psuHistoryDialog.FieldHistory, psuRowNames, "continued-field-history",
+                await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-continued-field-history.png"),
+                    WindowOrigin(display, processId, "Requirement history"), token));
+            NativeKeyboard.SchematicShortcut(display, processId, "", "Requirement history", false, false, resizeWidth: 590, resizeHeight: 440);
+            var compactHistory = await Wait(s => s.FieldHistory is { Loading: false, DialogWidth: < 600, DialogHeight: < 450 } h && h.ShownRows.Count > 0
+                && s.FieldHistory.InspectedRevisionId == earlierGeneral.RequirementRevisionId.ToString("D"));
+            await Task.Delay(FadeSettleMilliseconds, token);
+            compactHistory = await Read();
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-field-history-compact.png"), token);
+            VerifyShownHistoryRows(compactHistory.FieldHistory, psuRowNames, "continued-field-history-compact",
+                await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-continued-field-history-compact.png"),
+                    WindowOrigin(display, processId, "Requirement history"), token));
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
             await Wait(s => s.Dirty && s.Draft.Fields.General == earlierGeneral.Text
                 && s.Draft.RestoredFields.Any(r => r.SourceRevisionId == earlierGeneral.RequirementRevisionId.ToString("D")));
@@ -2451,10 +2526,12 @@ public sealed partial class NativeSessionTests
             var earlierSupplyImplementation = Contexts(replacedSupply)(earlierSupply.ContextRevisionId);
             Assert.AreNotEqual(refinedSupply.Selection.StateId, earlierSupplyImplementation.State);
             StringAssert.StartsWith(supplyHistoryDialog.FieldHistory.RowLabels[1], earlierSupplyImplementation.Name + " · v");
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"), token);
             VerifyShownHistoryRows(supplyHistoryDialog.FieldHistory,
                 ["", .. supplyGeneral.Select(e => HistoryRowName(Contexts(replacedSupply), e, refinedSupply.Selection.StateId))],
-                "continued-connection-field-history");
-            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"), token);
+                "continued-connection-field-history", await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"),
+                    WindowOrigin(display, processId, "Requirement history"), token));
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
             await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == earlierSupply.Text
                 && s.ConnectionDraft.RestoredFields.Any(r => r.SourceRevisionId == earlierSupply.RequirementRevisionId.ToString("D")));
@@ -3185,6 +3262,34 @@ public sealed partial class NativeSessionTests
             var ringInk = shot.MostContrasting(cx + 4, cy - ring.Height / 2, 6, 5, canvasColour);
             Assert.IsTrue(ring.Width >= 16 && shot.Contrast("P2-6 Connect ring on the canvas", ringInk, canvasColour) >= 3.0,
                 $"connect-port-target: the ring around the port under the pointer {CapturedWindow.Describe(ringInk)} stands 3:1 from the canvas.");
+            // CN-2 erratum 2026-09-26 (decision n7fb0ee3089916669, mockup audit M1-8, ledger p9fd01b0c9678331c): the finished
+            // connection takes the path its preview showed. Rail to DC input's three-segment path would run back through the PSU;
+            // the preview goes around it, and finishing the connection there commits exactly that route: every point the editor
+            // reports for it, placed on the canvas as the editor reports its origin and scale, is the last preview's. The finished
+            // connection is selected with a handle at each end. Undo removes it, and the connection is started again from Rail.
+            var lastPreview = aimed.ConnectPreview.Select(p => (p.X, p.Y)).ToArray();
+            Assert.IsTrue(lastPreview.Length > 4, $"connect-port-target: the preview {string.Join(" ", lastPreview)} goes around the PSU, not in three segments.");
+            Click(dcMark.X + dcMark.Width / 2, dcMark.Y + dcMark.Height / 2);
+            await Wait("around-caption", s => s.CaptionEditor == "connection");
+            Type("Rail sense"); Key("Return");
+            var around = await Wait("around-added", s => s.LevelDraft.NewConnections.Count == 2 && s.CaptionEditor == "");
+            string aroundId = around.LevelDraft.NewConnections[1].Selection.ConnectionId;
+            Assert.AreEqual(aroundId, around.ConnectionDraft?.Baseline.ConnectionId, "around-added: the finished connection is selected.");
+            var committed = (await Route(around, aroundId)).GetProperty("points").EnumerateArray().Select(p => Pixel(around,
+                double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            CollectionAssert.AreEqual(lastPreview, committed,
+                $"around-added: the committed route {string.Join(" ", committed)} is the last preview {string.Join(" ", lastPreview)}.");
+            Assert.AreEqual((around.CanvasOriginX, around.CanvasOriginY, around.CanvasScale), (aimed.CanvasOriginX, aimed.CanvasOriginY, aimed.CanvasScale),
+                "around-added: the view did not move, so the two are drawn alike.");
+            Assert.HasCount(2, around.ConnectionHandles, "around-added: the selected connection shows a handle at each end.");
+            Assert.IsTrue(around.ConnectionHandles.All(h => h.ObjectId == aroundId && h.Width >= 8 && h.Height >= 8));
+            await Capture("around-added");
+            Key("z", control: true);
+            await Wait("around-undone", s => s.LevelDraft.NewConnections.Count == 1 && s.ConnectionDraft is null && s.ConnectionHandles.Count == 0);
+            await Press("RecursiveToolConnect");
+            await Wait("strip-connect-again", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At(380, 180); await Wait("port-connect-restarted", s => s.CanvasHint == "Click a port to finish connection" && s.SelectedInterfaceId == rail);
             var (blockX, blockY) = Canvas(aimed, cpuX, cpuY);
             NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: blockX, clickFromTop: blockY);
             await Wait("connect-target-block", s => s.ConnectTarget?.Label == "CPU" && !s.PortMarks.Any(p => p.Active));
@@ -3598,6 +3703,72 @@ public sealed partial class NativeSessionTests
             // "Rail f…" beside its short first leg although the canvas around it was empty).
             VerifyCaptions(shot, compact, "compact", new Dictionary<string, string> { [power.Selection.ConnectionId] = "Power", [feed.Selection.ConnectionId] = "Rail feed" },
                 "Power", "Rail feed");
+        }
+        {
+            // Design QA round 2 in the compact window with a connection in progress (review of 7e8af4b5c6): the CPU is selected, then
+            // Connect starts on the PSU's Rail port. That port becomes the selection and the inspector shows its block, while the CPU
+            // is drawn plain again (R2-P2-3). Aimed at DC input, whose three-segment path would run back through the PSU, the
+            // preview leaves Rail outward and goes around the PSU into DC input, crossing no block and no port's name, and the hint
+            // covers no block (R2-P2-2). Escape cancels it and adds nothing.
+            var (compactCpuX, compactCpuY) = Centre(compact, cpu);
+            await At(compactCpuX, compactCpuY); await Wait("compact-cpu-selected", s => s.Draft.Baseline.BlockId == cpu && s.ConnectionDraft is null);
+            await Press("RecursiveToolConnect"); await Wait("compact-connect-tool", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            var railMark = (await Read()).PortMarks.Single(p => p.Label == "Rail");
+            Click(railMark.X + railMark.Width / 2, railMark.Y + railMark.Height / 2);
+            var compactStarted = await Wait("compact-port-connect-started", s => s.CanvasHint == "Click a port to finish connection");
+            Assert.AreEqual((psu, rail), (compactStarted.SelectedInterfaceOwnerId, compactStarted.SelectedInterfaceId),
+                "compact-port-connect-started: the Rail port, where the connection starts, is the selection (R2-P2-3).");
+            Assert.AreEqual("PSU", Find(compactStarted, "RecursiveOwnerCaption").Label, "compact-port-connect-started: the inspector shows the Rail port's block, not the CPU.");
+            var compactDc = compactStarted.PortMarks.Single(p => p.Label == "DC input");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: compactDc.X + compactDc.Width / 2,
+                clickFromTop: compactDc.Y + compactDc.Height / 2);
+            var compactAimed = await Wait("compact-connect-target-port", s => s.ConnectTarget?.Label == "DC input"
+                && s.PortMarks.Any(p => p.Label == "DC input" && p.Active) && s.ConnectPreview.Count >= 2);
+            var shot = await Shot("compact-connect-port-target");
+            VerifyConnectPreview(shot, compactAimed, "compact-connect-port-target", psu, "Rail", "DC input");
+            Assert.IsTrue(compactAimed.ConnectPreview.Count > 4, "compact-connect-port-target: the preview goes around the PSU, not in three segments.");
+            var canvasColour = shot.At(compactAimed.CanvasWindowX + (int)compactAimed.CanvasPixelWidth - 12, compactAimed.CanvasWindowY + (int)compactAimed.CanvasPixelHeight - 12);
+            var psuBox = compactAimed.BlockTexts.Single(b => b.BlockId == psu).Block; var cpuBox = compactAimed.BlockTexts.Single(b => b.BlockId == cpu).Block;
+            var psuFill = shot.At(psuBox.X + psuBox.Width - 18, psuBox.Y + psuBox.Height - 14); var cpuFill = shot.At(cpuBox.X + cpuBox.Width - 18, cpuBox.Y + cpuBox.Height - 14);
+            var psuBorder = shot.MostContrasting(psuBox.X + psuBox.Width / 4 - 2, psuBox.Y - 1, 5, 4, psuFill);
+            var cpuBorder = shot.MostContrasting(cpuBox.X + cpuBox.Width / 4 - 2, cpuBox.Y - 1, 5, 4, cpuFill);
+            Assert.IsTrue(shot.Contrast("R2-P2-3 compact: connection source's outline on the canvas", psuBorder, canvasColour) >= 3.0,
+                $"compact-connect-port-target: the PSU, whose Rail port starts the connection, is outlined in the accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuBorder, cpuBorder) >= 60,
+                $"compact-connect-port-target: the CPU's outline {CapturedWindow.Describe(cpuBorder)} is not the selection's accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuFill, cpuFill) >= 12,
+                $"compact-connect-port-target: the CPU's fill {CapturedWindow.Describe(cpuFill)} is not the selection's tint {CapturedWindow.Describe(psuFill)}.");
+            int compactConnections = compactAimed.LevelDraft.Scope.LocalDiagram.Connections.Count;
+            Key("Escape");
+            var connectCancelled = await Wait("compact-connect-cancelled", s => s.CanvasHint == "" && s.CanvasTool == "select" && s.ConnectPreview.Count == 0);
+            Assert.AreEqual(compactConnections, connectCancelled.LevelDraft.Scope.LocalDiagram.Connections.Count, "compact-connect-cancelled: Escape adds no connection.");
+            Assert.IsEmpty(connectCancelled.LevelDraft.NewConnections, "compact-connect-cancelled: nothing was drawn.");
+            Assert.IsFalse(connectCancelled.Dirty, "compact-connect-cancelled: nothing changed.");
+            // Finished in the compact window, the connection takes the path its preview showed there too (CN-2 erratum 2026-09-26);
+            // Undo removes it again.
+            await Press("RecursiveToolConnect"); await Wait("compact-connect-again", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            railMark = (await Read()).PortMarks.Single(p => p.Label == "Rail");
+            Click(railMark.X + railMark.Width / 2, railMark.Y + railMark.Height / 2);
+            await Wait("compact-port-connect-restarted", s => s.CanvasHint == "Click a port to finish connection" && s.SelectedInterfaceId == rail);
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: compactDc.X + compactDc.Width / 2,
+                clickFromTop: compactDc.Y + compactDc.Height / 2);
+            var compactAimedAgain = await Wait("compact-connect-target-port-again", s => s.ConnectTarget?.Label == "DC input" && s.ConnectPreview.Count >= 2);
+            var compactPreview = compactAimedAgain.ConnectPreview.Select(p => (p.X, p.Y)).ToArray();
+            Click(compactDc.X + compactDc.Width / 2, compactDc.Y + compactDc.Height / 2);
+            await Wait("compact-around-caption", s => s.CaptionEditor == "connection");
+            Type("Rail sense"); Key("Return");
+            var compactAround = await Wait("compact-around-added", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+            string compactAroundId = compactAround.LevelDraft.NewConnections[0].Selection.ConnectionId;
+            var compactCommitted = (await Route(compactAround, compactAroundId)).GetProperty("points").EnumerateArray().Select(p => Pixel(compactAround,
+                double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            CollectionAssert.AreEqual(compactPreview, compactCommitted,
+                $"compact-around-added: the committed route {string.Join(" ", compactCommitted)} is the last preview {string.Join(" ", compactPreview)}.");
+            Assert.HasCount(2, compactAround.ConnectionHandles, "compact-around-added: the finished connection is selected with a handle at each end.");
+            Key("z", control: true);
+            var compactUndone = await Wait("compact-around-undone", s => s.LevelDraft.NewConnections.Count == 0 && s.ConnectionHandles.Count == 0);
+            Assert.AreEqual(compactConnections, compactUndone.LevelDraft.Scope.LocalDiagram.Connections.Count, "compact-around-undone: Undo removes the connection.");
+            Assert.IsFalse(compactUndone.Dirty, "compact-around-undone: nothing is left to save.");
         }
         await Press("RecursiveToolConnect"); await Wait("compact-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         await Press("RecursiveToolSelect"); await Wait("compact-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
@@ -5077,6 +5248,114 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(3, savedTop.LocalDiagram.Connections.Length, "Signals are members, never connections of the level itself.");
         await Capture("saved");
 
+        // Owner default n7fb0ee3089916669 (mockup audit M1-9): a connection is drawn in its domain's colour, as the approved sketches
+        // draw them: power red, data blue, analog (the sketches' sense lines) dashed grey, each 4.5:1 or more on the canvas (in the
+        // dark theme lightened until it is, as the accent is); Control and Mechanical in the neutral wire colour; and a selected
+        // connection in the accent with a handle at each end, so a selected data connection stays apart from an unselected one.
+        // Supply input takes the data domain and Rail feed the analog one in this draft, measured at the default size and in the
+        // compact window; Decline then discards them.
+        (byte R, byte G, byte B) Wire(CapturedWindow shot, P.RecursiveDiagramEditorState at, (int X, int Y)[] route, string what, out bool dashed)
+        {
+            // The middle half of the connection's longest straight run, away from its ends, arrowheads and caption.
+            int longest = 1;
+            for (int i = 2; i < route.Length; ++i)
+                if (Math.Abs(route[i].X - route[i - 1].X) + Math.Abs(route[i].Y - route[i - 1].Y)
+                    > Math.Abs(route[longest].X - route[longest - 1].X) + Math.Abs(route[longest].Y - route[longest - 1].Y)) longest = i;
+            var (a, b) = (route[longest - 1], route[longest]);
+            var surface = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+            bool flat = a.Y == b.Y; int length = flat ? Math.Abs(b.X - a.X) : Math.Abs(b.Y - a.Y);
+            Assert.IsTrue(length >= 12, $"{what}: its longest run ({a} to {b}) is long enough to measure.");
+            int from = (flat ? Math.Min(a.X, b.X) : Math.Min(a.Y, b.Y)) + length / 4, span = length / 2;
+            var colour = flat ? shot.MostContrasting(from, a.Y - 2, span, 5, surface) : shot.MostContrasting(a.X - 2, from, 5, span, surface);
+            // Dashes leave gaps along the run; a solid line is one unbroken run of ink.
+            var ink = flat ? shot.InkRuns(from, a.Y - 1, span, 3, surface, rows: false, minimum: 1.5) : shot.InkRuns(a.X - 1, from, 3, span, surface, rows: true, minimum: 1.5);
+            dashed = ink.Count >= 3;
+            Assert.IsTrue(ink.Count >= 1, $"{what}: the wire is drawn where the editor reports it.");
+            return colour;
+        }
+        async Task DomainLooks(string step, bool selectedData)
+        {
+            await ParkPointer();
+            var at = await Wait(step, s => s.Rendered);
+            var shot = await Shot(step);
+            var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+            string D((byte R, byte G, byte B) c) => CapturedWindow.Describe(c);
+            var powerLook = Wire(shot, at, await RoutePixels(at, power), step + " Power", out bool powerDashed);
+            Assert.IsTrue(powerLook.R - Math.Max(powerLook.G, powerLook.B) >= 60 && !powerDashed, $"{step}: Power, domain Power, is drawn red {D(powerLook)} and solid.");
+            Assert.IsTrue(shot.Contrast("M1-9 power wire on the canvas", powerLook, canvas) >= 4.5, $"{step}: the red {D(powerLook)} reads 4.5:1 on the canvas {D(canvas)}.");
+            var dataLook = Wire(shot, at, await RoutePixels(at, supply), step + " Supply input", out bool dataDashed);
+            if (selectedData)
+            {
+                // The selected data connection: the accent, and a handle at each of its ends.
+                var handles = at.ConnectionHandles.Where(h => h.ObjectId == supply).ToArray();
+                Assert.HasCount(2, handles, $"{step}: the selected Supply input shows a handle at each end.");
+                Assert.IsTrue(shot.Contrast("M1-9 selected connection on the canvas", dataLook, canvas) >= 3.0, $"{step}: the selected Supply input {D(dataLook)} is drawn in the accent.");
+                foreach (var handle in handles)
+                {
+                    // The handle's outline is its first column; its fill (white, or the canvas's foreground in the dark theme) lies inside.
+                    var outline = shot.MostContrasting(handle.X, handle.Y + 2, 1, handle.Height - 4, canvas);
+                    Assert.IsTrue(handle.Width >= 8 && handle.Height >= 8 && shot.Contrast("M1-9 connection handle outline on the canvas", outline, canvas) >= 3.0,
+                        $"{step}: an end handle's outline {D(outline)} stands 3:1 from the canvas.");
+                }
+                Assert.IsTrue(at.ConnectionHandles.All(h => h.ObjectId == supply), $"{step}: only the selected connection shows handles.");
+            }
+            else
+            {
+                Assert.IsTrue(dataLook.B - Math.Max(dataLook.R, dataLook.G) >= 60 && !dataDashed, $"{step}: Supply input, domain Data, is drawn blue {D(dataLook)} and solid.");
+                Assert.IsTrue(shot.Contrast("M1-9 data wire on the canvas", dataLook, canvas) >= 4.5, $"{step}: the blue {D(dataLook)} reads 4.5:1 on the canvas {D(canvas)}.");
+                Assert.IsEmpty(at.ConnectionHandles, $"{step}: no connection is selected, so none shows handles.");
+            }
+            var feedLook = Wire(shot, at, await RoutePixels(at, feed), step + " Rail feed", out bool feedDashed);
+            int spread = Math.Max(feedLook.R, Math.Max(feedLook.G, feedLook.B)) - Math.Min(feedLook.R, Math.Min(feedLook.G, feedLook.B));
+            var feedDomain = at.LevelDraft.ConnectionDrafts.Single(c => c.Baseline.ConnectionId == feed).Domain;
+            if (feedDomain == P.DiagramDomain.DdAnalog)
+            {
+                Assert.IsTrue(spread <= 20 && feedDashed, $"{step}: Rail feed, domain Analog, is drawn in dashed grey {D(feedLook)}.");
+                Assert.IsTrue(shot.Contrast("M1-9 analog wire on the canvas", feedLook, canvas) >= 4.5, $"{step}: the dashed grey {D(feedLook)} reads 4.5:1 on the canvas.");
+            }
+            else
+                Assert.IsTrue(spread <= 20 && !feedDashed && shot.Contrast("M1-9 neutral wire on the canvas", feedLook, canvas) >= 1.5,
+                    $"{step}: Rail feed, domain {feedDomain}, is drawn in the neutral wire colour {D(feedLook)}, solid.");
+        }
+        await SelectConnection("domains-supply", supply);
+        await AddDetail("Home", "Down");
+        await Wait("domains-supply-row", s => Details(s).Contains("domain"));
+        await Press("RecursiveDomainData");
+        await Wait("domains-supply-data", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdData);
+        await SelectConnection("domains-feed", feed);
+        await AddDetail("Home", "Down", "Down");
+        await Wait("domains-feed-row", s => Details(s).Contains("domain"));
+        await Press("RecursiveDomainAnalog");
+        await Wait("domains-feed-analog", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdAnalog);
+        await ClickBlankCanvas("domains-level", root);
+        await DomainLooks("domains", selectedData: false);
+        await SelectConnection("domains-supply-selected", supply);
+        await DomainLooks("domains-selected", selectedData: true);
+        {
+            ulong beforeDomainsCompact = (await Read()).ViewRevision;
+            NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1100, resizeHeight: 760);
+            await Wait("domains-compact-window", s => s.Rendered && s.ViewRevision > beforeDomainsCompact && s.CanvasPixelWidth < 800);
+            await DomainLooks("domains-compact-selected", selectedData: true);
+            await ClickBlankCanvas("domains-compact-level", root);
+            await DomainLooks("domains-compact", selectedData: false);
+            await SelectConnection("domains-compact-feed", feed);
+            await Press("RecursiveDomainControl");
+            await Wait("domains-compact-control", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdControl);
+            await ClickBlankCanvas("domains-compact-control-level", root);
+            await DomainLooks("domains-compact-control", selectedData: false);
+            NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
+            await Wait("domains-default-window", s => s.Rendered && s.CanvasPixelWidth > 900);
+        }
+        await SelectConnection("domains-feed-mechanical", feed);
+        await Press("RecursiveDomainMechanical");
+        await Wait("domains-feed-mechanical-chosen", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdMechanical);
+        await ClickBlankCanvas("domains-mechanical-level", root);
+        await DomainLooks("domains-mechanical", selectedData: false);
+        Key("d", alt: true);
+        await Wait("domains-declined", s => !s.Dirty && s.LevelDraft.ConnectionDrafts.All(c => c.Domain == P.DiagramDomain.DdUnspecified || c.Baseline.ConnectionId == power));
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "domains-declined: the domains drawn for measuring were never saved.");
+        await SelectConnection("domains-power-again", power);
+
         // Decline discards a later change and writes nothing.
         await Press("RecursiveDirectionFromFirst");
         await Wait("direction-changed", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
@@ -5458,16 +5737,31 @@ public sealed partial class NativeSessionTests
         return state == viewedState ? "" : implementation;
     }
 
-    /// <summary>Mockup audit M1-3 in the editor's own history dialog: the list shows every row with its version and author
-    /// whole, as the approved rows read "v2 · User"; a row too wide for the list shortens only the leading name of the earlier
-    /// implementation it was saved in (<paramref name="names"/>, one per row).</summary>
-    private static void VerifyShownHistoryRows(P.FieldHistoryViewState history, IReadOnlyList<string> names, string step)
+    /// <summary>Mockup audit M1-3 and M1-12 in the editor's own history dialog: the list draws every row in the approved diagram
+    /// history's two-line pattern, its version, saved marker and author whole (they continue on the next line rather than being
+    /// cut, as "v2 · Saved · Compatib…" once was), then the earlier implementation it was saved in (<paramref name="names"/>, one
+    /// per row), which alone may end in "…". Each row lies whole inside the list, and, measured in <paramref name="shot"/> (a
+    /// capture of the dialog), its version and every line are drawn where the dialog reports them.</summary>
+    private static void VerifyShownHistoryRows(P.FieldHistoryViewState history, IReadOnlyList<string> names, string step, CapturedWindow? shot = null)
     {
-        Assert.HasCount(history.RowLabels.Count, history.ShownRowLabels, step + ": the list shows every loaded row.");
+        Assert.HasCount(history.RowLabels.Count, history.ShownRows, step + ": the list draws every loaded row.");
         Assert.HasCount(history.RowLabels.Count, names, step + ": one name per row.");
         for (int row = 0; row < history.RowLabels.Count; ++row)
-            Assert.IsTrue(NativeFieldHistoryTests.IsShownHistoryRow(history.RowLabels[row], names[row], history.ShownRowLabels[row]),
-                $"{step}: row {row} reads '{history.ShownRowLabels[row]}': '{history.RowLabels[row]}' whole, or with only '{names[row]}' shortened.");
+        {
+            var drawn = history.ShownRows[row];
+            Assert.IsTrue(NativeFieldHistoryTests.IsShownHistoryRow(history.RowLabels[row], names[row], drawn.Version, drawn.Lines),
+                $"{step}: row {row} reads '{drawn.Version} | {string.Join(" | ", drawn.Lines)}' for '{history.RowLabels[row]}'.");
+            Assert.IsTrue(drawn.Fits, $"{step}: row {row} ('{history.RowLabels[row]}') lies whole inside the list.");
+            if (shot is null || !drawn.Rect.Shown) continue;
+            var background = shot.At(drawn.Rect.X + drawn.Rect.Width - 4, drawn.Rect.Y + 2);
+            foreach (var (box, text) in new[] { (drawn.VersionRect, drawn.Version) }.Concat(drawn.LineRects.Zip(drawn.Lines)))
+            {
+                var ink = shot.InkRuns(box.X, box.Y, box.Width, box.Height, background, rows: false, minimum: 2.0);
+                Assert.IsTrue(ink.Count > 0 && ink[^1].Last - ink[0].First + 1 >= box.Width / 2,
+                    $"{step}: row {row}'s '{text}' is drawn where the dialog reports it ({box.X}, {box.Y}, {box.Width} x {box.Height}).");
+            }
+            shot.Record($"M1-12 row {row} lines", drawn.Lines.Count);
+        }
     }
 
     /// <summary>The implementation (its identity and name) a block revision was saved in.</summary>
@@ -6315,6 +6609,77 @@ public sealed partial class NativeSessionTests
             }
     }
 
+    /// <summary>CN-2 erratum 2026-09-26 (decision n7fb0ee3089916669, mockup audit M1-8) on a level as an agent observes it
+    /// (<paramref name="view"/>, with its resolved layout and its notes): no computed segment runs through the inside of a block,
+    /// or through a canvas note (a note is 240 × 100 units at its position; one without a position sits at (60 + 260i, 420)).
+    /// Running along a block's edge is not through it.</summary>
+    private static void VerifyRoutesOffBlocksAndNotes(JsonElement view, string step)
+    {
+        static decimal Unit(JsonElement value) => decimal.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+        var layout = view.GetProperty("resolvedLayout");
+        var inside = layout.GetProperty("blocks").EnumerateArray().Select(b => b.GetProperty("rect"))
+            .Select(r => (What: "a block", X: Unit(r.GetProperty("x")), Y: Unit(r.GetProperty("y")), W: Unit(r.GetProperty("width")), H: Unit(r.GetProperty("height")))).ToList();
+        var notes = view.GetProperty("diagram").GetProperty("localDiagram").TryGetProperty("annotations", out var found) ? found.EnumerateArray().ToArray() : [];
+        for (int i = 0; i < notes.Length; ++i)
+        {
+            bool canvas = notes[i].TryGetProperty("targetKind", out var kind) && kind.GetString() == "DAT_CANVAS";
+            bool placed = notes[i].TryGetProperty("position", out var position);
+            if (!canvas && !placed) continue;
+            inside.Add(("the note \"" + notes[i].GetProperty("text").GetString() + "\"", placed ? Unit(position.GetProperty("x")) : 60 + 260 * i,
+                placed ? Unit(position.GetProperty("y")) : 420, 240, 100));
+        }
+        foreach (var route in layout.GetProperty("routes").EnumerateArray())
+        {
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (X: Unit(p.GetProperty("x")), Y: Unit(p.GetProperty("y")))).ToArray();
+            for (int i = 1; i < points.Length; ++i)
+            {
+                var (a, b) = (points[i - 1], points[i]);
+                decimal left = Math.Min(a.X, b.X), right = Math.Max(a.X, b.X), top = Math.Min(a.Y, b.Y), bottom = Math.Max(a.Y, b.Y);
+                foreach (var (what, x, y, w, h) in inside)
+                    Assert.IsFalse(Math.Max(left, x) < Math.Min(right, x + w) && Math.Max(top, y) < Math.Min(bottom, y + h)
+                        && (a.Y == b.Y ? y < a.Y && a.Y < y + h : a.X == b.X ? x < a.X && a.X < x + w : true),
+                        $"{step}: the connection {route.GetProperty("connectionId").GetString()} runs from ({a.X}, {a.Y}) to ({b.X}, {b.Y}) through {what} at ({x}, {y}, {w} x {h}).");
+            }
+        }
+    }
+
+    /// <summary>Mockup audit M1-7 (decision n7fb0ee3089916669): every canvas note of the level is drawn 24 pixels or more clear of
+    /// every block with its selection handles (the block's box widened by the handles' 5 pixels), of every port's square and of
+    /// every wire of <paramref name="layout"/> (the level the editor drew, in diagram units, placed on the canvas as the editor
+    /// reports its origin and scale), at the size the window gives the level. A note pressed 5 pixels under the PSU read as the
+    /// PSU's comment although it overlapped nothing. The smallest gap is recorded with the capture's measurements.</summary>
+    private static void VerifyNotesClear(P.RecursiveDiagramEditorState at, JsonElement layout, string step, CapturedWindow shot)
+    {
+        static double Unit(JsonElement value) => double.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+        int X(double x) => at.CanvasWindowX + (int)Math.Round((x - at.CanvasOriginX) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        int Y(double y) => at.CanvasWindowY + (int)Math.Round((y - at.CanvasOriginY) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        var others = new List<(string What, int X, int Y, int W, int H)>();
+        foreach (var text in at.BlockTexts)
+            others.Add(("the block " + (text.Caption?.Label ?? text.BlockId) + " with its handles", text.Block.X - 5, text.Block.Y - 5, text.Block.Width + 10, text.Block.Height + 10));
+        foreach (var mark in at.PortMarks) others.Add(("the port square " + mark.Label, mark.X, mark.Y, mark.Width, mark.Height));
+        foreach (var route in layout.GetProperty("routes").EnumerateArray())
+        {
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (X: X(Unit(p.GetProperty("x"))), Y: Y(Unit(p.GetProperty("y"))))).ToArray();
+            for (int i = 1; i < points.Length; ++i)
+                others.Add(("the wire " + route.GetProperty("connectionId").GetString(), Math.Min(points[i - 1].X, points[i].X), Math.Min(points[i - 1].Y, points[i].Y),
+                    Math.Abs(points[i].X - points[i - 1].X) + 1, Math.Abs(points[i].Y - points[i - 1].Y) + 1));
+        }
+        Assert.IsNotEmpty(at.CanvasNotes, step + ": the level draws its notes.");
+        foreach (var note in at.CanvasNotes)
+        {
+            var n = note.Rect;
+            int smallest = int.MaxValue;
+            foreach (var (what, x, y, w, h) in others)
+            {
+                int gap = Math.Max(Math.Max(x - (n.X + n.Width), n.X - (x + w)), Math.Max(y - (n.Y + n.Height), n.Y - (y + h)));
+                smallest = Math.Min(smallest, gap);
+                Assert.IsTrue(gap >= 24, $"{step}: the note \"{string.Join(" ", note.Lines)}\" ({n.X}, {n.Y}, {n.Width} x {n.Height}) is {gap} pixels from {what} "
+                    + $"({x}, {y}, {w} x {h}), less than 24.");
+            }
+            shot.Record("M1-7 note clear of blocks, ports and wires (px)", smallest);
+        }
+    }
+
     /// <summary>Review of the design QA fixes: a control the editor paints itself keeps what assistive technology reads (on
     /// GTK, the control's ATK object): the expected role, and its visible label as its name. ATK 2.36 renamed the role "push
     /// button" to "button"; either name is the same role.</summary>
@@ -6614,9 +6979,8 @@ public sealed partial class NativeSessionTests
     /// <summary>Design QA round 2, R2-P2-2, measured: the Connect preview leaves the port it starts from outward (to the right, off
     /// the block's right edge) for 8 pixels or more, runs through no block and across no boundary port's name, and ends on the
     /// port under the pointer. Inside the source block, where the earlier preview struck through the port's name, no dash is
-    /// drawn; along the preview's longest run, its accent dash is. Only the preview is measured here: a finished connection
-    /// whose target lies behind its source still takes rule F4's three-segment path through the block, a difference that
-    /// awaits a contract decision of the integration owner.</summary>
+    /// drawn; along the preview's longest run, its accent dash is. The finished connection takes this same path (CN-2 erratum
+    /// 2026-09-26); the drawing journey finishes one and compares its committed route with the last preview.</summary>
     private static void VerifyConnectPreview(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string sourceBlock, string sourcePort, string targetPort)
     {
         var points = at.ConnectPreview.Select(p => (X: p.X, Y: p.Y)).ToArray();
@@ -6696,7 +7060,7 @@ public sealed partial class NativeSessionTests
             foreach (var other in shown.Where(o => !ReferenceEquals(o, caption)))
                 Assert.IsTrue(Apart(caption, other.X, other.Y, other.X + other.Width, other.Y + other.Height), $"{step}: the captions '{caption.Label}' and '{other.Label}' do not overlap.");
             // Review of design QA round 2: no caption strikes through the level's dashed boundary. It lies wholly inside the frame
-            // or wholly outside it, as a connection to a boundary port may be captioned beside the port's own name.
+            // or wholly outside it, as the caption of a connection to a boundary port may lie outside the frame.
             if (at.LevelFrame is { } frame)
                 Assert.IsTrue(Apart(caption, frame.X, frame.Y, frame.X + frame.Width, frame.Y + frame.Height)
                     || Inside(caption, frame.X + 1, frame.Y + 1, frame.X + frame.Width - 1, frame.Y + frame.Height - 1),

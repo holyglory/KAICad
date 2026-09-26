@@ -83,7 +83,7 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue(badOperation.IsError ?? false);
             Assert.AreEqual(4, transport.Calls);
             var valid = transport.State.Clone();
-            for (int variant = 0; variant < 7; ++variant)
+            for (int variant = 0; variant < 9; ++variant)
             {
                 transport.State = valid.Clone();
                 switch (variant)
@@ -95,10 +95,18 @@ public sealed class PcbDrcToolTests
                     case 4: transport.State.Status = (PcbDrcJobStatus)4; break;
                     case 5: transport.State.OperationId = Guid.Empty.ToString("D"); break;
                     case 6: transport.State.CheckedRevision.Epoch = Guid.Empty.ToString("D"); break;
+                    // An incomplete snapshot must say why, and a complete one must not claim a gap.
+                    case 7: transport.State.SnapshotComplete = false; transport.State.ResultsFresh = false; break;
+                    case 8: transport.State.InputWarnings.Add("snapshot_incomplete: item_identity: fixture"); break;
                 }
                 Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
                     transport.Session.Epoch, default)).IsError, $"Invalid native state variant {variant} was accepted");
             }
+            transport.State = valid.Clone();
+            transport.State.SnapshotComplete = false; transport.State.ResultsFresh = false;
+            transport.State.InputWarnings.Add("snapshot_incomplete: generated_item_identity: 1 finding names an object that exists only inside this check.");
+            Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false, "An incomplete snapshot that says why is a valid state.");
             transport.State = valid.Clone();
             transport.State.Status = (PcbDrcJobStatus)2;
             transport.State.WorkerFinished = false; transport.State.Progress = 0.2;

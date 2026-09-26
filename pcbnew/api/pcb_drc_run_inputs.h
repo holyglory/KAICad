@@ -10,6 +10,7 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <tl/expected.hpp>
 #include <vector>
@@ -42,6 +43,14 @@ struct PCB_DRC_CAPTURE_CONTEXT
     const PNS::ROUTING_SETTINGS* routingSettings = nullptr;
     // Native capture result, borrowed only for this uninterrupted checkpoint.
     const kiapi::automation::v1::SchematicParityNetlistSnapshot* schematic = nullptr;
+};
+
+// An input the check could not capture exactly. A check with any such gap never
+// reports a complete snapshot or fresh results; the code and explanation say why.
+struct PCB_DRC_INPUT_GAP
+{
+    std::string code;
+    std::string message;
 };
 
 struct PCB_DRC_COPPER_PREPARATION
@@ -124,6 +133,20 @@ public:
     // Call after installing and initializing the board's owned DRC engine.
     const PCB_DRC_COPPER_PREPARATION& PrepareCopper( PROGRESS_REPORTER* aReporter = nullptr );
 
+    // Inputs this bundle did not capture exactly, known at capture.
+    std::vector<PCB_DRC_INPUT_GAP> Gaps() const;
+    // After a completed PrepareCopper: record, for each object the preparation generated
+    // in the private board, the object of the open board it stands for: the tuning
+    // pattern (generator) that regenerated it, or the teardrop of the open board with
+    // the same layer, net, kind and outline.
+    void MapGeneratedItems();
+    // Replace an identity a finding names in the private board by the identity of the
+    // object it stands for: an object of the open board, the open drawing sheet, a
+    // candidate item of the request or, for a generated object, its generating source.
+    // False when it names nothing a person or agent can find in the open board or in
+    // the request.
+    bool ResolveFindingItem( KIID& aIdentity ) const;
+
 private:
     PCB_DRC_RUN_INPUTS() = default;
     std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> m_document;
@@ -138,5 +161,8 @@ private:
     KIID m_sourceDrawingIdentity;
     std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;
     PCB_DRC_COPPER_PREPARATION m_copperPreparation;
+    std::set<KIID> m_candidates;
+    // Generated object of the private board -> the open board's object it stands for.
+    std::map<KIID, KIID> m_generated;
 };
 #endif

@@ -83,9 +83,9 @@ public sealed partial class NativeSessionTests
     // gets real copper violations of the exact checked revision, cancels one check mid-run, forces a failure with rules
     // that do not compile and recovers, and is refused for wrong-instance and stale targets without either board
     // changing. After each terminal outcome (completed, cancelled, failed, recovered) the editor it happened in accepts
-    // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. Ordinary jobs
-    // never claim a complete snapshot or fresh results: KiCad does not yet capture every project and rules input a check
-    // depends on (decision n39a51a3a2ff84c55, ledger p23deb822a36256a6).
+    // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. KiCad captures
+    // every input a check reads, so every check reports a complete snapshot, and a completed check reports fresh results
+    // while none of those inputs has changed (ledger p23deb822a36256a6).
     private static async Task VerifyPcbDrcTwoProjects(NativeClient client, DocumentSpecifier board, int processId,
         string display, string evidence, CancellationToken token)
     {
@@ -271,10 +271,9 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(1.0, job.Progress);
                 Assert.IsTrue(job.WorkerFinished);
                 Assert.IsFalse(job.CancellationRequested, because + " Nothing asked this check to stop.");
-                Assert.IsFalse(job.SnapshotComplete,
-                    "An ordinary check never claims a complete input snapshot (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
-                Assert.IsFalse(job.ResultsFresh,
-                    "An ordinary check never claims fresh results (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
+                Assert.IsTrue(job.SnapshotComplete,
+                    because + " KiCad captured every input the check reads (ledger p23deb822a36256a6). " + string.Join(" | ", job.InputWarnings));
+                Assert.IsTrue(job.ResultsFresh, because + " Nothing the check read has changed since it was captured.");
                 Assert.AreEqual(at, job.CheckedRevision, because);
                 var fixture = target.Fixture;
                 CollectionAssert.AreEqual(new[]
@@ -463,7 +462,8 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(terminalB.CancellationRequested);
             Assert.IsEmpty(terminalB.Findings, "A cancelled check never exposes the violations it had already found.");
             Assert.IsLessThan(1.0, terminalB.Progress);
-            Assert.IsFalse(terminalB.ResultsFresh || terminalB.SnapshotComplete);
+            Assert.IsFalse(terminalB.ResultsFresh, "A cancelled check has no results to be fresh.");
+            Assert.IsTrue(terminalB.SnapshotComplete, "A cancelled check keeps the complete snapshot it was captured from.");
             Assert.AreEqual(savedB.Revision, terminalB.CheckedRevision);
             Assert.AreEqual(terminalB, await Read(b, b2), "A cancelled check stays cancelled.");
             Assert.AreEqual(terminalB, Parse(await mcp.Tool("kicad_pcb_drc_cancel", new
@@ -489,7 +489,8 @@ public sealed partial class NativeSessionTests
                 "The failure must name the rules file and the item's own line and offset in it.");
             Assert.IsEmpty(failedA.Findings, "A failed check never exposes findings.");
             Assert.IsTrue(failedA.WorkerFinished);
-            Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh || failedA.SnapshotComplete);
+            Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh);
+            Assert.IsTrue(failedA.SnapshotComplete, "The broken rules were captured exactly; only the check failed.");
             Assert.IsLessThan(1.0, failedA.Progress);
             Assert.AreEqual(failedA, await Read(a, a3), "A failed check stays failed.");
             // A check cancelled after its findings started leaves nothing behind: the next complete check of the same

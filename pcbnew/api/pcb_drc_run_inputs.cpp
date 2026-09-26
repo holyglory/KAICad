@@ -20,6 +20,10 @@
 #include <json_common.h>
 #include <ki_exception.h>
 #include <router/pns_routing_settings.h>
+#include <eda_group.h>
+#include <pcb_marker.h>
+#include <zone.h>
+#include <fmt/format.h>
 #include <algorithm>
 #include <stdexcept>
 
@@ -69,6 +73,9 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
     const auto& settings = aBoard.GetDesignSettings();
     nlohmann::json result = {
         { "project_path", project ? project->GetProjectFullName().ToStdString() : "" },
+        // The editor's current variant resolves variant field values and ${VARIANT}; it
+        // lives only in memory and switching it is no board edit.
+        { "current_variant", aBoard.GetCurrentVariant().utf8_string() },
         { "project", project ? project->GetProjectFile().CaptureCurrentState() : nlohmann::json() },
         { "board_settings", settings.CaptureCurrentState() },
         { "net_settings", settings.m_NetSettings
@@ -256,7 +263,67 @@ tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateIte
         identities.push_back( item->m_Uuid );
         source.Add( item.release() );
     }
+    m_candidates.insert( identities.begin(), identities.end() );
     return identities;
+}
+
+std::vector<PCB_DRC_INPUT_GAP> PCB_DRC_RUN_INPUTS::Gaps() const
+{
+    std::vector<PCB_DRC_INPUT_GAP> gaps;
+    const auto& gap = m_document->IdentityGap();
+    if( !gap.Empty() )
+    {
+        gaps.push_back( { "item_identity",
+                fmt::format( "The check's copy of the board does not keep the identity of every object of the open "
+                             "board ({} missing from the copy, {} in the copy but not in the open board, {} identities "
+                             "held by more than one object), so a finding could name an object that does not exist "
+                             "in the open board.",
+                             gap.missing, gap.unexpected, gap.shared ) } );
+    }
+    return gaps;
+}
+
+void PCB_DRC_RUN_INPUTS::MapGeneratedItems()
+{
+    const std::set<KIID>& source = m_document->SourceIdentities();
+    m_generated.clear();
+    for( BOARD_ITEM* item : GetBoard().GetItemSet() )
+    {
+        if( item->Type() == PCB_MARKER_T || source.contains( item->m_Uuid ) || m_candidates.contains( item->m_Uuid ) )
+            continue;
+        // A tuning pattern regenerates its tracks with new identities; the pattern is the
+        // object of the open board a person selects and edits.
+        if( EDA_GROUP* group = item->GetParentGroup() )
+        {
+            const EDA_ITEM* owner = group->AsEdaItem();
+            if( owner->Type() == PCB_GENERATOR_T && source.contains( owner->m_Uuid ) )
+            {
+                m_generated.emplace( item->m_Uuid, owner->m_Uuid );
+                continue;
+            }
+        }
+        // A rebuilt teardrop is the open board's teardrop only when it is the same one.
+        if( item->Type() == PCB_ZONE_T )
+            if( auto teardrop = m_document->SourceTeardrop( *static_cast<const ZONE*>( item ) ) )
+                m_generated.emplace( item->m_Uuid, *teardrop );
+    }
+}
+
+bool PCB_DRC_RUN_INPUTS::ResolveFindingItem( KIID& aIdentity ) const
+{
+    if( aIdentity == niluuid ) return true; // Names no object.
+    if( m_proxy && aIdentity == m_proxy->m_Uuid )
+    {
+        aIdentity = m_sourceDrawingIdentity;
+        return true;
+    }
+    if( m_candidates.contains( aIdentity ) ) return true;
+    if( const auto generated = m_generated.find( aIdentity ); generated != m_generated.end() )
+    {
+        aIdentity = generated->second;
+        return true;
+    }
+    return m_document->SourceIdentities().contains( aIdentity );
 }
 
 bool PCB_DRC_RUN_INPUTS::HasLibraryDependencies() const

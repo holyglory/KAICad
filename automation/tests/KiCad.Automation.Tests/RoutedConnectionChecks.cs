@@ -12,7 +12,9 @@ internal static class RoutedConnectionChecks
 
     /// <summary>What is wrong with one routed connection on one sheet, or nothing:
     /// <list type="bullet">
-    /// <item>every wire is straight along one axis, has length, ends on the connection grid and lies inside the page inset;</item>
+    /// <item>every wire is straight along one axis, has length, ends on the connection grid, lies inside the route region
+    /// (<paramref name="region"/>: the drawing sheet's frame interior less the clearance) and keeps the clearance from every
+    /// drawing-sheet keep-out (<paramref name="keepOuts"/>, the title block);</item>
     /// <item>the wires form one tree, with no wire end on the inside of another of its wires and no two of its wires sharing
     /// a stretch, that reaches every new pin (<paramref name="terminals"/>);</item>
     /// <item>a junction sits exactly where three or more wire ends and symbols meet (a symbol counted once however many of its
@@ -24,11 +26,13 @@ internal static class RoutedConnectionChecks
     /// only at their ends.</item>
     /// </list>
     /// <paramref name="symbolsAt"/> counts, for every pin point of the sheet, the symbols with a pin there.</summary>
-    public static List<string> Problems(string name, long grid, (long L, long T, long R, long B) usable, IReadOnlyList<(P A, P B)> wires,
+    public static List<string> Problems(string name, long grid, (long L, long T, long R, long B) region, IReadOnlyList<(P A, P B)> wires,
         IReadOnlyCollection<P> junctions, IReadOnlyList<(P At, (int Dx, int Dy) Facing)> labels, IReadOnlyDictionary<P, int> symbolsAt,
-        IReadOnlyCollection<P> terminals, IReadOnlyList<(P A, P B)> otherWires, IReadOnlyList<(P A, P B)>? attached = null)
+        IReadOnlyCollection<P> terminals, IReadOnlyList<(P A, P B)> otherWires, IReadOnlyList<(P A, P B)>? attached = null,
+        IReadOnlyList<(long L, long T, long R, long B)>? keepOuts = null, long clearance = 0)
     {
         attached ??= [];
+        keepOuts ??= [];
         var problems = new List<string>();
         void Problem(string text) => problems.Add(name + ": " + text);
         if (wires.Count == 0) { Problem("no wire is drawn"); return problems; }
@@ -38,8 +42,12 @@ internal static class RoutedConnectionChecks
             foreach (var p in new[] { a, b })
             {
                 if (p.X % grid != 0 || p.Y % grid != 0) Problem("wire end " + p + " is off the connection grid");
-                if (p.X < usable.L || p.X > usable.R || p.Y < usable.T || p.Y > usable.B) Problem("wire end " + p + " lies outside the page inset");
+                if (p.X < region.L || p.X > region.R || p.Y < region.T || p.Y > region.B) Problem("wire end " + p + " lies outside the drawing sheet's frame");
             }
+            foreach (var k in keepOuts)
+                if (Math.Max(a.X, b.X) >= k.L - clearance && Math.Min(a.X, b.X) <= k.R + clearance && Math.Max(a.Y, b.Y) >= k.T - clearance
+                    && Math.Min(a.Y, b.Y) <= k.B + clearance)
+                    Problem("wire " + a + "-" + b + " runs within the clearance of the drawing sheet's title block");
         }
         // Shape: one tree reaching every new pin.
         for (int i = 0; i < wires.Count; i++)

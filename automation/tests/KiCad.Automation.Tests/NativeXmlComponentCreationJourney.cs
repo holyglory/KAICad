@@ -31,14 +31,15 @@ public sealed partial class NativeSessionTests
     //    publishes the XML. KiCad's pin partition is exactly the 11 nets (PsuCpuFixture.AssertNative). Every connection with two
     //    or more new pins on a sheet is drawn as orthogonal wires with junctions and one name label (CN-1 §7) unless no route
     //    fits, which the realization records per connection (kept as evidence, islands.json); every other generated stub, label
-    //    and sheet pin follows CN-1 §6. KiCad's own measurement shows no generated wire over a symbol body or any text.
-    //    Replaying the apply returns its receipt, a repeated plan has nothing to do and a repeated apply is a no-op.
+    //    and sheet pin follows CN-1 §6. KiCad's own measurement shows no generated wire over a symbol body or any text, and
+    //    every routed wire and junction inside the drawing sheet's inner border and clear of its title block as KiCad draws
+    //    them. Replaying the apply returns its receipt, a repeated plan has nothing to do and a repeated apply is a no-op.
     // 5. One native undo removes the whole realization and redo restores it; save and reload keep it, and the recovery record
     //    adopts the reloaded editor with nothing left to do.
     // 6. I2C pull-ups added to connected nets (two coordinate-free, one placed and locked) are placed by the connection-aware
     //    layout tool, then created and connected by one more realization, checked the same way.
-    // 7. The rendered wire check catches what it must: a probe wire run into a symbol body and one run through a label are
-    //    reported, and one native undo takes them away again.
+    // 7. The rendered wire check catches what it must: probe wires run along a pin, on past a pin into a symbol body (reported
+    //    over the body itself) and through a label are reported, and one native undo takes them away again.
     private static async Task VerifyPsuCpuConnectedRealization(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -191,7 +192,7 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEquivalent(realization.Generated.Select(g => g.Id).ToArray(), drawn.ToArray(),
             "KiCad holds exactly the generated items of the recorded realization.");
         var stubs = await RequireLabelStubs(client, components, realized, policy, token, RoutedItems(realization));
-        var routes = await RequireRoutedInKiCad(client, realized, realization, intent, policy, "complete", token);
+        var routes = await RequireRoutedInKiCad(client, realized, realization, intent, policy, expected.Presentation.PageInsetMm * 1_000_000L, "complete", token);
         var clear = await RequireGeneratedWiresClear(client, realized, realization, "complete", token);
         await CheckPresentation(realized, synchronized, "complete");
         Step("complete stage realized");
@@ -517,9 +518,12 @@ public sealed partial class NativeSessionTests
                 xmlUnchanged = true, baselineUnchanged = true, pendingAbandoned = true };
         }
 
-        // Recall of the rendered wire check on PSU: a probe wire from a generated label's own pin straight into that pin's symbol,
-        // and one from the label's anchor along its text. Each joins only its own connection, so KiCad's nets are unchanged. The
-        // check must report the first over the symbol's body and the second over the label, then one native undo removes both.
+        // Recall of the rendered wire check on PSU, with three probe wires: one from a generated label's own pin straight along
+        // that pin into its symbol, one from the label's anchor along its text, and one from a pin of the symbol with the widest
+        // drawn body straight along that pin and on into the body (the pin's length and then up to 5 mm, half the body's depth at
+        // most). Each starts on its own pin or label, so KiCad gives it that connection and its nets are otherwise unchanged. The
+        // check must report the first on that symbol's pin, the second over the label, and the third over the body KiCad renders
+        // without its pins (BodyBounds), 1 mm or more of it inside that body; then one native undo removes all three.
         async Task<object> RequireWireCheckRecall(CheckedSchematicState at)
         {
             string psu = sheetPaths["PSU"];
@@ -529,7 +533,7 @@ public sealed partial class NativeSessionTests
                 .OrderBy(g => g.Id).First();
             var label = (LocalLabel)items[named.Id];
             var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
-                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = at.State.Revision.Clone() }, token);
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = at.State.Revision.Clone(), IncludePresentation = true }, token);
             var (owner, pin) = measured.Obstacles.Where(o => o.SymbolPins is not null)
                 .SelectMany(o => o.SymbolPins.Pins.Select(p => (Owner: o, Pin: p))).Single(x => x.Pin.Id.Value == named.PlacedPinId!.Value.ToString("D"));
             const long Probe = 3_000_000;
@@ -538,26 +542,50 @@ public sealed partial class NativeSessionTests
                 End = new() { XNm = from.XNm + dx, YNm = from.YNm + dy }, Type = SchematicLineType.SltWire, Locked = LockedState.LsUnlocked };
             var intoBody = Wire(pin.Position, pin.BodyDirectionX * Probe, pin.BodyDirectionY * Probe);
             var alongText = Wire(label.Position, fx * Probe, fy * Probe);
+            // The widest drawn body on PSU, as KiCad's presentation facts give it without the pins, and the first of its pins, as
+            // drawn from connection point to root, behind which the body is at least 4 mm deep.
+            var bodies = measured.Presentation.Objects.Where(o => o.PresentationRole == "symbol" && o.BodyBounds is not null).ToArray();
+            Assert.IsNotEmpty(bodies, "KiCad reports the drawn bodies of the PSU symbols.");
+            var widest = bodies.OrderByDescending(o => Math.Min(o.BodyBounds.Size.XNm, o.BodyBounds.Size.YNm)).ThenBy(o => o.Id.Value, StringComparer.Ordinal).First();
+            var body = widest.BodyBounds;
+            var bodyBox = new PresentationBounds(body.Position.XNm, body.Position.YNm, body.Position.XNm + body.Size.XNm, body.Position.YNm + body.Size.YNm);
+            var deep = widest.PinLines.Select(l => (Start: l.Nodes[0].Point, Root: l.Nodes[1].Point)).Select(l =>
+            {
+                var (dx, dy) = (Math.Sign(l.Root.XNm - l.Start.XNm), Math.Sign(l.Root.YNm - l.Start.YNm));
+                long depth = dx > 0 ? bodyBox.RightNm - l.Root.XNm : dx < 0 ? l.Root.XNm - bodyBox.LeftNm : dy > 0 ? bodyBox.BottomNm - l.Root.YNm : l.Root.YNm - bodyBox.TopNm;
+                return (l.Start, Dx: dx, Dy: dy, Length: Math.Abs(l.Root.XNm - l.Start.XNm) + Math.Abs(l.Root.YNm - l.Start.YNm), Depth: depth);
+            }).Where(l => Math.Abs(l.Dx) + Math.Abs(l.Dy) == 1 && l.Depth >= 4_000_000)
+                .OrderBy(l => l.Start.XNm).ThenBy(l => l.Start.YNm).First();
+            long inside = Math.Min(deep.Depth / 2, 5_000_000) / 100 * 100;
+            var pastPin = Wire(deep.Start, deep.Dx * (deep.Length + inside), deep.Dy * (deep.Length + inside));
             var batch = new ApplySchematicItemBatch { Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
                 OperationId = Guid.NewGuid().ToString("D"), Description = "Probe the rendered wire check" };
-            batch.Operations.Add(new[] { intoBody, alongText }.Select(w => new SchematicItemOperation { TargetDocument = screen.Metadata.Document.Clone(), Create = Any.Pack(w) }));
+            batch.Operations.Add(new[] { intoBody, alongText, pastPin }.Select(w => new SchematicItemOperation { TargetDocument = screen.Metadata.Document.Clone(), Create = Any.Pack(w) }));
             var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = batch, ExpectedState = at.State.Clone() }, token);
             Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status, receipt.ErrorCode + ": " + receipt.ErrorMessage);
             var probed = await Capture();
             var comparison = SchematicElectricalComparison.Compare(store.Read()!.State.Baseline, probed.Electrical, [], token);
             Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "The probe wires join nothing new.");
-            var body = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
+            var alongPin = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
                 [Guid.Parse(intoBody.Id.Value)], cancellationToken: token);
             var text = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
                 [Guid.Parse(alongText.Id.Value)], cancellationToken: token);
-            Assert.IsTrue(body.Any(f => f.Rule == PresentationVerifier.WireOverlapsSymbol && f.ObjectIds.Contains(Guid.Parse(owner.Id.Value))),
-                "A wire into a symbol body is reported: " + string.Join("; ", body.Select(f => f.Rule)));
+            var intoWidest = await NativePresentationChecks.CheckWireOverlapsAsync(client, screen.Metadata.Document, probed.State.Revision,
+                [Guid.Parse(pastPin.Id.Value)], cancellationToken: token);
+            Assert.IsTrue(alongPin.Any(f => f.Rule == PresentationVerifier.WireOverlapsSymbol && f.ObjectIds.Contains(Guid.Parse(owner.Id.Value))),
+                "A wire along a pin into its symbol is reported: " + string.Join("; ", alongPin.Select(f => f.Rule)));
             Assert.IsTrue(text.Any(f => f.Rule == PresentationVerifier.WireOverlapsText && f.ObjectIds.Contains(named.Id)),
                 "A wire through a label is reported: " + string.Join("; ", text.Select(f => f.Rule)));
+            // The body itself, not only a pin line, is caught: a finding on that symbol lying inside its drawn body, 1 mm or more.
+            var inBody = intoWidest.Where(f => f.Rule == PresentationVerifier.WireOverlapsSymbol && f.ObjectIds.Contains(Guid.Parse(widest.Id.Value))
+                && f.Bounds is not null && bodyBox.Contains(f.Bounds) && f.Measured >= 1m).ToArray();
+            Assert.IsNotEmpty(inBody, "A wire run on into a symbol body is reported over that body: "
+                + string.Join("; ", intoWidest.Select(f => f.Rule + " " + f.Measured + " " + f.Bounds)));
             await FocusedSchematicShortcut(client, document, processId, display, "z", token);
             await Until("probe undo", s => Same(s.Electrical.Hierarchy.Data, at.Electrical.Hierarchy.Data));
-            return new { symbol = body.Where(f => f.Rule == PresentationVerifier.WireOverlapsSymbol).Select(f => f.Measured).Max(),
-                label = text.Where(f => f.Rule == PresentationVerifier.WireOverlapsText).Select(f => f.Measured).Max(), undone = true };
+            return new { pin = alongPin.Where(f => f.Rule == PresentationVerifier.WireOverlapsSymbol).Select(f => f.Measured).Max(),
+                label = text.Where(f => f.Rule == PresentationVerifier.WireOverlapsText).Select(f => f.Measured).Max(),
+                body = inBody.Select(f => f.Measured).Max(), bodyOf = widest.Id.Value, intoBodyMm = inside / 1_000_000m, undone = true };
         }
 
         // CN-1 §10 and §6 once more on the realized design: I2C pull-ups R2 (PSU_SCL to RAIL_B) and R4 (MEM_SCL to RAIL_B)
@@ -620,7 +648,8 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEquivalent(pullRealization.Generated.Select(g => g.Id).ToArray(), GeneratedIn(before, after).Except(pullIntent.CreatedSymbolIds).ToArray(),
                 "KiCad holds exactly the generated items the pull-ups' realization planned.");
             var stubbed = await RequireLabelStubs(client, before, after, policy, token, RoutedItems(pullRealization));
-            var pullRoutes = await RequireRoutedInKiCad(client, after, pullRealization, pullIntent, policy, "pull-up", token);
+            var pullRoutes = await RequireRoutedInKiCad(client, after, pullRealization, pullIntent, policy, expected.Presentation.PageInsetMm * 1_000_000L,
+                "pull-up", token);
             var pullClear = await RequireGeneratedWiresClear(client, after, pullRealization, "pull-up", token);
             await CheckPresentation(after, design, "pull-up");
             return new { preferredAnchors = proposal.GetProperty("preferredAnchors").GetArrayLength(), created = 3,
@@ -746,7 +775,7 @@ public sealed partial class NativeSessionTests
     // The PSU/CPU Complete-stage connections that the fixture's layout leaves room to route (CN-1 §7), by sheet and net; the
     // realizer's replay of recorded measurements holds the same list (SchematicConnectionRealizerTests.ThePsuCpuSheetsAreWiredWhereARouteFits).
     internal static readonly IReadOnlyCollection<(string Sheet, string Net)> PsuCpuRoutedConnections =
-        [("PSU", "DCDC_OUT"), ("PSU", "GND"), ("PSU", "PSU_SCL"), ("PSU", "PSU_SDA"), ("PSU", "RAIL_A"), ("PSU", "RAIL_B"), ("PSU", "VIN"),
+        [("PSU", "DCDC_OUT"), ("PSU", "GND"), ("PSU", "LDO_FAULT"), ("PSU", "PSU_SDA"), ("PSU", "RAIL_A"), ("PSU", "VIN"),
             ("CPU", "GND"), ("CPU", "MEM_SCL")];
 
     // The items of the connections a realization routed (CN-1 §7): their wires, junctions and labels.
@@ -798,9 +827,10 @@ public sealed partial class NativeSessionTests
     }
 
     // CN-1 §7 on what KiCad holds after committing a realization: every routed connection's wires, junctions and label are drawn,
-    // in the form RoutedConnectionChecks requires, against the pins KiCad measures at that revision.
+    // in the form RoutedConnectionChecks requires, against the pins KiCad measures at that revision; and every routed wire and
+    // junction lies inside the drawing sheet's frame and clear of its title block as KiCad draws them (DrawingSheetProblems).
     private static async Task<object> RequireRoutedInKiCad(NativeClient client, CheckedSchematicState after, SchematicConnectionRealization realization,
-        SchematicConnectionIntent intent, SchematicConnectionPolicy policy, string stage, CancellationToken token)
+        SchematicConnectionIntent intent, SchematicConnectionPolicy policy, long pageInsetNm, string stage, CancellationToken token)
     {
         var routed = realization.Outcomes.Where(o => o.Strategy == ConnectionRealizationStrategy.OrthogonalWire).ToArray();
         var measured = new Dictionary<string, SchematicPlacementGeometry>(StringComparer.Ordinal);
@@ -814,8 +844,75 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(problems, stage + ": KiCad's routed connections: " + string.Join("; ", problems.Take(12)));
         var drawn = after.Electrical.Hierarchy.Data.Instances.SelectMany(s => SchematicItemDelta.Index(s.Items)).GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
         var ids = RoutedItems(realization).ToArray();
+        // The drawing sheet as KiCad draws it on each routed sheet, against the routed wires and junctions KiCad holds there.
+        var frames = new List<object>();
+        var frameProblems = new List<string>();
+        foreach (var (path, geometry) in measured.OrderBy(m => m.Key, StringComparer.Ordinal))
+        {
+            var screen = after.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == path);
+            var items = SchematicItemDelta.Index(screen.Items);
+            var mine = realization.Generated.Where(g => routed.Any(o => o.RepresentativePathKey == path && o.GeneratedIds.Contains(g.Id))
+                && g.Role is GeneratedConnectionRole.RouteWire or GeneratedConnectionRole.Junction).Select(g => items[g.Id]).ToArray();
+            var (found, frame) = DrawingSheetProblems(path, geometry, mine.OfType<SchematicLine>().ToArray(), mine.OfType<Junction>().ToArray(),
+                policy.ClearanceNm, pageInsetNm);
+            frameProblems.AddRange(found);
+            frames.Add(frame);
+        }
+        Assert.IsEmpty(frameProblems, stage + ": routed wires and the drawing sheet: " + string.Join("; ", frameProblems.Take(12)));
         return new { connections = routed.Length, wires = ids.Count(id => drawn[id] is SchematicLine), junctions = ids.Count(id => drawn[id] is Junction),
-            labels = ids.Count(id => drawn[id] is LocalLabel or GlobalLabel or HierarchicalLabel) };
+            labels = ids.Count(id => drawn[id] is LocalLabel or GlobalLabel or HierarchicalLabel), drawingSheets = frames };
+    }
+
+    // CN-1 §7 region (the erratum lane 2A reported) on KiCad's own drawing, independently of the realizer's reading of it: the
+    // drawing sheet KiCad draws on the sheet (its border frames are the drawn rectangles around the middle of its margin frame
+    // spanning more than half of it both ways; everything else it draws inside the innermost of them is art, such as the title
+    // block) must hold every routed wire and junction inside that innermost frame, at least the clearance in from it, and at
+    // least the clearance from every piece of art; and that frame lies at least the fixture's page inset in from every page
+    // edge (psu-cpu-fixture-and-ownership.md §1.6.3). Returns the problems and what was measured.
+    internal static (List<string> Problems, object Evidence) DrawingSheetProblems(string sheet, SchematicPlacementGeometry geometry,
+        IReadOnlyList<SchematicLine> wires, IReadOnlyList<Junction> junctions, long clearance, long pageInsetNm)
+    {
+        var problems = new List<string>();
+        if (geometry.DrawingSheet?.MarginFrame is not { } margin)
+        {
+            problems.Add(sheet + ": KiCad did not measure its drawing sheet: " + string.Join("; ", geometry.Limitations));
+            return (problems, new { sheet });
+        }
+        static (long L, long T, long R, long B) Box(Kiapi.Common.Types.Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
+        var page = Box(geometry.PageBounds);
+        var m = Box(margin);
+        var items = geometry.DrawingSheet.Items.Select(i => (i.Kind, Box: Box(i.Bounds))).ToArray();
+        bool IsFrame((SchematicWiringDrawingSheetItemKind Kind, (long L, long T, long R, long B) Box) i) =>
+            i.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
+            && 2 * i.Box.L < m.L + m.R && 2 * i.Box.R > m.L + m.R && 2 * i.Box.T < m.T + m.B && 2 * i.Box.B > m.T + m.B
+            && 2 * (i.Box.R - i.Box.L) > m.R - m.L && 2 * (i.Box.B - i.Box.T) > m.B - m.T;
+        var frames = items.Where(IsFrame).Select(i => i.Box).ToArray();
+        if (frames.Length == 0) { problems.Add(sheet + ": KiCad draws no border frame on it"); return (problems, new { sheet }); }
+        var inner = (L: frames.Max(f => f.L), T: frames.Max(f => f.T), R: frames.Min(f => f.R), B: frames.Min(f => f.B));
+        if (inner.L < page.L + pageInsetNm || inner.T < page.T + pageInsetNm || inner.R > page.R - pageInsetNm || inner.B > page.B - pageInsetNm)
+            problems.Add(sheet + ": the drawing sheet's inner frame " + inner + " is not the page inset in from the page " + page);
+        var art = items.Where(i => !IsFrame(i) && i.Box.L < inner.R && i.Box.R > inner.L && i.Box.T < inner.B && i.Box.B > inner.T).Select(i => i.Box).ToArray();
+        if (art.Length == 0) problems.Add(sheet + ": KiCad draws no title block inside the frame");
+        void Check(string what, long x0, long y0, long x1, long y1)
+        {
+            if (Math.Min(x0, x1) < inner.L + clearance || Math.Max(x0, x1) > inner.R - clearance || Math.Min(y0, y1) < inner.T + clearance
+                || Math.Max(y0, y1) > inner.B - clearance)
+                problems.Add(sheet + ": " + what + " is not inside the drawing sheet's frame " + inner);
+            foreach (var a in art)
+                if (Math.Max(x0, x1) >= a.L - clearance && Math.Min(x0, x1) <= a.R + clearance && Math.Max(y0, y1) >= a.T - clearance && Math.Min(y0, y1) <= a.B + clearance)
+                    problems.Add(sheet + ": " + what + " runs within the clearance of the drawing sheet's title block or art " + a);
+        }
+        foreach (var wire in wires)
+            Check("routed wire " + wire.Id.Value + " (" + wire.Start.XNm + ", " + wire.Start.YNm + ")-(" + wire.End.XNm + ", " + wire.End.YNm + ")",
+                wire.Start.XNm, wire.Start.YNm, wire.End.XNm, wire.End.YNm);
+        foreach (var junction in junctions)
+            Check("junction " + junction.Id.Value, junction.Position.XNm, junction.Position.YNm, junction.Position.XNm, junction.Position.YNm);
+        return (problems, new
+        {
+            sheet, innerFrameMm = new[] { inner.L, inner.T, inner.R, inner.B }.Select(v => v / 1_000_000m).ToArray(),
+            artMm = art.Select(a => new[] { a.L, a.T, a.R, a.B }.Select(v => v / 1_000_000m).ToArray()).ToArray(),
+            routedWires = wires.Count, junctions = junctions.Count
+        });
     }
 
     // No generated wire runs over a symbol body or any text, as KiCad measures its own rendering at the realized revision

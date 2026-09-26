@@ -197,6 +197,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
     result.mutable_revision()->CopyFrom( aCtx.Request.expected_revision() );
     result.mutable_screen_id()->set_value( screen->GetUuid().AsStdString() );
     result.set_pin_geometry_available( true );
+    result.set_field_bounds_reported( true );
     const auto& page = screen->GetPageSettings();
     PackBox2( *result.mutable_page_bounds(), BOX2I( VECTOR2I( 0, 0 ),
             VECTOR2I( page.GetWidthIU( schIUScale.IU_PER_MILS ), page.GetHeightIU( schIUScale.IU_PER_MILS ) ) ), schIUScale );
@@ -207,7 +208,13 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
         BOX2I bounds = measure( item, *path, variant, *settings ); bounds.Normalize();
         PackBox2( *output->mutable_bounds(), bounds, schIUScale );
         if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( &item ) )
+        {
             PackSchematicPinGeometry( *symbol, *path, variant, *output->mutable_symbol_pins() );
+            // The field boxes the bounds take in, so that generated wires can keep clear of a symbol's
+            // text inside its own bounds (CN-1 §7 escape corridors).
+            for( const BOX2I& field : MeasureSchematicSymbolFieldBounds( *symbol, *path, variant ) )
+                PackBox2( *output->add_visible_field_bounds(), field, schIUScale );
+        }
     };
     try
     {
@@ -274,6 +281,14 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
                 append( **prototype, result.add_item_candidates() );
             }
         }
+        // The drawing sheet is no schematic item; routed wires keep inside its frame and clear of its
+        // title block (CN-1 §7 region).
+        std::string drawingSheetError;
+        if( !PackSchematicDrawingSheet( *path, *settings, *result.mutable_drawing_sheet(), drawingSheetError ) )
+        {
+            result.clear_drawing_sheet();
+            result.add_limitations( "The drawing sheet was not measured: " + drawingSheetError );
+        }
         if( aCtx.Request.include_presentation() )
         {
             // Presentation facts of this exact instance at the same observed revision, so a
@@ -288,6 +303,6 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> API_HANDLER_SC
     if( journal.Epoch() != result.revision().epoch() || journal.Sequence() != result.revision().sequence() )
         return reject( "The schematic changed during placement measurement" );
     result.add_limitations( "Conservative native bounding envelopes; not an occlusion or readability certificate" );
-    result.add_limitations( "Drawing-sheet border and title-block reservation must be supplied as layout constraints" );
+    result.add_limitations( "The drawing sheet is reported as drawn items, not as obstacles; layouts must reserve its frame and title block themselves" );
     return result;
 }

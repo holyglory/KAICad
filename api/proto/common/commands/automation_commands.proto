@@ -592,6 +592,13 @@ message SchematicPlacementGeometry {
   // response's. Unlike ReadSchematicPresentationFacts it measures any loaded sheet instance, not
   // only the displayed one, and fills every lane 2A presentation field.
   SchematicPresentationFacts presentation = 100;
+  // The drawing sheet (page frame, title block and any other drawing-sheet art) KiCad draws on
+  // this sheet instance, which is no schematic item and so no obstacle. Absent from peers that
+  // predate it, and when KiCad cannot measure its drawing sheet (a limitation then says why).
+  SchematicWiringDrawingSheet drawing_sheet = 101;
+  // True when every symbol in obstacles and candidates reports visible_field_bounds; false from
+  // peers that predate that field, whose symbols cannot be told apart from ones with no visible field.
+  bool field_bounds_reported = 102;
   // -- end lane 2A --
 }
 
@@ -602,6 +609,10 @@ message SchematicPlacementBounds {
   // Absent for objects other than symbols. Never infer pins from the envelope.
   SchematicSymbolPinGeometry symbol_pins = 4;
   // -- lane 2A (100-199) --
+  // For a symbol: the sheet-space bounds of each field it shows at this instance (visible, not private
+  // and with text there, as the painter draws it), in field order, each one of the boxes that bounds
+  // takes in. Empty for any other object.
+  repeated kiapi.common.types.Box2 visible_field_bounds = 100;
   // -- end lane 2A --
 }
 
@@ -1069,6 +1080,32 @@ message SchematicOperationReceipt {
 }
 
 // == lane 2A messages ==
+// What a drawing-sheet item draws (DS_DRAW_ITEM_BASE type).
+enum SchematicWiringDrawingSheetItemKind {
+  SWR_DRAWING_SHEET_ITEM_UNSPECIFIED = 0;
+  SWR_DRAWING_SHEET_ITEM_LINE = 1;
+  SWR_DRAWING_SHEET_ITEM_RECTANGLE = 2;
+  SWR_DRAWING_SHEET_ITEM_TEXT = 3;
+  SWR_DRAWING_SHEET_ITEM_POLYGON = 4;
+  SWR_DRAWING_SHEET_ITEM_BITMAP = 5;
+}
+
+// One item KiCad draws for the drawing sheet, with its sheet-space bounding box: a line's or
+// rectangle's end points (without the pen width), a text's box, a polygon's or bitmap's extent.
+message SchematicWiringDrawingSheetItem {
+  SchematicWiringDrawingSheetItemKind kind = 1;
+  kiapi.common.types.Box2 bounds = 2;
+}
+
+// The drawing sheet KiCad draws on one sheet instance, built from its own drawing-sheet model at
+// this instance's page size, first-page option, page number and title block, as its canvas draws it.
+message SchematicWiringDrawingSheet {
+  // The page shrunk by the drawing sheet's left, top, right and bottom margins: the frame its
+  // corner-anchored items are placed in.
+  kiapi.common.types.Box2 margin_frame = 1;
+  // Every item it draws, in drawing order.
+  repeated SchematicWiringDrawingSheetItem items = 2;
+}
 // == end ==
 
 // == lane 2C messages ==

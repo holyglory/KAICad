@@ -30,6 +30,7 @@
 #include <pin_map.h>
 
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,7 @@ namespace kiapi::automation::v1
 {
 class SchematicPresentationFacts;
 class SchematicSymbolPinGeometry;
+class SchematicWiringDrawingSheet;
 }
 
 /// Sheet-space body of a placed symbol at an explicit sheet instance: the drawn body and its
@@ -96,6 +98,20 @@ void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_REND
 /// incomplete by #PackSchematicPinGeometry instead of refusing the whole sheet.
 BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
                                     const wxString& aVariant );
+/// Sheet-space bounds of each field a placed symbol shows at an explicit sheet instance (visible, not
+/// private, with text there), in field order: each is one of the field boxes MeasureSchematicSymbolBounds
+/// takes in besides the body.
+std::vector<BOX2I> MeasureSchematicSymbolFieldBounds( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
+                                                      const wxString& aVariant );
+/// The drawing sheet KiCad draws on the loaded sheet instance @a aPath (page frame, title block and
+/// any other drawing-sheet art), built the way its canvas builds it but from a private copy of the
+/// drawing-sheet model, at that instance's page size, first-page option, page number, file name
+/// and title block: the page shrunk by the model's margins, and every drawn item's kind and
+/// bounding box. Returns false with @a aOutput cleared and the reason in @a aError when the
+/// drawing-sheet model cannot be copied. Never changes the design or the human view.
+bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,
+                                std::string& aError );
 
 /// Observe exact active pin identities and sheet-space anchors. Incomplete
 /// mappings return no pins; previous output is cleared before every observation.

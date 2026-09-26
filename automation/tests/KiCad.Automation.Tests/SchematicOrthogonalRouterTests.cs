@@ -132,11 +132,60 @@ public sealed class SchematicOrthogonalRouterTests
         // Guard: 100 nm further away it does not.
         CollectionAssert.AreEqual(new[] { S(0, 0, 10, 0) },
             Routed(Request(pins, obstacles: [new(new(3 * G, C + 100, 7 * G, 5 * G), [])])).Segments.ToArray());
-        // A pin inside its own symbol's bounds leaves through its escape corridor; without that exemption it cannot leave.
-        // Here the first pin's own symbol (a field in front of it) reaches its escape node.
+        // A pin inside its own symbol's bounds leaves through its escape corridor, which runs straight out to the first node
+        // clear of those bounds inflated by the clearance (the realizer keeps it clear of the symbol's own fields); without that
+        // exemption it cannot leave. Here the first pin's own symbol reaches its escape node.
         var owner = new Box(-5 * G, -2 * G, G, 2 * G);
-        Routed(Request(pins, obstacles: [new(owner, [new(0, 0), new(G, 0)])]));
+        Routed(Request(pins, obstacles: [new(owner, [new(0, 0), new(G, 0), new(2 * G, 0)])]));
         StringAssert.Contains(Fallback(Request(pins, obstacles: [new(owner, [])])), "no free grid node");
+        // Must-catch: a corridor that stops inside the inflated bounds does not let the route step out of them.
+        StringAssert.Contains(Fallback(Request(pins, obstacles: [new(owner, [new(0, 0), new(G, 0)])])), "cannot reach the rest of its connection");
+    }
+
+    [TestMethod]
+    public void ARouteLeavesItsPinsOwnSymbolOnlyStraightAlongTheCorridor()
+    {
+        // The root's own symbol is a thin box along its pin line, so the rows one grid above and below its corridor are clear
+        // of it. The second pin comes down from above: it must not step through the thin box onto the corridor, but joins the
+        // tree at the corridor's end outside the box. Guard: without that symbol it comes straight down onto the escape.
+        var pins = new[] { Pin(1, 0, 0, (1, 0)), Pin(2, 1, -6, (0, 1)) };
+        var thin = new RouteObstacle(new Box(-5 * G, -G / 4, 3 * G, G / 4), [new(0, 0), new(G, 0), new(2 * G, 0), new(3 * G, 0), new(4 * G, 0)]);
+        var route = Routed(Request(pins, obstacles: [thin]));
+        Assert.IsFalse(route.Segments.Any(s => s.Start.X == s.End.X && s.Start.X <= 3 * G + C && Math.Min(s.Start.Y, s.End.Y) < 0 && Math.Max(s.Start.Y, s.End.Y) >= 0),
+            "Nothing crosses the thin symbol: " + Describe(route));
+        var straight = Routed(Request(pins));
+        CollectionAssert.Contains(straight.Segments.ToArray(), S(1, -6, 1, 0), Describe(straight));
+    }
+
+    [TestMethod]
+    public void AnObstacleThinnerThanTheGridIsNeverSteppedOver()
+    {
+        // A drawing-sheet line (a title-block row) half a grid below the path, inflated by a clearance under half the grid,
+        // contains no grid node; a step across it is still blocked, so the vertical route detours round its end.
+        var pins = new[] { Pin(1, 5, -5, (0, 1)), Pin(2, 5, 5, (0, -1)) };
+        var line = new RouteObstacle(new Box(3 * G, G / 2, 7 * G, G / 2), []);
+        var route = Routed(Request(pins, obstacles: [line]));
+        Assert.IsFalse(route.Segments.Any(s => s.Start.X == s.End.X && s.Start.X >= 3 * G - C && s.Start.X <= 7 * G + C
+            && Math.Min(s.Start.Y, s.End.Y) <= G / 2 && Math.Max(s.Start.Y, s.End.Y) >= G / 2), "Nothing steps over the line: " + Describe(route));
+        // Guard: without the line the route runs straight.
+        CollectionAssert.AreEqual(new[] { S(5, -5, 5, 5) }, Routed(Request(pins)).Segments.ToArray());
+    }
+
+    [TestMethod]
+    public void MemoryFollowsTheSearchNotThePage()
+    {
+        // A 3 m square page on the 1.27 mm grid has about 5.6 million grid nodes. Two nearby pins route on it with about 7 bytes
+        // per node for the sheet and search state only for what the search reaches (was about 65 bytes per node for every
+        // pin joined). Guard: a page beyond the grid-node cap falls back instead of laying out its grid.
+        var pins = new[] { Pin(1, 0, 0, (1, 0)), Pin(2, 10, 0, (-1, 0)) };
+        var huge = new Box(-1180 * G, -1180 * G, 1180 * G, 1180 * G);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var route = Routed(Request(pins) with { Region = huge });
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        CollectionAssert.AreEqual(new[] { S(0, 0, 10, 0) }, route.Segments.ToArray());
+        Assert.IsLessThan(64L * 1024 * 1024, allocated, "Routing on a 5.6 million node grid allocated " + allocated + " bytes.");
+        var beyond = new Box(-1600 * G, -1600 * G, 1600 * G, 1600 * G);
+        StringAssert.Contains(Fallback(Request(pins) with { Region = beyond }), "too large");
     }
 
     [TestMethod]

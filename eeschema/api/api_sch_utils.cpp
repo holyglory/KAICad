@@ -51,6 +51,10 @@
 #include <api/sch_text_presentation.h>
 #include <sch_connection.h>
 #include <sch_render_settings.h>
+#include <drawing_sheet/ds_data_model.h>
+#include <drawing_sheet/ds_draw_item.h>
+#include <page_info.h>
+#include <project.h>
 #include <trigo.h>
 
 #include <api/api_utils.h>
@@ -247,6 +251,97 @@ BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PA
     for( const SCH_FIELD& field : symbol.GetFields() )
         if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
     return bounds;
+}
+
+
+std::vector<BOX2I> MeasureSchematicSymbolFieldBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
+                                                      const wxString& variant )
+{
+    std::vector<BOX2I> fields;
+    for( const SCH_FIELD& field : symbol.GetFields() )
+    {
+        // Like the painter: a hidden or private field, or one whose text is empty here, draws nothing.
+        if( !field.IsVisible() || field.IsPrivate() || field.GetShownText( &path, true, 0, variant ).IsEmpty() )
+            continue;
+        BOX2I box = field.GetBoundingBox( &path, variant );
+        box.Normalize();
+        fields.push_back( box );
+    }
+    return fields;
+}
+
+
+bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,
+                                std::string& aError )
+{
+    using namespace kiapi::automation::v1;
+    aOutput.Clear();
+    SCH_SCREEN* screen = aPath.LastScreen();
+    if( !screen || !screen->Schematic() )
+    {
+        aError = "The sheet instance has no loaded screen";
+        return false;
+    }
+    std::unique_ptr<DS_DATA_MODEL> layout;
+    try
+    {
+        // Like the offscreen renderer: a private copy of the persisted drawing sheet, so neither the
+        // global model's coordinate environment nor its cached draw items change.
+        layout = DS_DATA_MODEL::GetTheInstance().CloneForRendering();
+    }
+    catch( const std::exception& error )
+    {
+        aError = std::string( "The drawing sheet cannot be copied: " ) + error.what();
+        return false;
+    }
+    if( !layout )
+    {
+        aError = "The drawing sheet cannot be copied";
+        return false;
+    }
+    SCHEMATIC& schematic = *screen->Schematic();
+    DS_DRAW_ITEM_LIST items( schIUScale );
+    items.SetDefaultPenSize( aSettings.GetDrawingSheetLineWidth() );
+    items.SetIsFirstPage( aPath.GetVirtualPageNumber() == 1 );
+    items.SetPageNumber( aPath.GetPageNumber() );
+    items.SetSheetCount( screen->GetPageCount() );
+    items.SetFileName( screen->GetFileName() );
+    items.SetSheetName( aPath.Last()->GetName() );
+    items.SetSheetPath( aPath.PathHumanReadable() );
+    items.SetSheetLayer( aSettings.GetLayerName() );
+    items.SetVariantName( schematic.GetCurrentVariant() );
+    items.SetVariantDesc( schematic.GetVariantDescription( schematic.GetCurrentVariant() ) );
+    items.SetProject( &schematic.Project() );
+    items.SetProperties( schematic.GetProperties() );
+    const PAGE_INFO& page = screen->GetPageSettings();
+    items.BuildDrawItemsList( page, screen->GetTitleBlock(), layout.get() );
+    const int width = page.GetWidthIU( schIUScale.IU_PER_MILS ), height = page.GetHeightIU( schIUScale.IU_PER_MILS );
+    const VECTOR2I leftTop( schIUScale.mmToIU( layout->GetLeftMargin() ), schIUScale.mmToIU( layout->GetTopMargin() ) );
+    const VECTOR2I rightBottom( width - schIUScale.mmToIU( layout->GetRightMargin() ),
+                                height - schIUScale.mmToIU( layout->GetBottomMargin() ) );
+    BOX2I frame( leftTop, rightBottom - leftTop );
+    frame.Normalize();
+    PackBox2( *aOutput.mutable_margin_frame(), frame, schIUScale );
+    for( DS_DRAW_ITEM_BASE* item = items.GetFirst(); item; item = items.GetNext() )
+    {
+        SchematicWiringDrawingSheetItemKind kind;
+        switch( item->Type() )
+        {
+        case WSG_LINE_T:   kind = SWR_DRAWING_SHEET_ITEM_LINE; break;
+        case WSG_RECT_T:   kind = SWR_DRAWING_SHEET_ITEM_RECTANGLE; break;
+        case WSG_TEXT_T:   kind = SWR_DRAWING_SHEET_ITEM_TEXT; break;
+        case WSG_POLY_T:   kind = SWR_DRAWING_SHEET_ITEM_POLYGON; break;
+        case WSG_BITMAP_T: kind = SWR_DRAWING_SHEET_ITEM_BITMAP; break;
+        default:           continue; // the page limits, drawn only by the drawing-sheet editor
+        }
+        BOX2I bounds = item->GetBoundingBox();
+        bounds.Normalize();
+        SchematicWiringDrawingSheetItem* drawn = aOutput.add_items();
+        drawn->set_kind( kind );
+        PackBox2( *drawn->mutable_bounds(), bounds, schIUScale );
+    }
+    return true;
 }
 
 

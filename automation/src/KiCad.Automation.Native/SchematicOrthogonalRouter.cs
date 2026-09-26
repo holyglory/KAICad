@@ -62,12 +62,13 @@ public sealed record SchematicRoutingLimits(int MaxExpandedNodes, int LengthFact
     public static readonly SchematicRoutingLimits Contract = new(200_000, 4);
 }
 
-/// <summary>Orthogonal wiring of one connection on one sheet (CN-1 §7). Wires run on the connection grid inside the page
-/// inset. A grid node is blocked when it lies within an obstacle's bounds inflated by the clearance (except a pin's own
-/// escape corridor through its own symbol), within the clearance of a foreign connection point, on a segment that may not be
-/// crossed, or inside a generated label; an edge is blocked when it runs parallel to a foreign segment within the clearance,
-/// passes within the clearance of a foreign connection point, or meets a generated label. A foreign wire is crossed only at a right angle, away from its ends, and never where the
-/// route turns, ends or branches. Every step costs 1, every bend 2 and every crossing 10. The tree grows from the first
+/// <summary>Orthogonal wiring of one connection on one sheet (CN-1 §7). Wires run on the connection grid inside the route
+/// region (the drawing sheet's frame interior less the clearance). A grid node is blocked when it lies within an obstacle's
+/// bounds inflated by the clearance (except a pin's own escape corridor through its own symbol), within the clearance of a
+/// foreign connection point, on a segment that may not be crossed, or inside a generated label; an edge is blocked when it
+/// meets an obstacle's inflated bounds (except between two nodes of an escape corridor), runs parallel to a foreign segment
+/// within the clearance, passes within the clearance of a foreign connection point, or meets a generated label. A foreign
+/// wire is crossed only at a right angle, away from its ends, and never where the route turns, ends or branches. Every step costs 1, every bend 2 and every crossing 10. The tree grows from the first
 /// pin by joining the Manhattan-nearest remaining pin (ties by pin identity) to any node of the tree with A*, whose ties
 /// prefer horizontal moves, then lower x, then lower y. Collinear steps merge into maximal segments, and a junction is
 /// placed wherever three or more wire ends and pins meet, which includes every branch on the inside of a segment. The
@@ -98,17 +99,25 @@ internal static class SchematicOrthogonalRouter
 
     private static bool Vertical(int d) => d >= 2;
 
+    /// <summary>At most this many grid nodes are laid out for one sheet: about 7 bytes each (node and edge flags, crossing
+    /// counts and the reused distance field), so at most about 56 MB, whatever the page. The search state itself is kept only
+    /// for the nodes a search reaches, which the expanded-node budget bounds.</summary>
+    internal const int MaxGridNodes = 8_000_000;
+
+    // Node flags, one byte per grid node. Edge flags index the edge leaving a node to the right (horizontal) or downwards
+    // (vertical). A crossing node lies on the inside of a crossable foreign segment: crossing it costs 10 and the route must
+    // pass straight through.
+    private const byte BlockedFlag = 1, HBlockedFlag = 2, VBlockedFlag = 4, CrossVFlag = 8, CrossHFlag = 16;
+
     private sealed class Search(OrthogonalRouteRequest request, CancellationToken token)
     {
         private readonly long g = request.GridNm, c = request.ClearanceNm;
         private long i0, j0;
         private int width, height;
-        private bool[] blocked = [];
-        // Edge flags index the edge leaving a node to the right (horizontal) or downwards (vertical).
-        private bool[] hBlocked = [], vBlocked = [];
+        private byte[] flags = [];
         private byte[] hCross = [], vCross = [];
-        // A node on the inside of a crossable foreign segment: crossing it costs 10 and the route must pass straight through.
-        private bool[] crossV = [], crossH = [];
+        // Manhattan distance of every node to the nearest tree node, recomputed in place for each pin the tree joins.
+        private int[] distance = [];
         private readonly HashSet<int> goals = [];
         private readonly Dictionary<(int A, int B), bool> edges = [];
         private int expanded;
@@ -147,18 +156,18 @@ internal static class SchematicOrthogonalRouter
             {
                 token.ThrowIfCancellationRequested();
                 if (goals.Count == 0) return new(null, "the connection's first pin has no free grid node to join");
-                var distance = Distances();
+                var nearest = Distances();
                 // The Manhattan-nearest remaining pin (or the existing connection), ties by identity.
                 int best = -1; long bestDistance = long.MaxValue; string bestKey = "";
                 for (int k = 0; k < remaining.Count; k++)
                 {
-                    long d = distance[Index(remaining[k].Escape(g))];
+                    long d = nearest[Index(remaining[k].Escape(g))];
                     string key = remaining[k].PlacedPinId.ToString("D");
                     if (d < bestDistance || (d == bestDistance && string.CompareOrdinal(key, bestKey) < 0)) { best = k; bestDistance = d; bestKey = key; }
                 }
                 if (existingPending)
                 {
-                    long d = request.Existing!.Points.Select(p => Index(p.Node)).Where(n => n >= 0).Select(n => distance[n]).DefaultIfEmpty(long.MaxValue).Min();
+                    long d = request.Existing!.Points.Select(p => Index(p.Node)).Where(n => n >= 0).Select(n => (long)nearest[n]).DefaultIfEmpty(long.MaxValue).Min();
                     if (d < bestDistance || (d == bestDistance && string.CompareOrdinal(request.Existing.TieKey, bestKey) < 0)) { best = -1; bestDistance = d; }
                 }
                 if (best >= 0)
@@ -167,7 +176,7 @@ internal static class SchematicOrthogonalRouter
                     remaining.RemoveAt(best);
                     var start = Index(terminal.Escape(g));
                     AddEdge(terminal.Anchor, terminal.Escape(g));
-                    var path = AStar([(start, DirectionOf(terminal.Outward), (IReadOnlyCollection<int>?)null)], out string? failure);
+                    var path = AStar([(start, DirectionOf(terminal.Outward), (IReadOnlyCollection<int>?)null)], nearest, out string? failure);
                     if (path is null) return new(null, failure ?? "pin " + terminal.PlacedPinId.ToString("D") + " cannot reach the rest of its connection");
                     Commit(path, goal: start);
                 }
@@ -181,7 +190,7 @@ internal static class SchematicOrthogonalRouter
                         if (node < 0) continue;
                         if (point.Corridor is { } corridor)
                         {
-                            if (blocked[node]) continue;
+                            if (IsBlocked(node)) continue;
                             starts.Add((node, DirectionOf(corridor), null));
                         }
                         else
@@ -194,7 +203,7 @@ internal static class SchematicOrthogonalRouter
                         }
                     }
                     if (starts.Count == 0) return new(null, "the connection's existing wires and pins offer no free point to attach to");
-                    var path = AStar(starts, out string? failure);
+                    var path = AStar(starts, nearest, out string? failure);
                     if (path is null) return new(null, failure ?? "the new pins cannot reach the connection's existing wires and pins");
                     var from = request.Existing.Points.First(p => Index(p.Node) == path[0]);
                     if (from is { Pin: { } pin, Corridor: { } }) AddEdge(pin, from.Node);
@@ -220,13 +229,17 @@ internal static class SchematicOrthogonalRouter
             var r = request.Region;
             long first = CeilDiv(r.L, g), last = FloorDiv(r.R, g), top = CeilDiv(r.T, g), bottom = FloorDiv(r.B, g);
             if (last < first || bottom < top) { reason = "the page inset leaves no grid to route on"; return false; }
-            if ((last - first + 1) * (bottom - top + 1) > 16_000_000) { reason = "the page is too large to route on its connection grid"; return false; }
+            if ((last - first + 1) * (bottom - top + 1) > MaxGridNodes) { reason = "the page is too large to route on its connection grid"; return false; }
             i0 = first; j0 = top; width = (int)(last - first + 1); height = (int)(bottom - top + 1);
             int n = width * height;
-            blocked = new bool[n]; hBlocked = new bool[n]; vBlocked = new bool[n]; hCross = new byte[n]; vCross = new byte[n];
-            crossV = new bool[n]; crossH = new bool[n];
+            flags = new byte[n]; hCross = new byte[n]; vCross = new byte[n]; distance = new int[n];
             return true;
         }
+
+        private bool IsBlocked(int n) => (flags[n] & BlockedFlag) != 0;
+        private void Block(int n) => flags[n] |= BlockedFlag;
+        private void BlockH(int n) => flags[n] |= HBlockedFlag;
+        private void BlockV(int n) => flags[n] |= VBlockedFlag;
 
         private static long FloorDiv(long a, long b) => a >= 0 ? a / b : -((-a + b - 1) / b);
         private static long CeilDiv(long a, long b) => -FloorDiv(-a, b);
@@ -265,7 +278,20 @@ internal static class SchematicOrthogonalRouter
                 var exempt = obstacle.ExemptNodes.Select(Index).Where(n => n >= 0).ToHashSet();
                 var inflated = obstacle.Bounds.Inflate(c);
                 foreach (int n in Nodes(inflated.L, inflated.T, inflated.R, inflated.B))
-                    if (!exempt.Contains(n)) blocked[n] = true;
+                    if (!exempt.Contains(n)) Block(n);
+                // No edge meets the inflated bounds either, except along an escape corridor: a box thinner than the grid
+                // (a drawing-sheet line, a thin symbol) is never stepped over, and a route leaves a pin's own symbol only
+                // straight along its corridor, never sideways out of it.
+                foreach (int n in Nodes(inflated.L - g, inflated.T, inflated.R, inflated.B))
+                {
+                    int right = Neighbour(n, 0);
+                    if (right >= 0 && !(exempt.Contains(n) && exempt.Contains(right))) BlockH(n);
+                }
+                foreach (int n in Nodes(inflated.L, inflated.T - g, inflated.R, inflated.B))
+                {
+                    int down = Neighbour(n, 2);
+                    if (down >= 0 && !(exempt.Contains(n) && exempt.Contains(down))) BlockV(n);
+                }
             }
             // The connection's own pins are connection points too: a route reaches them only through their escapes.
             var points = request.Points.Concat(request.Segments.SelectMany(s => new[] { s.A, s.B }))
@@ -273,7 +299,7 @@ internal static class SchematicOrthogonalRouter
                 .Concat(request.Existing?.Points.Where(p => p.Pin is not null).Select(p => p.Pin!.Value) ?? []);
             foreach (var p in points)
             {
-                foreach (int n in Nodes(p.X - c, p.Y - c, p.X + c, p.Y + c)) blocked[n] = true;
+                foreach (int n in Nodes(p.X - c, p.Y - c, p.X + c, p.Y + c)) Block(n);
                 MarkPointEdges(p);
             }
             foreach (var segment in request.Segments) MarkSegment(segment);
@@ -291,12 +317,12 @@ internal static class SchematicOrthogonalRouter
             foreach (int n in Nodes(p.X - c - g, p.Y - c, p.X + c, p.Y + c))
             {
                 var q = At(n);
-                if (Neighbour(n, 0) >= 0 && Clear(q) && Clear(new(q.X + g, q.Y))) hBlocked[n] = true;
+                if (Neighbour(n, 0) >= 0 && Clear(q) && Clear(new(q.X + g, q.Y))) BlockH(n);
             }
             foreach (int n in Nodes(p.X - c, p.Y - c - g, p.X + c, p.Y + c))
             {
                 var q = At(n);
-                if (Neighbour(n, 2) >= 0 && Clear(q) && Clear(new(q.X, q.Y + g))) vBlocked[n] = true;
+                if (Neighbour(n, 2) >= 0 && Clear(q) && Clear(new(q.X, q.Y + g))) BlockV(n);
             }
         }
 
@@ -316,7 +342,7 @@ internal static class SchematicOrthogonalRouter
                     var p = At(n);
                     long a0 = vertical ? p.Y : p.X, a1 = a0 + g;
                     if (Math.Min(a1, hi) - Math.Max(a0, lo) <= 0) continue;
-                    if (vertical) vBlocked[n] = true; else hBlocked[n] = true;
+                    if (vertical) BlockV(n); else BlockH(n);
                 }
                 // Crossings: grid lines perpendicular to the segment strictly inside its span.
                 foreach (int n in vertical ? Nodes(across - g, lo, across, hi) : Nodes(lo, across - g, hi, across))
@@ -328,13 +354,13 @@ internal static class SchematicOrthogonalRouter
                     if (line == across)
                     {
                         // The node lies on the inside of the segment.
-                        if (!s.Crossable || near) blocked[n] = true;
-                        else if (vertical) crossV[n] = true; else crossH[n] = true;
+                        if (!s.Crossable || near) Block(n);
+                        else flags[n] |= vertical ? CrossVFlag : CrossHFlag;
                     }
                     else if (line < across && across < line + g)
                     {
                         // The perpendicular edge leaving this node crosses the segment between two nodes.
-                        if (!s.Crossable || near) { if (vertical) hBlocked[n] = true; else vBlocked[n] = true; }
+                        if (!s.Crossable || near) { if (vertical) BlockH(n); else BlockV(n); }
                         else if (vertical) hCross[n]++; else vCross[n]++;
                     }
                 }
@@ -344,7 +370,7 @@ internal static class SchematicOrthogonalRouter
             // remaining edge clear of it.
             var box = Box.Segment(s.A, s.B).Inflate(g);
             foreach (int n in Nodes(box.L, box.T, box.R, box.B))
-                if (DistanceSquared(At(n), s.A, s.B) <= (double)g * g) blocked[n] = true;
+                if (DistanceSquared(At(n), s.A, s.B) <= (double)g * g) Block(n);
         }
 
         private static double DistanceSquared(Pt p, Pt a, Pt b)
@@ -361,15 +387,15 @@ internal static class SchematicOrthogonalRouter
             foreach (int n in Nodes(envelope.L - g, envelope.T - g, envelope.R, envelope.B))
             {
                 var p = At(n);
-                if (envelope.Contains(p)) blocked[n] = true;
-                if (SegmentMeets(p, new(p.X + g, p.Y), envelope, open: false)) hBlocked[n] = true;
-                if (SegmentMeets(p, new(p.X, p.Y + g), envelope, open: false)) vBlocked[n] = true;
+                if (envelope.Contains(p)) Block(n);
+                if (SegmentMeets(p, new(p.X + g, p.Y), envelope, open: false)) BlockH(n);
+                if (SegmentMeets(p, new(p.X, p.Y + g), envelope, open: false)) BlockV(n);
             }
         }
 
         private bool EdgeBlocked(int n, int d, int m) => d switch
         {
-            0 => hBlocked[n], 1 => hBlocked[m], 2 => vBlocked[n], _ => vBlocked[m]
+            0 => (flags[n] & HBlockedFlag) != 0, 1 => (flags[m] & HBlockedFlag) != 0, 2 => (flags[n] & VBlockedFlag) != 0, _ => (flags[m] & VBlockedFlag) != 0
         };
 
         private int EdgeCrossings(int n, int d, int m) => d switch
@@ -377,7 +403,11 @@ internal static class SchematicOrthogonalRouter
             0 => hCross[n], 1 => hCross[m], 2 => vCross[n], _ => vCross[m]
         };
 
-        private bool Crossing(int n) => crossV[n] || crossH[n];
+        private bool Crossing(int n) => (flags[n] & (CrossVFlag | CrossHFlag)) != 0;
+
+        private bool CrossV(int n) => (flags[n] & CrossVFlag) != 0;
+
+        private bool CrossH(int n) => (flags[n] & CrossHFlag) != 0;
 
         // ---- tree ----
 
@@ -416,22 +446,23 @@ internal static class SchematicOrthogonalRouter
         private void AddGoal(Pt p)
         {
             int n = Index(p);
-            if (n >= 0 && !blocked[n] && !Crossing(n)) goals.Add(n);
+            if (n >= 0 && !IsBlocked(n) && !Crossing(n)) goals.Add(n);
         }
 
         private void Commit(IReadOnlyList<int> path, int goal)
         {
             for (int k = 1; k < path.Count; k++) edges[Key(At(path[k - 1]), At(path[k]))] = true;
             routed += (path.Count - 1) * g;
-            foreach (int n in path) if (!blocked[n] && !Crossing(n)) goals.Add(n);
-            if (goal >= 0 && !blocked[goal] && !Crossing(goal)) goals.Add(goal);
+            foreach (int n in path) if (!IsBlocked(n) && !Crossing(n)) goals.Add(n);
+            if (goal >= 0 && !IsBlocked(goal) && !Crossing(goal)) goals.Add(goal);
         }
 
-        // Manhattan distance of every node to the nearest goal, in grid steps (two-pass L1 distance transform).
-        private long[] Distances()
+        // Manhattan distance of every node to the nearest goal, in grid steps (two-pass L1 distance transform), into the one
+        // distance field of this search.
+        private int[] Distances()
         {
-            var d = new long[width * height];
-            Array.Fill(d, long.MaxValue / 4);
+            var d = distance;
+            Array.Fill(d, int.MaxValue / 4);
             foreach (int n in goals) d[n] = 0;
             for (int j = 0; j < height; j++)
                 for (int i = 0; i < width; i++)
@@ -465,31 +496,29 @@ internal static class SchematicOrthogonalRouter
             }
         }
 
-        // A* from the starts to any goal node. States are (node, direction of the last move); a start's direction is its
-        // escape or corridor, or None for an existing wire end, whose first move is limited to `allowed`.
-        private List<int>? AStar(IReadOnlyList<(int Node, int Incoming, IReadOnlyCollection<int>? Allowed)> starts, out string? failure)
+        // A* from the starts to any goal node, with `h` the Manhattan distance to the nearest goal. States are (node, direction
+        // of the last move); a start's direction is its escape or corridor, or None for an existing wire end, whose first move
+        // is limited to `allowed`. The state of only the states the search reaches is kept, so its size follows the
+        // expanded-node budget, not the page.
+        private List<int>? AStar(IReadOnlyList<(int Node, int Incoming, IReadOnlyCollection<int>? Allowed)> starts, int[] h, out string? failure)
         {
             failure = null;
-            var h = Distances();
-            int states = width * height * 5;
-            var cost = new long[states];
-            Array.Fill(cost, long.MaxValue);
-            var parent = new int[states];
-            var closed = new bool[states];
+            var cost = new Dictionary<int, long>();
+            var parent = new Dictionary<int, int>();
+            var closed = new HashSet<int>();
             var open = new PriorityQueue<int, Priority>(PriorityOrder.Instance);
             var allowedAt = new Dictionary<int, IReadOnlyCollection<int>>();
             foreach (var (node, incoming, allowed) in starts)
             {
                 int s = node * 5 + incoming;
-                if (cost[s] == 0) continue;
+                if (cost.TryGetValue(s, out long known) && known == 0) continue;
                 cost[s] = 0; parent[s] = -1;
                 if (allowed is not null) allowedAt[s] = allowed;
                 open.Enqueue(s, new(h[node], incoming is 2 or 3 ? 1 : 0, node % width, node / width, incoming));
             }
             while (open.TryDequeue(out int s, out _))
             {
-                if (closed[s]) continue;
-                closed[s] = true;
+                if (!closed.Add(s)) continue;
                 token.ThrowIfCancellationRequested();
                 if (++expanded > request.Limits.MaxExpandedNodes) { failure = Exhausted(); return null; }
                 int n = s / 5, din = s % 5;
@@ -507,13 +536,13 @@ internal static class SchematicOrthogonalRouter
                     if (Crossing(n) && d != din) continue;
                     if (allowedAt.TryGetValue(s, out var allowed) && !allowed.Contains(d)) continue;
                     int m = Neighbour(n, d);
-                    if (m < 0 || blocked[m] || EdgeBlocked(n, d, m)) continue;
+                    if (m < 0 || IsBlocked(m) || EdgeBlocked(n, d, m)) continue;
                     // A crossing is entered at a right angle to the segment it lies on.
-                    if ((crossV[m] && Vertical(d)) || (crossH[m] && !Vertical(d))) continue;
+                    if ((CrossV(m) && Vertical(d)) || (CrossH(m) && !Vertical(d))) continue;
                     long step = 1 + (din != None && d != din ? 2 : 0) + 10L * EdgeCrossings(n, d, m) + (Crossing(m) ? 10 : 0);
                     int t = m * 5 + d;
                     long next = cost[s] + step;
-                    if (next >= cost[t] || closed[t]) continue;
+                    if (closed.Contains(t) || (cost.TryGetValue(t, out long reached) && next >= reached)) continue;
                     cost[t] = next; parent[t] = s;
                     open.Enqueue(t, new(next + h[m], Vertical(d) ? 1 : 0, m % width, m / width, d));
                 }

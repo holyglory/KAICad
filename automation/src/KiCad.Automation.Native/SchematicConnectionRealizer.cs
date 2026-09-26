@@ -218,6 +218,11 @@ public static class SchematicConnectionRealizer
         if (view.Page is { } known && known != page)
             throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One sheet reported two page sizes.");
         view.Page = page;
+        if (view.Measured && !Equals(view.DrawingSheet, measured.DrawingSheet))
+            throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "One revision measured the drawing sheet of sheet " + view.Path + " twice differently.");
+        view.DrawingSheet = measured.DrawingSheet;
+        view.FieldsReported = (!view.Measured || view.FieldsReported) && measured.FieldBoundsReported;
+        view.Measured = true;
         foreach (var obstacle in measured.Obstacles)
         {
             var id = Id(obstacle.Id);
@@ -234,6 +239,61 @@ public static class SchematicConnectionRealizer
         }
     }
 
+    /// <summary>How far in from each page edge KiCad's default drawing sheet draws the inside of its border (its 10 mm
+    /// margin plus the 2 mm band of zone marks), and how much of the page bottom the fixture policy keeps for the title
+    /// block (psu-cpu-fixture-and-ownership.md §1.6.3): the §7 route region of a sheet whose drawing sheet is not measured.</summary>
+    internal const long DefaultFrameInsetNm = 12_000_000, DefaultTitleBlockReserveNm = 50_000_000;
+
+    /// <summary>Where routed wires may run on one measured sheet instance (CN-1 §7 region, as corrected by the erratum lane 2A
+    /// reported: the page shrunk by <c>PageInsetNm</c> reaches into the drawing sheet's frame and title block, which are no
+    /// schematic items): the inside of the drawing sheet's innermost border frame, and the drawing-sheet art inside it (the
+    /// title block, any logo or text) as keep-outs, overlapping pieces merged into one box. A border frame is a drawn
+    /// rectangle around the middle of the drawing sheet's margin frame that spans more than half of it both ways. The region
+    /// is shrunk by <paramref name="clearance"/>; keep-outs are returned as drawn and are inflated by the clearance where they
+    /// are used. Without a measured drawing sheet the region is the inside of KiCad's default frame with the bottom
+    /// <see cref="DefaultTitleBlockReserveNm"/> kept for the title block.</summary>
+    internal static (Box Region, IReadOnlyList<Box> KeepOuts) RouteArea(Box page, SchematicWiringDrawingSheet? sheet, long clearance)
+    {
+        Box interior;
+        var keepOuts = new List<Box>();
+        if (sheet?.MarginFrame is null)
+            interior = new(checked(page.L + DefaultFrameInsetNm), checked(page.T + DefaultFrameInsetNm), checked(page.R - DefaultFrameInsetNm),
+                checked(page.B - DefaultTitleBlockReserveNm));
+        else
+        {
+            var margin = Box.Of(sheet.MarginFrame);
+            interior = Intersect(page, margin);
+            // Compared at twice their size, so that the middle of the margin frame needs no rounding.
+            Int128 middleX = (Int128)margin.L + margin.R, middleY = (Int128)margin.T + margin.B;
+            var items = sheet.Items.Select(i => (i.Kind, Bounds: Box.Of(i.Bounds))).ToArray();
+            bool Frame((SchematicWiringDrawingSheetItemKind Kind, Box Bounds) item) => item.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
+                && 2 * (Int128)item.Bounds.L < middleX && 2 * (Int128)item.Bounds.R > middleX && 2 * (Int128)item.Bounds.T < middleY && 2 * (Int128)item.Bounds.B > middleY
+                && 2 * ((Int128)item.Bounds.R - item.Bounds.L) > (Int128)margin.R - margin.L && 2 * ((Int128)item.Bounds.B - item.Bounds.T) > (Int128)margin.B - margin.T;
+            foreach (var frame in items.Where(Frame)) interior = Intersect(interior, frame.Bounds);
+            // Art inside the frame; a mark that only touches the frame's edge from outside stays outside it.
+            foreach (var item in items.Where(i => !Frame(i)))
+                if (item.Bounds.L < interior.R && item.Bounds.R > interior.L && item.Bounds.T < interior.B && item.Bounds.B > interior.T)
+                    keepOuts.Add(item.Bounds);
+            // Overlapping or touching pieces (the lines, texts and box of a title block) become one keep-out.
+            for (bool merged = true; merged;)
+            {
+                merged = false;
+                for (int i = 0; i < keepOuts.Count && !merged; i++)
+                    for (int j = i + 1; j < keepOuts.Count && !merged; j++)
+                        if (keepOuts[i].Touches(keepOuts[j]))
+                        {
+                            keepOuts[i] = keepOuts[i].Union(keepOuts[j]);
+                            keepOuts.RemoveAt(j);
+                            merged = true;
+                        }
+            }
+        }
+        var region = new Box(checked(interior.L + clearance), checked(interior.T + clearance), checked(interior.R - clearance), checked(interior.B - clearance));
+        return (region, [.. keepOuts.OrderBy(k => k.L).ThenBy(k => k.T).ThenBy(k => k.R).ThenBy(k => k.B)]);
+
+        static Box Intersect(Box a, Box b) => new(Math.Max(a.L, b.L), Math.Max(a.T, b.T), Math.Min(a.R, b.R), Math.Min(a.B, b.B));
+    }
+
     // Union of every instance path: obstacles, connection points and connection segments of the one physical screen.
     private static void BuildGeometry(Screen screen, SchematicConnectionPolicy policy)
     {
@@ -242,6 +302,20 @@ public static class SchematicConnectionRealizer
             throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "Instances of one sheet reported different pages.");
         long inset = policy.PageInsetNm;
         screen.Usable = new(screen.Page.L + inset, screen.Page.T + inset, screen.Page.R - inset, screen.Page.B - inset);
+        // §7 region (erratum): every instance's drawing sheet is kept clear, so the region is where all of them allow wires.
+        var areas = screen.Views.Select(v => RouteArea(screen.Page, v.DrawingSheet, policy.ClearanceNm)).ToArray();
+        screen.RouteRegion = areas.Skip(1).Aggregate(areas[0].Region, (a, b) => new(Math.Max(a.L, b.Region.L), Math.Max(a.T, b.Region.T),
+            Math.Min(a.R, b.Region.R), Math.Min(a.B, b.Region.B)));
+        screen.RouteKeepOuts.AddRange(areas.SelectMany(a => a.KeepOuts).Distinct().OrderBy(k => k.L).ThenBy(k => k.T).ThenBy(k => k.R).ThenBy(k => k.B));
+        screen.FieldsKnown = screen.Views.All(v => v.FieldsReported);
+        foreach (var view in screen.Views)
+            foreach (var (id, bounds) in view.Obstacles.Concat(view.Candidates))
+                if (bounds.SymbolPins is not null)
+                {
+                    if (!screen.Fields.TryGetValue(id, out var fields)) screen.Fields.Add(id, fields = []);
+                    foreach (var field in bounds.VisibleFieldBounds.Select(Box.Of))
+                        if (!fields.Contains(field)) fields.Add(field);
+                }
         var points = new HashSet<ForeignPoint>();
         var segments = new HashSet<ForeignSegment>();
         foreach (var view in screen.Views)
@@ -295,12 +369,24 @@ public static class SchematicConnectionRealizer
     internal const long PinTargetReachNm = 381_100;
 
     // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier):
-    // null when admitted, otherwise the rule that refuses it.
+    // null when admitted, otherwise the rule that refuses it. A piece of a routed connection (`routed`: a pin's escape, the
+    // stub carrying its name label, a corridor to its existing part) must also keep to the §7 route region, inside the
+    // drawing sheet's frame and clear of its title block.
     private static string? Refusal(SchematicConnectionPolicy policy, Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward,
-        Box? r, Guid? ownPin, Guid owner, Guid? carrierPin, Guid? carrierSymbol, Variant variant)
+        Box? r, Guid? ownPin, Guid owner, Guid? carrierPin, Guid? carrierSymbol, Variant variant, bool routed = false)
     {
         // 1. Inside the page inset.
         if (!screen.Usable.Contains(e) || (r is { } inside && !inside.Within(screen.Usable))) return "outside the page inset";
+        if (routed)
+        {
+            if (!screen.RouteRegion.Contains(e) || (r is { } framed && !framed.Within(screen.RouteRegion)))
+                return "outside the drawing sheet's frame";
+            foreach (var keepOut in screen.RouteKeepOuts)
+            {
+                if (SegmentMeets(a, e, keepOut.Inflate(policy.ClearanceNm), open: false)) return "within the clearance of the drawing sheet's title block";
+                if (r is { } label && label.InteriorMeets(keepOut)) return "the label overlaps the drawing sheet's title block";
+            }
+        }
         var stub = Box.Segment(a, e);
         bool Excepted(ForeignPoint p) => (ownPin is { } own && p.Owner == own && p.Position == a)
             || (carrierPin is { } carrier && p.Owner == carrier && p.Position == e)
@@ -451,6 +537,12 @@ public static class SchematicConnectionRealizer
         public required SchematicScreenData Native { get; init; }
         public required SchematicScreenData Planned { get; init; }
         public Box? Page { get; set; }
+        /// <summary>Whether a measurement of this instance was merged yet.</summary>
+        public bool Measured { get; set; }
+        /// <summary>The drawing sheet KiCad draws on this instance; null when it was not measured.</summary>
+        public SchematicWiringDrawingSheet? DrawingSheet { get; set; }
+        /// <summary>Whether every measurement of this instance reported its symbols' visible field bounds.</summary>
+        public bool FieldsReported { get; set; }
         public Dictionary<Guid, SchematicPlacementBounds> Obstacles { get; } = [];
         public Dictionary<Guid, SchematicPlacementBounds> Candidates { get; } = [];
         public Dictionary<Guid, SchematicSymbolPinGeometry> Pins { get; } = [];
@@ -482,6 +574,16 @@ public static class SchematicConnectionRealizer
         public required List<PathView> Views { get; init; }
         public Box Page { get; set; }
         public Box Usable { get; set; }
+        /// <summary>Where routed wires may run (§7 region erratum, <see cref="RouteArea"/>): the drawing sheet's frame interior
+        /// less the clearance, on every instance.</summary>
+        public Box RouteRegion { get; set; }
+        /// <summary>The drawing-sheet art inside the frame (the title block): keep-outs of routed wires, inflated by the
+        /// clearance.</summary>
+        public List<Box> RouteKeepOuts { get; } = [];
+        /// <summary>Whether every measurement of the sheet reported its symbols' visible field bounds.</summary>
+        public bool FieldsKnown { get; set; }
+        /// <summary>The visible field boxes of each symbol, on every instance.</summary>
+        public Dictionary<Guid, List<Box>> Fields { get; } = [];
         public Dictionary<Guid, Box> Obstacles { get; } = [];
         /// <summary>Wires and buses on the sheet: segments the router crosses or avoids by its own rules, not obstacles.</summary>
         public HashSet<Guid> ConnectionLines { get; } = [];
@@ -587,70 +689,72 @@ public static class SchematicConnectionRealizer
             // neighbouring pin could leave that pin's fixed label no room at any stub length (a CN-1 §6.3 clarification
             // requested from the integration owner). §7: at its turn in that order, an island with two or more new pins to join
             // on this sheet is routed instead; one that no route fits falls back to its stubs at once, with the reason recorded.
+            // Then §6.3 (c) and §6.5 sheet pins, and the check that every island crossing into its parent carries its
+            // hierarchical label.
+            // Routing never refuses what label stubs alone would draw (a CN-1 §7 clarification reported to the integration owner).
             // A route keeps clear the one-grid escape of every new pin still to be routed, and the shortest stub and its label of
-            // every island still to be drawn that will certainly need them (Reserved). When an island that fell back finds its
-            // stub room taken by the wires of islands routed before it, the sheet is drawn again from the start with that
-            // island's stub room kept clear as well; each redraw adds one such island, so this ends (a CN-1 §7 clarification
-            // reported to the integration owner).
+            // every island still to be drawn with stubs (Reserved). When anything is still refused for want of room (no stub, no
+            // join anchor, no sheet-pin slot) after a route was drawn on this sheet, the sheet is drawn again from the start with
+            // all the milestone-1 room of the refused island kept clear of every route: each stub length with each label it may
+            // carry, its join and anchor-label options, and its sheet-pin slots with their stubs and labels. Each redraw protects
+            // one more island; when a protected island is refused again, the sheet is drawn once more with no route at all, every
+            // island that would have been routed recording why, and only a refusal of that drawing stands.
             var start = Snapshot(screen);
-            var protectedStubs = new HashSet<Guid>();
+            var protectedRoom = new HashSet<Guid>();
+            string? abandoned = null;
             while (true)
             {
                 islands = [.. record.Islands.OrderBy(i => i.NetId).ThenBy(i => i.SheetPathKey, StringComparer.Ordinal).Select(i => new IslandState(i))];
-                var ordered = islands.OrderBy(i => UplinkPending(i) ? 1 : 0).ToList();
-                var routable = ordered.Where(i => RouteTerminals(screen, i).Count >= 2).ToHashSet();
-                IslandState? crowded = null;
-                for (int turn = 0; turn < ordered.Count && crowded is null; turn++)
+                IslandState? current = null;
+                bool routed = false;
+                try
                 {
-                    token.ThrowIfCancellationRequested();
-                    var island = ordered[turn];
-                    if (routable.Contains(island))
+                    var ordered = islands.OrderBy(i => UplinkPending(i) ? 1 : 0).ToList();
+                    var joinable = ordered.Where(i => RouteTerminals(screen, i).Count >= 2).ToHashSet();
+                    var routable = abandoned is null ? joinable : [];
+                    for (int turn = 0; turn < ordered.Count; turn++)
                     {
-                        var later = ordered.Skip(turn + 1).ToArray();
-                        var stubRoom = later.Where(i => !routable.Contains(i) || protectedStubs.Contains(i.Island.NetId)).ToArray();
-                        var escapes = later.Where(routable.Contains).SelectMany(i => RouteTerminals(screen, i).SelectMany(t => new[] { t.Terminal.Escape(policy.GridNm),
-                            t.Terminal.Anchor.Step(t.Terminal.Outward, (Corridor(screen, i, t.Terminal) ?? 1) * policy.GridNm) })).Distinct();
-                        if (TryRoute(screen, island, stubRoom, escapes)) continue;
+                        token.ThrowIfCancellationRequested();
+                        var island = current = ordered[turn];
+                        if (routable.Contains(island))
+                        {
+                            var later = ordered.Skip(turn + 1).ToArray();
+                            var shortRoom = later.Where(i => !routable.Contains(i) && !protectedRoom.Contains(i.Island.NetId)).ToArray();
+                            var fullRoom = later.Where(i => protectedRoom.Contains(i.Island.NetId)).ToArray();
+                            // Sheet pins are drawn after every island, so the sheet-pin room of a protected island drawn earlier,
+                            // or of this island itself, is kept as well.
+                            var sheetRoom = ordered.Take(turn + 1).Where(i => protectedRoom.Contains(i.Island.NetId)).ToArray();
+                            var escapes = later.Where(routable.Contains).SelectMany(i => RouteTerminals(screen, i).SelectMany(t => new[] { t.Terminal.Escape(policy.GridNm),
+                                t.Terminal.Anchor.Step(t.Terminal.Outward, (Corridor(screen, i, t.Terminal).Steps ?? 1) * policy.GridNm) })).Distinct();
+                            if (TryRoute(screen, island, shortRoom, fullRoom, sheetRoom, escapes)) { routed = true; continue; }
+                        }
+                        else if (abandoned is not null && joinable.Contains(island)) island.FallbackReason = abandoned;
+                        Stubs(screen, island);
                     }
-                    try { Stubs(screen, island); }
-                    catch (AutomationException refusal) when (island.FallbackReason is not null)
+                    // §6.3 (c) and §6.5: sheet pins, allocated in port-text order.
+                    foreach (var (island, sheet, port) in SheetPinOrder(screen, islands))
                     {
-                        if (!protectedStubs.Add(island.Island.NetId))
-                            throw Error(refusal.Code, refusal.Message + " Its wires were to be drawn as labelled stubs because no orthogonal route fits: "
-                                + island.FallbackReason + ".");
-                        crowded = island;
+                        current = island;
+                        SheetPinStub(screen, island, sheet, port);
                     }
+                    foreach (var island in islands)
+                    {
+                        current = island;
+                        RequireUplinkLabel(island);
+                    }
+                    break;
                 }
-                if (crowded is null) break;
-                Restore(screen, start);
+                catch (AutomationException refusal) when (routed && current is not null && refusal.Code is SchematicConnectionErrors.RealizationNoFreeStub
+                    or SchematicConnectionErrors.RealizationNoJoinAnchor or SchematicConnectionErrors.RealizationNoFreeSheetPinSlot)
+                {
+                    if (!protectedRoom.Add(current.Island.NetId))
+                        abandoned = "wires are not drawn on sheet " + record.InstancePathKeys[0] + " because routes left net '" + NetName(current)
+                            + "' no room even with its label-stub room kept clear (" + refusal.Message + ")";
+                    Restore(screen, start);
+                }
             }
-            // §6.3 (c) and §6.5: sheet pins, allocated in port-text order.
-            foreach (var (island, sheet, port) in SheetPinOrder(screen, islands)) SheetPinStub(screen, island, sheet, port);
             foreach (var island in islands)
             {
-                // §6.3 (d) with (e): the island's first stub carries its hierarchical label unless that stub attaches
-                // to a same-net power symbol, which leaves no room for a label (the power pin sits on the stub's line,
-                // so every longer stub runs through it), or is the optional stub of a new pin stacked on an existing
-                // connection that has no room; then the next labelled stub carries it. When no stub can carry it, the
-                // refusal names why (a CN-1 clarification requested from the integration owner).
-                if (UplinkPending(island))
-                    throw island.HierarchicalRefused.Count != 0
-                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
-                            + island.Island.SheetPathKey + ", but none of its new stubs there has room for one (so the stub of " + string.Join(", ", island.HierarchicalRefused)
-                            + (island.HierarchicalRefused.Count == 1 ? " carries a local label" : " carry local labels") + " instead)" + (island.UplinkRefused.Count != 0 ? " and new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
-                            + " sits on an existing connection with no free room for a stub" : "") + ". Clear the space next to one of those pins in the schematic editor.")
-                        : island.UplinkRefused.Count != 0
-                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
-                            + island.Island.SheetPathKey + ", but new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
-                            + " sits on an existing connection with no free room for a stub carrying that label, and no other new stub or sheet pin there "
-                            + "can carry it" + (island.Attached ? " (every other new stub ends on one of its power symbols)" : "")
-                            + ". Clear the space next to that pin in the schematic editor.")
-                        : island.Attached
-                        ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
-                            + island.Island.SheetPathKey + ", but every new stub there ends on one of its power symbols, so none has room for the label. "
-                            + "Move a power symbol away from the new pins in the schematic editor.")
-                        : Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The plan crosses net '" + NetName(island)
-                            + "' into its parent sheet but gives sheet " + island.Island.SheetPathKey + " nothing to carry its hierarchical label.");
                 outcomes.Add(new(island.Island.NetId, record.ScreenId, views[0].Path, island.Strategy,
                     island.Generated.ToArray(), island.Attached, island.FallbackReason));
                 if (island.Joined)
@@ -661,14 +765,43 @@ public static class SchematicConnectionRealizer
             if (islands.Count != 0)
                 diagnostics.Add(new(SchematicConnectionErrors.RealizationPageReservationsUnspecified, "info", null, null,
                     "The drawing-sheet title block on screen " + record.ScreenId.ToString("D")
-                    + " is not a schematic item; only the page inset keeps generated items away from it."));
+                    + " is not a schematic item; routed wires keep inside the drawing sheet's frame and clear of its title block as KiCad measures"
+                    + " them, and label stubs only inside the page inset."));
+        }
+
+        // §6.3 (d) with (e): the island's first stub carries its hierarchical label unless that stub attaches to a same-net power
+        // symbol, which leaves no room for a label (the power pin sits on the stub's line, so every longer stub runs through it), or
+        // is the optional stub of a new pin stacked on an existing connection that has no room; then the next labelled stub carries
+        // it. When no stub can carry it, the refusal names why (a CN-1 clarification requested from the integration owner).
+        private void RequireUplinkLabel(IslandState island)
+        {
+            if (!UplinkPending(island)) return;
+            throw island.HierarchicalRefused.Count != 0
+                ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                    + island.Island.SheetPathKey + ", but none of its new stubs there has room for one (so the stub of " + string.Join(", ", island.HierarchicalRefused)
+                    + (island.HierarchicalRefused.Count == 1 ? " carries a local label" : " carry local labels") + " instead)" + (island.UplinkRefused.Count != 0 ? " and new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
+                    + " sits on an existing connection with no free room for a stub" : "") + ". Clear the space next to one of those pins in the schematic editor.")
+                : island.UplinkRefused.Count != 0
+                ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                    + island.Island.SheetPathKey + ", but new pin " + string.Join(", ", island.UplinkRefused.Select(Describe))
+                    + " sits on an existing connection with no free room for a stub carrying that label, and no other new stub or sheet pin there "
+                    + "can carry it" + (island.Attached ? " (every other new stub ends on one of its power symbols)" : "")
+                    + ". Clear the space next to that pin in the schematic editor.")
+                : island.Attached
+                ? Error(SchematicConnectionErrors.RealizationNoFreeStub, "Net '" + NetName(island) + "' needs a hierarchical label on sheet "
+                    + island.Island.SheetPathKey + ", but every new stub there ends on one of its power symbols, so none has room for the label. "
+                    + "Move a power symbol away from the new pins in the schematic editor.")
+                : Error(SchematicConnectionErrors.ConnectedInternalInconsistency, "The plan crosses net '" + NetName(island)
+                    + "' into its parent sheet but gives sheet " + island.Island.SheetPathKey + " nothing to carry its hierarchical label.");
         }
 
         // Everything drawing a screen's islands adds, so that the screen can be drawn again from the same start.
-        private sealed record ScreenStart(int Items, int Points, int Segments, int Envelopes, int Generated, HashSet<Guid> Used);
+        private sealed record ScreenStart(int Items, int Points, int Segments, int Envelopes, int Generated, HashSet<Guid> Used,
+            Dictionary<Guid, int> SheetPins);
 
         private ScreenStart Snapshot(Screen screen) =>
-            new(screen.Items.Count, screen.Points.Count, screen.Segments.Count, screen.Envelopes.Count, generated.Count, [.. used]);
+            new(screen.Items.Count, screen.Points.Count, screen.Segments.Count, screen.Envelopes.Count, generated.Count, [.. used],
+                sheetPins.ToDictionary(p => p.Key, p => p.Value.Count));
 
         private void Restore(Screen screen, ScreenStart start)
         {
@@ -679,6 +812,12 @@ public static class SchematicConnectionRealizer
             generated.RemoveRange(start.Generated, generated.Count - start.Generated);
             used.Clear();
             used.UnionWith(start.Used);
+            foreach (var sheet in sheetPins.Keys.ToArray())
+            {
+                int kept = start.SheetPins.GetValueOrDefault(sheet);
+                if (kept == 0) sheetPins.Remove(sheet);
+                else sheetPins[sheet].RemoveRange(kept, sheetPins[sheet].Count - kept);
+            }
         }
 
         private MeasureSchematicPlacement Request(PathView view) => new()
@@ -724,7 +863,10 @@ public static class SchematicConnectionRealizer
                 && measured.Candidates.All(c => Equals(c.Anchor, request.Candidates.Single(r => r.Id.Equals(c.Id)).Position))
                 && measured.ItemCandidates.Count == request.ItemCandidates.Count
                 && measured.PageBounds is not null && ValidBox(measured.PageBounds)
-                && measured.Obstacles.Concat(measured.Candidates).Concat(measured.ItemCandidates).All(b => b.Anchor is not null && ValidBox(b.Bounds));
+                && measured.Obstacles.Concat(measured.Candidates).Concat(measured.ItemCandidates).All(b => b.Anchor is not null && ValidBox(b.Bounds)
+                    && b.VisibleFieldBounds.All(f => ValidBox(f) && Box.Of(f).Within(Box.Of(b.Bounds))))
+                && measured.ItemCandidates.All(b => b.VisibleFieldBounds.Count == 0)
+                && (measured.DrawingSheet is null || (ValidBox(measured.DrawingSheet.MarginFrame) && measured.DrawingSheet.Items.All(i => ValidBox(i.Bounds))));
             for (int i = 0; complete && i < request.ItemCandidates.Count; i++)
             {
                 var prototype = UnpackItem(request.ItemCandidates[i]);
@@ -1068,22 +1210,36 @@ public static class SchematicConnectionRealizer
         // The escape corridor of a terminal (§7): the pin's straight way out through the outline of its own symbol (and of any
         // symbol of the same island with a pin stacked on it), which KiCad measures with the symbol's visible fields, as far as
         // the first grid node clear of that outline inflated by the clearance; a stub runs through the same room (§6.4 rule 5).
-        // The number of grid steps to that node, at least one (the escape), and at most the longest stub; null beyond that.
-        private int? Corridor(Screen screen, IslandState island, RouteTerminal terminal)
+        // The outline stays an obstacle everywhere else (§7 "obstacle bounds"), so the corridor must reach out of it. It never
+        // passes the symbol's own text: it keeps the clearance from each of those symbols' visible fields, as KiCad measures
+        // them, or the pin has no escape (a CN-1 §7 clarification reported to the integration owner). The number of grid steps
+        // to that node, at least one (the escape), and at most the longest stub; otherwise null and why.
+        private (int? Steps, string? Blocked) Corridor(Screen screen, IslandState island, RouteTerminal terminal)
         {
             var owners = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == terminal.Anchor && island.Same.Contains(p.Owner))
-                .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct().Where(screen.Obstacles.ContainsKey).Select(o => screen.Obstacles[o].Inflate(policy.ClearanceNm)).ToArray();
+                .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct().OrderBy(o => o).ToArray();
+            var outlines = owners.Where(screen.Obstacles.ContainsKey).Select(o => screen.Obstacles[o].Inflate(policy.ClearanceNm)).ToArray();
             int longest = SchematicConnectionPolicy.StubMultiples[^1];
-            for (int steps = 1; steps <= longest; steps++)
-                if (!owners.Any(o => o.Contains(terminal.Anchor.Step(terminal.Outward, steps * policy.GridNm)))) return steps;
-            return null;
+            int? found = null;
+            for (int steps = 1; steps <= longest && found is null; steps++)
+                if (!outlines.Any(o => o.Contains(terminal.Anchor.Step(terminal.Outward, steps * policy.GridNm)))) found = steps;
+            if (found is not { } corridor) return (null, "is covered by its own symbol's outline for more than the longest stub");
+            var end = terminal.Anchor.Step(terminal.Outward, corridor * policy.GridNm);
+            foreach (var owner in owners)
+                foreach (var field in screen.Fields.GetValueOrDefault(owner, []))
+                    if (SegmentMeets(terminal.Anchor, end, field.Inflate(policy.ClearanceNm), open: false))
+                        return (null, "has its way out of symbol " + owner.ToString("D") + " run within the clearance of that symbol's own field text at ("
+                            + field.L.ToString(CultureInfo.InvariantCulture) + ", " + field.T.ToString(CultureInfo.InvariantCulture) + ")-("
+                            + field.R.ToString(CultureInfo.InvariantCulture) + ", " + field.B.ToString(CultureInfo.InvariantCulture) + ")");
+            return (corridor, null);
         }
 
         // §7: join the island's new pins with orthogonal wires named by one label at the first pin, or record why not (the island
         // then falls back to label stubs). Each pin's one-grid escape and the label stub at the first pin are admitted with the
         // §6.4 rules; the router keeps every other wire step clear of the sheet by the §7 rules. Nothing is kept unless the whole
         // island is routed.
-        private bool TryRoute(Screen screen, IslandState island, IReadOnlyList<IslandState> stubRoom, IEnumerable<Pt> escapes)
+        private bool TryRoute(Screen screen, IslandState island, IReadOnlyList<IslandState> shortRoom, IReadOnlyList<IslandState> fullRoom,
+            IReadOnlyList<IslandState> sheetRoom, IEnumerable<Pt> escapes)
         {
             long grid = policy.GridNm;
             var found = RouteTerminals(screen, island);
@@ -1094,36 +1250,59 @@ public static class SchematicConnectionRealizer
                 island.FallbackReason = reason;
                 return false;
             }
+            // Without every symbol's field positions no wire can be kept off a symbol's own text (Corridor): fail closed.
+            if (!screen.FieldsKnown)
+                return Fallback("this KiCad does not report where symbol fields are drawn, so routed wires cannot be kept clear of symbol text");
             var corridors = new Dictionary<Guid, int>();
             foreach (var terminal in terminals)
             {
                 var pin = pins[terminal.PlacedPinId];
                 if (terminal.Anchor.X % grid != 0 || terminal.Anchor.Y % grid != 0)
                     return Fallback("pin " + Describe(pin) + " is not on the connection grid");
-                if (Corridor(screen, island, terminal) is not { } steps)
-                    return Fallback("pin " + Describe(pin) + " is covered by its own symbol's outline for more than the longest stub");
-                corridors.Add(terminal.PlacedPinId, steps);
+                var (steps, blocked) = Corridor(screen, island, terminal);
+                if (steps is null) return Fallback("pin " + Describe(pin) + " " + blocked);
+                corridors.Add(terminal.PlacedPinId, steps.Value);
                 var escape = terminal.Escape(grid);
-                if (!screen.Usable.Contains(escape)) return Fallback("pin " + Describe(pin) + " leaves its symbol outside the page inset");
+                if (!screen.RouteRegion.Contains(escape)) return Fallback("pin " + Describe(pin) + " leaves its symbol outside the drawing sheet's frame");
                 if (Refusal(policy, screen, island, terminal.Anchor, escape, terminal.Outward, null, terminal.PlacedPinId, pin.SymbolId, null, null,
-                        Variant.Stub) is { } refused)
+                        Variant.Stub, routed: true) is { } refused)
                     return Fallback("pin " + Describe(pin) + " has no room to leave its symbol by one grid step (" + refused + ")");
             }
-            // The one label naming the connection sits on a stub from the tree's first pin (§7: global names on the tree root;
-            // the island's uplink hierarchical label; otherwise its local name, which KiCad needs to give the net its XML name).
-            var root = terminals[0];
-            var rootPin = pins[root.PlacedPinId];
+            // The one label naming the connection sits on a stub from the tree's root (§7: global names on the tree root; the
+            // island's uplink hierarchical label; otherwise its local name, which KiCad needs to give the net its XML name). The
+            // root is the first pin in the §7 order whose label stub fits inside the drawing sheet's frame without covering
+            // another pin's escape, and the tree grows from it (a CN-1 §7 clarification reported to the integration owner: a
+            // first pin whose label would leave the frame does not make a routable connection unroutable). The label's stub
+            // reaches at least one grid beyond the root's corridor, so that the tree has a node clear of the root's own symbol
+            // for the other pins to join.
             var kind = KindFor(island);
-            // The label's stub reaches at least one grid beyond the root's corridor, so that the tree has a node clear of the
-            // root's own symbol for the other pins to join.
-            if (!TryStub(screen, island, root.Anchor, root.Outward, root.PlacedPinId, rootPin.SymbolId, Variant.Stub, kind, out var stub, allowAttach: false,
-                    minimumLength: (corridors[root.PlacedPinId] + 1) * grid))
-                return Fallback("the " + kind.ToString().ToLowerInvariant() + " label naming the connection has no room at its first pin " + Describe(rootPin)
-                    + " (" + lastRefusal + ")");
+            Stub? labelled = null;
+            RouteTerminal? root = null;
+            var refusals = new List<string>();
+            foreach (var candidate in terminals)
+            {
+                var candidatePin = pins[candidate.PlacedPinId];
+                if (!TryStub(screen, island, candidate.Anchor, candidate.Outward, candidate.PlacedPinId, candidatePin.SymbolId, Variant.Stub, kind, out var tried,
+                        allowAttach: false, minimumLength: (corridors[candidate.PlacedPinId] + 1) * grid, routed: true))
+                {
+                    refusals.Add("pin " + Describe(candidatePin) + ": " + lastRefusal);
+                    continue;
+                }
+                var covered = terminals.FirstOrDefault(t => t != candidate && SegmentMeets(t.Anchor, t.Escape(grid), tried.Envelope!.Value, open: false));
+                if (covered is not null)
+                {
+                    refusals.Add("pin " + Describe(candidatePin) + ": it would cover the escape of pin " + Describe(pins[covered.PlacedPinId]));
+                    continue;
+                }
+                (labelled, root) = (tried, candidate);
+                break;
+            }
+            if (labelled is not { } stub || root is null)
+                return Fallback("the " + kind.ToString().ToLowerInvariant() + " label naming the connection has no room at any of its new pins ("
+                    + string.Join("; ", refusals) + ")");
+            var rootPin = pins[root.PlacedPinId];
             var envelope = stub.Envelope!.Value;
-            foreach (var terminal in terminals.Skip(1))
-                if (SegmentMeets(terminal.Anchor, terminal.Escape(grid), envelope, open: false))
-                    return Fallback("the label at pin " + Describe(rootPin) + " would cover the escape of pin " + Describe(pins[terminal.PlacedPinId]));
+            terminals = [root, .. terminals.Where(t => t != root)];
             // An existing connection without the island's name (a join, §6.3 (a)) is reached by wire; one that already carries the
             // name is joined through the label.
             RouteExistingPart? existing = null;
@@ -1148,13 +1327,15 @@ public static class SchematicConnectionRealizer
                                  .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct())
                         Exempt(owner, point.Pin!.Value, point.Node);
             var obstacles = screen.Obstacles.Where(o => !screen.ConnectionLines.Contains(o.Key)).OrderBy(o => o.Key)
-                .Select(o => new RouteObstacle(o.Value, owners.TryGetValue(o.Key, out var exempt) ? exempt : [])).ToArray();
+                .Select(o => new RouteObstacle(o.Value, owners.TryGetValue(o.Key, out var exempt) ? exempt : []))
+                .Concat(screen.RouteKeepOuts.Select(k => new RouteObstacle(k, []))).ToArray();
             // The one-grid escapes of the new pins still to be routed, and the shortest stub and its label at every pin of the islands
             // that will certainly be drawn with stubs, stay free (§7; a clarification reported to the integration owner: otherwise
-            // one island's wires could take the only way out, or the only stub room, another island has).
-            var (reservedNodes, reservedLabels) = Reserved(screen, stubRoom);
+            // one island's wires could take the only way out, or the only stub room, another island has). So does all the
+            // milestone-1 room of every island a route crowded out on an earlier drawing of this sheet.
+            var (reservedNodes, reservedLabels) = Reserved(screen, shortRoom, fullRoom, sheetRoom);
             reservedNodes.AddRange(escapes);
-            var request = new OrthogonalRouteRequest(grid, policy.ClearanceNm, screen.Usable, terminals, Length(stub), envelope, existing, obstacles,
+            var request = new OrthogonalRouteRequest(grid, policy.ClearanceNm, screen.RouteRegion, terminals, Length(stub), envelope, existing, obstacles,
                 [.. screen.Points.Select(p => p.Position).Concat(reservedNodes).Distinct()],
                 [.. screen.Segments.Select(s => new RouteSegment(s.A, s.B, !s.Bus && !island.Same.Contains(s.Owner)))],
                 [.. screen.Envelopes, .. reservedLabels], limits);
@@ -1178,29 +1359,71 @@ public static class SchematicConnectionRealizer
             static long Length(Stub s) => Math.Abs(s.E.X - s.A.X) + Math.Abs(s.E.Y - s.A.Y);
         }
 
-        // The room label stubs need at the pins of the islands still to be drawn: the two grid nodes of the shortest stub from
-        // each new pin and join candidate, and the label that stub would carry, in every kind the island may give it.
-        private (List<Pt> Nodes, List<Box> Labels) Reserved(Screen screen, IReadOnlyList<IslandState> pending)
+        // The room label stubs need, kept clear of a route: for `shortRoom` islands the grid nodes of the shortest stub from each
+        // new pin and join candidate and the label that stub would carry, in every kind the island may give it; for `fullRoom`
+        // islands every stub length with its labels, a label on each join candidate's own pin, and the room of their sheet pins;
+        // for `sheetRoom` islands (already drawn) the room of their sheet pins only.
+        private (List<Pt> Nodes, List<Box> Labels) Reserved(Screen screen, IReadOnlyList<IslandState> shortRoom, IReadOnlyList<IslandState> fullRoom,
+            IReadOnlyList<IslandState> sheetRoom)
         {
             var nodes = new List<Pt>();
             var labels = new List<Box>();
-            long first = SchematicConnectionPolicy.StubMultiples[0] * policy.GridNm;
-            foreach (var other in pending)
+            long grid = policy.GridNm;
+            void Stub(IslandState island, Pt a, (int Dx, int Dy) outward, IEnumerable<int> multiples)
             {
-                var pins = other.Island.Members.Where(m => m.RequiresStub).Select(m => m.Pin).Concat(other.Island.JoinCandidates)
-                    .DistinctBy(p => (p.SymbolId, p.PlacedPinId));
-                foreach (var pin in pins)
+                foreach (int multiple in multiples)
                 {
-                    var anchor = AnchorOf(screen.Views[0], pin);
-                    var a = Pt.Of(anchor.Position);
-                    var outward = SchematicConnectionGeometry.Outward(anchor);
-                    for (long step = policy.GridNm; step <= first; step += policy.GridNm) nodes.Add(a.Step(outward, step));
-                    foreach (var kind in Kinds(other.Island))
-                        if (screen.Prototypes.TryGetValue(new(kind, other.Island.LabelText, SchematicConnectionGeometry.Spin(outward)), out var prototype))
-                            labels.Add(prototype.Offset(a.Step(outward, first)));
+                    for (long step = grid; step <= multiple * grid; step += grid) nodes.Add(a.Step(outward, step));
+                    foreach (var kind in Kinds(island.Island))
+                        if (screen.Prototypes.TryGetValue(new(kind, island.Island.LabelText, SchematicConnectionGeometry.Spin(outward)), out var prototype))
+                            labels.Add(prototype.Offset(a.Step(outward, multiple * grid)));
                 }
             }
+            IEnumerable<ConnectionPlacedPin> Pins(IslandState island) => island.Island.Members.Where(m => m.RequiresStub).Select(m => m.Pin)
+                .Concat(island.Island.JoinCandidates).DistinctBy(p => (p.SymbolId, p.PlacedPinId));
+            foreach (var island in shortRoom)
+                foreach (var pin in Pins(island))
+                {
+                    var anchor = AnchorOf(screen.Views[0], pin);
+                    Stub(island, Pt.Of(anchor.Position), SchematicConnectionGeometry.Outward(anchor), [SchematicConnectionPolicy.StubMultiples[0]]);
+                }
+            foreach (var island in fullRoom)
+            {
+                foreach (var pin in Pins(island))
+                {
+                    var anchor = AnchorOf(screen.Views[0], pin);
+                    var (a, outward) = (Pt.Of(anchor.Position), SchematicConnectionGeometry.Outward(anchor));
+                    Stub(island, a, outward, SchematicConnectionPolicy.StubMultiples);
+                    if (island.Island.JoinCandidates.Any(c => c.PlacedPinId == pin.PlacedPinId))
+                        foreach (var kind in Kinds(island.Island))
+                            if (screen.Prototypes.TryGetValue(new(kind, island.Island.LabelText, SchematicConnectionGeometry.Spin(outward)), out var prototype))
+                                labels.Add(prototype.Offset(a));
+                }
+                SheetPinRoom(island);
+            }
+            foreach (var island in sheetRoom) SheetPinRoom(island);
             return (nodes, labels);
+
+            // Every free slot on the facing edge of each child sheet the island crosses into (§6.5), its stub at every length and
+            // each label that stub may carry.
+            void SheetPinRoom(IslandState island)
+            {
+                foreach (var sheetId in island.Island.ChildSheetSymbolIds)
+                {
+                    var sheet = SheetOf(screen, sheetId);
+                    var (side, x) = Side(screen, island, sheet);
+                    var outward = side == SheetSide.ShsLeft ? (-1, 0) : (1, 0);
+                    var taken = sheet.Pins.Where(p => p.Side == side).Select(p => p.Position.YNm).ToArray();
+                    long top = sheet.Position.YNm, bottom = checked(sheet.Position.YNm + sheet.Size.YNm);
+                    for (long y = checked(top + policy.SheetPinPitchNm); y <= bottom - policy.SheetPinPitchNm; y = checked(y + grid))
+                    {
+                        if (taken.Any(t => Math.Abs(t - y) < policy.SheetPinPitchNm)) continue;
+                        var a = new Pt(x, y);
+                        nodes.Add(a);
+                        Stub(island, a, outward, SchematicConnectionPolicy.StubMultiples);
+                    }
+                }
+            }
         }
 
         // The island's existing connection on this sheet as places a route may attach to (§7): the free ends of its wires, and
@@ -1229,7 +1452,8 @@ public static class SchematicConnectionRealizer
             var points = new Dictionary<Pt, RouteAttachPoint>();
             foreach (var end in own.SelectMany(s => new[] { s.A, s.B }).Distinct().OrderBy(p => p.X).ThenBy(p => p.Y))
             {
-                if (end.X % grid != 0 || end.Y % grid != 0 || !screen.Usable.Contains(end)) continue;
+                if (end.X % grid != 0 || end.Y % grid != 0 || !screen.RouteRegion.Contains(end)
+                    || screen.RouteKeepOuts.Any(k => k.Inflate(policy.ClearanceNm).Contains(end))) continue;
                 if (screen.Points.Any(p => !(p.Kind == PointKind.WireEnd && anchor.Contains(p.Owner) && p.Position == end)
                         && Math.Abs(p.Position.X - end.X) <= policy.ClearanceNm && Math.Abs(p.Position.Y - end.Y) <= policy.ClearanceNm)) continue;
                 if (screen.Segments.Any(s => !anchor.Contains(s.Owner) && OnSegment(end, s.A, s.B))) continue;
@@ -1243,8 +1467,9 @@ public static class SchematicConnectionRealizer
                 var a = Pt.Of(pinAnchor.Position);
                 var outward = SchematicConnectionGeometry.Outward(pinAnchor);
                 var node = a.Step(outward, grid);
-                if (points.ContainsKey(node) || !screen.Usable.Contains(node)) continue;
-                if (Refusal(policy, screen, island, a, node, outward, null, member.Pin.PlacedPinId, member.Pin.SymbolId, null, null, Variant.JoinStub) is not null)
+                if (points.ContainsKey(node) || !screen.RouteRegion.Contains(node)) continue;
+                if (Refusal(policy, screen, island, a, node, outward, null, member.Pin.PlacedPinId, member.Pin.SymbolId, null, null, Variant.JoinStub,
+                        routed: true) is not null)
                     continue;
                 var exits = Exits(a);
                 int symbols = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == a).Select(p => p.OwnerSymbol).Distinct().Count();
@@ -1316,7 +1541,7 @@ public static class SchematicConnectionRealizer
 
         // §6.3 (e) and (f): the first admissible stub length; a stub ending on a same-net power symbol pin attaches to it.
         private bool TryStub(Screen screen, IslandState island, Pt a, (int Dx, int Dy) outward, Guid? ownPin, Guid owner,
-            Variant variant, ConnectionLabelKind kind, out Stub stub, bool allowAttach = true, long minimumLength = 0)
+            Variant variant, ConnectionLabelKind kind, out Stub stub, bool allowAttach = true, long minimumLength = 0, bool routed = false)
         {
             var combo = new Combo(kind, island.Island.LabelText, SchematicConnectionGeometry.Spin(outward));
             foreach (int multiple in SchematicConnectionPolicy.StubMultiples)
@@ -1332,7 +1557,7 @@ public static class SchematicConnectionRealizer
                     continue;
                 }
                 var envelope = screen.Prototypes[combo].Offset(e);
-                if (Admit(screen, island, a, e, outward, envelope, ownPin, owner, null, null, variant))
+                if (Admit(screen, island, a, e, outward, envelope, ownPin, owner, null, null, variant, routed))
                 { stub = new(a, e, combo, envelope, null); return true; }
             }
             stub = null!;
@@ -1341,8 +1566,8 @@ public static class SchematicConnectionRealizer
 
         // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier).
         private bool Admit(Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward, Box? r, Guid? ownPin, Guid owner,
-            Guid? carrierPin, Guid? carrierSymbol, Variant variant) =>
-            (lastRefusal = Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant)) is null;
+            Guid? carrierPin, Guid? carrierSymbol, Variant variant, bool routed = false) =>
+            (lastRefusal = Refusal(policy, screen, island, a, e, outward, r, ownPin, owner, carrierPin, carrierSymbol, variant, routed)) is null;
 
         // §6.5: which side of sheet symbol K a new pin goes on, and that side's x.
         private (SheetSide Side, long X) Side(Screen screen, IslandState island, SheetSymbol sheet)

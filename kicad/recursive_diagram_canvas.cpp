@@ -2310,25 +2310,32 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
     }
     return result;
 }
+/// The place above and right of a boundary port drawn at aAt that has no stored placement yet, where its name goes when the
+/// fallback column has room, in canvas pixels with aDC's font (clear of the port's 12-pixel square, design QA P2-6).
+wxRect rightName( wxDC& dc, const R::PORT& port, const wxPoint& at )
+{
+    return wxRect( wxPoint( at.x + 12, at.y - 26 ), dc.GetTextExtent( Text( port.name ) ) );
+}
+/// Whether that place is clear: 8 pixels or more from every block (aBlocks) and from every port's square but its own
+/// (aSquares), and 3 pixels or more from every straight run of every connection (aWires), all as drawn. A name 3 pixels beside
+/// a block's port read as that port's name, and a run through a name cut it (mockup audit M1-2 and M1-11).
+bool rightNameClear( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks,
+                     const std::vector<wxRect>& squares, const std::vector<wxRect>& wires )
+{
+    const wxRect right = rightName( dc, port, at );
+    auto crowds = [&]( const wxRect& item, int by ) { return wxRect( item ).Inflate( by ).Intersects( right ); };
+    return std::none_of( blocks.begin(), blocks.end(), [&]( const wxRect& block ) { return crowds( block, 8 ); } )
+           && std::none_of( squares.begin(), squares.end(), [&]( const wxRect& square ) { return !square.Contains( at ) && crowds( square, 8 ); } )
+           && std::none_of( wires.begin(), wires.end(), [&]( const wxRect& run ) { return crowds( run, 3 ); } );
+}
 /// Where a boundary port drawn at aAt names itself, in canvas pixels, with aDC's font: outside the level frame beside the
-/// port's side, or above and right of a boundary port that has no stored placement yet. aBlocks are the child blocks and
-/// aSquares every port's square as drawn: where the name above and right of an unplaced port would come within 8 pixels of
-/// a block or of any port's square but its own, as the fallback column's names do in a small window or beside a block's
-/// edge port, it goes above and left of the port instead, outside the level, as the name of a port placed on the level's
-/// left side does (mockup audit M1-2; a name 3 pixels from a block's port read as that port's name).
-wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks, const std::vector<wxRect>& squares )
+/// port's side; for a boundary port that has no stored placement yet, above and right of it, or, when aLeft, above and left of
+/// it, outside the level, as the name of a port placed on the level's left side is drawn (mockup audit M1-2).
+wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, bool left )
 {
     wxSize extent = dc.GetTextExtent( Text( port.name ) );
-    // Clear of the port's 12-pixel square (design QA P2-6).
     if( !port.placed )
-    {
-        wxRect right( wxPoint( at.x + 12, at.y - 26 ), extent );
-        auto crowds = [&]( const wxRect& item ) { return wxRect( item ).Inflate( 8 ).Intersects( right ); };
-        if( std::none_of( blocks.begin(), blocks.end(), crowds )
-            && std::none_of( squares.begin(), squares.end(), [&]( const wxRect& square ) { return !square.Contains( at ) && crowds( square ); } ) )
-            return right;
-        return wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent );
-    }
+        return left ? wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent ) : rightName( dc, port, at );
     switch( port.side )
     {
     case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 10, at.y - extent.y - 6 ), extent );
@@ -2351,15 +2358,35 @@ std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portSquares( const R::LEVEL_LAYOUT&
     for( const auto& mark : portMarks( drawn ) ) squares.push_back( mark.rect );
     return squares;
 }
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::wireBoxes( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<wxRect> runs;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            auto route = drawn.Route( link, i );
+            for( size_t j = 1; j < route.size(); ++j )
+            {
+                wxPoint a = toScreen( route[j - 1] ), b = toScreen( route[j] );
+                runs.emplace_back( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+            }
+        }
+    return runs;
+}
 std::vector<RECURSIVE_DIAGRAM_FRAME::BOUNDARY_NAME> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
 {
     std::vector<BOUNDARY_NAME> result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
     const auto blocks = blockBoxes( drawn );
     const auto squares = portSquares( drawn );
+    const auto wires = wireBoxes( drawn );
+    // The fallback column names all its ports on one side, as the approved CPU walkthrough does: right of the ports while each
+    // name has a clear place there, otherwise all left of them, outside the level (mockup audit M1-2 and M1-11).
+    const bool left = std::any_of( drawn.Ports().begin(), drawn.Ports().end(), [&]( const R::PORT& port )
+            { return port.boundary && !port.placed && !rightNameClear( dc, port, toScreen( port.anchor ), blocks, squares, wires ); } );
     for( const auto& port : drawn.Ports() )
         if( port.boundary )
-            result.push_back( { port.blockId, port.interfaceId, port.name, boundaryName( dc, port, toScreen( port.anchor ), blocks, squares ) } );
+            result.push_back( { port.blockId, port.interfaceId, port.name, boundaryName( dc, port, toScreen( port.anchor ), left ) } );
     return result;
 }
 std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL_LAYOUT& drawn, const std::string& block ) const
@@ -2839,19 +2866,14 @@ int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
 RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R::LEVEL_LAYOUT& drawn ) const
 {
     // A port on the level frame names itself outside the frame at a fixed text size (see paint), so fitting
-    // leaves that many pixels beside the drawing on the port's side. So does a port of the fallback column whose name
-    // goes left of it at the current scale, because the first column's blocks or their ports leave it no room on the right
-    // (M1-2).
+    // leaves that many pixels beside the drawing on the port's side. So does the fallback column when its names go left of
+    // their ports at the current scale, because the blocks, their ports or the connections leave one of them no clear place
+    // on the right (M1-2, M1-11).
     LABEL_ROOM room;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
-    const auto blocks = blockBoxes( drawn );
-    const auto squares = portSquares( drawn );
-    for( const auto& port : drawn.Ports() ) if( port.boundary && !port.placed )
-    {
-        wxPoint at = toScreen( port.anchor );
-        wxRect name = boundaryName( dc, port, at, blocks, squares );
-        if( name.x < at.x ) room.left = std::max( room.left, name.width + 14 );
-    }
+    for( const auto& name : boundaryNames( drawn ) )
+        if( const R::PORT* port = drawn.Port( name.owner, name.id ); port && !port->placed && name.rect.x < toScreen( port->anchor ).x )
+            room.left = std::max( room.left, name.rect.width + 14 );
     for( const auto& port : drawn.Ports() ) if( port.boundary && port.placed )
     {
         wxSize extent = dc.GetTextExtent( Text( port.name ) );
@@ -3155,8 +3177,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         dc.DrawText( place.text, place.rect.GetTopLeft() );
     }
     std::optional<TARGET> target = connectTarget( drawn );
-    const auto blocks = blockBoxes( drawn );
-    const auto squares = portSquares( drawn );
+    const auto boundaryLabels = boundaryNames( drawn );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
         // Ports are 12 DIP squares at every zoom (design QA P2-6).
@@ -3168,8 +3189,8 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         if( port.boundary )
         {
             // A port on the level frame names itself outside the frame, beside its side.
-            if( const R::PORT* stored = drawn.Port( port.owner, port.id ) )
-                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at, blocks, squares ).GetTopLeft() );
+            for( const auto& name : boundaryLabels )
+                if( name.owner == port.owner && name.id == port.id ) { dc.DrawText( Text( port.name ), name.rect.GetTopLeft() ); break; }
         }
         else if( port.placed || selected )
         {

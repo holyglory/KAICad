@@ -273,6 +273,8 @@ private:
     std::vector<wxRect> blockBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// Every port square of aLayout as drawn, in canvas pixels (see portMarks).
     std::vector<wxRect> portSquares( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Every straight run of every connection of aLayout as drawn, as its bounding box in canvas pixels.
+    std::vector<wxRect> wireBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// A port's square as drawn at aAt: 12 DIP at every zoom (design QA P2-6).
     wxRect portMark( const wxPoint& aAt ) const;
     /// Every port square as drawn on the canvas (an unplaced child port once per place a connection attaches to it).

@@ -204,6 +204,8 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(observed.IsError == true, "The " + label + " level can be observed; the response is retained.");
                 var view = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation.json"), view.GetRawText(), token);
+                // Mockup audit M1-11: no connection runs through or against a boundary port's name, in every observed level.
+                VerifyBoundaryNamesOffWires(at, view.GetProperty("resolvedLayout"), label);
                 return view.GetProperty("resolvedLayout");
             }
             static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
@@ -6461,6 +6463,33 @@ public sealed partial class NativeSessionTests
                 var clear = new P.DiagramControlRect { X = mark.X - 8, Y = mark.Y - 8, Width = mark.Width + 16, Height = mark.Height + 16 };
                 Assert.IsTrue(RectsApart(name, clear), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
                     + $"is 8 pixels or more from the square of port '{mark.Label}' at ({mark.X}, {mark.Y}), so it cannot read as that port's name.");
+            }
+        }
+    }
+
+    /// <summary>Mockup audit M1-11: no connection runs through or against the name of a port on the level's boundary. Every
+    /// straight run of every computed path in <paramref name="layout"/> (the level the editor drew, in diagram units), placed on
+    /// the canvas as the editor reports its origin and scale, keeps 3 pixels or more from every boundary port's name. (On the
+    /// PSU level the Rail A sense run crossed "Telemetry" and the DC input run touched "Power" while those names sat right of
+    /// their ports.)</summary>
+    private static void VerifyBoundaryNamesOffWires(P.RecursiveDiagramEditorState at, JsonElement layout, string step)
+    {
+        static double Unit(JsonElement value) => double.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+        int X(double x) => at.CanvasWindowX + (int)Math.Round((x - at.CanvasOriginX) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        int Y(double y) => at.CanvasWindowY + (int)Math.Round((y - at.CanvasOriginY) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        Assert.IsTrue(at.CanvasScale > 0, step + ": the canvas reports its scale.");
+        foreach (var route in layout.GetProperty("routes").EnumerateArray())
+        {
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (X: X(Unit(p.GetProperty("x"))), Y: Y(Unit(p.GetProperty("y"))))).ToArray();
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), top = Math.Min(points[i - 1].Y, points[i].Y);
+                int right = Math.Max(points[i - 1].X, points[i].X), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                var run = new P.DiagramControlRect { X = left - 3, Y = top - 3, Width = right - left + 7, Height = bottom - top + 7 };
+                foreach (var name in at.BoundaryPortNames)
+                    Assert.IsTrue(RectsApart(name, run), $"{step}: the connection {route.GetProperty("connectionId").GetString()} runs from ({points[i - 1].X}, "
+                        + $"{points[i - 1].Y}) to ({points[i].X}, {points[i].Y}), within 3 pixels of the boundary port name '{name.Label}' ({name.X}, {name.Y}, "
+                        + $"{name.Width} x {name.Height}).");
             }
         }
     }

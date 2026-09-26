@@ -29,33 +29,42 @@ public sealed partial class NativeSessionTests
     //     Before the creation and before the realization, the same apply is first made through the test host with a scripted
     //     refusal, so KiCad commits it and the follow-up check refuses it (ledgers p0aa59a1dfc8701ea, p6728215278183167; see
     //     NativeSynchronizationRecoveryJourney). Retrying, planning and reattaching cannot leave that state; the public tool
-    //     kicad_design_recovery_resolve_pending can. The first project undoes the stuck creation and discards the stuck
+    //     kicad_design_recovery_resolve_pending can. The first project undoes the stuck creation (first refused while a later
+    //     edit made in KiCad is there, then accepted once KiCad's own undo took that edit back) and discards the stuck
     //     realization after KiCad's own undo, and the ordinary applies then resume; the second keeps both results and
-    //     publishes them. The first project also kills a KiCad started for a copy of the realized project while an automatic
-    //     worker watches it: the worker pauses with instance_exited within a second (pec2f1b53d4024a17). The second starts a
-    //     KiCad for a copy too, forces a creation stuck there, joins two XML nets with a wire in KiCad, saves and reloads the
-    //     sheets, and keeps KiCad's result: KiCad's connections are published and the nets' requirements wait for resolution.
+    //     publishes them. The first project also starts a KiCad for a copy of the realized project: there a connection the
+    //     XML adds never reaches KiCad (its test host is killed once the edit is journaled), a wire making that connection is
+    //     committed in KiCad through its checked-edit API (the journey cannot drive KiCad's wire tool), discard clears the
+    //     operation while the record keeps observing KiCad as it was, and refresh, plan and apply publish that wire; then an
+    //     automatic worker watches that KiCad and it is killed: the worker pauses with instance_exited within a second
+    //     (pec2f1b53d4024a17). The second starts a KiCad for a copy too, forces a creation
+    //     stuck there, joins two XML nets with a wire in KiCad, saves and reloads the sheets, and keeps KiCad's result: KiCad's
+    //     connections are published, the nets' requirements wait for resolution and the next plan has nothing to do.
     //  2. Records an earlier preview saved (p91fda8ca22a68141). Preview 23's snapshots listed library_cache among the state
     //     they could not hold; this build holds the library cache exactly and no longer lists it, so a preview 23 record sees
     //     a changed snapshot after upgrading. The same design's record, written as preview 23 wrote it (the only difference
     //     is that list), reattaches and plans normally: the planned design is the one this build writes and nothing is sent
-    //     to KiCad, and applying succeeds with nothing to send, save or write (before, it failed as a settings change). The
-    //     design file keeps preview 23's list until a synchronization next publishes the design. A record saved before
-    //     electrical checkpoints stops at planning with the one action that fixes it, kicad_design_electrical_baseline_initialize,
-    //     which then succeeds (before, it failed with a spurious electrical_baseline_mismatch), and the record plans and
-    //     applies normally. These records are this design's, written in preview 23's format by this build's store; a record
-    //     preview 23 itself wrote is kept byte for byte in automation/tests/fixtures/preview-23-recovery and read, planned
-    //     and saved again by DesignElectricalRecoveryTests.ARecordPreview23WroteReadsAndPlansAgainstThisBuildsSnapshot.
+    //     to KiCad. Applying it publishes exactly that planned design (before, apply failed as a settings change, and later
+    //     did nothing while the plan showed a design without the list): no edit reaches KiCad, KiCad saves its unchanged
+    //     sheets, the design file drops library_cache, and a second apply is a no-op. A record saved before electrical
+    //     checkpoints stops at planning with the one action that fixes it, kicad_design_electrical_baseline_initialize,
+    //     which then succeeds (before, it failed with a spurious electrical_baseline_mismatch), and the record plans the
+    //     same design. Both projects hold the same design, so this runs in the second only. These records are this design's,
+    //     written in preview 23's format by this build's store; a record preview 23 itself wrote is kept byte for byte in
+    //     automation/tests/fixtures/preview-23-recovery and read, planned, applied and saved again by
+    //     DesignElectricalRecoveryTests.ARecordPreview23WroteReadsPlansAndAppliesAgainstThisBuildsSnapshot.
     //  3. Every schematic file is lost, KiCad creates a new empty root for the project and the recovery record adopts it.
     //     Two ways the kept project settings can differ from the XML are refused through the public tools, each with the
     //     project file, the XML and KiCad unchanged (p001c485926b37099). The kept project file changed on disk (a text
     //     variable added): KiCad reads a project file only when it opens the project, so its new root still shows the
     //     settings it loaded, the plan is the rebuild, and apply refuses it with native_file_conflict before anything reaches
-    //     KiCad, so the changed file is never overwritten. KiCad's own project settings changed (the same text variable
-    //     added with kicad_schematic_apply_checked_batch): planning and applying are refused with
-    //     rebuild_project_settings_changed and a message naming the settings KiCad shows and the actions that work while
-    //     the files are lost (change them back in KiCad, or restore the saved project file and reopen the project). The
-    //     file is restored, and the journey takes the first action, after which the rebuild proceeds.
+    //     KiCad, naming the changed file and what fixes it, so the changed file is never overwritten. KiCad's own project
+    //     settings changed (the same text variable added with kicad_schematic_apply_checked_batch): planning and applying
+    //     are refused with rebuild_project_settings_changed and a message naming the settings KiCad shows, the actions that
+    //     work while the files are lost (change them back in KiCad, or restore the saved project file and reopen the
+    //     project) and the recovery step after them. The file is restored, and the journey follows the message literally:
+    //     the setting is changed back in KiCad, planning still refuses because the record has not seen that yet, the record
+    //     is refreshed with kicad_design_recovery_refresh, and the rebuild is planned and applied.
     //     (The harness KiCad cannot be started again inside the journey: NativeSessionTests checks afterwards that it kept its
     //     process epoch and still holds the project. Planning on a KiCad started after the file changed is the same
     //     classification, proven with every setting group in SchematicRebuildTests.)
@@ -231,7 +240,7 @@ public sealed partial class NativeSessionTests
             if (keeps) creationExit = await KeepStuckSynchronization(host, client, document, store, stuckCreation, instanceId, evidence, token);
             else
             {
-                creationExit = await UndoStuckSynchronization(host, client, document, store, stuckCreation, instanceId, evidence, token);
+                creationExit = await UndoStuckSynchronization(host, client, document, store, stuckCreation, processId, display, instanceId, evidence, token);
                 await Apply(store, "creation");
             }
             PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, (await Capture()).Electrical, PsuCpuStage.Components);
@@ -271,11 +280,13 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(drawn["LocalLabel"] > 0 && drawn["HierarchicalLabel"] > 0 && drawn["SchematicLine"] > 0 && drawn["SheetPin"] > 0,
                 "The realization drew labels, hierarchical labels, wires and sheet pins: " + JsonSerializer.Serialize(drawn));
             Step("complete stage realized", new { drawn, realizationExit });
-            // An automatic worker whose KiCad is killed pauses at once with instance_exited (first project). A creation kept after
-            // KiCad joined two XML nets and reloaded its saved sheets publishes KiCad's connections (second project).
+            // On a KiCad for a copy of the project, an XML connection KiCad never received is discarded and the same connection,
+            // committed in KiCad as a wire through its checked-edit API, is taken in and published; then an automatic worker
+            // whose KiCad is killed pauses at once with instance_exited (first project). A creation kept after KiCad joined two XML nets and reloaded its saved sheets
+            // publishes KiCad's connections (second project).
             object? exitPause = keeps ? null : await VerifyAutomaticPauseOnExit(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
                 evidence, instanceId, token);
-            if (exitPause is not null) Step("automatic worker paused on its KiCad's exit", exitPause);
+            if (exitPause is not null) Step("edit KiCad never received discarded and the wire committed in KiCad published; automatic worker paused on its KiCad's exit", exitPause);
             object? keptConnections = keeps ? await VerifyKeptConnectionsWin(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
                 evidence, instanceId, token) : null;
             if (keptConnections is not null) Step("KiCad's own connections kept and published", keptConnections);
@@ -310,12 +321,21 @@ public sealed partial class NativeSessionTests
                 CollectionAssert.Contains(screen.Metadata.NetChains.Select(c => c.Name).ToArray(), "REBUILD_CHAIN");
             }
             Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", realized.Electrical.Hierarchy.Data));
-            var earlier = await EarlierPreviewRecords(settledRecord, currentXml, realized);
-            Step("earlier preview records plan normally", earlier);
+            // Checked in the second project only: both projects hold the same realized design, so a second pass proves
+            // nothing new, and the first project spends that time on the edit KiCad never received.
+            object? earlier = keeps ? await EarlierPreviewRecords(settledRecord, currentXml, realized) : null;
+            if (earlier is not null) Step("earlier preview records plan and publish the planned design", earlier);
 
             // The original: saved by KiCad, clean, and the XML settled on it.
             var original = await Capture();
-            Assert.AreEqual(realized, original, "Adopting the earlier records sent nothing to KiCad.");
+            if (!keeps) Assert.AreEqual(realized, original, "Nothing since the realization reached this KiCad: the other flows ran on a copy's KiCad.");
+            else
+            {
+                // The earlier records' applies saved KiCad's sheets, which moves the save-related state; the design is the same.
+                Assert.AreEqual(realized.Electrical, original.Electrical, "Adopting the earlier records sent no edit to KiCad.");
+                Assert.AreEqual(realized.State.StateSha256, original.State.StateSha256, "Their applies saved KiCad's sheets unchanged.");
+            }
+            Assert.IsFalse(original.State.NativeContentDirty);
             var originalDesign = store.Read()!.State.Baseline;
             var originalSheetPins = OriginalSheetPins(original.Electrical.Hierarchy.Data);
             Assert.HasCount(12, originalSheetPins, "PSU and CPU each hold the five crossing nets' sheet pins, CPU_POWER two (contract §1.6.3).");
@@ -355,7 +375,10 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(changedFilePlan.GetProperty("nativeRebuildRequired").GetBoolean(), "Planning reads no file; KiCad shows the settings the XML records.");
             var changedFile = await RefusedRebuild("changed-project-file", changedProjectBytes, empty);
             Assert.AreEqual("native_file_conflict", changedFile.Code, changedFile.Message);
-            Assert.AreEqual("Native file baselines must be known and unchanged before synchronization.", changedFile.Message);
+            Assert.AreEqual("fixture.kicad_pro changed on disk after KiCad loaded it; restore it, or reopen the project in KiCad and reattach "
+                + "the recovery record (kicad_design_recovery_reattach; if its schematic files are lost, first create the root with "
+                + "kicad_schematic_create), then plan again. Nothing was sent to KiCad and no file was written.",
+                changedFile.Message, "The refusal names the changed file and what fixes it.");
             await File.WriteAllBytesAsync(projectFile, originalFiles[projectFile], token);
             var fileRestored = await Capture();
             Assert.IsTrue(CheckedSchematicContract.FileCoverage(fileRestored.State), "The restored project file is the one KiCad loaded.");
@@ -369,7 +392,8 @@ public sealed partial class NativeSessionTests
                 expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedSettings.State.Revision.Epoch }));
             const string SettingsRefusal = "KiCad's project settings (text variables) differ from the ones the XML records, so rebuilding would "
                 + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last "
-                + "saved with this XML and reopen the project), then rebuild.";
+                + "saved with this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after "
+                + "reopening the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) and rebuild.";
             var settingsPlan = await host.Tool("kicad_design_sync_plan", Recovery(store));
             await File.WriteAllTextAsync(Evidence("changed-settings-plan.json"), RetainedToolEvidence(settingsPlan), token);
             Assert.AreEqual("rebuild_project_settings_changed", Error(settingsPlan), settingsPlan.GetRawText());
@@ -381,12 +405,24 @@ public sealed partial class NativeSessionTests
             var changedSetting = await RefusedRebuild("changed-settings", originalFiles[projectFile], changedSettings);
             Assert.AreEqual("rebuild_project_settings_changed", changedSetting.Code, changedSetting.Message);
             Assert.AreEqual(SettingsRefusal, changedSetting.Message);
-            // The refusal's first action: the setting is changed back in KiCad, and the record adopts the root as KiCad shows it again.
+            // The message, followed literally. Its first action: the setting is changed back in KiCad.
             var restored = await EditTextVariables(changedSettings, emptyRoot.Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value),
                 "Restore the project's text variables");
             Assert.IsTrue(emptyRoot.Metadata.TextVariables.Equals(restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables));
             Assert.IsEmpty(restored.Electrical.Hierarchy.Data.Instances[0].Items);
-            Step("changed project settings refused");
+            // Planning reads the recovery record, which still holds the changed settings, so it still refuses: the refresh the
+            // message names next is needed.
+            var unrefreshed = await host.Tool("kicad_design_sync_plan", Recovery(store));
+            await File.WriteAllTextAsync(Evidence("changed-settings-unrefreshed-plan.json"), RetainedToolEvidence(unrefreshed), token);
+            Assert.AreEqual("rebuild_project_settings_changed", Error(unrefreshed), unrefreshed.GetRawText());
+            Assert.AreEqual(SettingsRefusal, unrefreshed.GetProperty("structuredContent").GetProperty("errorMessage").GetString());
+            // Then the recovery record is refreshed (the same document session, so no reattach); the rebuild is planned below.
+            var refreshed = await host.Tool("kicad_design_recovery_refresh", Recovery(store));
+            await File.WriteAllTextAsync(Evidence("changed-settings-refresh.json"), refreshed.GetRawText(), token);
+            RequireToolSuccess(refreshed);
+            Assert.IsTrue(refreshed.GetProperty("structuredContent").GetProperty("changed").GetBoolean(), refreshed.GetRawText());
+            Assert.AreEqual(restored.Electrical.Hierarchy.Data, store.Read()!.State.Observed, "The record observes the settings as KiCad shows them again.");
+            Step("changed project settings refused, put back and refreshed");
 
             // ---- 4. The schematic is rebuilt from the XML -------------------------------------------------------
             // Must-catch, in the live editor through the checked batch path apply uses: the identity is only ever a batch's
@@ -399,8 +435,6 @@ public sealed partial class NativeSessionTests
             refusals.Add(await RefusedIdentity(restored, "Atomic operation 1 rejected", Identity(originalRootScreen),
                 new SchematicItemOperation { TargetDocument = document.Clone(), Update = Any.Pack(probeLabel) }));
 
-            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
-                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
             saved = store.Read()!;
 
             // Must-catch: XML edited after the files were lost is refused with nothing sent to KiCad. Net chains are typed
@@ -508,7 +542,7 @@ public sealed partial class NativeSessionTests
             {
                 instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, stage = Stage.ToString(), seed = context.Seed.ToString(), realStdioProductionServer = true,
                 steps, layoutClearanceNm = LayoutClearanceNm,
-                stuckOperations = new { project = keeps ? "keep-and-replan, and KiCad's own connections kept" : "undo, discard and exit pause",
+                stuckOperations = new { project = keeps ? "keep-and-replan, and KiCad's own connections kept" : "undo, discard, never-received discard and exit pause",
                     creation = creationExit, realization = realizationExit, exitPause, keptConnections }, generatedSheets = generated.Select(g => new { g.SheetInstanceId, g.SheetSymbolId, g.ScreenId }),
                 original = new { original.State.StateSha256, original.State.SaveStableStateSha256, screens = original.Electrical.Hierarchy.Data.Instances.Count,
                     drawn, sheetPins = originalSheetPins.Length, nets = original.Electrical.Nets.Count,
@@ -517,7 +551,8 @@ public sealed partial class NativeSessionTests
                 changedProjectFile = new { planIsRebuild = true, applyRefused = changedFile.Code, message = changedFile.Message,
                     projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true },
                 changedProjectSettings = new { planRefused = "rebuild_project_settings_changed", applyRefused = changedSetting.Code, message = SettingsRefusal,
-                    projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true },
+                    projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true, changedBackInKiCad = true,
+                    planRefusedUntilRefresh = Error(unrefreshed), refreshed = true, thenRebuilt = true },
                 deleted = schematicFiles.Select(Path.GetFileName), newRootScreen = emptyRoot.Metadata.ScreenId.Value,
                 rebuild = new { operations = rebuildOperations.Count, created = rebuiltKinds, firstOperation = "rebuild_screen_identity", result = rebuild },
                 rebuilt = new { rebuilt.State.StateSha256, sameStateDigest = true, filesByteIdentical = originalFiles.Count, sameObjects = true,
@@ -573,22 +608,38 @@ public sealed partial class NativeSessionTests
             return result;
         }
 
-        // Apply an earlier record's plan through the public tool: KiCad already shows the design, so nothing is sent, saved or
-        // written, and the apply succeeds (before, it failed: the coverage-list difference was taken for a settings change).
-        async Task<JsonElement> ApplyUnchanged(DesignRecoveryStore on, string name, string designPath)
+        // Apply an earlier record's plan through the public tool: it publishes exactly the planned design (before, apply failed:
+        // the coverage-list difference was taken for a settings change; later it did nothing while the plan showed another
+        // design). KiCad already shows the design, so no edit is sent and KiCad only saves its unchanged sheets; the design
+        // file becomes the planned design, without library_cache. A second apply is a no-op.
+        async Task<JsonElement> ApplyPublishesPlanned(DesignRecoveryStore on, string name, string designPath, string planned)
         {
             var before = await Capture();
-            byte[] file = await File.ReadAllBytesAsync(designPath, token);
+            Assert.IsTrue(Encoding.UTF8.GetString(await File.ReadAllBytesAsync(designPath, token)).Contains("library_cache", StringComparison.Ordinal),
+                name + ": the design file preview 23 published lists library_cache.");
             var applied = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = on.StatePath, designPath,
                 expectedRevisionToken = on.Read()!.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
             await File.WriteAllTextAsync(Evidence(name + "-apply.json"), RetainedToolEvidence(applied), token);
             RequireToolSuccess(applied);
             var result = applied.GetProperty("structuredContent").Clone();
-            Assert.IsFalse(result.GetProperty("nativeMutationCommitted").GetBoolean(), applied.GetRawText());
-            Assert.IsFalse(result.GetProperty("nativeFilesSaved").GetBoolean(), applied.GetRawText());
+            Assert.IsFalse(result.GetProperty("nativeMutationCommitted").GetBoolean(), "No edit reaches KiCad: " + applied.GetRawText());
+            Assert.IsTrue(result.GetProperty("nativeFilesSaved").GetBoolean(), applied.GetRawText());
+            Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), applied.GetRawText());
             Assert.IsFalse(on.Read()!.State.HasPendingWork);
-            Assert.AreEqual(before, await Capture(), name + ": KiCad is unchanged.");
-            CollectionAssert.AreEqual(file, await File.ReadAllBytesAsync(designPath, token), name + ": the design itself did not change, so nothing is written.");
+            var after = await Capture();
+            Assert.AreEqual(before.Electrical, after.Electrical, name + ": KiCad shows the same design.");
+            Assert.AreEqual(before.State.StateSha256, after.State.StateSha256, name + ": KiCad saved its sheets unchanged.");
+            Assert.IsFalse(after.State.NativeContentDirty);
+            string published = await File.ReadAllTextAsync(designPath, token);
+            Assert.AreEqual(planned, published, name + ": plan and apply agree; the planned design is published.");
+            Assert.IsFalse(published.Contains("library_cache", StringComparison.Ordinal), name + ": the design file no longer lists library_cache.");
+            Assert.AreEqual(planned, Encoding.UTF8.GetString(on.Read()!.State.DesiredFileBytes));
+            var second = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = on.StatePath, designPath,
+                expectedRevisionToken = on.Read()!.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+            RequireToolSuccess(second);
+            Assert.IsFalse(second.GetProperty("structuredContent").GetProperty("nativeFilesSaved").GetBoolean(), name + ": a second apply is a no-op: "
+                + second.GetRawText());
+            Assert.AreEqual(published, await File.ReadAllTextAsync(designPath, token), name + ": a second apply writes nothing.");
             return result;
         }
 
@@ -637,12 +688,12 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(plan.GetProperty("connectionRealizationRequired").GetBoolean());
             Assert.AreEqual(text, plan.GetProperty("candidateDesignXml").GetString(), "The planned design is the design as this build writes it.");
             Assert.AreEqual(shown, await Capture(), "Planning must not change KiCad.");
-            await ApplyUnchanged(checkpointed, "preview23", checkpointedXml);
-            var again = await Plan(checkpointed, "preview23-second-plan");
-            Assert.AreEqual(0, again.GetProperty("nativeOperationsJson").GetArrayLength(), "Still nothing to send.");
-            results.Add(new { record = "electrical checkpoints (version 3)", reattached = true, planned = true, applied = true, nativeOperations = 0 });
+            await ApplyPublishesPlanned(checkpointed, "preview23", checkpointedXml, text);
+            results.Add(new { record = "electrical checkpoints (version 3)", reattached = true, planned = true, applied = true, nativeOperations = 0,
+                designPublishedAsPlanned = true, libraryCacheDropped = true, secondApplyNoOp = true });
 
-            // (b) A record saved before electrical checkpoints: planning names the one action that fixes it, which succeeds.
+            // (b) A record saved before electrical checkpoints: planning names the one action that fixes it, which succeeds, and the
+            //     record then plans exactly as (a) did; its apply is (a)'s from then on, so it is not repeated here.
             var legacy = new DesignRecoveryStore(Path.Combine(earlierRecords, "preview23-v1-recovery.json"));
             string legacyXml = Path.Combine(earlierRecords, "preview23-v1-design.xml");
             await File.WriteAllBytesAsync(legacyXml, oldXml, token);
@@ -662,9 +713,8 @@ public sealed partial class NativeSessionTests
             var legacyPlan = await Plan(legacy, "preview23-v1-initialized-plan");
             Assert.AreEqual(0, legacyPlan.GetProperty("nativeOperationsJson").GetArrayLength(), "Nothing to send to KiCad.");
             Assert.AreEqual(text, legacyPlan.GetProperty("candidateDesignXml").GetString(), "The planned design is the design as this build writes it.");
-            await ApplyUnchanged(legacy, "preview23-v1", legacyXml);
             results.Add(new { record = "no electrical checkpoints (version 1)", refusal = "missing_electrical_baseline", instruction,
-                initialized = true, planned = true, applied = true, nativeOperations = 0 });
+                initialized = true, planned = true, nativeOperations = 0, plannedDesignAsVersion3 = true });
             CollectionAssert.AreEqual(currentXml, await File.ReadAllBytesAsync(path, token), "The journey's own design file is untouched.");
             return results;
         }

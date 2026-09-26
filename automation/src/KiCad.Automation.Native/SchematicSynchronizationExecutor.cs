@@ -84,8 +84,9 @@ internal static class SchematicSynchronizationExecutor
             || !checkpoint.Electrical.Hierarchy.Data.Equals(saved.State.Observed)
             || !checkpoint.Electrical.Equals(saved.State.ObservedElectrical))
             throw Error("native_checkpoint_stale", "Refresh the native observation before applying this plan.");
+        // Name each file that no longer holds what KiCad loaded, and what fixes it (seam B, lane 2C).
         if (!CheckedSchematicContract.FileCoverage(checkpoint.State))
-            throw Error("native_file_conflict", "Native file baselines must be known and unchanged before synchronization.");
+            throw Error("native_file_conflict", CheckedSchematicContract.FileConflictMessage(checkpoint.State));
         if (realization)
         {
             // CN-1 §9.1 split: the lane checks this session's handshake capability,
@@ -110,7 +111,12 @@ internal static class SchematicSynchronizationExecutor
             return await ResumeAsync(store, receipts, client, saved, cancellationToken, executionCheckpoint);
         }
         var desired = DesignRecoveryStore.ReadDesired(saved.State);
-        bool unchangedXml = Equivalent(desired, plan.Candidate, saved.State, cancellationToken);
+        // Seam C (lane 2C): the XML is left as it is only when the planned design writes exactly as the saved one does. A
+        // difference the native delta treats as no change still reaches the XML, for example the retired library_cache
+        // coverage entry a record saved by preview 23 still lists: its apply publishes the design as the plan shows it. The
+        // baseline check below keeps comparing without the schematic's enumeration, which the baseline takes from KiCad.
+        bool unchangedXml = Equivalent(desired, plan.Candidate, saved.State, cancellationToken)
+            && SchematicDesignXml.Write(desired, saved.State.KnowledgeLibraries) == SchematicDesignXml.Write(plan.Candidate, saved.State.KnowledgeLibraries);
         byte[] candidateBytes = unchangedXml ? original : Encoding.UTF8.GetBytes(plan.CandidateXml!);
         if (unchangedXml && plan.NativeOperations.Count == 0 && !checkpoint.State.NativeContentDirty
             && checkpoint.State.CleanCheckpointSha256 == checkpoint.State.StateSha256

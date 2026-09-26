@@ -481,11 +481,14 @@ public sealed class SchematicRebuildTests
     // project setting. Every one of the thirteen setting groups the project file holds is checked on its own, with the
     // exact message naming only that group (ledger p001c485926b37099). The message names what is compared (the settings
     // KiCad shows) and only actions that work while the files are lost; synchronizing the settings into the XML is not one
-    // of them (review of 31cbe4f594). The NativeXmlRebuild journey proves the refusal through kicad_design_sync_plan and
-    // kicad_design_sync_apply on a setting changed in KiCad, and apply's refusal of a project file changed on disk.
+    // of them (review of 31cbe4f594). Planning reads the recovery record, not KiCad, so it also names the step that shows the
+    // record KiCad's settings again (review of 9c764b5537). The NativeXmlRebuild journey follows the message literally
+    // through kicad_design_sync_plan and kicad_design_sync_apply on a setting changed in KiCad, and proves apply's refusal of
+    // a project file changed on disk.
     private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
         + "Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last saved with "
-        + "this XML and reopen the project), then rebuild.";
+        + "this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after reopening "
+        + "the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) and rebuild.";
 
     private static readonly (string What, Action<SchematicMetadata> Edit)[] ProjectSettingGroups =
     [

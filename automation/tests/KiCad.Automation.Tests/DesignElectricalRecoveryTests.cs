@@ -190,9 +190,13 @@ public sealed class DesignElectricalRecoveryTests
     // file must still read, plan and save as it did. The NativeXmlRebuild journey proves against a live KiCad that this build's
     // snapshot of such a schematic differs from preview 23's only by the retired library_cache marker; here that snapshot is the
     // saved observation without it. Unit test, because no journey can run preview 23 itself; it extends no existing test, since
-    // every other record in the suites is written by this build's store.
+    // every other record in the suites is written by this build's store. Applied through the executor against an editor that
+    // shows this build's snapshot of that schematic (review of 9c764b5537, seam C), plan and apply agree: the apply publishes
+    // the planned design, whose file no longer lists library_cache, sends no native edit and only saves KiCad's unchanged
+    // sheets, and a second apply is a no-op. The KiCad that saved the record is gone, so the editor is scripted; the
+    // NativeXmlRebuild journey applies a record in the same format against a live KiCad.
     [TestMethod]
-    public void ARecordPreview23WroteReadsAndPlansAgainstThisBuildsSnapshot()
+    public async Task ARecordPreview23WroteReadsPlansAndAppliesAgainstThisBuildsSnapshot()
     {
         string fixture = Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "tests", "fixtures", "preview-23-recovery");
         string root = Directory.CreateTempSubdirectory("preview-23-recovery-").FullName;
@@ -253,13 +257,81 @@ public sealed class DesignElectricalRecoveryTests
             Assert.IsFalse(plan.NativeRebuildRequired);
             Assert.IsFalse(plan.NativeConnectionRealizationRequired);
             Assert.AreEqual(SchematicDesignXml.Write(state.Baseline with { Schematic = upgraded }, state.KnowledgeLibraries), plan.CandidateXml);
+            Assert.IsFalse(plan.CandidateXml!.Contains("library_cache", StringComparison.Ordinal), "The planned design no longer lists the retired entry.");
+            StringAssert.Contains(designXml, "library_cache", "The saved design file still does.");
             // The same record saved before electrical checkpoints stops at planning and names the one action that fixes it.
             var legacy = SchematicSynchronizationPlanner.Plan(reattached with { BaselineElectrical = null });
             Assert.AreEqual("missing_electrical_baseline", legacy.ErrorCode, legacy.ErrorMessage);
             StringAssert.Contains(legacy.ErrorMessage, "kicad_design_electrical_baseline_initialize");
             Assert.IsNull(legacy.Candidate);
+
+            // Applied, the record publishes exactly the planned design: nothing is sent to KiCad, KiCad saves its unchanged
+            // sheets, and the design file drops library_cache.
+            string designPath = Path.Combine(root, "design.xml");
+            File.WriteAllBytes(designPath, design);
+            var attached = store.Save(reattached, saved.RevisionToken);
+            var editor = new ScriptedEditor(reattached, observedElectrical, root);
+            var client = new NativeClient(editor, "ipc:///tmp/preview-23-apply.sock", editor.Epoch);
+            var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, attached.RevisionToken, Guid.NewGuid());
+            Assert.IsFalse(applied.NativeMutationCommitted, "Nothing is sent to KiCad.");
+            Assert.IsTrue(applied.NativeFilesSaved, "KiCad saves its unchanged sheets before the XML is published.");
+            Assert.IsTrue(applied.SynchronizationCommitted);
+            Assert.AreEqual(0, editor.Edits, "No native edit.");
+            Assert.AreEqual(1, editor.Saves);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(designPath), "Plan and apply agree: the planned design is published.");
+            var published = store.Read()!;
+            Assert.IsFalse(published.State.HasPendingWork);
+            Assert.AreEqual(plan.CandidateXml, Encoding.UTF8.GetString(published.State.DesiredFileBytes));
+            Assert.AreEqual(plan.CandidateXml, SchematicDesignXml.Write(published.State.Baseline, published.State.KnowledgeLibraries));
+            var again = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, published.RevisionToken, Guid.NewGuid());
+            Assert.IsFalse(again.NativeFilesSaved, "A second apply is a no-op.");
+            Assert.AreEqual(published.RevisionToken, again.RecoveryRevisionToken);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(designPath));
+            Assert.AreEqual(1, editor.Saves);
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>An editor showing one clean, saved checkpoint: its handshake, the checked capture and a checked save that
+    /// changes nothing. Any edit fails the test.</summary>
+    private sealed class ScriptedEditor : INativeTransport
+    {
+        private readonly CheckedSchematicState checkpoint;
+        private readonly string instance;
+        public string Epoch { get; } = Guid.NewGuid().ToString("D");
+        public int Saves, Edits;
+        public ScriptedEditor(DesignRecoveryState state, SchematicElectricalState shown, string directory)
+        {
+            instance = state.InstanceId.ToString("D");
+            string digest = new('c', 64);
+            checkpoint = new() { Electrical = shown.Clone(), State = new()
+            {
+                Document = state.Baseline.Schematic.Document.Clone(), ProcessEpoch = Epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
+                Revision = shown.Hierarchy.Revision.Clone(), StateSha256 = digest, CleanCheckpointSha256 = digest,
+                Scope = DocumentLifecycleScope.DlsSchematicHierarchy, ProjectSettingsIncluded = true
+            } };
+            string file = System.IO.Path.Combine(directory, "fixture.kicad_sch");
+            checkpoint.State.NativeFiles.Add(file);
+            checkpoint.State.FileBaselines.Add(new NativeFileBaselineState { Path = file, BaselinePath = file, BaselineKnown = true, CurrentKnown = true,
+                BaselineExists = true, CurrentExists = true, BaselineSha256 = new string('b', 64), CurrentSha256 = new string('b', 64),
+                BaselineBytes = 3, CurrentBytes = 3, Status = NativeFileBaselineStatus.NfbsUnchanged });
+        }
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested();
+            var message = ApiRequest.Parser.ParseFrom(request).Message; IMessage response;
+            if (message.Is(GetAutomationSession.Descriptor)) response = new AutomationSession { ProtocolVersion = 1, InstanceId = instance, Epoch = Epoch };
+            else if (message.Is(ReadCheckedSchematicState.Descriptor)) response = checkpoint.Clone();
+            else if (message.Is(CheckedSaveDocument.Descriptor))
+            {
+                var save = message.Unpack<CheckedSaveDocument>(); ++Saves;
+                response = new LifecycleOperationResult { Document = save.Document.Clone(), OperationId = save.OperationId, ProcessEpoch = Epoch,
+                    Status = LifecycleOperationStatus.LosSaved, ObservedState = checkpoint.State.Clone() };
+            }
+            else { ++Edits; throw new AssertFailedException("Publishing a record preview 23 saved must not edit KiCad: " + message.TypeUrl); }
+            return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Epoch },
+                Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(response) }.ToByteArray());
+        }
     }
 
     [TestMethod]

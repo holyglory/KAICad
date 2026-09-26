@@ -5,6 +5,8 @@ using Google.Protobuf;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 
+using ModelSheetInstance = KiCad.Automation.Model.SheetInstance;
+
 namespace KiCad.Automation.Native;
 
 /// <summary>Native owners that appeared in KiCad since the last synchronization, projected onto the design: owners a
@@ -20,6 +22,17 @@ internal sealed record SchematicNativeRestorationResult(SchematicDesign BindingC
     public IReadOnlyList<Guid> AddedParts { get; init; } = [];
     public IReadOnlyList<Guid> RemovedOccurrences { get; init; } = [];
     public IReadOnlyList<ComponentReferenceChange> ComponentChanges { get; init; } = [];
+    /// <summary>Added occurrences exactly as the saved XML declares them: the person's answers to resolution requests
+    /// (ledger p35cfdc0345e056a5). The XML differs from the last synchronized design only by them.</summary>
+    public IReadOnlyList<Guid> AnsweredOccurrences { get; init; } = [];
+    /// <summary>Sheets inserted in KiCad that become design sheets (ledger p5f6d5d0ca242d628).</summary>
+    public IReadOnlyList<Guid> AddedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets KiCad no longer shows, removed with everything on them.</summary>
+    public IReadOnlyList<Guid> RemovedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets KiCad shows at another place.</summary>
+    public IReadOnlyList<Guid> MovedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets a verified history restores with their exact identities.</summary>
+    public IReadOnlyList<Guid> RestoredSheetInstances { get; init; } = [];
 
     /// <summary>The verified history a restoration used; only restorations have one.</summary>
     public SchematicOwnershipHistory Source => History
@@ -63,7 +76,8 @@ internal static class SchematicNativeRestorationProjection
             var report = SchematicDesignBindings.Inspect(entry.Design, state.KnowledgeLibraries, token);
             if (!report.IdentitiesResolved || report.Differences.Any(d => d.Field == "unit")) continue;
             var reduced = SchematicNativeRemovalProjection.Project(entry.Design, state.Baseline.Schematic, state.KnowledgeLibraries, token);
-            if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0
+            if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0 && reduced.RemovedSheetInstances.Count == 0
+                || reduced.MovedSheetInstances.Count != 0
                 || SchematicNetReconciliation.Topology(reduced.BindingCandidate.Engineering.Circuit) != currentTopology
                 || SchematicNetReconciliation.Bindings(reduced.BindingCandidate) != currentBindings) continue;
             candidates.Add(Build(state, entry, token));
@@ -110,15 +124,23 @@ internal static class SchematicNativeRestorationProjection
         var definitions = current.Sheets.SelectMany(s => s.Components).Select(c => c.Id).ToHashSet();
         var restoredComponents = old.Components.Where(c => !componentIds.Contains(c.Id)).OrderBy(c => c.Id).ToArray();
         var restoredSymbols = old.Symbols.Where(s => !symbolIds.Contains(s.Id)).OrderBy(s => s.Id).ToArray();
+        // Sheets a KiCad undo shows again come back with their exact identities, in the history's order (ledger p5f6d5d0ca242d628).
+        var sheetIds = current.SheetInstances.Select(s => s.Id).ToHashSet();
+        var sheetDefinitions = current.Sheets.Select(s => s.Id).ToHashSet();
+        var restoredSheets = old.SheetInstances.Where(s => !sheetIds.Contains(s.Id)).ToArray();
+        var restoredSheetIds = restoredSheets.Select(s => s.Id).ToHashSet();
         var next = current with
         {
             Components = [.. current.Components, .. restoredComponents],
             Symbols = [.. current.Symbols, .. restoredSymbols],
-            Sheets = current.Sheets.Select(s => s with { Components = [.. s.Components,
-                .. old.Sheets.Single(o => o.Id == s.Id).Components.Where(c => !definitions.Contains(c.Id)).OrderBy(c => c.Id)] }).ToArray()
+            Sheets = [.. current.Sheets.Select(s => s with { Components = [.. s.Components,
+                .. old.Sheets.Single(o => o.Id == s.Id).Components.Where(c => !definitions.Contains(c.Id)).OrderBy(c => c.Id)] }),
+                .. old.Sheets.Where(s => !sheetDefinitions.Contains(s.Id))],
+            SheetInstances = [.. current.SheetInstances, .. restoredSheets]
         };
         var addedSymbols = restoredSymbols.Select(s => s.Id).ToHashSet();
         var design = baseline with { Engineering = baseline.Engineering with { Circuit = next }, Schematic = state.Observed.Clone(),
+            SheetBindings = [.. baseline.SheetBindings, .. history.Design.SheetBindings.Where(b => restoredSheetIds.Contains(b.SheetInstanceId))],
             SymbolBindings = [.. baseline.SymbolBindings, .. history.Design.SymbolBindings.Where(b => addedSymbols.Contains(b.SymbolOccurrenceId))
                 .OrderBy(b => b.SymbolOccurrenceId)] };
         var native = SchematicModelProjection.NativeSymbols(design, state.Observed);
@@ -151,7 +173,8 @@ internal static class SchematicNativeRestorationProjection
         var report = SchematicDesignBindings.Inspect(design, state.KnowledgeLibraries, token);
         if (!report.IdentitiesResolved)
             throw Error("unresolved_restored_bindings", "The restored declarations do not resolve every exact native object.");
-        return new(design, history, addedSymbols.Order().ToArray(), restoredIds.Order().ToArray());
+        return new(design, history, addedSymbols.Order().ToArray(), restoredIds.Order().ToArray())
+            { RestoredSheetInstances = [.. restoredSheets.Select(s => s.Id)] };
     }
 
     internal static EngineeringDesign ResolveRetained(EngineeringDesign design, SchematicNativeRestorationResult restoration,
@@ -193,14 +216,33 @@ internal static class SchematicNativeRestorationProjection
 }
 
 /// <summary>A decision the synchronization cannot take from exact identities alone. It names the native symbol KiCad
-/// shows, the sheet it sits on and the exact candidates; nothing is published until the question is answered.</summary>
+/// shows, the sheet it sits on and the exact candidates; nothing is published until the question is answered, in the XML
+/// or with kicad_design_ownership_answer. <paramref name="ProposedComponentId"/> is the component the symbol becomes when
+/// it is a component of its own: answering with it keeps the symbol apart from the candidate components.</summary>
 public sealed record SchematicOwnershipResolutionRequest(string Code, Guid NativeObjectId, string NativePath,
     Guid SheetInstanceId, string Reference, string LibraryId, int Unit, IReadOnlyList<Guid> CandidatePartIds,
-    IReadOnlyList<Guid> CandidateComponentIds, string Reason);
+    IReadOnlyList<Guid> CandidateComponentIds, string Reason, Guid ProposedComponentId);
+
+/// <summary>A person's answer for one symbol placed in KiCad (kicad_design_ownership_answer, ledger p35cfdc0345e056a5):
+/// <paramref name="PartId"/> is the part the symbol is, one of its request's candidate parts; <paramref name="ComponentId"/>
+/// is the component it draws a unit of: an existing component or another new symbol's proposed component from the
+/// request's candidates, or the symbol's own proposed component for a component of its own. Null leaves that decision to
+/// exact identities.</summary>
+public sealed record SchematicOwnershipAnswer(Guid NativeObjectId, Guid? PartId = null, Guid? ComponentId = null);
 
 internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationResult? Adoption,
     IReadOnlyList<SchematicOwnershipResolutionRequest> Requests, IReadOnlyList<SchematicBindingIssue> Issues,
-    IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null);
+    IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null)
+{
+    /// <summary>Sheet moves exact identities cannot decide (<see cref="SchematicNativeSheetChanges.MoveAmbiguous"/>).</summary>
+    public IReadOnlyList<SchematicSheetResolutionRequest> SheetRequests { get; init; } = [];
+}
+
+/// <summary>The saved XML with a person's answers declared (<see cref="SchematicNativeAdditionProjection.Answer"/>), and the
+/// native symbols it declares.</summary>
+internal sealed record SchematicOwnershipAnswerResult(SchematicDesign? Answered, IReadOnlyList<Guid> DeclaredSymbols,
+    IReadOnlyList<SchematicOwnershipResolutionRequest> Requests, IReadOnlyList<SchematicBindingIssue> Issues,
+    string? ErrorCode = null, string? ErrorMessage = null);
 
 /// <summary>Symbols placed in KiCad since the last synchronization become design components (ledger p74ee7c1da24272d9).
 /// Each new symbol becomes one new component instance on the sheet instance KiCad shows it on, with identities derived
@@ -209,14 +251,31 @@ internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationR
 /// declared symbol is, the same library symbol with exactly the same units and pins (numbers, names and units); a new
 /// part with that library symbol's pins when there is none. Anything else is a resolution request, never a guess: several
 /// such parts, a new unit of a multi-unit part that an existing component may be missing, or several new units of one
-/// multi-unit part. Symbols removed in the same KiCad change are removed as the removal projection removes them, with
-/// their instructions retained. Sheets that appear, disappear or move are not adopted here (sheet_ownership_changed).</summary>
+/// multi-unit part. The person answers a request in the saved XML, by declaring the occurrence bound to that symbol (its
+/// component, part, unit and reference as KiCad shows them), or with kicad_design_ownership_answer, which writes that
+/// declaration (ledger p35cfdc0345e056a5); a declared answer is taken exactly as declared. Symbols removed in the same
+/// KiCad change are removed as the removal projection removes them, with their instructions retained. Sheets KiCad
+/// removed or shows at another place follow KiCad as the removal projection projects them, and each sheet inserted in KiCad
+/// becomes a design sheet named as KiCad names it, with identities derived from the circuit, its parent sheet's path and its
+/// sheet symbol's UUID; symbols on it are adopted like any other (ledger p5f6d5d0ca242d628). A sheet an earlier synchronized
+/// design had is restored from that history instead, and a sheet shown several times is not adopted yet.</summary>
 public static class SchematicNativeAdditionProjection
 {
     public const string ResolutionRequired = "native_ownership_resolution_required";
+    /// <summary>An existing sheet moved into a sheet inserted in the same KiCad change: synchronize the new sheet first.</summary>
+    public const string MoveIntoNewSheet = "native_sheet_move_into_new_sheet";
     public const string PartAmbiguous = "native_part_ambiguous";
     public const string UnitOwnerAmbiguous = "native_unit_owner_ambiguous";
     public const string UnitGroupingAmbiguous = "native_unit_grouping_ambiguous";
+    /// <summary>The saved XML answers a symbol placed in KiCad with something KiCad does not show.</summary>
+    public const string AnswerMismatch = "native_ownership_answer_mismatch";
+    /// <summary>An answer given with kicad_design_ownership_answer that is not one of the request's choices.</summary>
+    public const string AnswerInvalid = "native_ownership_answer_invalid";
+    /// <summary>The tool that writes a person's answers into the saved XML.</summary>
+    public const string AnswerTool = "kicad_design_ownership_answer";
+    internal const string ResolutionMessage = "KiCad shows new symbols whose design owner cannot be decided from exact identities. "
+        + "Answer each request with " + AnswerTool + ", or declare the symbol's component in the XML, then synchronize again "
+        + "(resume the automatic synchronization, or plan and apply).";
 
     /// <summary>The stable identity a symbol placed in KiCad gives the design object of <paramref name="kind"/>
     /// ("component", "definition" or "occurrence").</summary>
@@ -236,8 +295,27 @@ public static class SchematicNativeAdditionProjection
         return Stable("kicad-native-adoption-v1\npart\n" + circuitId.ToString("D") + "\n" + libraryId + "\n" + Signature(units, pins));
     }
 
+    /// <summary>Whether <paramref name="desired"/> binds an occurrence the last synchronized design does not have to a
+    /// symbol KiCad shows and that design does not bind: an answer to a resolution request, not a creation.</summary>
+    internal static bool DeclaresAddedSymbols(DesignRecoveryState state, SchematicDesign desired)
+    {
+        var occurrences = state.Baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+        var bound = state.Baseline.SymbolBindings.Select(b => b.NativeObjectId).ToHashSet();
+        var candidates = desired.SymbolBindings.Where(b => !occurrences.Contains(b.SymbolOccurrenceId) && !bound.Contains(b.NativeObjectId))
+            .Select(b => b.NativeObjectId.ToString("D")).ToHashSet(StringComparer.Ordinal);
+        return candidates.Count != 0 && state.Observed.Instances.Any(screen => screen.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
+            && candidates.Contains(i.Unpack<SchematicSymbolInstance>().Id?.Value ?? "")));
+    }
+
     internal static SchematicNativeAdditionResult Project(DesignRecoveryState state, IReadOnlyList<SchematicOwnershipHistory>? history,
-        CancellationToken token)
+        CancellationToken token) => Project(state, history, null, null, token);
+
+    /// <param name="declared">The saved XML. Occurrences it binds to symbols placed in KiCad since the last synchronization
+    /// are the person's answers; they must agree with what KiCad shows, and the XML must differ from the last synchronized
+    /// design only by them.</param>
+    /// <param name="answers">Answers given with kicad_design_ownership_answer that the XML does not declare yet.</param>
+    internal static SchematicNativeAdditionResult Project(DesignRecoveryState state, IReadOnlyList<SchematicOwnershipHistory>? history,
+        SchematicDesign? declared, IReadOnlyList<SchematicOwnershipAnswer>? answers, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var gaps = new List<HierarchyCoverageGap>();
@@ -254,14 +332,21 @@ public static class SchematicNativeAdditionProjection
             if (!topology.IsValid) return Failure("invalid_native_hierarchy", "Resolve the reported native hierarchy before adopting new symbols.");
             static string Key(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value));
             var screens = observed.Instances.ToDictionary(Key, StringComparer.Ordinal);
-            var before = baseline.Schematic.Instances.ToDictionary(Key, StringComparer.Ordinal);
-            if (!screens.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(before.Keys)
-                || screens.Any(pair => pair.Value.Metadata.ScreenId.Value != before[pair.Key].Metadata.ScreenId.Value))
-                return Failure("sheet_ownership_changed", "Sheet insertion, removal or reparenting requires explicit ownership reconciliation.");
+            // Sheets inserted, removed or moved in KiCad (ledger p5f6d5d0ca242d628), by exact identity only.
+            var sheetChanges = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed);
+            if (sheetChanges.ErrorCode is not null)
+                return Failure(sheetChanges.ErrorCode, sheetChanges.ErrorMessage!) with
+                    { SheetRequests = SchematicNativeRemovalProjection.Requests(sheetChanges, baseline) };
+            var inserted = sheetChanges.Inserted.ToHashSet(StringComparer.Ordinal);
+            bool Within(string path, string sheet) => path == sheet || path.StartsWith(sheet + "/", StringComparison.Ordinal);
+            if (sheetChanges.Moved.Values.FirstOrDefault(to => inserted.Any(sheet => Within(to, sheet))) is { } into)
+                return Failure(MoveIntoNewSheet, "KiCad shows an existing sheet moved into a sheet inserted in the same change. Nothing was "
+                    + "published. Undo the move in KiCad, let the new sheet synchronize, then move the sheet into it.");
 
             var circuit = baseline.Engineering.Circuit;
             var components = circuit.Components.ToDictionary(c => c.Id);
-            var sheetPaths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+            // Where KiCad shows each design sheet now: moved sheets at their new place, removed sheets nowhere.
+            var sheetPaths = sheetChanges.Rebind(baseline.SheetBindings);
             var bound = baseline.SymbolBindings.Select(b =>
             {
                 var occurrence = circuit.Symbols.Single(s => s.Id == b.SymbolOccurrenceId);
@@ -271,7 +356,7 @@ public static class SchematicNativeAdditionProjection
                     .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => (Path: pair.Key, Symbol: i.Unpack<SchematicSymbolInstance>())))
                 .Where(x => !bound.Contains(x.Path + "#" + x.Symbol.Id.Value))
                 .OrderBy(x => x.Path, StringComparer.Ordinal).ThenBy(x => x.Symbol.Id.Value, StringComparer.Ordinal).ToArray();
-            if (added.Length == 0)
+            if (added.Length == 0 && inserted.Count == 0)
                 return Failure("electrical_ownership_changed", "Unit changes or changed library pin identities require explicit ownership reconciliation.");
 
             // A symbol KiCad shows again after an undo belongs to the verified history that knew it, not to a new
@@ -281,15 +366,26 @@ public static class SchematicNativeAdditionProjection
                 return Failure("native_restoration_with_additions",
                     "KiCad shows symbols an earlier synchronized design had together with newly placed ones. Synchronize them separately: "
                     + "undo the new placement in KiCad, synchronize the restored symbols, then redo it.");
+            // Likewise a sheet an earlier synchronized design had is restored from that history with its identities, never adopted anew.
+            var historicalSheets = (history ?? []).SelectMany(h => h.Design.SheetBindings.Select(b => SchematicDesignBindings.PathKey(b.NativePath)))
+                .ToHashSet(StringComparer.Ordinal);
+            if (inserted.Any(historicalSheets.Contains))
+                return Failure("native_restoration_with_additions",
+                    "KiCad shows a sheet an earlier synchronized design had together with other changes. Synchronize them separately: "
+                    + "undo the other changes in KiCad, synchronize the restored sheet, then redo them.");
 
-            // Removals first, exactly as a removal-only change is projected.
+            // Removals and moves first, exactly as a change without new owners is projected: KiCad's drawing without the
+            // inserted sheets and the new symbols.
             var withoutAdded = observed.Clone();
-            foreach (var screen in withoutAdded.Instances)
+            for (int index = withoutAdded.Instances.Count - 1; index >= 0; --index)
             {
+                var screen = withoutAdded.Instances[index];
                 string path = Key(screen);
+                if (inserted.Contains(path)) { withoutAdded.Instances.RemoveAt(index); continue; }
                 for (int i = screen.Items.Count - 1; i >= 0; --i)
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
-                        && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
+                            && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)
+                        || screen.Items[i].Is(SheetSymbol.Descriptor) && inserted.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value))
                         screen.Items.RemoveAt(i);
             }
             var removal = SchematicNativeRemovalProjection.Project(baseline, withoutAdded, libraries, token);
@@ -298,9 +394,43 @@ public static class SchematicNativeAdditionProjection
                 return Failure(removal.ErrorCode ?? "electrical_ownership_changed", removal.ErrorMessage
                     ?? "Unit changes or changed library pin identities require explicit ownership reconciliation.", removal.Issues);
             var kept = removal.BindingCandidate;
+            // Each sheet inserted in KiCad becomes a design sheet: a sheet definition and its one instance below the design sheet
+            // KiCad shows it in, with identities derived from the circuit, the parent sheet's path and the sheet symbol's UUID,
+            // so a repeated plan, a replay and a redo give the same identities. It is named as KiCad names it.
+            var addedSheets = new List<(SheetDefinition Definition, ModelSheetInstance Instance, SchematicSheetBinding Binding)>();
+            var keptSheets = kept.SheetBindings.ToDictionary(b => SchematicDesignBindings.PathKey(b.NativePath), b => b.SheetInstanceId, StringComparer.Ordinal);
+            foreach (string path in sheetChanges.Inserted)
+            {
+                token.ThrowIfCancellationRequested();
+                var sheetSymbol = SchematicNativeSheetChanges.SheetSymbolOf(observed, path);
+                string parent = SchematicNativeSheetChanges.Parent(path);
+                if (sheetSymbol?.NameField?.Text?.Text_ is not { } name || string.IsNullOrWhiteSpace(name) || !keptSheets.TryGetValue(parent, out var parentSheet))
+                    return Failure("native_sheet_incomplete", "A sheet inserted in KiCad needs its sheet symbol, a name and a parent sheet to join the design.");
+                var parentPath = PathOf(parent); Guid symbolId = Guid.Parse(SchematicNativeSheetChanges.Last(path));
+                Guid instanceId = AdoptedIdentity("sheet-instance", kept.Engineering.Circuit.Id, parentPath, symbolId);
+                Guid definitionId = AdoptedIdentity("sheet-definition", kept.Engineering.Circuit.Id, parentPath, symbolId);
+                addedSheets.Add((new(definitionId, name, []), new(instanceId, definitionId, parentSheet), new(instanceId, PathOf(path))));
+                keptSheets.Add(path, instanceId);
+            }
+            if (addedSheets.Count != 0)
+            {
+                var withSheets = kept.Engineering.Circuit with
+                {
+                    Sheets = [.. kept.Engineering.Circuit.Sheets, .. addedSheets.Select(s => s.Definition)],
+                    SheetInstances = [.. kept.Engineering.Circuit.SheetInstances, .. addedSheets.Select(s => s.Instance)]
+                };
+                try { withSheets.Validate(); }
+                catch (AutomationException error)
+                {
+                    return Failure("native_addition_conflict", "The sheets inserted in KiCad cannot join the design as they are: " + error.Message);
+                }
+                kept = kept with { Engineering = kept.Engineering with { Circuit = withSheets },
+                    SheetBindings = [.. kept.SheetBindings, .. addedSheets.Select(s => s.Binding)] };
+            }
             var keptCircuit = kept.Engineering.Circuit;
             var keptComponents = keptCircuit.Components.ToDictionary(c => c.Id);
             var definitions = keptCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
+            var parts = keptCircuit.Parts.ToDictionary(p => p.Id);
 
             // Library evidence for each existing part: the library symbols KiCad draws its units with, and its declared symbol.
             var evidence = new Dictionary<Guid, HashSet<string>>();
@@ -314,12 +444,11 @@ public static class SchematicNativeAdditionProjection
                     .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == binding.NativeObjectId.ToString("D"));
                 Evidence(definitions[owner.DefinitionId].PartId, LibraryKey(symbol));
             }
-            foreach (var declared in baseline.PartSymbols ?? [])
-                if (declared.LibraryId is { } library) Evidence(declared.PartId, LibraryKey(library));
+            foreach (var partSymbol in baseline.PartSymbols ?? [])
+                if (partSymbol.LibraryId is { } library) Evidence(partSymbol.PartId, LibraryKey(library));
 
-            var requests = new List<SchematicOwnershipResolutionRequest>();
-            var decided = new List<(string Path, SchematicSymbolInstance Symbol, Guid Sheet, Guid Part, PartDefinition? NewPart)>();
-            var newParts = new Dictionary<Guid, PartDefinition>();
+            // Each symbol placed in KiCad, as KiCad shows it.
+            var additions = new List<Addition>();
             foreach (var (path, symbol) in added)
             {
                 token.ThrowIfCancellationRequested();
@@ -332,19 +461,122 @@ public static class SchematicNativeAdditionProjection
                     || symbol.Definition is null || symbol.Unit is null || symbol.Unit.Unit < 1 || symbol.Unit.Unit > (int)symbol.Definition.UnitCount
                     || string.IsNullOrWhiteSpace(symbol.ReferenceField?.Text?.Text_))
                     return Failure("native_addition_incomplete", "A symbol placed in KiCad needs its identity, definition, unit and reference to be adopted.");
-                string library = LibraryKey(symbol);
                 var pins = Pins(symbol);
                 int units = checked((int)symbol.Definition.UnitCount);
-                string signature = Signature(units, pins);
-                var candidates = keptCircuit.Parts.Where(p => evidence.TryGetValue(p.Id, out var libraries) && libraries.Contains(library)
-                    && Signature(p.Units, p.Pins) == signature).Select(p => p.Id).ToList();
-                Guid derived = AdoptedPartIdentity(keptCircuit.Id, library, units, pins);
-                if (keptCircuit.Parts.SingleOrDefault(p => p.Id == derived) is { } earlier && Signature(earlier.Units, earlier.Pins) == signature
-                    && !candidates.Contains(derived))
-                    candidates.Add(derived);
+                string library = LibraryKey(symbol);
+                additions.Add(new(path, symbol, nativeId, sheet.SheetInstanceId, library, pins, units, Signature(units, pins),
+                    AdoptedIdentity("component", keptCircuit.Id, PathOf(path), nativeId), AdoptedPartIdentity(keptCircuit.Id, library, units, pins)));
+            }
+            var byKey = additions.ToDictionary(a => a.Key, StringComparer.Ordinal);
+            SchematicOwnershipResolutionRequest Request(Addition addition, string code, IReadOnlyList<Guid> candidateParts,
+                IReadOnlyList<Guid> candidateComponents, string reason) =>
+                new(code, addition.NativeId, addition.Path, addition.Sheet, addition.Reference, addition.Library, addition.Unit,
+                    candidateParts, candidateComponents, reason, addition.Proposed);
+
+            // The parts a symbol can be, exactly as its request offers them: the existing parts drawn or declared with the
+            // library symbol KiCad draws and with exactly its units and pins, and the part that library symbol already made
+            // for an earlier adoption. With none, the symbol makes that part (DerivedPart).
+            List<Guid> PartChoices(Addition addition)
+            {
+                var choices = keptCircuit.Parts.Where(p => evidence.TryGetValue(p.Id, out var libraries) && libraries.Contains(addition.Library)
+                    && Signature(p.Units, p.Pins) == addition.Signature).Select(p => p.Id).ToList();
+                if (parts.TryGetValue(addition.DerivedPart, out var earlier) && Signature(earlier.Units, earlier.Pins) == addition.Signature
+                    && !choices.Contains(addition.DerivedPart))
+                    choices.Add(addition.DerivedPart);
+                return choices;
+            }
+
+            // Answers the saved XML declares: occurrences it binds to these symbols, taken exactly as declared.
+            var declarations = new Dictionary<string, Declaration>(StringComparer.Ordinal);
+            if (declared is not null && declared.Engineering.Circuit.Id == circuit.Id)
+            {
+                var known = circuit.Symbols.Select(s => s.Id).ToHashSet();
+                var dc = declared.Engineering.Circuit;
+                var dComponents = dc.Components.ToDictionary(c => c.Id);
+                var dDefinitions = dc.Sheets.SelectMany(s => s.Components.Select(d => (Sheet: s.Id, Definition: d))).ToDictionary(x => x.Definition.Id);
+                var dParts = dc.Parts.ToDictionary(p => p.Id);
+                var dSymbols = dc.Symbols.ToDictionary(s => s.Id);
+                var dPaths = declared.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+                // The library symbol the XML declares for each part it adds.
+                var dLibraries = (declared.PartSymbols ?? []).Where(s => !parts.ContainsKey(s.PartId))
+                    .ToDictionary(s => s.PartId, s => LibraryKey(s.LibraryId));
+                foreach (var binding in declared.SymbolBindings.Where(b => !known.Contains(b.SymbolOccurrenceId)))
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (!dSymbols.TryGetValue(binding.SymbolOccurrenceId, out var occurrence) || !dComponents.TryGetValue(occurrence.ComponentId, out var component)
+                        || !dPaths.TryGetValue(occurrence.EffectiveSheetInstanceId(component), out var path)
+                        || !byKey.TryGetValue(path + "#" + binding.NativeObjectId.ToString("D"), out var addition))
+                        return Failure(AnswerMismatch, $"The XML binds occurrence {binding.SymbolOccurrenceId:D} to symbol {binding.NativeObjectId:D}, which KiCad "
+                            + "does not show as a symbol placed since the last synchronization on the sheet of that occurrence. Bind the symbol a resolution "
+                            + "request names, on the sheet it names; nothing was published.");
+                    if (declarations.ContainsKey(addition.Key))
+                        return Failure(AnswerMismatch, $"The XML binds two occurrences to symbol {addition.Reference} ({addition.NativeId:D}); bind each symbol once.");
+                    var (sheetDefinition, definition) = dDefinitions[component.DefinitionId];
+                    var part = dParts[definition.PartId];
+                    // The part must be one the request could offer: an existing part drawn or declared with the library symbol
+                    // KiCad draws, the part that library symbol makes, or a part the XML adds and declares with that library symbol.
+                    bool drawnWith = parts.ContainsKey(part.Id) ? PartChoices(addition).Contains(part.Id)
+                        : part.Id == addition.DerivedPart || dLibraries.TryGetValue(part.Id, out var library) && library == addition.Library;
+                    string? problem = Signature(part.Units, part.Pins) != addition.Signature
+                            ? $"part {part.Name}, whose units and pins are not those of the library symbol {addition.Library} KiCad draws"
+                        : !drawnWith ? $"part {part.Name}, which is not drawn or declared with the library symbol {addition.Library} KiCad draws"
+                        : occurrence.Unit != addition.Unit ? $"unit {occurrence.Unit}, but KiCad shows unit {addition.Unit}"
+                        : component.Reference != addition.Reference ? $"reference {component.Reference}, but KiCad shows {addition.Reference}"
+                        : definition.Value != addition.Value ? $"value {definition.Value}, but KiCad shows {addition.Value}"
+                        : occurrence.Placement is { } placement && !SchematicOrientation.Equivalent(placement, addition.Placement)
+                            ? "a placement other than the one KiCad shows"
+                        : null;
+                    if (problem is not null)
+                        return Failure(AnswerMismatch, $"The XML answers symbol {addition.Reference} ({addition.NativeId:D}) with {problem}. Make the answer "
+                            + "agree with what KiCad shows, or change the symbol in KiCad; nothing was published.");
+                    declarations.Add(addition.Key, new(addition, occurrence with { Placement = occurrence.Placement ?? addition.Placement },
+                        component, sheetDefinition, definition, part));
+                }
+                if (declarations.Count != 0 && !OnlyDeclarations(baseline, declared, declarations.Values, token))
+                    return Failure("ownership_change_with_xml_edits", "The XML answers which design objects the symbols placed in KiCad are, "
+                        + "but also changes other components, parts, units, nets or bindings. Both versions are kept: save the answer on its own "
+                        + "and synchronize it, then make the other change.");
+            }
+
+            // Answers given with kicad_design_ownership_answer.
+            var answerBy = new Dictionary<string, SchematicOwnershipAnswer>(StringComparer.Ordinal);
+            foreach (var answer in answers ?? [])
+            {
+                var matches = additions.Where(a => a.NativeId == answer.NativeObjectId).ToArray();
+                if (matches.Length != 1)
+                    return Failure(AnswerInvalid, $"Symbol {answer.NativeObjectId:D} is not a symbol KiCad shows since the last synchronization; "
+                        + "answer the symbols the resolution requests name.");
+                if (declarations.ContainsKey(matches[0].Key))
+                    return Failure(AnswerInvalid, $"The XML already answers symbol {matches[0].Reference} ({answer.NativeObjectId:D}).");
+                if (!answerBy.TryAdd(matches[0].Key, answer))
+                    return Failure(AnswerInvalid, $"Symbol {matches[0].Reference} ({answer.NativeObjectId:D}) is answered twice; answer each symbol once.");
+            }
+
+            // Parts, for every symbol the XML does not answer.
+            var requests = new List<SchematicOwnershipResolutionRequest>();
+            var decided = new List<Decision>();
+            var newParts = new Dictionary<Guid, PartDefinition>();
+            foreach (var addition in additions.Where(a => !declarations.ContainsKey(a.Key)))
+            {
+                token.ThrowIfCancellationRequested();
+                answerBy.TryGetValue(addition.Key, out var answer);
+                var candidates = PartChoices(addition);
+                Guid derived = addition.DerivedPart;
+                if (answer?.PartId is Guid chosen)
+                {
+                    // Only a part the request offers, or the part the symbol would be anyway: an answer never overrides a part
+                    // exact identities decide, and never makes the symbol a part drawn with another library symbol.
+                    if (!(candidates.Count == 0 ? chosen == derived : candidates.Contains(chosen)))
+                        return Failure(AnswerInvalid, $"Part {chosen:D} is not one of the parts {addition.Reference} ({addition.NativeId:D}) can be: "
+                            + $"a part drawn or declared with the library symbol {addition.Library} KiCad draws, with exactly its units and pins"
+                            + (candidates.Count == 0 ? $", of which this design has none, so the answer is the new part {derived:D}"
+                                : $" ({string.Join(", ", candidates.Order().Select(c => c.ToString("D")))})")
+                            + "; choose one of the request's candidate parts.");
+                    if (candidates.Count > 1) candidates = [chosen];
+                }
                 if (candidates.Count > 1)
                 {
-                    requests.Add(Request(PartAmbiguous, candidates.Order().ToArray(), [],
+                    requests.Add(Request(addition, PartAmbiguous, [.. candidates.Order()], [],
                         "Several parts are drawn with this library symbol and have exactly its pins; choose the part this symbol is."));
                     continue;
                 }
@@ -352,59 +584,123 @@ public static class SchematicNativeAdditionProjection
                 if (candidates.Count == 0)
                 {
                     created = newParts.TryGetValue(derived, out var shared) ? shared : new PartDefinition(derived,
-                        (symbol.LibraryId ?? symbol.Definition.Id)?.EntryName is { Length: > 0 } entry ? entry : library, units, pins);
+                        (addition.Symbol.LibraryId ?? addition.Symbol.Definition.Id)?.EntryName is { Length: > 0 } entry ? entry : addition.Library,
+                        addition.Units, addition.Pins);
                     newParts[derived] = created;
                 }
-                decided.Add((path, symbol, sheet.SheetInstanceId, created?.Id ?? candidates[0], created));
-
-                SchematicOwnershipResolutionRequest Request(string code, IReadOnlyList<Guid> parts, IReadOnlyList<Guid> owners, string reason) =>
-                    new(code, nativeId, path, sheet.SheetInstanceId, symbol.ReferenceField.Text.Text_, library, symbol.Unit.Unit, parts, owners, reason);
+                decided.Add(new(addition, created?.Id ?? candidates[0], created, answer));
             }
-            // Units of a multi-unit part: KiCad joins units into one component by their reference designator, which is a
-            // name. Adopt one only when no component could own it: every existing component of the part already draws that
-            // unit, and it is the only new unit of that part.
-            foreach (var group in decided.Where(d => (d.NewPart?.Units ?? keptCircuit.Parts.Single(p => p.Id == d.Part).Units) > 1).GroupBy(d => d.Part))
+            int Units(Guid part) => newParts.TryGetValue(part, out var created) ? created.Units : parts[part].Units;
+
+            // Units each component draws: existing ones, and the ones the XML declares.
+            var drawn = new Dictionary<Guid, HashSet<int>>();
+            void Draw(Guid component, int unit) { if (!drawn.TryGetValue(component, out var set)) drawn.Add(component, set = []); set.Add(unit); }
+            foreach (var occurrence in keptCircuit.Symbols) Draw(occurrence.ComponentId, occurrence.Unit);
+            foreach (var declaration in declarations.Values) Draw(declaration.Component.Id, declaration.Occurrence.Unit);
+            var owners = keptCircuit.Components.Select(c => (c.Id, Part: definitions[c.DefinitionId].PartId, c.Reference))
+                .Concat(declarations.Values.Where(d => !keptComponents.ContainsKey(d.Component.Id))
+                    .Select(d => (d.Component.Id, Part: d.Definition.PartId, d.Component.Reference)).Distinct()).ToList();
+
+            // Components answered with kicad_design_ownership_answer: a component of its own, or a unit of an existing component
+            // or of another new symbol's component.
+            var joins = new Dictionary<string, Guid>(StringComparer.Ordinal);
+            var founders = decided.Where(d => d.Answer?.ComponentId is Guid own && own == d.Addition.Proposed).ToHashSet();
+            foreach (var founder in founders)
             {
-                var owners = keptCircuit.Components.Where(c => definitions[c.DefinitionId].PartId == group.Key).ToArray();
+                owners.Add((founder.Addition.Proposed, founder.Part, founder.Addition.Reference));
+                Draw(founder.Addition.Proposed, founder.Addition.Unit);
+            }
+            var declaredOwners = declarations.Values.GroupBy(d => d.Component.Id).ToDictionary(g => g.Key, g => g.First());
+            foreach (var entry in decided.Where(d => d.Answer?.ComponentId is Guid target && target != d.Addition.Proposed))
+            {
+                Guid target = entry.Answer!.ComponentId!.Value;
+                var addition = entry.Addition;
+                // Another new symbol's own component: that symbol is a component of its own, of which this one is a unit.
+                var other = decided.FirstOrDefault(d => d.Addition.Proposed == target && (d.Answer?.ComponentId is null || d.Answer.ComponentId == target));
+                (Guid Part, string Reference)? owner = keptComponents.TryGetValue(target, out var existing) ? (definitions[existing.DefinitionId].PartId, existing.Reference)
+                    : declaredOwners.TryGetValue(target, out var declaredOwner) ? (declaredOwner.Definition.PartId, declaredOwner.Component.Reference)
+                    : other is not null ? (other.Part, other.Addition.Reference) : null;
+                if (owner is not { } chosen)
+                    return Failure(AnswerInvalid, $"Component {target:D} is not an existing component or a new symbol's own component; answer "
+                        + $"{addition.Reference} ({addition.NativeId:D}) with one of its request's candidate components or its proposed component.");
+                if (other is not null && founders.Add(other))
+                {
+                    owners.Add((target, other.Part, other.Addition.Reference));
+                    Draw(target, other.Addition.Unit);
+                }
+                string? problem = chosen.Part != entry.Part ? "is made from another part"
+                    : chosen.Reference != addition.Reference
+                        ? $"is named {chosen.Reference}, while KiCad shows {addition.Reference}; set the symbol's reference in KiCad first"
+                    : drawn.TryGetValue(target, out var units) && units.Contains(addition.Unit) ? $"already draws unit {addition.Unit}"
+                    : null;
+                if (problem is not null)
+                    return Failure(AnswerInvalid, $"{addition.Reference} ({addition.NativeId:D}) cannot be a unit of component {target:D}: that component {problem}.");
+                Draw(target, addition.Unit);
+                joins.Add(addition.Key, target);
+            }
+
+            // Units of a multi-unit part: KiCad joins units into one component by their reference designator, which is a
+            // name. Adopt one only when no component could own it: every other component of the part already draws that
+            // unit, and it is the only new unit of that part.
+            foreach (var group in decided.Where(d => d.Answer?.ComponentId is null && !founders.Contains(d) && Units(d.Part) > 1).GroupBy(d => d.Part))
+            {
+                var ofPart = owners.Where(o => o.Part == group.Key).Select(o => o.Id).Distinct().ToArray();
                 foreach (var entry in group)
                 {
-                    var missing = owners.Where(c => !keptCircuit.Symbols.Any(s => s.ComponentId == c.Id && s.Unit == entry.Symbol.Unit.Unit))
-                        .Select(c => c.Id).Order().ToArray();
+                    var missing = ofPart.Where(c => !(drawn.TryGetValue(c, out var units) && units.Contains(entry.Addition.Unit))).Order().ToArray();
                     if (missing.Length != 0 || group.Count() > 1)
-                        requests.Add(new(missing.Length != 0 ? UnitOwnerAmbiguous : UnitGroupingAmbiguous, Guid.Parse(entry.Symbol.Id.Value),
-                            entry.Path, entry.Sheet, entry.Symbol.ReferenceField.Text.Text_, LibraryKey(entry.Symbol), entry.Symbol.Unit.Unit, [group.Key],
-                            missing.Length != 0 ? missing : group.Where(g => g != entry).Select(g => AdoptedIdentity("component", keptCircuit.Id,
-                                PathOf(g.Path), Guid.Parse(g.Symbol.Id.Value))).Order().ToArray(),
-                            missing.Length != 0 ? "An existing component of this part does not draw this unit; choose whether the new unit is one of its units."
+                        requests.Add(Request(entry.Addition, missing.Length != 0 ? UnitOwnerAmbiguous : UnitGroupingAmbiguous, [group.Key],
+                            missing.Length != 0 ? missing : [.. group.Where(g => g != entry).Select(g => g.Addition.Proposed).Order()],
+                            missing.Length != 0 ? "A component of this part does not draw this unit; choose whether the new unit is one of its units."
                                 : "Several new units of this multi-unit part were placed; choose which of them are one component."));
                 }
             }
             if (requests.Count != 0)
-                return new(null, requests.OrderBy(r => r.NativePath, StringComparer.Ordinal).ThenBy(r => r.NativeObjectId).ToArray(), [],
-                    gaps.Distinct().ToArray(), ResolutionRequired,
-                    "KiCad shows new symbols whose design owner cannot be decided from exact identities; answer the resolution requests.");
+                return new(null, [.. requests.OrderBy(r => r.NativePath, StringComparer.Ordinal).ThenBy(r => r.NativeObjectId)], [],
+                    gaps.Distinct().ToArray(), ResolutionRequired, ResolutionMessage);
 
-            // Every decision is exact: create the parts, components and occurrences.
+            // Every decision is exact or answered: create the parts, components and occurrences.
             var sheets = keptCircuit.SheetInstances.ToDictionary(s => s.Id);
             var addedDefinitions = new Dictionary<Guid, List<ComponentDefinition>>();
-            var addedComponents = new List<ComponentInstance>(); var addedOccurrences = new List<SymbolOccurrence>();
-            var addedBindings = new List<SchematicSymbolBinding>();
-            foreach (var (path, symbol, sheet, part, _) in decided)
+            void Define(Guid sheetDefinition, ComponentDefinition definition)
             {
-                var nativeId = Guid.Parse(symbol.Id.Value); var nativePath = PathOf(path);
-                Guid definition = AdoptedIdentity("definition", keptCircuit.Id, nativePath, nativeId);
-                Guid component = AdoptedIdentity("component", keptCircuit.Id, nativePath, nativeId);
-                Guid occurrence = AdoptedIdentity("occurrence", keptCircuit.Id, nativePath, nativeId);
-                Guid owner = sheets[sheet].DefinitionId;
-                if (!addedDefinitions.TryGetValue(owner, out var list)) addedDefinitions.Add(owner, list = []);
-                list.Add(new(definition, part, symbol.ValueField?.Text?.Text_ ?? ""));
-                addedComponents.Add(new(component, definition, sheet, symbol.ReferenceField.Text.Text_));
-                addedOccurrences.Add(new(occurrence, component, symbol.Unit.Unit, SchematicModelProjection.Placement(symbol)));
-                addedBindings.Add(new(occurrence, nativeId));
+                if (!addedDefinitions.TryGetValue(sheetDefinition, out var list)) addedDefinitions.Add(sheetDefinition, list = []);
+                if (!list.Any(d => d.Id == definition.Id)) list.Add(definition);
+            }
+            var addedComponents = new List<ComponentInstance>(); var addedOccurrences = new List<SymbolOccurrence>();
+            var addedBindings = new List<SchematicSymbolBinding>(); var declaredParts = new List<PartDefinition>();
+            var componentSheets = keptComponents.ToDictionary(p => p.Key, p => p.Value.SheetInstanceId);
+            foreach (var declaration in declarations.Values) componentSheets.TryAdd(declaration.Component.Id, declaration.Component.SheetInstanceId);
+            foreach (var entry in decided.Where(d => !joins.ContainsKey(d.Addition.Key)))
+            {
+                var addition = entry.Addition; var nativePath = PathOf(addition.Path);
+                Guid definition = AdoptedIdentity("definition", keptCircuit.Id, nativePath, addition.NativeId);
+                Guid occurrence = AdoptedIdentity("occurrence", keptCircuit.Id, nativePath, addition.NativeId);
+                Define(sheets[addition.Sheet].DefinitionId, new(definition, entry.Part, addition.Value));
+                addedComponents.Add(new(addition.Proposed, definition, addition.Sheet, addition.Reference));
+                componentSheets[addition.Proposed] = addition.Sheet;
+                addedOccurrences.Add(new(occurrence, addition.Proposed, addition.Unit, addition.Placement));
+                addedBindings.Add(new(occurrence, addition.NativeId));
+            }
+            foreach (var entry in decided.Where(d => joins.ContainsKey(d.Addition.Key)))
+            {
+                var addition = entry.Addition; Guid target = joins[addition.Key];
+                Guid occurrence = AdoptedIdentity("occurrence", keptCircuit.Id, PathOf(addition.Path), addition.NativeId);
+                addedOccurrences.Add(new(occurrence, target, addition.Unit, addition.Placement, componentSheets[target] == addition.Sheet ? null : addition.Sheet));
+                addedBindings.Add(new(occurrence, addition.NativeId));
+            }
+            foreach (var declaration in declarations.Values.OrderBy(d => d.Addition.Path, StringComparer.Ordinal).ThenBy(d => d.Addition.NativeId))
+            {
+                if (!parts.ContainsKey(declaration.Part.Id) && !declaredParts.Any(p => p.Id == declaration.Part.Id)) declaredParts.Add(declaration.Part);
+                if (!definitions.ContainsKey(declaration.Definition.Id)) Define(declaration.SheetDefinition, declaration.Definition);
+                if (!keptComponents.ContainsKey(declaration.Component.Id) && !addedComponents.Any(c => c.Id == declaration.Component.Id))
+                    addedComponents.Add(declaration.Component);
+                addedOccurrences.Add(declaration.Occurrence);
+                addedBindings.Add(new(declaration.Occurrence.Id, declaration.Addition.NativeId));
             }
             var next = keptCircuit with
             {
-                Parts = [.. keptCircuit.Parts, .. newParts.Values.OrderBy(p => p.Id)],
+                Parts = [.. keptCircuit.Parts, .. newParts.Values.OrderBy(p => p.Id), .. declaredParts],
                 Sheets = [.. keptCircuit.Sheets.Select(s => addedDefinitions.TryGetValue(s.Id, out var extra) ? s with { Components = [.. s.Components, .. extra] } : s)],
                 Components = [.. keptCircuit.Components, .. addedComponents],
                 Symbols = [.. keptCircuit.Symbols, .. addedOccurrences]
@@ -425,12 +721,133 @@ public static class SchematicNativeAdditionProjection
             {
                 AddedOccurrences = [.. addedOccurrences.Select(o => o.Id).Order()],
                 AddedComponents = [.. addedComponents.Select(c => c.Id).Order()],
-                AddedParts = [.. newParts.Keys.Order()],
-                RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges
+                AddedParts = [.. newParts.Keys.Concat(declaredParts.Select(p => p.Id)).Order()],
+                AnsweredOccurrences = [.. declarations.Values.Select(d => d.Occurrence.Id).Order()],
+                RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges,
+                AddedSheetInstances = [.. addedSheets.Select(s => s.Instance.Id)],
+                RemovedSheetInstances = removal.RemovedSheetInstances, MovedSheetInstances = removal.MovedSheetInstances
             }, [], [], gaps.Distinct().ToArray());
+
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
     }
+
+    /// <summary>The saved XML with <paramref name="answers"/> declared, for kicad_design_ownership_answer: for each answered
+    /// symbol, and each symbol whose own component an answer joins, the occurrence bound to it and the component, definition
+    /// and part it adds. Everything else stays as saved. The next synchronization adopts the declared symbols exactly as
+    /// declared, and decides every other symbol placed in KiCad as it would without answers.</summary>
+    internal static SchematicOwnershipAnswerResult Answer(DesignRecoveryState state, IReadOnlyList<SchematicOwnershipHistory> history,
+        IReadOnlyList<SchematicOwnershipAnswer> answers, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(answers);
+        if (answers.Count == 0) return new(null, [], [], [], AnswerInvalid, "Give an answer for at least one symbol a resolution request names.");
+        var desired = DesignRecoveryStore.ReadDesired(state);
+        var result = Project(state, history, desired, answers, token);
+        if (result.Adoption is not { } adoption)
+            return new(null, [], result.Requests, result.Issues, result.ErrorCode, result.ErrorMessage);
+        var design = adoption.BindingCandidate; var circuit = design.Engineering.Circuit;
+        var components = circuit.Components.ToDictionary(c => c.Id);
+        var paths = design.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+        var occurrences = circuit.Symbols.ToDictionary(s => s.Id);
+        var answered = answers.Select(a => a.NativeObjectId).ToHashSet();
+        var joined = answers.Where(a => a.ComponentId is not null).Select(a => a.ComponentId!.Value).ToHashSet();
+        var desiredCircuit = desired.Engineering.Circuit;
+        var known = desiredCircuit.Symbols.Select(s => s.Id).ToHashSet();
+        // The added occurrences to declare: the answered symbols and the symbols whose own component an answer joins.
+        var declare = design.SymbolBindings.Where(b => !known.Contains(b.SymbolOccurrenceId) && adoption.AddedOccurrences.Contains(b.SymbolOccurrenceId))
+            .Where(b =>
+            {
+                var occurrence = occurrences[b.SymbolOccurrenceId];
+                return answered.Contains(b.NativeObjectId) || joined.Contains(occurrence.ComponentId)
+                    && AdoptedIdentity("component", circuit.Id, PathOf(paths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])]),
+                        b.NativeObjectId) == occurrence.ComponentId;
+            }).ToArray();
+        var declaredOccurrences = declare.Select(b => occurrences[b.SymbolOccurrenceId]).ToArray();
+        var newComponents = declaredOccurrences.Select(o => components[o.ComponentId]).Where(c => !desiredCircuit.Components.Any(d => d.Id == c.Id))
+            .DistinctBy(c => c.Id).ToArray();
+        var definitions = circuit.Sheets.SelectMany(s => s.Components.Select(d => (Sheet: s.Id, Definition: d))).ToDictionary(x => x.Definition.Id);
+        var desiredDefinitions = desiredCircuit.Sheets.SelectMany(s => s.Components).Select(d => d.Id).ToHashSet();
+        var newDefinitions = newComponents.Select(c => definitions[c.DefinitionId]).Where(d => !desiredDefinitions.Contains(d.Definition.Id))
+            .DistinctBy(d => d.Definition.Id).ToArray();
+        var newParts = newDefinitions.Select(d => d.Definition.PartId).Distinct().Where(p => !desiredCircuit.Parts.Any(x => x.Id == p))
+            .Select(p => circuit.Parts.Single(x => x.Id == p)).ToArray();
+        var answeredDesign = desired with
+        {
+            Engineering = desired.Engineering with
+            {
+                Circuit = desiredCircuit with
+                {
+                    Parts = [.. desiredCircuit.Parts, .. newParts],
+                    Sheets = [.. desiredCircuit.Sheets.Select(s => s with { Components = [.. s.Components,
+                        .. newDefinitions.Where(d => d.Sheet == s.Id).Select(d => d.Definition)] })],
+                    Components = [.. desiredCircuit.Components, .. newComponents],
+                    Symbols = [.. desiredCircuit.Symbols, .. declaredOccurrences]
+                }
+            },
+            SymbolBindings = [.. desired.SymbolBindings, .. declare]
+        };
+        return new(answeredDesign, [.. declare.Select(b => b.NativeObjectId).Order()], [], []);
+    }
+
+    // The saved XML is the last synchronized design with only the declared answers added: their occurrences and bindings,
+    // the components, definitions and parts only they use, and nets that differ only by the pins only they draw.
+    private static bool OnlyDeclarations(SchematicDesign baseline, SchematicDesign declared, IEnumerable<Declaration> declarations,
+        CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var circuit = baseline.Engineering.Circuit; var dc = declared.Engineering.Circuit;
+        var answers = declarations.ToArray();
+        var occurrences = answers.Select(d => d.Occurrence.Id).ToHashSet();
+        var bindings = answers.Select(d => d.Occurrence.Id).ToHashSet();
+        var baseComponents = circuit.Components.Select(c => c.Id).ToHashSet();
+        var baseDefinitions = circuit.Sheets.SelectMany(s => s.Components).Select(d => d.Id).ToHashSet();
+        var baseParts = circuit.Parts.Select(p => p.Id).ToHashSet();
+        var newComponents = answers.Select(d => d.Component.Id).Where(id => !baseComponents.Contains(id)).ToHashSet();
+        var newDefinitions = answers.Select(d => d.Definition.Id).Where(id => !baseDefinitions.Contains(id)).ToHashSet();
+        var newParts = answers.Select(d => d.Part.Id).Where(id => !baseParts.Contains(id)).ToHashSet();
+        // Pins a declared unit draws that the component did not draw before.
+        var answerPins = new HashSet<PinEndpoint>();
+        foreach (var owner in answers.GroupBy(d => d.Component.Id))
+        {
+            var part = owner.First().Part;
+            var before = circuit.Symbols.Where(s => s.ComponentId == owner.Key).Select(s => s.Unit).ToHashSet();
+            var after = before.Concat(owner.Select(d => d.Occurrence.Unit)).ToHashSet();
+            static bool Carried(IEnumerable<PartPin> pins, HashSet<int> units) => pins.Any(p => p.Unit == 0 ? units.Count != 0 : units.Contains(p.Unit));
+            foreach (var pins in part.Pins.GroupBy(p => p.Number, StringComparer.Ordinal))
+                if (Carried(pins, after) && !Carried(pins, before)) answerPins.Add(new(owner.Key, pins.Key));
+        }
+        var stripped = dc with
+        {
+            Parts = [.. dc.Parts.Where(p => !newParts.Contains(p.Id))],
+            Sheets = [.. dc.Sheets.Select(s => s with { Components = [.. s.Components.Where(d => !newDefinitions.Contains(d.Id))] })],
+            Components = [.. dc.Components.Where(c => !newComponents.Contains(c.Id))],
+            Symbols = [.. dc.Symbols.Where(s => !occurrences.Contains(s.Id))],
+            Nets = [.. dc.Nets.Select(n => n with { Pins = [.. n.Pins.Where(p => !answerPins.Contains(p))] })]
+        };
+        try
+        {
+            return CircuitXml.Write(stripped) == CircuitXml.Write(circuit)
+                && SchematicNetReconciliation.Bindings(declared with { SymbolBindings = [.. declared.SymbolBindings.Where(b => !bindings.Contains(b.SymbolOccurrenceId))] })
+                    == SchematicNetReconciliation.Bindings(baseline);
+        }
+        catch (AutomationException) { return false; }
+    }
+
+    // DerivedPart is the part this library symbol makes when no part of the design is drawn with it.
+    private sealed record Addition(string Path, SchematicSymbolInstance Symbol, Guid NativeId, Guid Sheet, string Library,
+        IReadOnlyList<PartPin> Pins, int Units, string Signature, Guid Proposed, Guid DerivedPart)
+    {
+        public string Key => Path + "#" + NativeId.ToString("D");
+        public int Unit => Symbol.Unit.Unit;
+        public string Reference => Symbol.ReferenceField.Text.Text_;
+        public string Value => Symbol.ValueField?.Text?.Text_ ?? "";
+        public SymbolPlacement Placement => SchematicModelProjection.Placement(Symbol);
+    }
+
+    private sealed record Declaration(Addition Addition, SymbolOccurrence Occurrence, ComponentInstance Component, Guid SheetDefinition,
+        ComponentDefinition Definition, PartDefinition Part);
+
+    private sealed record Decision(Addition Addition, Guid Part, PartDefinition? NewPart, SchematicOwnershipAnswer? Answer);
 
     private static IReadOnlyList<Guid> PathOf(string path) => [.. path.Split('/').Select(Guid.Parse)];
 

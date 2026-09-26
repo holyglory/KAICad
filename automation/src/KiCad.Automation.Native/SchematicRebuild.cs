@@ -364,17 +364,25 @@ public static class SchematicRebuild
         // files and never overwrites a project setting. While the files are lost the XML cannot take KiCad's settings instead:
         // every plan is this rebuild, and an edited XML is refused as rebuild_requires_settled_xml. So the message names only
         // what does fix it: putting KiCad's settings back, in KiCad or by reopening the project with the project file saved
-        // with this XML.
+        // with this XML. Planning reads the recovery record's saved observation, never KiCad, so the message also names the
+        // step that shows the record KiCad's settings again: a refresh in the same document session, or, after reopening the
+        // project (a new session), the new root created and the record reattached to it.
         var kept = state.Observed.Instances[0].Metadata;
         var recorded = baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(baseline.Schematic.Document)).Metadata;
         var changed = ChangedProjectSettings(kept, recorded);
         if (changed.Count != 0)
-            return Rejected("rebuild_project_settings_changed",
-                "KiCad's project settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding would "
-                + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad "
-                + "last saved with this XML and reopen the project), then rebuild.");
+            return Rejected("rebuild_project_settings_changed", SettingsChangedMessage(changed));
         return new(SchematicRebuildKind.Admitted, [.. baseline.SheetBindings.Select(b => b.SheetInstanceId)]);
     }
+
+    /// <summary>The refusal of a rebuild while KiCad's project settings differ from the ones the XML records: the settings,
+    /// how to put them back, and the recovery step after which planning sees them again.</summary>
+    internal static string SettingsChangedMessage(IEnumerable<string> changed) =>
+        "KiCad's project settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding would "
+        + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad "
+        + "last saved with this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; "
+        + "after reopening the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) "
+        + "and rebuild.";
 
     /// <summary>Whether the snapshot's coverage limitation <paramref name="marker"/> loses part of <paramref name="saved"/>.
     /// KiCad names shared-screen root ownership and net chains on every snapshot; shared sheet files and net chains are

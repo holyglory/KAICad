@@ -135,13 +135,15 @@ public sealed class SchematicNativeRestorationTests
             { NativeRevisionSequence = future.Saved.State.NativeRevision.Sequence + 1 } }, future.Saved.RevisionToken);
         plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(future.Store, saved);
         Assert.AreEqual("native_ownership_history_ahead", plan.ErrorCode);
-        // Two causes of missing history keep two codes, and both fail closed. A design never synchronized has no earlier
-        // owner to find; a design synchronized without content-verified retained XML may have one that cannot be read,
-        // so the restored symbol is never taken for a new one.
+        // Two causes of missing history keep two outcomes. A design never synchronized has no earlier owner to find, so
+        // planning continues with an empty history (seam 2, ledger p95b6c94e732b880a): every symbol KiCad shows that it does
+        // not bind is new to it, and adoption decides it on its own terms. This fixture draws them on sheets shown several
+        // times, which adoption refuses. A design synchronized without content-verified retained XML may have an earlier
+        // owner that cannot be read, so it keeps failing closed and the restored symbol is never taken for a new one.
         using var never = new Fixture();
         saved = never.Store.Save(never.Saved.State with { LastSynchronization = null }, never.Saved.RevisionToken);
         plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(never.Store, saved);
-        Assert.AreEqual("missing_native_ownership_history", plan.ErrorCode);
+        Assert.AreEqual("native_addition_repeated_sheet_unsupported", plan.ErrorCode, plan.ErrorMessage);
         Assert.IsNull(plan.Candidate); Assert.IsEmpty(plan.NativeOperations);
         using var unverified = new Fixture();
         saved = unverified.Store.Save(unverified.Saved.State with { LastSynchronization = unverified.Receipt with

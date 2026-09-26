@@ -255,6 +255,70 @@ public sealed class CheckedDesignRecoveryTests
         Invalid(asserted, Refused(asserted, "Atomic operation 1 rejected: something else"), "post-condition code without its detail");
     }
 
+    // Apply's native_file_conflict names each file KiCad saves the schematic to that no longer holds what KiCad loaded, and the
+    // fix (seam B; review of fc3f93f070, finding 2b). NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss proves one
+    // changed project file through the public tools against a real KiCad; the other kinds (deleted, created, not comparable,
+    // several at once, two files with one name, no file at all) are KiCad's file baselines, which that journey cannot produce
+    // within its time limit and no existing test builds, so each exact message is checked here from the baseline rows alone.
+    [TestMethod]
+    public void AFileConflictNamesEachFileKiCadNoLongerMatchesAndWhatFixesIt()
+    {
+        const string Project = "/work/fixture/fixture.kicad_pro", Root = "/work/fixture/fixture.kicad_sch", Psu = "/work/fixture/psu.kicad_sch";
+        const string Nested = "/work/fixture/sub/fixture.kicad_sch", Local = "/work/fixture/fixture.kicad_prl";
+        string a = new('a', 64), b = new('b', 64);
+        const string Reopen = "reopen the project in KiCad and reattach the recovery record (kicad_design_recovery_reattach; if its schematic "
+            + "files are lost, first create the root with kicad_schematic_create), then plan again. Nothing was sent to KiCad and no file was written.";
+        NativeFileBaselineState Row(string path, bool before = true, bool now = true, string? current = null,
+            NativeFileBaselineStatus status = NativeFileBaselineStatus.NfbsUnchanged, bool known = true) => new()
+        {
+            Path = path, BaselinePath = path, BaselineKnown = true, CurrentKnown = known, BaselineExists = before, CurrentExists = now,
+            BaselineSha256 = before ? a : "", BaselineBytes = before ? 3UL : 0, CurrentSha256 = now ? current ?? a : "", CurrentBytes = now ? 3UL : 0,
+            Status = status
+        };
+        NativeFileBaselineState Changed(string path) => Row(path, current: b, status: NativeFileBaselineStatus.NfbsChanged);
+        NativeFileBaselineState Deleted(string path) => Row(path, now: false, status: NativeFileBaselineStatus.NfbsChanged);
+        NativeFileBaselineState Created(string path) => Row(path, before: false, status: NativeFileBaselineStatus.NfbsChanged);
+        DocumentLifecycleState State(IEnumerable<string> listed, params NativeFileBaselineState[] rows)
+        {
+            var state = new DocumentLifecycleState();
+            state.NativeFiles.Add(listed); state.FileBaselines.Add(rows);
+            return state;
+        }
+        DocumentLifecycleState Of(params NativeFileBaselineState[] rows) => State(rows.Select(r => r.Path), rows);
+
+        // False positive: every file as KiCad loaded it passes the coverage check, so no conflict is reported.
+        Assert.IsTrue(CheckedSchematicContract.FileCoverage(Of(Row(Project), Row(Root), Row(Psu))));
+
+        foreach (var (state, expected, what) in new (DocumentLifecycleState, string, string)[]
+        {
+            (Of(Changed(Project), Row(Root)), "fixture.kicad_pro changed on disk after KiCad loaded it; restore it, or " + Reopen, "one changed file"),
+            (Of(Row(Project), Deleted(Root)), "fixture.kicad_sch was deleted after KiCad loaded it; restore it, or " + Reopen, "one deleted file"),
+            (Of(Row(Project), Row(Root), Created(Local)),
+                "fixture.kicad_prl was created on disk where KiCad has not saved it yet; remove it, or " + Reopen, "one created file"),
+            (Of(Row(Project), Row(Root, status: NativeFileBaselineStatus.NfbsUnreadable)),
+                "KiCad cannot compare fixture.kicad_sch with what it loaded; " + Reopen, "an unreadable file"),
+            (Of(Row(Project), Row(Root, known: false)), "KiCad cannot compare fixture.kicad_sch with what it loaded; " + Reopen, "an unknown current file"),
+            (State([Project, Root], Row(Project)), "KiCad cannot compare fixture.kicad_sch with what it loaded; " + Reopen, "a listed file without a baseline"),
+            (Of(Changed(Project), Deleted(Root), Created(Psu)),
+                "fixture.kicad_pro changed on disk after KiCad loaded it; fixture.kicad_sch was deleted after KiCad loaded it; psu.kicad_sch was "
+                + "created on disk where KiCad has not saved it yet; restore the changed and deleted files and remove the created ones, or " + Reopen,
+                "changed, deleted and created files"),
+            (Of(Changed(Project), Changed(Psu), Deleted(Local)),
+                "fixture.kicad_pro and psu.kicad_sch changed on disk after KiCad loaded them; fixture.kicad_prl was deleted after KiCad loaded it; "
+                + "restore them, or " + Reopen, "several changed files and a deleted one"),
+            (Of(Changed(Project), Row(Psu, status: NativeFileBaselineStatus.NfbsWrongPath)),
+                "fixture.kicad_pro changed on disk after KiCad loaded it; KiCad cannot compare psu.kicad_sch with what it loaded; " + Reopen,
+                "a changed file and one that cannot be compared: only reopening fixes both"),
+            (Of(Changed(Root), Changed(Nested)),
+                Root + " and " + Nested + " changed on disk after KiCad loaded them; restore them, or " + Reopen, "two files with one name"),
+            (State([]), "KiCad reports no file it saves this schematic to; " + Reopen, "no file at all"),
+        })
+        {
+            Assert.IsFalse(CheckedSchematicContract.FileCoverage(state), what + ": the coverage check refuses it.");
+            Assert.AreEqual(expected, CheckedSchematicContract.FileConflictMessage(state), what);
+        }
+    }
+
     private sealed class ReceiptTransport : INativeTransport
     {
         internal NativeClientTests.FixtureTransport Session { get; } = new() { Epoch = Guid.NewGuid().ToString("D") };

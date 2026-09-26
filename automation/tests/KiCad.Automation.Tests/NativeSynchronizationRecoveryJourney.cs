@@ -23,16 +23,22 @@ public sealed partial class NativeSessionTests
     // KiCad, the recovery record, the XML and the production server always see KiCad's own state, and the way out is taken
     // through the production server's public tool kicad_design_recovery_resolve_pending.
     //  - First project: the stuck creation is undone (KiCad shows the arranged sheets again, the record observes them, the XML
-    //    is unchanged) and synchronization resumes with the journey's ordinary creation apply. The stuck realization is taken
-    //    back in KiCad with Edit > Undo, discard verifies KiCad no longer shows it, and the ordinary realization apply resumes.
-    //    Discard is refused while KiCad still shows either result. A KiCad started for a copy of the realized project is watched
-    //    by an automatic worker and killed: the worker pauses with instance_exited within a second.
+    //    is unchanged) and synchronization resumes with the journey's ordinary creation apply. Undo is first refused while a
+    //    later edit made in KiCad (a wire, committed through KiCad's checked-edit API) is there, and accepted once KiCad's own
+    //    Edit > Undo (Ctrl+Z) took that edit back. The stuck realization is taken back in KiCad with Edit > Undo, discard
+    //    verifies KiCad no longer shows it, and the ordinary realization apply resumes. Discard is refused while KiCad still
+    //    shows either result. On a KiCad started for a copy of the realized project, an XML connection's native edit is
+    //    journaled by the test host, which is killed before sending it (KICAD_SYNC_HARNESS_PAUSE_STAGE layout-prepared), so
+    //    KiCad never receives it; a wire making the same connection is then committed in KiCad through its checked-edit API
+    //    (VerifyNeverReceivedDiscard): undo and keep-and-replan are refused and name discard, discard clears the operation
+    //    while the record keeps observing KiCad as it was, and refresh, plan and apply publish the wire KiCad shows. That KiCad is then watched by an automatic worker
+    //    and killed: the worker pauses with instance_exited within a second.
     //  - Second project: both stuck operations are kept (keep-and-replan); each continuation is completed with
-    //    kicad_design_sync_apply, which saves KiCad's result and publishes the XML re-planned from it. On a KiCad started for a
-    //    copy of the realized project, a stuck creation is kept after the person joined two XML nets with a wire and saved and
-    //    reloaded the sheets (VerifyKeptConnectionsWin): discard and undo are refused and name keep-and-replan, KiCad's joined
-    //    net is published with the requirements on the two nets waiting for resolution, and the kept result's publication is
-    //    refused undo and discard while KiCad shows it.
+    //    kicad_design_sync_apply, which saves KiCad's sheets and publishes the XML re-planned from it. On a KiCad started for a
+    //    copy of the realized project, a stuck creation is kept after a wire joined two XML nets in KiCad and the sheets were
+    //    saved (Ctrl+S) and reloaded (VerifyKeptConnectionsWin): discard and undo are refused and name keep-and-replan, KiCad's
+    //    joined net is published with the requirements on the two nets waiting for resolution, the kept result's publication
+    //    is refused undo and discard while KiCad shows it, and afterwards the next plan has nothing to do.
     // Every path ends with KiCad, the recovery record and the XML consistent, and the next synchronization proceeds.
 
     private sealed record StuckSynchronization(Guid OperationId, string NativeOperationId, StoredDesignRecovery Held, CheckedSchematicState Before,
@@ -120,9 +126,12 @@ public sealed partial class NativeSessionTests
     }
 
     // Undo: KiCad shows the design as the operation found it, the record observes that state with nothing pending, and the
-    // baseline, desired XML and XML file are unchanged. Discard is refused first, while KiCad still shows the result.
+    // baseline, desired XML and XML file are unchanged. Discard is refused first, while KiCad still shows the result. Undo is
+    // refused while a later edit made in KiCad is there (it would remove that too), and accepted once KiCad's own undo
+    // (Ctrl+Z) took the later edit back: KiCad then shows exactly what the operation left, by content, at a later revision.
     private static async Task<object> UndoStuckSynchronization(StdioMcpFixture host, NativeClient client, DocumentSpecifier document,
-        DesignRecoveryStore store, StuckSynchronization stuck, string instanceId, string evidence, CancellationToken token)
+        DesignRecoveryStore store, StuckSynchronization stuck, int processId, string display, string instanceId, string evidence,
+        CancellationToken token)
     {
         var early = await ResolvePending(host, instanceId, store, stuck, "discard", evidence, token, label: "refused");
         Assert.AreEqual("operation_result_in_kicad", Error(early), early.GetRawText());
@@ -131,6 +140,43 @@ public sealed partial class NativeSessionTests
         var mismatch = await host.Tool("kicad_design_recovery_resolve_pending", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = stuck.Held.RevisionToken, operationId = Guid.NewGuid().ToString("D"), choice = "undo" });
         Assert.AreEqual("pending_operation_mismatch", Error(mismatch), mismatch.GetRawText());
+
+        // A later edit made in KiCad: a short wire on a free spot of the root sheet, committed through KiCad's checked-edit
+        // API (the journey cannot drive KiCad's wire tool). Undo would also remove it, so it is refused and names Edit > Undo.
+        var spot = await FreeSymbolSpot(client, stuck.Committed, token);
+        var later = new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") }, Type = SchematicLineType.SltWire,
+            Start = new() { XNm = spot.XNm - 2_540_000, YNm = spot.YNm }, End = new() { XNm = spot.XNm + 2_540_000, YNm = spot.YNm },
+            Locked = LockedState.LsUnlocked };
+        var edit = new ApplySchematicItemBatch { Document = stuck.Committed.State.Document.Clone(), DocumentEpoch = stuck.Committed.State.Revision.Epoch,
+            ExpectedRevision = stuck.Committed.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), Description = "Draw wire" };
+        edit.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), Create = Google.Protobuf.WellKnownTypes.Any.Pack(later) });
+        var drawn = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = edit, ExpectedState = stuck.Committed.State.Clone() }, token);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, drawn.Status, drawn.ToString());
+        var edited = await Capture();
+        Assert.AreNotEqual(stuck.Committed.State.StateSha256, edited.State.StateSha256, "KiCad shows the later edit.");
+        var refused = await ResolvePending(host, instanceId, store, stuck, "undo", evidence, token, label: "later-edit");
+        Assert.AreEqual("native_changed_since_operation", Error(refused), refused.GetRawText());
+        StringAssert.Contains(refused.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "Edit > Undo");
+        Assert.AreEqual(stuck.Held.RevisionToken, store.Read()!.RevisionToken, "A refused undo changes nothing in the record.");
+        Assert.AreEqual(edited.State, (await Capture()).State, "A refused undo sends nothing to KiCad.");
+        // The person takes the later edit back with KiCad's own undo: KiCad shows exactly what the operation left again, at a
+        // later revision, and undo of the operation is accepted.
+        await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+        CheckedSchematicState takenBack;
+        using (var wait = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            wait.CancelAfter(TimeSpan.FromSeconds(20));
+            while (true)
+            {
+                takenBack = await Capture();
+                if (takenBack.State.Revision.Sequence > edited.State.Revision.Sequence) break;
+                await Task.Delay(250, wait.Token);
+            }
+        }
+        Assert.IsFalse(takenBack.Electrical.Hierarchy.Data.Instances.SelectMany(s => s.Items).Any(i => i.Is(SchematicLine.Descriptor)
+            && i.Unpack<SchematicLine>().Id.Value == later.Id.Value), "KiCad's undo took the later wire back.");
+        Assert.AreEqual(stuck.Committed.State.StateSha256, takenBack.State.StateSha256, "KiCad shows exactly what the operation left, by content.");
+        Assert.AreNotEqual(stuck.Committed.State.Revision.Sequence, takenBack.State.Revision.Sequence, "At a later revision.");
 
         var reply = await ResolvePending(host, instanceId, store, stuck, "undo", evidence, token);
         RequireToolSuccess(reply);
@@ -150,7 +196,8 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(again.GetProperty("structuredContent").GetProperty("resolvedNow").GetBoolean(), again.GetRawText());
         Assert.AreEqual(record.RevisionToken, store.Read()!.RevisionToken);
         Assert.AreEqual(undone.State, (await Capture()).State);
-        return new { stuck.Evidence, discardRefused = Error(early), mismatchRefused = Error(mismatch), outcome = "undone",
+        return new { stuck.Evidence, discardRefused = Error(early), mismatchRefused = Error(mismatch),
+            undoRefusedWhileLaterEdit = Error(refused), laterEditTakenBackWithCtrlZ = true, outcome = "undone",
             undoOperations = view.GetProperty("undoOperations").GetInt32(), undoOperationId = view.GetProperty("undoOperationId").GetString(),
             revisionAfter = undone.State.Revision.Sequence, receiptPath = view.GetProperty("receiptPath").GetString(), repeatedCallNoOp = true };
 
@@ -372,6 +419,7 @@ public sealed partial class NativeSessionTests
     // started for a copy of the realized project like a person would start it, attached to the production server, and watched by
     // an automatic worker; once the worker watches, KiCad is killed. The server finds the exit by its process observer (it did
     // not start this KiCad) and the worker's status is paused with instance_exited within a second, while nothing needs KiCad.
+    // Before the worker starts, the same KiCad serves VerifyNeverReceivedDiscard, and the worker watches the design it published.
     private static async Task<object> VerifyAutomaticPauseOnExit(StdioMcpFixture host, SchematicDesign design, string projectDirectory,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -381,6 +429,8 @@ public sealed partial class NativeSessionTests
         var root = kicad.Root;
         var direct = kicad.Client;
         string? session = null;
+        var (published, neverReceived) = await VerifyNeverReceivedDiscard(host, kicad, design, evidence, instanceId, token);
+        design = published;
         try
         {
             var shown = await direct.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new() { Document = root.Clone(), ProcessEpoch = direct.Epoch }, token);
@@ -471,7 +521,7 @@ public sealed partial class NativeSessionTests
                 statusesAfterExit = seen.Select(s => JsonSerializer.Deserialize<JsonElement>(s.GetRawText())).ToArray(),
                 resumeRefused = Error(resume), recordUnchanged = true, xmlUnchanged = true };
             await File.WriteAllTextAsync(evidenceFile, JsonSerializer.Serialize(result), token);
-            return result;
+            return new { neverReceived, exitPause = result };
 
             async Task<JsonElement> Wait(JsonElement current)
             {
@@ -489,18 +539,227 @@ public sealed partial class NativeSessionTests
         }
     }
 
+    // Discard of an operation whose native edit KiCad never received (review of 03566919ff, finding 1). On a KiCad started for
+    // a copy of the realized project, its own record holds that design, and the XML adds two resistors side by side on a free
+    // spot of the root sheet (created through the production server) and then a new net NS joining their pins 2. That
+    // connection is applied through the test host paused once its native edit is journaled (KICAD_SYNC_HARNESS_PAUSE_STAGE
+    // layout-prepared) and the host is killed there, so KiCad never receives the edit (its receipt is not-found). The same
+    // connection is then made in KiCad: a wire between the two pins, committed through KiCad's checked-edit API (the journey
+    // cannot drive KiCad's wire tool). Undo and keep-and-replan are refused and name discard. Discard clears the operation:
+    // nativeStatus not-found, observationKept true, nothing pending, nothing sent to KiCad, the XML and the record's
+    // observation unchanged. kicad_design_recovery_refresh then takes the wire in, the plan needs no native edit because
+    // KiCad already shows the connection, and apply publishes the XML with NS and the wire KiCad shows; a second plan has
+    // nothing to do. Returns the published design.
+    private static async Task<(SchematicDesign Published, object Proof)> VerifyNeverReceivedDiscard(StdioMcpFixture host, CopiedKiCad kicad,
+        SchematicDesign design, string evidence, string instanceId, CancellationToken token)
+    {
+        var client = kicad.Client;
+        var root = kicad.Root;
+        string id = kicad.Id;
+        string Evidence(string name) => Path.Combine(evidence, instanceId + "-never-received-" + name);
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+            { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
+        string Message(JsonElement reply) => reply.GetProperty("structuredContent").GetProperty("errorMessage").GetString()!;
+        var shown = await Capture();
+        var baseline = design with { Schematic = shown.Electrical.Hierarchy.Data.Clone() };
+        string designPath = Path.Combine(kicad.Copy, "never-received.xml");
+        byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, []));
+        await File.WriteAllBytesAsync(designPath, bytes, token);
+        var store = new DesignRecoveryStore(Path.Combine(kicad.Scratch, "never-received-recovery.json"));
+        store.Save(new(Guid.NewGuid(), Guid.Parse(id), new(shown.State.Revision.Epoch, shown.State.Revision.Sequence),
+            shown.Electrical.Hierarchy.TrackingComplete, baseline, bytes, baseline.Schematic.Clone(), [],
+            BaselineElectrical: shown.Electrical.Clone(), ObservedElectrical: shown.Electrical.Clone()), null);
+        object Recovery() => new { instanceId = id, recoveryPath = store.StatePath, expectedRevisionToken = store.Read()!.RevisionToken };
+        async Task<byte[]> Desire(SchematicDesign next)
+        {
+            byte[] wanted = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(next, []));
+            await File.WriteAllBytesAsync(designPath, wanted, token);
+            var current = store.Read()!;
+            store.Save(current.State with { DesiredFileBytes = wanted }, current.RevisionToken);
+            return wanted;
+        }
+        async Task<JsonElement> Plan(string name)
+        {
+            var plan = await host.Tool("kicad_design_sync_plan", Recovery());
+            await File.WriteAllTextAsync(Evidence(name + ".json"), RetainedToolEvidence(plan), token);
+            RequireToolSuccess(plan);
+            Assert.IsTrue(plan.GetProperty("structuredContent").GetProperty("canPrepare").GetBoolean(), plan.GetRawText());
+            return plan.GetProperty("structuredContent").Clone();
+        }
+        async Task<JsonElement> Apply(string name)
+        {
+            var applied = await host.Tool("kicad_design_sync_apply", new { instanceId = id, recoveryPath = store.StatePath, designPath,
+                expectedRevisionToken = store.Read()!.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+            await File.WriteAllTextAsync(Evidence(name + "-apply.json"), RetainedToolEvidence(applied), token);
+            RequireToolSuccess(applied);
+            var result = applied.GetProperty("structuredContent").Clone();
+            Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), applied.GetRawText());
+            Assert.IsFalse(store.Read()!.State.HasPendingWork);
+            return result;
+        }
+
+        // 1. Two resistors like R1, side by side on a free spot of the root sheet, created from XML.
+        var spot = await FreeSymbolSpot(client, shown, token);
+        var circuit = baseline.Engineering.Circuit;
+        var r1 = circuit.Components.Single(c => c.Reference == "R1");
+        var r1Definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == r1.DefinitionId);
+        var rootSheet = circuit.SheetInstances.Single(s => s.ParentId is null);
+        Guid[] definitions = [Guid.NewGuid(), Guid.NewGuid()], components = [Guid.NewGuid(), Guid.NewGuid()], occurrences = [Guid.NewGuid(), Guid.NewGuid()];
+        var withResistors = baseline with { Engineering = baseline.Engineering with { Circuit = circuit with
+        {
+            Sheets = [.. circuit.Sheets.Select(s => s.Id != rootSheet.DefinitionId ? s : s with { Components = [.. s.Components,
+                .. definitions.Select(d => new ComponentDefinition(d, r1Definition.PartId, r1Definition.Value))] })],
+            Components = [.. circuit.Components, .. components.Select((c, i) => new ComponentInstance(c, definitions[i], rootSheet.Id, "R" + (91 + i)))],
+            Symbols = [.. circuit.Symbols, .. occurrences.Select((o, i) => new SymbolOccurrence(o, components[i], 1,
+                new SymbolPlacement((spot.XNm + i * 10_160_000L) / 1_000_000m, spot.YNm / 1_000_000m, 0, false, false, false)))]
+        } } };
+        await Desire(withResistors);
+        Assert.IsTrue((await Apply("creation")).GetProperty("nativeMutationCommitted").GetBoolean(), "KiCad created the two resistors.");
+        var created = store.Read()!.State.Baseline;
+
+        // 2. The XML joins the two resistors' pins 2 in a new net NS. Its connection realization is journaled by the test host,
+        //    which is killed right there, before it sends the native edit.
+        var ns = new CircuitNet(Guid.NewGuid(), "NS", [new(components[0], "2"), new(components[1], "2")]);
+        var connected = created with { Engineering = created.Engineering with { Circuit = created.Engineering.Circuit with
+            { Nets = [.. created.Engineering.Circuit.Nets, ns] } } };
+        byte[] connectedXml = await Desire(connected);
+        var before = await Capture();
+        var operation = Guid.NewGuid();
+        string marker = Evidence("pause.json");
+        await using (var harness = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.StartInfo("layout-prepared", marker), Evidence("host"),
+            Evidence("host.log"), token))
+        {
+            RequireToolSuccess(await harness.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = id }));
+            Task markerReady = SyncHarnessProcessTests.WaitForMarkerAsync(marker, token);
+            Task<JsonElement> call = harness.Tool("kicad_design_sync_apply", new { instanceId = id, recoveryPath = store.StatePath, designPath,
+                expectedRevisionToken = store.Read()!.RevisionToken, operationId = operation.ToString("D") });
+            try
+            {
+                if (await Task.WhenAny(markerReady, call) == call)
+                { RequireToolSuccess(await call); Assert.Fail("The test host completed the realization without pausing once it was journaled."); }
+                await markerReady;
+                await harness.TerminateAsync(); Assert.IsTrue(harness.ForcedTermination);
+                await Assert.ThrowsAsync<IOException>(async () => { await call; });
+            }
+            catch
+            {
+                await harness.TerminateAsync();
+                try { await call; } catch (Exception) { }
+                throw;
+            }
+        }
+        var held = store.Read()!;
+        Assert.AreEqual(operation, held.State.PendingLayout?.OperationId, "The realization is journaled and pending.");
+        Assert.AreEqual(DesignLayoutIntent.ConnectionRealizationLane, held.State.PendingLayout!.Lane);
+        var batch = held.State.PendingMutation ?? throw new AssertFailedException("The record holds the realization's native edit.");
+        Assert.AreEqual(before.State, (await Capture()).State, "KiCad never received the edit.");
+        var receipt = await client.InvokeAsync<ReadCheckedSchematicBatchReceipt, CheckedSchematicBatchReceipt>(new()
+        {
+            Document = batch.Document.Clone(), ProcessEpoch = client.Epoch, OperationId = batch.OperationId,
+            ExpectedRequest = new CheckedSchematicBatch { Batch = batch.Clone(), ExpectedState = held.State.PendingNativeState!.Clone() }
+        }, token);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsNotFound, receipt.Status, "KiCad has no receipt of the edit: " + receipt);
+        CollectionAssert.AreEqual(connectedXml, await File.ReadAllBytesAsync(designPath, token));
+
+        // 3. The same connection is made in KiCad: a wire from R91's pin 2 to R92's pin 2, committed through its checked-edit API.
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+            { Document = root.Clone(), ExpectedRevision = before.State.Revision.Clone() }, token);
+        Vector2 Pin2(Guid occurrence)
+        {
+            string symbol = created.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence).NativeObjectId.ToString("D");
+            return measured.Obstacles.Single(o => o.Id?.Value == symbol && o.SymbolPins is not null).SymbolPins.Pins
+                .Single(p => p.Number == "2").Position.Clone();
+        }
+        var (from, to) = (Pin2(occurrences[0]), Pin2(occurrences[1]));
+        Assert.AreEqual(from.YNm, to.YNm, "Both resistors stand upright side by side, so one straight wire joins their pins 2.");
+        var wire = new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") }, Type = SchematicLineType.SltWire,
+            Start = from, End = to, Locked = LockedState.LsUnlocked };
+        var edit = new ApplySchematicItemBatch { Document = before.State.Document.Clone(), DocumentEpoch = before.State.Revision.Epoch,
+            ExpectedRevision = before.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), Description = "Draw wire" };
+        edit.Operations.Add(new SchematicItemOperation { TargetDocument = root.Clone(), Create = Google.Protobuf.WellKnownTypes.Any.Pack(wire) });
+        var committed = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = edit, ExpectedState = before.State.Clone() }, token);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, committed.Status, committed.ToString());
+        var drawn = await Capture();
+        var drawnComparison = SchematicElectricalComparison.Compare(connected, drawn.Electrical, []);
+        Assert.IsTrue(drawnComparison.PinBindingsComplete && drawnComparison.ConnectivityEquivalent, "KiCad shows exactly the connection the XML asks for.");
+
+        // 4. Nothing of the operation reached KiCad: undo and keep-and-replan are refused and name discard; discard clears it.
+        var stuck = new StuckSynchronization(operation, batch.OperationId, held, before, before, receipt, connectedXml, designPath, new { });
+        var undo = await ResolvePending(host, id, store, stuck, "undo", evidence, token, label: "never-received");
+        Assert.AreEqual("native_operation_not_committed", Error(undo), undo.GetRawText());
+        StringAssert.Contains(Message(undo), "choose discard");
+        var keep = await ResolvePending(host, id, store, stuck, "keep-and-replan", evidence, token, label: "never-received");
+        Assert.AreEqual("native_operation_not_committed", Error(keep), keep.GetRawText());
+        StringAssert.Contains(Message(keep), "choose discard");
+        Assert.AreEqual(held.RevisionToken, store.Read()!.RevisionToken, "The refusals change nothing in the record.");
+        var reply = await ResolvePending(host, id, store, stuck, "discard", evidence, token);
+        RequireToolSuccess(reply);
+        var view = reply.GetProperty("structuredContent").Clone();
+        Assert.AreEqual("discarded", view.GetProperty("outcome").GetString(), view.GetRawText());
+        Assert.AreEqual("not-found", view.GetProperty("nativeStatus").GetString(), view.GetRawText());
+        Assert.IsTrue(view.GetProperty("observationKept").GetBoolean(), view.GetRawText());
+        Assert.IsFalse(view.GetProperty("pendingWork").GetBoolean(), view.GetRawText());
+        Assert.AreEqual(0, view.GetProperty("undoOperations").GetInt32(), "Discard sends nothing to KiCad.");
+        StringAssert.Contains(view.GetProperty("nextStep").GetString(), "kicad_design_recovery_refresh");
+        Assert.AreEqual(drawn.State, (await Capture()).State, "Discard sends nothing to KiCad.");
+        var discarded = store.Read()!;
+        Assert.IsFalse(discarded.State.HasPendingWork, "Nothing is pending.");
+        Assert.AreEqual(held.State.Observed, discarded.State.Observed, "The record still observes KiCad as it was before the wire.");
+        Assert.AreEqual(held.State.NativeRevision, discarded.State.NativeRevision);
+        Assert.AreEqual(SchematicDesignXml.Write(held.State.Baseline, []), SchematicDesignXml.Write(discarded.State.Baseline, []), "The baseline did not move.");
+        CollectionAssert.AreEqual(connectedXml, discarded.State.DesiredFileBytes, "The desired XML is unchanged.");
+        CollectionAssert.AreEqual(connectedXml, await File.ReadAllBytesAsync(designPath, token), "The XML file is unchanged.");
+
+        // 5. Refresh takes the wire in; plan and apply publish it.
+        var refreshed = await host.Tool("kicad_design_recovery_refresh", Recovery());
+        await File.WriteAllTextAsync(Evidence("refresh.json"), refreshed.GetRawText(), token);
+        RequireToolSuccess(refreshed);
+        Assert.IsTrue(refreshed.GetProperty("structuredContent").GetProperty("changed").GetBoolean(), refreshed.GetRawText());
+        Assert.AreEqual(drawn.Electrical.Hierarchy.Data, store.Read()!.State.Observed, "The record observes the wire committed in KiCad.");
+        var takenIn = await Plan("taken-in-plan");
+        Assert.IsFalse(takenIn.GetProperty("connectionRealizationRequired").GetBoolean(), "KiCad already shows the connection.");
+        Assert.AreEqual(0, takenIn.GetProperty("nativeOperationsJson").GetArrayLength(), "Nothing to send to KiCad: " + takenIn.GetRawText());
+        var planned = SchematicDesignXml.Read(takenIn.GetProperty("candidateDesignXml").GetString()!, []);
+        Assert.IsTrue(planned.Schematic.Instances.SelectMany(s => s.Items).Any(i => i.Is(SchematicLine.Descriptor) && i.Unpack<SchematicLine>().Id.Value == wire.Id.Value),
+            "The plan publishes the wire committed in KiCad.");
+        var publication = await Apply("taken-in");
+        Assert.IsFalse(publication.GetProperty("nativeMutationCommitted").GetBoolean(), "The wire is already in KiCad: nothing is sent.");
+        Assert.IsTrue(publication.GetProperty("nativeFilesSaved").GetBoolean());
+        var final = await Capture();
+        Assert.IsFalse(final.State.NativeContentDirty, "KiCad saved the wire.");
+        var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        var published = xml.Engineering.Circuit.Nets.Single(n => n.Id == ns.Id);
+        CollectionAssert.AreEquivalent(ns.Pins.ToArray(), published.Pins.ToArray(), "The XML keeps NS with the two pins.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(final.Electrical.Hierarchy.Data, xml.Schematic, token), "The XML describes what KiCad shows, the wire included.");
+        var comparison = SchematicElectricalComparison.Compare(xml, final.Electrical, []);
+        Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "KiCad's connections are the XML's.");
+        var settled = await Plan("settled-plan");
+        Assert.AreEqual(0, settled.GetProperty("nativeOperationsJson").GetArrayLength(), "The next plan has nothing to send.");
+        Assert.AreEqual(await File.ReadAllTextAsync(designPath, token), settled.GetProperty("candidateDesignXml").GetString(), "Nor anything to publish.");
+
+        var proof = new
+        {
+            instanceId = id, resistors = new[] { "R91", "R92" }, net = "NS", operationId = operation, nativeOperationId = batch.OperationId,
+            receiptStatus = receipt.Status.ToString(), refused = new { undo = Error(undo), keep = Error(keep) }, nativeStatus = "not-found",
+            observationKept = true, refreshed = true, publishedWithoutNativeEdit = true, receiptPath = view.GetProperty("receiptPath").GetString()
+        };
+        await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(proof), token);
+        return (store.Read()!.State.Baseline, proof);
+    }
+
     // Keep-and-replan when KiCad's connections really differ from the XML (ledger p0aa59a1dfc8701ea), after KiCad saved and
     // reloaded its sheets, and the publication of a kept result that can be neither undone nor discarded while KiCad shows it.
     // A KiCad is started for a copy of the realized project, and its record holds that design with a requirement on each of two
     // nets whose labels one straight wire can join on a sheet below the root. The XML then adds a resistor on the root sheet,
     // and that creation is forced stuck as in ForceStuckSynchronization: KiCad commits it and the scripted check refuses it.
-    // The person draws the wire in KiCad, so KiCad joins the two nets the XML keeps apart, saves the sheets (Ctrl+S) and
-    // reloads them (File > Revert), so KiCad's receipt of the creation is gone (session-ended). Discard and undo are refused
-    // and name keep-and-replan; keep-and-replan keeps what KiCad shows: both nets are reported merged into one net named as
-    // KiCad names it, and their
-    // requirements become unresolved net bindings. While that result waits for its publication, discard and undo of the
-    // publication are refused (kept_result_pending). Completing it publishes the XML with KiCad's joined net and the resistor;
-    // KiCad, the record and the XML then agree, with nothing pending.
+    // A wire is then committed in KiCad through its checked-edit API (the journey cannot drive KiCad's wire tool), so KiCad
+    // joins the two nets the XML keeps apart; the sheets are saved with Ctrl+S and reloaded from disk with the RevertDocument
+    // API request (what File > Revert does), so KiCad's receipt of the creation is gone (session-ended). Discard and undo are
+    // refused and name keep-and-replan; keep-and-replan keeps what KiCad shows: both nets are reported merged into one net
+    // named as KiCad names it, and their requirements become unresolved net bindings. While that result waits for its
+    // publication, discard and undo of the publication are refused (kept_result_pending). Completing it publishes the XML
+    // with KiCad's joined net and the resistor; KiCad, the record and the XML then agree, with nothing pending, and the next
+    // plan on the copy's record has nothing to send or publish, so synchronization resumes.
     private static async Task<object> VerifyKeptConnectionsWin(StdioMcpFixture host, SchematicDesign design, string projectDirectory,
         string display, string evidence, string instanceId, CancellationToken token)
     {
@@ -529,7 +788,7 @@ public sealed partial class NativeSessionTests
         var shown = await Capture();
         var circuit = design.Engineering.Circuit;
 
-        // The wire the person will draw, and the copy's record: the realized design as KiCad shows it for the copy, with a
+        // The wire to commit in KiCad through its checked-edit API, and the copy's record: the realized design as KiCad shows it for the copy, with a
         // requirement on each of the two nets it joins.
         var wire = await ChooseJoiningWire(client, shown, circuit, token);
         var (first, second) = (circuit.Nets.Single(n => n.Name == wire.First), circuit.Nets.Single(n => n.Name == wire.Second));
@@ -567,7 +826,7 @@ public sealed partial class NativeSessionTests
         var stuck = await ForceStuckSynchronization(client, root, store, designPath, id, "creation-check", "native_sync_connectivity_mismatch",
             evidence, token);
 
-        // The person draws the wire: KiCad joins exactly the two nets.
+        // The wire, committed through KiCad's checked-edit API: KiCad joins exactly the two nets.
         var committed = await Capture();
         Assert.AreEqual(stuck.Committed.State, committed.State);
         var line = new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") }, Type = SchematicLineType.SltWire,
@@ -590,8 +849,8 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(joinedItems.All(item => newItems.Contains(item)), "The new net holds both nets.");
         Assert.IsFalse(added.Any(item => earlierItems.Contains(item)), "The wire joins nothing else: " + string.Join(", ", added));
 
-        // The person saves KiCad's sheets (Ctrl+S) and reloads them from disk (File > Revert): a new document session, whose
-        // receipts hold nothing of the creation.
+        // KiCad's sheets are saved (Ctrl+S) and reloaded from disk with the RevertDocument API request, as File > Revert does:
+        // a new document session, whose receipts hold nothing of the creation.
         await FocusedSchematicShortcut(client, root, kicad.Process.Id, display, "s", token);
         await Until("saved its sheets after Ctrl+S", s => !s.State.NativeContentDirty && s.State.Revision.Epoch == wired.State.Revision.Epoch);
         for (int attempt = 0; ; attempt++)
@@ -681,6 +940,15 @@ public sealed partial class NativeSessionTests
         var comparison = SchematicElectricalComparison.Compare(xml, final.Electrical, []);
         Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "KiCad's connections are the XML's.");
         Assert.AreEqual(SchematicDesignXml.Write(xml, []), SchematicDesignXml.Write(published.State.Baseline, []), "The baseline is the published XML.");
+        // Synchronization resumes: the next plan on the copy's record has nothing to send to KiCad and nothing to publish.
+        var resumed = await host.Tool("kicad_design_sync_plan", new { instanceId = id, recoveryPath = store.StatePath,
+            expectedRevisionToken = published.RevisionToken });
+        await File.WriteAllTextAsync(Path.Combine(evidence, id + "-kept-connections-resumed-plan.json"), RetainedToolEvidence(resumed), token);
+        RequireToolSuccess(resumed);
+        var next = resumed.GetProperty("structuredContent");
+        Assert.IsTrue(next.GetProperty("canPrepare").GetBoolean(), resumed.GetRawText());
+        Assert.AreEqual(0, next.GetProperty("nativeOperationsJson").GetArrayLength(), "Nothing to send to KiCad: " + resumed.GetRawText());
+        Assert.AreEqual(await File.ReadAllTextAsync(designPath, token), next.GetProperty("candidateDesignXml").GetString(), "Nothing to publish.");
 
         var proof = new
         {
@@ -690,7 +958,8 @@ public sealed partial class NativeSessionTests
             refusedAfterReload = new { discard = Error(discard), undo = Error(undo) }, keptStatus = "session-ended",
             netChanges = changes.Select(c => JsonSerializer.Deserialize<JsonElement>(c.GetRawText())).ToArray(), joinedNetId = joinedNet,
             joinedNetName = joined.Name, refusedWhileKept = new { undo = Error(undoKept), discard = Error(discardKept) },
-            continuationOperationId = continuation, unresolvedNetBindings = bindings.Count, receiptPath = view.GetProperty("receiptPath").GetString()
+            continuationOperationId = continuation, unresolvedNetBindings = bindings.Count, receiptPath = view.GetProperty("receiptPath").GetString(),
+            resumedPlanNoChanges = true
         };
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-kept-connections.json"), JsonSerializer.Serialize(proof), token);
         return proof;

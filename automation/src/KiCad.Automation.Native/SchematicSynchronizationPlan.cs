@@ -70,7 +70,16 @@ public static class SchematicSynchronizationPlanner
         {
             if (selected && sameOwners)
                 throw new AutomationException("native_owner_resolution_stale", "The selected restoration no longer applies; clear it or inspect the current owners.");
-            var history = await SchematicOwnershipHistoryReader.ReadAsync(store, saved.State, token);
+            IReadOnlyList<SchematicOwnershipHistory> history;
+            try { history = await SchematicOwnershipHistoryReader.ReadAsync(store, saved.State, token); }
+            catch (AutomationException error) when (!selected && error.Code == SchematicOwnershipHistoryReader.NeverSynchronized)
+            {
+                // Seam 2 (lane 2C, ledger p95b6c94e732b880a): a design never synchronized has no earlier owner of anything
+                // KiCad shows, so every symbol it does not bind is new and planning continues with an empty history. History
+                // that exists always takes precedence, and history that cannot be verified keeps failing closed
+                // (unverified_native_ownership_history), so a restored symbol is never taken for a new one.
+                history = [];
+            }
             if (selected) _ = SchematicNativeRestorationProjection.Project(saved.State, history, token);
             return Prepare(saved.State, allowConnectedLayout, token, history, session);
         }
@@ -101,7 +110,11 @@ public static class SchematicSynchronizationPlanner
                 ? SchematicHierarchyMerge.Resolve(state.Baseline.Schematic, desired.Schematic, state.Observed,
                     choices.SnapshotToken, choices.Choices, token)
                 : SchematicHierarchyMerge.Plan(state.Baseline.Schematic, desired.Schematic, state.Observed, token);
-            if (SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering))
+            // Seam 4 (lane 2C, ledger p35cfdc0345e056a5): XML that answers an ownership resolution request binds new
+            // occurrences to symbols KiCad already shows. That is no creation, so it reaches the later hooks; any other
+            // binding change keeps the creation path and its creation_bindings_changed refusal.
+            if (SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, desired.Engineering)
+                && !SchematicNativeAdditionProjection.DeclaresAddedSymbols(state, desired))
                 return PrepareCreation(state, desired, hierarchy, gaps, token);
             // Lane entry points. A diff neither lane admits keeps the general path
             // below unchanged, including its error codes.
@@ -136,8 +149,10 @@ public static class SchematicSynchronizationPlanner
             if (properties.Candidate is null)
                 return Failure(properties.ErrorCode ?? "design_property_conflict", properties.ErrorMessage ?? "Resolve the reported native/model property conflicts first.");
             var survivingSymbols = properties.Candidate.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+            // Seam 3 (lane 2C): restored and adopted owners bring their sheet bindings along with their symbol bindings.
             var candidate = desired with { Engineering = properties.Candidate,
                 Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic),
+                SheetBindings = electrical.Restoration?.BindingCandidate.SheetBindings ?? desired.SheetBindings,
                 SymbolBindings = electrical.Restoration is not null ? electrical.Restoration.BindingCandidate.SymbolBindings
                     : nativeRemovals ? desired.SymbolBindings.Where(b => survivingSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
                     : desired.SymbolBindings };

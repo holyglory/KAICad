@@ -23,6 +23,17 @@ public sealed record SchematicNetReconciliationResult(EngineeringDesign? Candida
     public IReadOnlyList<Guid>? AddedParts { get; init; }
     /// <summary>Decisions exact identities cannot take; set with <see cref="SchematicNativeAdditionProjection.ResolutionRequired"/>.</summary>
     public IReadOnlyList<SchematicOwnershipResolutionRequest>? ResolutionRequests { get; init; }
+    /// <summary>Sheets KiCad shows that the design did not have, adopted with identities derived from the circuit, the parent
+    /// sheet's path and the sheet symbol's UUID (ledger p5f6d5d0ca242d628).</summary>
+    public IReadOnlyList<Guid>? AddedSheetInstances { get; init; }
+    /// <summary>Design sheets removed with everything on them: sheets KiCad no longer shows, or sheets the XML removes.</summary>
+    public IReadOnlyList<Guid>? RemovedSheetInstances { get; init; }
+    /// <summary>Design sheets shown at another place: under another parent, or through another sheet symbol.</summary>
+    public IReadOnlyList<Guid>? MovedSheetInstances { get; init; }
+    /// <summary>Design sheets a KiCad undo shows again, restored from verified history with their exact identities.</summary>
+    public IReadOnlyList<Guid>? RestoredSheetInstances { get; init; }
+    /// <summary>Sheet moves exact identities cannot decide; set with <see cref="SchematicNativeSheetChanges.MoveAmbiguous"/>.</summary>
+    public IReadOnlyList<SchematicSheetResolutionRequest>? SheetResolutionRequests { get; init; }
 }
 
 /// <summary>Pure three-way electrical-model reconciliation over stable exact
@@ -44,34 +55,53 @@ public static class SchematicNetReconciliation
             var (baseline, observed) = SchematicElectricalCheckpoints.Require(state);
             var desiredDocument = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(state.DesiredFileBytes), state.KnowledgeLibraries);
             var desired = desiredDocument.Engineering;
-            if (Topology(state.Baseline.Engineering.Circuit) != Topology(desired.Circuit)
-                || Bindings(state.Baseline) != Bindings(desiredDocument))
+            bool nativeOwnersChanged = NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed);
+            // XML that binds new occurrences to symbols placed in KiCad answers their resolution requests (ledger
+            // p35cfdc0345e056a5); the addition projection checks that the answer is all the XML changes.
+            if ((Topology(state.Baseline.Engineering.Circuit) != Topology(desired.Circuit) || Bindings(state.Baseline) != Bindings(desiredDocument))
+                && !(nativeOwnersChanged && SchematicNativeAdditionProjection.DeclaresAddedSymbols(state, desiredDocument)))
                 throw Failure("electrical_ownership_changed", "Reconcile changed component, sheet, unit or pin ownership before merging nets.");
             SchematicNativeRemovalResult? removal = null;
             SchematicNativeRestorationResult? restoration = null;
-            if (NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed))
+            if (nativeOwnersChanged)
             {
                 removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed, state.KnowledgeLibraries, token);
                 if (removal.BindingCandidate is null)
                 {
                     if (removal.ErrorCode != "electrical_ownership_changed" || history is null)
-                        return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage);
+                        return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage)
+                            { SheetResolutionRequests = removal.SheetRequests.Count == 0 ? null : removal.SheetRequests };
                     try { restoration = SchematicNativeRestorationProjection.Project(state, history, token); }
                     catch (AutomationException error) when (error.Code == "native_ownership_history_not_matched")
                     {
                         // No verified history knows these owners: they are symbols placed in KiCad since.
-                        var addition = SchematicNativeAdditionProjection.Project(state, history, token);
+                        var addition = SchematicNativeAdditionProjection.Project(state, history, desiredDocument, null, token);
                         if (addition.Adoption is null)
                             return new(null, [], [], addition.Issues.Select(i => new ElectricalBindingIssue(i.Code, i.NativePath,
                                 i.NativeObjectId?.ToString("D"), i.ModelId)).ToArray(), addition.CoverageGaps, addition.ErrorCode, addition.ErrorMessage)
-                                { ResolutionRequests = addition.Requests.Count == 0 ? null : addition.Requests };
+                                { ResolutionRequests = addition.Requests.Count == 0 ? null : addition.Requests,
+                                  SheetResolutionRequests = addition.SheetRequests.Count == 0 ? null : addition.SheetRequests };
                         restoration = addition.Adoption;
                     }
                     removal = null;
                 }
+                else if (removal.SheetsChanged)
+                {
+                    // Sheets KiCad removed or shows at another place (ledger p5f6d5d0ca242d628). The design's sheet bindings
+                    // and parents follow KiCad, so the change is carried as an adoption of nothing new: its binding candidate
+                    // holds the sheets as KiCad shows them, and the symbols and components the removed sheets took along.
+                    restoration = new SchematicNativeRestorationResult(removal.BindingCandidate, null, [], [])
+                    {
+                        RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges,
+                        RemovedSheetInstances = removal.RemovedSheetInstances, MovedSheetInstances = removal.MovedSheetInstances
+                    };
+                    removal = null;
+                }
                 // Circuit/layout edits need their own three-way owner resolution.
-                // Independent instruction changes are retained in the candidate.
-                if (CircuitXml.Write(desired.Circuit) != CircuitXml.Write(state.Baseline.Engineering.Circuit))
+                // Independent instruction changes are retained in the candidate. An XML answer to a resolution request
+                // is the one circuit edit allowed here; the addition projection already refused any other.
+                if (restoration is not { History: null, AnsweredOccurrences.Count: > 0 }
+                    && CircuitXml.Write(desired.Circuit) != CircuitXml.Write(state.Baseline.Engineering.Circuit))
                     throw Failure("ownership_change_with_xml_edits", "Resolve concurrent circuit or layout XML edits and native ownership changes before applying either version.");
             }
             var before = SchematicElectricalComparison.Compare(state.Baseline, baseline, state.KnowledgeLibraries, token);
@@ -111,15 +141,19 @@ public static class SchematicNetReconciliation
                 : Partition(source.Design.Engineering.Circuit, universe, stackedNow).Nets;
             var restoredNets = new HashSet<Guid>();
             var historicalImplicit = new HashSet<PinEndpoint>();
-            if (restoration is { AddedComponents.Count: > 0 })
+            if (restoration is { History: null, AddedOccurrences.Count: > 0 })
             {
-                // A symbol placed in KiCad starts with every pin unconnected: a lone new pin is no new net.
+                // A symbol placed in KiCad starts with every pin unconnected: a lone new pin is no new net. That holds for
+                // every pin a new component draws, and for the pins a new unit of an existing component adds.
                 var adoptedCircuit = restoration.BindingCandidate.Engineering.Circuit;
                 var adoptedParts = adoptedCircuit.Parts.ToDictionary(p => p.Id);
                 var adoptedDefinitions = adoptedCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
-                foreach (var component in adoptedCircuit.Components.Where(c => restoration.AddedComponents.Contains(c.Id)))
+                var adoptedComponents = adoptedCircuit.Components.ToDictionary(c => c.Id);
+                var shown = universe.ToHashSet();
+                foreach (var component in adoptedCircuit.Symbols.Where(s => restoration.AddedOccurrences.Contains(s.Id))
+                             .Select(s => adoptedComponents[s.ComponentId]).DistinctBy(c => c.Id))
                     foreach (var pin in adoptedParts[adoptedDefinitions[component.DefinitionId].PartId].Pins)
-                        historicalImplicit.Add(new(component.Id, pin.Number));
+                        if (!shown.Contains(new(component.Id, pin.Number))) historicalImplicit.Add(new(component.Id, pin.Number));
             }
             if (restoration?.History is not null)
             {
@@ -175,6 +209,9 @@ public static class SchematicNetReconciliation
                 candidate = SchematicNativeRestorationProjection.ResolveRetained(candidate, restoration, restoredNets, state.KnowledgeLibraries);
             candidate.Validate(state.KnowledgeLibraries);
             bool adopted = restoration is { History: null };
+            // A sheet-only change adopts no symbol: it reports no added symbols, components or parts.
+            bool added = adopted && restoration!.AddedOccurrences.Count != 0;
+            static IReadOnlyList<Guid>? Listed(IReadOnlyList<Guid>? ids) => ids is { Count: > 0 } ? ids : null;
             return new(candidate, [], changes, [], gaps,
                 RemovedSymbolOccurrences: removal?.RemovedOccurrences ?? (adopted && restoration!.RemovedOccurrences.Count != 0 ? restoration.RemovedOccurrences : null),
                 ComponentChanges: componentChanges.Count == 0 && removal is null ? null : componentChanges,
@@ -182,9 +219,13 @@ public static class SchematicNetReconciliation
                 RestoredNetIds: restoration is null || adopted ? null : restoredNets.Order().ToArray())
             {
                 Restoration = restoration,
-                AddedSymbolOccurrences = adopted ? restoration!.AddedOccurrences : null,
-                AddedComponents = adopted ? restoration!.AddedComponents : null,
-                AddedParts = adopted ? restoration!.AddedParts : null
+                AddedSymbolOccurrences = added ? restoration!.AddedOccurrences : null,
+                AddedComponents = added ? restoration!.AddedComponents : null,
+                AddedParts = added ? restoration!.AddedParts : null,
+                AddedSheetInstances = Listed(restoration?.AddedSheetInstances),
+                RemovedSheetInstances = Listed(restoration?.RemovedSheetInstances),
+                MovedSheetInstances = Listed(restoration?.MovedSheetInstances),
+                RestoredSheetInstances = Listed(restoration?.RestoredSheetInstances)
             };
         }
         catch (DecoderFallbackException error) { return new(null, [], [], [], [], "invalid_desired_design", error.Message); }

@@ -225,15 +225,7 @@ public sealed class SymbolSheetOwnershipTests
     public void AnUndecidablePartIsARequestAndANewLibrarySymbolIsANewPart()
     {
         // Two parts drawn with the same library symbol and pins: the new symbol could be either.
-        var (ambiguous, added, _) = PlacedResistor(baseline =>
-        {
-            var circuit = baseline.Engineering.Circuit;
-            var r = circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3));
-            var sense = r with { Id = Guid.NewGuid(), Name = "R_sense" };
-            var declaration = baseline.PartSymbols!.Single(p => p.PartId == r.Id) with { PartId = sense.Id };
-            return baseline with { Engineering = baseline.Engineering with { Circuit = circuit with { Parts = [.. circuit.Parts, sense] } },
-                PartSymbols = [.. baseline.PartSymbols!, declaration] };
-        });
+        var (ambiguous, added, _) = PlacedResistor(WithSense);
         var result = SchematicNetReconciliation.Plan(ambiguous, [], CancellationToken.None);
         Assert.IsNull(result.Candidate);
         Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, result.ErrorCode, result.ErrorMessage);
@@ -258,6 +250,429 @@ public sealed class SymbolSheetOwnershipTests
         var part = created.Candidate.Circuit.Parts.Single(p => p.Id == created.AddedParts!.Single());
         Assert.AreEqual(SchematicNativeAdditionProjection.AdoptedPartIdentity(state.Baseline.Engineering.Circuit.Id, "Device:R_Small", part.Units, part.Pins), part.Id);
         Assert.AreEqual(PsuCpuFixture.Engineering().Circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3)).Pins.Count, part.Pins.Count);
+    }
+
+    // A second part drawn with the fixture's library resistor and exactly its pins.
+    private static readonly Guid SensePart = Guid.Parse("5e115e00-0000-4000-8000-00000000000a");
+
+    private static SchematicDesign WithSense(SchematicDesign baseline)
+    {
+        var circuit = baseline.Engineering.Circuit;
+        var r = circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3));
+        var declaration = baseline.PartSymbols!.Single(p => p.PartId == r.Id) with { PartId = SensePart };
+        return baseline with { Engineering = baseline.Engineering with { Circuit = circuit with { Parts = [.. circuit.Parts, r with { Id = SensePart, Name = "R_sense" }] } },
+            PartSymbols = [.. baseline.PartSymbols!, declaration] };
+    }
+
+    // A part with exactly the fixture resistor's units and pins, declared with another library symbol: a capacitor's.
+    private static readonly Guid CapacitorPart = Guid.Parse("c0000000-0000-4000-8000-00000000000c");
+
+    private static SchematicDesign WithCapacitor(SchematicDesign baseline)
+    {
+        var circuit = baseline.Engineering.Circuit;
+        var r = circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3));
+        var declaration = baseline.PartSymbols!.Single(p => p.PartId == r.Id) with
+            { PartId = CapacitorPart, LibraryId = new() { LibraryNickname = "Device", EntryName = "C" } };
+        return baseline with { Engineering = baseline.Engineering with { Circuit = circuit with { Parts = [.. circuit.Parts, r with { Id = CapacitorPart, Name = "C" }] } },
+            PartSymbols = [.. baseline.PartSymbols!, declaration] };
+    }
+
+    // The XML a person writes to answer with a part of their own that the XML adds: the resistor's units and pins, declared
+    // with the library symbol they name (none: no declaration).
+    private static SchematicDesign WithOwnPart(SchematicDesign design, Guid part, string? library)
+    {
+        var circuit = design.Engineering.Circuit;
+        var r = circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3));
+        var added = design with { Engineering = design.Engineering with { Circuit = circuit with { Parts = [.. circuit.Parts, r with { Id = part, Name = "R_own" }] } } };
+        if (library is null) return added;
+        var declaration = design.PartSymbols!.Single(p => p.PartId == r.Id) with
+            { PartId = part, LibraryId = new() { LibraryNickname = library.Split(':')[0], EntryName = library.Split(':')[1] } };
+        return added with { PartSymbols = [.. design.PartSymbols!, declaration] };
+    }
+
+    private static byte[] Xml(SchematicDesign design) => Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, []));
+
+    // The XML a person writes to answer that the symbol placed in KiCad is a new component on the PSU sheet: identities of
+    // their own choosing, the part they choose, and no placement unless given.
+    private static (SchematicDesign Design, Guid Component, Guid Occurrence) HandAnswer(DesignRecoveryState state, Guid native, Guid part,
+        string value, string reference = "R2", SymbolPlacement? placement = null)
+    {
+        var design = DesignRecoveryStore.ReadDesired(state); var circuit = design.Engineering.Circuit;
+        Guid sheet = PsuCpuIds.Id(0x05, 2), sheetDefinition = circuit.SheetInstances.Single(i => i.Id == sheet).DefinitionId;
+        Guid definition = Guid.NewGuid(), component = Guid.NewGuid(), occurrence = Guid.NewGuid();
+        return (design with
+        {
+            Engineering = design.Engineering with { Circuit = circuit with
+            {
+                Sheets = [.. circuit.Sheets.Select(s => s.Id == sheetDefinition ? s with { Components = [.. s.Components, new(definition, part, value)] } : s)],
+                Components = [.. circuit.Components, new(component, definition, sheet, reference)],
+                Symbols = [.. circuit.Symbols, new(occurrence, component, 1, placement)]
+            } },
+            SymbolBindings = [.. design.SymbolBindings, new(occurrence, native)]
+        }, component, occurrence);
+    }
+
+    // A person's answers to resolution requests (ledger p35cfdc0345e056a5), and planning a design never synchronized (ledger
+    // p95b6c94e732b880a). The PSU/CPU ownership journey answers an undecidable part with kicad_design_ownership_answer while
+    // the automatic worker waits, and adopts a symbol placed before a first synchronization, against KiCad. These offline
+    // cases pin what the journey cannot reach cheaply: an answer written by hand with the person's own identities, every
+    // refusal, and the planner seams the answer passes through. No existing test could be extended: before this item a
+    // request could only stay paused, and a never-synchronized design could not plan an added symbol.
+    [TestMethod]
+    public async Task AnAnswerInTheXmlOrFromTheToolAdoptsAnUndecidableSymbolAsAnswered()
+    {
+        var token = CancellationToken.None;
+        var (state, added, path) = PlacedResistor(WithSense);
+        Assert.IsNull(state.LastSynchronization, "The fixture record has never synchronized.");
+        Guid native = Guid.Parse(added.Id.Value), circuit = state.Baseline.Engineering.Circuit.Id;
+        Guid proposed = SchematicNativeAdditionProjection.AdoptedIdentity("component", circuit, path, native);
+        Guid occurrence = SchematicNativeAdditionProjection.AdoptedIdentity("occurrence", circuit, path, native);
+        string value = added.ValueField.Text.Text_;
+        var requested = SchematicNetReconciliation.Plan(state, [], token);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, requested.ErrorCode);
+        StringAssert.Contains(requested.ErrorMessage, SchematicNativeAdditionProjection.AnswerTool, "The refusal says how to answer.");
+        Assert.AreEqual(proposed, requested.ResolutionRequests!.Single().ProposedComponentId, "The request names the component R2 would be.");
+
+        // The tool's answer declares R2 as an R_sense in the saved XML, and changes nothing else.
+        var answer = SchematicNativeAdditionProjection.Answer(state, [], [new(native, PartId: SensePart)], token);
+        Assert.IsNotNull(answer.Answered, answer.ErrorCode + ": " + answer.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { native }, answer.DeclaredSymbols.ToArray());
+        var saved = DesignRecoveryStore.ReadDesired(state);
+        var declared = answer.Answered.Engineering.Circuit;
+        CollectionAssert.AreEqual(saved.Engineering.Circuit.Parts.Select(p => p.Id).ToArray(), declared.Parts.Select(p => p.Id).ToArray(),
+            "An existing part was chosen: no part is added.");
+        CollectionAssert.AreEqual(new[] { proposed }, declared.Components.Select(c => c.Id).Except(saved.Engineering.Circuit.Components.Select(c => c.Id)).ToArray());
+        CollectionAssert.AreEqual(new[] { new SchematicSymbolBinding(occurrence, native) }, answer.Answered.SymbolBindings.Except(saved.SymbolBindings).ToArray());
+        Assert.AreEqual(EngineeringDesignXml.Write(saved.Engineering with { Circuit = declared }, []), EngineeringDesignXml.Write(answer.Answered.Engineering, []),
+            "Only the circuit gains the answer.");
+        var answeredState = state with { DesiredFileBytes = Xml(answer.Answered) };
+
+        // Planned from the saved record, as apply and the worker plan it. The record has never synchronized, so planning
+        // continues with an empty history (seam 2); binding a new occurrence to a symbol KiCad already shows is no XML
+        // creation although the XML adds a component (seam 4); sheets keep their bindings (seam 3).
+        Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(state.Baseline, answer.Answered.Engineering));
+        string directory = Directory.CreateTempSubdirectory("kicad-ownership-answer-").FullName;
+        try
+        {
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json"));
+            var record = store.Save(answeredState, null);
+            var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, record);
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+            Assert.IsEmpty(plan.NativeOperations, "KiCad already shows R2; nothing is sent to it.");
+            Assert.IsFalse(plan.NativeRebuildRequired); Assert.IsFalse(plan.NativeConnectionRealizationRequired);
+            var candidate = plan.Candidate!.Engineering.Circuit;
+            var component = candidate.Components.Single(c => c.Id == proposed);
+            Assert.AreEqual("R2", component.Reference);
+            Assert.AreEqual(SensePart, candidate.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId).PartId);
+            Assert.AreEqual(SchematicModelProjection.Placement(added), candidate.Symbols.Single(s => s.Id == occurrence).Placement);
+            CollectionAssert.AreEqual(new[] { occurrence }, plan.Electrical!.AddedSymbolOccurrences!.ToArray());
+            CollectionAssert.AreEqual(state.Baseline.SheetBindings.Select(b => (b.SheetInstanceId, SchematicDesignBindings.PathKey(b.NativePath))).ToArray(),
+                plan.Candidate.SheetBindings.Select(b => (b.SheetInstanceId, SchematicDesignBindings.PathKey(b.NativePath))).ToArray());
+            Assert.AreEqual(plan.CandidateXml, (await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store, record)).CandidateXml,
+                "Apply and the worker plan the same design.");
+            // Once published, the answered design is settled: planning it again changes nothing.
+            var settled = SchematicSynchronizationPlanner.Plan(answeredState with { Baseline = plan.Candidate, DesiredFileBytes = Encoding.UTF8.GetBytes(plan.CandidateXml!),
+                BaselineElectrical = answeredState.ObservedElectrical!.Clone() });
+            Assert.IsTrue(settled.CanPrepare, settled.ErrorCode + ": " + settled.ErrorMessage);
+            Assert.IsEmpty(settled.NativeOperations); Assert.IsNull(settled.Electrical!.AddedComponents);
+            Assert.AreEqual(plan.CandidateXml, settled.CandidateXml);
+            // A design synchronized without content-verified retained XML still refuses the placement (fails closed).
+            var unverified = store.Save(record.State with { LastSynchronization = new(2, Guid.NewGuid(), record.State.InstanceId,
+                Path.Combine(directory, "design.xml"), new string('a', 64), new string('b', 64), Guid.NewGuid().ToString("D"),
+                Guid.NewGuid().ToString("D"), record.State.NativeRevision.Sequence, false, true, null, null, null) }, record.RevisionToken);
+            Assert.AreEqual("unverified_native_ownership_history", (await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, unverified)).ErrorCode);
+            // A record created again at the path of one that synchronized has no synchronization of its own, but the receipts
+            // archived beside it show this instance synchronized there: it fails closed too. Another instance's receipts do not.
+            var again = new DesignRecoveryStore(Path.Combine(directory, "again.json"));
+            var archive = new DesignSynchronizationReceipts(again.StatePath);
+            var receipt = unverified.State.LastSynchronization!;
+            archive.Archive(receipt with { OperationId = Guid.NewGuid(), InstanceId = Guid.NewGuid() });
+            var recreated = again.Save(answeredState, null);
+            var otherInstance = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(again, recreated);
+            Assert.IsTrue(otherInstance.CanPrepare, otherInstance.ErrorCode + ": " + otherInstance.ErrorMessage);
+            archive.Archive(receipt);
+            Assert.AreEqual("unverified_native_ownership_history", (await SchematicSynchronizationPlanner.PlanWithHistoryAsync(again, recreated)).ErrorCode);
+        }
+        finally { Directory.Delete(directory, true); }
+
+        // An answer written by hand, with the person's own identities and no placement, is taken exactly as declared.
+        var (own, ownComponent, ownOccurrence) = HandAnswer(state, native, SensePart, value);
+        var hand = SchematicNetReconciliation.Plan(state with { DesiredFileBytes = Xml(own) }, [], token);
+        Assert.IsNotNull(hand.Candidate, hand.ErrorCode + ": " + hand.ErrorMessage);
+        Assert.AreEqual("R2", hand.Candidate.Circuit.Components.Single(c => c.Id == ownComponent).Reference);
+        Assert.AreEqual(SchematicModelProjection.Placement(added), hand.Candidate.Circuit.Symbols.Single(s => s.Id == ownOccurrence).Placement,
+            "The placement KiCad shows fills the one the answer leaves out.");
+        CollectionAssert.AreEqual(new[] { ownOccurrence }, hand.Restoration!.AnsweredOccurrences.ToArray());
+        Assert.IsFalse(hand.Candidate.Circuit.Components.Any(c => c.Id == proposed), "No derived identity is invented beside the person's.");
+
+        // Refusals, before KiCad or the XML changes: an answer that disagrees with KiCad, an XML that changes something else
+        // too, and a binding to a symbol KiCad does not show as new.
+        string? Planned(SchematicDesign xml) => SchematicNetReconciliation.Plan(state with { DesiredFileBytes = Xml(xml) }, [], token).ErrorCode;
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, Planned(HandAnswer(state, native, SensePart, value, reference: "R9").Design));
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, Planned(HandAnswer(state, native, SensePart, "10k").Design));
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, Planned(HandAnswer(state, native, SensePart, value,
+            placement: new SymbolPlacement(1.27m, 1.27m, 0, false, false, false)).Design));
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, Planned(HandAnswer(state, native, PsuCpuIds.Id(0x03, 1), value).Design),
+            "The connector part does not have the resistor's pins.");
+        var renamed = own with { Engineering = own.Engineering with { Circuit = own.Engineering.Circuit with { Components = [.. own.Engineering.Circuit.Components
+            .Select(c => c.Id == PsuCpuIds.Id(0x07, 2) ? c with { Reference = "U10" } : c)] } } };
+        Assert.AreEqual("ownership_change_with_xml_edits", Planned(renamed));
+        Guid r1 = state.Baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == PsuCpuIds.Id(0x09, 3)).NativeObjectId;
+        Assert.AreEqual("electrical_ownership_changed", Planned(HandAnswer(state, r1, SensePart, value).Design),
+            "R1's symbol is no symbol placed since the last synchronization.");
+
+        // Tool answers that are not one of the request's choices are refused; a missing part leaves the request open.
+        var invalid = new SchematicOwnershipAnswer[][]
+        {
+            [], [new(native, PartId: PsuCpuIds.Id(0x03, 2))], [new(Guid.NewGuid(), PartId: SensePart)],
+            [new(native, PartId: SensePart, ComponentId: PsuCpuIds.Id(0x07, 3))], [new(native, PartId: SensePart), new(native, PartId: SensePart)]
+        };
+        foreach (var answers in invalid)
+        {
+            var refused = SchematicNativeAdditionProjection.Answer(state, [], answers, token);
+            Assert.IsNull(refused.Answered); Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, refused.ErrorCode, refused.ErrorMessage);
+        }
+        var open = SchematicNativeAdditionProjection.Answer(state, [], [new(native)], token);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, open.ErrorCode);
+        Assert.AreEqual(native, open.Requests.Single().NativeObjectId);
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid,
+            SchematicNativeAdditionProjection.Answer(state with { DesiredFileBytes = Xml(answer.Answered) }, [], [new(native, PartId: SensePart)], token).ErrorCode,
+            "A symbol the XML already answers is not answered twice.");
+
+        // A part with exactly the resistor's pins but drawn with another library symbol (a capacitor) is none of R2's
+        // choices, through the tool or in the XML; nor may an answer override the part exact identities decide.
+        var (withCapacitor, placed, _) = PlacedResistor(d => WithCapacitor(WithSense(d)));
+        Guid placedNative = Guid.Parse(placed.Id.Value);
+        string placedValue = placed.ValueField.Text.Text_;
+        var offered = SchematicNetReconciliation.Plan(withCapacitor, [], token).ResolutionRequests!.Single();
+        CollectionAssert.AreEquivalent(new[] { PsuCpuIds.Id(0x03, 3), SensePart }, offered.CandidatePartIds.ToArray(), "The capacitor is not offered.");
+        var capacitorAnswer = SchematicNativeAdditionProjection.Answer(withCapacitor, [], [new(placedNative, PartId: CapacitorPart)], token);
+        Assert.IsNull(capacitorAnswer.Answered);
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, capacitorAnswer.ErrorCode, capacitorAnswer.ErrorMessage);
+        string? PlannedWith(DesignRecoveryState source, SchematicDesign xml) => SchematicNetReconciliation.Plan(source with { DesiredFileBytes = Xml(xml) }, [], token).ErrorCode;
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, PlannedWith(withCapacitor, HandAnswer(withCapacitor, placedNative, CapacitorPart, placedValue).Design),
+            "The XML cannot make the resistor KiCad draws a capacitor.");
+        Assert.IsNull(PlannedWith(withCapacitor, HandAnswer(withCapacitor, placedNative, SensePart, placedValue).Design), "One of the choices is taken.");
+        var (exact, exactPlaced, _) = PlacedResistor(WithCapacitor);
+        var decided = SchematicNetReconciliation.Plan(exact, [], token);
+        Assert.IsNotNull(decided.Candidate, "Without R_sense, R2 is the fixture's R by exact identity: " + decided.ErrorCode);
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, SchematicNativeAdditionProjection.Answer(exact, [],
+            [new(Guid.Parse(exactPlaced.Id.Value), PartId: CapacitorPart)], token).ErrorCode, "An answer cannot override the part exact identities decide.");
+        // A part the XML adds itself is an answer only when the XML declares it with the library symbol KiCad draws.
+        Guid ownPart = Guid.Parse("0e0e0e0e-0000-4000-8000-00000000000e");
+        SchematicDesign OwnPartAnswer(string? library) => HandAnswer(state with { DesiredFileBytes = Xml(WithOwnPart(DesignRecoveryStore.ReadDesired(state), ownPart, library)) },
+            native, ownPart, value).Design;
+        Assert.IsNull(PlannedWith(state, OwnPartAnswer("Device:R")), "A new part declared with the resistor's library symbol is taken as declared.");
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, PlannedWith(state, OwnPartAnswer("Device:C")));
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, PlannedWith(state, OwnPartAnswer(null)), "A new part without a library symbol says nothing.");
+    }
+
+    // kicad_design_ownership_answer over the production MCP STDIO server, as an agent calls it (ledger p35cfdc0345e056a5). The
+    // PSU/CPU ownership journey drives it against KiCad while the automatic worker waits; this process-level case pins its
+    // arguments, refusals and file effects without KiCad. Lane-owned home, so the parent's McpProcessTests seam is untouched.
+    [TestMethod]
+    public async Task OwnershipAnswersOverStdioDeclareExactlyWhatThePersonChose()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-ownership-answer-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        try
+        {
+            var (state, added, path) = PlacedResistor(d => WithCapacitor(WithSense(d)));
+            string recoveryPath = Path.Combine(root, "recovery.json"), designPath = Path.Combine(root, "design.xml");
+            await File.WriteAllBytesAsync(designPath, state.DesiredFileBytes, timeout.Token);
+            var store = new DesignRecoveryStore(recoveryPath);
+            var saved = store.Save(state, null);
+            Guid native = Guid.Parse(added.Id.Value);
+            Guid proposed = SchematicNativeAdditionProjection.AdoptedIdentity("component", state.Baseline.Engineering.Circuit.Id, path, native);
+
+            await using var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(), Path.Combine(root, "state"),
+                Path.Combine(root, "host.log"), timeout.Token);
+            var names = new List<string>(); string? cursor = null;
+            do
+            {
+                var page = await host.ListTools(cursor);
+                names.AddRange(page.GetProperty("tools").EnumerateArray().Select(t => t.GetProperty("name").GetString()!));
+                cursor = page.TryGetProperty("nextCursor", out var next) && next.ValueKind == JsonValueKind.String ? next.GetString() : null;
+            } while (cursor is not null);
+            CollectionAssert.Contains(names, SchematicNativeAdditionProjection.AnswerTool);
+
+            object Args(object[] answers, string? token = null, string? design = null) => new { instanceId = state.InstanceId.ToString("D"),
+                recoveryPath, expectedRevisionToken = token ?? store.Read()!.RevisionToken, designPath = design ?? designPath, answers };
+            static JsonElement Success(JsonElement result)
+            {
+                Assert.IsFalse(result.TryGetProperty("isError", out var error) && error.GetBoolean(), result.GetRawText());
+                return result.GetProperty("structuredContent");
+            }
+            static string? Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString();
+            byte[] before = await File.ReadAllBytesAsync(designPath, timeout.Token);
+
+            // Refusals write nothing: not one of the choices (the regulator's pins, the capacitor's library symbol), no answer, a
+            // stale record, a relative path, a missing part.
+            Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Code(await host.Tool("kicad_design_ownership_answer",
+                Args([new { nativeObjectId = native, partId = PsuCpuIds.Id(0x03, 2) }]))));
+            Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Code(await host.Tool("kicad_design_ownership_answer",
+                Args([new { nativeObjectId = native, partId = CapacitorPart }]))));
+            Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Code(await host.Tool("kicad_design_ownership_answer", Args([]))));
+            Assert.AreEqual("design_recovery_changed", Code(await host.Tool("kicad_design_ownership_answer",
+                Args([new { nativeObjectId = native, partId = SensePart }], token: new string('0', 64)))));
+            Assert.AreEqual("invalid_design_path", Code(await host.Tool("kicad_design_ownership_answer",
+                Args([new { nativeObjectId = native, partId = SensePart }], design: "design.xml"))));
+            var open = await host.Tool("kicad_design_ownership_answer", Args([new { nativeObjectId = native }]));
+            Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, Code(open));
+            Assert.AreEqual(native, open.GetProperty("structuredContent").GetProperty("ownershipResolutionRequests").EnumerateArray().Single()
+                .GetProperty("nativeObjectId").GetGuid(), "The request stays open and is named again.");
+            CollectionAssert.AreEqual(before, await File.ReadAllBytesAsync(designPath, timeout.Token), "Refusals write nothing.");
+            Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken, "Refusals leave the record as it was.");
+
+            // The answer: R2 is an R_sense. The XML declares it and the record takes that XML in; KiCad is not contacted.
+            var answered = Success(await host.Tool("kicad_design_ownership_answer", Args([new { nativeObjectId = native, partId = SensePart }])));
+            Assert.IsTrue(answered.GetProperty("designFileWritten").GetBoolean());
+            Assert.AreEqual(JsonValueKind.Null, answered.GetProperty("synchronizationConflict").ValueKind,
+                "The next synchronization's plan, made before writing, finds nothing else to stop at.");
+            Assert.IsFalse(answered.GetProperty("nativeMutationAuthorized").GetBoolean());
+            var symbol = answered.GetProperty("answeredSymbols").EnumerateArray().Single();
+            Assert.AreEqual(native, symbol.GetProperty("nativeObjectId").GetGuid());
+            Assert.AreEqual(proposed, symbol.GetProperty("componentId").GetGuid());
+            Assert.AreEqual(SensePart, symbol.GetProperty("partId").GetGuid());
+            byte[] written = await File.ReadAllBytesAsync(designPath, timeout.Token);
+            Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(written)), answered.GetProperty("designSha256").GetString());
+            var record = store.Read()!;
+            CollectionAssert.AreEqual(written, record.State.DesiredFileBytes);
+            Assert.AreEqual(answered.GetProperty("recoveryRevisionToken").GetString(), record.RevisionToken);
+            Assert.AreEqual(native, SchematicDesignXml.Read(Encoding.UTF8.GetString(written), []).SymbolBindings
+                .Single(b => b.SymbolOccurrenceId == symbol.GetProperty("occurrenceId").GetGuid()).NativeObjectId);
+            var plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, record);
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+            var component = plan.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == proposed);
+            Assert.AreEqual(SensePart, plan.Candidate.Engineering.Circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId).PartId);
+            // The XML now answers R2; answering it again is refused and writes nothing.
+            Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Code(await host.Tool("kicad_design_ownership_answer",
+                Args([new { nativeObjectId = native, partId = PsuCpuIds.Id(0x03, 3) }]))));
+            CollectionAssert.AreEqual(written, await File.ReadAllBytesAsync(designPath, timeout.Token));
+
+            // A record that cannot take the answered XML in after the check (here its folder turned read-only; a concurrent
+            // record change fails the same way): the XML keeps the answer and the result says so, so the person resumes the
+            // synchronization, which reads the XML, instead of answering again.
+            if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
+            {
+                Assert.Inconclusive("A read-only POSIX folder makes the record's save fail; Windows and privileged processes cannot express it.");
+                return;
+            }
+            string lockedFolder = Path.Combine(root, "locked"), lockedDesign = Path.Combine(root, "locked-design.xml");
+            var lockedStore = new DesignRecoveryStore(Path.Combine(lockedFolder, "recovery.json"));
+            await File.WriteAllBytesAsync(lockedDesign, state.DesiredFileBytes, timeout.Token);
+            var locked = lockedStore.Save(state, null);
+            File.SetUnixFileMode(lockedFolder, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            try
+            {
+                var partial = await host.Tool("kicad_design_ownership_answer", new { instanceId = state.InstanceId.ToString("D"),
+                    recoveryPath = lockedStore.StatePath, expectedRevisionToken = locked.RevisionToken, designPath = lockedDesign,
+                    answers = new object[] { new { nativeObjectId = native, partId = SensePart } } });
+                Assert.IsTrue(partial.GetProperty("isError").GetBoolean(), partial.GetRawText());
+                var content = partial.GetProperty("structuredContent");
+                Assert.AreEqual("design_recovery_io", content.GetProperty("errorCode").GetString());
+                Assert.IsTrue(content.GetProperty("designFileWritten").GetBoolean());
+                Assert.IsFalse(content.GetProperty("recoveryDesiredUpdated").GetBoolean());
+                StringAssert.Contains(content.GetProperty("errorMessage").GetString(), "Do not answer again");
+                Assert.AreEqual(proposed, content.GetProperty("answeredSymbols").EnumerateArray().Single().GetProperty("componentId").GetGuid());
+                byte[] lockedWritten = await File.ReadAllBytesAsync(lockedDesign, timeout.Token);
+                Assert.AreEqual(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(lockedWritten)), content.GetProperty("designSha256").GetString());
+                CollectionAssert.AreEqual(written, lockedWritten, "The XML holds the same answer.");
+                Assert.AreEqual(locked.RevisionToken, lockedStore.Read()!.RevisionToken, "The record is as it was.");
+            }
+            finally { File.SetUnixFileMode(lockedFolder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // The native symbol an occurrence is bound to, and the snapshot without it.
+    private static (SchematicHierarchyData Without, SchematicSymbolInstance Symbol) WithoutSymbol(SchematicDesign design, Guid occurrence)
+    {
+        var symbol = SchematicModelProjection.NativeSymbols(design, design.Schematic)[occurrence].Clone();
+        var without = design.Schematic.Clone();
+        foreach (var screen in without.Instances)
+            for (int i = screen.Items.Count - 1; i >= 0; --i)
+                if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor) && screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value == symbol.Id.Value)
+                    screen.Items.RemoveAt(i);
+        return (without, symbol);
+    }
+
+    private static SchematicScreenData ScreenOf(SchematicHierarchyData data, SchematicDesign design, Guid sheetInstance) => data.Instances.Single(s =>
+        string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value))
+            == SchematicDesignBindings.PathKey(design.SheetBindings.Single(b => b.SheetInstanceId == sheetInstance).NativePath));
+
+    private static DesignRecoveryState Checkpointed(SchematicDesign baseline, SchematicHierarchyData observed)
+    {
+        var state = SchematicRebuildTests.State(baseline, baseline, observed);
+        return state with { BaselineElectrical = Isolated(baseline.Schematic, state.BaselineElectrical!.Hierarchy.Revision),
+            ObservedElectrical = Isolated(observed, state.ObservedElectrical!.Hierarchy.Revision) };
+    }
+
+    // Answers to unit requests (ledger p35cfdc0345e056a5), offline only: the PSU/CPU ownership journey answers a part request.
+    // KiCad joins the units of a multi-unit part into one component by their reference, a name, so the person decides which
+    // component a new unit belongs to.
+    [TestMethod]
+    public void AnswersToUnitRequestsMakeTheNewUnitsPartOfTheComponentThePersonChose()
+    {
+        var token = CancellationToken.None;
+        var placed = SchematicRebuildTests.Placed();
+        Guid unitFour = PsuCpuIds.Id(0x09, 10), processor = PsuCpuIds.Id(0x07, 7), cpuPower = PsuCpuIds.Id(0x05, 4), cpu = PsuCpuIds.Id(0x05, 3);
+        // An earlier synchronization removed the processor's power unit; now the person places that unit of U5 again.
+        var (without, removed) = WithoutSymbol(placed, unitFour);
+        var baseline = SchematicRebuildTests.WithoutOccurrences(placed, unitFour) with { Schematic = without };
+        var observed = without.Clone();
+        var again = PlacedCopy(removed, "U5", 0);
+        ScreenOf(observed, baseline, cpuPower).Items.Add(Any.Pack(again));
+        var state = Checkpointed(baseline, observed);
+        Guid native = Guid.Parse(again.Id.Value);
+        var request = SchematicNetReconciliation.Plan(state, [], token).ResolutionRequests!.Single();
+        Assert.AreEqual(SchematicNativeAdditionProjection.UnitOwnerAmbiguous, request.Code);
+        CollectionAssert.AreEqual(new[] { processor }, request.CandidateComponentIds.ToArray());
+        // A component of its own would be a second U5.
+        Assert.AreEqual("native_addition_conflict", SchematicNativeAdditionProjection.Answer(state, [],
+            [new(native, ComponentId: request.ProposedComponentId)], token).ErrorCode);
+        // The person answers that it is U5's power unit.
+        var answer = SchematicNativeAdditionProjection.Answer(state, [], [new(native, ComponentId: processor)], token);
+        Assert.IsNotNull(answer.Answered, answer.ErrorCode + ": " + answer.ErrorMessage);
+        Assert.AreEqual(baseline.Engineering.Circuit.Components.Count, answer.Answered.Engineering.Circuit.Components.Count, "No component is added.");
+        var joined = SchematicNetReconciliation.Plan(state with { DesiredFileBytes = Xml(answer.Answered) }, [], token);
+        Assert.IsNotNull(joined.Candidate, joined.ErrorCode + ": " + joined.ErrorMessage);
+        var units = joined.Candidate.Circuit.Symbols.Where(s => s.ComponentId == processor).ToArray();
+        CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4 }, units.Select(u => u.Unit).ToArray());
+        Assert.AreEqual(cpuPower, units.Single(u => u.Unit == 4).SheetInstanceId, "The unit sits on CPU_POWER, apart from U5's own sheet.");
+        Assert.IsEmpty(joined.AddedComponents!);
+        Assert.IsFalse(joined.Candidate.Circuit.Nets.Any(n => n.Pins.Any(p => p.ComponentId == processor)), "Its new pins are unconnected, so they make no net.");
+        // Joining a component whose reference KiCad does not show is refused: set the reference in KiCad first.
+        var renamed = PlacedCopy(removed, "U7", 0);
+        var elsewhere = without.Clone(); ScreenOf(elsewhere, baseline, cpuPower).Items.Add(Any.Pack(renamed));
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, SchematicNativeAdditionProjection.Answer(Checkpointed(baseline, elsewhere), [],
+            [new(Guid.Parse(renamed.Id.Value), ComponentId: processor)], token).ErrorCode);
+
+        // Two new units of the processor's part, named U9: the person answers that they are one component.
+        var screen = ScreenOf(placed.Schematic, placed, cpu);
+        SchematicSymbolInstance Unit(int unit) => SchematicModelProjection.NativeSymbols(placed, placed.Schematic)[placed.Engineering.Circuit.Symbols
+            .Single(s => s.ComponentId == processor && s.Unit == unit).Id];
+        var first = PlacedCopy(Unit(1), "U9", 0, 101_600_000); var second = PlacedCopy(Unit(2), "U9", 0, 101_600_000);
+        var two = placed.Schematic.Clone(); ScreenOf(two, placed, cpu).Items.Add(Any.Pack(first)); ScreenOf(two, placed, cpu).Items.Add(Any.Pack(second));
+        var pair = Checkpointed(placed, two);
+        Guid firstNative = Guid.Parse(first.Id.Value), secondNative = Guid.Parse(second.Id.Value);
+        var requests = SchematicNetReconciliation.Plan(pair, [], token).ResolutionRequests!;
+        Assert.HasCount(2, requests);
+        Assert.IsTrue(requests.All(r => r.Code == SchematicNativeAdditionProjection.UnitGroupingAmbiguous));
+        var firstRequest = requests.Single(r => r.NativeObjectId == firstNative);
+        var secondRequest = requests.Single(r => r.NativeObjectId == secondNative);
+        CollectionAssert.AreEqual(new[] { secondRequest.ProposedComponentId }, firstRequest.CandidateComponentIds.ToArray());
+        var grouped = SchematicNativeAdditionProjection.Answer(pair, [], [new(secondNative, ComponentId: firstRequest.ProposedComponentId)], token);
+        Assert.IsNotNull(grouped.Answered, grouped.ErrorCode + ": " + grouped.ErrorMessage);
+        CollectionAssert.AreEquivalent(new[] { firstNative, secondNative }, grouped.DeclaredSymbols.ToArray(), "The component the answer joins is declared with it.");
+        var one = SchematicNetReconciliation.Plan(pair with { DesiredFileBytes = Xml(grouped.Answered) }, [], token);
+        Assert.IsNotNull(one.Candidate, one.ErrorCode + ": " + one.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { firstRequest.ProposedComponentId }, one.AddedComponents!.ToArray());
+        CollectionAssert.AreEquivalent(new[] { 1, 2 }, one.Candidate.Circuit.Symbols.Where(s => s.ComponentId == firstRequest.ProposedComponentId).Select(s => s.Unit).ToArray());
+        Assert.AreEqual("U9", one.Candidate.Circuit.Components.Single(c => c.Id == firstRequest.ProposedComponentId).Reference);
+        // Each unit a component of its own would be two components named U9.
+        Assert.AreEqual("native_addition_conflict", SchematicNativeAdditionProjection.Answer(pair, [],
+            [new(firstNative, ComponentId: firstRequest.ProposedComponentId), new(secondNative, ComponentId: secondRequest.ProposedComponentId)], token).ErrorCode);
     }
 
     [TestMethod]

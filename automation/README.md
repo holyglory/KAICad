@@ -3333,6 +3333,29 @@ matches. `kicad_diagram_proposal_retained` recovers the request after a stale or
 failed publication. Unknown proposal IDs, changed targets and reused IDs with
 different content are rejected.
 
+Agents can also grow connections the way people do in the editor.
+`kicad_diagram_connection_endpoint_set` binds or unbinds one end of a connection to a
+block interface or a level-boundary port, with an explicit unresolved state, and
+`kicad_diagram_connection_members_refine` groups a connection's signals into members
+(groups, pairs, signals) that keep their own General/Schematic/Routing fields and
+history. Both check the current revision and refuse stale or ambiguous targets without
+partial writes: `connection_edit_target_missing`, `ambiguous_connection_edit`,
+`invalid_connection_refinement`, `invalid_connection_edit_operation` and
+`stale_connection_parent`. A connection's new revision takes the operation ID, so a
+client whose call was cut off can see whether it landed, and repeating it writes
+nothing. Field history continues across implementations and chosen proposals: a
+revision derived from another implementation names it as its parent.
+
+`kicad_diagram_agent_context` gives any agent one revision-bound bundle for a chosen
+level: the diagram, its direct children, the General/Schematic/Routing fields,
+comments on elements and free space, and the prompt and attachment references, each
+with its exact revision. `kicad_diagram_proposal_compare` compares a proposal built on
+an older revision with today's design and names exactly which elements changed on
+each side, or reports that the proposal was already adopted; a publish whose request
+no longer prepares against today's file is refused as `block_proposal_source_changed`
+with `comparisonUnavailable` naming the cause. The contract is in
+`automation/qualification/agent-refinement-contract.md`.
+
 The complete proposal model has contract coverage for a power unit decomposed into
 converters plus telemetry and a partly resolved signal bundle. The native journey
 also publishes and reads a proposal through MCP in both themes. These tools do not

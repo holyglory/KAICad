@@ -185,6 +185,10 @@ public sealed class McpProcessTests
             CollectionAssert.DoesNotContain(names, "kicad_diagram_migrate");
             Assert.IsFalse(names.Any(name => name.StartsWith("kicad_structure_", StringComparison.Ordinal)), string.Join(", ", names));
             CollectionAssert.Contains(names, "kicad_diagram_open");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_endpoint_set");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_members_refine");
+            CollectionAssert.Contains(names, "kicad_diagram_agent_context");
+            CollectionAssert.Contains(names, "kicad_diagram_proposal_compare");
             var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
             Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());

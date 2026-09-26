@@ -192,6 +192,82 @@ public sealed class DesignPublicationRecoveryTests
         }
     }
 
+    // Isolated store rule (ledgers p0aa59a1dfc8701ea, p6728215278183167): the one save that leaves a pending operation without
+    // its completion clears exactly the operation its receipt names, at the receipt's revision, or replaces it with the
+    // keep-and-replan continuation, and moves only the observation. Its receipt names the record revision it produced and
+    // replaces a receipt an earlier attempt left when its record replacement failed. The native journey behind
+    // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss proves undo, discard and keep through the public tool
+    // against a real KiCad; a journey can neither hand the store the altered next states refused here nor make a record
+    // replacement fail after its receipt was written, so they are checked alone (no existing test covers this store rule).
+    [TestMethod]
+    public void OnlyAResolutionOfExactlyThePendingOperationClearsIt()
+    {
+        using var fixture = new Fixture();
+        var saved = fixture.Saved; var state = saved.State;
+        var moved = state.ObservedElectrical!.Clone(); moved.Hierarchy.Revision.Sequence += 3;
+        var cleared = state with
+        {
+            PendingMutation = null, PendingNativeState = null, PendingNativeSave = null, PendingPublication = null,
+            NativeRevision = new(moved.Hierarchy.Revision.Epoch, moved.Hierarchy.Revision.Sequence), ObservedElectrical = moved
+        };
+        DesignPendingResolution Receipt(Guid operation, string from, Guid? continuation = null) => new(DesignPendingResolution.CurrentSchemaVersion,
+            operation, null, state.InstanceId, continuation is null ? "discard" : "keep-and-replan",
+            continuation is null ? DesignPendingResolution.Discarded : DesignPendingResolution.KeepPending, from, "publication", "ordinary", "none",
+            state.PendingNativeState!.ProcessEpoch, state.NativeRevision, cleared.NativeRevision, null, 0, continuation, false,
+            new string('0', 64), new string('0', 64), null, Google.Protobuf.MessageExtensions.ToByteArray(state.PendingNativeState), state.PendingPublication, null, null, DateTimeOffset.UtcNow);
+        string Refused(DesignRecoveryState next, DesignPendingResolution receipt) =>
+            Assert.ThrowsExactly<AutomationException>(() => fixture.Store.ResolvePendingOperation(saved, next, receipt)).Code;
+        var operation = fixture.Intent.OperationId;
+
+        Assert.AreEqual("pending_operation_mismatch", Refused(cleared, Receipt(Guid.NewGuid(), saved.RevisionToken)));
+        Assert.AreEqual("pending_operation_mismatch", Refused(cleared, Receipt(operation, new string('f', 64))));
+        var otherBaseline = state.Baseline with { Schematic = state.Baseline.Schematic.Clone() };
+        otherBaseline.Schematic.Instances[0].Metadata.TitleBlock.Title = "Rewritten baseline";
+        Assert.AreEqual("pending_resolution_changed", Refused(cleared with { Baseline = otherBaseline,
+            BaselineElectrical = WithData(state.BaselineElectrical!, otherBaseline.Schematic) }, Receipt(operation, saved.RevisionToken)));
+        Assert.AreEqual("pending_resolution_changed", Refused(cleared with { DesiredFileBytes = fixture.Intent.CandidateFileBytes },
+            Receipt(operation, saved.RevisionToken)), "The desired XML never changes here.");
+
+        // The keep-and-replan continuation: one prepared publication from the XML the record holds, guarded by exactly the
+        // observed native state, under the continuation named by the receipt.
+        var guard = state.PendingNativeState!.Clone(); guard.Revision = moved.Hierarchy.Revision.Clone();
+        var continuation = Guid.NewGuid();
+        var kept = cleared with
+        {
+            PendingNativeState = guard, PendingPublication = DesignPublicationIntent.Create(fixture.Intent.DesignPath, state.DesiredFileBytes,
+                fixture.Intent.CandidateFileBytes, continuation, saved.RevisionToken)
+        };
+        Assert.AreEqual("pending_resolution_changed", Refused(kept, Receipt(operation, saved.RevisionToken, Guid.NewGuid())));
+        Assert.AreEqual("pending_resolution_changed", Refused(kept with { PendingPublication = kept.PendingPublication! with
+            { ExpectedFileBytes = fixture.Intent.CandidateFileBytes } }, Receipt(operation, saved.RevisionToken, continuation)));
+        Assert.AreEqual("pending_resolution_changed", Refused(kept, Receipt(operation, saved.RevisionToken)), "A discard journals nothing.");
+        Assert.AreEqual(saved.RevisionToken, fixture.Store.Read()!.RevisionToken, "Every refusal changed nothing.");
+        Assert.IsFalse(Directory.Exists(DesignPendingResolutions.Directory(fixture.RecordPath)), "A refused resolution keeps no receipt.");
+
+        // An earlier attempt whose record replacement failed left its receipt (a discard); the resolution that is saved replaces it.
+        DesignPendingResolutions.Write(fixture.RecordPath, Receipt(operation, saved.RevisionToken));
+        Assert.AreEqual("discard", DesignPendingResolutions.Find(fixture.RecordPath, operation, state.InstanceId)!.Value.Receipt.Choice);
+        var resolved = fixture.Store.ResolvePendingOperation(saved, kept, Receipt(operation, saved.RevisionToken, continuation));
+        Assert.AreEqual(continuation, resolved.State.PendingPublication!.OperationId);
+        Assert.IsNull(resolved.State.PendingMutation);
+        Assert.AreEqual(cleared.NativeRevision, resolved.State.NativeRevision);
+        Assert.AreEqual(SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries), SchematicDesignXml.Write(resolved.State.Baseline, resolved.State.KnowledgeLibraries));
+        CollectionAssert.AreEqual(state.DesiredFileBytes, resolved.State.DesiredFileBytes);
+        var receipt = DesignPendingResolutions.Find(fixture.RecordPath, operation, state.InstanceId)!.Value.Receipt;
+        Assert.AreEqual(saved.RevisionToken, receipt.ResolvedFromRevisionToken);
+        Assert.AreEqual(continuation, receipt.ContinuationOperationId);
+        Assert.AreEqual("keep-and-replan", receipt.Choice, "The earlier attempt's receipt was replaced.");
+        Assert.AreEqual(resolved.RevisionToken, receipt.ResultRevisionToken, "The receipt names the record revision the resolution produced.");
+        Assert.AreEqual(operation, DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId)!.Value.Receipt.OperationId,
+            "The continuation is found as the publication of the kept result.");
+        Assert.AreEqual("design_recovery_changed", Refused(cleared, Receipt(operation, saved.RevisionToken)), "A resolution happens once.");
+
+        static SchematicElectricalState WithData(SchematicElectricalState electrical, Kiapi.Schematic.Types.SchematicHierarchyData data)
+        {
+            var copy = electrical.Clone(); copy.Hierarchy.Data = data.Clone(); return copy;
+        }
+    }
+
     internal sealed class Fixture : IDisposable
     {
         private readonly string directory = Directory.CreateTempSubdirectory("design-publication-recovery-").FullName;

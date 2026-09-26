@@ -11,7 +11,9 @@ internal static class SchematicElectricalCheckpoints
             throw Error("invalid_electrical_recovery", "An exact recovery origin and instance are required.");
         if (state.HasPendingWork)
             throw Error("pending_recovery_requires_reconciliation", "Reconcile the exact pending operation first.");
-        var baseline = state.BaselineElectrical ?? throw Error("missing_electrical_baseline", "Initialize the matched electrical baseline first.");
+        var baseline = state.BaselineElectrical ?? throw Error("missing_electrical_baseline",
+            "This recovery record has no electrical baseline (records saved before electrical checkpoints, as by earlier previews, have none). "
+            + "Initialize it with kicad_design_electrical_baseline_initialize while KiCad shows the saved design, then plan again.");
         var observed = state.ObservedElectrical ?? throw Error("missing_electrical_observation", "Capture current matching electrical state first.");
         if (baseline.Hierarchy?.Revision is null || observed.Hierarchy?.Revision is null
             || string.IsNullOrWhiteSpace(baseline.Hierarchy.Revision.Epoch)

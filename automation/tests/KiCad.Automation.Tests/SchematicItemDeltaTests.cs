@@ -264,6 +264,40 @@ public sealed class SchematicItemDeltaTests
         Assert.AreEqual(0, SchematicItemDelta.Plan(current, desired).Single().ReplaceVariantRegistry.Descriptions.Count);
     }
 
+    // Ledger p91fda8ca22a68141: builds up to preview 23 listed library_cache among the state their snapshots could not hold,
+    // although they held the cache exactly; this build no longer lists it. A record those builds saved needs no native edit
+    // against this build's snapshot of the same sheet, in either direction; before, applying it failed with "Unsupported
+    // settings or document identity changed". Only that retired marker is exempt: any other coverage difference still stops
+    // planning (MissingCoverageMetadataChangesAndIdentityAmbiguityStopPlanning), and so does every metadata change KiCad
+    // cannot make. The NativeXmlRebuild journey applies such a record through kicad_design_sync_apply against a live KiCad;
+    // this pins the delta rule on its own, which no existing case covers.
+    [TestMethod]
+    public void TheRetiredLibraryCacheMarkerIsNotANativeEdit()
+    {
+        var upgraded = Fixture();
+        upgraded.Metadata.UnrepresentedState.Clear();
+        upgraded.Metadata.UnrepresentedState.Add(new[] { "complete_project_settings", "shared_screen_root_ownership", "net_chains" });
+        var preview23 = upgraded.Clone();
+        preview23.Metadata.UnrepresentedState.Insert(2, "library_cache");
+        Assert.AreEqual(0, SchematicItemDelta.Plan(upgraded, preview23).Count);
+        Assert.AreEqual(0, SchematicItemDelta.Plan(preview23, upgraded).Count);
+        Assert.IsTrue(SchematicItemDelta.SameCoverage(upgraded.Metadata.UnrepresentedState, preview23.Metadata.UnrepresentedState));
+        // Must-catch: any other coverage difference, with or without the retired marker, and an identity KiCad cannot change.
+        foreach (var (what, edit) in new (string, Action<SchematicMetadata>)[]
+        {
+            ("another marker", m => m.UnrepresentedState.Add("future_settings")),
+            ("a marker dropped", m => m.UnrepresentedState.Remove("net_chains")),
+            ("another screen identity", m => m.ScreenId = new() { Value = Guid.NewGuid().ToString("D") }),
+        })
+        {
+            var desired = preview23.Clone();
+            edit(desired.Metadata);
+            var refused = Assert.ThrowsExactly<AutomationException>(() => SchematicItemDelta.Plan(upgraded, desired), what);
+            Assert.AreEqual("unsupported_schematic_delta", refused.Code, what);
+            Assert.AreEqual("Unsupported settings or document identity changed; those changes cannot be discarded.", refused.Message, what);
+        }
+    }
+
     private static SchematicScreenData Fixture()
     {
         string root = Guid.NewGuid().ToString("D");

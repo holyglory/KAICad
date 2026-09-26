@@ -189,9 +189,13 @@ internal static class SchematicSynchronizationExecutor
         if (saved.State.PendingNativeSave is null)
         {
             var observed = await Capture(client, saved.State, token);
-            if (!observed.State.Equals(receipt?.ObservedAfter ?? initialState))
-                throw Error("native_changed_during_sync", "Native state changed after this operation; reconcile it before saving.");
-            RequireCandidate(candidate, observed.Electrical, saved.State, token);
+            try
+            {
+                if (!observed.State.Equals(receipt?.ObservedAfter ?? initialState))
+                    throw Error("native_changed_during_sync", "Native state changed after this operation; reconcile it before saving.");
+                RequireCandidate(candidate, observed.Electrical, saved.State, token);
+            }
+            catch (AutomationException error) { throw Stuck(error, intent.OperationId, committed: receipt is not null); }
             saved = store.Save(saved.State with { PendingNativeSave = new()
             {
                 Document = observed.State.Document.Clone(), ExpectedState = observed.State.Clone(),
@@ -246,6 +250,24 @@ internal static class SchematicSynchronizationExecutor
         return resultReceipt.Result(complete.RevisionToken, replayed: false) with { RetainedXml = history };
     }
 
+    // A check that refuses an operation after KiCad committed its native change leaves the operation pending, and resuming
+    // it repeats the same check (ledgers p0aa59a1dfc8701ea and p6728215278183167). The refusal keeps its code and says how to
+    // leave the operation with kicad_design_recovery_resolve_pending (DesignRecoveryPendingResolution).
+    internal const string ResolvePendingTool = "kicad_design_recovery_resolve_pending";
+
+    private static AutomationException Stuck(AutomationException error, Guid operationId, bool committed)
+    {
+        if (error.Message.Contains(ResolvePendingTool, StringComparison.Ordinal)) return error;
+        string next = committed
+            ? $" KiCad holds this operation's native change and retrying repeats this check. Leave it with {ResolvePendingTool} "
+                + $"(operationId {operationId:D}): undo removes the change from KiCad, keep-and-replan keeps KiCad's result and publishes "
+                + "the XML re-planned from it, and discard clears the operation once KiCad no longer shows its result."
+            : $" Retrying repeats this check. Leave the operation with {ResolvePendingTool} (operationId {operationId:D}): "
+                + "keep-and-replan publishes the XML re-planned from what KiCad shows, and discard clears the operation once KiCad "
+                + "shows the design as it was before the change it would publish.";
+        return new(error.Code, error.Message + next, error.Details);
+    }
+
     private static DesignSynchronizationReceipt? Completed(StoredDesignRecovery saved,
         DesignSynchronizationReceipts receipts, Guid operationId) => saved.State.LastSynchronization?.OperationId == operationId
             ? saved.State.LastSynchronization : receipts.Read(operationId);
@@ -285,21 +307,31 @@ internal static class SchematicSynchronizationExecutor
         CheckedSchematicContract.ValidateResult(request, receipt, inspect: false);
         // Lane realizations check their own receipt first, for example to abandon a
         // batch that their native assertion rejected without any mutation.
-        if (lane == LayoutLane.ConnectionRealization) SchematicConnectedAddition.CheckReceipt(store, saved, receipt);
-        else if (lane == LayoutLane.Rebuild) SchematicRebuild.CheckReceipt(store, saved, receipt);
+        try
+        {
+            if (lane == LayoutLane.ConnectionRealization) SchematicConnectedAddition.CheckReceipt(store, saved, receipt);
+            else if (lane == LayoutLane.Rebuild) SchematicRebuild.CheckReceipt(store, saved, receipt);
+        }
+        catch (AutomationException error) when (receipt.Status == CheckedSchematicBatchStatus.CsbsCompleted)
+        { throw Stuck(error, intent.OperationId, committed: true); }
         if (receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted)
             throw Error("native_sync_not_committed", receipt.ErrorMessage.Length == 0
                 ? "Inspect the retained connected-move operation before continuing." : receipt.ErrorMessage);
         var observed = await Capture(client, saved.State, token);
-        if (!observed.State.Equals(receipt.ObservedAfter))
-            throw Error("native_changed_during_sync", "Native state changed after the move; preserve the pending versions for reconciliation.");
-        var planned = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.PlannedDesignFileBytes), saved.State.KnowledgeLibraries);
-        var resolved = lane switch
+        SchematicDesign resolved;
+        try
         {
-            LayoutLane.ConnectionRealization => SchematicConnectedAddition.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
-            LayoutLane.Rebuild => SchematicRebuild.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
-            _ => SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token)
-        };
+            if (!observed.State.Equals(receipt.ObservedAfter))
+                throw Error("native_changed_during_sync", "Native state changed after the move; preserve the pending versions for reconciliation.");
+            var planned = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.PlannedDesignFileBytes), saved.State.KnowledgeLibraries);
+            resolved = lane switch
+            {
+                LayoutLane.ConnectionRealization => SchematicConnectedAddition.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
+                LayoutLane.Rebuild => SchematicRebuild.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
+                _ => SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token)
+            };
+        }
+        catch (AutomationException error) { throw Stuck(error, intent.OperationId, committed: true); }
         byte[] candidate = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(resolved, saved.State.KnowledgeLibraries));
         if (!(await File.ReadAllBytesAsync(intent.DesignPath, token)).AsSpan().SequenceEqual(intent.ExpectedFileBytes))
             throw Error("publication_target_changed", "XML changed while resolving the move; retain the pending native result.");

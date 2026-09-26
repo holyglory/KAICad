@@ -15,25 +15,41 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     private readonly Channel<AutomaticDesignInput> inputs = Channel.CreateBounded<AutomaticDesignInput>(
         new BoundedChannelOptions(1) { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false });
     private readonly IReadOnlyList<FileStream> leases;
+    private readonly BlockOwnershipTarget? blocks;
     private readonly Task nativeReader;
     private readonly Task fileReader;
+    private readonly Task exitWatcher;
     private int disposed;
     public DesignRecoveryStore Store { get; }
     public AutomationSession? Session { get; }
 
     private AutomaticDesignDriver(DesignRecoveryStore store, NativeClient client, string designPath, Guid instanceId,
-        AutomationSession session, NativeEventSubscription native, DesignFileSubscription file, IReadOnlyList<FileStream> leases)
+        AutomationSession session, NativeEventSubscription native, DesignFileSubscription file, IReadOnlyList<FileStream> leases,
+        BlockOwnershipTarget? blocks)
     {
         Store = store; this.client = client; this.designPath = designPath; this.instanceId = instanceId; Session = session;
-        this.native = native; this.file = file; this.leases = leases;
-        nativeReader = Task.Run(ReadNativeAsync); fileReader = Task.Run(ReadFileAsync);
+        this.native = native; this.file = file; this.leases = leases; this.blocks = blocks;
+        nativeReader = Task.Run(ReadNativeAsync); fileReader = Task.Run(ReadFileAsync); exitWatcher = Task.Run(WatchExitAsync);
     }
 
-    internal static async Task<AutomaticDesignDriver> CreateAsync(DesignRecoveryStore store, NativeClient client,
+    internal static Task<AutomaticDesignDriver> CreateAsync(DesignRecoveryStore store, NativeClient client,
         string designPath, string expectedRecoveryRevision, CancellationToken token)
+        => CreateAsync(store, client, designPath, expectedRecoveryRevision, null, token);
+
+    internal static async Task<AutomaticDesignDriver> CreateAsync(DesignRecoveryStore store, NativeClient client,
+        string designPath, string expectedRecoveryRevision, BlockOwnershipTarget? blocks, CancellationToken token)
     {
         if (!Path.IsPathFullyQualified(designPath)) throw Error("invalid_automatic_sync_path", "Provide an absolute design path.");
         designPath = Path.GetFullPath(designPath);
+        if (blocks is not null)
+        {
+            if (!Path.IsPathFullyQualified(blocks.BlockGraphPath) || blocks.DesignId == Guid.Empty)
+                throw Error("invalid_automatic_sync_path", "Provide the absolute block graph path and the design's exact identity together.");
+            blocks = blocks with { BlockGraphPath = Path.GetFullPath(blocks.BlockGraphPath) };
+            var separate = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            if (separate.Equals(blocks.BlockGraphPath, designPath) || separate.Equals(blocks.BlockGraphPath, store.StatePath))
+                throw Error("invalid_automatic_sync_path", "The block graph, design and recovery files must remain separate.");
+        }
         var saved = store.Read() ?? throw Error("missing_design_recovery", "Initialize the exact design recovery record first.");
         if (saved.RevisionToken != expectedRecoveryRevision) throw Error("design_recovery_changed", "Reload the recovery record before starting automatic synchronization.");
         var session = await client.HandshakeAsync(token);
@@ -69,8 +85,10 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
                 try { leases.Add(new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)); }
                 catch (IOException) { throw Error("automatic_sync_ownership_conflict", "Another automatic worker owns this design, document or recovery record."); }
             }
+            // The block graph must read and bind this design's circuit before the worker owns anything.
+            if (blocks is not null) _ = await BlockOwnershipSynchronization.PlanAsync(blocks.BlockGraphPath, blocks.DesignId, saved.State.Baseline, token);
             if (store.Read()?.RevisionToken != saved.RevisionToken) throw Error("design_recovery_changed", "Recovery changed while acquiring automatic ownership.");
-            return new(store, client, designPath, saved.State.InstanceId, session.Clone(), source, file, leases);
+            return new(store, client, designPath, saved.State.InstanceId, session.Clone(), source, file, leases, blocks);
         }
         catch { foreach (var lease in leases) lease.Dispose(); file?.Dispose(); source.Dispose(); throw; }
     }
@@ -92,6 +110,11 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     public Task<SchematicSynchronizationExecution> ApplyAsync(StoredDesignRecovery saved, Guid operationId,
         string requestRevisionToken, CancellationToken token) =>
         SchematicSynchronizationExecutor.ApplyAsync(Store, client, designPath, requestRevisionToken, operationId, token);
+
+    public async Task<BlockOwnershipResult?> SynchronizeBlocksAsync(StoredDesignRecovery saved, CancellationToken token) =>
+        blocks is null ? null : await BlockOwnershipSynchronization.SynchronizeAsync(blocks.BlockGraphPath, blocks.DesignId,
+            saved.State.Baseline, BlockOwnershipSynchronization.NativeOrigin("Bind components placed in KiCad to the block of their sheet"),
+            token: token);
 
     private async Task ReadNativeAsync()
     {
@@ -149,6 +172,21 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
         catch (Exception error) { await Failure("automatic_file_observation_failed", error.Message); }
     }
 
+    // The worker learns at once that its KiCad ended (ledger pec2f1b53d4024a17), instead of when it next needs KiCad or its
+    // events fall silent: a KiCad this server started reports its exit status as it ends, and the exit of one it attached
+    // is found by its process observer's bounded backoff (at most every half second). Only a proven exit pauses the worker,
+    // with instance_exited and the observer's description of that exit; a client without an observer is not watched.
+    private async Task WatchExitAsync()
+    {
+        if (client.Process is not { } process) return;
+        try
+        {
+            var exit = await process.WaitForExitAsync(stopping.Token);
+            await Failure("instance_exited", process.ExitedError(exit, requestMayHaveReached: false).Message);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+    }
+
     private async Task Failure(string code, string message)
     {
         try { await inputs.Writer.WriteAsync(new(AutomaticDesignSignal.Recovery, ReattachRequired: true,
@@ -167,7 +205,7 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopping.Cancel(); native.Dispose(); file.Dispose();
-        await Task.WhenAll(nativeReader, fileReader); inputs.Writer.TryComplete();
+        await Task.WhenAll(nativeReader, fileReader, exitWatcher); inputs.Writer.TryComplete();
         foreach (var lease in leases) lease.Dispose(); stopping.Dispose();
     }
 

@@ -18,7 +18,17 @@ namespace KiCad.Automation.Native;
 public enum SchematicRebuildKind { NotApplicable = 0, Admitted = 1, Rejected = 2 }
 
 public sealed record SchematicRebuildClassification(SchematicRebuildKind Kind, IReadOnlyList<Guid> SheetInstanceIds,
-    string? ErrorCode = null, string? ErrorMessage = null);
+    string? ErrorCode = null, string? ErrorMessage = null)
+{
+    /// <summary>Set when the admitted shape is an XML removal of components or units rather than a sheet
+    /// generation or rebuild (ledger p74ee7c1da24272d9).</summary>
+    internal SchematicXmlRemoval? XmlRemoval { get; init; }
+}
+
+/// <summary>What an XML revision removes: symbol occurrences (units), the components whose every occurrence it removes,
+/// and the native symbols they are bound to, by native sheet path and symbol UUID.</summary>
+internal sealed record SchematicXmlRemoval(IReadOnlyList<Guid> RemovedOccurrences, IReadOnlyList<Guid> RemovedComponents,
+    IReadOnlyList<(string Path, Guid NativeId)> NativeSymbols);
 
 /// <summary>The model sheet instances an admitted rebuild regenerates natively from
 /// saved XML. The synchronization seam only carries it from planner to executor.
@@ -64,6 +74,7 @@ public static class SchematicRebuild
     public const string BatchDescription = "Rebuild native sheets from XML";
     private const string SharedScreenRootOwnership = "shared_screen_root_ownership";
     private const string NetChains = "net_chains";
+    private const string LibraryCache = "library_cache";
 
     private const long Grid = 1_270_000L;
     private const long SheetWidth = 38_100_000L;
@@ -75,6 +86,9 @@ public static class SchematicRebuild
 
     private static SchematicRebuildClassification NotApplicable => new(SchematicRebuildKind.NotApplicable, []);
     private static SchematicRebuildClassification Rejected(string code, string message) => new(SchematicRebuildKind.Rejected, [], code, message);
+
+    /// <summary>An XML revision removes a unit of a component it keeps, yet leaves pins only that unit draws in their nets.</summary>
+    public const string UnitPinsConnected = "xml_removal_unit_pins_connected";
 
     /// <summary>Decide whether a saved XML revision needs native sheets generated or
     /// rebuilt. Pure: reads no files or editor. A shape neither rule admits keeps the general path
@@ -90,7 +104,8 @@ public static class SchematicRebuild
         try
         {
             if (IsReplacedEmptyRoot(state)) return ClassifyRebuild(state, desired, token);
-            return ClassifyGeneration(state, desired, token);
+            var generation = ClassifyGeneration(state, desired, token);
+            return generation.Kind != SchematicRebuildKind.NotApplicable ? generation : ClassifyXmlRemoval(state, desired, token);
         }
         catch (AutomationException)
         {
@@ -112,6 +127,7 @@ public static class SchematicRebuild
         token.ThrowIfCancellationRequested();
         try
         {
+            if (shape.XmlRemoval is { } removal) return PlanXmlRemoval(state, desired, hierarchy, removal, gaps, token);
             var planned = IsReplacedEmptyRoot(state) ? PlanRebuild(state, desired, token) : PlanGeneration(state, desired, shape, token);
             var bindings = SchematicDesignBindings.Inspect(planned.Design, state.KnowledgeLibraries, token);
             gaps.AddRange(bindings.CoverageGaps);
@@ -344,22 +360,30 @@ public static class SchematicRebuild
                 + "), so they cannot be rebuilt without loss.");
         if (baseline.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1))
             return Rejected("rebuild_state_unrepresented", "Rebuilding a sheet file shown by several sheets is not supported yet.");
-        // The project file was kept, so KiCad's new root already shows its settings. They must be the ones the XML
-        // records: a rebuild recreates only the deleted schematic files and never overwrites a project setting.
+        // The project file was kept, so KiCad's new root shows project settings: the ones KiCad loaded from that file, and any
+        // change made in KiCad since. They must be the ones the XML records: a rebuild recreates only the deleted schematic
+        // files and never overwrites a project setting. While the files are lost the XML cannot take KiCad's settings instead:
+        // every plan is this rebuild, and an edited XML is refused as rebuild_requires_settled_xml. So the message names only
+        // what does fix it: putting KiCad's settings back, in KiCad or by reopening the project with the project file saved
+        // with this XML.
         var kept = state.Observed.Instances[0].Metadata;
         var recorded = baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(baseline.Schematic.Document)).Metadata;
         var changed = ChangedProjectSettings(kept, recorded);
         if (changed.Count != 0)
             return Rejected("rebuild_project_settings_changed",
-                "The kept project file's settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding "
-                + "would overwrite them. Restore the project file KiCad last saved with this XML, or synchronize its settings first.");
+                "KiCad's project settings (" + string.Join(", ", changed) + ") differ from the ones the XML records, so rebuilding would "
+                + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad "
+                + "last saved with this XML and reopen the project), then rebuild.");
         return new(SchematicRebuildKind.Admitted, [.. baseline.SheetBindings.Select(b => b.SheetInstanceId)]);
     }
 
     /// <summary>Whether the snapshot's coverage limitation <paramref name="marker"/> loses part of <paramref name="saved"/>.
     /// KiCad names shared-screen root ownership and net chains on every snapshot; they lose something only when the
     /// saved schematic has a sheet file shown by several sheets or roots, or net chains. Untyped project settings stay in
-    /// the kept project file. Any other limitation is a loss.</summary>
+    /// the kept project file. Builds up to preview 23 also named the library cache on every snapshot, although they held
+    /// each screen's cache exactly (a definition they could not read failed the whole read); a record they saved loses
+    /// its cache only where a placed symbol's definition is missing from its screen's cache. Any other limitation is a
+    /// loss.</summary>
     internal static bool Lost(string marker, SchematicHierarchyData saved)
     {
         ArgumentNullException.ThrowIfNull(marker);
@@ -370,8 +394,25 @@ public static class SchematicRebuild
             SharedScreenRootOwnership => saved.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1)
                 || saved.Instances.Count(s => s.Metadata.Document.SheetPath.Path.Count == saved.Document.SheetPath.Path.Count) != 1,
             NetChains => saved.Instances.Any(s => s.Metadata.NetChains.Count != 0),
+            LibraryCache => saved.Instances.Any(MissesCachedDefinition),
             _ => true
         };
+    }
+
+    // Whether a symbol placed on the screen has no definition in the screen's library cache under the key KiCad names it
+    // by (SCH_SYMBOL::GetSchSymbolLibraryName): its cache alias when it has one, otherwise its library identifier. A
+    // symbol whose key cannot be named counts as missing.
+    private static bool MissesCachedDefinition(SchematicScreenData screen)
+    {
+        var keys = screen.CachedSymbols.Select(c => c.CacheKey).ToHashSet(StringComparer.Ordinal);
+        foreach (var symbol in screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()))
+        {
+            var library = symbol.LibraryId ?? symbol.Definition?.Id;
+            string key = symbol.LibName.Length != 0 ? symbol.LibName : library is null ? ""
+                : (library.LibraryNickname.Length == 0 ? "" : library.LibraryNickname + ":") + library.EntryName;
+            if (key.Length == 0 || !keys.Contains(key)) return true;
+        }
+        return false;
     }
 
     /// <summary>The typed project settings (every one the project file holds) in which <paramref name="kept"/> differs
@@ -493,6 +534,180 @@ public static class SchematicRebuild
         var result = data.Clone();
         foreach (var screen in result.Instances) screen.Metadata.LoadedNativeFormatVersion = 0;
         return result;
+    }
+
+    // ---- XML removal of components and units -------------------------------------------
+
+    // A saved XML revision that only removes symbol occurrences (units) and whole components, with their native bindings,
+    // their pins in nets (a removed component's pins, and the pins only a removed unit draws) and definitions or parts
+    // nothing else uses, while KiCad still shows the design last synchronized. Each removed occurrence's native symbol is
+    // removed from KiCad. The XML keeps whatever instructions its author kept, including ones retained as detached
+    // references to the removed components. Any other XML shape keeps the general path and its codes. Two removals are
+    // refused before KiCad changes: one that keeps a removed unit's pins in their nets (xml_removal_unit_pins_connected),
+    // and one made while KiCad also changed, which keeps both versions (ownership_change_with_xml_edits), because applying
+    // either would discard the other.
+    private static SchematicRebuildClassification ClassifyXmlRemoval(DesignRecoveryState state, SchematicDesign desired, CancellationToken token)
+    {
+        var baseline = state.Baseline;
+        var before = baseline.Engineering.Circuit;
+        var after = desired.Engineering.Circuit;
+        if (before.Id != after.Id) return NotApplicable;
+        var afterSymbols = after.Symbols.ToDictionary(s => s.Id);
+        var removed = before.Symbols.Where(s => !afterSymbols.ContainsKey(s.Id)).ToArray();
+        if (removed.Length == 0) return NotApplicable;
+        var beforeSymbols = before.Symbols.ToDictionary(s => s.Id);
+        var beforeComponents = before.Components.ToDictionary(c => c.Id);
+        var afterComponents = after.Components.ToDictionary(c => c.Id);
+        // Nothing is added or changed: every surviving object is exactly the one last synchronized.
+        if (after.Symbols.Any(s => !beforeSymbols.TryGetValue(s.Id, out var old) || !old.Equals(s))
+            || after.Components.Any(c => !beforeComponents.TryGetValue(c.Id, out var old) || !old.Equals(c))
+            || !before.SheetInstances.OrderBy(i => i.Id).SequenceEqual(after.SheetInstances.OrderBy(i => i.Id))
+            || !before.Sheets.Select(d => d.Id).Order().SequenceEqual(after.Sheets.Select(d => d.Id).Order()))
+            return NotApplicable;
+        var beforeParts = before.Parts.ToDictionary(p => p.Id);
+        if (after.Parts.Any(p => !beforeParts.TryGetValue(p.Id, out var old)
+                || SchematicNativeCreationProjection.NormalizePart(old) != SchematicNativeCreationProjection.NormalizePart(p)))
+            return NotApplicable;
+        var retired = before.Components.Where(c => !afterComponents.ContainsKey(c.Id)).Select(c => c.Id).ToHashSet();
+        // A removed component takes all its units with it.
+        if (before.Symbols.Any(s => retired.Contains(s.ComponentId) && afterSymbols.ContainsKey(s.Id))) return NotApplicable;
+        foreach (var sheet in before.Sheets)
+        {
+            var next = after.Sheets.Single(d => d.Id == sheet.Id);
+            if (next.Name != sheet.Name || next.Components.Any(c => !sheet.Components.Contains(c))) return NotApplicable;
+            // A definition goes only with every component made from it.
+            if (sheet.Components.Where(c => !next.Components.Contains(c)).Any(d => after.Components.Any(c => c.DefinitionId == d.Id)))
+                return NotApplicable;
+        }
+        // A component that keeps other units no longer draws the pins only its removed units carry (a unit-0 pin is common
+        // to every unit, so it stays while any unit is drawn).
+        var definitionParts = before.Sheets.SelectMany(d => d.Components).ToDictionary(d => d.Id, d => d.PartId);
+        var unitPins = new HashSet<PinEndpoint>();
+        foreach (var component in after.Components.Where(c => removed.Any(s => s.ComponentId == c.Id)))
+        {
+            var drawn = before.Symbols.Where(s => s.ComponentId == component.Id).Select(s => s.Unit).ToHashSet();
+            var kept = after.Symbols.Where(s => s.ComponentId == component.Id).Select(s => s.Unit).ToHashSet();
+            static bool Carried(IEnumerable<PartPin> pins, HashSet<int> units) => pins.Any(p => p.Unit == 0 ? units.Count != 0 : units.Contains(p.Unit));
+            foreach (var pins in beforeParts[definitionParts[component.DefinitionId]].Pins.GroupBy(p => p.Number, StringComparer.Ordinal))
+                if (Carried(pins, drawn) && !Carried(pins, kept)) unitPins.Add(new(component.Id, pins.Key));
+        }
+        // Nets lose exactly the pins of the removed components and units; a net left without pins may go too. XML that keeps
+        // a removed unit's pin in a net describes a connection nothing draws, and is refused below once the rest of the
+        // revision is a removal.
+        var afterNets = after.Nets.ToDictionary(n => n.Id);
+        bool unitPinsKept = false;
+        foreach (var net in before.Nets)
+        {
+            var remaining = net.Pins.Where(p => !retired.Contains(p.ComponentId) && !unitPins.Contains(p)).ToArray();
+            if (!afterNets.TryGetValue(net.Id, out var next))
+            {
+                if (remaining.Length != 0 || net.Pins.Count == 0) return NotApplicable;
+                continue;
+            }
+            var pins = next.Pins.ToHashSet();
+            if (next.Name != net.Name || pins.Count != next.Pins.Count || !pins.IsSupersetOf(remaining)
+                || !pins.IsSubsetOf(net.Pins.Where(p => !retired.Contains(p.ComponentId))))
+                return NotApplicable;
+            unitPinsKept |= pins.Count != remaining.Length;
+        }
+        if (after.Nets.Any(n => !before.Nets.Any(b => b.Id == n.Id))) return NotApplicable;
+        // The XML removes the occurrences' native bindings with them and keeps every other binding exactly.
+        var removedIds = removed.Select(s => s.Id).ToHashSet();
+        var keptBindings = baseline.SymbolBindings.Where(b => !removedIds.Contains(b.SymbolOccurrenceId)).ToHashSet();
+        if (!desired.SymbolBindings.ToHashSet().SetEquals(keptBindings) || desired.SymbolBindings.Count != keptBindings.Count
+            || SchematicNetReconciliation.Bindings(baseline with { SymbolBindings = [] })
+                != SchematicNetReconciliation.Bindings(desired with { SymbolBindings = [] }))
+            return NotApplicable;
+        // The native symbols bound to the removed occurrences, where KiCad shows them.
+        var paths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+        var natives = removed.Select(s => (Path: paths[s.EffectiveSheetInstanceId(beforeComponents[s.ComponentId])],
+            NativeId: baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == s.Id).NativeObjectId)).ToArray();
+        // The XML's native snapshot is the last synchronized one, with or without the removed symbols.
+        if (!SameDrawing(Without(desired.Schematic, natives), Without(baseline.Schematic, natives), token)) return NotApplicable;
+        if (unitPinsKept)
+            return Rejected(UnitPinsConnected,
+                "The XML removes a unit but keeps pins only that unit draws in their nets. Remove those pins from their nets too, "
+                + "or keep the unit; nothing was sent to KiCad.");
+        if (!NativeUnchanged(state, token))
+            return Rejected("ownership_change_with_xml_edits",
+                "The XML removes components or units while KiCad changed since the last synchronization. Both versions are kept: "
+                + "synchronize or undo the KiCad change first, then the removal is applied.");
+        // A symbol on a sheet file shown several times is one native object: remove it only with every occurrence it draws.
+        static string Key(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(id => id.Value));
+        var screens = state.Observed.Instances.ToDictionary(Key, StringComparer.Ordinal);
+        var removedNative = natives.Select(n => (Screen: screens[n.Path].Metadata.ScreenId.Value, n.NativeId)).ToHashSet();
+        foreach (var binding in keptBindings)
+        {
+            var occurrence = beforeSymbols[binding.SymbolOccurrenceId];
+            string screen = screens[paths[occurrence.EffectiveSheetInstanceId(beforeComponents[occurrence.ComponentId])]].Metadata.ScreenId.Value;
+            if (removedNative.Contains((screen, binding.NativeObjectId)))
+                return Rejected("xml_removal_shared_symbol",
+                    "The XML removes a unit drawn on a sheet file shown several times but keeps it on another of those sheets; remove it from every one.");
+        }
+        return new(SchematicRebuildKind.Admitted, [])
+        {
+            XmlRemoval = new([.. removedIds.Order()], [.. retired.Order()], [.. natives.Distinct().OrderBy(n => n.Path, StringComparer.Ordinal).ThenBy(n => n.NativeId)])
+        };
+    }
+
+    private static SchematicSynchronizationPlan PlanXmlRemoval(DesignRecoveryState state, SchematicDesign desired,
+        SchematicHierarchyMergeResult hierarchy, SchematicXmlRemoval removal, List<HierarchyCoverageGap> gaps, CancellationToken token)
+    {
+        var schematic = Without(state.Observed, removal.NativeSymbols);
+        var removedIds = removal.RemovedOccurrences.ToHashSet();
+        var candidate = desired with { Schematic = schematic,
+            SymbolBindings = [.. state.Baseline.SymbolBindings.Where(b => !removedIds.Contains(b.SymbolOccurrenceId))] };
+        var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
+        gaps.AddRange(bindings.CoverageGaps);
+        SchematicSynchronizationPlan Failure(string code, string message, IReadOnlyList<SchematicBindingIssue>? issues = null) =>
+            new(null, null, [], hierarchy, null, null, issues ?? [], [], null, gaps.Distinct().ToArray(), true, code, message);
+        if (!bindings.IdentitiesResolved)
+            return Failure("xml_removal_binding_invalid", "After the removal the design no longer resolves every native object exactly.", bindings.Issues);
+        string xml = SchematicDesignXml.Write(candidate, state.KnowledgeLibraries);
+        if (SchematicDesignXml.Write(SchematicDesignXml.Read(xml, state.KnowledgeLibraries), state.KnowledgeLibraries) != xml)
+            return Failure("inconsistent_design_serialization", "The candidate must round-trip without information loss.");
+        var operations = SchematicHierarchyDelta.Plan(state.Observed, schematic, token);
+        var expected = removal.NativeSymbols.Select(n => n.NativeId.ToString("D")).ToHashSet(StringComparer.Ordinal);
+        // Only the symbols are removed. The delta also states each touched screen's library cache as it is, so KiCad keeps
+        // its cached definitions (the XML still records them) instead of pruning the removed symbols' entries itself.
+        var caches = state.Observed.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().CachedSymbols, StringComparer.Ordinal);
+        bool Kept(SchematicItemOperation o) => o.ReplaceLibraryCache is { } cache && caches.TryGetValue(cache.ScreenId?.Value ?? "", out var current)
+            && cache.Definitions.OrderBy(c => c.CacheKey, StringComparer.Ordinal).SequenceEqual(current.OrderBy(c => c.CacheKey, StringComparer.Ordinal));
+        var removals = operations.Where(o => o.Remove is not null).Select(o => o.Remove.Value).ToArray();
+        if (removals.Length != expected.Count || !removals.ToHashSet(StringComparer.Ordinal).SetEquals(expected)
+            || operations.Any(o => o.Remove is null && !Kept(o)))
+            return Failure("xml_removal_operation_unsupported", "Removing these units from KiCad would need an edit other than removing their symbols; nothing was sent to KiCad.");
+        var electrical = new SchematicNetReconciliationResult(candidate.Engineering, [], [], [], [],
+            RemovedSymbolOccurrences: removal.RemovedOccurrences);
+        return new(candidate, xml, operations.Select(o => o.Clone()).ToArray(), hierarchy, electrical, null, [], [], null,
+            gaps.Distinct().ToArray(), true);
+    }
+
+    private static SchematicHierarchyData Without(SchematicHierarchyData data, IReadOnlyCollection<(string Path, Guid NativeId)> symbols)
+    {
+        var result = data.Clone();
+        foreach (var screen in result.Instances)
+        {
+            string path = string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(id => id.Value));
+            var ids = symbols.Where(s => s.Path == path).Select(s => s.NativeId.ToString("D")).ToHashSet(StringComparer.Ordinal);
+            for (int i = screen.Items.Count - 1; i >= 0; --i)
+                if (ids.Count != 0 && screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
+                    && ids.Contains(screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
+                    screen.Items.RemoveAt(i);
+        }
+        return result;
+    }
+
+    // The same native objects apart from loaded-format provenance and enumeration.
+    private static bool SameDrawing(SchematicHierarchyData a, SchematicHierarchyData b, CancellationToken token)
+    {
+        try
+        {
+            return a.Instances.Count == b.Instances.Count
+                && SchematicHierarchyDelta.Plan(WithoutProvenance(a), WithoutProvenance(b), token).Count == 0;
+        }
+        catch (AutomationException) { return false; }
     }
 
     // ---- Planning -------------------------------------------------------------------------

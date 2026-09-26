@@ -327,7 +327,7 @@ public static class SchematicConnectionRealizer
             }
             foreach (var (symbol, pins) in view.Pins)
                 foreach (var pin in pins.Pins)
-                    points.Add(new(Pt.Of(pin.Position), PointKind.Pin, Id(pin.Id), symbol));
+                    points.Add(new(Pt.Of(pin.Position), PointKind.Pin, Id(pin.Id), symbol, pin.Number));
             foreach (var (id, item) in SchematicItemDelta.Index(view.Native.Items))
             {
                 switch (item)
@@ -441,7 +441,7 @@ public static class SchematicConnectionRealizer
             if (id != owner && id != carrierSymbol && SegmentMeets(a, e, bounds, open: false)
                 && !(variant == Variant.JoinStub && ((island.Same.Contains(id) && OnlyWithin(a, e, bounds, 0))
                     || (stackedAtA.Contains(id) && OnlyWithin(a, e, bounds, PinTargetReachNm)))))
-                return (a == e ? "the pin lies inside the bounds of item " : "the stub crosses item ") + id.ToString("D");
+                return (a == e ? "the pin lies inside the bounds of " : "the stub crosses ") + Item(id);
             // 6. The label overlaps no obstacle, including its own symbol. An anchor label sits on its pin's connection
             // point: every real label reaches a little behind its anchor (at most LabelBackToleranceNm, by the §6.2
             // orientation guard), over its own pin, and KiCad's measured bounds of the pin's symbol end PinTargetReachNm
@@ -453,9 +453,9 @@ public static class SchematicConnectionRealizer
             // body (for example one dragged away) puts everything between them inside the symbol's own bounds.
             bool ownPinSymbol = variant == Variant.AnchorLabel && id == owner;
             if (r is { } labelBox && (ownPinSymbol ? Beyond(labelBox, a, outward, PinTargetReachNm) : labelBox).InteriorMeets(bounds))
-                return ownPinSymbol ? "the label overlaps symbol " + id.ToString("D") + " more than the pin target in front of the pin"
-                    : id == owner ? "the label overlaps the bounds KiCad measures for its own symbol " + id.ToString("D") + ", which take in all of that symbol's visible fields"
-                    : "the label overlaps item " + id.ToString("D");
+                return ownPinSymbol ? "the label overlaps symbol " + Symbol(id) + " more than the pin target in front of the pin"
+                    : id == owner ? "the label overlaps the bounds KiCad measures for its own symbol " + Symbol(id) + ", which take in all of that symbol's visible fields"
+                    : "the label overlaps " + Item(id);
         }
         foreach (var envelope in screen.Envelopes)
         {
@@ -464,9 +464,17 @@ public static class SchematicConnectionRealizer
         }
         return null;
 
-        static string Describe(ForeignPoint point) => point.Kind switch
+        // What a person reads: a symbol by its component's reference (U4, or TP802/TP803 for one drawn on a repeated sheet), and a
+        // symbol's pin by that reference and its pin number (U4.4, TP802.1/TP803.1); an item without a reference (a wire, a sheet,
+        // a text) by its identity.
+        string Symbol(Guid id) => screen.References.TryGetValue(id, out var references) ? string.Join("/", references) : id.ToString("D");
+        string Item(Guid id) => screen.References.ContainsKey(id) ? "symbol " + Symbol(id) : "item " + id.ToString("D");
+        string Describe(ForeignPoint point) => point.Kind switch
         {
-            PointKind.Pin => "pin " + point.Owner.ToString("D") + " of symbol " + point.OwnerSymbol?.ToString("D"),
+            PointKind.Pin when point.OwnerSymbol is { } symbol && point.Number.Length != 0 && screen.References.TryGetValue(symbol, out var references) =>
+                "pin " + string.Join("/", references.Select(r => r + "." + point.Number)),
+            PointKind.Pin => "pin " + (point.Number.Length != 0 ? point.Number : point.Owner.ToString("D"))
+                + (point.OwnerSymbol is { } symbol ? " of symbol " + Symbol(symbol) : ""),
             PointKind.Generated => "a generated connection point",
             _ => point.Kind.ToString().ToLowerInvariant() + " point of " + point.Owner.ToString("D")
         };
@@ -523,7 +531,8 @@ public static class SchematicConnectionRealizer
 
     private enum PointKind { Pin, WireEnd, Junction, NoConnect, BusEntry, Label, SheetPin, Generated }
 
-    private sealed record ForeignPoint(Pt Position, PointKind Kind, Guid Owner, Guid? OwnerSymbol);
+    // A connection point on the sheet; a symbol's pin also carries its pin number, by which a reason a person reads names it.
+    private sealed record ForeignPoint(Pt Position, PointKind Kind, Guid Owner, Guid? OwnerSymbol, string Number = "");
 
     private sealed record ForeignSegment(Pt A, Pt B, Guid Owner, bool Bus = false);
 
@@ -595,6 +604,10 @@ public static class SchematicConnectionRealizer
         public List<Box> Envelopes { get; } = [];
         public Dictionary<Combo, Box> Prototypes { get; } = [];
         public List<IMessage> Items { get; } = [];
+        /// <summary>How a reason a person reads names a placed symbol: by the references the planned design gives the components
+        /// it draws (U4; TP802/TP803 on a repeated sheet). Empty where no planned design names the symbols (<see cref="AnchorLabelRefusal"/> judges a live sheet on its
+        /// own), which then names them by identity.</summary>
+        public IReadOnlyDictionary<Guid, string[]> References { get; init; } = new Dictionary<Guid, string[]>();
     }
 
     private sealed class Run(SchematicConnectionIntent intent, SchematicDesign candidate, CheckedSchematicState checkpoint,
@@ -617,7 +630,7 @@ public static class SchematicConnectionRealizer
         // Component references by component identity and by the native symbol that places them, for Describe and DescribeSymbol.
         private readonly Dictionary<Guid, string> references = candidate.Engineering.Circuit.Components
             .GroupBy(c => c.Id).ToDictionary(g => g.Key, g => g.First().Reference);
-        private readonly Dictionary<Guid, string> symbolReferences = SymbolReferences(candidate);
+        private readonly Dictionary<Guid, string[]> symbolReferences = SymbolReferences(candidate);
         private readonly KiCad.Automation.Protocol.DocumentRevision revision = checkpoint.State?.Revision ?? new();
         // Why the last stub, join stub or anchor label that was tried was refused, for the refusal a person reads.
         private string? lastRefusal;
@@ -663,7 +676,7 @@ public static class SchematicConnectionRealizer
                         + " is not the planned screen in the native checkpoint.");
                 views.Add(new PathView { Path = path, Native = nativeScreen, Planned = plannedScreen });
             }
-            var screen = new Screen { Record = record, Views = views };
+            var screen = new Screen { Record = record, Views = views, References = symbolReferences };
             screens.Add(record.ScreenId, screen);
             // Round 1: every instance path, with the created symbols on that screen as candidates.
             foreach (var view in views)
@@ -1298,8 +1311,11 @@ public static class SchematicConnectionRealizer
             // nfa2005d67574bfea: the root is the first terminal in (escape x, escape y, PlacedPinId) order whose name-label stub is
             // admissible in the route region and covers no other terminal's escape, neither by its wire nor by its label; the tree
             // grows from it and it carries the connection's one label; when no terminal qualifies the connection falls back to
-            // label stubs. The label's stub reaches at least one grid beyond the root's corridor, so that the tree has a node clear
-            // of the root's own symbol for the other pins to join.
+            // label stubs. Every stub length is tried, in the §6.3 (f) order, until one is admissible and covers nothing, so a longer
+            // stub that carries the label past another pin's escape still makes its pin the root. The label's stub reaches at least
+            // one grid beyond the root's corridor, so that the tree has a node clear of the root's own symbol for the other pins to
+            // join (a shorter stub leaves them only nodes inside that symbol's outline, or the label's own anchor; a CN-1 §7
+            // wording requested from the integration owner).
             var kind = KindFor(island);
             Stub? labelled = null;
             RouteTerminal? root = null;
@@ -1307,17 +1323,15 @@ public static class SchematicConnectionRealizer
             foreach (var candidate in terminals)
             {
                 var candidatePin = pins[candidate.PlacedPinId];
+                string? Covers(Stub admitted) => terminals.FirstOrDefault(t => t != candidate
+                        && (SegmentMeets(t.Anchor, t.Escape(grid), admitted.Envelope!.Value, open: false)
+                            || SegmentMeets(t.Anchor, t.Escape(grid), Box.Segment(admitted.A, admitted.E), open: false))) is { } covered
+                    ? "its label stub would cover the escape of pin " + Describe(pins[covered.PlacedPinId])
+                    : null;
                 if (!TryStub(screen, island, candidate.Anchor, candidate.Outward, candidate.PlacedPinId, candidatePin.SymbolId, Variant.Stub, kind, out var tried,
-                        allowAttach: false, minimumLength: (corridors[candidate.PlacedPinId] + 1) * grid, routed: true))
+                        allowAttach: false, minimumLength: (corridors[candidate.PlacedPinId] + 1) * grid, routed: true, reject: Covers))
                 {
                     refusals.Add("pin " + Describe(candidatePin) + ": " + lastRefusal);
-                    continue;
-                }
-                var covered = terminals.FirstOrDefault(t => t != candidate && (SegmentMeets(t.Anchor, t.Escape(grid), tried.Envelope!.Value, open: false)
-                    || SegmentMeets(t.Anchor, t.Escape(grid), Box.Segment(tried.A, tried.E), open: false)));
-                if (covered is not null)
-                {
-                    refusals.Add("pin " + Describe(candidatePin) + ": its label stub would cover the escape of pin " + Describe(pins[covered.PlacedPinId]));
                     continue;
                 }
                 (labelled, root) = (tried, candidate);
@@ -1566,9 +1580,12 @@ public static class SchematicConnectionRealizer
 
         private sealed record Stub(Pt A, Pt E, Combo? Label, Box? Envelope, Guid? Carrier);
 
-        // §6.3 (e) and (f): the first admissible stub length; a stub ending on a same-net power symbol pin attaches to it.
+        // §6.3 (e) and (f): the first stub length, in that order and of at least `minimumLength`, that §6.4 admits and `reject`
+        // (when given) does not refuse; a stub ending on a same-net power symbol pin attaches to it. When none is taken,
+        // `lastRefusal` says why the last length tried was not.
         private bool TryStub(Screen screen, IslandState island, Pt a, (int Dx, int Dy) outward, Guid? ownPin, Guid owner,
-            Variant variant, ConnectionLabelKind kind, out Stub stub, bool allowAttach = true, long minimumLength = 0, bool routed = false)
+            Variant variant, ConnectionLabelKind kind, out Stub stub, bool allowAttach = true, long minimumLength = 0, bool routed = false,
+            Func<Stub, string?>? reject = null)
         {
             var combo = new Combo(kind, island.Island.LabelText, SchematicConnectionGeometry.Spin(outward));
             foreach (int multiple in SchematicConnectionPolicy.StubMultiples)
@@ -1585,7 +1602,12 @@ public static class SchematicConnectionRealizer
                 }
                 var envelope = screen.Prototypes[combo].Offset(e);
                 if (Admit(screen, island, a, e, outward, envelope, ownPin, owner, null, null, variant, routed))
-                { stub = new(a, e, combo, envelope, null); return true; }
+                {
+                    var admitted = new Stub(a, e, combo, envelope, null);
+                    if (reject?.Invoke(admitted) is { } why) { lastRefusal = why; continue; }
+                    stub = admitted;
+                    return true;
+                }
             }
             stub = null!;
             return false;
@@ -1880,17 +1902,24 @@ public static class SchematicConnectionRealizer
         private string Describe(ConnectionPlacedPin pin) =>
             (references.TryGetValue(pin.Endpoint.ComponentId, out var reference) ? reference : pin.Endpoint.ComponentId.ToString("D")) + "." + pin.Endpoint.Pin;
 
-        private string DescribeSymbol(Guid nativeSymbol) => symbolReferences.TryGetValue(nativeSymbol, out var reference) ? reference : nativeSymbol.ToString("D");
+        private string DescribeSymbol(Guid nativeSymbol) => symbolReferences.TryGetValue(nativeSymbol, out var references)
+            ? string.Join("/", references) : nativeSymbol.ToString("D");
 
-        private static Dictionary<Guid, string> SymbolReferences(SchematicDesign design)
+        // The references of the components each native symbol draws, in ordinal order: one for a symbol on a sheet used once,
+        // one per instance for a symbol on a repeated sheet (TP802/TP803 name the same drawn symbol).
+        private static Dictionary<Guid, string[]> SymbolReferences(SchematicDesign design)
         {
             var components = design.Engineering.Circuit.Components.GroupBy(c => c.Id).ToDictionary(g => g.Key, g => g.First().Reference);
             var occurrences = design.Engineering.Circuit.Symbols.GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.First().ComponentId);
-            var result = new Dictionary<Guid, string>();
-            foreach (var binding in design.SymbolBindings.OrderBy(b => b.SymbolOccurrenceId))
+            var result = new Dictionary<Guid, SortedSet<string>>();
+            foreach (var binding in design.SymbolBindings)
                 if (occurrences.TryGetValue(binding.SymbolOccurrenceId, out var component) && components.TryGetValue(component, out var reference))
-                    result.TryAdd(binding.NativeObjectId, reference);
-            return result;
+                {
+                    if (!result.TryGetValue(binding.NativeObjectId, out var references))
+                        result.Add(binding.NativeObjectId, references = new(StringComparer.Ordinal));
+                    references.Add(reference);
+                }
+            return result.ToDictionary(r => r.Key, r => r.Value.ToArray());
         }
 
         private static IMessage UnpackItem(Any any)

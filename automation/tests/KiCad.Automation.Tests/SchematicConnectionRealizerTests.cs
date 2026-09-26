@@ -319,12 +319,14 @@ public sealed class SchematicConnectionRealizerTests
         // leaves leftwards onto it, so the stub's wire (not its label) would cover the lower pin's escape; the tree grows from the
         // lower pin, which carries the label, and the upper pin joins its stub. Guard: with the lower pin away from that stub,
         // the upper pin, first in order, is the root.
-        async Task<SchematicConnectionRealization> Rooted(Point second)
+        async Task<SchematicConnectionRealization> Rooted(Point second, bool lowerDown = false, long? labelHalf = null)
         {
             var laid = scene with { Geometry = scene.Geometry.Copy() };
+            laid.Geometry.LabelHalf = labelHalf;
             Lay(laid, upper, new(80 * Grid, 40 * Grid), (0, 1));
             laid.Geometry.Body[upper.SymbolId] = new(80 * Grid - Grid / 4, 36 * Grid, 80 * Grid + Grid / 4, 40 * Grid + 3 * Grid / 5);
-            LayLeft(laid, lower, second);
+            if (lowerDown) Lay(laid, lower, second, (0, 1));
+            else LayLeft(laid, lower, second);
             var (drawn, drawnMeasured) = await laid.RealizeMeasured();
             Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, drawn.Outcomes.Single().Strategy, drawn.Outcomes.Single().FallbackReason);
             var found = RoutedProblems(drawn, laid.Intent, drawnMeasured, Policy);
@@ -339,6 +341,20 @@ public sealed class SchematicConnectionRealizerTests
         var apart = await Rooted(new(86 * Grid, 50 * Grid));
         Assert.AreEqual(upper.PlacedPinId, apart.Generated.Single(g => g.Role == GeneratedConnectionRole.StubLabel).PlacedPinId,
             "With nothing on its label stub, the first pin in order is the root.");
+        Assert.AreEqual(new Vector2 { XNm = 80 * Grid, YNm = 43 * Grid }, Generated<LocalLabel>(apart).Single().Position,
+            "The root's label sits at the end of its shortest admissible stub, one grid past its corridor.");
+        // E4 asks for a pin whose name-label stub covers no other pin's escape, at any admissible length, not only the shortest.
+        // Must-catch: with labels two and a half grids across (as a larger text would draw them) and the lower pin one grid right
+        // of the upper pin's stub, leaving downwards, the label on the upper pin's three-grid stub reaches over the lower pin's
+        // escape, but its four-grid stub carries the label past it and covers nothing: the upper pin, first in order, is still the
+        // root, with that longer stub, and the lower pin joins its stub one grid above the label.
+        var wide = await Rooted(new(81 * Grid, 42 * Grid), lowerDown: true, labelHalf: 5 * Grid / 4);
+        Assert.AreEqual(upper.PlacedPinId, wide.Generated.Single(g => g.Role == GeneratedConnectionRole.StubLabel).PlacedPinId,
+            "A longer stub of the first pin carries the label past the lower pin's escape, so the first pin is still the root.");
+        Assert.AreEqual(new Vector2 { XNm = 80 * Grid, YNm = 44 * Grid }, Generated<LocalLabel>(wide).Single().Position,
+            "The label sits at the end of the four-grid stub, past the lower pin's escape.");
+        Assert.AreEqual(new Vector2 { XNm = 80 * Grid, YNm = 43 * Grid }, Generated<Junction>(wide).Single().Position,
+            "The lower pin joins the root's stub one grid above the label.");
     }
 
     [TestMethod]
@@ -468,6 +484,28 @@ public sealed class SchematicConnectionRealizerTests
         Assert.IsEmpty(RoutedProblems(clearRealization, scene.Intent, clearMeasured, Policy));
         var clearLabel = scene.Geometry.LabelBox(Generated<LocalLabel>(clearRealization).Single());
         Assert.IsLessThan(166_000_000 - Policy.ClearanceNm, clearLabel.B, "The label keeps the clearance above the title block.");
+        // The creation journey's own check of KiCad's drawing (NativeSessionTests.DrawingSheetProblems), which judges each routed
+        // name label by the box KiCad measures for it. Guard: this routed connection, its label by the box measured for it, passes.
+        // Must-catch: that box one nanometre inside the clearance of the title block, or of the inner frame, is reported; exactly
+        // at the clearance from the frame it is not (a label may touch the frame shrunk by the clearance, E1).
+        long c1 = Policy.ClearanceNm;
+        var (sheetPath, sheetGeometry) = clearMeasured.Single();
+        var routedWires = Generated<SchematicLine>(clearRealization).ToArray();
+        var routedJunctions = Generated<Junction>(clearRealization).ToArray();
+        List<string> SheetProblems(Rect label) => NativeSessionTests.DrawingSheetProblems(sheetPath, sheetGeometry, routedWires, routedJunctions,
+            [("name label", new Box2 { Position = new() { XNm = label.L, YNm = label.T }, Size = new() { XNm = label.R - label.L, YNm = label.B - label.T } })],
+            c1, Policy.PageInsetNm).Problems;
+        Assert.IsEmpty(SheetProblems(clearLabel), string.Join("; ", SheetProblems(clearLabel)));
+        Rect Moved(long dx, long dy) => new(clearLabel.L + dx, clearLabel.T + dy, clearLabel.R + dx, clearLabel.B + dy);
+        var intoTitle = SheetProblems(Moved(0, 166_000_000 - c1 + 1 - clearLabel.B));
+        Assert.HasCount(1, intoTitle, string.Join("; ", intoTitle));
+        StringAssert.Contains(intoTitle[0], "within the clearance of the drawing sheet's title block");
+        Assert.IsEmpty(SheetProblems(Moved(0, 166_000_000 - c1 - 1 - clearLabel.B)), "One nanometre further up the label keeps the clearance.");
+        long up = 100_000_000 - clearLabel.T;
+        var intoFrame = SheetProblems(Moved(285_000_000 - c1 + 1 - clearLabel.R, up));
+        Assert.HasCount(1, intoFrame, string.Join("; ", intoFrame));
+        StringAssert.Contains(intoFrame[0], "is not inside the drawing sheet's frame");
+        Assert.IsEmpty(SheetProblems(Moved(285_000_000 - c1 - clearLabel.R, up)), "A label may touch the frame shrunk by the clearance.");
         // Must-catch: two pins near the top border, leaving upwards: the label naming the connection would reach past the inner
         // border at every stub length, so they are drawn with label stubs (which the page inset still admits) and say why.
         // Guard: one grid lower the label fits inside the border and the pins are routed.
@@ -959,6 +997,35 @@ public sealed class SchematicConnectionRealizerTests
         var clear = scene with { Geometry = scene.Geometry.Copy() };
         clear.Geometry.Body[unrelated] = new(at.X - 9 * Grid, at.Y + 2 * Grid, at.X - Grid / 2, at.Y + 4 * Grid);
         Assert.HasCount(3, Generated<LocalLabel>(await clear.Realize()));
+        // The refusal a person reads names what is in the way by reference, never by identity. TP1's longest stub (eight grids
+        // to the left) crosses R9's body and R1's, whichever the measurement lists first: it names that symbol R9 or R1.
+        static string LongestTried(AutomationException error)
+        {
+            const string From = "(at the longest stub length tried, ", To = "). Move the symbol";
+            int from = error.Message.IndexOf(From, StringComparison.Ordinal), to = error.Message.IndexOf(To, StringComparison.Ordinal);
+            Assert.IsTrue(from >= 0 && to > from, error.Message);
+            return error.Message[(from + From.Length)..to];
+        }
+        var crossed = LongestTried(await Assert.ThrowsExactlyAsync<AutomationException>(covering.Realize));
+        CollectionAssert.Contains(new[] { "the stub crosses symbol R1", "the stub crosses symbol R9" }, crossed);
+        // A pin in the way is named by its symbol's reference and its number: R9 measured whole, with its pin 1 three grids left of
+        // TP1.1 on TP1's stub room (pin 2 two grids above it, its body a thin box between them), is the first thing on that
+        // stub, and the refusal says "pin R9.1 lies on the stub", never the pin's or the symbol's identity.
+        var pinned = scene with { Geometry = scene.Geometry.Copy() };
+        pinned.Geometry.Incomplete.Clear();
+        var r9 = pinned.Plan.Candidate!.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => Guid.Parse(s.Id.Value) == unrelated);
+        var r9Pins = SchematicPlacedPins.Active(r9, r9.Unit?.Unit ?? 1).OrderBy(p => p.Number, StringComparer.Ordinal).ToArray();
+        Assert.AreEqual("1", r9Pins[0].Number);
+        pinned.Geometry.Place[Guid.Parse(r9Pins[0].Id.Value)] = new(at.X - 3 * Grid, at.Y);
+        pinned.Geometry.Place[Guid.Parse(r9Pins[1].Id.Value)] = new(at.X - 3 * Grid, at.Y - 2 * Grid);
+        pinned.Geometry.Body[unrelated] = new(at.X - 3 * Grid - Grid / 4, at.Y - 2 * Grid, at.X - 3 * Grid + Grid / 4, at.Y);
+        var inTheWay = await Assert.ThrowsExactlyAsync<AutomationException>(pinned.Realize);
+        Assert.AreEqual(SchematicConnectionErrors.RealizationNoFreeStub, inTheWay.Code, inTheWay.Message);
+        StringAssert.Contains(inTheWay.Message, "Pin TP1.1 ");
+        Assert.AreEqual("pin R9.1 lies on the stub", LongestTried(inTheWay));
+        foreach (var identity in new[] { unrelated.ToString("D"), r9Pins[0].Id.Value })
+            Assert.IsFalse(inTheWay.Message.Contains(identity, StringComparison.Ordinal), inTheWay.Message);
         scene.Geometry.Incomplete.Clear();
         // Must-catch: a new symbol with no connection at all must still report its pins, which must be proven to touch
         // no existing connection point; guard: reported completely, it is simply created.
@@ -1861,6 +1928,16 @@ public sealed class SchematicConnectionRealizerTests
 
     internal static string PinName(SchematicDesign design, PinEndpoint pin) => Reference(design, pin.ComponentId) + "." + pin.Pin;
 
+    // How they name a placed symbol: by the references of every component it draws, in ordinal order (one per instance of a
+    // repeated sheet, TP802/TP803).
+    internal static string SymbolName(SchematicDesign design, Guid nativeSymbol)
+    {
+        var circuit = design.Engineering.Circuit;
+        var occurrences = design.SymbolBindings.Where(b => b.NativeObjectId == nativeSymbol).Select(b => b.SymbolOccurrenceId).ToHashSet();
+        var components = circuit.Symbols.Where(s => occurrences.Contains(s.Id)).Select(s => s.ComponentId).ToHashSet();
+        return string.Join("/", circuit.Components.Where(c => components.Contains(c.Id)).Select(c => c.Reference).Distinct().Order(StringComparer.Ordinal));
+    }
+
     // Keep a component created once against the unedited baseline when the scene's sheets are later decorated.
     private static SchematicDesign Adopt(SchematicDesign design, SchematicDesign created) =>
         design with { Engineering = design.Engineering with { Circuit = created.Engineering.Circuit } };
@@ -2041,6 +2118,9 @@ public sealed class SchematicConnectionRealizerTests
         public Dictionary<Guid, Rect> Body { get; private set; } = [];
         /// <summary>Overrides <see cref="MeasuredBehind"/> for every label kind.</summary>
         public long? LabelBehind { get; set; }
+        /// <summary>Half the size of every label across its facing direction, in place of half a grid (as a larger label text
+        /// would draw it).</summary>
+        public long? LabelHalf { get; set; }
         public Func<MeasureSchematicPlacement, SchematicPlacementGeometry, SchematicPlacementGeometry>? Tamper { get; set; }
         /// <summary>Visible fields of a symbol, which its bounds take in as KiCad's do.</summary>
         public Dictionary<Guid, List<Rect>> Fields { get; private set; } = [];
@@ -2053,7 +2133,7 @@ public sealed class SchematicConnectionRealizerTests
         public Geometry Copy() => new()
         {
             Requests = [], Sized = new(Sized), Incomplete = new(Incomplete), Power = new(Power), Direction = new(Direction),
-            Library = new(Library), Place = new(Place), Shift = new(Shift), Body = new(Body), LabelBehind = LabelBehind, Tamper = Tamper,
+            Library = new(Library), Place = new(Place), Shift = new(Shift), Body = new(Body), LabelBehind = LabelBehind, LabelHalf = LabelHalf, Tamper = Tamper,
             Fields = Fields.ToDictionary(f => f.Key, f => f.Value.ToList()), DrawingSheet = DrawingSheet?.Clone(), FieldsReported = FieldsReported
         };
 
@@ -2173,9 +2253,9 @@ public sealed class SchematicConnectionRealizerTests
                 }
                 case SchematicLine line:
                     result.Anchor = line.Start.Clone(); result.Bounds = Box(Span(Of(line.Start), Of(line.End))); return result;
-                case LocalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, 0, Behind(label));
-                case GlobalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label));
-                case HierarchicalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label));
+                case LocalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, 0, Behind(label), LabelHalf ?? Grid / 2);
+                case GlobalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label), LabelHalf ?? Grid / 2);
+                case HierarchicalLabel label: return Label(result, label.Position, label.Text.Text_, label.SpinStyle, Grid, Behind(label), LabelHalf ?? Grid / 2);
                 case SheetSymbol sheet:
                     result.Anchor = sheet.Position.Clone();
                     result.Bounds = Box(new(sheet.Position.XNm, sheet.Position.YNm, sheet.Position.XNm + sheet.Size.XNm, sheet.Position.YNm + sheet.Size.YNm));
@@ -2202,9 +2282,9 @@ public sealed class SchematicConnectionRealizerTests
         };
 
         private static SchematicPlacementBounds Label(SchematicPlacementBounds result, Vector2 position, string text, SchematicLabelSpinStyle spin,
-            long shape, long behind)
+            long shape, long behind, long half)
         {
-            long length = (text.Length + 1) * Grid * 3 / 4 + shape, half = Grid / 2;
+            long length = (text.Length + 1) * Grid * 3 / 4 + shape;
             var (x, y) = (position.XNm, position.YNm);
             var box = spin switch
             {
@@ -2309,6 +2389,7 @@ public sealed class SchematicConnectionRealizerTests
         Assert.IsNotEmpty(recordings);
         // Which scenarios ran the conditional must-catches below, so that none of them can go silent.
         var covering = new List<string>();
+        var ownNames = new Dictionary<string, string>(StringComparer.Ordinal);
         var anchorBranches = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var recording in recordings)
         {
@@ -2468,8 +2549,15 @@ public sealed class SchematicConnectionRealizerTests
                 // The covering bounds are the symbol's, so the refusal names the covered pin or another pin of that symbol whose
                 // stub is drawn before it.
                 StringAssert.Contains(error.Message, "Pin " + Reference(recording.Plan.Candidate!, covered.Pin.Endpoint.ComponentId) + ".", recording.Scenario);
-                StringAssert.Contains(error.Message, "the label overlaps the bounds KiCad measures for its own symbol " + covered.Pin.SymbolId.ToString("D")
+                // The symbol is named by the reference of every component it draws: on the repeated channel sheet (channel-pair)
+                // one drawn probe is TP802 on one instance and TP803 on the other.
+                string ownName = SymbolName(recording.Plan.Candidate!, covered.Pin.SymbolId);
+                ownNames.Add(recording.Scenario, ownName);
+                StringAssert.Contains(ownName, Reference(recording.Plan.Candidate!, covered.Pin.Endpoint.ComponentId), recording.Scenario);
+                StringAssert.Contains(error.Message, "the label overlaps the bounds KiCad measures for its own symbol " + ownName
                     + ", which take in all of that symbol's visible fields", recording.Scenario);
+                Assert.IsFalse(error.Message.Contains(covered.Pin.SymbolId.ToString("D"), StringComparison.Ordinal),
+                    recording.Scenario + ": the refusal names the symbol by its reference, never by its identity: " + error.Message);
             }
             // On a real sheet where an existing connection was named by a label on a join candidate's pin (no join stub had
             // room): a junction one grid inside that label leaves it no room there, so the realizer never draws over the
@@ -2509,6 +2597,10 @@ public sealed class SchematicConnectionRealizerTests
             }
         }
         Assert.IsNotEmpty(covering, "Some recording has a new pin whose own symbol can be made to cover its stub room.");
+        // Must-catch: the probe drawn once on the repeated channel sheet is named by both of its references, never by one of them
+        // alone nor by its identity.
+        Assert.AreEqual(2, ownNames.GetValueOrDefault("channel-pair", "").Split('/').Length,
+            "channel-pair names its repeated-sheet probe by both references: " + ownNames.GetValueOrDefault("channel-pair"));
         // The live scenes are built so that each branch is taken on every recording of them.
         Assert.AreEqual("next-candidate", anchorBranches.GetValueOrDefault("join-anchor-label"),
             "join-anchor-label names its first candidate, so blocking that label names the next one.");

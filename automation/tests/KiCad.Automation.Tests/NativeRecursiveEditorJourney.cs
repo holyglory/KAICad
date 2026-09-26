@@ -156,6 +156,7 @@ public sealed partial class NativeSessionTests
                 if (!compact || shown == note.Text)
                 {
                     Assert.AreEqual(note.Text, shown, step + ": the note's lines break between words.");
+                    Assert.AreEqual("", drawn.Rect.Tooltip, step + ": the note \"" + note.Text + "\", shown whole, needs no tooltip.");
                     continue;
                 }
                 // In the compact window a note keeps its text at full size in its smaller box, as a block's caption does (design
@@ -169,6 +170,9 @@ public sealed partial class NativeSessionTests
                 string rest = whole.Length == 0 ? note.Text : note.Text[(whole.Length + 1)..];
                 Assert.IsTrue(rest.StartsWith(drawn.Lines[^1][..^1].TrimEnd(), StringComparison.Ordinal),
                     step + ": the shortened note's last line is the start of the rest of its text (shown: \"" + shown + "\").");
+                // Review of the mockup audit's pass 5 (M1-13): a note shortened in the compact window could be read only by clicking
+                // it; it shows its whole text on hover, as a shortened connection caption does (hovered in the compact-note-hover step).
+                Assert.AreEqual(note.Text, drawn.Rect.Tooltip, step + ": the shortened note \"" + shown + "\" shows its whole text on hover.");
             }
             // Mockup audit M1-1: Comments opens on the selected element's own comment, or on a new one, never on a note in the
             // level's free space (typing there used to rewrite the note, and the note was drawn as the selected comment).
@@ -364,7 +368,28 @@ public sealed partial class NativeSessionTests
             await FixtureLevel("compact-psu", compactPsu, compactPsuLayout);
             Key("BackSpace"); await Wait("compact-system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.Draft.Baseline.BlockId == S(psu.BlockId));
             Key("Right"); await Wait("compact-cpu-selected", s => s.Draft.Baseline.BlockId == S(cpu.BlockId));
-            Key("Return"); await Wait("compact-cpu-again", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(cpu.BlockId));
+            Key("Return");
+            var compactCpuAgain = await Wait("compact-cpu-again", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(cpu.BlockId));
+            // M1-13 (review of the mockup audit's pass 5): in the compact window the CPU note shows only its first word ("Compare…"),
+            // and it could be read whole only by clicking it. With the pointer resting on it, the canvas shows its whole text as its
+            // tooltip, as a shortened connection caption does; the tooltip goes when the pointer leaves the note.
+            string cpuNoteText = cpuRevision.LocalDiagram.Notes.Single(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas).Text;
+            var shortNote = compactCpuAgain.CanvasNotes.Single();
+            Assert.IsTrue(shortNote.Lines.Count > 0 && shortNote.Lines[^1].EndsWith('…') && shortNote.Rect.Tooltip == cpuNoteText,
+                $"compact-cpu-again: the CPU note is drawn shortened (\"{string.Join(" ", shortNote.Lines)}\") and names its whole text on hover.");
+            ulong noteMotions = compactCpuAgain.CanvasMotions;
+            foreach (int dx in new[] { -3, 0, 2 })
+                NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: shortNote.Rect.X + shortNote.Rect.Width / 2 + dx,
+                    clickFromTop: shortNote.Rect.Y + shortNote.Rect.Height / 2);
+            await Wait("compact-note-hover", s => s.CanvasMotions > noteMotions && s.CanvasTooltip == cpuNoteText);
+            // GTK shows the tooltip after the pointer rests for its delay; the capture waits past it. The tooltip read back from the
+            // canvas window is asserted; the capture is not measured for its popup.
+            await Task.Delay(1500, token);
+            await Capture("compact-note-hover");
+            var noteRested = await Wait("compact-note-rested", s => s.CanvasTooltip == cpuNoteText);
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: noteRested.CanvasWindowX + (int)noteRested.CanvasPixelWidth - 4,
+                clickFromTop: noteRested.CanvasWindowY + (int)noteRested.CanvasPixelHeight - 4);
+            await Wait("compact-note-hover-left", s => s.CanvasTooltip == "" && s.CanvasMotions > noteRested.CanvasMotions);
             ulong beforeDefault = (await Read()).ViewRevision;
             NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
             await Wait("default-cpu", s => s.Rendered && s.ViewRevision > beforeDefault && s.CanvasPixelWidth > 900 && s.CanvasScale == cpuLevel.CanvasScale
@@ -853,7 +878,11 @@ public sealed partial class NativeSessionTests
             static bool Under(P.DiagramControlRect r, P.DiagramCanvasPoint p) => p.X >= r.X && p.X < r.X + r.Width && p.Y >= r.Y && p.Y < r.Y + r.Height;
             static string TipUnderPointer(P.RecursiveDiagramEditorState s) =>
                 s.ConnectionCaptions.FirstOrDefault(c => c.Tooltip != "" && Under(c, s.CanvasPointer))?.Tooltip
-                ?? s.BlockChips.Select(b => b.More).FirstOrDefault(m => m is not null && Under(m, s.CanvasPointer))?.Tooltip ?? "";
+                ?? s.BlockChips.Select(b => b.More).FirstOrDefault(m => m is not null && Under(m, s.CanvasPointer))?.Tooltip
+                ?? NoteTip(s);
+            // A shortened note under the pointer (M1-13): the note drawn last, on top, as the canvas finds it.
+            static string NoteTip(P.RecursiveDiagramEditorState s) =>
+                s.CanvasNotes.Select(n => n.Rect).LastOrDefault(r => Under(r, s.CanvasPointer))?.Tooltip ?? "";
             Assert.AreEqual(shortenedCaption.Tooltip, TipUnderPointer(hovered), "dense: the pointer rests on the shortened caption.");
             // The keyboard selects the PSU (the arrows step through the level's blocks) and Enter opens its level.
             Key("Escape");
@@ -1501,6 +1530,19 @@ public sealed partial class NativeSessionTests
             var compactNames = await Read();
             VerifyBoundaryNamesClear(compactNames, "recursive-compact");
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-compact-state.json"), SchematicJson.Formatter.Format(compactNames), token);
+            // Mockup audit M1-11 here too (review of 9b17e133db: step 28 of the audit had judged this level's wires only from the
+            // capture): no connection runs through or within 3 pixels of a boundary port's name, the level's routes read as an
+            // agent observes them.
+            var compactObserved = await client.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentId"] = graph.DocumentId.ToString("D"), ["expectedSourceToken"] = compactNames.SourceToken,
+                ["expectedViewRevision"] = compactNames.ViewRevision, ["views"] = new[] { new { viewId = "level", pixelWidth = 800, pixelHeight = 600 } }
+            }, cancellationToken: token);
+            Assert.IsFalse(compactObserved.IsError == true, "recursive-compact: the level can be observed.");
+            var compactLevelView = JsonSerializer.SerializeToElement(compactObserved).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-compact-observation.json"), compactLevelView.GetRawText(), token);
+            Assert.IsTrue(compactLevelView.GetProperty("resolvedLayout").GetProperty("routes").GetArrayLength() > 0, "recursive-compact: the level's connections are observed.");
+            VerifyBoundaryNamesOffWires(compactNames, compactLevelView.GetProperty("resolvedLayout"), "recursive-compact");
             Key("3", control: true); Key("a", control: true); Type("A compact-window routing edit."); await Wait(s => s.Dirty);
             await Save();
             Key("4", control: true);
@@ -3764,7 +3806,11 @@ public sealed partial class NativeSessionTests
                 double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
             CollectionAssert.AreEqual(compactPreview, compactCommitted,
                 $"compact-around-added: the committed route {string.Join(" ", compactCommitted)} is the last preview {string.Join(" ", compactPreview)}.");
+            // The finished connection itself is the selection, with its own handles (as at the default size), not only some handles.
+            Assert.AreEqual(compactAroundId, compactAround.ConnectionDraft?.Baseline.ConnectionId, "compact-around-added: the finished connection is selected.");
             Assert.HasCount(2, compactAround.ConnectionHandles, "compact-around-added: the finished connection is selected with a handle at each end.");
+            Assert.IsTrue(compactAround.ConnectionHandles.All(h => h.ObjectId == compactAroundId && h.Width >= 8 && h.Height >= 8),
+                "compact-around-added: both handles belong to the finished connection.");
             Key("z", control: true);
             var compactUndone = await Wait("compact-around-undone", s => s.LevelDraft.NewConnections.Count == 0 && s.ConnectionHandles.Count == 0);
             Assert.AreEqual(compactConnections, compactUndone.LevelDraft.Scope.LocalDiagram.Connections.Count, "compact-around-undone: Undo removes the connection.");
@@ -5251,17 +5297,22 @@ public sealed partial class NativeSessionTests
         // Owner default n7fb0ee3089916669 (mockup audit M1-9): a connection is drawn in its domain's colour, as the approved sketches
         // draw them: power red, data blue, analog (the sketches' sense lines) dashed grey, each 4.5:1 or more on the canvas (in the
         // dark theme lightened until it is, as the accent is); Control and Mechanical in the neutral wire colour; and a selected
-        // connection in the accent with a handle at each end, so a selected data connection stays apart from an unselected one.
-        // Supply input takes the data domain and Rail feed the analog one in this draft, measured at the default size and in the
+        // connection in the accent, two pixels wide against one, with a handle at each end, so a selected data connection stays
+        // apart from an unselected one (in the dark theme the accent and the lightened data blue are close in colour, so there
+        // mainly by its weight and handles). Supply input takes the data domain and Rail feed the analog one in this draft, measured at the default size and in the
         // compact window; Decline then discards them.
-        (byte R, byte G, byte B) Wire(CapturedWindow shot, P.RecursiveDiagramEditorState at, (int X, int Y)[] route, string what, out bool dashed)
+        static ((int X, int Y) A, (int X, int Y) B) LongestRun((int X, int Y)[] route)
         {
-            // The middle half of the connection's longest straight run, away from its ends, arrowheads and caption.
             int longest = 1;
             for (int i = 2; i < route.Length; ++i)
                 if (Math.Abs(route[i].X - route[i - 1].X) + Math.Abs(route[i].Y - route[i - 1].Y)
                     > Math.Abs(route[longest].X - route[longest - 1].X) + Math.Abs(route[longest].Y - route[longest - 1].Y)) longest = i;
-            var (a, b) = (route[longest - 1], route[longest]);
+            return (route[longest - 1], route[longest]);
+        }
+        (byte R, byte G, byte B) Wire(CapturedWindow shot, P.RecursiveDiagramEditorState at, (int X, int Y)[] route, string what, out bool dashed)
+        {
+            // The middle half of the connection's longest straight run, away from its ends, arrowheads and caption.
+            var (a, b) = LongestRun(route);
             var surface = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
             bool flat = a.Y == b.Y; int length = flat ? Math.Abs(b.X - a.X) : Math.Abs(b.Y - a.Y);
             Assert.IsTrue(length >= 12, $"{what}: its longest run ({a} to {b}) is long enough to measure.");
@@ -5273,6 +5324,28 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(ink.Count >= 1, $"{what}: the wire is drawn where the editor reports it.");
             return colour;
         }
+        // A solid wire's width in pixels: the fewest pixels of unbroken ink across its longest straight run, at three places in its
+        // middle quarter.
+        int Weight(CapturedWindow shot, P.RecursiveDiagramEditorState at, (int X, int Y)[] route, string what)
+        {
+            var (a, b) = LongestRun(route);
+            var surface = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+            bool flat = a.Y == b.Y; int length = flat ? Math.Abs(b.X - a.X) : Math.Abs(b.Y - a.Y), line = flat ? a.Y : a.X;
+            int least = int.MaxValue;
+            foreach (int eighth in new[] { 3, 4, 5 })
+            {
+                int along = (flat ? Math.Min(a.X, b.X) : Math.Min(a.Y, b.Y)) + length * eighth / 8;
+                bool Ink(int across) => CapturedWindow.Contrast(flat ? shot.At(along, across) : shot.At(across, along), surface) >= 1.5;
+                int start = new[] { 0, -1, 1, -2, 2 }.Select(d => line + d).FirstOrDefault(Ink, int.MinValue);
+                Assert.AreNotEqual(int.MinValue, start, $"{what}: the wire is drawn across its run at {along}.");
+                int low = start, high = start;
+                while (start - low < 6 && Ink(low - 1)) --low;
+                while (high - start < 6 && Ink(high + 1)) ++high;
+                least = Math.Min(least, high - low + 1);
+            }
+            return shot.Record(what + " wire width", least);
+        }
+        ((byte R, byte G, byte B) Colour, int Weight)? unselectedData = null;
         async Task DomainLooks(string step, bool selectedData)
         {
             await ParkPointer();
@@ -5283,27 +5356,43 @@ public sealed partial class NativeSessionTests
             var powerLook = Wire(shot, at, await RoutePixels(at, power), step + " Power", out bool powerDashed);
             Assert.IsTrue(powerLook.R - Math.Max(powerLook.G, powerLook.B) >= 60 && !powerDashed, $"{step}: Power, domain Power, is drawn red {D(powerLook)} and solid.");
             Assert.IsTrue(shot.Contrast("M1-9 power wire on the canvas", powerLook, canvas) >= 4.5, $"{step}: the red {D(powerLook)} reads 4.5:1 on the canvas {D(canvas)}.");
-            var dataLook = Wire(shot, at, await RoutePixels(at, supply), step + " Supply input", out bool dataDashed);
+            var supplyRoute = await RoutePixels(at, supply);
+            var dataLook = Wire(shot, at, supplyRoute, step + " Supply input", out bool dataDashed);
+            int dataWeight = Weight(shot, at, supplyRoute, "M1-9 " + (selectedData ? "selected " : "") + "Supply input");
             if (selectedData)
             {
                 // The selected data connection: the accent, and a handle at each of its ends.
                 var handles = at.ConnectionHandles.Where(h => h.ObjectId == supply).ToArray();
                 Assert.HasCount(2, handles, $"{step}: the selected Supply input shows a handle at each end.");
-                Assert.IsTrue(shot.Contrast("M1-9 selected connection on the canvas", dataLook, canvas) >= 3.0, $"{step}: the selected Supply input {D(dataLook)} is drawn in the accent.");
+                Assert.IsTrue(shot.Contrast("M1-9 selected connection on the canvas", dataLook, canvas) >= 3.0, $"{step}: the selected Supply input {D(dataLook)} stands 3:1 from the canvas.");
                 foreach (var handle in handles)
                 {
                     // The handle's outline is its first column; its fill (white, or the canvas's foreground in the dark theme) lies inside.
                     var outline = shot.MostContrasting(handle.X, handle.Y + 2, 1, handle.Height - 4, canvas);
                     Assert.IsTrue(handle.Width >= 8 && handle.Height >= 8 && shot.Contrast("M1-9 connection handle outline on the canvas", outline, canvas) >= 3.0,
                         $"{step}: an end handle's outline {D(outline)} stands 3:1 from the canvas.");
+                    // The wire is the selection's accent, the colour of its handles' outline on this same capture (review of 9b17e133db:
+                    // 3:1 from the canvas alone would also accept the unselected data blue).
+                    Assert.IsTrue(CapturedWindow.Distance(dataLook, outline) <= 8,
+                        $"{step}: the selected Supply input {D(dataLook)} is drawn in the accent of its handles' outline {D(outline)}.");
                 }
                 Assert.IsTrue(at.ConnectionHandles.All(h => h.ObjectId == supply), $"{step}: only the selected connection shows handles.");
+                // Apart from the same connection unselected, measured in the "domains" step of this theme: by colour, by weight (two
+                // pixels against one) and by its handles. In the dark theme the accent and the lightened data blue are close in colour
+                // (both about 4.5:1 on the canvas), so there the weight and the handles carry the difference.
+                if (unselectedData is not { } unselected) throw new AssertFailedException($"{step}: the unselected data wire is measured first.");
+                int apart = shot.Record("M1-9 selected Supply input colour distance from the unselected data blue", CapturedWindow.Distance(dataLook, unselected.Colour));
+                Assert.IsTrue(apart >= 20, $"{step}: the selected Supply input {D(dataLook)} is coloured apart from the unselected data blue {D(unselected.Colour)} (distance {apart}).");
+                Assert.IsTrue(dataWeight >= 2 && dataWeight > unselected.Weight,
+                    $"{step}: the selected Supply input is drawn {dataWeight} pixels wide, heavier than the {unselected.Weight} of an unselected wire.");
             }
             else
             {
                 Assert.IsTrue(dataLook.B - Math.Max(dataLook.R, dataLook.G) >= 60 && !dataDashed, $"{step}: Supply input, domain Data, is drawn blue {D(dataLook)} and solid.");
                 Assert.IsTrue(shot.Contrast("M1-9 data wire on the canvas", dataLook, canvas) >= 4.5, $"{step}: the blue {D(dataLook)} reads 4.5:1 on the canvas {D(canvas)}.");
+                Assert.AreEqual(1, dataWeight, $"{step}: an unselected wire is one pixel wide.");
                 Assert.IsEmpty(at.ConnectionHandles, $"{step}: no connection is selected, so none shows handles.");
+                unselectedData ??= (dataLook, dataWeight);
             }
             var feedLook = Wire(shot, at, await RoutePixels(at, feed), step + " Rail feed", out bool feedDashed);
             int spread = Math.Max(feedLook.R, Math.Max(feedLook.G, feedLook.B)) - Math.Min(feedLook.R, Math.Min(feedLook.G, feedLook.B));

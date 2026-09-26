@@ -304,9 +304,12 @@ private:
     /// The selected connection's end handles as drawn, in canvas pixels (owner default n7fb0ee3089916669); empty when no
     /// connection is selected.
     std::vector<wxRect> connectionHandles( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
-    /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, or the choices behind a
-    /// "+N more" chip; empty elsewhere.
+    /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, the choices behind a
+    /// "+N more" chip, or the whole text of a note drawn shortened; empty elsewhere.
     wxString canvasTipAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    /// The whole text of the canvas note drawn topmost at aPoint, in canvas pixels, when that note is too small to show all of
+    /// it (it ends in "…"); nothing when no note is there or the note shows its whole text.
+    std::optional<wxString> shortenedNoteAt( const wxPoint& aPoint ) const;
     /// Sets the canvas's tooltip to what lies under the pointer now (canvasTipAt), or none while the pointer is off the canvas,
     /// a drag is under way or no level is shown. Called on every pointer motion, when the pointer leaves, and after every
     /// repaint, so the tooltip follows a canvas that changes under a pointer that stays still (review of design QA round 2).

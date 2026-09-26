@@ -183,8 +183,9 @@ BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const
 wxRect PortNameRect( wxDC& aDC, const wxString& aName, D::DiagramPortSide aSide, const wxPoint& aAt );
 /// The lines a canvas note shows in a text area of aWidth by aHeight pixels with aDC's font. Lines break between
 /// words (only a word wider than the note breaks inside it), the note's own line breaks are kept, and text that
-/// does not fit ends its last shown line with "…".
-std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight );
+/// does not fit ends its last shown line with "…". When aShortened is given, it tells whether any of the text is left
+/// out, so the note shows its whole text on hover.
+std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight, bool* aShortened = nullptr );
 /// What the "+N more" chip shows on hover: each choice behind it with its value and its state, one per line, for example
 /// "Family: TLV755P (candidate)" (design QA round 2, R2-P2-6).
 wxString MoreToolTip( const NODE& aNode, const BLOCK_CHIPS& aChips );

@@ -232,9 +232,10 @@ message RecursiveDiagramEditorState {
   // How many distinct level geometries pointer drags reached in this window since it opened: each is one position the
   // level must be laid out for, however many pointer motions reached it.
   uint64 drag_positions = 232;
-  // The canvas's tooltip as it is set on the canvas now: the full caption of a shortened connection caption, or the choices
-  // behind a "+N more" chip, under the pointer; empty when the pointer is over neither or not over the canvas. It follows the
-  // canvas as it changes under a pointer that stays still (a level switch, a rename, a new fit or a history preview).
+  // The canvas's tooltip as it is set on the canvas now: the full caption of a shortened connection caption, the choices
+  // behind a "+N more" chip, or the whole text of a note drawn shortened, under the pointer; empty when the pointer is over
+  // none of these or not over the canvas. It follows the canvas as it changes under a pointer that stays still (a level
+  // switch, a rename, a new fit or a history preview).
   string canvas_tooltip = 233;
   // The Connect tool's preview of the connection in progress as drawn, relative to the editor window, in pixels, from its
   // first end to the pointer or the port or block the pointer is on; empty when no connection is in progress.
@@ -270,7 +271,8 @@ message DiagramCanvasBlockText {
 
 // A note on the canvas as drawn: its box relative to the editor window, in pixels (shown is true when the whole box
 // lies inside the canvas), and the lines of text it shows. Lines break between words; only a word wider than the note
-// breaks inside it, and text that does not fit ends the last shown line with "…".
+// breaks inside it, and text that does not fit ends the last shown line with "…"; such a note shows its whole text on
+// hover, reported as rect.tooltip (empty for a note shown whole).
 message DiagramCanvasNote {
   string annotation_id = 1;
   DiagramControlRect rect = 2;
@@ -346,8 +348,9 @@ message DiagramControlRect {
   // The diagram object the control is drawn for: the connection id of a connection caption; the owning block's id and the
   // port's interface id, joined by "/", of a port's square and of a boundary port's name; empty otherwise.
   string object_id = 11;
-  // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, or
-  // the choices behind a "+N more" chip, one per line; empty when it shows none. (Lane 2B band, 200-299.)
+  // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, the
+  // choices behind a "+N more" chip, one per line, or the whole text of a canvas note drawn shortened (on the note's rect);
+  // empty when it shows none. (Lane 2B band, 200-299.)
   string tooltip = 200;
 }
 

@@ -2794,8 +2794,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
                 wxRect box = noteRect( note, i );
                 auto* row = result.add_canvas_notes(); row->set_annotation_id( note.id() ); place( row->mutable_rect(), "DiagramCanvasNote", box, false );
-                box.Deflate( 8 );
-                for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y ) ) row->add_lines( R::Utf8( line ) );
+                box.Deflate( 8 ); bool shortened = false;
+                for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y, &shortened ) )
+                    row->add_lines( R::Utf8( line ) );
+                // A note drawn shortened shows its whole text on hover (M1-13), as a shortened connection caption does.
+                if( shortened ) row->mutable_rect()->set_tooltip( note.text() );
             }
             // Design QA fixes, as drawn: every port's square and the Connect tool's highlight (P2-6), every connection caption
             // (P2-7), every block's caption and version line (P2-7) and the selected block's handles (P1-1).

@@ -1098,10 +1098,21 @@ Exact rule as implemented (lane 2B, item audit-p2-closeout, 2026-09-26):
   included), each computed leg is checked in level order. Its three-segment path crosses when one of its runs passes
   through the inside of a child block, its own blocks included (a run along a block's edge is not inside it), or when one
   of its points lies outside the level. The names of a block's ports are drawn just inside the block's edge, and the names
-  of the level's own ports outside the level, so these two tests are "through a block or across a port's name" in diagram
-  units, at every zoom. The level is the stored frame; without one, F3's fallback frame (the box of the children, notes and
-  boundary anchors, expanded by 40), whose left side is the fallback column at x 40 while a boundary port has no placement.
-  Stored routes are drawn as stored, as before.
+  of the level's own ports outside the level, so these two tests stand for "through a block or across a port's name" in
+  diagram units, which keeps every route the same at every zoom. Names are drawn at a fixed pixel size, so two kinds of
+  name can lie where these tests do not reach:
+  - A block port's name can reach past the block's edge: a name on the top or bottom edge is centred on its port and can
+    pass the block's side edges near a corner, and a long name on a side edge of a narrow block can pass the opposite edge
+    when the level is drawn small (as in the compact window). A leg may cross the part outside the block; the route is not
+    changed for it, so that the route stays independent of zoom as `resolved_layout` requires. No journey checks for such
+    a crossing; it is recorded as a presentation follow-up (P3) in the project's design QA.
+  - A level's port without a stored placement may name itself inside the level, above and right of its port. The editor
+    uses that place only when it is 3 pixels or more from every straight run of every connection (and 8 pixels or more
+    from every block and every other port's square); otherwise it names every port of the fallback column left of its
+    port, outside the level. Connections are kept off these names by where the name is placed, not by this test.
+  The level is the stored frame; without one, F3's fallback frame (the box of the children, notes and boundary anchors,
+  expanded by 40), whose left side is the fallback column at x 40 while a boundary port has no placement. Stored routes are
+  drawn as stored, as before.
 - **The way around.** From the first end, a lead of 20 units along the way that end leaves (F4c, F4d); then only horizontal
   and vertical runs that never pass through the inside of a child block expanded by 10 units on each side (they may run
   along that outline) and stay inside the level, to the point 20 units out from the other end along the way that end

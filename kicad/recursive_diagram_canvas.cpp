@@ -1362,7 +1362,7 @@ wxRect VersionRect( wxDC& dc, const wxString& text, const wxRect& inner, const w
     return inner.Contains( line ) ? line : wxRect();
 }
 
-std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height )
+std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height, bool* shortened )
 {
     std::vector<wxString> lines;
     wxString value = text; int y = 0;
@@ -1388,6 +1388,7 @@ std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int 
         { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > width ) line.RemoveLast(); line += wxS( "…" ); }
         lines.push_back( line ); y += dc.GetCharHeight();
     }
+    if( shortened ) *shortened = !value.empty();
     return lines;
 }
 
@@ -2954,7 +2955,27 @@ wxString RECURSIVE_DIAGRAM_FRAME::canvasTipAt( const R::LEVEL_LAYOUT& drawn, con
     for( const auto& [block, chips] : drawnChips() )
         if( chips.more && chips.more->Contains( point ) )
             if( const R::NODE* node = drawn.Node( block ) ) return R::MoreToolTip( *node, chips );
+    // A note too small for its text, as in the compact window, shows its whole text, as a shortened caption does (review of the
+    // mockup audit's pass 5, M1-13). The note drawn last, on top, wins.
+    if( auto text = shortenedNoteAt( point ) ) return *text;
     return wxString();
+}
+
+std::optional<wxString> RECURSIVE_DIAGRAM_FRAME::shortenedNoteAt( const wxPoint& point ) const
+{
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const auto& notes = visibleNotes();
+    for( int i = notes.size() - 1; i >= 0; --i )
+    {
+        const auto& note = notes.Get( i );
+        if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+        wxRect box = noteRect( note, i );
+        if( !box.Contains( point ) ) continue;
+        box.Deflate( 8 ); bool shortened = false;
+        R::NoteLines( dc, Text( note.text() ), box.width, box.GetBottom() - box.y, &shortened );
+        return shortened ? std::optional<wxString>( Text( note.text() ) ) : std::nullopt;
+    }
+    return std::nullopt;
 }
 
 std::optional<wxRect> RECURSIVE_DIAGRAM_FRAME::connectHint( const R::LEVEL_LAYOUT& drawn, const std::vector<wxPoint>& preview ) const

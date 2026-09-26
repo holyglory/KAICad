@@ -421,7 +421,10 @@ public sealed partial class NativeSessionTests
                 "Instance B must not check project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = Guid.NewGuid().ToString("D") }),
                 "A read with an epoch no process has must be refused.", code: "stale_process_epoch");
-            await Unchanged(boards2, "Refused stale and wrong-target requests must leave both boards alone.");
+            // KiCad without a window (kicad-cli api-server) refuses requests for these boards the same way.
+            await VerifyHeadlessWrongProjectRefusal(a.Board, b.Board, display, evidence, token);
+            Console.WriteLine($"Two-project PCB checks: headless KiCad refused both projects' boards at {clock.Elapsed.TotalSeconds:F1}s.");
+            await Unchanged(boards2, "Refused stale, wrong-target and headless requests must leave both boards alone.");
 
             // 3. Project B's check is cancelled after its copper clearance checks, while project A's check runs beside it and
             //    completes with its first findings. The cancelled check ends cancelled, never completed, only once its
@@ -574,6 +577,105 @@ public sealed partial class NativeSessionTests
             var fixtureTrack = await native.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = target }, Items = { new KIID { Value = "33333333-3333-4333-8333-333333333333" } } }, token);
             Assert.HasCount(1, fixtureTrack.Items, $"{path} must hold its own fixture again.");
+        }
+    }
+
+    // Ledger p3865669bf8f25214. KiCad without a window (kicad-cli api-server) serves a third project whose board has the
+    // same file name as the boards of projects A and B. A request naming project A's or B's board reaches it and is refused
+    // with the text the PCB editors give, naming both projects, so the agent knows it reached the wrong KiCad instance
+    // rather than a closed board. The server still reports a closed board of its own project as not open, refuses its own
+    // project named by a relative folder for that reason, and keeps serving its own board.
+    private static async Task VerifyHeadlessWrongProjectRefusal(DocumentSpecifier boardA, DocumentSpecifier boardB,
+        string display, string evidence, CancellationToken token)
+    {
+        Assert.AreEqual(boardA.BoardFilename, boardB.BoardFilename, "The editors' boards share one file name.");
+        string directory = Directory.CreateTempSubdirectory("kicad-drc-headless-").FullName;
+        string socket = Path.Combine(directory, "api.sock");
+        string boardPath = Path.Combine(directory, boardA.BoardFilename);
+        // Test data only: the third project, and a board KiCad's own loader reads, known by the grid origin it sets.
+        await File.WriteAllTextAsync(Path.ChangeExtension(boardPath, ".kicad_pro"), """{"meta":{"version":3}}""", token);
+        await File.WriteAllTextAsync(boardPath,
+            "(kicad_pcb (version 20260206) (generator \"pcbnew\")\n  (general (thickness 1.6)) (paper \"A4\")\n" +
+            "  (layers (0 \"F.Cu\" signal) (2 \"B.Cu\" signal) (25 \"Edge.Cuts\" user))\n" +
+            "  (setup (pad_to_mask_clearance 0) (grid_origin 12 34))\n)\n", token);
+        var start = new ProcessStartInfo(Path.Combine(FindRoot(), "automation", "artifacts", "native", "kicad", "kicad-cli"))
+        {
+            WorkingDirectory = directory, UseShellExecute = false,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.Environment["DISPLAY"] = display;
+        start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+        start.Environment["XDG_CONFIG_HOME"] = Path.Combine(directory, "config");
+        start.Environment["XDG_CACHE_HOME"] = Path.Combine(directory, "cache");
+        foreach (string arg in new[] { "api-server", "--socket", socket }) start.ArgumentList.Add(arg);
+        using var process = Process.Start(start)!;
+        var stdout = Capture(process.StandardOutput, Path.Combine(evidence, "pcb-drc-two-projects-headless.stdout.log"));
+        var stderr = Capture(process.StandardError, Path.Combine(evidence, "pcb-drc-two-projects-headless.stderr.log"));
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(60));
+            var headless = new NativeClient(new NngTransport(), "ipc://" + socket);
+            while (true)
+            {
+                deadline.Token.ThrowIfCancellationRequested();
+                Assert.IsFalse(process.HasExited, "The headless KiCad exited before serving requests.");
+                try { await headless.GetVersionAsync(deadline.Token); break; }
+                catch (NngException) { }
+                catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                await Task.Delay(100, deadline.Token);
+            }
+            var own = (await headless.OpenRootBoardAsync(boardPath, deadline.Token)).Document;
+            Assert.AreEqual(boardA.BoardFilename, own.BoardFilename);
+            Assert.AreEqual(boardA.Project.Name, own.Project.Name, "Only the project folder tells the three boards apart.");
+            Assert.AreNotEqual(boardA.Project.Path, own.Project.Path);
+            Assert.AreNotEqual(boardB.Project.Path, own.Project.Path);
+
+            Task<Vector2> Origin(DocumentSpecifier board) => headless.InvokeAsync<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
+                new() { Board = board, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid }, deadline.Token);
+            async Task Refused<TRequest, TResponse>(TRequest request, string expected, string because)
+                where TRequest : Google.Protobuf.IMessage<TRequest>
+                where TResponse : Google.Protobuf.IMessage<TResponse>, new()
+            {
+                var refusal = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                    headless.InvokeAsync<TRequest, TResponse>(request, deadline.Token));
+                Assert.AreEqual(3, refusal.Status, because);
+                Assert.AreEqual(expected, refusal.Message, because);
+            }
+            string OtherProject(DocumentSpecifier board) =>
+                $"the requested document {board.BoardFilename} of project '{board.Project.Name}' at '{board.Project.Path}' is " +
+                $"not open in this KiCad instance, which has project '{own.Project.Name}' at '{own.Project.Path}' open; send " +
+                "the request to the KiCad instance that has that project open";
+
+            var origin = await Origin(own);
+            Assert.AreEqual((12_000_000L, 34_000_000L), (origin.XNm, origin.YNm), "The headless KiCad must serve its own board.");
+            await Refused<StartPcbDrcJob, PcbDrcJobState>(new()
+                {
+                    Document = boardA, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = headless.Epoch,
+                    ExpectedRevision = new DocumentRevision { Epoch = Guid.NewGuid().ToString("D"), Sequence = 1 }
+                }, OtherProject(boardA), "The headless KiCad must refuse a PCB check of project A's board, naming both projects.");
+            await Refused<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
+                new() { Board = boardB, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid }, OtherProject(boardB),
+                "The headless KiCad must refuse a read of project B's board, naming both projects.");
+            var closed = own.Clone(); closed.BoardFilename = "closed.kicad_pcb";
+            await Refused<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = closed },
+                "the requested document closed.kicad_pcb is not open",
+                "A closed board of the headless KiCad's own project is not open there; it belongs to no other instance.");
+            var relative = own.Clone(); relative.Project.Path = ".";
+            await Refused<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
+                new() { Board = relative, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid },
+                $"the requested document {own.BoardFilename} names project '{own.Project.Name}' by the folder '.', which is not " +
+                "an absolute path; name the project by its absolute folder path",
+                "A relative project folder is refused for that reason, even where it leads to the server's own project.");
+            Assert.AreEqual(origin, await Origin(own), "After the refusals the headless KiCad still serves its own board.");
+        }
+        finally
+        {
+            // This process and its folder exist only for this step.
+            if (!process.HasExited) process.Kill();
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(stdout, stderr);
+            Directory.Delete(directory, true);
         }
     }
 }

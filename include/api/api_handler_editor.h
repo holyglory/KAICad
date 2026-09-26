@@ -35,6 +35,7 @@ using kiapi::common::types::ItemRequestStatus;
 using kiapi::common::commands::ItemDeletionStatus;
 
 class EDA_BASE_FRAME;
+class PROJECT;
 class TITLE_BLOCK;
 
 /**
@@ -59,6 +60,34 @@ protected:
      * @return an error status if busy, std::nullopt if not busy
      */
     virtual std::optional<ApiResponseStatus> checkForBusy();
+
+    /**
+     * The project this editor's requests are checked against, or nullptr when it has none.
+     * Defaults to the frame's project; handlers without a frame (a headless API server)
+     * override it with their own context's project.
+     */
+    virtual const PROJECT* requestProject() const;
+
+    /// Why the PCB editor refuses the project a board request names.
+    enum class PROJECT_MISMATCH
+    {
+        UNNAMED,       ///< No project is named, which an automation instance requires.
+        NOT_ABSOLUTE,  ///< The project is named by a folder that is not an absolute path.
+        OTHER_PROJECT  ///< The named project is not requestProject().
+    };
+
+    /**
+     * The PCB editor's only comparison of the project a board request names with
+     * requestProject(): why that project is refused, or nothing when it is accepted.
+     * validateDocumentInternal refuses a board for this reason (with boardProjectRefusal()),
+     * and validateDocument reports the same reason, so a closed board of this editor's own
+     * project is only ever reported as not open.
+     */
+    std::optional<PROJECT_MISMATCH> boardProjectMismatch( const DocumentSpecifier& aDocument ) const;
+
+    /// The refusal of a board request for aReason, naming the requested and the open project.
+    ApiResponseStatus boardProjectRefusal( const DocumentSpecifier& aDocument,
+                                           PROJECT_MISMATCH aReason ) const;
 
     HANDLER_RESULT<commands::BeginCommitResponse> handleBeginCommit(
         const HANDLER_CONTEXT<commands::BeginCommit>& aCtx );

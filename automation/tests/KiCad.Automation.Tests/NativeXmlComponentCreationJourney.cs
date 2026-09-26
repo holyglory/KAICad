@@ -827,8 +827,9 @@ public sealed partial class NativeSessionTests
     }
 
     // CN-1 §7 on what KiCad holds after committing a realization: every routed connection's wires, junctions and label are drawn,
-    // in the form RoutedConnectionChecks requires, against the pins KiCad measures at that revision; and every routed wire and
-    // junction lies inside the drawing sheet's frame and clear of its title block as KiCad draws them (DrawingSheetProblems).
+    // in the form RoutedConnectionChecks requires, against the pins KiCad measures at that revision; and every routed wire,
+    // junction and name label lies inside the drawing sheet's frame and clear of its title block as KiCad draws them
+    // (DrawingSheetProblems), each label by the bounds KiCad measures for it at the realized revision.
     private static async Task<object> RequireRoutedInKiCad(NativeClient client, CheckedSchematicState after, SchematicConnectionRealization realization,
         SchematicConnectionIntent intent, SchematicConnectionPolicy policy, long pageInsetNm, string stage, CancellationToken token)
     {
@@ -851,26 +852,48 @@ public sealed partial class NativeSessionTests
         {
             var screen = after.Electrical.Hierarchy.Data.Instances.Single(s => SheetPathKey(s.Metadata.Document) == path);
             var items = SchematicItemDelta.Index(screen.Items);
-            var mine = realization.Generated.Where(g => routed.Any(o => o.RepresentativePathKey == path && o.GeneratedIds.Contains(g.Id))
+            var here = routed.Where(o => o.RepresentativePathKey == path).ToArray();
+            var mine = realization.Generated.Where(g => here.Any(o => o.GeneratedIds.Contains(g.Id))
                 && g.Role is GeneratedConnectionRole.RouteWire or GeneratedConnectionRole.Junction).Select(g => items[g.Id]).ToArray();
-            var (found, frame) = DrawingSheetProblems(path, geometry, mine.OfType<SchematicLine>().ToArray(), mine.OfType<Junction>().ToArray(),
+            // E1 of decision nfa2005d67574bfea also holds the label that names each routed connection: exactly one per connection,
+            // measured by KiCad itself as an item of the sheet at the realized revision.
+            var labels = new List<(string What, Kiapi.Common.Types.Box2 Bounds)>();
+            foreach (var outcome in here)
+            {
+                var named = realization.Generated.Where(g => outcome.GeneratedIds.Contains(g.Id) && g.Role == GeneratedConnectionRole.StubLabel).ToArray();
+                if (named.Length != 1)
+                {
+                    frameProblems.Add(path + ": routed connection " + outcome.NetId.ToString("D") + " has " + named.Length + " name labels instead of one");
+                    continue;
+                }
+                var bounds = geometry.Obstacles.SingleOrDefault(o => o.Id.Value == named[0].Id.ToString("D"));
+                if (bounds?.Bounds is null)
+                {
+                    frameProblems.Add(path + ": KiCad did not measure the name label " + named[0].Id.ToString("D") + " of routed connection " + outcome.NetId.ToString("D"));
+                    continue;
+                }
+                labels.Add(("name label " + named[0].Id.ToString("D") + " (" + items[named[0].Id].Descriptor.Name + ")", bounds.Bounds));
+            }
+            var (found, frame) = DrawingSheetProblems(path, geometry, mine.OfType<SchematicLine>().ToArray(), mine.OfType<Junction>().ToArray(), labels,
                 policy.ClearanceNm, pageInsetNm);
             frameProblems.AddRange(found);
             frames.Add(frame);
         }
-        Assert.IsEmpty(frameProblems, stage + ": routed wires and the drawing sheet: " + string.Join("; ", frameProblems.Take(12)));
+        Assert.IsEmpty(frameProblems, stage + ": routed wires, their name labels and the drawing sheet: " + string.Join("; ", frameProblems.Take(12)));
         return new { connections = routed.Length, wires = ids.Count(id => drawn[id] is SchematicLine), junctions = ids.Count(id => drawn[id] is Junction),
             labels = ids.Count(id => drawn[id] is LocalLabel or GlobalLabel or HierarchicalLabel), drawingSheets = frames };
     }
 
-    // CN-1 §7 region (the erratum lane 2A reported) on KiCad's own drawing, independently of the realizer's reading of it: the
-    // drawing sheet KiCad draws on the sheet (its border frames are the drawn rectangles around the middle of its margin frame
-    // spanning more than half of it both ways; everything else it draws inside the innermost of them is art, such as the title
-    // block) must hold every routed wire and junction inside that innermost frame, at least the clearance in from it, and at
-    // least the clearance from every piece of art; and that frame lies at least the fixture's page inset in from every page
-    // edge (psu-cpu-fixture-and-ownership.md §1.6.3). Returns the problems and what was measured.
+    // CN-1 §7 region (E1 of decision nfa2005d67574bfea) on KiCad's own drawing, independently of the realizer's reading of it:
+    // the drawing sheet KiCad draws on the sheet (its border frames are the drawn rectangles around the middle of its margin
+    // frame spanning more than half of it both ways; everything else it draws inside the innermost of them is art, such as the
+    // title block) must hold every routed wire and junction, and the whole measured box of every routed connection's name label,
+    // inside that innermost frame, at least the clearance in from it, and at least the clearance from every piece of art; and
+    // that frame lies at least the fixture's page inset in from every page edge (psu-cpu-fixture-and-ownership.md §1.6.3).
+    // Returns the problems and what was measured.
     internal static (List<string> Problems, object Evidence) DrawingSheetProblems(string sheet, SchematicPlacementGeometry geometry,
-        IReadOnlyList<SchematicLine> wires, IReadOnlyList<Junction> junctions, long clearance, long pageInsetNm)
+        IReadOnlyList<SchematicLine> wires, IReadOnlyList<Junction> junctions, IReadOnlyList<(string What, Kiapi.Common.Types.Box2 Bounds)> labels,
+        long clearance, long pageInsetNm)
     {
         var problems = new List<string>();
         if (geometry.DrawingSheet?.MarginFrame is not { } margin)
@@ -907,11 +930,17 @@ public sealed partial class NativeSessionTests
                 wire.Start.XNm, wire.Start.YNm, wire.End.XNm, wire.End.YNm);
         foreach (var junction in junctions)
             Check("junction " + junction.Id.Value, junction.Position.XNm, junction.Position.YNm, junction.Position.XNm, junction.Position.YNm);
+        foreach (var (what, bounds) in labels)
+        {
+            var b = Box(bounds);
+            Check(what + " (" + b.L + ", " + b.T + ")-(" + b.R + ", " + b.B + ")", b.L, b.T, b.R, b.B);
+        }
         return (problems, new
         {
             sheet, innerFrameMm = new[] { inner.L, inner.T, inner.R, inner.B }.Select(v => v / 1_000_000m).ToArray(),
             artMm = art.Select(a => new[] { a.L, a.T, a.R, a.B }.Select(v => v / 1_000_000m).ToArray()).ToArray(),
-            routedWires = wires.Count, junctions = junctions.Count
+            routedWires = wires.Count, junctions = junctions.Count,
+            nameLabelsMm = labels.Select(l => Box(l.Bounds)).Select(b => new[] { b.L, b.T, b.R, b.B }.Select(v => v / 1_000_000m).ToArray()).ToArray()
         });
     }
 
@@ -3119,7 +3148,10 @@ public sealed partial class NativeSessionTests
         //    are one source of VPAIR, so nothing is refused, and KiCad's pin partition is exactly what the creation assertion
         //    states: both placements joined by their name, every other pin alone.
         // 6. VW2 of the same part is a second source of VPAIR: the public layout and preview tools refuse it while planning,
-        //    naming VW2.2 and VW1.2 once each, and nothing changes.
+        //    naming VW2.2 and VW1.2 once each, and nothing changes: KiCad, its journal, the baseline and the saved XML bytes.
+        // 7. Ledger p2d40d4ec87d01d32: VS1 and VS2 of a part whose one symbol draws two hidden power inputs named VSTK at one
+        //    point, added with the net VSTK that lists one pin of each pair: planned, created in one checked commit, and KiCad's
+        //    pin partition joins all four VSTK pins.
         async Task<object> RequireHiddenPowerPinCreation()
         {
             string Evidence(string name) => Path.Combine(evidence, instanceId + "-hidden-power-" + name);
@@ -3407,6 +3439,8 @@ public sealed partial class NativeSessionTests
             var secondLayout = await host.Tool("kicad_design_propose_initial_layout", LayoutArguments(secondFree.RevisionToken));
             await File.WriteAllTextAsync(Evidence("second-pair-layout.json"), RetainedToolEvidence(secondLayout), token);
             Assert.IsTrue(secondLayout.GetProperty("isError").GetBoolean(), secondLayout.GetRawText());
+            CollectionAssert.AreEqual(secondFree.State.DesiredFileBytes, await File.ReadAllBytesAsync(path, token),
+                "The refused layout leaves the saved XML exactly as it was written.");
             var secondError = JsonDocument.Parse(secondLayout.GetProperty("content")[0].GetProperty("text").GetString()!).RootElement;
             Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, secondError.GetProperty("code").GetString(), secondLayout.GetRawText());
             string secondMessage = secondError.GetProperty("message").GetString()!;
@@ -3421,6 +3455,8 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Evidence("second-pair-plan.json"), RetainedToolEvidence(secondPreview), token);
             var secondContent = secondPreview.GetProperty("structuredContent");
             Assert.IsFalse(secondContent.GetProperty("canPrepare").GetBoolean(), secondPreview.GetRawText());
+            CollectionAssert.AreEqual(placedSecond.State.DesiredFileBytes, await File.ReadAllBytesAsync(path, token),
+                "The refused preview leaves the saved XML exactly as it was written.");
             Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, secondContent.GetProperty("errorCode").GetString(), secondPreview.GetRawText());
             StringAssert.Contains(secondContent.GetProperty("errorMessage").GetString()!, "including hidden power pin VW1.2");
             Assert.AreEqual(pairNative, await Capture(), "The refused second part must not reach KiCad.");
@@ -3433,6 +3469,70 @@ public sealed partial class NativeSessionTests
             store.Save(restoring.State with { DesiredFileBytes = pairRecord.State.DesiredFileBytes }, restoring.RevisionToken);
             var published = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
             Assert.IsTrue(published.CanPrepare && published.NativeOperations.Count == 0 && published.Connections is null, published.ErrorCode + ": " + published.ErrorMessage);
+
+            // 7. Ledger p2d40d4ec87d01d32: a part from the probe drawing whose one symbol draws two hidden power inputs named VSTK,
+            // pins 2 and 3, at one point 5.08 mm to the right of the probe pin; the name is used nowhere else.
+            var stackSymbol = rootScreen.CachedSymbols.Single(c => c.CacheKey == probeKey).Clone();
+            stackSymbol.CacheKey = "Automation:StackedPowerProbe";
+            stackSymbol.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "StackedPowerProbeDefinition" };
+            var stackPins = new List<PartPin>();
+            foreach (var child in stackSymbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>();
+                pin.Id.Value = Guid.NewGuid().ToString("D");
+                child.Unit = new() { Unit = 1 };
+                child.Item = Any.Pack(pin);
+                stackPins.Add(new(pin.Number, pin.Name, 1));
+            }
+            Assert.IsFalse(stackPins.Any(p => p.Number is "2" or "3" || p.Name == "VSTK"), "The probe drawing leaves pin numbers 2 and 3 and the name VSTK free.");
+            string[] lonePins = [.. stackPins.Select(p => p.Number)];
+            foreach (string number in new[] { "2", "3" })
+            {
+                var stackChild = stackSymbol.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor)).Clone();
+                var stackPin = stackChild.Item.Unpack<SchematicPin>();
+                stackPin.Id = new() { Value = Guid.NewGuid().ToString("D") }; stackPin.Number = number; stackPin.Name = "VSTK";
+                stackPin.ElectricalType = ElectricalPinType.EptPowerInput; stackPin.Visible = false;
+                stackPin.Position = new() { XNm = (stackPin.Position?.XNm ?? 0) + 5_080_000, YNm = stackPin.Position?.YNm ?? 0 };
+                stackChild.Unit = new() { Unit = 1 }; stackChild.Item = Any.Pack(stackPin);
+                stackSymbol.Definition.Items.Add(stackChild);
+                stackPins.Add(new(number, "VSTK", 1));
+            }
+            var stackPart = new PartDefinition(Guid.NewGuid(), "XML stacked power probe", 1, stackPins);
+            var stackDeclaration = new SchematicPartSymbol(stackPart.Id, new() { LibraryNickname = "Declared", EntryName = "StackedPowerProbe" }, stackSymbol);
+            (ComponentInstance Component, ComponentDefinition Definition, SymbolOccurrence Occurrence) Stack(string reference)
+            {
+                var definition = new ComponentDefinition(Guid.NewGuid(), stackPart.Id, "Stacked power probe");
+                var component = new ComponentInstance(Guid.NewGuid(), definition.Id, rootSheet.Id, reference);
+                return (component, definition, new SymbolOccurrence(Guid.NewGuid(), component.Id, 1, null));
+            }
+            var vs1 = Stack("VS1"); var vs2 = Stack("VS2");
+            // The XML adds VS1 and VS2 with the net VSTK holding only VS1.2 and VS2.2: KiCad joins VS1.3 and VS2.3 to it through the
+            // pins they are drawn on, so planning takes each pair as the one connection KiCad makes. The layout tool places them,
+            // the preview plans the connection, and apply creates both in one checked commit whose pin partition KiCad verified:
+            // all four VSTK pins one net, every other pin alone.
+            var stackLaid = await Laid(Adding(paired, rootSheet.DefinitionId, [vs1, vs2],
+                nets => [.. nets, new CircuitNet(Guid.NewGuid(), "VSTK", [new(vs1.Component.Id, "2"), new(vs2.Component.Id, "2")])], stackPart, stackDeclaration), "stacked");
+            var stackRecord = Write(stackLaid);
+            var stackPreview = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = stackRecord.RevisionToken });
+            await File.WriteAllTextAsync(Evidence("stacked-plan.json"), RetainedToolEvidence(stackPreview), token);
+            RequireToolSuccess(stackPreview);
+            var stackPlanned = stackPreview.GetProperty("structuredContent");
+            Assert.IsTrue(stackPlanned.GetProperty("connectionRealizationRequired").GetBoolean(), stackPreview.GetRawText());
+            var stackIntent = stackPlanned.GetProperty("connectionIntent");
+            Assert.AreEqual("VSTK", stackIntent.GetProperty("nets").EnumerateArray().Single().GetProperty("globalName").GetString(), "The hidden pins name the net globally.");
+            Assert.AreEqual(0, stackIntent.GetProperty("screens").EnumerateArray().Sum(s => s.GetProperty("islands").GetArrayLength()),
+                "Hidden power pins need nothing drawn.");
+            Assert.AreEqual(1 + 2 * lonePins.Length, stackIntent.GetProperty("expectedGroupCount").GetInt32(), "The four VSTK pins, and each other pin alone.");
+            var stacked = await Committed("stacked", created: 2);
+            var stackModel = store.Read()!.State.Baseline;
+            string[][] stackGroups = [Keys(stackModel, (vs1.Component.Id, "2"), (vs1.Component.Id, "3"), (vs2.Component.Id, "2"), (vs2.Component.Id, "3")),
+                .. lonePins.SelectMany(n => new[] { Keys(stackModel, (vs1.Component.Id, n)), Keys(stackModel, (vs2.Component.Id, n)) })];
+            RequireAssertedPartition(stacked.Before, stacked.After, stackGroups, "VS1 and VS2 created with VSTK");
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan((await Capture()).Electrical.Hierarchy.Data, SchematicDesignXml.Read(await File.ReadAllTextAsync(path, token), []).Schematic, token),
+                "The published XML is what KiCad shows.");
+            var stackSettled = SchematicSynchronizationPlanner.Plan(store.Read()!.State, session, token);
+            Assert.IsTrue(stackSettled.CanPrepare && stackSettled.NativeOperations.Count == 0 && stackSettled.Connections is null,
+                stackSettled.ErrorCode + ": " + stackSettled.ErrorMessage);
 
             var result = new
             {
@@ -3449,7 +3549,9 @@ public sealed partial class NativeSessionTests
                     // Until the seam request lands, an unconnected creation is committed without the assertion and checked after.
                     assertionSent = pairReceipt.Result?.ConnectivityAssertionVerified ?? false,
                     secondPartLayoutErrorCode = secondError.GetProperty("code").GetString(), secondPartMessage = secondMessage,
-                    secondPartPlanErrorCode = secondContent.GetProperty("errorCode").GetString(), nativeUnchanged = true }
+                    secondPartPlanErrorCode = secondContent.GetProperty("errorCode").GetString(), nativeUnchanged = true, xmlUnchanged = true },
+                stackedPowerPart = new { stackPart.Name, stackedPins = new[] { "2", "3" }, powerName = "VSTK", listedPins = new[] { "VS1.2", "VS2.2" },
+                    expectedGroups = stackGroups.Length, planned = true, stacked.Proof, partitionMatchesAssertion = true, settled = true }
             };
             await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(result), token);
             return result;

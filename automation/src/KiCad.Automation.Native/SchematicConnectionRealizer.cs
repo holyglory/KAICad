@@ -62,8 +62,8 @@ public static class SchematicConnectionRealizer
         RealizeAsync(intent, candidate, checkpoint, measure, policy, SchematicRoutingLimits.Contract, token);
 
     /// <summary><see cref="RealizeAsync(SchematicConnectionIntent, SchematicDesign, CheckedSchematicState, Func{MeasureSchematicPlacement, CancellationToken, Task{SchematicPlacementGeometry}}, SchematicConnectionPolicy, CancellationToken)"/>
-    /// with other routing budgets than the contract's (§7). Unit tests of the label-stub rules pass a zero node budget, so
-    /// every connection falls back to label stubs exactly as it does when no route fits.</summary>
+    /// with other routing budgets than the contract's (§7). A test that passes a zero node budget sees every connection fall
+    /// back to label stubs exactly as it does when no route fits.</summary>
     internal static Task<SchematicConnectionRealization> RealizeAsync(SchematicConnectionIntent intent, SchematicDesign candidate,
         CheckedSchematicState checkpoint, Func<MeasureSchematicPlacement, CancellationToken, Task<SchematicPlacementGeometry>> measure,
         SchematicConnectionPolicy policy, SchematicRoutingLimits limits, CancellationToken token = default)
@@ -370,8 +370,10 @@ public static class SchematicConnectionRealizer
 
     // §6.4 admission of a stub from a to e, pointing outward, with label envelope r (null when attaching to a carrier):
     // null when admitted, otherwise the rule that refuses it. A piece of a routed connection (`routed`: a pin's escape, the
-    // stub carrying its name label, a corridor to its existing part) must also keep to the §7 route region, inside the
-    // drawing sheet's frame and clear of its title block.
+    // stub carrying its name label and that label, an attach wire to its existing part) must also keep to the §7 route region
+    // (decision nfa2005d67574bfea, E1): inside the drawing sheet's innermost frame shrunk by the clearance, and at least the
+    // clearance from its title block and other art, the wire and the label alike (a label may touch the shrunk frame, as a
+    // wire end may, but not the keep-out inflated by the clearance).
     private static string? Refusal(SchematicConnectionPolicy policy, Screen screen, IslandState island, Pt a, Pt e, (int Dx, int Dy) outward,
         Box? r, Guid? ownPin, Guid owner, Guid? carrierPin, Guid? carrierSymbol, Variant variant, bool routed = false)
     {
@@ -383,8 +385,9 @@ public static class SchematicConnectionRealizer
                 return "outside the drawing sheet's frame";
             foreach (var keepOut in screen.RouteKeepOuts)
             {
-                if (SegmentMeets(a, e, keepOut.Inflate(policy.ClearanceNm), open: false)) return "within the clearance of the drawing sheet's title block";
-                if (r is { } label && label.InteriorMeets(keepOut)) return "the label overlaps the drawing sheet's title block";
+                var kept = keepOut.Inflate(policy.ClearanceNm);
+                if (SegmentMeets(a, e, kept, open: false)) return "within the clearance of the drawing sheet's title block";
+                if (r is { } label && label.Touches(kept)) return "the label comes within the clearance of the drawing sheet's title block";
             }
         }
         var stub = Box.Segment(a, e);
@@ -611,6 +614,10 @@ public static class SchematicConnectionRealizer
         private readonly List<ConnectionDiagnostic> diagnostics = [];
         private readonly SortedSet<string> limitations = new(StringComparer.Ordinal);
         private readonly Dictionary<Guid, Screen> screens = [];
+        // Component references by component identity and by the native symbol that places them, for Describe and DescribeSymbol.
+        private readonly Dictionary<Guid, string> references = candidate.Engineering.Circuit.Components
+            .GroupBy(c => c.Id).ToDictionary(g => g.Key, g => g.First().Reference);
+        private readonly Dictionary<Guid, string> symbolReferences = SymbolReferences(candidate);
         private readonly KiCad.Automation.Protocol.DocumentRevision revision = checkpoint.State?.Revision ?? new();
         // Why the last stub, join stub or anchor label that was tried was refused, for the refusal a person reads.
         private string? lastRefusal;
@@ -891,11 +898,11 @@ public static class SchematicConnectionRealizer
             {
                 if (!view.Pins.TryGetValue(symbol, out var geometry))
                     throw Error(SchematicConnectionErrors.RealizationMeasurementIncomplete, "The measurement of sheet " + view.Path
-                        + " has no pin geometry for new symbol " + symbol.ToString("D") + ".");
+                        + " has no pin geometry for new symbol " + DescribeSymbol(symbol) + ".");
                 if (!geometry.Complete)
                     throw Error(geometry.IncompleteReason == SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved
                             ? SchematicConnectionErrors.RealizationVariantPinIdentityUnresolved : SchematicConnectionErrors.RealizationPinGeometryIncomplete,
-                        "KiCad cannot report exact pin positions for new symbol " + symbol.ToString("D") + " on sheet " + view.Path
+                        "KiCad cannot report exact pin positions for new symbol " + DescribeSymbol(symbol) + " on sheet " + view.Path
                         + ", so it cannot prove the symbol touches no existing connection"
                         + (geometry.Limitations.Count == 0 ? "." : ": " + string.Join("; ", geometry.Limitations)));
             }
@@ -1009,7 +1016,7 @@ public static class SchematicConnectionRealizer
                                 && !(grouped && groupOf.TryGetValue((view.Path, p.Pin), out int other) && other == group));
                         if (contact)
                             throw Error(SchematicConnectionErrors.RealizationCreatedPinContact, "Created pin " + pin.Number + " of symbol "
-                                + symbol.ToString("D") + " on sheet " + view.Path + " lands on an existing connection point it must not join. Move the new symbol in the XML.");
+                                + DescribeSymbol(symbol) + " on sheet " + view.Path + " lands on an existing connection point it must not join. Move the new symbol in the XML.");
                     }
                 }
             }
@@ -1207,17 +1214,39 @@ public static class SchematicConnectionRealizer
             return [.. found.Values];
         }
 
-        // The escape corridor of a terminal (§7): the pin's straight way out through the outline of its own symbol (and of any
-        // symbol of the same island with a pin stacked on it), which KiCad measures with the symbol's visible fields, as far as
-        // the first grid node clear of that outline inflated by the clearance; a stub runs through the same room (§6.4 rule 5).
-        // The outline stays an obstacle everywhere else (§7 "obstacle bounds"), so the corridor must reach out of it. It never
-        // passes the symbol's own text: it keeps the clearance from each of those symbols' visible fields, as KiCad measures
-        // them, or the pin has no escape (a CN-1 §7 clarification reported to the integration owner). The number of grid steps
-        // to that node, at least one (the escape), and at most the longest stub; otherwise null and why.
+        // The symbols of the island that draw a pin exactly at `at`: the pin's own symbol and any symbol of the same island with a
+        // pin stacked on it. A routed wire may cross their outline there, and only there (the escape corridor of a new pin, or
+        // the one-grid attach wire at an already connected pin).
+        private static Guid[] OwnersAt(Screen screen, IslandState island, Pt at) =>
+            [.. screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == at && island.Same.Contains(p.Owner))
+                .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct().Order()];
+
+        // E3 (decision nfa2005d67574bfea): a routed wire that runs from a pin at `a` straight out through the outline of its own
+        // symbols (`owners`, see OwnersAt) to `end` keeps the clearance from every field those symbols paint, as KiCad measures
+        // them. This holds for a new pin's escape corridor and for the one-grid attach wire at an already connected pin alike.
+        // Null when it does; otherwise which field it comes too near, for the reason a person reads.
+        private string? FieldTooNear(Screen screen, IReadOnlyList<Guid> owners, Pt a, Pt end)
+        {
+            foreach (var owner in owners)
+                foreach (var field in screen.Fields.GetValueOrDefault(owner, []))
+                    if (SegmentMeets(a, end, field.Inflate(policy.ClearanceNm), open: false))
+                        return "symbol " + DescribeSymbol(owner) + "'s own field text at (" + Mm(field.L) + ", " + Mm(field.T) + ")-(" + Mm(field.R) + ", "
+                            + Mm(field.B) + ") mm";
+            return null;
+
+            static string Mm(long nm) => (nm / 1_000_000m).ToString("0.####", CultureInfo.InvariantCulture);
+        }
+
+        // The escape corridor of a terminal (§7, E3 of decision nfa2005d67574bfea): the pin's straight way out through the outline
+        // of its own symbol (and of any symbol of the same island with a pin stacked on it), which KiCad measures with the symbol's
+        // visible fields, as far as the first grid node clear of that outline inflated by the clearance; a stub runs through the
+        // same room (§6.4 rule 5). The outline stays an obstacle everywhere else (§7 "obstacle bounds"), so the corridor must reach
+        // out of it. It never passes those symbols' own text: it keeps the clearance from each field they paint (FieldTooNear), or
+        // the pin has no escape. The number of grid steps to that node, at least one (the escape), and at most the longest stub;
+        // otherwise null and why.
         private (int? Steps, string? Blocked) Corridor(Screen screen, IslandState island, RouteTerminal terminal)
         {
-            var owners = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == terminal.Anchor && island.Same.Contains(p.Owner))
-                .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct().OrderBy(o => o).ToArray();
+            var owners = OwnersAt(screen, island, terminal.Anchor);
             var outlines = owners.Where(screen.Obstacles.ContainsKey).Select(o => screen.Obstacles[o].Inflate(policy.ClearanceNm)).ToArray();
             int longest = SchematicConnectionPolicy.StubMultiples[^1];
             int? found = null;
@@ -1225,12 +1254,8 @@ public static class SchematicConnectionRealizer
                 if (!outlines.Any(o => o.Contains(terminal.Anchor.Step(terminal.Outward, steps * policy.GridNm)))) found = steps;
             if (found is not { } corridor) return (null, "is covered by its own symbol's outline for more than the longest stub");
             var end = terminal.Anchor.Step(terminal.Outward, corridor * policy.GridNm);
-            foreach (var owner in owners)
-                foreach (var field in screen.Fields.GetValueOrDefault(owner, []))
-                    if (SegmentMeets(terminal.Anchor, end, field.Inflate(policy.ClearanceNm), open: false))
-                        return (null, "has its way out of symbol " + owner.ToString("D") + " run within the clearance of that symbol's own field text at ("
-                            + field.L.ToString(CultureInfo.InvariantCulture) + ", " + field.T.ToString(CultureInfo.InvariantCulture) + ")-("
-                            + field.R.ToString(CultureInfo.InvariantCulture) + ", " + field.B.ToString(CultureInfo.InvariantCulture) + ")");
+            if (FieldTooNear(screen, owners, terminal.Anchor, end) is { } field)
+                return (null, "would leave its symbol within the clearance of " + field);
             return (corridor, null);
         }
 
@@ -1268,13 +1293,13 @@ public static class SchematicConnectionRealizer
                         Variant.Stub, routed: true) is { } refused)
                     return Fallback("pin " + Describe(pin) + " has no room to leave its symbol by one grid step (" + refused + ")");
             }
-            // The one label naming the connection sits on a stub from the tree's root (§7: global names on the tree root; the
-            // island's uplink hierarchical label; otherwise its local name, which KiCad needs to give the net its XML name). The
-            // root is the first pin in the §7 order whose label stub fits inside the drawing sheet's frame without covering
-            // another pin's escape, and the tree grows from it (a CN-1 §7 clarification reported to the integration owner: a
-            // first pin whose label would leave the frame does not make a routable connection unroutable). The label's stub
-            // reaches at least one grid beyond the root's corridor, so that the tree has a node clear of the root's own symbol
-            // for the other pins to join.
+            // The one label naming the connection sits on a stub from the tree's root: the global name, else the island's uplink
+            // hierarchical label, else a local label with its name, which KiCad needs to give the net its XML name. E4 of decision
+            // nfa2005d67574bfea: the root is the first terminal in (escape x, escape y, PlacedPinId) order whose name-label stub is
+            // admissible in the route region and covers no other terminal's escape, neither by its wire nor by its label; the tree
+            // grows from it and it carries the connection's one label; when no terminal qualifies the connection falls back to
+            // label stubs. The label's stub reaches at least one grid beyond the root's corridor, so that the tree has a node clear
+            // of the root's own symbol for the other pins to join.
             var kind = KindFor(island);
             Stub? labelled = null;
             RouteTerminal? root = null;
@@ -1288,10 +1313,11 @@ public static class SchematicConnectionRealizer
                     refusals.Add("pin " + Describe(candidatePin) + ": " + lastRefusal);
                     continue;
                 }
-                var covered = terminals.FirstOrDefault(t => t != candidate && SegmentMeets(t.Anchor, t.Escape(grid), tried.Envelope!.Value, open: false));
+                var covered = terminals.FirstOrDefault(t => t != candidate && (SegmentMeets(t.Anchor, t.Escape(grid), tried.Envelope!.Value, open: false)
+                    || SegmentMeets(t.Anchor, t.Escape(grid), Box.Segment(tried.A, tried.E), open: false)));
                 if (covered is not null)
                 {
-                    refusals.Add("pin " + Describe(candidatePin) + ": it would cover the escape of pin " + Describe(pins[covered.PlacedPinId]));
+                    refusals.Add("pin " + Describe(candidatePin) + ": its label stub would cover the escape of pin " + Describe(pins[covered.PlacedPinId]));
                     continue;
                 }
                 (labelled, root) = (tried, candidate);
@@ -1318,13 +1344,11 @@ public static class SchematicConnectionRealizer
                 list.AddRange(nodes);
             }
             foreach (var terminal in terminals)
-                foreach (var owner in screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == terminal.Anchor && island.Same.Contains(p.Owner))
-                             .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct())
+                foreach (var owner in OwnersAt(screen, island, terminal.Anchor))
                     Exempt(owner, [terminal.Anchor, .. Enumerable.Range(1, corridors[terminal.PlacedPinId]).Select(k => terminal.Anchor.Step(terminal.Outward, k * grid))]);
             if (existing is not null)
                 foreach (var point in existing.Points.Where(p => p.Pin is not null))
-                    foreach (var owner in screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == point.Pin && island.Same.Contains(p.Owner))
-                                 .Select(p => p.OwnerSymbol).OfType<Guid>().Distinct())
+                    foreach (var owner in OwnersAt(screen, island, point.Pin!.Value))
                         Exempt(owner, point.Pin!.Value, point.Node);
             var obstacles = screen.Obstacles.Where(o => !screen.ConnectionLines.Contains(o.Key)).OrderBy(o => o.Key)
                 .Select(o => new RouteObstacle(o.Value, owners.TryGetValue(o.Key, out var exempt) ? exempt : []))
@@ -1428,7 +1452,9 @@ public static class SchematicConnectionRealizer
 
         // The island's existing connection on this sheet as places a route may attach to (§7): the free ends of its wires, and
         // a one-grid corridor out of each of its connected pins that a join stub could use (§6.4 join stub variant). A wire end
-        // with anything foreign at it or within the clearance, or on a foreign segment, is left out. Null when none remains.
+        // with anything foreign at it or within the clearance, or on a foreign segment, is left out, and so is a pin corridor
+        // that would run within the clearance of its own symbols' field text (E3 of decision nfa2005d67574bfea, FieldTooNear).
+        // Null when none remains.
         private RouteExistingPart? ExistingPart(Screen screen, IslandState island)
         {
             long grid = policy.GridNm;
@@ -1469,7 +1495,8 @@ public static class SchematicConnectionRealizer
                 var node = a.Step(outward, grid);
                 if (points.ContainsKey(node) || !screen.RouteRegion.Contains(node)) continue;
                 if (Refusal(policy, screen, island, a, node, outward, null, member.Pin.PlacedPinId, member.Pin.SymbolId, null, null, Variant.JoinStub,
-                        routed: true) is not null)
+                        routed: true) is not null
+                    || FieldTooNear(screen, OwnersAt(screen, island, a), a, node) is not null)
                     continue;
                 var exits = Exits(a);
                 int symbols = screen.Points.Where(p => p.Kind == PointKind.Pin && p.Position == a).Select(p => p.OwnerSymbol).Distinct().Count();
@@ -1848,7 +1875,23 @@ public static class SchematicConnectionRealizer
 
         private string NetName(IslandState island) => intent.Nets.FirstOrDefault(n => n.NetId == island.Island.NetId)?.Name ?? island.Island.NetId.ToString("D");
 
-        private static string Describe(ConnectionPlacedPin pin) => pin.Endpoint.ComponentId.ToString("D") + "." + pin.Endpoint.Pin;
+        // How a reason or refusal names a pin and a symbol for a person: by the reference the planned design gives its component
+        // (U4.4, U4), or by identity when the design names none.
+        private string Describe(ConnectionPlacedPin pin) =>
+            (references.TryGetValue(pin.Endpoint.ComponentId, out var reference) ? reference : pin.Endpoint.ComponentId.ToString("D")) + "." + pin.Endpoint.Pin;
+
+        private string DescribeSymbol(Guid nativeSymbol) => symbolReferences.TryGetValue(nativeSymbol, out var reference) ? reference : nativeSymbol.ToString("D");
+
+        private static Dictionary<Guid, string> SymbolReferences(SchematicDesign design)
+        {
+            var components = design.Engineering.Circuit.Components.GroupBy(c => c.Id).ToDictionary(g => g.Key, g => g.First().Reference);
+            var occurrences = design.Engineering.Circuit.Symbols.GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.First().ComponentId);
+            var result = new Dictionary<Guid, string>();
+            foreach (var binding in design.SymbolBindings.OrderBy(b => b.SymbolOccurrenceId))
+                if (occurrences.TryGetValue(binding.SymbolOccurrenceId, out var component) && components.TryGetValue(component, out var reference))
+                    result.TryAdd(binding.NativeObjectId, reference);
+            return result;
+        }
 
         private static IMessage UnpackItem(Any any)
         {

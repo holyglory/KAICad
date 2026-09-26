@@ -612,6 +612,80 @@ public sealed class SchematicNativeCreationProjectionTests
             string.Join(",", group.Select(k => k.SheetPathKey + "/" + k.PlacedPinId.ToString("D")).Order(StringComparer.Ordinal));
     }
 
+    // Ledger p2d40d4ec87d01d32: a new part whose one symbol draws two hidden power inputs of one name (VSTK) at one point. KiCad
+    // makes them one connection, so planning treats them as one when the XML also adds connections, as the unconnected path
+    // does: both left out of every net they are one source of VSTK, joined only to each other; and one of them in a net declares
+    // its stacked partner through it (decision n757c07fe60e30e87), so the partner is no second source and joins that net's
+    // expected group. A second such part left out of every net is still a second source and is refused, naming its pin.
+    // A unit test on purpose: which created pins count as one source is isolated planning logic that the existing
+    // common-pin test (APinCommonToAllUnitsIsOneSourceThatKiCadJoinsAcrossUnits) cannot express with its two-unit part; the
+    // rendered creation journey creates such parts in KiCad with a declared connection and compares KiCad's own pin partition.
+    [TestMethod]
+    public void SameNamedHiddenPinsOneSymbolStacksAreOneConnectionWhenTheXmlAlsoAddsConnections()
+    {
+        var bench = new SchematicConnectionIntentBuilderTests.Bench();
+        Guid r = bench.Part("R", SchematicConnectionIntentBuilderTests.Passive("1"), SchematicConnectionIntentBuilderTests.Passive("2"));
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2");
+        var state = bench.State([]);
+        static ConnectionPinKey[] Keys(SchematicDesign design, params (Guid Component, string Number)[] pins) => SchematicConnectionIntentBuilderTests.Keys(design, pins);
+        var part = StackedPowerPart();
+        DesignRecoveryState Saved(SchematicDesign design, params CircuitNet[] nets) =>
+            SchematicConnectionIntentBuilderTests.Revise(state, _ => SchematicConnectionIntentBuilderTests.WithNets(design, nets)).Saved;
+
+        // One part, U7. Unconnected, it is created as before, and its assertion joins its two VSTK pins only.
+        var (single, singleIds) = WithCommonPowerPart(state.Baseline, part, "U7");
+        Guid u7 = singleIds[0];
+        var unconnected = SchematicSynchronizationPlanner.Plan(SchematicConnectionIntentBuilderTests.Revise(state, _ => single).Saved);
+        Assert.IsTrue(unconnected.CanPrepare && unconnected.CandidateXml is not null, unconnected.ErrorCode + ": " + unconnected.ErrorMessage);
+        // Guard: the XML adds OUT, joining U7.1 and R1.1, and leaves both VSTK pins in no net. They are one source of VSTK and
+        // one expected group of their own.
+        var alone = SchematicConnectionIntentBuilderTests.Plan(Saved(single, new CircuitNet(Guid.NewGuid(), "OUT", [new(u7, "1"), new(r1, "1")])));
+        var aloneIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(alone);
+        SchematicConnectionIntentBuilderTests.RequireGroups(aloneIntent, [Keys(alone.Candidate!, (u7, "1"), (r1, "1")), Keys(alone.Candidate!, (u7, "2"), (u7, "3"))]);
+
+        // Two parts, U7 and U8.
+        var (both, ids) = WithCommonPowerPart(state.Baseline, part, "U7", "U8");
+        (u7, Guid u8) = (ids[0], ids[1]);
+        var output = new CircuitNet(Guid.NewGuid(), "OUT", [new(u7, "1"), new(r1, "1")]);
+        // Guard: VSTK holds U7.2 and U8.2 and leaves their stacked partners U7.3 and U8.3 out. Each partner is declared through
+        // its listed pin, so nothing is refused, and all four pins are one expected group, the global net VSTK.
+        var declared = SchematicConnectionIntentBuilderTests.Plan(Saved(both, new CircuitNet(Guid.NewGuid(), "VSTK", [new(u7, "2"), new(u8, "2")]), output));
+        var declaredIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(declared);
+        Assert.AreEqual("VSTK", declaredIntent.Nets.Single(n => n.Name == "VSTK").GlobalName);
+        SchematicConnectionIntentBuilderTests.RequireGroups(declaredIntent, [Keys(declared.Candidate!, (u7, "2"), (u7, "3"), (u8, "2"), (u8, "3")),
+            Keys(declared.Candidate!, (u7, "1"), (r1, "1")), Keys(declared.Candidate!, (u8, "1"))]);
+        // Must-catch: VSTK holds U7.2 and R2.1 and leaves both of U8's VSTK pins out. U8's pair is a second source of VSTK, which
+        // KiCad would join silently, so it is refused while planning, naming one of U8's pins (created pins are ordered by their
+        // new identities) and the pin the XML lists in VSTK, never the partner declared only through it.
+        var second = Saved(both, new CircuitNet(Guid.NewGuid(), "VSTK", [new(u7, "2"), new(r2, "1")]), output);
+        SchematicConnectionIntentBuilderTests.RequireRefusal(second, SchematicConnectionErrors.ConnectedImplicitPowerConflict, "is named 'VSTK'");
+        string refusal = SchematicConnectionIntentBuilderTests.Plan(second).ErrorMessage!;
+        StringAssert.Matches(refusal, new System.Text.RegularExpressions.Regex(@"^Hidden power pin U8\.[23] is named 'VSTK'"));
+        StringAssert.Matches(refusal, new System.Text.RegularExpressions.Regex(@"Add U8\.[23] to net 'VSTK', which holds U7\.2, so the connection is declared"));
+    }
+
+    /// <summary>A declared one-unit part: pin 1 OUT, passive and visible, and pins 2 and 3, both hidden power inputs named VSTK,
+    /// drawn at one point 2.54 mm to its right.</summary>
+    private static (PartDefinition Part, SchematicPartSymbol Declaration) StackedPowerPart()
+    {
+        var (declared, _) = SchematicPartSymbolTests.Fixture();
+        var source = declared.PartSymbols!.Single();
+        var part = new PartDefinition(Guid.NewGuid(), "Stacked power pins", 1, [new("1", "OUT", 1), new("2", "VSTK", 1), new("3", "VSTK", 1)]);
+        var symbol = source.Symbol.Clone();
+        symbol.CacheKey = "StackedPowerAlias";
+        symbol.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "StackedPowerDefinition" };
+        symbol.Definition.UnitCount = 1;
+        symbol.Definition.Items.Clear();
+        foreach (var (number, type, x) in new[] { ("1", ElectricalPinType.EptPassive, 0L), ("2", ElectricalPinType.EptPowerInput, 2_540_000L),
+            ("3", ElectricalPinType.EptPowerInput, 2_540_000L) })
+            symbol.Definition.Items.Add(new SchematicSymbolChild { Unit = new() { Unit = 1 }, Item = Any.Pack(new SchematicPin
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Number = number, Name = number == "1" ? "OUT" : "VSTK", ElectricalType = type,
+                Visible = number == "1", Position = new() { XNm = x, YNm = 0 }
+            }) });
+        return (part, new SchematicPartSymbol(part.Id, new() { LibraryNickname = "External", EntryName = "StackedPower" }, symbol));
+    }
+
     // CN-1 §5.5 for created local power symbols, and names KiCad resolves only when it builds the nets (review of ledger
     // pb41c5714361c378a): a new local power symbol that the XML leaves out of every net joins every label, hierarchical label
     // and local power symbol of its name on its own sheet, so it is refused while another exists there, and allowed on another

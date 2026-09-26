@@ -257,7 +257,9 @@ internal static class SchematicNativeCreationProjection
     /// longer describe the schematic. Sources are compared by model node, as the electrical comparison compares them: a pin
     /// common to several units is one physical pin however many units show it, and pins one symbol stacks at one point are
     /// one connection, so those may share a name. A created pin the XML puts in a net is checked by the connection intent,
-    /// and counts here as one more source of its name. Throws <c>connected_implicit_power_conflict</c> for a hidden power
+    /// and counts here as one more source of its name; so is a pin its symbol draws at one point with a pin of the same name
+    /// that the XML puts in a net, because KiCad joins it to that net through that pin (decision n757c07fe60e30e87, ledger
+    /// p2d40d4ec87d01d32). Throws <c>connected_implicit_power_conflict</c> for a hidden power
     /// input, <c>connected_global_name_conflict</c> for a global power symbol, <c>connected_net_name_conflict</c> for a local
     /// power symbol, and <c>connected_power_name_unresolved</c> when a created power symbol, or an existing item such a pin
     /// could join, has no literal name; always before anything reaches KiCad.</summary>
@@ -271,22 +273,31 @@ internal static class SchematicNativeCreationProjection
         var netOf = new Dictionary<PinEndpoint, CircuitNet>();
         foreach (var net in candidate.Engineering.Circuit.Nets)
             foreach (var pin in net.Pins) netOf.TryAdd(pin, net);
-        var undeclared = sources.Where(s => !netOf.ContainsKey(s.Endpoint)).ToArray();
-        if (undeclared.Length == 0) return;
+        if (sources.All(s => netOf.ContainsKey(s.Endpoint))) return;
         // The model node of each pin: the stacked-pin node the electrical comparison uses, otherwise the model pin itself,
         // which every placement of a pin common to several units shares.
         var nodes = new Dictionary<PinEndpoint, PinEndpoint>();
         foreach (var group in SchematicElectricalComparison.StackedPinNodes(candidate, token))
             foreach (var pin in group) nodes[pin] = group[0];
         PinEndpoint Node(PinEndpoint pin) => nodes.GetValueOrDefault(pin, pin);
+        // A pin its symbol draws at one point with a pin of the same name that the XML declares in a net is one connection with
+        // that pin in KiCad (decision n757c07fe60e30e87, ledger p2d40d4ec87d01d32): it is declared through that pin, and the
+        // connection intent checks the names that net carries. Every other created power pin in no net must be alone.
+        bool DeclaredThroughPartner(CreatedPowerPin source) => sources.Any(other => netOf.ContainsKey(other.Endpoint)
+            && Node(other.Endpoint) == Node(source.Endpoint) && other.Global == source.Global && other.Name == source.Name
+            && (other.Global || other.Path == source.Path));
+        var undeclared = sources.Where(s => !netOf.ContainsKey(s.Endpoint) && !DeclaredThroughPartner(s)).ToArray();
+        if (undeclared.Length == 0) return;
         var existing = ExistingPowerSources(baseline, candidate, netOf, undeclared.Any(s => s.Global),
             undeclared.Where(s => !s.Global).Select(s => s.Path).ToHashSet(StringComparer.Ordinal), token);
         foreach (var source in undeclared)
         {
             token.ThrowIfCancellationRequested();
+            // Among created pins, one the XML lists in a net is named first, so that the remedy names that net and the pin it lists.
             var other = (source.Global ? existing.Global.GetValueOrDefault(source.Name) : existing.Local.GetValueOrDefault((source.Path, source.Name)))
                 ?? sources.Where(s => s.Global == source.Global && s.Name == source.Name && (s.Global || s.Path == source.Path)
                         && Node(s.Endpoint) != Node(source.Endpoint))
+                    .OrderBy(s => netOf.ContainsKey(s.Endpoint) ? 0 : 1)
                     .Select(s => new PowerNameSource(s.Description, s.Member, netOf.GetValueOrDefault(s.Endpoint)?.Name)).FirstOrDefault();
             if (other is null) continue;
             string code = !source.Global ? SchematicConnectionErrors.ConnectedNetNameConflict
@@ -369,10 +380,12 @@ internal static class SchematicNativeCreationProjection
     /// themselves without any wire (pins one symbol stacks at one point, and created power pins that share a global name, or a
     /// local name on one sheet instance, such as every unit's placement of one common hidden power input). Every group that
     /// existed before stays exactly as it was, because the assertion names only created pins. This is the lane half of the
-    /// seam request for ledger pb41c5714361c378a: the executor sends an unconnected creation with this as its last operation
-    /// to a KiCad that advertises <see cref="SchematicConnectedAddition.NativeCapability"/>, so a join no plan can foresee
+    /// seam request for ledger pb41c5714361c378a. Nothing in production sends it yet: once the parent's executor change lands
+    /// (decision n16a9af7c671d9c09, item 6), the executor will append it as the last operation of an unconnected creation sent
+    /// to a KiCad that advertises <see cref="SchematicConnectedAddition.NativeCapability"/>, so that a join no plan can foresee
     /// (such as a new pin placed on an existing wire end) is refused by KiCad without any change instead of being found after
-    /// the commit.</summary>
+    /// the commit. Until then, and on a KiCad without that capability, an unconnected creation is checked only after it is
+    /// committed.</summary>
     internal static SchematicItemOperation CreationAssertion(SchematicDesign baseline, SchematicDesign candidate, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(baseline);

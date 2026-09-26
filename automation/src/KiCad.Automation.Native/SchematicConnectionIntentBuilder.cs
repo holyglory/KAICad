@@ -584,6 +584,12 @@ public static partial class SchematicConnectionIntentBuilder
                         throw Error(code, what + " is named '" + name + "' but sits in net '" + plan.Net.Name + "'. Put it in the net of '" + name + "'.");
                     continue;
                 }
+                // A pin its symbol draws at one point with a pin of the same name that a net lists is one connection with that pin
+                // in KiCad (decision n757c07fe60e30e87, ledger p2d40d4ec87d01d32): it is declared through that pin, whose net
+                // carries the name (checked for that pin here), so it is no other source of the name.
+                if (createdSources.Any(other => Node(other) == Node(placement) && memberOf.TryGetValue(other.Key, out var partner)
+                        && partner.GlobalName == name && (IsGlobalPowerSymbol(other.Symbol) ? CarrierName(other.Symbol) : ImplicitName(other.NativePin)) == name))
+                    continue;
                 bool elsewhere = nativeCarriers.ContainsKey(name) || plans.Any(p => p.GlobalName == name)
                     || createdSources.Any(other => Node(other) != Node(placement)
                         && (IsGlobalPowerSymbol(other.Symbol) ? CarrierName(other.Symbol) : ImplicitName(other.NativePin)) == name);
